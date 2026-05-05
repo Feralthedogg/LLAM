@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+import pathlib
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
+
+
+FIELD_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
+DEFAULT_CASES = ["spawn_join", "channel_pingpong", "io_echo", "poll_wake", "sleep_fanout", "opaque_block"]
+NAME_ALIASES = {
+    "poll_wake_approx": "poll_wake",
+    "opaque_syscall_sleep_approx": "opaque_block",
+    "opaque_block_in_place_approx": "opaque_block",
+}
+
+
+@dataclass
+class BenchRow:
+    runtime: str
+    case: str
+    ops_per_sec: float
+    p50_us: float
+    p99_us: float
+
+
+def parse_fields(line: str) -> dict[str, str]:
+    return dict(FIELD_RE.findall(line))
+
+
+def normalize_case(name: str) -> str:
+    return NAME_ALIASES.get(name, name)
+
+
+def parse_output(runtime: str, output: str) -> list[BenchRow]:
+    rows: list[BenchRow] = []
+    prefixes = {
+        "LLAM": "[bench] ",
+        "Goroutine": "[go-bench] ",
+        "Tokio": "[tokio-bench] ",
+    }
+    prefix = prefixes[runtime]
+
+    for line in output.splitlines():
+        if not line.startswith(prefix):
+            continue
+        fields = parse_fields(line)
+        if "name" not in fields or "ops_per_sec" not in fields:
+            continue
+        rows.append(
+            BenchRow(
+                runtime=runtime,
+                case=normalize_case(fields["name"]),
+                ops_per_sec=float(fields["ops_per_sec"]),
+                p50_us=float(fields["p50_us"]),
+                p99_us=float(fields["p99_us"]),
+            )
+        )
+    return rows
+
+
+def run_command(root: pathlib.Path, runtime: str, command: list[str], env: dict[str, str], timeout: int) -> list[BenchRow]:
+    print(f"[bench-runtime-compare] running {runtime}", file=sys.stderr)
+    proc = subprocess.run(
+        command,
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stdout)
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(proc.returncode)
+    return parse_output(runtime, proc.stdout)
+
+
+def write_csv(path: pathlib.Path, rows: list[BenchRow]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["runtime", "case", "ops_per_sec", "p50_us", "p99_us"])
+        for row in rows:
+            writer.writerow([row.runtime, row.case, f"{row.ops_per_sec:.2f}", f"{row.p50_us:.2f}", f"{row.p99_us:.2f}"])
+
+
+def print_summary(rows: list[BenchRow], cases: list[str]) -> None:
+    by_key = {(row.runtime, row.case): row for row in rows}
+    runtimes = [runtime for runtime in ["LLAM", "Goroutine", "Tokio"] if any(row.runtime == runtime for row in rows)]
+
+    if runtimes != ["LLAM", "Goroutine", "Tokio"]:
+        print("| runtime | case | ops/s | p50 us | p99 us |")
+        print("| --- | --- | ---: | ---: | ---: |")
+        for case in cases:
+            for runtime in runtimes:
+                row = by_key.get((runtime, case))
+                if row is None:
+                    continue
+                print(f"| {runtime} | {case} | {row.ops_per_sec:.2f} | {row.p50_us:.2f} | {row.p99_us:.2f} |")
+        return
+
+    print("| case | LLAM ops/s | Goroutine ops/s | Tokio ops/s | LLAM/Go | LLAM/Tokio |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: |")
+    for case in cases:
+        values = [by_key.get((runtime, case)) for runtime in runtimes]
+        if any(value is None for value in values):
+            continue
+        llam, go, tokio = values
+        assert llam is not None and go is not None and tokio is not None
+        print(
+            f"| {case} | {llam.ops_per_sec:.2f} | {go.ops_per_sec:.2f} | {tokio.ops_per_sec:.2f} | "
+            f"{llam.ops_per_sec / go.ops_per_sec:.2f}x | {llam.ops_per_sec / tokio.ops_per_sec:.2f}x |"
+        )
+
+
+def grouped_bars(ax, cases: list[str], runtimes: list[str], values: dict[tuple[str, str], float], ylabel: str, title: str, log: bool = False) -> None:
+    width = 0.25
+    xs = list(range(len(cases)))
+    offsets = {"LLAM": -width, "Goroutine": 0.0, "Tokio": width}
+    colors = {"LLAM": "#0f766e", "Goroutine": "#2563eb", "Tokio": "#d97706"}
+
+    for runtime in runtimes:
+        ys = [values[(runtime, case)] for case in cases]
+        ax.bar([x + offsets[runtime] for x in xs], ys, width=width, label=runtime, color=colors[runtime])
+    ax.set_xticks(xs)
+    ax.set_xticklabels(cases, rotation=25, ha="right")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(axis="y", alpha=0.25)
+    if log:
+        ax.set_yscale("log")
+
+
+def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str]) -> None:
+    if plt is None:
+        print("[bench-runtime-compare] matplotlib not available; skipping graph", file=sys.stderr)
+        return
+
+    runtimes = ["LLAM", "Goroutine", "Tokio"]
+    by_key = {(row.runtime, row.case): row for row in rows}
+    complete_cases = [case for case in cases if all((runtime, case) in by_key for runtime in runtimes)]
+
+    ops = {(runtime, case): by_key[(runtime, case)].ops_per_sec for runtime in runtimes for case in complete_cases}
+    p50 = {(runtime, case): by_key[(runtime, case)].p50_us for runtime in runtimes for case in complete_cases}
+    p99 = {(runtime, case): by_key[(runtime, case)].p99_us for runtime in runtimes for case in complete_cases}
+    speedup_go = {("LLAM", case): by_key[("LLAM", case)].ops_per_sec / by_key[("Goroutine", case)].ops_per_sec for case in complete_cases}
+    speedup_go.update({("Tokio", case): by_key[("Tokio", case)].ops_per_sec / by_key[("Goroutine", case)].ops_per_sec for case in complete_cases})
+
+    plt.style.use("seaborn-v0_8-whitegrid")
+    fig, axes = plt.subplots(2, 2, figsize=(18, 11), constrained_layout=True)
+    fig.suptitle("LLAM vs Goroutine vs Tokio Runtime Benchmarks", fontsize=18, fontweight="bold")
+
+    grouped_bars(axes[0][0], complete_cases, runtimes, ops, "ops/sec (log)", "Throughput", log=True)
+    grouped_bars(axes[0][1], complete_cases, runtimes, p50, "p50 us (log)", "Median Latency", log=True)
+    grouped_bars(axes[1][0], complete_cases, runtimes, p99, "p99 us (log)", "Tail Latency", log=True)
+    grouped_bars(axes[1][1], complete_cases, ["LLAM", "Tokio"], speedup_go, "x vs Goroutine", "Throughput Speedup vs Goroutine", log=False)
+    axes[0][0].legend(loc="upper right")
+    axes[1][1].axhline(1.0, color="#111827", linewidth=1, linestyle="--", alpha=0.6)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Compare LLAM, Goroutine, and Tokio benchmarks and render graphs.")
+    parser.add_argument("--rounds", type=int, default=31)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--out-dir", default="object/bench_compare")
+    parser.add_argument("--runtime", choices=["all", "llam", "go", "tokio"], default="all")
+    parser.add_argument("--no-build", action="store_true")
+    args = parser.parse_args()
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    out_dir = root / args.out_dir
+    selected_runtimes = {
+        "all": ["LLAM", "Goroutine", "Tokio"],
+        "llam": ["LLAM"],
+        "go": ["Goroutine"],
+        "tokio": ["Tokio"],
+    }[args.runtime]
+    env = os.environ.copy()
+    env.update(
+        {
+            "LLAM_BENCH_ROUNDS": str(args.rounds),
+            "LLAM_BENCH_WARMUP_ROUNDS": str(args.warmup),
+            "LLAM_BENCH_SPAWN_TASKS": "512",
+            "LLAM_BENCH_CHANNEL_MESSAGES": "4096",
+            "LLAM_BENCH_IO_MESSAGES": "512",
+            "LLAM_BENCH_POLL_EVENTS": "512",
+            "LLAM_BENCH_SLEEP_TASKS": "1024",
+            "LLAM_BENCH_OPAQUE_SCOPES": "64",
+        }
+    )
+
+    if not args.no_build:
+        if "LLAM" in selected_runtimes:
+            subprocess.run(["make", "-j4"], cwd=root, check=True)
+        if "Tokio" in selected_runtimes:
+            subprocess.run(
+                ["cargo", "build", "--release", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
+                cwd=root,
+                check=True,
+            )
+
+    rows: list[BenchRow] = []
+    if "LLAM" in selected_runtimes:
+        rows.extend(run_command(root, "LLAM", ["./bench"], env, args.timeout))
+    if "Goroutine" in selected_runtimes:
+        rows.extend(run_command(root, "Goroutine", ["go", "run", "scripts/bench_go_compare.go"], env, args.timeout))
+    if "Tokio" in selected_runtimes:
+        rows.extend(
+            run_command(
+                root,
+                "Tokio",
+                ["cargo", "run", "--release", "--quiet", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
+                env,
+                args.timeout,
+            )
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "runtime_compare.csv"
+    graph_path = out_dir / "runtime_compare.png"
+    graph_written = False
+    write_csv(csv_path, rows)
+    if selected_runtimes == ["LLAM", "Goroutine", "Tokio"]:
+        plot_graph(graph_path, rows, DEFAULT_CASES)
+        graph_written = plt is not None
+    else:
+        print("[bench-runtime-compare] graph requires --runtime all; skipping graph", file=sys.stderr)
+    print_summary(rows, DEFAULT_CASES)
+    print(f"\nCSV: {csv_path}")
+    if graph_written:
+        print(f"Graph: {graph_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,127 @@
+/**
+ * @file src/core/runtime_task_alloc.c
+ * @brief Task object allocation, reuse, and task-id assignment.
+ *
+ * @details
+ * Task objects are owned by the shard allocator that created them. The owner can
+ * allocate and recycle tasks from its local free list without locking. Foreign
+ * shards return tasks through the owner's atomic remote-free list, which is
+ * drained at quiescent scheduler points.
+ *
+ * @copyright Copyright 2026 Feralthedogg
+ *
+ * @par License
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "runtime_internal.h"
+
+/**
+ * @brief Allocate a task object from a shard-local cache.
+ *
+ * @param shard Shard that should own the returned task object.
+ * @return Reinitialized task object on success, or NULL on allocation failure.
+ *
+ * @note The embedded pthread mutex is preserved across reuse. Task slabs
+ *       initialize the mutex once and allocator teardown destroys it.
+ */
+nm_task_t *nm_task_alloc(nm_shard_t *shard) {
+    nm_task_t *task = NULL;
+
+    if (shard == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    for (;;) {
+        if (g_nm_tls_shard == shard) {
+            // Same-shard allocation is the hot path; no other thread mutates the
+            // owner-local free list without taking the slow path lock.
+            task = shard->allocator.task_free;
+            if (task != NULL) {
+                bool lock_initialized = task->lock_initialized;
+
+                shard->allocator.task_free = task->alloc_next;
+                shard->allocator.task_reuses += 1U;
+                // Clear around the embedded lock so the pthread_mutex_t remains
+                // valid while all task-visible state is reset.
+                memset(task, 0, offsetof(nm_task_t, lock));
+                memset((char *)task + offsetof(nm_task_t, all_next),
+                       0,
+                       sizeof(*task) - offsetof(nm_task_t, all_next));
+                task->lock_initialized = lock_initialized;
+                task->alloc_owner_shard = shard->id;
+                return task;
+            }
+        } else {
+            // Cold external/bootstrap allocation. Serialize access to another
+            // shard's local free list rather than using the remote-free queue.
+            nm_allocator_lock(&shard->allocator);
+            task = shard->allocator.task_free;
+            if (task != NULL) {
+                bool lock_initialized = task->lock_initialized;
+
+                shard->allocator.task_free = task->alloc_next;
+                shard->allocator.task_reuses += 1U;
+                nm_allocator_unlock(&shard->allocator);
+                memset(task, 0, offsetof(nm_task_t, lock));
+                memset((char *)task + offsetof(nm_task_t, all_next),
+                       0,
+                       sizeof(*task) - offsetof(nm_task_t, all_next));
+                task->lock_initialized = lock_initialized;
+                task->alloc_owner_shard = shard->id;
+                return task;
+            }
+            nm_allocator_unlock(&shard->allocator);
+        }
+        // Empty cache: grow one slab and retry so callers see normal allocation
+        // semantics instead of needing to understand slab management.
+        if (nm_allocator_grow_task_slab(shard) != 0) {
+            return NULL;
+        }
+    }
+}
+
+/**
+ * @brief Return a task object to its allocation-owner shard.
+ *
+ * @param task Task object previously returned by ::nm_task_alloc.
+ */
+void nm_task_allocator_free(nm_task_t *task) {
+    nm_runtime_t *rt = &g_nm_runtime;
+    nm_shard_t *owner;
+    nm_task_t *head;
+
+    if (task == NULL || task->alloc_owner_shard >= rt->active_shards) {
+        return;
+    }
+
+    owner = &rt->shards[task->alloc_owner_shard];
+    task->alloc_next = NULL;
+    if (g_nm_tls_shard != NULL && g_nm_tls_shard->id == owner->id) {
+        // Owner shard can recycle directly; this is the common task cleanup path
+        // after joined tasks are reclaimed by their home scheduler.
+        task->alloc_next = owner->allocator.task_free;
+        owner->allocator.task_free = task;
+        owner->allocator.task_frees += 1U;
+        return;
+    }
+
+    // Foreign frees publish onto a lock-free remote list and set one pending
+    // flag. The owner drains the list in nm_allocator_quiescent().
+    do {
+        head = atomic_load(&owner->allocator.task_remote_free);
+        task->alloc_next = head;
+    } while (!atomic_compare_exchange_weak(&owner->allocator.task_remote_free, &head, task));
+    atomic_store_explicit(&owner->allocator.remote_free_pending, 1U, memory_order_release);
+}

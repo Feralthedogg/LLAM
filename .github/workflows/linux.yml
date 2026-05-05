@@ -1,0 +1,58 @@
+name: linux
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc
+            cc: gcc
+            cflags: "-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer"
+          - name: sanitizer
+            cc: gcc
+            cflags: "-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake git python3
+
+      - name: Build liburing
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: Make build
+        run: make clean all CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
+
+      - name: Verify Linux
+        if: matrix.name != 'sanitizer'
+        run: make verify-linux CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
+
+      - name: Sanitizer stress
+        if: matrix.name == 'sanitizer'
+        run: LLAM_STRESS_ROUNDS=4 ./stress
+
+      - name: CMake build
+        if: matrix.name == 'gcc'
+        run: |
+          cmake -S . -B build/linux -DCMAKE_C_COMPILER=gcc -DCMAKE_ASM_COMPILER=gcc
+          cmake --build build/linux
+
+      - name: Benchmark smoke
+        if: matrix.name == 'gcc'
+        run: LLAM_BENCH_ONLY=spawn_join LLAM_BENCH_ROUNDS=1 ./bench

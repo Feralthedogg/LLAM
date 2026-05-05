@@ -1,0 +1,7 @@
+[package]
+name = "bench_tokio_compare"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

@@ -1,0 +1,362 @@
+/**
+ * @file src/io/runtime_io_watch_darwin_worker.c
+ * @brief Darwin I/O worker loop and kqueue polling lifecycle.
+ *
+ * @details
+ * Each Darwin I/O node owns a kqueue worker. The worker applies queued control
+ * operations, submits one-shot requests, waits for kqueue events, handles user
+ * wake events, and dispatches tagged watch/request events to specialized
+ * handlers.
+ *
+ * @copyright Copyright 2026 Feralthedogg
+ *
+ * @par License
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "runtime_io_watch_darwin_internal.h"
+
+/** @brief Apply one queued Darwin control operation. */
+void nm_darwin_process_control(nm_node_t *node, nm_io_control_op_t *op) {
+    int rc = 0;
+
+    switch (op->kind) {
+    case NM_IO_CONTROL_POLL_ACTIVATE: {
+        nm_poll_watch_t *watch = op->target;
+        nm_io_req_t *waiters = NULL;
+
+        rc = nm_darwin_poll_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH);
+        pthread_mutex_lock(&node->watch_lock);
+        if (rc == 0) {
+            // EV_DISPATCH produces one event then disables the watch until the
+            // event handler explicitly re-enables it.
+            watch->active = true;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            atomic_fetch_add(&node->pending_ops, 1U);
+        } else {
+            watch->active = false;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            watch->sticky_revents = 0;
+            waiters = nm_poll_watch_take_waiters(watch);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        while (waiters != NULL) {
+            nm_io_req_t *next = waiters->next;
+
+            waiters->next = NULL;
+            nm_io_complete_req(node, waiters, -errno, false);
+            waiters = next;
+        }
+        break;
+    }
+    case NM_IO_CONTROL_POLL_DEACTIVATE: {
+        nm_poll_watch_t *watch = op->target;
+        unsigned migrate_target = UINT_MAX;
+        bool kick_target = false;
+
+        rc = nm_darwin_poll_watch_change(node, watch, EV_DELETE);
+        pthread_mutex_lock(&node->watch_lock);
+        watch->activating = false;
+        watch->deactivate_queued = false;
+        if (watch->active) {
+            watch->active = false;
+            atomic_fetch_sub(&node->pending_ops, 1U);
+        }
+        if (watch->migrate_target_node_index != UINT_MAX) {
+            migrate_target = watch->migrate_target_node_index;
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        if (rc != 0 && errno != ENOENT && errno != EAGAIN) {
+            nm_record_fatal(node->runtime, errno);
+        }
+        if (migrate_target != UINT_MAX &&
+            nm_finalize_poll_watch_migration(node, watch, migrate_target, &kick_target) &&
+            kick_target &&
+            migrate_target < node->runtime->active_nodes) {
+            nm_kick_node(&node->runtime->nodes[migrate_target]);
+        }
+        break;
+    }
+    case NM_IO_CONTROL_ACCEPT_ACTIVATE: {
+        nm_accept_watch_t *watch = op->target;
+        nm_io_req_t *waiters = NULL;
+
+        rc = nm_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH | EV_CLEAR);
+        pthread_mutex_lock(&node->watch_lock);
+        if (rc == 0) {
+            watch->active = true;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            atomic_fetch_add(&node->pending_ops, 1U);
+        } else {
+            watch->active = false;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            waiters = watch->wait_head;
+            watch->wait_head = NULL;
+            watch->wait_tail = NULL;
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        while (waiters != NULL) {
+            nm_io_req_t *next = waiters->next;
+
+            waiters->next = NULL;
+            nm_io_complete_req(node, waiters, -errno, false);
+            waiters = next;
+        }
+        break;
+    }
+    case NM_IO_CONTROL_ACCEPT_DEACTIVATE: {
+        nm_accept_watch_t *watch = op->target;
+        unsigned migrate_target = UINT_MAX;
+        bool kick_target = false;
+
+        rc = nm_darwin_accept_watch_change(node, watch, EV_DELETE);
+        pthread_mutex_lock(&node->watch_lock);
+        watch->activating = false;
+        watch->deactivate_queued = false;
+        if (watch->active) {
+            watch->active = false;
+            atomic_fetch_sub(&node->pending_ops, 1U);
+        }
+        if (watch->migrate_target_node_index != UINT_MAX) {
+            migrate_target = watch->migrate_target_node_index;
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        if (rc != 0 && errno != ENOENT) {
+            nm_record_fatal(node->runtime, errno);
+        }
+        if (migrate_target != UINT_MAX &&
+            nm_finalize_accept_watch_migration(node, watch, migrate_target, &kick_target) &&
+            kick_target &&
+            migrate_target < node->runtime->active_nodes) {
+            nm_kick_node(&node->runtime->nodes[migrate_target]);
+        }
+        break;
+    }
+    case NM_IO_CONTROL_RECV_ACTIVATE: {
+        nm_recv_watch_t *watch = op->target;
+        nm_io_req_t *waiters = NULL;
+
+        rc = nm_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH | EV_CLEAR);
+        pthread_mutex_lock(&node->watch_lock);
+        if (rc == 0) {
+            watch->active = true;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            atomic_fetch_add(&node->pending_ops, 1U);
+        } else {
+            watch->active = false;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            waiters = watch->wait_head;
+            watch->wait_head = NULL;
+            watch->wait_tail = NULL;
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        while (waiters != NULL) {
+            nm_io_req_t *next = waiters->next;
+
+            waiters->next = NULL;
+            nm_io_complete_req(node, waiters, -errno, false);
+            waiters = next;
+        }
+        break;
+    }
+    case NM_IO_CONTROL_RECV_DEACTIVATE: {
+        nm_recv_watch_t *watch = op->target;
+        unsigned migrate_target = UINT_MAX;
+        bool kick_target = false;
+
+        rc = nm_darwin_recv_watch_change(node, watch, EV_DELETE);
+        pthread_mutex_lock(&node->watch_lock);
+        watch->activating = false;
+        watch->deactivate_queued = false;
+        if (watch->active) {
+            watch->active = false;
+            atomic_fetch_sub(&node->pending_ops, 1U);
+        }
+        if (watch->migrate_target_node_index != UINT_MAX) {
+            migrate_target = watch->migrate_target_node_index;
+        } else {
+            nm_maybe_destroy_recv_watch_locked(node, watch);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        if (rc != 0 && errno != ENOENT) {
+            nm_record_fatal(node->runtime, errno);
+        }
+        if (migrate_target != UINT_MAX &&
+            nm_finalize_recv_watch_migration(node, watch, migrate_target, &kick_target) &&
+            kick_target &&
+            migrate_target < node->runtime->active_nodes) {
+            nm_kick_node(&node->runtime->nodes[migrate_target]);
+        }
+        break;
+    }
+    case NM_IO_CONTROL_REQ_CANCEL: {
+        nm_io_req_t *req = op->target;
+
+        if (req == NULL || atomic_load_explicit(&req->wait_mode, memory_order_acquire) != NM_IO_WAIT_MODE_INFLIGHT) {
+            break;
+        }
+        // kqueue cancellation is represented by deleting the registered filter
+        // and completing through the normal canceled request path.
+        nm_darwin_req_delete(node, req);
+        nm_io_complete_req(node, req, -ECANCELED, true);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/** @brief Submit all queued one-shot requests for a node. */
+void nm_darwin_process_submissions(nm_node_t *node) {
+    nm_io_req_t *reqs = nm_take_node_submissions(node);
+
+    while (reqs != NULL) {
+        nm_io_req_t *next = reqs->next;
+
+        reqs->next = NULL;
+        nm_darwin_submit_req(node, reqs);
+        reqs = next;
+    }
+}
+
+/** @brief Queue deactivation controls for all active watches during shutdown. */
+void nm_darwin_queue_shutdown_controls(nm_node_t *node) {
+    bool kicked = false;
+
+    pthread_mutex_lock(&node->watch_lock);
+    for (nm_poll_watch_t *watch = node->poll_watches; watch != NULL; watch = watch->next) {
+        if (watch->active && !watch->deactivate_queued) {
+            watch->deactivate_queued = true;
+            if (nm_node_queue_control_locked(node, NM_IO_CONTROL_POLL_DEACTIVATE, watch) == 0) {
+                kicked = true;
+            }
+        }
+    }
+    for (nm_accept_watch_t *watch = node->accept_watches; watch != NULL; watch = watch->next) {
+        if (watch->active && !watch->deactivate_queued) {
+            watch->deactivate_queued = true;
+            if (nm_node_queue_control_locked(node, NM_IO_CONTROL_ACCEPT_DEACTIVATE, watch) == 0) {
+                kicked = true;
+            }
+        }
+    }
+    for (nm_recv_watch_t *watch = node->recv_watches; watch != NULL; watch = watch->next) {
+        if (watch->active && !watch->deactivate_queued) {
+            watch->deactivate_queued = true;
+            if (nm_node_queue_control_locked(node, NM_IO_CONTROL_RECV_DEACTIVATE, watch) == 0) {
+                kicked = true;
+            }
+        }
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+    if (kicked) {
+        nm_kick_node(node);
+    }
+}
+
+/**
+ * @brief Main loop for a Darwin I/O node worker.
+ *
+ * @param arg Pointer to an ::nm_node_t.
+ * @return Always NULL.
+ */
+void *nm_io_worker_main(void *arg) {
+    nm_node_t *node = arg;
+    nm_runtime_t *rt = node->runtime;
+
+    nm_tune_io_worker_thread(node);
+
+    for (;;) {
+        struct kevent events[NM_DARWIN_KEVENT_BATCH];
+        struct timespec ts;
+        struct timespec *ts_ptr = NULL;
+        unsigned pending;
+        int count;
+        unsigned i;
+
+        if (atomic_load(&rt->stop_requested)) {
+            nm_darwin_queue_shutdown_controls(node);
+        }
+
+        {
+            nm_io_control_op_t *controls = nm_take_node_controls(node);
+
+            while (controls != NULL) {
+                nm_io_control_op_t *next = controls->next;
+
+                controls->next = NULL;
+                nm_darwin_process_control(node, controls);
+                free(controls);
+                controls = next;
+            }
+        }
+        nm_darwin_process_submissions(node);
+
+        pending = atomic_load(&node->pending_ops);
+        if (atomic_load(&rt->stop_requested) && pending == 0U) {
+            break;
+        }
+
+        if (pending == 0U) {
+            ts.tv_sec = 0;
+            ts.tv_nsec = 1000000L;
+            ts_ptr = &ts;
+        } else {
+            // Pending backend work can block indefinitely; wake controls use
+            // EVFILT_USER/MACHPORT to interrupt this wait.
+            ts_ptr = NULL;
+        }
+
+        do {
+            count = kevent(node->event_fd, NULL, 0, events, (int)NM_DARWIN_KEVENT_BATCH, ts_ptr);
+        } while (count < 0 && errno == EINTR);
+        if (count < 0) {
+            nm_record_fatal(rt, errno);
+            break;
+        }
+
+        for (i = 0; i < (unsigned)count; ++i) {
+            uint64_t user_data;
+            unsigned tag;
+
+            if (events[i].filter == EVFILT_USER || events[i].filter == EVFILT_MACHPORT) {
+                nm_drain_node_wake(node);
+                continue;
+            }
+            user_data = (uint64_t)(uintptr_t)events[i].udata;
+            tag = nm_io_udata_tag(user_data);
+
+            // Tags mirror the Linux user_data scheme so higher-level completion
+            // code can stay backend-agnostic.
+            if (tag == NM_IO_UDATA_POLL_WATCH) {
+                nm_darwin_handle_poll_watch_event(node,
+                                                  nm_io_udata_ptr(user_data),
+                                                  nm_darwin_poll_revents(&events[i]));
+            } else if (tag == NM_IO_UDATA_ACCEPT_WATCH) {
+                nm_darwin_handle_accept_watch_event(node, nm_io_udata_ptr(user_data));
+            } else if (tag == NM_IO_UDATA_RECV_WATCH) {
+                nm_darwin_handle_recv_watch_event(node, nm_io_udata_ptr(user_data));
+            } else if (tag == NM_IO_UDATA_REQ) {
+                nm_darwin_handle_req_event(node, nm_io_udata_ptr(user_data), &events[i]);
+            }
+        }
+    }
+
+    return NULL;
+}

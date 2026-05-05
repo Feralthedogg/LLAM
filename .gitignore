@@ -1,0 +1,13 @@
+object/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+bench
+demo
+stress
+perf.data
+perf.data.old
+scripts/bench_tokio_compare/target/
+scripts/__pycache__/

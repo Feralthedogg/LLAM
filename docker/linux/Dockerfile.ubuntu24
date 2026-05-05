@@ -1,0 +1,31 @@
+FROM ubuntu:24.04
+
+ARG LIBURING_REF=master
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CC=gcc
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cargo \
+    cmake \
+    curl \
+    git \
+    golang-go \
+    pkg-config \
+    python3 \
+    rustc \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch "$LIBURING_REF" https://github.com/axboe/liburing.git /tmp/liburing \
+    && make -C /tmp/liburing -j"$(nproc)" \
+    && make -C /tmp/liburing install \
+    && ldconfig \
+    && rm -rf /tmp/liburing
+
+WORKDIR /work
+COPY . .
+
+RUN make clean && make all CC=gcc
+
+CMD ["make", "verify-linux", "CC=gcc"]
