@@ -1,7 +1,7 @@
 # LLAM
 
 <p align="center">
-  <img src="image/LLAM_Logo.png" alt="LLAM logo" width="240">
+  <img src="image/LLAM_Logo.png" alt="LLAM logo" width="420">
 </p>
 
 ![C11](https://img.shields.io/badge/C-C11-blue)
