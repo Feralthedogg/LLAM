@@ -4,8 +4,8 @@
  *
  * @details
  * This file saves and restores the AArch64 callee-saved register set used by
- * LLAM fibers. The offsets must match the AArch64 @c nm_ctx_t layout in
- * src/internal/nm_internal.h.
+ * LLAM fibers. The offsets must match the AArch64 @c llam_ctx_t layout in
+ * src/internal/llam_internal.h.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -25,9 +25,9 @@
 
     .text
     .align 2
-    .globl nm_ctx_switch
-    .type nm_ctx_switch, %function
-nm_ctx_switch:
+    .globl llam_ctx_switch
+    .type llam_ctx_switch, %function
+llam_ctx_switch:
     /*
      * x0 = context to save
      * x1 = context to restore
@@ -76,16 +76,16 @@ nm_ctx_switch:
     msr fpsr, x10
     mov sp, x9
     ret
-    .size nm_ctx_switch, .-nm_ctx_switch
+    .size llam_ctx_switch, .-llam_ctx_switch
 
-    .globl nm_fiber_bootstrap
-    .type nm_fiber_bootstrap, %function
-nm_fiber_bootstrap:
+    .globl llam_fiber_bootstrap
+    .type llam_fiber_bootstrap, %function
+llam_fiber_bootstrap:
     /*
-     * nm_ctx_make_task seeds x19 with nm_task_t*. Enter C bootstrap, then fall
+     * llam_ctx_make_task seeds x19 with llam_task_t*. Enter C bootstrap, then fall
      * through to task-exit cleanup if the user function returns.
      */
     mov x0, x19
-    bl nm_task_bootstrap
-    b nm_task_exit_internal
-    .size nm_fiber_bootstrap, .-nm_fiber_bootstrap
+    bl llam_task_bootstrap
+    b llam_task_exit_internal
+    .size llam_fiber_bootstrap, .-llam_fiber_bootstrap

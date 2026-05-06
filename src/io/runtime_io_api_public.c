@@ -1,6 +1,6 @@
 /**
  * @file src/io/runtime_io_api_public.c
- * @brief Public llam_* and nm_* I/O API entry points.
+ * @brief Public llam_* and llam_* I/O API entry points.
  *
  * @details
  * Public I/O calls prefer the cheapest completion path available for the
@@ -9,7 +9,7 @@
  *  - inside a task, they first try a non-blocking direct fast path;
  *  - if direct completion is not possible, they submit to the async backend;
  *  - when the backend cannot support the descriptor or operation, they fall
- *    back to ::nm_call_blocking so the scheduler worker is not pinned.
+ *    back to ::llam_call_blocking so the scheduler worker is not pinned.
  *
  * Owned-buffer reads follow the same policy while also handling provided-buffer
  * and multishot receive support when the backend exposes it.
@@ -33,6 +33,19 @@
 #include "runtime_io_api_internal.h"
 
 /**
+ * @brief Run an I/O blocking fallback and ignore the callback payload.
+ *
+ * The request object carries the real operation result. Using the result-style
+ * blocking API keeps a legitimate callback NULL distinct from submission
+ * failure, even though I/O callbacks normally return the request pointer.
+ */
+static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
+    void *ignored = NULL;
+
+    return llam_call_blocking_result(fn, req, &ignored);
+}
+
+/**
  * @brief Read bytes from a descriptor without blocking the scheduler worker.
  *
  * Managed tasks attempt direct non-blocking completion before submitting an
@@ -45,18 +58,18 @@
  *
  * @return Number of bytes read, or -1 with @c errno set.
  */
-ssize_t nm_read(int fd, void *buf, size_t count) {
-    nm_io_req_t *req;
+ssize_t llam_read(int fd, void *buf, size_t count) {
+    llam_io_req_t *req;
     ssize_t result;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return read(fd, buf, count);
     }
     {
         ssize_t direct_result;
-        int direct_rc = nm_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
+        int direct_rc = llam_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
 
         if (direct_rc > 0) {
             return direct_result;
@@ -64,9 +77,9 @@ ssize_t nm_read(int fd, void *buf, size_t count) {
         if (direct_rc < 0) {
             return -1;
         }
-        if (nm_io_coop_yield_enabled() && nm_io_shard_has_local_work()) {
-            nm_yield();
-            direct_rc = nm_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
+        if (llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
+            llam_yield();
+            direct_rc = llam_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
             if (direct_rc > 0) {
                 return direct_result;
             }
@@ -74,7 +87,7 @@ ssize_t nm_read(int fd, void *buf, size_t count) {
                 return -1;
             }
         }
-        direct_rc = nm_try_direct_blocking_rw(fd, buf, count, false, false, 0, &direct_result);
+        direct_rc = llam_try_direct_blocking_rw(fd, buf, count, false, false, 0, &direct_result);
         if (direct_rc > 0) {
             return direct_result;
         }
@@ -83,41 +96,41 @@ ssize_t nm_read(int fd, void *buf, size_t count) {
         }
     }
 
-    req = nm_api_io_req_acquire(g_nm_tls_shard);
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    req->kind = NM_IO_KIND_READ;
+    req->kind = LLAM_IO_KIND_READ;
     req->fd = fd;
     req->buf = buf;
     req->count = count;
     req->recv_watch = NULL;
-    if (nm_issue_io(req, false, 0U) != 0) {
-        if (!nm_io_capability_error(errno)) {
-            nm_api_io_req_release(g_nm_tls_shard, req);
+    if (llam_issue_io(req, false, 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
             return -1;
         }
-        req->kind = NM_IO_KIND_READ;
+        req->kind = LLAM_IO_KIND_READ;
         req->fd = fd;
         req->buf = buf;
         req->count = count;
-        req->task = g_nm_tls_task;
-        if (nm_call_blocking(nm_blocking_read_impl, req) == NULL) {
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_read_impl, req) != 0) {
             int saved_errno = errno;
 
-            nm_api_io_req_release(g_nm_tls_shard, req);
+            llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
             return -1;
         }
         result = req->result;
-        nm_api_io_req_release(g_nm_tls_shard, req);
+        llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
 
     result = req->result;
-    nm_api_io_req_release(g_nm_tls_shard, req);
+    llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
 }
 
@@ -130,10 +143,10 @@ ssize_t nm_read(int fd, void *buf, size_t count) {
  *
  * @return Number of bytes read, or -1 with @c errno set.
  *
- * @see nm_io_buffer_release
+ * @see llam_io_buffer_release
  */
-ssize_t nm_read_owned(int fd, size_t max_count, nm_io_buffer_t **out) {
-    return nm_read_owned_impl(fd, max_count, 0, false, out);
+ssize_t llam_read_owned(int fd, size_t max_count, llam_io_buffer_t **out) {
+    return llam_read_owned_impl(fd, max_count, 0, false, out);
 }
 
 /**
@@ -146,10 +159,10 @@ ssize_t nm_read_owned(int fd, size_t max_count, nm_io_buffer_t **out) {
  *
  * @return Number of bytes received, or -1 with @c errno set.
  *
- * @see nm_io_buffer_release
+ * @see llam_io_buffer_release
  */
-ssize_t nm_recv_owned(int fd, size_t max_count, int flags, nm_io_buffer_t **out) {
-    return nm_read_owned_impl(fd, max_count, flags, true, out);
+ssize_t llam_recv_owned(int fd, size_t max_count, int flags, llam_io_buffer_t **out) {
+    return llam_read_owned_impl(fd, max_count, flags, true, out);
 }
 
 /**
@@ -158,9 +171,9 @@ ssize_t nm_recv_owned(int fd, size_t max_count, int flags, nm_io_buffer_t **out)
  * Buffers backed by io_uring provided-buffer storage are recycled to their node
  * before the wrapper is returned to the runtime allocator.
  *
- * @param buffer Buffer returned by ::nm_read_owned or ::nm_recv_owned.
+ * @param buffer Buffer returned by ::llam_read_owned or ::llam_recv_owned.
  */
-void nm_io_buffer_release(nm_io_buffer_t *buffer) {
+void llam_io_buffer_release(llam_io_buffer_t *buffer) {
     if (buffer == NULL) {
         return;
     }
@@ -173,14 +186,14 @@ void nm_io_buffer_release(nm_io_buffer_t *buffer) {
         return;
     }
 
-    if (buffer->provided_storage && g_nm_runtime.initialized &&
-        buffer->provided_node_index < g_nm_runtime.active_nodes) {
-        (void)nm_node_recycle_recv_buffer(&g_nm_runtime.nodes[buffer->provided_node_index], buffer->provided_bid);
+    if (buffer->provided_storage && g_llam_runtime.initialized &&
+        buffer->provided_node_index < g_llam_runtime.active_nodes) {
+        (void)llam_node_recycle_recv_buffer(&g_llam_runtime.nodes[buffer->provided_node_index], buffer->provided_bid);
         buffer->provided_storage = false;
         buffer->provided_bid = 0U;
     }
 
-    nm_io_buffer_allocator_free(buffer);
+    llam_io_buffer_allocator_free(buffer);
 }
 
 /**
@@ -190,7 +203,7 @@ void nm_io_buffer_release(nm_io_buffer_t *buffer) {
  *
  * @return Data pointer, or @c NULL for @c NULL input.
  */
-void *nm_io_buffer_data(nm_io_buffer_t *buffer) {
+void *llam_io_buffer_data(llam_io_buffer_t *buffer) {
     if (buffer == NULL) {
         return NULL;
     }
@@ -204,7 +217,7 @@ void *nm_io_buffer_data(nm_io_buffer_t *buffer) {
  *
  * @return Valid byte count, or 0 for @c NULL input.
  */
-size_t nm_io_buffer_size(const nm_io_buffer_t *buffer) {
+size_t llam_io_buffer_size(const llam_io_buffer_t *buffer) {
     return buffer != NULL ? buffer->size : 0U;
 }
 
@@ -215,7 +228,7 @@ size_t nm_io_buffer_size(const nm_io_buffer_t *buffer) {
  *
  * @return Capacity in bytes, or 0 for @c NULL input.
  */
-size_t nm_io_buffer_capacity(const nm_io_buffer_t *buffer) {
+size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer) {
     return buffer != NULL ? buffer->capacity : 0U;
 }
 
@@ -232,30 +245,30 @@ size_t nm_io_buffer_capacity(const nm_io_buffer_t *buffer) {
  *
  * @return Number of bytes written, or -1 with @c errno set.
  */
-ssize_t nm_write(int fd, const void *buf, size_t count) {
-    nm_io_req_t *req;
+ssize_t llam_write(int fd, const void *buf, size_t count) {
+    llam_io_req_t *req;
     ssize_t result;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return write(fd, buf, count);
     }
     {
         ssize_t direct_result;
         bool direct_socket = false;
-        int direct_rc = nm_try_direct_rw(fd, (void *)buf, count, true, false, 0, &direct_result, &direct_socket);
+        int direct_rc = llam_try_direct_rw(fd, (void *)buf, count, true, false, 0, &direct_result, &direct_socket);
 
         if (direct_rc > 0) {
-            nm_maybe_handoff_after_socket_write(fd, count, direct_socket);
+            llam_maybe_handoff_after_socket_write(fd, count, direct_socket);
             return direct_result;
         }
         if (direct_rc < 0) {
             return -1;
         }
-        direct_rc = nm_try_direct_blocking_rw(fd, (void *)buf, count, true, false, 0, &direct_result);
+        direct_rc = llam_try_direct_blocking_rw(fd, (void *)buf, count, true, false, 0, &direct_result);
         if (direct_rc > 0) {
-            nm_maybe_handoff_after_socket_write(fd, count, false);
+            llam_maybe_handoff_after_socket_write(fd, count, false);
             return direct_result;
         }
         if (direct_rc < 0) {
@@ -263,40 +276,40 @@ ssize_t nm_write(int fd, const void *buf, size_t count) {
         }
     }
 
-    req = nm_api_io_req_acquire(g_nm_tls_shard);
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    req->kind = NM_IO_KIND_WRITE;
+    req->kind = LLAM_IO_KIND_WRITE;
     req->fd = fd;
     req->buf = (void *)buf;
     req->count = count;
-    if (nm_issue_io(req, false, 0U) != 0) {
-        if (!nm_io_capability_error(errno)) {
-            nm_api_io_req_release(g_nm_tls_shard, req);
+    if (llam_issue_io(req, false, 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
             return -1;
         }
-        req->kind = NM_IO_KIND_WRITE;
+        req->kind = LLAM_IO_KIND_WRITE;
         req->fd = fd;
         req->buf = (void *)buf;
         req->count = count;
-        req->task = g_nm_tls_task;
-        if (nm_call_blocking(nm_blocking_write_impl, req) == NULL) {
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_write_impl, req) != 0) {
             int saved_errno = errno;
 
-            nm_api_io_req_release(g_nm_tls_shard, req);
+            llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
             return -1;
         }
         result = req->result;
-        nm_api_io_req_release(g_nm_tls_shard, req);
+        llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
 
     result = req->result;
-    nm_api_io_req_release(g_nm_tls_shard, req);
+    llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
 }
 
@@ -312,8 +325,8 @@ ssize_t nm_write(int fd, const void *buf, size_t count) {
  *
  * @return Accepted descriptor, or -1 with @c errno set.
  */
-int nm_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
-    nm_io_req_t *req;
+int llam_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
+    llam_io_req_t *req;
     int result;
     bool allow_multishot = addr == NULL && addrlen == NULL;
 
@@ -321,60 +334,60 @@ int nm_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
     allow_multishot = false;
 #endif
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return accept(fd, addr, addrlen);
     }
 
-    req = nm_api_io_req_acquire(g_nm_tls_shard);
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    req->kind = NM_IO_KIND_ACCEPT;
+    req->kind = LLAM_IO_KIND_ACCEPT;
     req->fd = fd;
     req->addr = addr;
     req->addrlen = addrlen;
     req->recv_watch = NULL;
     if (allow_multishot) {
-        if (nm_issue_multishot_accept(req) == 0) {
+        if (llam_issue_multishot_accept(req) == 0) {
             result = (int)req->result;
-            nm_api_io_req_release(g_nm_tls_shard, req);
+            llam_api_io_req_release(g_llam_tls_shard, req);
             return result;
         }
-        if (!nm_io_capability_error(errno)) {
+        if (!llam_io_capability_error(errno)) {
             result = (int)req->result;
-            nm_api_io_req_release(g_nm_tls_shard, req);
+            llam_api_io_req_release(g_llam_tls_shard, req);
             return result;
         }
         errno = 0;
     }
-    if (nm_issue_io(req, false, 0U) != 0) {
-        if (!nm_io_capability_error(errno)) {
-            nm_api_io_req_release(g_nm_tls_shard, req);
+    if (llam_issue_io(req, false, 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
             return -1;
         }
-        req->kind = NM_IO_KIND_ACCEPT;
+        req->kind = LLAM_IO_KIND_ACCEPT;
         req->fd = fd;
         req->addr = addr;
         req->addrlen = addrlen;
-        req->task = g_nm_tls_task;
-        if (nm_call_blocking(nm_blocking_accept_impl, req) == NULL) {
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_accept_impl, req) != 0) {
             int saved_errno = errno;
 
-            nm_api_io_req_release(g_nm_tls_shard, req);
+            llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
             return -1;
         }
         result = (int)req->result;
-        nm_api_io_req_release(g_nm_tls_shard, req);
+        llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
 
     result = (int)req->result;
-    nm_api_io_req_release(g_nm_tls_shard, req);
+    llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
 }
 
@@ -392,55 +405,55 @@ int nm_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
  *
  * @return 0 on connection, or -1 with @c errno set.
  */
-int nm_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
-    nm_io_req_t *req;
+int llam_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
+    llam_io_req_t *req;
     int result;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
     if (addr == NULL) {
         errno = EINVAL;
         return -1;
     }
-    if (g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return connect(fd, addr, addrlen);
     }
 
-    req = nm_api_io_req_acquire(g_nm_tls_shard);
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    req->kind = NM_IO_KIND_CONNECT;
+    req->kind = LLAM_IO_KIND_CONNECT;
     req->fd = fd;
     req->addr = (struct sockaddr *)addr;
     req->addr_len = addrlen;
     req->recv_watch = NULL;
-    if (nm_issue_io(req, false, 0U) != 0) {
-        if (!nm_io_capability_error(errno)) {
-            nm_api_io_req_release(g_nm_tls_shard, req);
+    if (llam_issue_io(req, false, 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
             return -1;
         }
-        req->kind = NM_IO_KIND_CONNECT;
+        req->kind = LLAM_IO_KIND_CONNECT;
         req->fd = fd;
         req->addr = (struct sockaddr *)addr;
         req->addr_len = addrlen;
-        req->task = g_nm_tls_task;
-        if (nm_call_blocking(nm_blocking_connect_impl, req) == NULL) {
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_connect_impl, req) != 0) {
             int saved_errno = errno;
 
-            nm_api_io_req_release(g_nm_tls_shard, req);
+            llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
             return -1;
         }
         result = (int)req->result;
-        nm_api_io_req_release(g_nm_tls_shard, req);
+        llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
 
     result = (int)req->result;
-    nm_api_io_req_release(g_nm_tls_shard, req);
+    llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
 }
 
@@ -458,93 +471,93 @@ int nm_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
  *
  * @return Positive ready count, 0 on timeout, or -1 with @c errno set.
  */
-int nm_poll_fd(int fd, short events, int timeout_ms, short *revents) {
-    nm_io_req_t *req;
+int llam_poll_fd(int fd, short events, int timeout_ms, short *revents) {
+    llam_io_req_t *req;
     int result;
     bool yielded_for_local_work = false;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
-        return nm_platform_poll_fd(fd, events, timeout_ms, revents);
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
+        return llam_platform_poll_fd(fd, events, timeout_ms, revents);
     }
-    if (timeout_ms > 0 && nm_io_coop_yield_enabled() && nm_io_shard_has_local_work()) {
-        if (nm_io_poll_coop_yield_enabled()) {
+    if (timeout_ms > 0 && llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
+        if (llam_io_poll_coop_yield_enabled()) {
             yielded_for_local_work = true;
-            nm_yield();
+            llam_yield();
         }
     }
-    result = nm_try_socket_pollin_now(fd, events, revents);
+    result = llam_try_socket_pollin_now(fd, events, revents);
     if (result == INT_MIN) {
-        result = nm_platform_poll_now(fd, events, revents);
+        result = llam_platform_poll_now(fd, events, revents);
     }
     if (result != 0 || timeout_ms == 0) {
         return result;
     }
-    if ((!yielded_for_local_work || nm_io_poll_extra_yield_enabled()) && nm_io_coop_yield_enabled() &&
-        nm_io_poll_coop_yield_enabled() && nm_io_shard_has_local_work()) {
-        nm_yield();
-        result = nm_try_socket_pollin_now(fd, events, revents);
+    if ((!yielded_for_local_work || llam_io_poll_extra_yield_enabled()) && llam_io_coop_yield_enabled() &&
+        llam_io_poll_coop_yield_enabled() && llam_io_shard_has_local_work()) {
+        llam_yield();
+        result = llam_try_socket_pollin_now(fd, events, revents);
         if (result == INT_MIN) {
-            result = nm_platform_poll_now(fd, events, revents);
+            result = llam_platform_poll_now(fd, events, revents);
         }
         if (result != 0 || timeout_ms == 0) {
             return result;
         }
     }
-    result = nm_try_direct_blocking_poll(fd, events, timeout_ms, revents);
+    result = llam_try_direct_blocking_poll(fd, events, timeout_ms, revents);
     if (result != INT_MIN) {
         return result;
     }
 
-    req = nm_api_io_req_acquire(g_nm_tls_shard);
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    req->kind = NM_IO_KIND_POLL;
+    req->kind = LLAM_IO_KIND_POLL;
     req->fd = fd;
     req->poll_events = events;
     req->timeout_ms = timeout_ms;
     req->recv_watch = NULL;
 
-    if (timeout_ms < 0 && nm_issue_multishot_poll(req) == 0) {
+    if (timeout_ms < 0 && llam_issue_multishot_poll(req) == 0) {
         result = (int)req->result;
         if (revents != NULL) {
             *revents = req->poll_revents;
         }
-        nm_api_io_req_release(g_nm_tls_shard, req);
+        llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
-    if (timeout_ms < 0 && !nm_io_capability_error(errno)) {
+    if (timeout_ms < 0 && !llam_io_capability_error(errno)) {
         result = (int)req->result;
         if (revents != NULL) {
             *revents = req->poll_revents;
         }
-        nm_api_io_req_release(g_nm_tls_shard, req);
+        llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
 
     if (timeout_ms == 0) {
-        nm_api_io_req_release(g_nm_tls_shard, req);
-        return nm_platform_poll_fd(fd, events, 0, revents);
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        return llam_platform_poll_fd(fd, events, 0, revents);
     }
 
-    if (nm_issue_io(req, timeout_ms >= 0, timeout_ms >= 0 ? nm_now_ns() + (uint64_t)timeout_ms * 1000000ULL : 0U) != 0) {
-        if (!nm_io_capability_error(errno)) {
-            nm_api_io_req_release(g_nm_tls_shard, req);
+    if (llam_issue_io(req, timeout_ms >= 0, timeout_ms >= 0 ? llam_now_ns() + (uint64_t)timeout_ms * 1000000ULL : 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
             return -1;
         }
-        req->kind = NM_IO_KIND_POLL;
+        req->kind = LLAM_IO_KIND_POLL;
         req->fd = fd;
         req->poll_events = events;
         req->timeout_ms = timeout_ms;
-        req->task = g_nm_tls_task;
-        if (nm_call_blocking(nm_blocking_poll_impl, req) == NULL) {
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_poll_impl, req) != 0) {
             int saved_errno = errno;
 
-            nm_api_io_req_release(g_nm_tls_shard, req);
+            llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
             return -1;
         }
@@ -553,6 +566,6 @@ int nm_poll_fd(int fd, short events, int timeout_ms, short *revents) {
     if (revents != NULL) {
         *revents = req->poll_revents;
     }
-    nm_api_io_req_release(g_nm_tls_shard, req);
+    llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
 }

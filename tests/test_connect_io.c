@@ -301,7 +301,7 @@ static int test_managed_connect_success_and_invalid(void) {
     memset(&opts, 0, sizeof(opts));
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
-    opts.experimental_lockfree_normq = 1U;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     if (llam_runtime_init(&opts) != 0) {
         close_if_valid(&state.listener_fd);
         return test_fail_errno("llam_runtime_init failed");

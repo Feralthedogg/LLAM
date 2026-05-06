@@ -31,9 +31,9 @@
      */
     .text
 
-    .globl nm_eventfd_try_claim
-    .type nm_eventfd_try_claim, @function
-nm_eventfd_try_claim:
+    .globl llam_eventfd_try_claim
+    .type llam_eventfd_try_claim, @function
+llam_eventfd_try_claim:
     .cfi_startproc
     xorl %eax, %eax
     movl $1, %edx
@@ -43,9 +43,9 @@ nm_eventfd_try_claim:
     ret
     .cfi_endproc
 
-    .globl nm_linux_futex_wait_private
-    .type nm_linux_futex_wait_private, @function
-nm_linux_futex_wait_private:
+    .globl llam_linux_futex_wait_private
+    .type llam_linux_futex_wait_private, @function
+llam_linux_futex_wait_private:
     /* syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, NULL, NULL, 0) */
     .cfi_startproc
     movl %esi, %edx
@@ -58,9 +58,9 @@ nm_linux_futex_wait_private:
     ret
     .cfi_endproc
 
-    .globl nm_linux_futex_wait_private_timeout
-    .type nm_linux_futex_wait_private_timeout, @function
-nm_linux_futex_wait_private_timeout:
+    .globl llam_linux_futex_wait_private_timeout
+    .type llam_linux_futex_wait_private_timeout, @function
+llam_linux_futex_wait_private_timeout:
     /* syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, timeout, NULL, 0) */
     .cfi_startproc
     movq %rdx, %r10
@@ -73,9 +73,9 @@ nm_linux_futex_wait_private_timeout:
     ret
     .cfi_endproc
 
-    .globl nm_linux_futex_wake_private
-    .type nm_linux_futex_wake_private, @function
-nm_linux_futex_wake_private:
+    .globl llam_linux_futex_wake_private
+    .type llam_linux_futex_wake_private, @function
+llam_linux_futex_wake_private:
     /* syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, count, NULL, NULL, 0) */
     .cfi_startproc
     movl %esi, %edx

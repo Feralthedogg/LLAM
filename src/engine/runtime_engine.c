@@ -35,8 +35,8 @@
  *
  * @return Approximate normal queue depth.
  */
-static unsigned nm_snapshot_norm_depth(nm_shard_t *shard) {
-    return nm_norm_queue_depth(shard);
+static unsigned llam_snapshot_norm_depth(llam_shard_t *shard) {
+    return llam_norm_queue_depth(shard);
 }
 
 /**
@@ -53,14 +53,14 @@ static unsigned nm_snapshot_norm_depth(nm_shard_t *shard) {
  *
  * @return @c true when stealing should proceed.
  */
-static bool nm_should_steal_from_victim(nm_shard_t *thief, nm_shard_t *victim, unsigned victim_depth, unsigned thief_depth) {
+static bool llam_should_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim, unsigned victim_depth, unsigned thief_depth) {
     bool busy = false;
 
     if (thief == NULL || victim == NULL || victim == thief) {
         return false;
     }
-    if (nm_runtime_steal_pause_active(thief->runtime) || nm_shard_merge_pause_requested(thief) ||
-        nm_shard_merge_pause_requested(victim)) {
+    if (llam_runtime_steal_pause_active(thief->runtime) || llam_shard_merge_pause_requested(thief) ||
+        llam_shard_merge_pause_requested(victim)) {
         return false;
     }
     if (victim_depth < 2U || victim_depth < thief_depth * 2U) {
@@ -75,7 +75,7 @@ static bool nm_should_steal_from_victim(nm_shard_t *thief, nm_shard_t *victim, u
         return false;
     }
 
-    if (nm_lockfree_normq_enabled(victim->runtime)) {
+    if (llam_lockfree_normq_enabled(victim->runtime)) {
         // The lock-free deque is best with deep backlog; stealing tiny queues
         // mostly adds migration churn to short wake/sleep workloads.
         if (victim_depth < 8U || victim_depth <= thief_depth + 2U) {
@@ -98,33 +98,33 @@ static bool nm_should_steal_from_victim(nm_shard_t *thief, nm_shard_t *victim, u
  *
  * @return Number of tasks migrated to @p thief.
  */
-unsigned nm_steal_from_victim(nm_shard_t *thief, nm_shard_t *victim) {
+unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
     unsigned stolen = 0;
     unsigned victim_depth;
-    unsigned thief_depth = nm_snapshot_norm_depth(thief);
+    unsigned thief_depth = llam_snapshot_norm_depth(thief);
 
-    if (victim == thief || !nm_shard_is_online(thief) || !nm_shard_is_online(victim)) {
+    if (victim == thief || !llam_shard_is_online(thief) || !llam_shard_is_online(victim)) {
         return 0;
     }
 
-    victim_depth = nm_snapshot_norm_depth(victim);
-    if (!nm_should_steal_from_victim(thief, victim, victim_depth, thief_depth)) {
+    victim_depth = llam_snapshot_norm_depth(victim);
+    if (!llam_should_steal_from_victim(thief, victim, victim_depth, thief_depth)) {
         return 0;
     }
 
-    if (nm_lockfree_normq_enabled(victim->runtime)) {
-        victim_depth = nm_max_unsigned(1U, victim_depth / 4U);
+    if (llam_lockfree_normq_enabled(victim->runtime)) {
+        victim_depth = llam_max_unsigned(1U, victim_depth / 4U);
     } else {
         victim_depth /= 2U;
     }
     while (victim_depth > 0U) {
-        nm_task_t *task;
+        llam_task_t *task;
 
-        if (nm_lockfree_normq_enabled(victim->runtime)) {
-            task = nm_norm_queue_steal(victim);
+        if (llam_lockfree_normq_enabled(victim->runtime)) {
+            task = llam_norm_queue_steal(victim);
         } else {
             pthread_mutex_lock(&victim->lock);
-            task = nm_queue_pop_tail(&victim->norm_q);
+            task = llam_queue_pop_tail(&victim->norm_q);
             if (task != NULL) {
                 atomic_fetch_sub_explicit(&victim->norm_depth, 1U, memory_order_release);
             }
@@ -133,23 +133,23 @@ unsigned nm_steal_from_victim(nm_shard_t *thief, nm_shard_t *victim) {
         if (task == NULL) {
             break;
         }
-        if ((task->flags & NM_TASK_FLAG_PINNED) != 0U) {
+        if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
             // Pinned tasks must remain on the victim; put them back on inject.
             pthread_mutex_lock(&victim->lock);
             task->enqueue_hot = 0U;
-            if (nm_queue_push_bounded_locked(victim, &victim->inject_q, NM_INJECT_QUEUE_CAP, task)) {
+            if (llam_queue_push_bounded_locked(victim, &victim->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
                 victim->metrics.inject_enqueues += 1U;
             }
             pthread_mutex_unlock(&victim->lock);
-            nm_kick_shard(victim);
+            llam_kick_shard(victim);
             victim_depth -= 1U;
             continue;
         }
 
         pthread_mutex_lock(&thief->lock);
-        (void)nm_norm_queue_push_owner_locked(thief, task);
+        (void)llam_norm_queue_push_owner_locked(thief, task);
         thief->metrics.migrations += 1U;
-        nm_trace_shard(thief, task, NM_TRACE_STEAL, NM_TASK_STATE_RUNNABLE, NM_TASK_STATE_RUNNABLE, NM_WAIT_NONE);
+        llam_trace_shard(thief, task, LLAM_TRACE_STEAL, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_NONE);
         pthread_mutex_unlock(&thief->lock);
         stolen += 1U;
         victim_depth -= 1U;
@@ -174,17 +174,17 @@ unsigned nm_steal_from_victim(nm_shard_t *thief, nm_shard_t *victim) {
  *
  * @return Runnable task on success, or @c NULL when no suitable victim exists.
  */
-nm_task_t *nm_try_steal_task(nm_runtime_t *rt, nm_shard_t *shard) {
+llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard) {
     unsigned i;
-    nm_shard_t *best_same_node = NULL;
-    nm_shard_t *best_remote = NULL;
+    llam_shard_t *best_same_node = NULL;
+    llam_shard_t *best_remote = NULL;
     unsigned best_same_depth = 0U;
     unsigned best_remote_depth = 0U;
 
-    if (rt->deterministic != 0U || nm_runtime_online_shards(rt) < 2U || nm_runtime_steal_pause_active(rt)) {
+    if (rt->deterministic != 0U || llam_runtime_online_shards(rt) < 2U || llam_runtime_steal_pause_active(rt)) {
         return NULL;
     }
-    if (!nm_shard_is_online(shard)) {
+    if (!llam_shard_is_online(shard)) {
         return NULL;
     }
 
@@ -193,35 +193,35 @@ nm_task_t *nm_try_steal_task(nm_runtime_t *rt, nm_shard_t *shard) {
 
         // Prefer same-locality work first; remote stealing is the fallback below.
         if (rt->shards[i].id == shard->id || rt->shards[i].node_index != shard->node_index ||
-            !nm_shard_is_online(&rt->shards[i])) {
+            !llam_shard_is_online(&rt->shards[i])) {
             continue;
         }
 
-        depth = nm_snapshot_norm_depth(&rt->shards[i]);
+        depth = llam_snapshot_norm_depth(&rt->shards[i]);
         if (depth > best_same_depth) {
             best_same_depth = depth;
             best_same_node = &rt->shards[i];
         }
     }
-    if (best_same_node != NULL && nm_steal_from_victim(shard, best_same_node) > 0U) {
-        return nm_take_local_task(shard);
+    if (best_same_node != NULL && llam_steal_from_victim(shard, best_same_node) > 0U) {
+        return llam_take_local_task(shard);
     }
 
     for (i = 0; i < rt->active_shards; ++i) {
         unsigned depth;
 
-        if (rt->shards[i].node_index == shard->node_index || !nm_shard_is_online(&rt->shards[i])) {
+        if (rt->shards[i].node_index == shard->node_index || !llam_shard_is_online(&rt->shards[i])) {
             continue;
         }
 
-        depth = nm_snapshot_norm_depth(&rt->shards[i]);
+        depth = llam_snapshot_norm_depth(&rt->shards[i]);
         if (depth > best_remote_depth) {
             best_remote_depth = depth;
             best_remote = &rt->shards[i];
         }
     }
-    if (best_remote != NULL && nm_steal_from_victim(shard, best_remote) > 0U) {
-        return nm_take_local_task(shard);
+    if (best_remote != NULL && llam_steal_from_victim(shard, best_remote) > 0U) {
+        return llam_take_local_task(shard);
     }
 
     return NULL;
@@ -238,7 +238,7 @@ nm_task_t *nm_try_steal_task(nm_runtime_t *rt, nm_shard_t *shard) {
  * @return Timeout in milliseconds, 0 for already-expired timers, or -1 when no
  *         timer constrains the wait.
  */
-static int nm_shard_next_timeout(nm_shard_t *shard, bool *has_timeout, uint64_t *timeout_ns) {
+static int llam_shard_next_timeout(llam_shard_t *shard, bool *has_timeout, uint64_t *timeout_ns) {
     int timeout_ms = -1;
     uint64_t now;
 
@@ -252,7 +252,7 @@ static int nm_shard_next_timeout(nm_shard_t *shard, bool *has_timeout, uint64_t 
         return timeout_ms;
     }
 
-    now = nm_now_ns();
+    now = llam_now_ns();
     pthread_mutex_lock(&shard->lock);
     if (shard->timers != NULL) {
         if (has_timeout != NULL) {
@@ -285,23 +285,23 @@ static int nm_shard_next_timeout(nm_shard_t *shard, bool *has_timeout, uint64_t 
  *
  * @return @c true when the shard should leave idle wait immediately.
  */
-static bool nm_idle_spin_ready(nm_shard_t *shard, uint64_t now_ns) {
-    nm_runtime_t *rt = shard->runtime;
+static bool llam_idle_spin_ready(llam_shard_t *shard, uint64_t now_ns) {
+    llam_runtime_t *rt = shard->runtime;
     bool ready = false;
 
     if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
         return true;
     }
-    if (nm_runtime_overflow_depth(rt) > 0U) {
+    if (llam_runtime_overflow_depth(rt) > 0U) {
         // Overflow work is runtime-global, so any idle shard can help drain it.
         return true;
     }
-    if (nm_norm_queue_depth(shard) > 0U) {
+    if (llam_norm_queue_depth(shard) > 0U) {
         return true;
     }
 
     pthread_mutex_lock(&shard->lock);
-    ready = shard->inject_q.depth > 0U || shard->hot_q.depth > 0U || nm_norm_queue_depth(shard) > 0U;
+    ready = shard->inject_q.depth > 0U || shard->hot_q.depth > 0U || llam_norm_queue_depth(shard) > 0U;
     if (!ready && shard->timers != NULL && shard->timers->deadline_ns <= now_ns) {
         ready = true;
     }
@@ -322,8 +322,8 @@ static bool nm_idle_spin_ready(nm_shard_t *shard, uint64_t now_ns) {
  *
  * @return @c true when the shard should spin first.
  */
-static bool nm_should_idle_spin(nm_shard_t *shard, int timeout_ms, uint64_t now_ns) {
-    nm_runtime_t *rt = shard->runtime;
+static bool llam_should_idle_spin(llam_shard_t *shard, int timeout_ms, uint64_t now_ns) {
+    llam_runtime_t *rt = shard->runtime;
     uint64_t since_last_wake_ns;
 
     if (rt->idle_spin_ns == 0U || rt->idle_spin_max_iters == 0U) {
@@ -333,7 +333,7 @@ static bool nm_should_idle_spin(nm_shard_t *shard, int timeout_ms, uint64_t now_
         return false;
     }
     if (shard->last_idle_wake_ns == 0U || now_ns < shard->last_idle_wake_ns) {
-        return nm_runtime_pressure_signal(rt);
+        return llam_runtime_pressure_signal(rt);
     }
 
     since_last_wake_ns = now_ns - shard->last_idle_wake_ns;
@@ -341,7 +341,7 @@ static bool nm_should_idle_spin(nm_shard_t *shard, int timeout_ms, uint64_t now_
     if (since_last_wake_ns <= rt->idle_spin_ns * 4U) {
         return true;
     }
-    return nm_runtime_pressure_signal(rt);
+    return llam_runtime_pressure_signal(rt);
 }
 
 /**
@@ -355,22 +355,22 @@ static bool nm_should_idle_spin(nm_shard_t *shard, int timeout_ms, uint64_t now_
  *
  * @return @c true when work became available during the spin.
  */
-static bool nm_idle_spin(nm_shard_t *shard, int timeout_ms) {
-    nm_runtime_t *rt = shard->runtime;
-    uint64_t start_ns = nm_now_ns();
+static bool llam_idle_spin(llam_shard_t *shard, int timeout_ms) {
+    llam_runtime_t *rt = shard->runtime;
+    uint64_t start_ns = llam_now_ns();
     uint64_t spin_budget_ns = rt->idle_spin_ns;
     unsigned max_iters = rt->idle_spin_max_iters;
     unsigned iters = 0U;
 
-    if (!nm_should_idle_spin(shard, timeout_ms, start_ns)) {
+    if (!llam_should_idle_spin(shard, timeout_ms, start_ns)) {
         return false;
     }
 
     for (;;) {
         uint64_t now_ns;
 
-        if (nm_idle_spin_ready(shard, nm_now_ns())) {
-            uint64_t done_ns = nm_now_ns();
+        if (llam_idle_spin_ready(shard, llam_now_ns())) {
+            uint64_t done_ns = llam_now_ns();
 
             pthread_mutex_lock(&shard->lock);
             shard->metrics.idle_spin_loops += iters;
@@ -385,9 +385,9 @@ static bool nm_idle_spin(nm_shard_t *shard, int timeout_ms) {
             break;
         }
 
-        nm_pause_cpu();
+        llam_pause_cpu();
         iters += 1U;
-        now_ns = nm_now_ns();
+        now_ns = llam_now_ns();
         if (now_ns < start_ns || now_ns - start_ns >= spin_budget_ns) {
             break;
         }
@@ -396,7 +396,7 @@ static bool nm_idle_spin(nm_shard_t *shard, int timeout_ms) {
     pthread_mutex_lock(&shard->lock);
     shard->metrics.idle_spin_loops += iters;
     shard->metrics.idle_spin_fallbacks += 1U;
-    shard->metrics.idle_spin_ns += nm_now_ns() - start_ns;
+    shard->metrics.idle_spin_ns += llam_now_ns() - start_ns;
     pthread_mutex_unlock(&shard->lock);
     return false;
 }
@@ -408,13 +408,13 @@ static bool nm_idle_spin(nm_shard_t *shard, int timeout_ms) {
  * @param shard      Shard entering idle wait.
  * @param timeout_ms Computed timeout in milliseconds.
  */
-static void nm_idle_futex_wait(nm_shard_t *shard, int timeout_ms) {
-    int wait_timeout_ms = timeout_ms < 0 ? NM_IDLE_POLL_TIMEOUT_MS : timeout_ms;
+static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
+    int wait_timeout_ms = timeout_ms < 0 ? LLAM_IDLE_POLL_TIMEOUT_MS : timeout_ms;
     struct timespec ts;
     struct timespec *ts_ptr = NULL;
 
     if (atomic_exchange_explicit(&shard->event_pending, 0U, memory_order_acq_rel) != 0U) {
-        shard->last_idle_wake_ns = nm_now_ns();
+        shard->last_idle_wake_ns = llam_now_ns();
         return;
     }
     if (wait_timeout_ms == 0) {
@@ -427,11 +427,11 @@ static void nm_idle_futex_wait(nm_shard_t *shard, int timeout_ms) {
     }
 
     for (;;) {
-        long rc = nm_linux_futex_wait_private_timeout(&shard->event_pending, 0U, ts_ptr);
+        long rc = llam_linux_futex_wait_private_timeout(&shard->event_pending, 0U, ts_ptr);
 
         if (rc == 0) {
             atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
-            shard->last_idle_wake_ns = nm_now_ns();
+            shard->last_idle_wake_ns = llam_now_ns();
             return;
         }
         if (errno == EINTR) {
@@ -439,7 +439,7 @@ static void nm_idle_futex_wait(nm_shard_t *shard, int timeout_ms) {
         }
         if (errno == EAGAIN) {
             atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
-            shard->last_idle_wake_ns = nm_now_ns();
+            shard->last_idle_wake_ns = llam_now_ns();
         }
         return;
     }
@@ -455,44 +455,50 @@ static void nm_idle_futex_wait(nm_shard_t *shard, int timeout_ms) {
  *
  * @param shard Shard that has become idle.
  */
-void nm_idle_wait(nm_shard_t *shard) {
+void llam_idle_wait(llam_shard_t *shard) {
+    llam_runtime_t *rt = shard->runtime;
     int timeout_ms;
 #if defined(__APPLE__)
     bool has_precise_timeout = false;
     uint64_t precise_timeout_ns = 0U;
 #endif
 
+    if (rt != NULL && atomic_load_explicit(&rt->live_tasks, memory_order_acquire) == 0U) {
+        llam_request_stop(rt);
+        return;
+    }
+
 #if defined(__APPLE__)
-    timeout_ms = nm_shard_next_timeout(shard, &has_precise_timeout, &precise_timeout_ns);
+    timeout_ms = llam_shard_next_timeout(shard, &has_precise_timeout, &precise_timeout_ns);
 #else
-    timeout_ms = nm_shard_next_timeout(shard, NULL, NULL);
+    timeout_ms = llam_shard_next_timeout(shard, NULL, NULL);
 #endif
-    if (nm_idle_spin(shard, timeout_ms)) {
+    if (llam_idle_spin(shard, timeout_ms)) {
         return;
     }
 
     shard->metrics.idle_polls += 1U;
-    nm_trace_shard(shard, NULL, NM_TRACE_IDLE, NM_TASK_STATE_RUNNABLE, NM_TASK_STATE_PARKED, NM_WAIT_NONE);
+    llam_trace_shard(shard, NULL, LLAM_TRACE_IDLE, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_PARKED, LLAM_WAIT_NONE);
 
 #if defined(__linux__)
-    nm_idle_futex_wait(shard, timeout_ms);
+    llam_idle_futex_wait(shard, timeout_ms);
 #else
     for (;;) {
-        int wait_timeout_ms = timeout_ms < 0 ? NM_IDLE_POLL_TIMEOUT_MS : timeout_ms;
+        int wait_timeout_ms = timeout_ms < 0 ? LLAM_IDLE_POLL_TIMEOUT_MS : timeout_ms;
 #if defined(__APPLE__)
         uint64_t wait_timeout_ns =
             has_precise_timeout ? precise_timeout_ns : (uint64_t)wait_timeout_ms * 1000000ULL;
         // Darwin keeps the precise timer delta to avoid millisecond rounding drift.
-        int rc = nm_wake_handle_wait_ns(shard->event_fd, wait_timeout_ms, wait_timeout_ns);
+        int rc = llam_wake_handle_wait_ns(shard->event_fd, wait_timeout_ms, wait_timeout_ns);
 #else
-        int rc = nm_wake_handle_wait(shard->event_fd, wait_timeout_ms);
+        int rc = llam_wake_handle_wait(shard->event_fd, wait_timeout_ms);
 #endif
         if (rc < 0 && errno == EINTR) {
             continue;
         }
         if (rc > 0) {
-            nm_drain_shard_wake(shard);
-            shard->last_idle_wake_ns = nm_now_ns();
+            llam_drain_shard_wake(shard);
+            shard->last_idle_wake_ns = llam_now_ns();
         }
         return;
     }

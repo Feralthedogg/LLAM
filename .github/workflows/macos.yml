@@ -1,0 +1,49 @@
+name: macos
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-aarch64
+            runner: macos-14
+            cc: clang
+            package_target: macos-aarch64
+          - name: macos-x86_64
+            runner: macos-15-intel
+            cc: clang
+            package_target: macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Darwin
+        run: make verify-darwin CC="${{ matrix.cc }}"
+
+      - name: CMake build
+        run: |
+          cmake -S . -B build/macos -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang
+          cmake --build build/macos
+          ctest --test-dir build/macos --output-on-failure
+
+      - name: Benchmark smoke
+        run: LLAM_BENCH_ONLY=spawn_join LLAM_BENCH_ROUNDS=1 ./bench
+
+      - name: Package smoke
+        run: |
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.0 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
+          grep '/include/llam/runtime.h$' package-files.txt
+          grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
+          grep '/lib/pkgconfig/llam.pc$' package-files.txt

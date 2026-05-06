@@ -32,8 +32,8 @@
  * @param shard Preferred allocation-owner shard.
  * @return Request object on success, or NULL on allocation failure.
  */
-nm_io_req_t *nm_io_req_alloc(nm_shard_t *shard) {
-    nm_io_req_t *req = NULL;
+llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
+    llam_io_req_t *req = NULL;
 
     if (shard == NULL) {
         errno = EINVAL;
@@ -41,7 +41,7 @@ nm_io_req_t *nm_io_req_alloc(nm_shard_t *shard) {
     }
 
     for (;;) {
-        if (g_nm_tls_shard == shard) {
+        if (g_llam_tls_shard == shard) {
             // Owner-shard request allocation is lock-free and dominates the I/O
             // submission path.
             req = shard->allocator.io_req_free;
@@ -57,12 +57,12 @@ nm_io_req_t *nm_io_req_alloc(nm_shard_t *shard) {
             }
         } else {
             // Cold external path: serialize access to the owner-local free list.
-            nm_allocator_lock(&shard->allocator);
+            llam_allocator_lock(&shard->allocator);
             req = shard->allocator.io_req_free;
             if (req != NULL) {
                 shard->allocator.io_req_free = req->alloc_next;
                 shard->allocator.io_req_reuses += 1U;
-                nm_allocator_unlock(&shard->allocator);
+                llam_allocator_unlock(&shard->allocator);
                 memset(req, 0, sizeof(*req));
                 req->owner_shard = shard->id;
                 req->alloc_owner_shard = shard->id;
@@ -70,11 +70,11 @@ nm_io_req_t *nm_io_req_alloc(nm_shard_t *shard) {
                 atomic_store(&req->inflight_owner_shard, UINT_MAX);
                 return req;
             }
-            nm_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->allocator);
         }
         // Grow lazily so startup does not reserve request objects for inactive
         // shards or workloads that never touch I/O.
-        if (nm_allocator_grow_io_req_slab(shard) != 0) {
+        if (llam_allocator_grow_io_req_slab(shard) != 0) {
             return NULL;
         }
     }
@@ -86,10 +86,10 @@ nm_io_req_t *nm_io_req_alloc(nm_shard_t *shard) {
  * @param shard Current shard hint (unused; ownership is embedded in @p req).
  * @param req   Request object to recycle.
  */
-void nm_io_req_free(nm_shard_t *shard, nm_io_req_t *req) {
-    nm_runtime_t *rt = &g_nm_runtime;
-    nm_shard_t *owner;
-    nm_io_req_t *head;
+void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_shard_t *owner;
+    llam_io_req_t *head;
 
     (void)shard;
     if (req == NULL || req->alloc_owner_shard >= rt->active_shards) {
@@ -99,7 +99,7 @@ void nm_io_req_free(nm_shard_t *shard, nm_io_req_t *req) {
     owner = &rt->shards[req->alloc_owner_shard];
     req->next = NULL;
     req->alloc_next = NULL;
-    if (g_nm_tls_shard != NULL && g_nm_tls_shard->id == owner->id) {
+    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
         // Fast return when the completion path runs on the allocation owner.
         req->alloc_next = owner->allocator.io_req_free;
         owner->allocator.io_req_free = req;
@@ -123,8 +123,8 @@ void nm_io_req_free(nm_shard_t *shard, nm_io_req_t *req) {
  * @param min_capacity Minimum usable data capacity in bytes.
  * @return Buffer wrapper on success, or NULL on allocation failure.
  */
-nm_io_buffer_t *nm_io_buffer_alloc(nm_shard_t *shard, size_t min_capacity) {
-    nm_io_buffer_t *buffer = NULL;
+llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity) {
+    llam_io_buffer_t *buffer = NULL;
 
     if (shard == NULL) {
         errno = EINVAL;
@@ -132,7 +132,7 @@ nm_io_buffer_t *nm_io_buffer_alloc(nm_shard_t *shard, size_t min_capacity) {
     }
 
     for (;;) {
-        if (g_nm_tls_shard == shard) {
+        if (g_llam_tls_shard == shard) {
             // Inline buffers stay entirely inside the slab object; large payload
             // requests attach external storage only for that allocation.
             buffer = shard->allocator.io_buffer_free;
@@ -142,11 +142,11 @@ nm_io_buffer_t *nm_io_buffer_alloc(nm_shard_t *shard, size_t min_capacity) {
                 memset(buffer, 0, sizeof(*buffer));
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
-                buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
-                if (min_capacity > NM_IO_BUFFER_INLINE_BYTES) {
+                buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+                if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
                     buffer->data = calloc(1, min_capacity);
                     if (buffer->data == NULL) {
-                        nm_io_buffer_allocator_free(buffer);
+                        llam_io_buffer_allocator_free(buffer);
                         return NULL;
                     }
                     buffer->capacity = min_capacity;
@@ -157,20 +157,20 @@ nm_io_buffer_t *nm_io_buffer_alloc(nm_shard_t *shard, size_t min_capacity) {
         } else {
             // Foreign allocation is rare, but keeps public API calls legal from
             // threads that are not currently running a scheduler shard.
-            nm_allocator_lock(&shard->allocator);
+            llam_allocator_lock(&shard->allocator);
             buffer = shard->allocator.io_buffer_free;
             if (buffer != NULL) {
                 shard->allocator.io_buffer_free = buffer->alloc_next;
                 shard->allocator.io_buffer_reuses += 1U;
-                nm_allocator_unlock(&shard->allocator);
+                llam_allocator_unlock(&shard->allocator);
                 memset(buffer, 0, sizeof(*buffer));
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
-                buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
-                if (min_capacity > NM_IO_BUFFER_INLINE_BYTES) {
+                buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+                if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
                     buffer->data = calloc(1, min_capacity);
                     if (buffer->data == NULL) {
-                        nm_io_buffer_allocator_free(buffer);
+                        llam_io_buffer_allocator_free(buffer);
                         return NULL;
                     }
                     buffer->capacity = min_capacity;
@@ -178,11 +178,11 @@ nm_io_buffer_t *nm_io_buffer_alloc(nm_shard_t *shard, size_t min_capacity) {
                 }
                 return buffer;
             }
-            nm_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->allocator);
         }
         // The requested capacity is handled after a wrapper is obtained; slab
         // growth only creates wrapper objects with inline storage.
-        if (nm_allocator_grow_io_buffer_slab(shard) != 0) {
+        if (llam_allocator_grow_io_buffer_slab(shard) != 0) {
             return NULL;
         }
     }
@@ -193,10 +193,10 @@ nm_io_buffer_t *nm_io_buffer_alloc(nm_shard_t *shard, size_t min_capacity) {
  *
  * @param buffer Buffer wrapper to recycle.
  */
-void nm_io_buffer_allocator_free(nm_io_buffer_t *buffer) {
-    nm_runtime_t *rt = &g_nm_runtime;
-    nm_shard_t *owner;
-    nm_io_buffer_t *head;
+void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_shard_t *owner;
+    llam_io_buffer_t *head;
 
     if (buffer == NULL) {
         return;
@@ -211,7 +211,7 @@ void nm_io_buffer_allocator_free(nm_io_buffer_t *buffer) {
     buffer->detached_wrapper = false;
     buffer->data = buffer->inline_data;
     buffer->size = 0U;
-    buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
+    buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
     buffer->alloc_next = NULL;
 
     if (buffer->alloc_owner_shard >= rt->active_shards) {
@@ -219,7 +219,7 @@ void nm_io_buffer_allocator_free(nm_io_buffer_t *buffer) {
     }
 
     owner = &rt->shards[buffer->alloc_owner_shard];
-    if (g_nm_tls_shard != NULL && g_nm_tls_shard->id == owner->id) {
+    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
         // Owner-local recycle avoids allocator locking and malloc churn.
         buffer->alloc_next = owner->allocator.io_buffer_free;
         owner->allocator.io_buffer_free = buffer;

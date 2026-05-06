@@ -20,15 +20,19 @@
 
 #include "stress_internal.h"
 
+static unsigned stress_runtime_flag_enabled(const llam_runtime_opts_t *opts, uint64_t flag) {
+    return opts != NULL && (opts->experimental_flags & flag) != 0U ? 1U : 0U;
+}
+
 int stress_run_multi_phase(const char *phase_name,
                                   const stress_phase_entry_t *entries,
                                   unsigned entry_count,
                                   unsigned spawn_start_shard,
                                   unsigned override_online_floor,
-                                  const nm_runtime_opts_t *opts,
+                                  const llam_runtime_opts_t *opts,
                                   unsigned require_dynamic_motion,
                                   unsigned require_floor_reach) {
-    nm_runtime_stats_t stats;
+    llam_runtime_stats_t stats;
     unsigned failures_before = atomic_load(&g_failures);
     unsigned i;
 
@@ -36,93 +40,88 @@ int stress_run_multi_phase(const char *phase_name,
            phase_name,
            opts->deterministic,
            opts->forced_yield_every,
-           opts->experimental_shard_rings,
-           opts->experimental_shard_rings_multishot,
-           opts->experimental_dynamic_shards,
-           opts->experimental_lockfree_normq,
-           opts->experimental_huge_alloc,
-           opts->experimental_sqpoll,
+           stress_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS),
+           stress_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT),
+           stress_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS),
+           stress_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ),
+           stress_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC),
+           stress_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL),
            opts->sqpoll_cpu);
-    if (nm_runtime_init(opts) != 0) {
-        perror("nm_runtime_init");
+    if (llam_runtime_init(opts) != 0) {
+        perror("llam_runtime_init");
         return 1;
     }
     if (spawn_start_shard == UINT_MAX - 1U) {
-        spawn_start_shard = g_nm_runtime.active_shards > 1U ? g_nm_runtime.active_shards - 2U : 0U;
+        spawn_start_shard = g_llam_runtime.active_shards > 1U ? g_llam_runtime.active_shards - 2U : 0U;
     } else if (spawn_start_shard == UINT_MAX - 2U) {
-        unsigned online_shards = atomic_load_explicit(&g_nm_runtime.online_shards, memory_order_acquire);
+        unsigned online_shards = atomic_load_explicit(&g_llam_runtime.online_shards, memory_order_acquire);
 
         spawn_start_shard = online_shards > 0U ? online_shards - 1U : 0U;
     }
-    if (spawn_start_shard != UINT_MAX && spawn_start_shard < g_nm_runtime.active_shards) {
-        g_nm_runtime.next_spawn_shard = spawn_start_shard;
+    if (spawn_start_shard != UINT_MAX && spawn_start_shard < g_llam_runtime.active_shards) {
+        g_llam_runtime.next_spawn_shard = spawn_start_shard;
     }
     if (override_online_floor != UINT_MAX && override_online_floor > 0U) {
-        g_nm_runtime.dynamic_online_floor =
-            override_online_floor < g_nm_runtime.active_shards ? override_online_floor : g_nm_runtime.active_shards;
+        g_llam_runtime.dynamic_online_floor =
+            override_online_floor < g_llam_runtime.active_shards ? override_online_floor : g_llam_runtime.active_shards;
     }
     for (i = 0U; i < entry_count; ++i) {
         if (entries[i].task_fn == NULL) {
             continue;
         }
-        if (nm_spawn(entries[i].task_fn,
+        if (llam_spawn(entries[i].task_fn,
                      entries[i].arg,
-                     &(nm_spawn_opts_t){
-                         .task_class = NM_TASK_CLASS_DEFAULT,
-                         .stack_class = NM_STACK_CLASS_DEFAULT,
-                         .flags = NM_SPAWN_F_PINNED,
+                     &(llam_spawn_opts_t){
+                         .task_class = LLAM_TASK_CLASS_DEFAULT,
+                         .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                         .flags = LLAM_SPAWN_F_PINNED,
                      }) == NULL) {
-            perror("nm_spawn");
-            nm_runtime_shutdown();
+            perror("llam_spawn");
+            llam_runtime_shutdown();
             return 1;
         }
     }
-    if (nm_run() != 0) {
-        perror("nm_run");
-        nm_dump_runtime_state(STDOUT_FILENO);
-        nm_runtime_shutdown();
+    if (llam_run() != 0) {
+        perror("llam_run");
+        llam_dump_runtime_state(STDOUT_FILENO);
+        llam_runtime_shutdown();
         return 1;
     }
-    if (nm_runtime_collect_stats(&stats) != 0) {
-        perror("nm_runtime_collect_stats");
-        nm_runtime_shutdown();
+    if (llam_runtime_collect_stats(&stats) != 0) {
+        perror("llam_runtime_collect_stats");
+        llam_runtime_shutdown();
         return 1;
     }
     stress_print_phase_stats(phase_name, &stats);
     if (require_dynamic_motion != 0U &&
-        stats.dynamic_shards != 0U &&
-        stats.active_shards > stats.online_shards_floor &&
-        stats.online_shards_max <= stats.online_shards_min) {
+        stats.dynamic_workers != 0U &&
+        stats.active_workers > stats.online_workers_floor &&
+        stats.online_workers_max <= stats.online_workers_min) {
         stress_fail_msg("dynamic phase did not move online shard range");
     }
     if (require_floor_reach != 0U &&
-        stats.dynamic_shards != 0U &&
-        stats.active_shards > stats.online_shards_floor &&
-        stats.online_shards_min > stats.online_shards_floor) {
+        stats.dynamic_workers != 0U &&
+        stats.active_workers > stats.online_workers_floor &&
+        stats.online_workers_min > stats.online_workers_floor) {
         stress_fail_msg("dynamic phase did not return to base online floor");
     }
     if (atomic_load(&g_failures) != failures_before) {
-        nm_dump_runtime_state(STDOUT_FILENO);
-        nm_runtime_shutdown();
+        llam_dump_runtime_state(STDOUT_FILENO);
+        llam_runtime_shutdown();
         return 1;
     }
-    nm_runtime_shutdown();
+    llam_runtime_shutdown();
     return 0;
 }
 
 int main(void) {
-    nm_runtime_opts_t runtime_opts = {
+    llam_runtime_opts_t runtime_opts = {
         .deterministic = 1U,
         .forced_yield_every = 1U,
-        .experimental_shard_rings = 0U,
-        .experimental_shard_rings_multishot = 0U,
-        .experimental_dynamic_shards = 0U,
-        .experimental_lockfree_normq = 1U,
-        .experimental_huge_alloc = 0U,
-        .experimental_sqpoll = 0U,
+        .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ,
         .sqpoll_cpu = -1,
     };
-    nm_runtime_opts_t dynamic_runtime_opts;
+    llam_runtime_opts_t dynamic_runtime_opts;
     unsigned stress_rounds = stress_round_count();
     unsigned deterministic_phase = 1U;
     unsigned dynamic_phase = 0U;
@@ -141,18 +140,45 @@ int main(void) {
     unsigned dynamic_live_poll_waiters;
     unsigned dynamic_live_poll_monitor_rounds;
     unsigned dynamic_live_poll_monitor_us;
+    unsigned worker_rings;
+    unsigned worker_rings_multishot;
+    unsigned dynamic_workers;
+    unsigned lockfree_normq;
+    unsigned huge_alloc;
+    unsigned sqpoll;
     int rc = 0;
 
-    runtime_opts.experimental_shard_rings = stress_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS", 0U);
-    runtime_opts.experimental_shard_rings_multishot =
-        stress_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS_MULTISHOT", 0U);
-    runtime_opts.experimental_dynamic_shards = stress_env_flag_default("LLAM_EXPERIMENTAL_DYNAMIC_WORKERS", 1U);
-    runtime_opts.experimental_lockfree_normq = stress_env_flag_default("LLAM_EXPERIMENTAL_LOCKFREE_NORMQ", 1U);
-    runtime_opts.experimental_huge_alloc = stress_env_flag_default("LLAM_EXPERIMENTAL_HUGE_ALLOC", 0U);
-    runtime_opts.experimental_sqpoll = stress_env_flag_default("LLAM_EXPERIMENTAL_SQPOLL", 0U);
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
+    worker_rings = stress_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS", 0U);
+    worker_rings_multishot = stress_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS_MULTISHOT", 0U);
+    dynamic_workers = stress_env_flag_default("LLAM_EXPERIMENTAL_DYNAMIC_WORKERS", 1U);
+    lockfree_normq = stress_env_flag_default("LLAM_EXPERIMENTAL_LOCKFREE_NORMQ", 1U);
+    huge_alloc = stress_env_flag_default("LLAM_EXPERIMENTAL_HUGE_ALLOC", 0U);
+    sqpoll = stress_env_flag_default("LLAM_EXPERIMENTAL_SQPOLL", 0U);
+    runtime_opts.experimental_flags = 0U;
+    if (worker_rings != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS;
+    }
+    if (worker_rings_multishot != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT;
+    }
+    if (dynamic_workers != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
+    }
+    if (lockfree_normq != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    }
+    if (huge_alloc != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC;
+    }
+    if (sqpoll != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL;
+    }
     runtime_opts.sqpoll_cpu = stress_env_i32("LLAM_SQPOLL_CPU", -1, -1, 4096);
     deterministic_phase = stress_env_flag_default("LLAM_STRESS_DETERMINISTIC_PHASE", 1U);
-    dynamic_phase = stress_env_flag_default("LLAM_STRESS_DYNAMIC_PHASE", runtime_opts.experimental_dynamic_shards != 0U ? 1U : 0U);
+    dynamic_phase = stress_env_flag_default("LLAM_STRESS_DYNAMIC_PHASE", dynamic_workers != 0U ? 1U : 0U);
     dynamic_rounds = stress_env_u32("LLAM_STRESS_DYNAMIC_ROUNDS", 1U, 64U);
     dynamic_sleep_tasks = stress_env_u32("LLAM_STRESS_DYNAMIC_SLEEP_TASKS", 512U, 8192U);
     dynamic_sleep_yields = stress_env_u32("LLAM_STRESS_DYNAMIC_SLEEP_YIELDS", 4U, 64U);
@@ -234,12 +260,12 @@ int main(void) {
            dynamic_live_poll_waiters,
            dynamic_live_poll_monitor_rounds,
            dynamic_live_poll_monitor_us,
-           runtime_opts.experimental_shard_rings,
-           runtime_opts.experimental_shard_rings_multishot,
-           runtime_opts.experimental_dynamic_shards,
-           runtime_opts.experimental_lockfree_normq,
-           runtime_opts.experimental_huge_alloc,
-           runtime_opts.experimental_sqpoll,
+           worker_rings,
+           worker_rings_multishot,
+           dynamic_workers,
+           lockfree_normq,
+           huge_alloc,
+           sqpoll,
            runtime_opts.sqpoll_cpu);
     atomic_init(&g_failures, 0U);
     if (deterministic_phase != 0U &&
@@ -249,7 +275,7 @@ int main(void) {
         goto cleanup;
     }
     if (dynamic_phase != 0U &&
-        stress_run_phase("dynamic", dynamic_suite_task, &dynamic_state, &dynamic_runtime_opts, 1U, 0U) != 0) {
+        stress_run_phase("dynamic", dynamic_suite_task, &dynamic_state, &dynamic_runtime_opts, 0U, 0U) != 0) {
         fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
         rc = 1;
         goto cleanup;
@@ -294,7 +320,7 @@ int main(void) {
         stress_print_phase_skipped("dynamic_live_poll_watch", "platform uses reduced Darwin poll-watch profile");
     }
     if (dynamic_phase != 0U &&
-        dynamic_runtime_opts.experimental_shard_rings_multishot != 0U &&
+        stress_runtime_flag_enabled(&dynamic_runtime_opts, LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT) != 0U &&
         stress_platform_supports_foreign_poll_watch()) {
         const stress_phase_entry_t foreign_poll_entries[] = {
             {
@@ -323,7 +349,7 @@ int main(void) {
             goto cleanup;
         }
     } else if (dynamic_phase != 0U &&
-               dynamic_runtime_opts.experimental_shard_rings_multishot != 0U &&
+               stress_runtime_flag_enabled(&dynamic_runtime_opts, LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT) != 0U &&
                !stress_platform_supports_foreign_poll_watch()) {
         stress_print_phase_skipped("dynamic_foreign_poll_watch", "platform lacks foreign watch rehome backend");
     }
@@ -332,7 +358,7 @@ int main(void) {
                          dynamic_idle_accept_watch_task,
                          &idle_accept_state,
                          &dynamic_runtime_opts,
-                         1U,
+                         0U,
                          1U) != 0) {
         fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
         rc = 1;
@@ -343,7 +369,7 @@ int main(void) {
                              dynamic_idle_poll_watch_task,
                              &idle_poll_state,
                              &dynamic_runtime_opts,
-                             1U,
+                             0U,
                              1U) != 0) {
             fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
             rc = 1;
@@ -357,7 +383,7 @@ int main(void) {
                              dynamic_idle_recv_watch_task,
                              &idle_recv_state,
                              &dynamic_runtime_opts,
-                             1U,
+                             0U,
                              1U) != 0) {
             fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
             rc = 1;

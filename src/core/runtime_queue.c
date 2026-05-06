@@ -60,7 +60,7 @@
  * @note This function wakes all shards because any online worker may be able
  *       to drain overflow work.
  */
-void nm_enqueue_overflow_task(nm_runtime_t *rt, nm_task_t *task) {
+void llam_enqueue_overflow_task(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL || !rt->overflow_lock_initialized) {
         return;
     }
@@ -68,10 +68,10 @@ void nm_enqueue_overflow_task(nm_runtime_t *rt, nm_task_t *task) {
     task->queue_next = NULL;
     task->queue_prev = NULL;
     pthread_mutex_lock(&rt->overflow_lock);
-    nm_queue_push_tail(&rt->overflow_q, task);
+    llam_queue_push_tail(&rt->overflow_q, task);
     atomic_store(&rt->overflow_depth, rt->overflow_q.depth);
     pthread_mutex_unlock(&rt->overflow_lock);
-    nm_wake_all_shards(rt);
+    llam_wake_all_shards(rt);
 }
 
 /**
@@ -82,8 +82,8 @@ void nm_enqueue_overflow_task(nm_runtime_t *rt, nm_task_t *task) {
  * @return Task removed from overflow storage, or NULL if no overflow task is
  *         currently available.
  */
-nm_task_t *nm_take_overflow_task(nm_runtime_t *rt) {
-    nm_task_t *task;
+llam_task_t *llam_take_overflow_task(llam_runtime_t *rt) {
+    llam_task_t *task;
 
     if (rt == NULL || !rt->overflow_lock_initialized) {
         return NULL;
@@ -93,7 +93,7 @@ nm_task_t *nm_take_overflow_task(nm_runtime_t *rt) {
     }
 
     pthread_mutex_lock(&rt->overflow_lock);
-    task = nm_queue_pop_head(&rt->overflow_q);
+    task = llam_queue_pop_head(&rt->overflow_q);
     atomic_store(&rt->overflow_depth, rt->overflow_q.depth);
     pthread_mutex_unlock(&rt->overflow_lock);
     return task;
@@ -105,7 +105,7 @@ nm_task_t *nm_take_overflow_task(nm_runtime_t *rt) {
  * @param rt Runtime instance.
  * @return Current overflow depth, or 0 if overflow storage is unavailable.
  */
-unsigned nm_runtime_overflow_depth(nm_runtime_t *rt) {
+unsigned llam_runtime_overflow_depth(llam_runtime_t *rt) {
     if (rt == NULL || !rt->overflow_lock_initialized) {
         return 0U;
     }
@@ -122,7 +122,7 @@ unsigned nm_runtime_overflow_depth(nm_runtime_t *rt) {
  * @param rt Runtime instance.
  * @return true when pressure-sensitive scheduling should be enabled.
  */
-bool nm_runtime_pressure_signal(nm_runtime_t *rt) {
+bool llam_runtime_pressure_signal(llam_runtime_t *rt) {
     unsigned overflow_depth;
     unsigned overflow_threshold;
     unsigned online_shards;
@@ -132,7 +132,7 @@ bool nm_runtime_pressure_signal(nm_runtime_t *rt) {
         return false;
     }
 
-    overflow_depth = nm_runtime_overflow_depth(rt);
+    overflow_depth = llam_runtime_overflow_depth(rt);
     if (rt->block_worker_count > 0U) {
         block_pending = atomic_load(&rt->block_pending);
     }
@@ -140,8 +140,8 @@ bool nm_runtime_pressure_signal(nm_runtime_t *rt) {
         return false;
     }
 
-    online_shards = nm_max_unsigned(1U, nm_runtime_online_shards(rt));
-    overflow_threshold = nm_max_unsigned(4U, online_shards * 2U);
+    online_shards = llam_max_unsigned(1U, llam_runtime_online_shards(rt));
+    overflow_threshold = llam_max_unsigned(4U, online_shards * 2U);
     if (overflow_depth >= overflow_threshold) {
         return true;
     }
@@ -163,16 +163,16 @@ bool nm_runtime_pressure_signal(nm_runtime_t *rt) {
  * @param shard Scheduler shard to sample.
  * @return Approximate runnable load for shard selection.
  */
-unsigned nm_snapshot_shard_load(nm_shard_t *shard) {
+unsigned llam_snapshot_shard_load(llam_shard_t *shard) {
     unsigned load;
 
     pthread_mutex_lock(&shard->lock);
-    load = shard->inject_q.depth + shard->hot_q.depth + nm_norm_queue_depth(shard);
+    load = shard->inject_q.depth + shard->hot_q.depth + llam_norm_queue_depth(shard);
     if (atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
         load += 1U;
     }
     if (shard->opaque_redirect_active) {
-        load += NM_INJECT_QUEUE_CAP;
+        load += LLAM_INJECT_QUEUE_CAP;
     }
     pthread_mutex_unlock(&shard->lock);
     return load;
@@ -193,7 +193,7 @@ unsigned nm_snapshot_shard_load(nm_shard_t *shard) {
  *
  * @return Target shard id. Returns 0 only for invalid runtime/task input.
  */
-unsigned nm_pick_runnable_shard(nm_runtime_t *rt, nm_task_t *task) {
+unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task) {
     unsigned home_id;
     unsigned last_id;
     unsigned origin_id;
@@ -208,25 +208,25 @@ unsigned nm_pick_runnable_shard(nm_runtime_t *rt, nm_task_t *task) {
     }
 
     home_id = task->home_shard < rt->active_shards ? task->home_shard : task->last_shard % rt->active_shards;
-    if ((task->flags & NM_TASK_FLAG_PINNED) != 0U || rt->active_shards < 2U) {
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U || rt->active_shards < 2U) {
         return home_id;
     }
 
     last_id = task->last_shard < rt->active_shards ? task->last_shard : home_id;
-    origin_id = g_nm_tls_shard != NULL && g_nm_tls_shard->id < rt->active_shards ? g_nm_tls_shard->id : home_id;
+    origin_id = g_llam_tls_shard != NULL && g_llam_tls_shard->id < rt->active_shards ? g_llam_tls_shard->id : home_id;
     best_id = home_id;
     best_load = UINT_MAX;
-    if (nm_shard_accepts_new_work(&rt->shards[home_id])) {
+    if (llam_shard_accepts_new_work(&rt->shards[home_id])) {
         best_id = home_id;
-        best_load = nm_snapshot_shard_load(&rt->shards[home_id]);
+        best_load = llam_snapshot_shard_load(&rt->shards[home_id]);
         best_found = true;
     } else {
         for (i = 0; i < rt->active_shards; ++i) {
-            if (!nm_shard_accepts_new_work(&rt->shards[i])) {
+            if (!llam_shard_accepts_new_work(&rt->shards[i])) {
                 continue;
             }
             best_id = i;
-            best_load = nm_snapshot_shard_load(&rt->shards[i]);
+            best_load = llam_snapshot_shard_load(&rt->shards[i]);
             best_found = true;
             break;
         }
@@ -234,14 +234,14 @@ unsigned nm_pick_runnable_shard(nm_runtime_t *rt, nm_task_t *task) {
     if (!best_found) {
         return home_id;
     }
-    pressure = nm_runtime_pressure_signal(rt);
+    pressure = llam_runtime_pressure_signal(rt);
 
     if (!pressure && best_load < 8U) {
         return best_id;
     }
 
-    if (last_id != best_id && nm_shard_accepts_new_work(&rt->shards[last_id])) {
-        unsigned load = nm_snapshot_shard_load(&rt->shards[last_id]);
+    if (last_id != best_id && llam_shard_accepts_new_work(&rt->shards[last_id])) {
+        unsigned load = llam_snapshot_shard_load(&rt->shards[last_id]);
 
         if (rt->shards[last_id].node_index == rt->shards[home_id].node_index && load + 2U < best_load) {
             best_id = last_id;
@@ -249,8 +249,8 @@ unsigned nm_pick_runnable_shard(nm_runtime_t *rt, nm_task_t *task) {
         }
     }
 
-    if (origin_id != best_id && nm_shard_accepts_new_work(&rt->shards[origin_id])) {
-        unsigned load = nm_snapshot_shard_load(&rt->shards[origin_id]);
+    if (origin_id != best_id && llam_shard_accepts_new_work(&rt->shards[origin_id])) {
+        unsigned load = llam_snapshot_shard_load(&rt->shards[origin_id]);
 
         if (rt->shards[origin_id].node_index == rt->shards[home_id].node_index && load + 2U < best_load) {
             best_id = origin_id;
@@ -265,7 +265,7 @@ unsigned nm_pick_runnable_shard(nm_runtime_t *rt, nm_task_t *task) {
         if (i == best_id) {
             continue;
         }
-        if (!nm_shard_accepts_new_work(&rt->shards[i])) {
+        if (!llam_shard_accepts_new_work(&rt->shards[i])) {
             continue;
         }
 
@@ -273,14 +273,14 @@ unsigned nm_pick_runnable_shard(nm_runtime_t *rt, nm_task_t *task) {
             continue;
         }
 
-        load = nm_snapshot_shard_load(&rt->shards[i]);
+        load = llam_snapshot_shard_load(&rt->shards[i]);
         if (rt->shards[i].node_index != rt->shards[home_id].node_index) {
             penalty += pressure ? 2U : 8U;
         }
         if (i != last_id) {
             penalty += 1U;
         }
-        if (task->task_class == NM_TASK_CLASS_LATENCY && i != home_id) {
+        if (task->task_class == LLAM_TASK_CLASS_LATENCY && i != home_id) {
             penalty += 2U;
         }
 
@@ -309,14 +309,14 @@ unsigned nm_pick_runnable_shard(nm_runtime_t *rt, nm_task_t *task) {
  *
  * @note Caller must hold @p shard->lock.
  */
-bool nm_should_enqueue_hot_locked(nm_shard_t *shard,
-                                  const nm_task_t *task,
+bool llam_should_enqueue_hot_locked(llam_shard_t *shard,
+                                  const llam_task_t *task,
                                   bool hot_requested,
                                   bool pressure) {
     unsigned norm_depth;
 
     /* Pressure can still demote hot work so the normal lane does not starve. */
-    if (task != NULL && task->task_class == NM_TASK_CLASS_LATENCY) {
+    if (task != NULL && task->task_class == LLAM_TASK_CLASS_LATENCY) {
         return true;
     }
 
@@ -328,7 +328,7 @@ bool nm_should_enqueue_hot_locked(nm_shard_t *shard,
         return false;
     }
 
-    norm_depth = nm_norm_queue_depth(shard);
+    norm_depth = llam_norm_queue_depth(shard);
     if (shard->hot_q.depth >= norm_depth + 8U) {
         return false;
     }
@@ -346,9 +346,9 @@ bool nm_should_enqueue_hot_locked(nm_shard_t *shard,
  *
  * @note Caller must hold @p shard->lock.
  */
-unsigned nm_hot_streak_cap_locked(nm_shard_t *shard, bool pressure) {
+unsigned llam_hot_streak_cap_locked(llam_shard_t *shard, bool pressure) {
     unsigned cap = pressure ? 2U : 8U;
-    unsigned norm_depth = nm_norm_queue_depth(shard);
+    unsigned norm_depth = llam_norm_queue_depth(shard);
 
     if (norm_depth > shard->hot_q.depth && norm_depth > 0U) {
         cap = pressure ? 1U : 4U;
@@ -369,12 +369,12 @@ unsigned nm_hot_streak_cap_locked(nm_shard_t *shard, bool pressure) {
  *
  * @note Caller must hold @p shard->lock.
  */
-bool nm_queue_push_bounded_locked(nm_shard_t *shard,
-                                  nm_queue_t *queue,
+bool llam_queue_push_bounded_locked(llam_shard_t *shard,
+                                  llam_queue_t *queue,
                                   unsigned capacity,
-                                  nm_task_t *task) {
+                                  llam_task_t *task) {
     if (queue->depth < capacity) {
-        nm_queue_push_tail(queue, task);
+        llam_queue_push_tail(queue, task);
         if (queue == &shard->inject_q) {
             atomic_store_explicit(&shard->inject_depth, queue->depth, memory_order_release);
         }
@@ -382,7 +382,7 @@ bool nm_queue_push_bounded_locked(nm_shard_t *shard,
     }
 
     shard->metrics.queue_overflows += 1U;
-    nm_enqueue_overflow_task(shard->runtime, task);
+    llam_enqueue_overflow_task(shard->runtime, task);
     return false;
 }
 
@@ -396,8 +396,8 @@ bool nm_queue_push_bounded_locked(nm_shard_t *shard,
  * @note Internal helper.  The chosen target must still be revalidated under
  *       that target's lock before enqueueing.
  */
-static unsigned nm_pick_opaque_redirect_target_id(nm_shard_t *blocked) {
-    nm_runtime_t *rt;
+static unsigned llam_pick_opaque_redirect_target_id(llam_shard_t *blocked) {
+    llam_runtime_t *rt;
     unsigned start;
     unsigned i;
 
@@ -411,9 +411,9 @@ static unsigned nm_pick_opaque_redirect_target_id(nm_shard_t *blocked) {
     start = (blocked->id + 1U) % rt->active_shards;
     for (i = 0U; i < rt->active_shards; ++i) {
         unsigned id = (start + i) % rt->active_shards;
-        nm_shard_t *candidate = &rt->shards[id];
+        llam_shard_t *candidate = &rt->shards[id];
 
-        if (candidate == blocked || !nm_shard_accepts_new_work(candidate)) {
+        if (candidate == blocked || !llam_shard_accepts_new_work(candidate)) {
             continue;
         }
         return id;
@@ -433,9 +433,9 @@ static unsigned nm_pick_opaque_redirect_target_id(nm_shard_t *blocked) {
  * @note Caller must hold @p blocked->lock.  This function tries the target
  *       lock without blocking to avoid deadlocking two shard locks.
  */
-bool nm_enqueue_opaque_redirect_task_locked(nm_shard_t *blocked, nm_task_t *task, bool hot) {
-    nm_runtime_t *rt;
-    nm_shard_t *target;
+bool llam_enqueue_opaque_redirect_task_locked(llam_shard_t *blocked, llam_task_t *task, bool hot) {
+    llam_runtime_t *rt;
+    llam_shard_t *target;
     unsigned target_id;
     bool queued;
 
@@ -448,7 +448,7 @@ bool nm_enqueue_opaque_redirect_task_locked(nm_shard_t *blocked, nm_task_t *task
         return false;
     }
     target = &rt->shards[target_id];
-    if (!nm_shard_accepts_new_work(target)) {
+    if (!llam_shard_accepts_new_work(target)) {
         return false;
     }
     if (pthread_mutex_trylock(&target->lock) != 0) {
@@ -460,13 +460,13 @@ bool nm_enqueue_opaque_redirect_task_locked(nm_shard_t *blocked, nm_task_t *task
     }
 
     task->enqueue_hot = hot ? 1U : 0U;
-    queued = nm_queue_push_bounded_locked(target, &target->inject_q, NM_INJECT_QUEUE_CAP, task);
+    queued = llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task);
     if (queued) {
         target->metrics.inject_enqueues += 1U;
     }
     pthread_mutex_unlock(&target->lock);
     if (queued) {
-        nm_kick_shard(target);
+        llam_kick_shard(target);
     }
     return true;
 }
@@ -480,7 +480,7 @@ bool nm_enqueue_opaque_redirect_task_locked(nm_shard_t *blocked, nm_task_t *task
  *
  * @param shard Owner shard whose inject queue is drained.
  */
-void nm_drain_inject_queue(nm_shard_t *shard) {
+void llam_drain_inject_queue(llam_shard_t *shard) {
     unsigned drained = 0;
     bool pressure;
 
@@ -488,7 +488,7 @@ void nm_drain_inject_queue(nm_shard_t *shard) {
         return;
     }
 
-    pressure = nm_runtime_pressure_signal(shard->runtime);
+    pressure = llam_runtime_pressure_signal(shard->runtime);
 
     pthread_mutex_lock(&shard->lock);
     if (shard->inject_q.depth == 0U) {
@@ -496,21 +496,21 @@ void nm_drain_inject_queue(nm_shard_t *shard) {
         pthread_mutex_unlock(&shard->lock);
         return;
     }
-    while (drained < NM_INJECT_DRAIN_BUDGET) {
-        nm_task_t *task = nm_queue_pop_head(&shard->inject_q);
+    while (drained < LLAM_INJECT_DRAIN_BUDGET) {
+        llam_task_t *task = llam_queue_pop_head(&shard->inject_q);
         bool prefer_hot;
 
         if (task == NULL) {
             break;
         }
 
-        prefer_hot = nm_should_enqueue_hot_locked(shard, task, task->enqueue_hot != 0U, pressure);
+        prefer_hot = llam_should_enqueue_hot_locked(shard, task, task->enqueue_hot != 0U, pressure);
         if (prefer_hot) {
-            if (nm_queue_push_bounded_locked(shard, &shard->hot_q, NM_HOT_QUEUE_CAP, task)) {
+            if (llam_queue_push_bounded_locked(shard, &shard->hot_q, LLAM_HOT_QUEUE_CAP, task)) {
                 shard->metrics.hot_enqueues += 1U;
             }
         } else {
-            (void)nm_norm_queue_push_owner_locked(shard, task);
+            (void)llam_norm_queue_push_owner_locked(shard, task);
         }
         task->enqueue_hot = 0U;
         drained += 1U;
@@ -528,9 +528,9 @@ void nm_drain_inject_queue(nm_shard_t *shard) {
  *
  * @note Caller must hold @p shard->lock.
  */
-static void nm_flush_queue_to_redirect_locked(nm_shard_t *shard, nm_queue_t *queue, bool force_hot) {
+static void llam_flush_queue_to_redirect_locked(llam_shard_t *shard, llam_queue_t *queue, bool force_hot) {
     for (;;) {
-        nm_task_t *task = nm_queue_pop_head(queue);
+        llam_task_t *task = llam_queue_pop_head(queue);
         bool hot;
 
         if (task == NULL) {
@@ -538,9 +538,9 @@ static void nm_flush_queue_to_redirect_locked(nm_shard_t *shard, nm_queue_t *que
         }
         hot = force_hot || task->enqueue_hot != 0U;
         shard->metrics.migrations += 1U;
-        if (!nm_enqueue_opaque_redirect_task_locked(shard, task, hot)) {
+        if (!llam_enqueue_opaque_redirect_task_locked(shard, task, hot)) {
             task->enqueue_hot = 0U;
-            nm_enqueue_overflow_task(shard->runtime, task);
+            llam_enqueue_overflow_task(shard->runtime, task);
         }
     }
     if (queue == &shard->inject_q) {
@@ -560,34 +560,34 @@ static void nm_flush_queue_to_redirect_locked(nm_shard_t *shard, nm_queue_t *que
  *
  * @note Caller must hold @p shard->lock.
  */
-void nm_activate_opaque_redirect_locked(nm_shard_t *shard, nm_task_t *current_task) {
+void llam_activate_opaque_redirect_locked(llam_shard_t *shard, llam_task_t *current_task) {
     if (shard->opaque_redirect_active) {
         return;
     }
 
     shard->opaque_redirect_active = true;
-    shard->opaque_redirect_target_id = nm_pick_opaque_redirect_target_id(shard);
-    nm_flush_queue_to_redirect_locked(shard, &shard->inject_q, false);
-    nm_flush_queue_to_redirect_locked(shard, &shard->hot_q, true);
+    shard->opaque_redirect_target_id = llam_pick_opaque_redirect_target_id(shard);
+    llam_flush_queue_to_redirect_locked(shard, &shard->inject_q, false);
+    llam_flush_queue_to_redirect_locked(shard, &shard->hot_q, true);
     for (;;) {
-        nm_task_t *task = nm_norm_queue_pop_owner_locked(shard);
+        llam_task_t *task = llam_norm_queue_pop_owner_locked(shard);
 
         if (task == NULL) {
             break;
         }
         task->enqueue_hot = 0U;
         shard->metrics.migrations += 1U;
-        if (!nm_enqueue_opaque_redirect_task_locked(shard, task, false)) {
-            nm_enqueue_overflow_task(shard->runtime, task);
+        if (!llam_enqueue_opaque_redirect_task_locked(shard, task, false)) {
+            llam_enqueue_overflow_task(shard->runtime, task);
         }
     }
     if (current_task != NULL) {
-        nm_trace_shard(shard,
+        llam_trace_shard(shard,
                        current_task,
-                       NM_TRACE_STATE,
-                       NM_TASK_STATE_RUNNING,
-                       NM_TASK_STATE_BLOCKED_OPAQUE,
-                       NM_WAIT_BLOCKING);
+                       LLAM_TRACE_STATE,
+                       LLAM_TASK_STATE_RUNNING,
+                       LLAM_TASK_STATE_BLOCKED_OPAQUE,
+                       LLAM_WAIT_BLOCKING);
     }
 }
 
@@ -598,7 +598,7 @@ void nm_activate_opaque_redirect_locked(nm_shard_t *shard, nm_task_t *current_ta
  *
  * @note Caller must hold @p shard->lock.
  */
-void nm_deactivate_opaque_redirect_locked(nm_shard_t *shard) {
+void llam_deactivate_opaque_redirect_locked(llam_shard_t *shard) {
     shard->opaque_redirect_active = false;
     shard->opaque_redirect_target_id = UINT_MAX;
 }
@@ -611,15 +611,15 @@ void nm_deactivate_opaque_redirect_locked(nm_shard_t *shard) {
  *
  * @return Runnable task, or NULL if no local task is available.
  */
-nm_task_t *nm_take_local_task_with_pressure(nm_shard_t *shard, bool pressure) {
-    nm_task_t *task;
+llam_task_t *llam_take_local_task_with_pressure(llam_shard_t *shard, bool pressure) {
+    llam_task_t *task;
 
     pthread_mutex_lock(&shard->lock);
     if (shard->hot_q.depth > 0U) {
         bool take_norm = false;
 
         if (shard->hot_streak >= (pressure ? 1U : 4U)) {
-            unsigned norm_depth = nm_norm_queue_depth(shard);
+            unsigned norm_depth = llam_norm_queue_depth(shard);
 
             if (norm_depth > 0U) {
                 unsigned hot_cap = pressure ? 2U : 8U;
@@ -633,14 +633,14 @@ nm_task_t *nm_take_local_task_with_pressure(nm_shard_t *shard, bool pressure) {
 
         if (take_norm) {
             shard->hot_streak = 0U;
-            task = nm_norm_queue_pop_owner_locked(shard);
+            task = llam_norm_queue_pop_owner_locked(shard);
         } else {
             shard->hot_streak += 1U;
-            task = nm_queue_pop_head(&shard->hot_q);
+            task = llam_queue_pop_head(&shard->hot_q);
         }
     } else {
         shard->hot_streak = 0U;
-        task = nm_norm_queue_pop_owner_locked(shard);
+        task = llam_norm_queue_pop_owner_locked(shard);
     }
     pthread_mutex_unlock(&shard->lock);
     return task;
@@ -652,6 +652,6 @@ nm_task_t *nm_take_local_task_with_pressure(nm_shard_t *shard, bool pressure) {
  * @param shard Shard whose local runnable lanes are inspected.
  * @return Runnable task, or NULL if no local task is available.
  */
-nm_task_t *nm_take_local_task(nm_shard_t *shard) {
-    return nm_take_local_task_with_pressure(shard, nm_runtime_pressure_signal(shard->runtime));
+llam_task_t *llam_take_local_task(llam_shard_t *shard) {
+    return llam_take_local_task_with_pressure(shard, llam_runtime_pressure_signal(shard->runtime));
 }

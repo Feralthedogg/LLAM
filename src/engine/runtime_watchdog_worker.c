@@ -35,7 +35,7 @@
  *
  * @return Aggregated progress value.
  */
-static uint64_t nm_runtime_progress_snapshot(nm_runtime_t *rt) {
+static uint64_t llam_runtime_progress_snapshot(llam_runtime_t *rt) {
     uint64_t snapshot = atomic_load(&rt->live_tasks);
     unsigned i;
 
@@ -69,13 +69,13 @@ static uint64_t nm_runtime_progress_snapshot(nm_runtime_t *rt) {
  *
  * @return Always @c NULL.
  */
-void *nm_ctrl_worker_main(void *arg) {
-    nm_runtime_t *rt = arg;
+void *llam_ctrl_worker_main(void *arg) {
+    llam_runtime_t *rt = arg;
 
-    nm_tune_ctrl_thread();
+    llam_tune_ctrl_thread();
 
     for (;;) {
-        uint64_t now_ns = nm_now_ns();
+        uint64_t now_ns = llam_now_ns();
         unsigned i;
 
         if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
@@ -83,20 +83,20 @@ void *nm_ctrl_worker_main(void *arg) {
         }
 
         for (i = 0; i < rt->active_shards; ++i) {
-            nm_watchdog_check_shard(&rt->shards[i], now_ns);
+            llam_watchdog_check_shard(&rt->shards[i], now_ns);
         }
 
-        nm_runtime_nudge_marked_watch_migrations(rt);
-        nm_runtime_adjust_online_shards(rt);
+        llam_runtime_nudge_marked_watch_migrations(rt);
+        llam_runtime_adjust_online_shards(rt);
 
         if (atomic_load(&rt->fatal_errno) == 0 &&
             atomic_load(&rt->live_tasks) > 0U &&
-            !nm_runtime_has_runnable_work(rt) &&
-            !nm_runtime_has_pending_timers(rt) &&
+            !llam_runtime_has_runnable_work(rt) &&
+            !llam_runtime_has_pending_timers(rt) &&
             atomic_load(&rt->block_pending) == 0U &&
-            !nm_runtime_has_io_pending(rt) &&
-            !nm_runtime_has_opaque_blocking(rt)) {
-            uint64_t snapshot = nm_runtime_progress_snapshot(rt);
+            !llam_runtime_has_io_pending(rt) &&
+            !llam_runtime_has_opaque_blocking(rt)) {
+            uint64_t snapshot = llam_runtime_progress_snapshot(rt);
 
             if (snapshot == rt->deadlock_progress_snapshot) {
                 rt->deadlock_probe_streak += 1U;
@@ -105,23 +105,23 @@ void *nm_ctrl_worker_main(void *arg) {
                 rt->deadlock_probe_streak = 1U;
             }
 
-            if (rt->deadlock_probe_streak >= NM_DEADLOCK_SUSPECT_STREAK) {
+            if (rt->deadlock_probe_streak >= LLAM_DEADLOCK_SUSPECT_STREAK) {
                 for (i = 0; i < rt->active_shards; ++i) {
                     pthread_mutex_lock(&rt->shards[i].lock);
                     rt->shards[i].metrics.deadlock_suspicions += 1U;
                     pthread_mutex_unlock(&rt->shards[i].lock);
                 }
-                nm_record_fatal(rt, EDEADLK);
+                llam_record_fatal(rt, EDEADLK);
             }
         } else {
-            rt->deadlock_progress_snapshot = nm_runtime_progress_snapshot(rt);
+            rt->deadlock_progress_snapshot = llam_runtime_progress_snapshot(rt);
             rt->deadlock_probe_streak = 0U;
         }
 
         {
             struct timespec ts;
             ts.tv_sec = 0;
-            ts.tv_nsec = (long)NM_WATCHDOG_INTERVAL_NS;
+            ts.tv_nsec = (long)LLAM_WATCHDOG_INTERVAL_NS;
             nanosleep(&ts, NULL);
         }
     }

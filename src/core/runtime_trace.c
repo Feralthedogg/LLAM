@@ -35,13 +35,13 @@
  * @param to     New task state.
  * @param reason Wait/block reason associated with the transition.
  */
-void nm_trace_shard(nm_shard_t *shard,
-                           nm_task_t *task,
-                           nm_trace_kind_t kind,
-                           nm_task_state_id_t from,
-                           nm_task_state_id_t to,
-                           nm_wait_reason_t reason) {
-    nm_trace_event_t *event;
+void llam_trace_shard(llam_shard_t *shard,
+                           llam_task_t *task,
+                           llam_trace_kind_t kind,
+                           llam_task_state_id_t from,
+                           llam_task_state_id_t to,
+                           llam_wait_reason_t reason) {
+    llam_trace_event_t *event;
     unsigned slot;
 
     if (shard == NULL || shard->runtime == NULL || shard->runtime->trace_events_enabled == 0U) {
@@ -50,9 +50,9 @@ void nm_trace_shard(nm_shard_t *shard,
 
     // Ring overwrite is intentional: trace data is best-effort and must never
     // block scheduler progress or allocate on the hot path.
-    slot = shard->trace_head % NM_TRACE_RING_CAP;
+    slot = shard->trace_head % LLAM_TRACE_RING_CAP;
     event = &shard->trace_ring[slot];
-    event->ts_ns = nm_now_ns();
+    event->ts_ns = llam_now_ns();
     event->task_id = task != NULL ? task->id : 0;
     event->kind = (uint32_t)kind;
     event->from_state = (uint16_t)from;

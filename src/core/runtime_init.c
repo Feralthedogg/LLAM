@@ -12,7 +12,7 @@
  *  - initialize global task/blocking/overflow infrastructure,
  *  - install diagnostics/signal handling, and finally start the controller.
  *
- * Failure handling is intentionally centralized through ::nm_runtime_shutdown
+ * Failure handling is intentionally centralized through ::llam_runtime_shutdown
  * once partially initialized runtime resources exist. Early failures before
  * those resources are published clean up their local allocations directly.
  *
@@ -46,25 +46,33 @@
  *
  * @return The selected runtime profile.
  */
-static nm_runtime_profile_t nm_runtime_profile_from_env(nm_runtime_profile_t fallback) {
-    const char *env = nm_env_get("LLAM_RUNTIME_PROFILE");
+static llam_runtime_profile_t llam_runtime_profile_from_env(llam_runtime_profile_t fallback) {
+    const char *env = llam_env_get("LLAM_RUNTIME_PROFILE");
 
     if (env == NULL || env[0] == '\0') {
         return fallback;
     }
     if (strcmp(env, "release-fast") == 0 || strcmp(env, "fast") == 0 || strcmp(env, "release") == 0) {
-        return NM_RUNTIME_PROFILE_RELEASE_FAST;
+        return LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     }
     if (strcmp(env, "debug-safe") == 0 || strcmp(env, "debug") == 0 || strcmp(env, "safe") == 0) {
-        return NM_RUNTIME_PROFILE_DEBUG_SAFE;
+        return LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     }
     if (strcmp(env, "io-latency") == 0 || strcmp(env, "latency-io") == 0 || strcmp(env, "poll") == 0) {
-        return NM_RUNTIME_PROFILE_IO_LATENCY;
+        return LLAM_RUNTIME_PROFILE_IO_LATENCY;
     }
     if (strcmp(env, "balanced") == 0 || strcmp(env, "default") == 0) {
-        return NM_RUNTIME_PROFILE_BALANCED;
+        return LLAM_RUNTIME_PROFILE_BALANCED;
     }
     return fallback;
+}
+
+/** @brief Return true when @p profile is a supported public runtime profile. */
+static bool llam_public_runtime_profile_valid(uint32_t profile) {
+    return profile == (uint32_t)LLAM_RUNTIME_PROFILE_BALANCED ||
+           profile == (uint32_t)LLAM_RUNTIME_PROFILE_RELEASE_FAST ||
+           profile == (uint32_t)LLAM_RUNTIME_PROFILE_DEBUG_SAFE ||
+           profile == (uint32_t)LLAM_RUNTIME_PROFILE_IO_LATENCY;
 }
 
 /**
@@ -79,8 +87,8 @@ static nm_runtime_profile_t nm_runtime_profile_from_env(nm_runtime_profile_t fal
  *
  * @return 0 or 1.
  */
-static unsigned nm_runtime_env_flag(const char *name, unsigned default_value) {
-    const char *env = nm_env_get(name);
+static unsigned llam_runtime_env_flag(const char *name, unsigned default_value) {
+    const char *env = llam_env_get(name);
 
     if (env == NULL || env[0] == '\0') {
         return default_value;
@@ -101,8 +109,8 @@ static unsigned nm_runtime_env_flag(const char *name, unsigned default_value) {
  *
  * @return Parsed and clamped value.
  */
-static unsigned nm_runtime_env_u32(const char *name, unsigned default_value, unsigned max_value) {
-    const char *env = nm_env_get(name);
+static unsigned llam_runtime_env_u32(const char *name, unsigned default_value, unsigned max_value) {
+    const char *env = llam_env_get(name);
     char *end = NULL;
     unsigned long parsed;
 
@@ -129,7 +137,7 @@ static unsigned nm_runtime_env_u32(const char *name, unsigned default_value, uns
  *
  * @return Zero-based index on success, or -1 when not found.
  */
-static int nm_find_cpu_index(const unsigned *cpus, unsigned count, unsigned target_cpu) {
+static int llam_find_cpu_index(const unsigned *cpus, unsigned count, unsigned target_cpu) {
     unsigned i;
 
     if (cpus == NULL) {
@@ -160,7 +168,7 @@ static int nm_find_cpu_index(const unsigned *cpus, unsigned count, unsigned targ
  * @return -1 with @c errno set on invalid arguments, allocation failure, or an
  *         explicit SQPOLL CPU outside the allowed CPU set.
  */
-static int nm_runtime_reserve_sqpoll_cpu(nm_runtime_t *rt, unsigned **cpus_inout, unsigned *observed_inout) {
+static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_inout, unsigned *observed_inout) {
     unsigned *cpus;
     unsigned observed;
     unsigned reserved_cpu;
@@ -187,7 +195,7 @@ static int nm_runtime_reserve_sqpoll_cpu(nm_runtime_t *rt, unsigned **cpus_inout
 
     if (rt->sqpoll_cpu >= 0) {
         reserved_cpu = (unsigned)rt->sqpoll_cpu;
-        reserved_index = nm_find_cpu_index(cpus, observed, reserved_cpu);
+        reserved_index = llam_find_cpu_index(cpus, observed, reserved_cpu);
         if (reserved_index < 0) {
             errno = EINVAL;
             return -1;
@@ -229,17 +237,19 @@ static int nm_runtime_reserve_sqpoll_cpu(nm_runtime_t *rt, unsigned **cpus_inout
  *
  * @param opts Optional runtime options. Passing @c NULL uses deterministic
  *             balanced defaults with environment overrides still honored.
+ * @param opts_size Size of the caller's option struct when @p opts is non-NULL.
  *
  * @return 0 on success.
  * @return -1 with @c errno set on invalid state, CPU discovery failure,
  *         allocation failure, pthread failure, I/O setup failure, or signal
  *         handler installation failure.
  *
- * @see nm_runtime_shutdown
- * @see nm_run
+ * @see llam_runtime_shutdown
+ * @see llam_run
  */
-int nm_runtime_init(const nm_runtime_opts_t *opts) {
-    nm_runtime_t *rt = &g_nm_runtime;
+int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_opts_t opts_storage;
     unsigned i;
     unsigned observed;
     unsigned observed_total;
@@ -250,7 +260,27 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     unsigned *io_node_ids = NULL;
     size_t altstack_size;
     const char *light_safepoint_env;
+    size_t opts_copy_size;
+    uint64_t experimental_flags;
     int rc;
+
+    if (opts != NULL) {
+        if (opts_size == 0U) {
+            errno = EINVAL;
+            return -1;
+        }
+        memset(&opts_storage, 0, sizeof(opts_storage));
+        opts_storage.deterministic = 1U;
+        opts_storage.sqpoll_cpu = -1;
+        opts_storage.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+        opts_copy_size = opts_size < sizeof(opts_storage) ? opts_size : sizeof(opts_storage);
+        memcpy(&opts_storage, opts, opts_copy_size);
+        opts = &opts_storage;
+        if (!llam_public_runtime_profile_valid(opts->profile)) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
 
     if (rt->initialized) {
         errno = EBUSY;
@@ -258,9 +288,9 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     }
 
     memset(rt, 0, sizeof(*rt));
-    g_nm_tls_shard = NULL;
-    g_nm_tls_task = NULL;
-    g_nm_tls_scheduler_ctx = NULL;
+    g_llam_tls_shard = NULL;
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = NULL;
     rt->init_thread = pthread_self();
 #if defined(__linux__)
     if (pthread_getaffinity_np(rt->init_thread, sizeof(rt->init_thread_affinity), &rt->init_thread_affinity) == 0) {
@@ -268,77 +298,84 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     }
 #endif
 
-    observed = nm_count_allowed_cpus(&cpus);
+    observed = llam_count_allowed_cpus(&cpus);
     if (observed == 0U) {
         errno = ENODEV;
         return -1;
     }
     observed_total = observed;
 
+    experimental_flags = opts != NULL ? opts->experimental_flags : 0U;
     rt->deterministic = opts != NULL ? (opts->deterministic != 0U) : 1U;
     rt->forced_yield_every = opts != NULL ? opts->forced_yield_every : 0U;
-    rt->experimental_shard_rings = opts != NULL ? (opts->experimental_shard_rings != 0U) : 0U;
+    rt->experimental_shard_rings =
+        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS) != 0U ? 1U : 0U;
     rt->experimental_shard_rings_multishot =
-        opts != NULL ? (opts->experimental_shard_rings_multishot != 0U) : 0U;
-    rt->experimental_dynamic_shards = opts != NULL ? (opts->experimental_dynamic_shards != 0U) : 0U;
-    rt->experimental_lockfree_normq = opts != NULL ? (opts->experimental_lockfree_normq != 0U) : 0U;
-    rt->experimental_huge_alloc_requested = opts != NULL ? (opts->experimental_huge_alloc != 0U) : 0U;
+        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT) != 0U ? 1U : 0U;
+    rt->experimental_dynamic_shards =
+        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS) != 0U ? 1U : 0U;
+    rt->experimental_lockfree_normq =
+        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ) != 0U ? 1U : 0U;
+    rt->experimental_huge_alloc_requested =
+        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC) != 0U ? 1U : 0U;
     rt->idle_spin_ns = opts != NULL ? opts->idle_spin_ns : 0U;
     rt->idle_spin_max_iters = opts != NULL ? opts->idle_spin_max_iters : 0U;
-    rt->experimental_sqpoll_requested = opts != NULL ? (opts->experimental_sqpoll != 0U) : 0U;
+    rt->experimental_sqpoll_requested =
+        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL) != 0U ? 1U : 0U;
     rt->sqpoll_cpu = opts != NULL ? opts->sqpoll_cpu : -1;
-    rt->profile = nm_runtime_profile_from_env(opts != NULL ? opts->profile : NM_RUNTIME_PROFILE_BALANCED);
-    light_safepoint_env = nm_env_get("LLAM_DIAG_LIGHT_SAFEPOINT");
-    rt->trace_events_enabled = nm_runtime_env_flag("LLAM_TRACE_EVENTS", 0U);
-    rt->wake_latency_metrics_enabled = nm_runtime_env_flag("LLAM_WAKE_LATENCY_METRICS", 0U);
+    rt->profile =
+        llam_runtime_profile_from_env(opts != NULL ? (llam_runtime_profile_t)opts->profile : LLAM_RUNTIME_PROFILE_BALANCED);
+    light_safepoint_env = llam_env_get("LLAM_DIAG_LIGHT_SAFEPOINT");
+    rt->trace_events_enabled = llam_runtime_env_flag("LLAM_TRACE_EVENTS", 0U);
+    rt->wake_latency_metrics_enabled = llam_runtime_env_flag("LLAM_WAKE_LATENCY_METRICS", 0U);
     rt->run_timing_enabled =
-        nm_runtime_env_flag("LLAM_RUN_TIMING", 0U) ||
-        nm_runtime_env_flag("LLAM_STACK_SAMPLING", 0U) ||
+        llam_runtime_env_flag("LLAM_RUN_TIMING", 0U) ||
+        llam_runtime_env_flag("LLAM_STACK_SAMPLING", 0U) ||
         (light_safepoint_env != NULL &&
          light_safepoint_env[0] != '\0' &&
          strcmp(light_safepoint_env, "0") == 0) ||
-        nm_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U);
+        llam_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U);
     if (light_safepoint_env != NULL && light_safepoint_env[0] != '\0') {
         rt->cheap_safepoint = strcmp(light_safepoint_env, "0") != 0 ? 1U : 0U;
     } else {
-        rt->cheap_safepoint = nm_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U) != 0U ? 0U : 1U;
+        rt->cheap_safepoint = llam_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U) != 0U ? 0U : 1U;
     }
-    rt->safepoint_clock_period = rt->profile == NM_RUNTIME_PROFILE_RELEASE_FAST ? 128U : 32U;
-    if (rt->profile == NM_RUNTIME_PROFILE_IO_LATENCY) {
+    rt->safepoint_clock_period = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 128U : 32U;
+    if (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY) {
         rt->safepoint_clock_period = 64U;
     }
-    if (rt->profile == NM_RUNTIME_PROFILE_DEBUG_SAFE) {
+    if (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE) {
         rt->safepoint_clock_period = 1U;
     }
     rt->safepoint_clock_period =
-        nm_runtime_env_u32("LLAM_SAFEPOINT_CLOCK_PERIOD", rt->safepoint_clock_period, 4096U);
+        llam_runtime_env_u32("LLAM_SAFEPOINT_CLOCK_PERIOD", rt->safepoint_clock_period, 4096U);
 #if defined(__APPLE__)
-    rt->preempt_poll_period = rt->profile == NM_RUNTIME_PROFILE_RELEASE_FAST ? 16U : 8U;
-    if (rt->profile == NM_RUNTIME_PROFILE_IO_LATENCY) {
+    rt->preempt_poll_period = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 16U : 8U;
+    if (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY) {
         rt->preempt_poll_period = 16U;
     }
 #else
-    rt->preempt_poll_period = rt->profile == NM_RUNTIME_PROFILE_RELEASE_FAST ? 4U : 1U;
-    if (rt->profile == NM_RUNTIME_PROFILE_IO_LATENCY) {
+    rt->preempt_poll_period = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 4U : 1U;
+    if (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY) {
         rt->preempt_poll_period = 4U;
     }
 #endif
-    if (rt->profile == NM_RUNTIME_PROFILE_DEBUG_SAFE) {
+    if (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE) {
         rt->preempt_poll_period = 1U;
     }
-    rt->preempt_poll_period = nm_runtime_env_u32("LLAM_PREEMPT_POLL_PERIOD", rt->preempt_poll_period, 4096U);
+    rt->preempt_poll_period = llam_runtime_env_u32("LLAM_PREEMPT_POLL_PERIOD", rt->preempt_poll_period, 4096U);
     rt->spawn_fanout_wake_interval =
-        nm_runtime_env_u32("LLAM_SPAWN_FANOUT_WAKE_INTERVAL", 0U, 65535U);
+        llam_runtime_env_u32("LLAM_SPAWN_FANOUT_WAKE_INTERVAL", 0U, 65535U);
     rt->channel_local_handoff_enabled =
-        nm_runtime_env_flag("LLAM_CHANNEL_LOCAL_HANDOFF",
-                            rt->profile == NM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 1U);
+        llam_runtime_env_flag("LLAM_CHANNEL_LOCAL_HANDOFF",
+                            rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 1U);
     if (rt->experimental_shard_rings != 0U) {
         rt->experimental_sqpoll_requested = 0U;
     }
     if (rt->deterministic != 0U || observed <= 1U) {
         rt->experimental_dynamic_shards = 0U;
     }
-    if (nm_runtime_reserve_sqpoll_cpu(rt, &cpus, &observed) != 0) {
+    if (llam_runtime_reserve_sqpoll_cpu(rt, &cpus, &observed) != 0) {
         free(cpus);
         memset(rt, 0, sizeof(*rt));
         return -1;
@@ -353,7 +390,7 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
                                    : rt->active_shards;
 
         if (floor_basis > 8U) {
-            rt->dynamic_online_floor = nm_max_unsigned(4U, floor_basis / 2U);
+            rt->dynamic_online_floor = llam_max_unsigned(4U, floor_basis / 2U);
         } else if (floor_basis > 4U) {
             rt->dynamic_online_floor = 4U;
         } else {
@@ -370,8 +407,8 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     atomic_store(&rt->steal_pause_active, 0U);
     atomic_store(&rt->active_io_waiters, 0U);
     rt->allowed_cpus = cpus;
-    (void)nm_detect_xsave_support(rt);
-    altstack_size = NM_ALTSTACK_BYTES;
+    (void)llam_detect_xsave_support(rt);
+    altstack_size = LLAM_ALTSTACK_BYTES;
     if (altstack_size < (size_t)SIGSTKSZ) {
         altstack_size = (size_t)SIGSTKSZ;
     }
@@ -404,8 +441,8 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     }
 
     for (i = 0; i < rt->active_shards; ++i) {
-        unsigned kernel_node_id = nm_detect_cpu_node(rt->allowed_cpus[i]);
-        unsigned node_index = nm_find_or_add_node_id(locality_node_ids, &locality_nodes, rt->active_shards, kernel_node_id);
+        unsigned kernel_node_id = llam_detect_cpu_node(rt->allowed_cpus[i]);
+        unsigned node_index = llam_find_or_add_node_id(locality_node_ids, &locality_nodes, rt->active_shards, kernel_node_id);
 
         rt->shards[i].runtime = rt;
         rt->shards[i].id = i;
@@ -417,7 +454,7 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
         atomic_init(&rt->shards[i].merge_pause_requested, 0U);
         atomic_init(&rt->shards[i].merge_pause_ack, 0U);
         atomic_init(&rt->shards[i].steal_pause_ack, 0U);
-        nm_cldeque_init(&rt->shards[i].norm_cldeque);
+        llam_cldeque_init(&rt->shards[i].norm_cldeque);
         atomic_init(&rt->shards[i].inject_depth, 0U);
         atomic_init(&rt->shards[i].norm_depth, 0U);
         atomic_init(&rt->shards[i].timer_count, 0U);
@@ -433,11 +470,11 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
         if (io_node_ids != NULL) {
             io_node_ids[i] = kernel_node_id;
         }
-        rt->shards[i].event_fd = nm_wake_handle_create();
+        rt->shards[i].event_fd = llam_wake_handle_create();
         if (rt->shards[i].event_fd < 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
         rc = pthread_mutex_init(&rt->shards[i].lock, NULL);
@@ -445,15 +482,24 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
+        rc = pthread_mutex_init(&rt->shards[i].stack_cache_lock, NULL);
+        if (rc != 0) {
+            free(io_node_ids);
+            free(locality_node_ids);
+            errno = rc;
+            llam_runtime_shutdown();
+            return -1;
+        }
+        rt->shards[i].stack_cache_lock_initialized = true;
         rc = pthread_mutex_init(&rt->shards[i].opaque_lock, NULL);
         if (rc != 0) {
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
         rc = pthread_cond_init(&rt->shards[i].opaque_cv, NULL);
@@ -461,13 +507,13 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
-        if (nm_opaque_wake_init(&rt->shards[i]) != 0) {
+        if (llam_opaque_wake_init(&rt->shards[i]) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
         rt->shards[i].signal_stack = mmap(NULL,
@@ -480,23 +526,23 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
             rt->shards[i].signal_stack = NULL;
             free(io_node_ids);
             free(locality_node_ids);
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
         rt->shards[i].signal_stack_size = altstack_size;
         rt->shards[i].previous_sigaltstack.ss_flags = SS_DISABLE;
-        nm_allocator_init(&rt->shards[i].allocator);
-        if (nm_ctx_init_fp_state(&rt->shards[i].scheduler_ctx) != 0 ||
-            nm_ctx_init_fp_state(&rt->shards[i].opaque_scheduler_ctx) != 0) {
+        llam_allocator_init(&rt->shards[i].allocator);
+        if (llam_ctx_init_fp_state(&rt->shards[i].scheduler_ctx) != 0 ||
+            llam_ctx_init_fp_state(&rt->shards[i].opaque_scheduler_ctx) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
-        atomic_store_explicit(&rt->shards[i].last_safepoint_ns, nm_now_ns(), memory_order_relaxed);
+        atomic_store_explicit(&rt->shards[i].last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
         atomic_store(&rt->shards[i].last_run_started_ns, 0U);
     }
-    nm_runtime_prewarm_task_allocators(rt);
+    llam_runtime_prewarm_task_allocators(rt);
 
     rt->active_nodes = rt->experimental_shard_rings != 0U ? rt->active_shards : locality_nodes;
 
@@ -505,7 +551,7 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     if (rt->kernel_node_ids == NULL || rt->nodes == NULL) {
         free(io_node_ids);
         free(locality_node_ids);
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         errno = ENOMEM;
         return -1;
     }
@@ -524,39 +570,39 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
         rt->nodes[i].kernel_node_id = rt->kernel_node_ids[i];
         rt->nodes[i].sqpoll_enabled = false;
         rt->nodes[i].sqpoll_cpu = UINT_MAX;
-        rt->nodes[i].event_fd = nm_wake_handle_create();
+        rt->nodes[i].event_fd = llam_wake_handle_create();
         if (rt->nodes[i].event_fd < 0) {
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
         rc = pthread_mutex_init(&rt->nodes[i].submit_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
         rc = pthread_mutex_init(&rt->nodes[i].watch_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
         rc = pthread_mutex_init(&rt->nodes[i].recv_buf_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
-        if (nm_node_init_ring(rt, &rt->nodes[i]) == 0) {
+        if (llam_node_init_ring(rt, &rt->nodes[i]) == 0) {
             rt->nodes[i].ring_ready = true;
-            nm_probe_ring_support(&rt->nodes[i]);
-            (void)nm_node_setup_recv_buf_ring(&rt->nodes[i]);
+            llam_probe_ring_support(&rt->nodes[i]);
+            (void)llam_node_setup_recv_buf_ring(&rt->nodes[i]);
             if (rt->experimental_shard_rings != 0U && rt->experimental_shard_rings_multishot == 0U) {
                 rt->nodes[i].supports_multishot_recv = false;
                 rt->nodes[i].supports_multishot_accept = false;
                 rt->nodes[i].supports_multishot_poll = false;
             }
-            if (pthread_create(&rt->nodes[i].thread, NULL, nm_io_worker_main, &rt->nodes[i]) == 0) {
+            if (pthread_create(&rt->nodes[i].thread, NULL, llam_io_worker_main, &rt->nodes[i]) == 0) {
                 rt->nodes[i].thread_started = true;
             } else {
                 io_uring_queue_exit(&rt->nodes[i].ring);
@@ -568,30 +614,30 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     rc = pthread_mutex_init(&rt->task_list_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         return -1;
     }
     rt->task_list_lock_initialized = true;
     rc = pthread_mutex_init(&rt->stack_cache_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         return -1;
     }
     rt->stack_cache_lock_initialized = true;
-    nm_runtime_prewarm_stack_cache(rt);
+    llam_runtime_prewarm_stack_cache(rt);
 
     rc = pthread_mutex_init(&rt->block_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         return -1;
     }
     rt->block_lock_initialized = true;
     rc = pthread_cond_init(&rt->block_cv, NULL);
     if (rc != 0) {
         errno = rc;
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         return -1;
     }
     rt->block_cv_initialized = true;
@@ -601,7 +647,7 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     rc = pthread_mutex_init(&rt->overflow_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         return -1;
     }
     rt->overflow_lock_initialized = true;
@@ -616,32 +662,36 @@ int nm_runtime_init(const nm_runtime_opts_t *opts) {
     }
     rt->block_threads = calloc(rt->block_worker_count, sizeof(*rt->block_threads));
     if (rt->block_threads == NULL) {
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         errno = ENOMEM;
         return -1;
     }
 
     for (i = 0; i < rt->block_worker_count; ++i) {
-        rc = pthread_create(&rt->block_threads[i], NULL, nm_block_worker_main, rt);
+        rc = pthread_create(&rt->block_threads[i], NULL, llam_block_worker_main, rt);
         if (rc != 0) {
             errno = rc;
-            nm_runtime_shutdown();
+            llam_runtime_shutdown();
             return -1;
         }
     }
 
-    if (nm_install_process_signal_handlers(rt) != 0) {
-        nm_runtime_shutdown();
+    if (llam_install_process_signal_handlers(rt) != 0) {
+        llam_runtime_shutdown();
         return -1;
     }
 
-    rc = pthread_create(&rt->ctrl_thread, NULL, nm_ctrl_worker_main, rt);
+    rc = pthread_create(&rt->ctrl_thread, NULL, llam_ctrl_worker_main, rt);
     if (rc != 0) {
         errno = rc;
-        nm_runtime_shutdown();
+        llam_runtime_shutdown();
         return -1;
     }
     rt->ctrl_thread_started = true;
     rt->initialized = true;
     return 0;
+}
+
+int llam_runtime_init(const llam_runtime_opts_t *opts) {
+    return llam_runtime_init_ex(opts, opts != NULL ? sizeof(*opts) : 0U);
 }

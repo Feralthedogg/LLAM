@@ -23,29 +23,29 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_PROTO_SYNC_H
-#define NM_RUNTIME_PROTO_SYNC_H
+#ifndef LLAM_RUNTIME_PROTO_SYNC_H
+#define LLAM_RUNTIME_PROTO_SYNC_H
 
 #include "runtime_state.h"
 
 /*
  * Managed-task context validation.
  */
-int nm_require_task_context(void);
+int llam_require_task_context(void);
 
 /*
  * Capacity-one channel cache. This keeps ping-pong style channels from
  * repeatedly allocating and freeing the same small object shape.
  */
-nm_channel_t *nm_channel_cache_acquire(void);
-bool nm_channel_cache_release(nm_channel_t *channel);
+llam_channel_t *llam_channel_cache_acquire(void);
+bool llam_channel_cache_release(llam_channel_t *channel);
 
 /*
  * Mutex internal entry point shared by normal, timed, and condvar reacquire
  * paths. Condvar waits pass register_cancel=false while reacquiring the mutex
  * after wakeup so cancellation is reported by the condition wait itself.
  */
-int nm_mutex_lock_impl(nm_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool register_cancel);
+int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool register_cancel);
 
 /*
  * Wait-node allocation and task tracking.
@@ -53,23 +53,23 @@ int nm_mutex_lock_impl(nm_mutex_t *mutex, bool has_deadline, uint64_t deadline_n
  * The current task's embedded wait node is preferred; heap nodes are only used
  * when the embedded slot is already occupied.
  */
-nm_wait_node_t *nm_sync_wait_node_acquire(nm_shard_t *shard);
-void nm_sync_wait_node_release(nm_shard_t *shard, nm_wait_node_t *node);
-void nm_task_set_wait_node_tracking(nm_task_t *task,
-                                    nm_wait_node_t *node,
-                                    nm_wait_queue_t *queue,
+llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard);
+void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node);
+void llam_task_set_wait_node_tracking(llam_task_t *task,
+                                    llam_wait_node_t *node,
+                                    llam_wait_queue_t *queue,
                                     pthread_mutex_t *queue_lock,
                                     unsigned parked_shard);
-nm_wait_node_t *nm_wait_node_alloc(nm_shard_t *shard);
-void nm_wait_node_free(nm_shard_t *shard, nm_wait_node_t *node);
+llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard);
+void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node);
 
 /*
  * FIFO wait-queue primitives and wake dispatch.
  */
-nm_wait_node_t *nm_wait_queue_pop_head(nm_wait_queue_t *queue);
-void nm_wait_queue_push_tail(nm_wait_queue_t *queue, nm_wait_node_t *node);
-bool nm_wait_queue_remove(nm_wait_queue_t *queue, nm_wait_node_t *node);
-void nm_wake_wait_node(nm_wait_node_t *node, bool hot, nm_wait_reason_t reason);
-void nm_wake_wait_queue_all(nm_wait_queue_t *queue, int error_code, nm_wait_reason_t reason);
+llam_wait_node_t *llam_wait_queue_pop_head(llam_wait_queue_t *queue);
+void llam_wait_queue_push_tail(llam_wait_queue_t *queue, llam_wait_node_t *node);
+bool llam_wait_queue_remove(llam_wait_queue_t *queue, llam_wait_node_t *node);
+void llam_wake_wait_node(llam_wait_node_t *node, bool hot, llam_wait_reason_t reason);
+void llam_wake_wait_queue_all(llam_wait_queue_t *queue, int error_code, llam_wait_reason_t reason);
 
 #endif

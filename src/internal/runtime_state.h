@@ -22,27 +22,27 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_STATE_H
-#define NM_RUNTIME_STATE_H
+#ifndef LLAM_RUNTIME_STATE_H
+#define LLAM_RUNTIME_STATE_H
 
 #include "runtime_types.h"
 
 // Process-wide runtime singleton. Public init/shutdown owns its lifetime.
-extern nm_runtime_t g_nm_runtime;
+extern llam_runtime_t g_llam_runtime;
 
 // Cached XSAVE/FPU capability bits discovered at runtime initialization.
-extern uint32_t g_nm_xsave_mask_lo;
-extern uint32_t g_nm_xsave_mask_hi;
-extern uint32_t g_nm_fp_control_context;
+extern uint32_t g_llam_xsave_mask_lo;
+extern uint32_t g_llam_xsave_mask_hi;
+extern uint32_t g_llam_fp_control_context;
 
 // Scheduler TLS. These are set only while a runtime worker or managed task runs.
-extern _Thread_local nm_shard_t *g_nm_tls_shard;
-extern _Thread_local nm_task_t *g_nm_tls_task;
-extern _Thread_local nm_ctx_t *g_nm_tls_scheduler_ctx;
+extern _Thread_local llam_shard_t *g_llam_tls_shard;
+extern _Thread_local llam_task_t *g_llam_tls_task;
+extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
 
 // Recursion/fast-path hints used by channel handoff and opaque-block redirect.
-extern _Thread_local unsigned g_nm_tls_io_handoff_yield;
-extern _Thread_local unsigned g_nm_tls_opaque_redirect_hint;
+extern _Thread_local unsigned g_llam_tls_io_handoff_yield;
+extern _Thread_local unsigned g_llam_tls_opaque_redirect_hint;
 
 /**
  * @brief Encoded completion user-data tags for backend I/O events.
@@ -51,11 +51,11 @@ extern _Thread_local unsigned g_nm_tls_opaque_redirect_hint;
  * backend completion pointer refers to.
  */
 enum {
-    NM_IO_UDATA_REQ = 0U,
-    NM_IO_UDATA_POLL_WATCH = 1U,
-    NM_IO_UDATA_ACCEPT_WATCH = 2U,
-    NM_IO_UDATA_RECV_WATCH = 3U,
-    NM_IO_UDATA_CONTROL = 4U,
+    LLAM_IO_UDATA_REQ = 0U,
+    LLAM_IO_UDATA_POLL_WATCH = 1U,
+    LLAM_IO_UDATA_ACCEPT_WATCH = 2U,
+    LLAM_IO_UDATA_RECV_WATCH = 3U,
+    LLAM_IO_UDATA_CONTROL = 4U,
 };
 
 #endif

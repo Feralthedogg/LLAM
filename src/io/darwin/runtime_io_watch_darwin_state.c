@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_darwin_state.c
+ * @file src/io/darwin/runtime_io_watch_darwin_state.c
  * @brief Darwin/kqueue watch state queues and wait-list ownership helpers.
  *
  * @details
@@ -26,7 +26,7 @@
 #include "runtime_io_watch_darwin_internal.h"
 
 /** @brief Mix a 64-bit watch identity component. */
-uint64_t nm_hash_watch_identity_u64(uint64_t value) {
+uint64_t llam_hash_watch_identity_u64(uint64_t value) {
     value ^= value >> 30;
     value *= UINT64_C(0xbf58476d1ce4e5b9);
     value ^= value >> 27;
@@ -36,8 +36,8 @@ uint64_t nm_hash_watch_identity_u64(uint64_t value) {
 }
 
 /** @brief Update per-shard in-flight I/O waiter accounting. */
-void nm_shard_note_inflight_io_waiter(unsigned owner_shard, int delta) {
-    nm_runtime_t *rt = &g_nm_runtime;
+void llam_shard_note_inflight_io_waiter(unsigned owner_shard, int delta) {
+    llam_runtime_t *rt = &g_llam_runtime;
 
     if (delta == 0 || owner_shard >= rt->active_shards) {
         return;
@@ -50,7 +50,7 @@ void nm_shard_note_inflight_io_waiter(unsigned owner_shard, int delta) {
 }
 
 /** @brief Append a request to a node submit queue while submit_lock is held. */
-void nm_queue_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
+void llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req) {
     req->next = NULL;
     if (node->submit_tail != NULL) {
         node->submit_tail->next = req;
@@ -61,9 +61,9 @@ void nm_queue_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
 }
 
 /** @brief Remove a request from a node submit queue while submit_lock is held. */
-bool nm_remove_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = node->submit_head;
+bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = node->submit_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -85,8 +85,8 @@ bool nm_remove_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
 }
 
 /** @brief Detach all queued submissions from a node. */
-nm_io_req_t *nm_take_node_submissions(nm_node_t *node) {
-    nm_io_req_t *head;
+llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
+    llam_io_req_t *head;
 
     pthread_mutex_lock(&node->submit_lock);
     head = node->submit_head;
@@ -97,7 +97,7 @@ nm_io_req_t *nm_take_node_submissions(nm_node_t *node) {
 }
 
 /** @brief Append a poll waiter while watch_lock is held. */
-void nm_poll_watch_enqueue_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
+void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
     req->next = NULL;
     if (watch->wait_tail != NULL) {
         watch->wait_tail->next = req;
@@ -108,9 +108,9 @@ void nm_poll_watch_enqueue_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
 }
 
 /** @brief Remove a poll waiter while watch_lock is held. */
-bool nm_poll_watch_remove_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = watch->wait_head;
+bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -132,8 +132,8 @@ bool nm_poll_watch_remove_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
 }
 
 /** @brief Detach all poll waiters from a watch. */
-nm_io_req_t *nm_poll_watch_take_waiters(nm_poll_watch_t *watch) {
-    nm_io_req_t *head = watch->wait_head;
+llam_io_req_t *llam_poll_watch_take_waiters(llam_poll_watch_t *watch) {
+    llam_io_req_t *head = watch->wait_head;
 
     watch->wait_head = NULL;
     watch->wait_tail = NULL;
@@ -141,7 +141,7 @@ nm_io_req_t *nm_poll_watch_take_waiters(nm_poll_watch_t *watch) {
 }
 
 /** @brief Append an accept waiter while watch_lock is held. */
-void nm_accept_watch_enqueue_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) {
+void llam_accept_watch_enqueue_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
     req->next = NULL;
     if (watch->wait_tail != NULL) {
         watch->wait_tail->next = req;
@@ -152,8 +152,8 @@ void nm_accept_watch_enqueue_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) 
 }
 
 /** @brief Pop one buffered accepted fd from an accept watch. */
-int nm_accept_watch_pop_ready(nm_accept_watch_t *watch) {
-    nm_accept_ready_t *ready = watch->ready_head;
+int llam_accept_watch_pop_ready(llam_accept_watch_t *watch) {
+    llam_accept_ready_t *ready = watch->ready_head;
     int fd;
 
     if (ready == NULL) {
@@ -170,9 +170,9 @@ int nm_accept_watch_pop_ready(nm_accept_watch_t *watch) {
 }
 
 /** @brief Remove an accept waiter while watch_lock is held. */
-bool nm_accept_watch_remove_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = watch->wait_head;
+bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -194,8 +194,8 @@ bool nm_accept_watch_remove_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) {
 }
 
 /** @brief Pop one accept waiter from a watch. */
-nm_io_req_t *nm_accept_watch_pop_waiter(nm_accept_watch_t *watch) {
-    nm_io_req_t *req = watch->wait_head;
+llam_io_req_t *llam_accept_watch_pop_waiter(llam_accept_watch_t *watch) {
+    llam_io_req_t *req = watch->wait_head;
 
     if (req == NULL) {
         return NULL;
@@ -209,8 +209,8 @@ nm_io_req_t *nm_accept_watch_pop_waiter(nm_accept_watch_t *watch) {
 }
 
 /** @brief Buffer an accepted fd, transferring ownership to the watch. */
-bool nm_accept_watch_push_ready_owned(nm_accept_watch_t *watch, int fd) {
-    nm_accept_ready_t *ready = calloc(1, sizeof(*ready));
+bool llam_accept_watch_push_ready_owned(llam_accept_watch_t *watch, int fd) {
+    llam_accept_ready_t *ready = calloc(1, sizeof(*ready));
 
     if (ready == NULL) {
         return false;
@@ -227,15 +227,15 @@ bool nm_accept_watch_push_ready_owned(nm_accept_watch_t *watch, int fd) {
 }
 
 /** @brief Buffer an accepted fd or close it if buffering fails. */
-void nm_accept_watch_push_ready(nm_accept_watch_t *watch, int fd) {
-    if (!nm_accept_watch_push_ready_owned(watch, fd)) {
+void llam_accept_watch_push_ready(llam_accept_watch_t *watch, int fd) {
+    if (!llam_accept_watch_push_ready_owned(watch, fd)) {
         close(fd);
     }
 }
 
 /** @brief Pop one receive waiter from a watch. */
-nm_io_req_t *nm_recv_watch_pop_waiter(nm_recv_watch_t *watch) {
-    nm_io_req_t *req = watch->wait_head;
+llam_io_req_t *llam_recv_watch_pop_waiter(llam_recv_watch_t *watch) {
+    llam_io_req_t *req = watch->wait_head;
 
     if (req == NULL) {
         return NULL;
@@ -254,8 +254,8 @@ nm_io_req_t *nm_recv_watch_pop_waiter(nm_recv_watch_t *watch) {
  * Darwin does not use io_uring provided buffers, so readiness cached by a watch
  * owns a heap copy of the received payload.
  */
-bool nm_recv_watch_push_ready_copy(nm_recv_watch_t *watch, const unsigned char *data, size_t size) {
-    nm_recv_ready_t *ready = calloc(1, sizeof(*ready));
+bool llam_recv_watch_push_ready_copy(llam_recv_watch_t *watch, const unsigned char *data, size_t size) {
+    llam_recv_ready_t *ready = calloc(1, sizeof(*ready));
 
     if (ready == NULL) {
         return false;
@@ -284,7 +284,7 @@ bool nm_recv_watch_push_ready_copy(nm_recv_watch_t *watch, const unsigned char *
 }
 
 /** @brief Capture device/inode identity for fd reuse protection. */
-bool nm_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
+bool llam_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
     struct stat st;
 
     if (fstat(fd, &st) != 0) {
@@ -300,12 +300,12 @@ bool nm_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
 }
 
 /** @brief Find a poll watch while watch_lock is held. */
-nm_poll_watch_t *nm_find_poll_watch_locked(nm_node_t *node, int fd, short events) {
-    nm_poll_watch_t *watch = node->poll_watches;
+llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short events) {
+    llam_poll_watch_t *watch = node->poll_watches;
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (!nm_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
     while (watch != NULL) {
@@ -318,8 +318,8 @@ nm_poll_watch_t *nm_find_poll_watch_locked(nm_node_t *node, int fd, short events
 }
 
 /** @brief Find an accept watch while watch_lock is held. */
-nm_accept_watch_t *nm_find_accept_watch_locked(nm_node_t *node, int fd) {
-    nm_accept_watch_t *watch = node->accept_watches;
+llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd) {
+    llam_accept_watch_t *watch = node->accept_watches;
 
     while (watch != NULL) {
         if (watch->fd == fd) {
@@ -331,8 +331,8 @@ nm_accept_watch_t *nm_find_accept_watch_locked(nm_node_t *node, int fd) {
 }
 
 /** @brief Find a receive watch while watch_lock is held. */
-nm_recv_watch_t *nm_find_recv_watch_locked(nm_node_t *node, int fd, dev_t st_dev, ino_t st_ino) {
-    nm_recv_watch_t *watch = node->recv_watches;
+llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t st_dev, ino_t st_ino) {
+    llam_recv_watch_t *watch = node->recv_watches;
 
     while (watch != NULL) {
         if (watch->fd == fd && watch->st_dev == st_dev && watch->st_ino == st_ino) {
@@ -344,12 +344,12 @@ nm_recv_watch_t *nm_find_recv_watch_locked(nm_node_t *node, int fd, dev_t st_dev
 }
 
 /** @brief Find or create a poll watch while watch_lock is held. */
-nm_poll_watch_t *nm_get_or_create_poll_watch_locked(nm_node_t *node, int fd, short events) {
-    nm_poll_watch_t *watch = node->poll_watches;
+llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int fd, short events) {
+    llam_poll_watch_t *watch = node->poll_watches;
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (!nm_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
     while (watch != NULL) {
@@ -377,8 +377,8 @@ nm_poll_watch_t *nm_get_or_create_poll_watch_locked(nm_node_t *node, int fd, sho
 }
 
 /** @brief Find or create an accept watch while watch_lock is held. */
-nm_accept_watch_t *nm_get_or_create_accept_watch_locked(nm_node_t *node, int fd) {
-    nm_accept_watch_t *watch = node->accept_watches;
+llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, int fd) {
+    llam_accept_watch_t *watch = node->accept_watches;
 
     while (watch != NULL) {
         if (watch->fd == fd) {
@@ -400,15 +400,15 @@ nm_accept_watch_t *nm_get_or_create_accept_watch_locked(nm_node_t *node, int fd)
 }
 
 /** @brief Find or create a receive watch while watch_lock is held. */
-nm_recv_watch_t *nm_get_or_create_recv_watch_locked(nm_node_t *node, int fd) {
-    nm_recv_watch_t *watch;
+llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int fd) {
+    llam_recv_watch_t *watch;
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (!nm_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
-    watch = nm_find_recv_watch_locked(node, fd, st_dev, st_ino);
+    watch = llam_find_recv_watch_locked(node, fd, st_dev, st_ino);
     if (watch != NULL) {
         return watch;
     }
@@ -428,8 +428,8 @@ nm_recv_watch_t *nm_get_or_create_recv_watch_locked(nm_node_t *node, int fd) {
 }
 
 /** @brief Destroy and unlink a poll watch while watch_lock is held. */
-void nm_destroy_poll_watch_locked(nm_node_t *node, nm_poll_watch_t *watch) {
-    nm_poll_watch_t **cursor = &node->poll_watches;
+void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch) {
+    llam_poll_watch_t **cursor = &node->poll_watches;
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
@@ -442,14 +442,14 @@ void nm_destroy_poll_watch_locked(nm_node_t *node, nm_poll_watch_t *watch) {
 }
 
 /** @brief Destroy and unlink an accept watch while closing buffered accepted fds. */
-void nm_destroy_accept_watch_locked(nm_node_t *node, nm_accept_watch_t *watch) {
-    nm_accept_watch_t **cursor = &node->accept_watches;
+void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch) {
+    llam_accept_watch_t **cursor = &node->accept_watches;
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
-                nm_accept_ready_t *next = watch->ready_head->next;
+                llam_accept_ready_t *next = watch->ready_head->next;
 
                 close(watch->ready_head->fd);
                 free(watch->ready_head);
@@ -463,14 +463,14 @@ void nm_destroy_accept_watch_locked(nm_node_t *node, nm_accept_watch_t *watch) {
 }
 
 /** @brief Destroy and unlink a receive watch while freeing buffered payload copies. */
-void nm_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch) {
-    nm_recv_watch_t **cursor = &node->recv_watches;
+void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch) {
+    llam_recv_watch_t **cursor = &node->recv_watches;
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
-                nm_recv_ready_t *next = watch->ready_head->next;
+                llam_recv_ready_t *next = watch->ready_head->next;
 
                 free(watch->ready_head->copy_data);
                 free(watch->ready_head);
@@ -484,7 +484,7 @@ void nm_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch) {
 }
 
 /** @brief Destroy a receive watch only when it has no active backend/user state. */
-void nm_maybe_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch) {
+void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch) {
     if (watch == NULL) {
         return;
     }
@@ -494,15 +494,15 @@ void nm_maybe_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch)
     if (watch->wait_head != NULL || watch->ready_head != NULL) {
         return;
     }
-    nm_destroy_recv_watch_locked(node, watch);
+    llam_destroy_recv_watch_locked(node, watch);
 }
 
 /** @brief Append a deferred accept completion. */
-bool nm_darwin_accept_completion_push(nm_darwin_accept_completion_t **head,
-                                             nm_darwin_accept_completion_t **tail,
-                                             nm_io_req_t *req,
+bool llam_darwin_accept_completion_push(llam_darwin_accept_completion_t **head,
+                                             llam_darwin_accept_completion_t **tail,
+                                             llam_io_req_t *req,
                                              int result) {
-    nm_darwin_accept_completion_t *completion = calloc(1, sizeof(*completion));
+    llam_darwin_accept_completion_t *completion = calloc(1, sizeof(*completion));
 
     if (completion == NULL) {
         return false;
@@ -519,11 +519,11 @@ bool nm_darwin_accept_completion_push(nm_darwin_accept_completion_t **head,
 }
 
 /** @brief Append a deferred poll completion group. */
-bool nm_darwin_poll_completion_push(nm_darwin_poll_completion_t **head,
-                                           nm_darwin_poll_completion_t **tail,
-                                           nm_io_req_t *waiters,
+bool llam_darwin_poll_completion_push(llam_darwin_poll_completion_t **head,
+                                           llam_darwin_poll_completion_t **tail,
+                                           llam_io_req_t *waiters,
                                            int revents) {
-    nm_darwin_poll_completion_t *completion;
+    llam_darwin_poll_completion_t *completion;
 
     if (waiters == NULL) {
         return true;
@@ -544,16 +544,16 @@ bool nm_darwin_poll_completion_push(nm_darwin_poll_completion_t **head,
 }
 
 /** @brief Complete and free deferred poll completion groups. */
-void nm_darwin_poll_completion_drain(nm_node_t *node, nm_darwin_poll_completion_t *head) {
+void llam_darwin_poll_completion_drain(llam_node_t *node, llam_darwin_poll_completion_t *head) {
     while (head != NULL) {
-        nm_darwin_poll_completion_t *next_group = head->next;
-        nm_io_req_t *waiters = head->waiters;
+        llam_darwin_poll_completion_t *next_group = head->next;
+        llam_io_req_t *waiters = head->waiters;
 
         while (waiters != NULL) {
-            nm_io_req_t *next = waiters->next;
+            llam_io_req_t *next = waiters->next;
 
             waiters->next = NULL;
-            nm_io_complete_req(node, waiters, head->revents, false);
+            llam_io_complete_req(node, waiters, head->revents, false);
             waiters = next;
         }
         free(head);
@@ -562,13 +562,13 @@ void nm_darwin_poll_completion_drain(nm_node_t *node, nm_darwin_poll_completion_
 }
 
 /** @brief Append a deferred receive completion that already owns copied data. */
-bool nm_darwin_recv_completion_push(nm_darwin_recv_completion_t **head,
-                                           nm_darwin_recv_completion_t **tail,
-                                           nm_io_req_t *req,
+bool llam_darwin_recv_completion_push(llam_darwin_recv_completion_t **head,
+                                           llam_darwin_recv_completion_t **tail,
+                                           llam_io_req_t *req,
                                            size_t size,
                                            unsigned char *copy_data,
                                            size_t copy_capacity) {
-    nm_darwin_recv_completion_t *completion = calloc(1, sizeof(*completion));
+    llam_darwin_recv_completion_t *completion = calloc(1, sizeof(*completion));
 
     if (completion == NULL) {
         return false;
@@ -587,9 +587,9 @@ bool nm_darwin_recv_completion_push(nm_darwin_recv_completion_t **head,
 }
 
 /** @brief Copy payload and append a deferred receive completion. */
-bool nm_darwin_recv_completion_push_copy(nm_darwin_recv_completion_t **head,
-                                                nm_darwin_recv_completion_t **tail,
-                                                nm_io_req_t *req,
+bool llam_darwin_recv_completion_push_copy(llam_darwin_recv_completion_t **head,
+                                                llam_darwin_recv_completion_t **tail,
+                                                llam_io_req_t *req,
                                                 const unsigned char *data,
                                                 size_t size) {
     unsigned char *copy = NULL;
@@ -601,7 +601,7 @@ bool nm_darwin_recv_completion_push_copy(nm_darwin_recv_completion_t **head,
         }
         memcpy(copy, data, size);
     }
-    if (!nm_darwin_recv_completion_push(head, tail, req, size, copy, size)) {
+    if (!llam_darwin_recv_completion_push(head, tail, req, size, copy, size)) {
         free(copy);
         return false;
     }
@@ -609,14 +609,14 @@ bool nm_darwin_recv_completion_push_copy(nm_darwin_recv_completion_t **head,
 }
 
 /** @brief Complete and free deferred receive completions. */
-void nm_darwin_recv_completion_drain(nm_node_t *node, nm_darwin_recv_completion_t *head) {
+void llam_darwin_recv_completion_drain(llam_node_t *node, llam_darwin_recv_completion_t *head) {
     while (head != NULL) {
-        nm_darwin_recv_completion_t *next = head->next;
-        nm_io_req_t *req = head->req;
+        llam_darwin_recv_completion_t *next = head->next;
+        llam_io_req_t *req = head->req;
         int result = (int)head->size;
 
         if (req == NULL || req->owned_buffer == NULL ||
-            !nm_darwin_assign_owned_buffer(req,
+            !llam_darwin_assign_owned_buffer(req,
                                            head->copy_data,
                                            head->size,
                                            head->copy_data,
@@ -624,13 +624,13 @@ void nm_darwin_recv_completion_drain(nm_node_t *node, nm_darwin_recv_completion_
             free(head->copy_data);
             if (req != NULL) {
                 req->use_provided_buffer = false;
-                nm_io_complete_req(node, req, -ENOMEM, false);
+                llam_io_complete_req(node, req, -ENOMEM, false);
             }
         } else {
             req->use_provided_buffer = false;
             // Ownership of copy_data moved into req->owned_buffer.
             head->copy_data = NULL;
-            nm_io_complete_req(node, req, result, false);
+            llam_io_complete_req(node, req, result, false);
         }
         free(head->copy_data);
         free(head);
@@ -639,9 +639,9 @@ void nm_darwin_recv_completion_drain(nm_node_t *node, nm_darwin_recv_completion_
 }
 
 /** @brief Remove a matching queued control operation while watch_lock is held. */
-bool nm_drop_node_control_locked(nm_node_t *node, nm_io_control_kind_t kind, const void *target) {
-    nm_io_control_op_t *prev = NULL;
-    nm_io_control_op_t *cur;
+bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kind, const void *target) {
+    llam_io_control_op_t *prev = NULL;
+    llam_io_control_op_t *cur;
 
     if (node == NULL) {
         return false;

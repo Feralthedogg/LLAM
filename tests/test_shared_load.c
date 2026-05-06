@@ -55,8 +55,177 @@ static int test_fail(const char *message) {
     return 1;
 }
 
+static int require_symbol(void *handle, const char *name) {
+    void *symbol;
+
+    (void)dlerror();
+    symbol = dlsym(handle, name);
+    if (symbol == NULL) {
+        const char *error = dlerror();
+
+        fprintf(stderr,
+                "[test_shared_load] missing public symbol %s: %s\n",
+                name,
+                error != NULL ? error : "unknown dlerror");
+        return 1;
+    }
+    return 0;
+}
+
+static int require_symbols(void *handle, const char *const *symbols, size_t count) {
+    size_t i;
+
+    for (i = 0U; i < count; ++i) {
+        if (require_symbol(handle, symbols[i]) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    static const char *const llam_symbols[] = {
+        "llam_abi_version",
+        "llam_version_string",
+        "llam_abi_get_info",
+        "llam_runtime_opts_init",
+        "llam_spawn_opts_init",
+        "llam_runtime_init_ex",
+        "llam_runtime_init",
+        "llam_runtime_request_stop",
+        "llam_runtime_shutdown",
+        "llam_runtime_collect_stats_ex",
+        "llam_runtime_collect_stats",
+        "llam_spawn_ex",
+        "llam_spawn",
+        "llam_run",
+        "llam_yield",
+        "llam_join",
+        "llam_join_until",
+        "llam_detach",
+        "llam_sleep_until",
+        "llam_sleep_ns",
+        "llam_call_blocking_result",
+        "llam_call_blocking",
+        "llam_enter_blocking",
+        "llam_leave_blocking",
+        "llam_task_set_class",
+        "llam_dump_runtime_state",
+        "llam_task_flags",
+        "llam_cancel_token_create",
+        "llam_cancel_token_destroy",
+        "llam_cancel_token_cancel",
+        "llam_cancel_token_is_cancelled",
+        "llam_mutex_create",
+        "llam_mutex_destroy",
+        "llam_mutex_lock",
+        "llam_mutex_lock_until",
+        "llam_mutex_trylock",
+        "llam_mutex_unlock",
+        "llam_cond_create",
+        "llam_cond_destroy",
+        "llam_cond_wait",
+        "llam_cond_wait_until",
+        "llam_cond_signal",
+        "llam_cond_broadcast",
+        "llam_channel_create",
+        "llam_channel_destroy",
+        "llam_channel_send",
+        "llam_channel_send_until",
+        "llam_channel_recv_result",
+        "llam_channel_recv_until_result",
+        "llam_channel_recv",
+        "llam_channel_recv_until",
+        "llam_channel_close",
+        "llam_read",
+        "llam_write",
+        "llam_read_owned",
+        "llam_recv_owned",
+        "llam_io_buffer_release",
+        "llam_io_buffer_data",
+        "llam_io_buffer_size",
+        "llam_io_buffer_capacity",
+        "llam_accept",
+        "llam_connect",
+        "llam_poll_fd",
+        "llam_now_ns",
+        "llam_task_id",
+        "llam_task_state_name",
+        "llam_task_class",
+        "llam_current_task",
+    };
+    static const char *const nm_symbols[] = {
+        "nm_abi_version",
+        "nm_version_string",
+        "nm_abi_get_info",
+        "nm_runtime_opts_init",
+        "nm_spawn_opts_init",
+        "nm_runtime_init_ex",
+        "nm_runtime_init",
+        "nm_runtime_request_stop",
+        "nm_runtime_shutdown",
+        "nm_runtime_collect_stats_ex",
+        "nm_runtime_collect_stats",
+        "nm_spawn_ex",
+        "nm_spawn",
+        "nm_run",
+        "nm_yield",
+        "nm_join",
+        "nm_join_until",
+        "nm_detach",
+        "nm_sleep_until",
+        "nm_sleep_ns",
+        "nm_call_blocking_result",
+        "nm_call_blocking",
+        "nm_enter_blocking",
+        "nm_leave_blocking",
+        "nm_task_set_class",
+        "nm_dump_runtime_state",
+        "nm_task_flags",
+        "nm_cancel_token_create",
+        "nm_cancel_token_destroy",
+        "nm_cancel_token_cancel",
+        "nm_cancel_token_is_cancelled",
+        "nm_mutex_create",
+        "nm_mutex_destroy",
+        "nm_mutex_lock",
+        "nm_mutex_lock_until",
+        "nm_mutex_trylock",
+        "nm_mutex_unlock",
+        "nm_cond_create",
+        "nm_cond_destroy",
+        "nm_cond_wait",
+        "nm_cond_wait_until",
+        "nm_cond_signal",
+        "nm_cond_broadcast",
+        "nm_channel_create",
+        "nm_channel_destroy",
+        "nm_channel_send",
+        "nm_channel_send_until",
+        "nm_channel_recv_result",
+        "nm_channel_recv_until_result",
+        "nm_channel_recv",
+        "nm_channel_recv_until",
+        "nm_channel_close",
+        "nm_read",
+        "nm_write",
+        "nm_read_owned",
+        "nm_recv_owned",
+        "nm_io_buffer_release",
+        "nm_io_buffer_data",
+        "nm_io_buffer_size",
+        "nm_io_buffer_capacity",
+        "nm_accept",
+        "nm_connect",
+        "nm_poll_fd",
+        "nm_now_ns",
+        "nm_task_id",
+        "nm_task_state_name",
+        "nm_task_class",
+        "nm_current_task",
+    };
     const char *path = argc > 1 ? argv[1] : LLAM_TEST_DEFAULT_SHARED_PATH;
+    char expected_version[32];
     abi_version_fn llam_abi_version_ptr = NULL;
     version_string_fn llam_version_string_ptr = NULL;
     abi_info_fn llam_abi_get_info_ptr = NULL;
@@ -76,12 +245,19 @@ int main(int argc, char **argv) {
     LOAD_FN(handle, "llam_abi_get_info", llam_abi_get_info_ptr);
     LOAD_FN(handle, "llam_connect", llam_connect_ptr);
     LOAD_FN(handle, "nm_abi_version", nm_abi_version_ptr);
+    if (require_symbols(handle, llam_symbols, sizeof(llam_symbols) / sizeof(llam_symbols[0])) != 0 ||
+        require_symbols(handle, nm_symbols, sizeof(nm_symbols) / sizeof(nm_symbols[0])) != 0) {
+        (void)dlclose(handle);
+        return 1;
+    }
 
     if (llam_abi_version_ptr() != LLAM_ABI_VERSION || nm_abi_version_ptr() != LLAM_ABI_VERSION) {
         (void)dlclose(handle);
         return test_fail("loaded ABI version does not match headers");
     }
-    if (llam_version_string_ptr() == NULL || strcmp(llam_version_string_ptr(), "0.1.0") != 0) {
+    (void)snprintf(expected_version, sizeof(expected_version), "%u.%u.%u",
+                   LLAM_VERSION_MAJOR, LLAM_VERSION_MINOR, LLAM_VERSION_PATCH);
+    if (llam_version_string_ptr() == NULL || strcmp(llam_version_string_ptr(), expected_version) != 0) {
         (void)dlclose(handle);
         return test_fail("loaded version string is unexpected");
     }

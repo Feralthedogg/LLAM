@@ -33,13 +33,13 @@
  * @param stack_class Requested stack class.
  * @return Usable stack bytes, excluding the guard page.
  */
-size_t nm_stack_bytes(nm_stack_class_t stack_class) {
+size_t llam_stack_bytes(llam_stack_class_t stack_class) {
     switch (stack_class) {
-    case NM_STACK_CLASS_LARGE:
+    case LLAM_STACK_CLASS_LARGE:
         return 256U * 1024U;
-    case NM_STACK_CLASS_HUGE:
+    case LLAM_STACK_CLASS_HUGE:
         return 1024U * 1024U;
-    case NM_STACK_CLASS_DEFAULT:
+    case LLAM_STACK_CLASS_DEFAULT:
     default:
         return 64U * 1024U;
     }
@@ -51,13 +51,13 @@ size_t nm_stack_bytes(nm_stack_class_t stack_class) {
  * @param task_class Task scheduling class.
  * @return Time slice budget in nanoseconds.
  */
-uint64_t nm_slice_ns(nm_task_class_t task_class) {
+uint64_t llam_slice_ns(llam_task_class_t task_class) {
     switch (task_class) {
-    case NM_TASK_CLASS_LATENCY:
+    case LLAM_TASK_CLASS_LATENCY:
         return 50000ULL;
-    case NM_TASK_CLASS_BATCH:
+    case LLAM_TASK_CLASS_BATCH:
         return 1000000ULL;
-    case NM_TASK_CLASS_DEFAULT:
+    case LLAM_TASK_CLASS_DEFAULT:
     default:
         return 200000ULL;
     }
@@ -68,7 +68,7 @@ uint64_t nm_slice_ns(nm_task_class_t task_class) {
  *
  * @return Current stack pointer value as an integer.
  */
-static uintptr_t nm_current_rsp(void) {
+static uintptr_t llam_current_rsp(void) {
     uintptr_t rsp;
 
 #if defined(__aarch64__)
@@ -90,7 +90,7 @@ static uintptr_t nm_current_rsp(void) {
  * @param rsp  Sampled stack pointer.
  * @return Bytes used from the high end of the stack.
  */
-static size_t nm_task_stack_used_from_rsp(const nm_task_t *task, uintptr_t rsp) {
+static size_t llam_task_stack_used_from_rsp(const llam_task_t *task, uintptr_t rsp) {
     uintptr_t low;
     uintptr_t high;
 
@@ -114,14 +114,14 @@ static size_t nm_task_stack_used_from_rsp(const nm_task_t *task, uintptr_t rsp) 
  *
  * @return true if sampling should record high-water data.
  */
-static bool nm_stack_sampling_enabled(void) {
+static bool llam_stack_sampling_enabled(void) {
     static atomic_int cached_enabled = ATOMIC_VAR_INIT(-1);
     int enabled = atomic_load_explicit(&cached_enabled, memory_order_acquire);
 
     if (enabled < 0) {
-        const char *sample_value = nm_env_get("LLAM_STACK_SAMPLING");
-        const char *light_value = nm_env_get("LLAM_DIAG_LIGHT_SAFEPOINT");
-        const char *strict_value = nm_env_get("LLAM_STRICT_SAFEPOINT");
+        const char *sample_value = llam_env_get("LLAM_STACK_SAMPLING");
+        const char *light_value = llam_env_get("LLAM_DIAG_LIGHT_SAFEPOINT");
+        const char *strict_value = llam_env_get("LLAM_STRICT_SAFEPOINT");
 
         // Cache the environment decision after the first check so the sampling
         // path does not repeatedly parse strings.
@@ -141,14 +141,14 @@ static bool nm_stack_sampling_enabled(void) {
  * @param task Task to update.
  * @param rsp  Sampled stack pointer.
  */
-void nm_task_sample_stack_rsp(nm_task_t *task, uintptr_t rsp) {
+void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp) {
     size_t used;
 
-    if (task == NULL || !nm_stack_sampling_enabled()) {
+    if (task == NULL || !llam_stack_sampling_enabled()) {
         return;
     }
 
-    used = nm_task_stack_used_from_rsp(task, rsp);
+    used = llam_task_stack_used_from_rsp(task, rsp);
     task->last_stack_used = used;
     if (used > task->stack_high_water) {
         task->stack_high_water = used;
@@ -160,11 +160,11 @@ void nm_task_sample_stack_rsp(nm_task_t *task, uintptr_t rsp) {
  *
  * @param task Task whose stack statistics should be updated.
  */
-void nm_task_sample_live_stack(nm_task_t *task) {
-    if (!nm_stack_sampling_enabled()) {
+void llam_task_sample_live_stack(llam_task_t *task) {
+    if (!llam_stack_sampling_enabled()) {
         return;
     }
-    nm_task_sample_stack_rsp(task, nm_current_rsp());
+    llam_task_sample_stack_rsp(task, llam_current_rsp());
 }
 
 /**
@@ -173,7 +173,7 @@ void nm_task_sample_live_stack(nm_task_t *task) {
  * @param task Task to inspect.
  * @return Static string describing the observed stack profile.
  */
-const char *nm_stack_profile_hint(const nm_task_t *task) {
+const char *llam_stack_profile_hint(const llam_task_t *task) {
     size_t peak;
 
     if (task == NULL || task->stack_size == 0U) {
@@ -201,7 +201,7 @@ const char *nm_stack_profile_hint(const nm_task_t *task) {
  *
  * @return Cached page size from @c sysconf(_SC_PAGESIZE).
  */
-long nm_page_size(void) {
+long llam_page_size(void) {
     static long cached_page_size = 0;
 
     if (cached_page_size == 0) {

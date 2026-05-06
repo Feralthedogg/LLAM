@@ -32,7 +32,7 @@
  * @param task Task handle, or NULL.
  * @return Task id, or 0 for NULL.
  */
-uint64_t nm_task_id(const nm_task_t *task) {
+uint64_t llam_task_id(const llam_task_t *task) {
     return task != NULL ? task->id : 0U;
 }
 
@@ -42,8 +42,8 @@ uint64_t nm_task_id(const nm_task_t *task) {
  * @param task Task handle, or NULL.
  * @return State name, or "UNKNOWN" for NULL.
  */
-const char *nm_task_state_name(const nm_task_t *task) {
-    return task != NULL ? nm_state_name_from_id(task->state) : "UNKNOWN";
+const char *llam_task_state_name(const llam_task_t *task) {
+    return task != NULL ? llam_state_name_from_id(task->state) : "UNKNOWN";
 }
 
 /**
@@ -52,8 +52,8 @@ const char *nm_task_state_name(const nm_task_t *task) {
  * @param task Task handle, or NULL.
  * @return Task class, or default class for NULL.
  */
-nm_task_class_t nm_task_class(const nm_task_t *task) {
-    return task != NULL ? task->task_class : NM_TASK_CLASS_DEFAULT;
+uint32_t llam_task_class(const llam_task_t *task) {
+    return task != NULL ? (uint32_t)task->task_class : (uint32_t)LLAM_TASK_CLASS_DEFAULT;
 }
 
 /**
@@ -61,46 +61,36 @@ nm_task_class_t nm_task_class(const nm_task_t *task) {
  *
  * @return Current task, or NULL outside a runtime-managed task.
  */
-nm_task_t *nm_current_task(void) {
-    return g_nm_tls_task;
+llam_task_t *llam_current_task(void) {
+    return g_llam_tls_task;
 }
 
 /**
- * @brief Collect a flat runtime statistics snapshot.
- *
- * Benchmarks consume this format so they do not need to scrape the human dump.
- *
- * @param stats Destination snapshot.
- * @return 0 on success, -1 with @c errno set on invalid arguments.
+ * @brief Fill the current library's full runtime statistics layout.
  */
-int nm_runtime_collect_stats(nm_runtime_stats_t *stats) {
-    nm_runtime_t *rt = &g_nm_runtime;
+static void llam_runtime_collect_stats_full(llam_runtime_stats_t *stats) {
+    llam_runtime_t *rt = &g_llam_runtime;
     unsigned i;
 
-    if (stats == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
     memset(stats, 0, sizeof(*stats));
-    stats->active_shards = rt->active_shards;
-    stats->online_shards = nm_runtime_online_shards(rt);
-    stats->online_shards_floor = nm_runtime_online_shards_floor(rt);
-    stats->online_shards_min = nm_runtime_online_shards_min(rt);
-    stats->online_shards_max = nm_runtime_online_shards_max(rt);
+    stats->active_workers = rt->active_shards;
+    stats->online_workers = llam_runtime_online_shards(rt);
+    stats->online_workers_floor = llam_runtime_online_shards_floor(rt);
+    stats->online_workers_min = llam_runtime_online_shards_min(rt);
+    stats->online_workers_max = llam_runtime_online_shards_max(rt);
     stats->active_nodes = rt->active_nodes;
-    stats->dynamic_shards = rt->experimental_dynamic_shards != 0U ? 1U : 0U;
-    stats->shard_rings = rt->experimental_shard_rings != 0U ? 1U : 0U;
-    stats->shard_rings_multishot = rt->experimental_shard_rings_multishot != 0U ? 1U : 0U;
+    stats->dynamic_workers = rt->experimental_dynamic_shards != 0U ? 1U : 0U;
+    stats->worker_rings = rt->experimental_shard_rings != 0U ? 1U : 0U;
+    stats->worker_rings_multishot = rt->experimental_shard_rings_multishot != 0U ? 1U : 0U;
     stats->lockfree_normq = rt->experimental_lockfree_normq != 0U ? 1U : 0U;
     stats->huge_alloc = rt->experimental_huge_alloc_active != 0U ? 1U : 0U;
     stats->sqpoll = rt->experimental_sqpoll_active != 0U ? 1U : 0U;
-    stats->overflow_depth = nm_runtime_overflow_depth(rt);
+    stats->overflow_depth = llam_runtime_overflow_depth(rt);
 
     // Shard metrics are protected by the shard lock so the snapshot does not
     // read partially updated multi-field groups.
     for (i = 0; i < rt->active_shards; ++i) {
-        nm_shard_t *shard = &rt->shards[i];
+        llam_shard_t *shard = &rt->shards[i];
 
         pthread_mutex_lock(&shard->lock);
         stats->ctx_switches += shard->metrics.ctx_switches;
@@ -142,7 +132,37 @@ int nm_runtime_collect_stats(nm_runtime_stats_t *stats) {
         stats->io_submit_calls += rt->nodes[i].submit_calls;
         stats->io_submit_syscalls += rt->nodes[i].submit_syscalls;
     }
+}
+
+/**
+ * @brief Collect a flat runtime statistics snapshot with a caller size.
+ *
+ * Benchmarks consume this format so they do not need to scrape the human dump.
+ * Dynamic loaders and FFI bindings should call this form so future stats fields
+ * appended at the tail cannot overflow an older caller's smaller struct.
+ *
+ * @param stats Destination snapshot.
+ * @param stats_size Size of the caller's stats struct.
+ * @return 0 on success, -1 with @c errno set on invalid arguments.
+ */
+int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size) {
+    llam_runtime_stats_t full_stats;
+    size_t copy_size;
+
+    if (stats == NULL || stats_size == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    llam_runtime_collect_stats_full(&full_stats);
+    memset(stats, 0, stats_size);
+    copy_size = stats_size < sizeof(full_stats) ? stats_size : sizeof(full_stats);
+    memcpy(stats, &full_stats, copy_size);
     return 0;
+}
+
+int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
+    return llam_runtime_collect_stats_ex(stats, stats != NULL ? sizeof(*stats) : 0U);
 }
 
 /**
@@ -150,23 +170,23 @@ int nm_runtime_collect_stats(nm_runtime_stats_t *stats) {
  *
  * @param fd Destination file descriptor.
  */
-void nm_dump_runtime_state(int fd) {
-    nm_runtime_t *rt = &g_nm_runtime;
+void llam_dump_runtime_state(int fd) {
+    llam_runtime_t *rt = &g_llam_runtime;
     unsigned i;
     unsigned block_pending = atomic_load(&rt->block_pending);
     unsigned block_active = atomic_load(&rt->block_active);
-    unsigned overflow_depth = nm_runtime_overflow_depth(rt);
-    unsigned online_shards = nm_max_unsigned(1U, nm_runtime_online_shards(rt));
-    unsigned online_floor = nm_runtime_online_shards_floor(rt);
-    unsigned online_min = nm_runtime_online_shards_min(rt);
-    unsigned online_max = nm_runtime_online_shards_max(rt);
-    unsigned overflow_threshold = nm_max_unsigned(4U, online_shards * 2U);
-    unsigned pressure = nm_runtime_pressure_signal(rt) ? 1U : 0U;
-    const char *profile = rt->profile == NM_RUNTIME_PROFILE_RELEASE_FAST
+    unsigned overflow_depth = llam_runtime_overflow_depth(rt);
+    unsigned online_shards = llam_max_unsigned(1U, llam_runtime_online_shards(rt));
+    unsigned online_floor = llam_runtime_online_shards_floor(rt);
+    unsigned online_min = llam_runtime_online_shards_min(rt);
+    unsigned online_max = llam_runtime_online_shards_max(rt);
+    unsigned overflow_threshold = llam_max_unsigned(4U, online_shards * 2U);
+    unsigned pressure = llam_runtime_pressure_signal(rt) ? 1U : 0U;
+    const char *profile = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
                               ? "release-fast"
-                              : (rt->profile == NM_RUNTIME_PROFILE_DEBUG_SAFE
+                              : (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE
                                      ? "debug-safe"
-                                     : (rt->profile == NM_RUNTIME_PROFILE_IO_LATENCY ? "io-latency" : "balanced"));
+                                     : (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ? "io-latency" : "balanced"));
 
     dprintf(fd,
             "runtime:\n"
@@ -202,7 +222,7 @@ void nm_dump_runtime_state(int fd) {
             rt->xsave_area_size);
 
     // The dump format is intentionally text-first for bug reports and benchmark
-    // logs; machine consumers should use nm_runtime_collect_stats().
+    // logs; machine consumers should use llam_runtime_collect_stats().
     dprintf(fd,
             "block:\n"
             "  workers=%u pending=%u active=%u queued=%u peak_active=%u\n",
@@ -246,18 +266,18 @@ void nm_dump_runtime_state(int fd) {
 
     dprintf(fd, "shards:\n");
     for (i = 0; i < rt->active_shards; ++i) {
-        nm_shard_t *shard = &rt->shards[i];
-        size_t trace_count = shard->trace_head > NM_TRACE_RING_CAP ? NM_TRACE_RING_CAP : shard->trace_head;
-        unsigned begin = shard->trace_head > NM_TRACE_RING_CAP ? shard->trace_head - NM_TRACE_RING_CAP : 0U;
+        llam_shard_t *shard = &rt->shards[i];
+        size_t trace_count = shard->trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : shard->trace_head;
+        unsigned begin = shard->trace_head > LLAM_TRACE_RING_CAP ? shard->trace_head - LLAM_TRACE_RING_CAP : 0U;
         unsigned j;
-        nm_task_t *current;
+        llam_task_t *current;
 
         pthread_mutex_lock(&shard->lock);
         current = atomic_load_explicit(&shard->current, memory_order_acquire);
         dprintf(fd,
                 "  shard=%u online=%u cpu=%u node=%u io_node=%u current=%llu opaque_redirect=%u opaque_helper(started=%u ready=%u active=%u) opaque_depth=%u/%u redirect_depth=%u/%u queues(inject=%u hot=%u norm=%u timers=%u)\n",
                 shard->id,
-                nm_shard_is_online(shard) ? 1U : 0U,
+                llam_shard_is_online(shard) ? 1U : 0U,
                 shard->cpu_id,
                 shard->node_index,
                 shard->io_node_index,
@@ -272,7 +292,7 @@ void nm_dump_runtime_state(int fd) {
                 shard->opaque_redirect_depth_peak,
                 shard->inject_q.depth,
                 shard->hot_q.depth,
-                nm_norm_queue_depth(shard),
+                llam_norm_queue_depth(shard),
                 shard->timers != NULL ? 1U : 0U);
         dprintf(fd,
                 "    metrics ctx_switches=%llu yields=%llu parks=%llu wakes=%llu sleeps=%llu joins=%llu steals=%llu migrations=%llu slice_budget_ns=%llu max_run_ns=%llu slice_overruns=%llu\n",
@@ -325,16 +345,16 @@ void nm_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.opaque_leave_wait_ns,
                 (unsigned long long)shard->metrics.opaque_leave_wait_samples,
                 (unsigned long long)shard->metrics.opaque_leave_wait_max_ns,
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_JOIN],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_SLEEP],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_BLOCKING],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_IO],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_CANCEL],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_MUTEX],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_COND],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_CHANNEL_SEND],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_CHANNEL_RECV],
-                (unsigned long long)shard->metrics.wake_reason_hist[NM_WAIT_TIMEOUT]);
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_JOIN],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_SLEEP],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_BLOCKING],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_IO],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_CANCEL],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_MUTEX],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_COND],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_CHANNEL_SEND],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_CHANNEL_RECV],
+                (unsigned long long)shard->metrics.wake_reason_hist[LLAM_WAIT_TIMEOUT]);
         dprintf(fd,
                 "    allocator lock(acq=%llu contention=%llu grows=%llu grow_fail=%llu) burst_max(task=%llu wait=%llu timer=%llu io_req=%llu io_buf=%llu)\n",
                 (unsigned long long)shard->allocator.lock_acquires,
@@ -375,35 +395,35 @@ void nm_dump_runtime_state(int fd) {
                 (unsigned long long)shard->allocator.io_buffer_remote_drains);
         dprintf(fd, "    trace:\n");
         for (j = begin; j < begin + (unsigned)trace_count; ++j) {
-            const nm_trace_event_t *event = &shard->trace_ring[j % NM_TRACE_RING_CAP];
+            const llam_trace_event_t *event = &shard->trace_ring[j % LLAM_TRACE_RING_CAP];
             dprintf(fd,
                     "      ts=%llu kind=%s task=%llu %s->%s reason=%s\n",
                     (unsigned long long)event->ts_ns,
-                    nm_trace_kind_name((nm_trace_kind_t)event->kind),
+                    llam_trace_kind_name((llam_trace_kind_t)event->kind),
                     (unsigned long long)event->task_id,
-                    nm_state_name_from_id((nm_task_state_id_t)event->from_state),
-                    nm_state_name_from_id((nm_task_state_id_t)event->to_state),
-                    nm_wait_reason_name((nm_wait_reason_t)event->reason));
+                    llam_state_name_from_id((llam_task_state_id_t)event->from_state),
+                    llam_state_name_from_id((llam_task_state_id_t)event->to_state),
+                    llam_wait_reason_name((llam_wait_reason_t)event->reason));
         }
         pthread_mutex_unlock(&shard->lock);
     }
 
     dprintf(fd, "tasks:\n");
     pthread_mutex_lock(&rt->task_list_lock);
-    for (nm_task_t *task = rt->all_tasks; task != NULL; task = task->all_next) {
+    for (llam_task_t *task = rt->all_tasks; task != NULL; task = task->all_next) {
         dprintf(fd,
                 "  id=%llu state=%s class=%d flags=0x%x home=%u last=%u wait=%s stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
                 (unsigned long long)task->id,
-                nm_state_name_from_id(task->state),
+                llam_state_name_from_id(task->state),
                 (int)task->task_class,
                 task->flags,
                 task->home_shard,
                 task->last_shard,
-                nm_wait_reason_name(task->wait_reason),
+                llam_wait_reason_name(task->wait_reason),
                 task->stack_size,
                 task->last_stack_used,
                 task->stack_high_water,
-                nm_stack_profile_hint(task),
+                llam_stack_profile_hint(task),
                 (unsigned long long)task->last_run_ns,
                 (unsigned long long)task->total_run_ns,
                 (unsigned long long)task->last_opaque_block_ns,

@@ -36,10 +36,10 @@
  *
  * @return Merge target, or @c NULL when no accepting target exists.
  */
-nm_shard_t *nm_runtime_pick_merge_target(nm_runtime_t *rt, nm_shard_t *source) {
-    nm_shard_t *best_same_io = NULL;
-    nm_shard_t *best_same_node = NULL;
-    nm_shard_t *best_any = NULL;
+llam_shard_t *llam_runtime_pick_merge_target(llam_runtime_t *rt, llam_shard_t *source) {
+    llam_shard_t *best_same_io = NULL;
+    llam_shard_t *best_same_node = NULL;
+    llam_shard_t *best_any = NULL;
     unsigned best_same_io_load = UINT_MAX;
     unsigned best_same_node_load = UINT_MAX;
     unsigned best_any_load = UINT_MAX;
@@ -50,14 +50,14 @@ nm_shard_t *nm_runtime_pick_merge_target(nm_runtime_t *rt, nm_shard_t *source) {
     }
 
     for (i = 0U; i < rt->active_shards; ++i) {
-        nm_shard_t *candidate = &rt->shards[i];
+        llam_shard_t *candidate = &rt->shards[i];
         unsigned load;
 
-        if (candidate == source || !nm_shard_accepts_new_work(candidate)) {
+        if (candidate == source || !llam_shard_accepts_new_work(candidate)) {
             continue;
         }
 
-        load = nm_watchdog_snapshot_shard_load(candidate);
+        load = llam_watchdog_snapshot_shard_load(candidate);
         if (candidate->io_node_index == source->io_node_index) {
             if (load < best_same_io_load) {
                 best_same_io = candidate;
@@ -90,7 +90,7 @@ nm_shard_t *nm_runtime_pick_merge_target(nm_runtime_t *rt, nm_shard_t *source) {
 /**
  * @brief Sleep briefly while waiting for a watchdog pause handshake.
  */
-void nm_watchdog_pause_briefly(void) {
+void llam_watchdog_pause_briefly(void) {
     struct timespec ts;
 
     ts.tv_sec = 0;
@@ -104,7 +104,7 @@ void nm_watchdog_pause_briefly(void) {
  * @param rt     Runtime to update.
  * @param active Whether stealing should pause.
  */
-void nm_runtime_set_steal_pause(nm_runtime_t *rt, bool active) {
+void llam_runtime_set_steal_pause(llam_runtime_t *rt, bool active) {
     unsigned i;
 
     if (rt == NULL) {
@@ -115,7 +115,7 @@ void nm_runtime_set_steal_pause(nm_runtime_t *rt, bool active) {
         atomic_store_explicit(&rt->shards[i].steal_pause_ack, 0U, memory_order_release);
     }
     atomic_store_explicit(&rt->steal_pause_active, active ? 1U : 0U, memory_order_release);
-    nm_wake_all_shards(rt);
+    llam_wake_all_shards(rt);
 }
 
 /**
@@ -126,19 +126,19 @@ void nm_runtime_set_steal_pause(nm_runtime_t *rt, bool active) {
  *
  * @return @c true when all online shards acknowledged before the deadline.
  */
-bool nm_runtime_wait_steal_pause_ack(nm_runtime_t *rt, uint64_t deadline_ns) {
+bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns) {
     if (rt == NULL) {
         return false;
     }
 
-    while (nm_now_ns() < deadline_ns) {
+    while (llam_now_ns() < deadline_ns) {
         unsigned i;
         bool all_ack = true;
 
         for (i = 0U; i < rt->active_shards; ++i) {
-            nm_shard_t *shard = &rt->shards[i];
+            llam_shard_t *shard = &rt->shards[i];
 
-            if (!nm_shard_is_online(shard)) {
+            if (!llam_shard_is_online(shard)) {
                 continue;
             }
             if (atomic_load_explicit(&shard->steal_pause_ack, memory_order_acquire) == 0U) {
@@ -149,7 +149,7 @@ bool nm_runtime_wait_steal_pause_ack(nm_runtime_t *rt, uint64_t deadline_ns) {
         if (all_ack) {
             return true;
         }
-        nm_watchdog_pause_briefly();
+        llam_watchdog_pause_briefly();
     }
     return false;
 }
@@ -159,13 +159,13 @@ bool nm_runtime_wait_steal_pause_ack(nm_runtime_t *rt, uint64_t deadline_ns) {
  *
  * @param shard Shard to pause.
  */
-void nm_shard_request_merge_pause(nm_shard_t *shard) {
+void llam_shard_request_merge_pause(llam_shard_t *shard) {
     if (shard == NULL) {
         return;
     }
     atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
     atomic_store_explicit(&shard->merge_pause_requested, 1U, memory_order_release);
-    nm_kick_shard(shard);
+    llam_kick_shard(shard);
 }
 
 /**
@@ -173,13 +173,13 @@ void nm_shard_request_merge_pause(nm_shard_t *shard) {
  *
  * @param shard Shard to release.
  */
-void nm_shard_release_merge_pause(nm_shard_t *shard) {
+void llam_shard_release_merge_pause(llam_shard_t *shard) {
     if (shard == NULL) {
         return;
     }
     atomic_store_explicit(&shard->merge_pause_requested, 0U, memory_order_release);
     atomic_store_explicit(&shard->merge_pause_ack, 0U, memory_order_release);
-    nm_kick_shard(shard);
+    llam_kick_shard(shard);
 }
 
 /**
@@ -190,19 +190,19 @@ void nm_shard_release_merge_pause(nm_shard_t *shard) {
  *
  * @return @c true when the shard acknowledged before the deadline.
  */
-bool nm_shard_wait_merge_pause_ack(nm_shard_t *shard, uint64_t deadline_ns) {
+bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns) {
     if (shard == NULL) {
         return false;
     }
 
-    while (nm_now_ns() < deadline_ns) {
-        if (!nm_shard_is_online(shard)) {
+    while (llam_now_ns() < deadline_ns) {
+        if (!llam_shard_is_online(shard)) {
             return false;
         }
         if (atomic_load_explicit(&shard->merge_pause_ack, memory_order_acquire) != 0U) {
             return true;
         }
-        nm_watchdog_pause_briefly();
+        llam_watchdog_pause_briefly();
     }
     return false;
 }
@@ -214,12 +214,12 @@ bool nm_shard_wait_merge_pause_ack(nm_shard_t *shard, uint64_t deadline_ns) {
  *
  * @return @c true when no current task, queues, or redirect state remain.
  */
-bool nm_shard_can_offline_locked(const nm_shard_t *shard) {
+bool llam_shard_can_offline_locked(const llam_shard_t *shard) {
     return shard != NULL &&
            atomic_load_explicit(&shard->current, memory_order_acquire) == NULL &&
            shard->inject_q.depth == 0U &&
            shard->hot_q.depth == 0U &&
-           nm_norm_queue_depth(shard) == 0U &&
+           llam_norm_queue_depth(shard) == 0U &&
            !shard->opaque_redirect_active;
 }
 
@@ -230,7 +230,7 @@ bool nm_shard_can_offline_locked(const nm_shard_t *shard) {
  *
  * @return @c true when no current task or opaque redirect is active.
  */
-bool nm_shard_can_start_merge_locked(const nm_shard_t *shard) {
+bool llam_shard_can_start_merge_locked(const llam_shard_t *shard) {
     return shard != NULL &&
            atomic_load_explicit(&shard->current, memory_order_acquire) == NULL &&
            !shard->opaque_redirect_active;
@@ -245,14 +245,14 @@ bool nm_shard_can_start_merge_locked(const nm_shard_t *shard) {
  *
  * @return @c true when the task is runnable, unpinned, and not waiting.
  */
-static bool nm_task_can_merge_runnable(const nm_shard_t *source, const nm_shard_t *target, const nm_task_t *task) {
+static bool llam_task_can_merge_runnable(const llam_shard_t *source, const llam_shard_t *target, const llam_task_t *task) {
     if (source == NULL || target == NULL || task == NULL) {
         return false;
     }
-    if ((task->flags & NM_TASK_FLAG_PINNED) != 0U) {
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
         return false;
     }
-    if (task->state != NM_TASK_STATE_RUNNABLE || task->wait_reason != NM_WAIT_NONE) {
+    if (task->state != LLAM_TASK_STATE_RUNNABLE || task->wait_reason != LLAM_WAIT_NONE) {
         return false;
     }
     return true;
@@ -267,15 +267,15 @@ static bool nm_task_can_merge_runnable(const nm_shard_t *source, const nm_shard_
  *
  * @return @c true when every queued task is mergeable.
  */
-static bool nm_queue_can_merge_runnable(const nm_shard_t *source, const nm_shard_t *target, const nm_queue_t *queue) {
-    const nm_task_t *task;
+static bool llam_queue_can_merge_runnable(const llam_shard_t *source, const llam_shard_t *target, const llam_queue_t *queue) {
+    const llam_task_t *task;
 
     if (source == NULL || target == NULL || queue == NULL) {
         return false;
     }
 
     for (task = queue->head; task != NULL; task = task->queue_next) {
-        if (!nm_task_can_merge_runnable(source, target, task)) {
+        if (!llam_task_can_merge_runnable(source, target, task)) {
             return false;
         }
     }
@@ -289,7 +289,7 @@ static bool nm_queue_can_merge_runnable(const nm_shard_t *source, const nm_shard
  * @param target Target shard receiving ownership.
  * @param task   Task to update.
  */
-void nm_merge_rehome_task(nm_shard_t *source, nm_shard_t *target, nm_task_t *task) {
+void llam_merge_rehome_task(llam_shard_t *source, llam_shard_t *target, llam_task_t *task) {
     if (source == NULL || target == NULL || task == NULL) {
         return;
     }
@@ -307,13 +307,13 @@ void nm_merge_rehome_task(nm_shard_t *source, nm_shard_t *target, nm_task_t *tas
  *
  * @return @c true after the task has been accounted as migrated.
  */
-static bool nm_merge_task_to_target_locked(nm_shard_t *source, nm_shard_t *target, nm_task_t *task) {
+static bool llam_merge_task_to_target_locked(llam_shard_t *source, llam_shard_t *target, llam_task_t *task) {
     if (source == NULL || target == NULL || task == NULL) {
         return false;
     }
 
-    nm_merge_rehome_task(source, target, task);
-    if (nm_queue_push_bounded_locked(target, &target->inject_q, NM_INJECT_QUEUE_CAP, task)) {
+    llam_merge_rehome_task(source, target, task);
+    if (llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
         target->metrics.inject_enqueues += 1U;
     }
     source->metrics.migrations += 1U;
@@ -332,8 +332,8 @@ static bool nm_merge_task_to_target_locked(nm_shard_t *source, nm_shard_t *targe
  *
  * @return @c true on success.
  */
-static bool nm_merge_lockfree_normq_locked(nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out) {
-    nm_task_t *staged[NM_NORM_QUEUE_CAP];
+static bool llam_merge_lockfree_normq_locked(llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
+    llam_task_t *staged[LLAM_NORM_QUEUE_CAP];
     unsigned staged_count = 0U;
     unsigned i;
 
@@ -343,25 +343,25 @@ static bool nm_merge_lockfree_normq_locked(nm_shard_t *source, nm_shard_t *targe
     if (source == NULL || target == NULL || source == target) {
         return false;
     }
-    if (!nm_lockfree_normq_enabled(source->runtime)) {
+    if (!llam_lockfree_normq_enabled(source->runtime)) {
         return true;
     }
-    if (!nm_runtime_steal_pause_active(source->runtime) ||
-        !nm_shard_merge_pause_requested(source) ||
+    if (!llam_runtime_steal_pause_active(source->runtime) ||
+        !llam_shard_merge_pause_requested(source) ||
         atomic_load_explicit(&source->merge_pause_ack, memory_order_acquire) == 0U) {
-        return nm_norm_queue_depth(source) == 0U;
+        return llam_norm_queue_depth(source) == 0U;
     }
 
-    while (staged_count < NM_NORM_QUEUE_CAP) {
-        nm_task_t *task = nm_norm_queue_pop_owner_locked(source);
+    while (staged_count < LLAM_NORM_QUEUE_CAP) {
+        llam_task_t *task = llam_norm_queue_pop_owner_locked(source);
 
         if (task == NULL) {
             break;
         }
         staged[staged_count++] = task;
-        if (!nm_task_can_merge_runnable(source, target, task)) {
+        if (!llam_task_can_merge_runnable(source, target, task)) {
             for (i = staged_count; i-- > 0U;) {
-                if (nm_norm_queue_push_owner_locked(source, staged[i])) {
+                if (llam_norm_queue_push_owner_locked(source, staged[i])) {
                     source->metrics.norm_enqueues -= 1U;
                 }
             }
@@ -370,7 +370,7 @@ static bool nm_merge_lockfree_normq_locked(nm_shard_t *source, nm_shard_t *targe
     }
 
     for (i = 0U; i < staged_count; ++i) {
-        (void)nm_merge_task_to_target_locked(source, target, staged[i]);
+        (void)llam_merge_task_to_target_locked(source, target, staged[i]);
     }
     if (migrated_out != NULL) {
         *migrated_out = staged_count;
@@ -390,7 +390,7 @@ static bool nm_merge_lockfree_normq_locked(nm_shard_t *source, nm_shard_t *targe
  *
  * @return @c true when all runnable queues were migrated safely.
  */
-bool nm_merge_runnable_queues_locked(nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out) {
+bool llam_merge_runnable_queues_locked(llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
     unsigned migrated = 0U;
     unsigned lockfree_norm_migrated = 0U;
 
@@ -400,45 +400,45 @@ bool nm_merge_runnable_queues_locked(nm_shard_t *source, nm_shard_t *target, uns
     if (source == NULL || target == NULL || source == target) {
         return false;
     }
-    if (!nm_queue_can_merge_runnable(source, target, &source->inject_q) ||
-        !nm_queue_can_merge_runnable(source, target, &source->hot_q)) {
+    if (!llam_queue_can_merge_runnable(source, target, &source->inject_q) ||
+        !llam_queue_can_merge_runnable(source, target, &source->hot_q)) {
         return false;
     }
-    if (!nm_lockfree_normq_enabled(source->runtime) && !nm_queue_can_merge_runnable(source, target, &source->norm_q)) {
+    if (!llam_lockfree_normq_enabled(source->runtime) && !llam_queue_can_merge_runnable(source, target, &source->norm_q)) {
         return false;
     }
 
     for (;;) {
-        nm_task_t *task = nm_queue_pop_head(&source->inject_q);
+        llam_task_t *task = llam_queue_pop_head(&source->inject_q);
 
         if (task == NULL) {
             break;
         }
-        (void)nm_merge_task_to_target_locked(source, target, task);
+        (void)llam_merge_task_to_target_locked(source, target, task);
         migrated += 1U;
     }
     atomic_store_explicit(&source->inject_depth, source->inject_q.depth, memory_order_release);
     for (;;) {
-        nm_task_t *task = nm_queue_pop_head(&source->hot_q);
+        llam_task_t *task = llam_queue_pop_head(&source->hot_q);
 
         if (task == NULL) {
             break;
         }
-        (void)nm_merge_task_to_target_locked(source, target, task);
+        (void)llam_merge_task_to_target_locked(source, target, task);
         migrated += 1U;
     }
-    if (!nm_lockfree_normq_enabled(source->runtime)) {
+    if (!llam_lockfree_normq_enabled(source->runtime)) {
         for (;;) {
-            nm_task_t *task = nm_queue_pop_head(&source->norm_q);
+            llam_task_t *task = llam_queue_pop_head(&source->norm_q);
 
             if (task == NULL) {
                 break;
             }
             atomic_fetch_sub_explicit(&source->norm_depth, 1U, memory_order_release);
-            (void)nm_merge_task_to_target_locked(source, target, task);
+            (void)llam_merge_task_to_target_locked(source, target, task);
             migrated += 1U;
         }
-    } else if (!nm_merge_lockfree_normq_locked(source, target, &lockfree_norm_migrated)) {
+    } else if (!llam_merge_lockfree_normq_locked(source, target, &lockfree_norm_migrated)) {
         return false;
     }
     migrated += lockfree_norm_migrated;

@@ -7,12 +7,13 @@
 ![C11](https://img.shields.io/badge/C-C11-blue)
 ![Linux](https://img.shields.io/badge/Linux-io_uring-yellow)
 ![macOS](https://img.shields.io/badge/macOS-kqueue-lightgrey)
+![Windows](https://img.shields.io/badge/Windows-planned-inactive)
 ![Build](https://img.shields.io/badge/build-Make%20%2F%20CMake-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, `connect`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
 
-LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/Darwin backend uses kqueue-based watch and completion paths.
+LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/Darwin backend uses kqueue-based watch and completion paths. Native Windows 10/11 support is planned, but not shipped in 1.0.0.
 
 ## Key Features
 
@@ -20,6 +21,7 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/
 - N:M scheduling over runtime worker threads.
 - Linux I/O backend based on io_uring/liburing.
 - macOS/Darwin I/O backend based on kqueue.
+- Windows 10/11 backend roadmap for IOCP, scheduler wake integration, and Fiber/context switching.
 - Task primitives: `spawn`, `yield`, `join`, `sleep`, deadlines, and task metadata.
 - Synchronization primitives: mutex, condition variable, channel, and cancellation token.
 - Blocking integration through `llam_call_blocking`, `llam_enter_blocking`, and `llam_leave_blocking`.
@@ -37,9 +39,9 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/
 | Linux aarch64 | Supported | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
 | macOS x86_64 | Supported | kqueue + x86_64 asm context switch | Apple Clang | `CC=clang make verify-darwin` |
-| Windows | API/build boundary scaffold only | Not complete | MSVC/MinGW planned | `scripts/verify_windows.ps1` |
+| Windows 10/11 | Planned, not native in 1.0.0 | IOCP/Fiber planned | MSVC/MinGW planned | `scripts/verify_windows.ps1` for WSL fallback; `-Native` reports planned status |
 
-Native Windows runtime support is not complete. Use WSL/Linux if you need a working Windows-hosted path today.
+Native Windows runtime support is not complete in 1.0.0. Use WSL/Linux if you need a working Windows-hosted path today. The native Windows plan is documented in `docs/windows-roadmap.md`.
 
 ## Getting Started
 
@@ -67,11 +69,25 @@ Build on macOS:
 CC=clang make -j4
 ```
 
+Build on Windows today:
+
+```powershell
+.\scripts\verify_windows.ps1
+```
+
+This verifies the Linux backend through WSL. `.\scripts\verify_windows.ps1 -Native` intentionally exits with the planned-backend status until the IOCP/Fiber implementation lands.
+
 Build with CMake:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j4
+```
+
+Install with CMake:
+
+```bash
+cmake --install build --prefix "$HOME/.local"
 ```
 
 Run the included programs:
@@ -95,6 +111,10 @@ Build outputs:
 - `bench`: microbenchmarks for spawn/join, channels, I/O, poll, sleep fanout, and opaque blocking.
 - `test_abi_contract`: ABI metadata, size handshakes, and legacy compatibility checks.
 - `test_connect_io`: direct and runtime-managed `llam_connect()` success and invalid-input checks.
+- `test_runtime_core`: lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats checks.
+- `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
+- `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
+- `test_nm_compat_runtime`: legacy `nm_*` runtime wrapper behavior.
 - `test_shared_load`: `dlopen()` coverage for the shared library ABI surface.
 
 ## Using LLAM In An Application
@@ -112,9 +132,34 @@ Use `llam_runtime_shared` when a language runtime needs to load LLAM dynamically
 The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, `demo`, `stress`, `bench`,
-`libllam_runtime.a`, and the platform shared library. Tag pushes such as
-`v1.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64, macOS
-x86_64, and macOS arm64 through `.github/workflows/release.yml`.
+`libllam_runtime.a`, the platform shared library, `pkg-config` metadata, CMake
+package files, and an `install.sh` helper. Tag pushes such as `v1.0.0` build and
+publish `.tar.xz` archives for Linux x86_64, Linux aarch64, macOS x86_64, and
+macOS arm64 through `.github/workflows/release.yml`. Native Windows archives are
+not published until the planned IOCP/Fiber backend is implemented and verified.
+
+Use an installed SDK with CMake:
+
+```cmake
+find_package(llam CONFIG REQUIRED)
+
+add_executable(my_app main.c)
+target_link_libraries(my_app PRIVATE llam::runtime)
+```
+
+Use an installed SDK with `pkg-config`:
+
+```bash
+cc main.c $(pkg-config --cflags --libs llam) -o my_app
+```
+
+Install a release archive:
+
+```bash
+tar -xf llam-1.0.0-macos-aarch64.tar.xz
+cd llam-1.0.0-macos-aarch64
+./install.sh --prefix "$HOME/.local"
+```
 
 Include the canonical public API:
 
@@ -124,7 +169,9 @@ Include the canonical public API:
 
 `include/llam/nm_runtime.h` and `include/nm_runtime.h` provide compatibility for the older `nm_*` API names. New code should prefer the `llam_*` API.
 
-Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. The ABI and semantic contract is documented in `docs/abi.md`.
+Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer `llam_runtime_init_ex()` and `llam_spawn_ex()` so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
+macOS-specific performance gates and remaining structural work are tracked in `docs/macos-performance.md`.
+Windows backend scope and acceptance gates are tracked in `docs/windows-roadmap.md`.
 
 ## Execution Model
 
@@ -166,7 +213,10 @@ int main(void) {
 
 ## Task, Join, And Sleep
 
-A task is a `void (*)(void *)` function. Pass shared state through the task argument and use `llam_join()` when a parent task needs the child to finish.
+A task is a `void (*)(void *)` function. Pass shared state through the task
+argument and use `llam_join()` when a parent task needs the child to finish.
+Every task handle returned by `llam_spawn*()` must be consumed by either a
+successful join or `llam_detach()`.
 
 ```c
 #include "llam/runtime.h"
@@ -207,7 +257,7 @@ int rc = llam_join_until(task, deadline);
 
 ## Channels
 
-A channel transfers pointer values between tasks. Capacity `0` behaves like a rendezvous channel. Capacity `1` or greater behaves like a bounded buffer.
+A channel transfers pointer values between tasks. Capacity must be at least `1`; capacity `1` or greater behaves like a bounded buffer.
 
 ```c
 #include "llam/runtime.h"
@@ -261,7 +311,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, and macOS uses kqueue. The I/O primitive set covers `read`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, and macOS uses kqueue. Windows native I/O is planned around IOCP. The current I/O primitive set covers `read`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`.
 
 ```c
 #include "llam/runtime.h"
@@ -322,6 +372,7 @@ static void root(void *arg) {
 ```
 
 The owned-buffer API lets the runtime allocate the I/O buffer. Release it with `llam_io_buffer_release()`.
+EOF or a zero-byte read returns `0` with `buffer == NULL`; failures return `-1`, set `errno`, and also leave `buffer == NULL`.
 
 ```c
 llam_io_buffer_t *buffer = NULL;
@@ -338,7 +389,7 @@ llam_io_buffer_release(buffer);
 
 ## Blocking Work
 
-Long CPU work or blocking syscalls can pin a worker if they run directly inside a task. Use `llam_call_blocking()` to offload such work, or wrap explicit blocking regions with `llam_enter_blocking()` and `llam_leave_blocking()`.
+Long CPU work or blocking syscalls can pin a worker if they run directly inside a task. Use `llam_call_blocking_result()` to offload such work without ambiguity, or wrap explicit blocking regions with `llam_enter_blocking()` and `llam_leave_blocking()`.
 
 ```c
 #include "llam/runtime.h"
@@ -352,9 +403,11 @@ static void *slow_syscall(void *arg) {
 }
 
 static void task(void *arg) {
+    void *result = NULL;
+
     (void)arg;
 
-    (void)llam_call_blocking(slow_syscall, NULL);
+    (void)llam_call_blocking_result(slow_syscall, NULL, &result);
 }
 ```
 
@@ -373,22 +426,29 @@ Runtime lifecycle:
 
 | API | Purpose |
 | --- | --- |
+| `llam_runtime_opts_init` | Fill runtime options with ABI-safe library defaults. |
+| `llam_runtime_init_ex` | Initialize the runtime with an explicit option struct size for FFI. |
 | `llam_runtime_init` | Initialize the runtime. |
+| `llam_runtime_request_stop` | Request cooperative scheduler stop and wake workers. |
 | `llam_runtime_shutdown` | Shut the runtime down and release resources. |
+| `llam_runtime_collect_stats_ex` | Collect stats with an explicit output struct size for FFI. |
 | `llam_runtime_collect_stats` | Collect scheduler, I/O, blocking, and queue statistics. |
 
 Task scheduling:
 
 | API | Purpose |
 | --- | --- |
+| `llam_spawn_opts_init` | Fill spawn options with ABI-safe library defaults. |
+| `llam_spawn_ex` | Create a task with an explicit option struct size for FFI. |
 | `llam_spawn` | Create a task. |
 | `llam_run` | Run the scheduler. |
 | `llam_yield` | Yield the current task. |
 | `llam_join` | Wait for task completion. |
 | `llam_join_until` | Wait for task completion until a deadline. |
+| `llam_detach` | Consume a task handle without waiting for completion. |
 | `llam_sleep_ns` | Sleep for a duration. |
 | `llam_sleep_until` | Sleep until an absolute deadline. |
-| `llam_task_set_class` | Change the current task class. |
+| `llam_task_set_class` | Change the current task class; invalid class values fail with `EINVAL`. |
 | `llam_current_task` | Return the current task handle. |
 | `llam_task_id` | Return a task id. |
 | `llam_task_state_name` | Return a task state string. |
@@ -414,7 +474,8 @@ Blocking:
 
 | API | Purpose |
 | --- | --- |
-| `llam_call_blocking` | Run a blocking function through the runtime blocking path. |
+| `llam_call_blocking_result` | Run a blocking function through the unambiguous `int + out` API. |
+| `llam_call_blocking` | Convenience blocking API; ambiguous when callback returns `NULL`. |
 | `llam_enter_blocking` | Mark the current task as entering a blocking region. |
 | `llam_leave_blocking` | Mark the current task as leaving a blocking region. |
 
@@ -423,7 +484,7 @@ Cancellation:
 | API | Purpose |
 | --- | --- |
 | `llam_cancel_token_create` | Create a cancellation token. |
-| `llam_cancel_token_destroy` | Destroy a cancellation token. |
+| `llam_cancel_token_destroy` | Destroy a cancellation token; live observers make it fail with `EBUSY`. |
 | `llam_cancel_token_cancel` | Request cancellation. |
 | `llam_cancel_token_is_cancelled` | Check cancellation state. |
 
@@ -431,26 +492,28 @@ Mutex and condition variables:
 
 | API | Purpose |
 | --- | --- |
-| `llam_mutex_create` / `llam_mutex_destroy` | Create or destroy a mutex. |
-| `llam_mutex_lock` / `llam_mutex_unlock` | Lock or unlock a mutex. |
-| `llam_mutex_lock_until` | Wait for a mutex until a deadline. |
-| `llam_mutex_trylock` | Try to lock immediately. |
-| `llam_cond_create` / `llam_cond_destroy` | Create or destroy a condition variable. |
-| `llam_cond_wait` | Wait on a condition variable. |
-| `llam_cond_wait_until` | Wait on a condition variable until a deadline. |
-| `llam_cond_signal` | Wake one waiter. |
-| `llam_cond_broadcast` | Wake all waiters. |
+| `llam_mutex_create` / `llam_mutex_destroy` | Create or destroy a mutex; destroy returns `EBUSY` while owned or waited on. |
+| `llam_mutex_lock` / `llam_mutex_unlock` | Lock or unlock a non-recursive mutex; self-lock returns `EDEADLK`, non-owner unlock returns `EPERM`. |
+| `llam_mutex_lock_until` | Wait for a mutex until a deadline; self-lock returns `EDEADLK`. |
+| `llam_mutex_trylock` | Try to lock immediately; returns `EBUSY` when already locked. |
+| `llam_cond_create` / `llam_cond_destroy` | Create or destroy a condition variable; destroy returns `EBUSY` while waited on. |
+| `llam_cond_wait` | Wait on a condition variable; caller must own the mutex and wait in a predicate loop. |
+| `llam_cond_wait_until` | Wait on a condition variable until a deadline; reacquires the mutex before returning. |
+| `llam_cond_signal` | Wake one waiter; may be called with or without the mutex and outside a managed task. |
+| `llam_cond_broadcast` | Wake all waiters; may be called with or without the mutex and outside a managed task. |
 
 Channels:
 
 | API | Purpose |
 | --- | --- |
-| `llam_channel_create` / `llam_channel_destroy` | Create or destroy a channel. |
+| `llam_channel_create` / `llam_channel_destroy` | Create or destroy a channel; destroy returns `EBUSY` while buffered values or waiters remain. |
 | `llam_channel_send` | Send a value. |
 | `llam_channel_send_until` | Send a value until a deadline. |
-| `llam_channel_recv` | Receive a value. |
-| `llam_channel_recv_until` | Receive a value until a deadline. |
-| `llam_channel_close` | Close a channel. |
+| `llam_channel_recv_result` | Receive a value through an unambiguous `int + out` API. |
+| `llam_channel_recv_until_result` | Receive a value until a deadline through an unambiguous `int + out` API. |
+| `llam_channel_recv` | Convenience receive API; use result form if `NULL` is a valid payload. |
+| `llam_channel_recv_until` | Convenience timed receive API; use result form if `NULL` is a valid payload. |
+| `llam_channel_close` | Idempotently close a channel; buffered values remain drainable and sends fail with `EPIPE`. |
 
 I/O:
 
@@ -464,7 +527,7 @@ I/O:
 | `llam_io_buffer_data` | Return the owned buffer data pointer. |
 | `llam_io_buffer_size` | Return the number of bytes read. |
 | `llam_io_buffer_capacity` | Return owned buffer capacity. |
-| `llam_accept` | Accept a connection from a listener fd. |
+| `llam_accept` | Accept a connection from a listener fd; returns `LLAM_INVALID_FD` on failure. |
 | `llam_connect` | Connect a socket without blocking the scheduler worker. |
 | `llam_poll_fd` | Wait for fd readiness. |
 
@@ -475,6 +538,8 @@ Time, debug, and platform:
 | `llam_now_ns` | Return a monotonic nanosecond timestamp. |
 | `llam_dump_runtime_state` | Dump runtime state to an fd. |
 | `llam_fd_t` | Platform-specific fd/socket handle type. |
+| `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Platform-correct invalid descriptor sentinel and predicate. |
+| `NM_INVALID_FD` / `NM_FD_IS_INVALID` | Legacy compatibility invalid descriptor sentinel and predicate. |
 | `LLAM_PLATFORM_LINUX` | Linux build flag. |
 | `LLAM_PLATFORM_DARWIN` | macOS/Darwin build flag. |
 | `LLAM_PLATFORM_WINDOWS` | Windows build flag. |
@@ -482,14 +547,20 @@ Time, debug, and platform:
 
 ## Runtime Options
 
-Pass `NULL` to `llam_runtime_init()` for the default runtime configuration. Pass `llam_runtime_opts_t` when you need explicit tuning.
+Pass `NULL` to `llam_runtime_init()` for the default runtime configuration. Pass `llam_runtime_opts_t` when you need explicit tuning. Dynamic loaders and language bindings should initialize option structs with `llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE)` and `llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE)`, then call `llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE)`, `llam_spawn_ex(fn, arg, &opts, LLAM_SPAWN_OPTS_CURRENT_SIZE)`, and `llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE)`.
+
+Public option and stats structs use fixed-width integer storage for ABI-facing
+scalar fields. Enum constants remain available for C readability, but FFI
+bindings should model task classes, stack classes, profiles, flags, and
+32-bit state counters as `uint32_t`; `sqpoll_cpu` is `int32_t`.
 
 ```c
 llam_runtime_opts_t opts = {
     .deterministic = 0,
     .forced_yield_every = 0,
-    .experimental_dynamic_workers = 1,
-    .experimental_lockfree_normq = 1,
+    .experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS |
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ,
     .profile = LLAM_RUNTIME_PROFILE_BALANCED,
 };
 
@@ -504,16 +575,22 @@ Important fields:
 | --- | --- |
 | `deterministic` | Deterministic scheduling mode. |
 | `forced_yield_every` | Force a yield at a fixed interval. |
-| `experimental_worker_rings` | Experimental per-worker I/O ring mode. |
-| `experimental_worker_rings_multishot` | Allow multishot watches with worker rings. |
-| `experimental_dynamic_workers` | Soft-park and reactivate idle workers. |
-| `experimental_lockfree_normq` | Use the lock-free normal queue. |
-| `experimental_huge_alloc` | Prefer hugepage-friendly allocator backing. |
+| `experimental_flags` | Bitwise OR of `LLAM_RUNTIME_EXPERIMENTAL_F_*` flags. |
 | `idle_spin_ns` | Spin before idle poll fallback. |
 | `idle_spin_max_iters` | Maximum idle-spin iterations. |
-| `experimental_sqpoll` | Experimental Linux io_uring SQPOLL mode. |
 | `sqpoll_cpu` | CPU reserved for SQPOLL. |
 | `profile` | Runtime policy profile: balanced, release-fast, debug-safe, or io-latency. |
+
+Experimental flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS` | Experimental per-worker I/O ring mode. |
+| `LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT` | Allow multishot watches with worker rings. |
+| `LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS` | Soft-park and reactivate idle workers. |
+| `LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ` | Use the lock-free normal queue. |
+| `LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC` | Prefer hugepage-friendly allocator backing. |
+| `LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL` | Experimental Linux io_uring SQPOLL mode. |
 
 Selected environment variables:
 
@@ -574,6 +651,9 @@ python3 scripts/bench_runtime_compare.py --runtime all
 ```
 
 Graph generation requires Python `matplotlib`. Without it, the script still writes CSV and prints tables.
+The scheduled `Runtime Benchmarks` workflow runs the same comparison on Linux
+x86_64, macOS arm64, and macOS x86_64, then uploads CSV/PNG artifacts for
+regression tracking.
 
 Run the benchmark matrix:
 
@@ -594,6 +674,12 @@ Build a local release archive:
 ```bash
 make clean all test
 ./scripts/package_release.sh
+```
+
+Or use the Makefile package target:
+
+```bash
+make package
 ```
 
 Verify Linux:
@@ -626,6 +712,15 @@ Verify Linux in Docker:
 ./scripts/docker_verify_linux.sh
 ```
 
+Check Windows status:
+
+```powershell
+.\scripts\verify_windows.ps1
+.\scripts\verify_windows.ps1 -Native
+```
+
+The default command verifies through WSL when available. The `-Native` command is expected to exit with status `2` until native Windows support is complete.
+
 Remove generated files:
 
 ```bash
@@ -636,40 +731,201 @@ make clean
 
 ## Architecture
 
+### Overview
+
+LLAM is a user-level N:M thread scheduler. A small number of OS worker threads (typically one per CPU core) run many lightweight tasks. Each task has its own stack and can be suspended and resumed without kernel intervention.
+
 ```mermaid
-flowchart LR
-    App[Application / examples] --> API[include/llam public API]
-    API --> Core[src/core runtime]
-    Core --> Scheduler[task scheduler]
-    Core --> Sync[sync primitives]
-    Core --> Engine[src/engine workers]
-    Engine --> Blocking[blocking compensation]
-    Core --> IO[src/io backend]
-    IO --> Linux[Linux io_uring]
-    IO --> Darwin[macOS kqueue]
+flowchart TB
+    subgraph UserSpace["User Space"]
+        direction TB
+        Tasks["Tasks (N lightweight fibers)"] --> Shards
+        subgraph Shards["Scheduler Shards (per worker)"]
+            direction LR
+            S0["Shard 0\nhot_q / norm_q / inject_q\ntimers / allocator"]
+            S1["Shard 1\nhot_q / norm_q / inject_q\ntimers / allocator"]
+            S0 <-->|work steal| S1
+        end
+        Shards --> Nodes
+        subgraph Nodes["I/O Nodes"]
+            direction LR
+            N0["Node 0\nio_uring / kqueue\nwatch tables"]
+            N1["Node 1\nio_uring / kqueue\nwatch tables"]
+        end
+        Watchdog["Watchdog\nprobe / scale / merge / rehome"] -.-> Shards
+        BlockPool["Blocking Thread Pool"] -.-> Shards
+        OpaqueHelpers["Opaque Helpers\n(per-shard compensation)"] -.-> Shards
+    end
+    Shards -->|runs on| Workers["OS Threads (M pthreads)"]
 ```
 
-Technology stack:
+```mermaid
+flowchart LR
+    App["Application"] --> API["include/llam\npublic API"]
+    API --> Core["src/core\nscheduler / tasks / sync"]
+    API --> IO["src/io\nI/O API + backends"]
+    Core --> Engine["src/engine\nworkers / watchdog"]
+    Engine --> Blocking["blocking\ncompensation"]
+    IO --> Linux["src/io/linux\nio_uring"]
+    IO --> Darwin["src/io/darwin\nkqueue"]
+    IO -.->|planned| Windows["Windows\nIOCP / Fiber"]
+    Core --> ASM["src/asm\ncontext switch"]
+```
 
-- C11
-- GCC, Clang, and Apple Clang
-- Make and CMake
-- pthread
-- Linux io_uring/liburing
-- macOS kqueue
-- x86_64/aarch64 assembly context switch paths
-- Portable `ucontext` fallback path
+### N:M Threading Model
 
-Source layout:
+**Tasks** are the fundamental unit of execution. Each task is a `void (*)(void *)` function with its own fiber stack allocated via `mmap` with a guard page. Tasks are scheduled cooperatively onto OS worker threads; the runtime never preempts a task without its participation (safepoints, yields, or I/O waits).
 
-- `include/llam`: public API.
-- `src/core`: runtime lifecycle, scheduler, task, sync, timer, and stats.
-- `src/io`: Linux io_uring and Darwin/kqueue I/O backends.
-- `src/engine`: workers, watchdog, and blocking compensation.
-- `src/asm`: platform-specific context switch assembly.
-- `examples`: demo, stress, and benchmark programs.
-- `scripts`: verification and benchmark helper scripts.
-- `docker`: Linux verification Dockerfiles.
+**Shards** are per-worker scheduler partitions. Each shard owns:
+
+- **Three run queues**: `hot_q` (latency-critical, capacity 1024), `norm_q` (normal, capacity 4096), and `inject_q` (cross-shard, capacity 1024).
+- **A timer heap**: min-heap ordered by deadline, used for `llam_sleep_until` and timed waits.
+- **A per-shard allocator**: slab-based pools for tasks, wait nodes, timer nodes, I/O requests, and I/O buffers, each with lock-free remote-free queues for cross-shard deallocation.
+- **A stack cache**: per-class (default/large/huge) stack mapping reuse pool.
+- **Scheduler context**: the fiber context (`llam_ctx_t`) the scheduler loop itself runs on.
+- **An opaque helper thread**: a pre-spawned compensation thread that takes over scheduling when the primary worker enters a blocking region.
+
+The `norm_q` has two implementations selected at init time: a mutex-guarded FIFO queue, or a **Chase-Lev lock-free deque** (`llam_cldeque_t`) for work-stealing. The lock-free deque is a bounded circular buffer of 4096 task pointers with separated `top` (steal end) and `bottom` (push/pop end) atomics, each on its own cache line.
+
+**Nodes** are platform I/O event backends. Each node owns either an `io_uring` ring (Linux) or a kqueue fd (Darwin), plus watch tables, submit queues, and control queues. Shards submit I/O requests to nodes; nodes complete requests back to the owning shard's task.
+
+### Scheduler Loop
+
+The core scheduler loop (`llam_scheduler_loop`) runs on each worker thread:
+
+```
+loop:
+    1. Check runtime drain (live_tasks == 0 → stop)
+    2. Handle merge-pause requests from the watchdog
+    3. Handle dynamic-worker offline state
+    4. Drain inject queue (up to 32 tasks per pass)
+    5. Fire expired timers
+    6. Dequeue from hot_q, then norm_q
+    7. Attempt work-steal from a random sibling shard
+    8. If no task found → idle wait (eventfd/kqueue/futex)
+    9. Context switch to the selected task
+   10. On return: record metrics, check safepoints, repeat
+```
+
+Task selection priority: **hot queue → normal queue → inject queue → steal**. The hot queue is reserved for latency-class tasks and I/O completions. The inject queue receives cross-shard work and is drained with a budget cap to prevent starvation.
+
+### Context Switching
+
+Context switches are performed in hand-written assembly for each supported platform. The runtime saves and restores only the callee-saved registers required by the platform ABI:
+
+| Platform | Saved registers | Mechanism |
+| --- | --- | --- |
+| Linux x86_64 | `rbx, rbp, r12-r15`, `rsp` | Direct `mov`/`ret` in `context_x86_64.S` |
+| Linux aarch64 | `x19-x29, x30, sp` | `stp`/`ldp` in `context_arm64.S` |
+| Darwin x86_64 | `rbx, rbp, r12-r15`, `rsp` | Same register set as Linux x86_64 |
+| Darwin arm64 | `x19-x29, x30, sp` | Same register set as Linux aarch64 |
+| Fallback | Full register set | `ucontext` via `swapcontext()` |
+
+On x86_64, the fast path is approximately:
+
+```asm
+mov [rdi], rsp        ; save current SP
+mov rsp, [rsi]        ; restore target SP
+ret                   ; jump to target's saved return address
+```
+
+No syscall, no privilege transition, no TLB flush. Typical cost is tens of nanoseconds versus microseconds for a kernel thread switch.
+
+**FP state isolation**: the runtime detects XSAVE support at init and tracks the XSAVE mask and area size. Tasks that modify x87/SSE rounding modes (MXCSR, x87 CW) are isolated from one another across context switches.
+
+### I/O Backend
+
+LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each I/O call (`llam_read`, `llam_write`, `llam_accept`, `llam_connect`, `llam_poll_fd`) follows this path:
+
+```
+1. Direct nonblocking fast path (try without parking)
+2. Cooperative yield + retry if local work is pending
+3. Direct blocking heuristic for short-lived ops
+4. Async backend submission (io_uring SQE or kqueue kevent)
+5. Blocking-worker fallback if the backend cannot handle the fd
+```
+
+**Linux backend** (`src/io/linux/`): each `llam_node_t` owns an `io_uring` instance with a ring depth of 256. Features include:
+
+- One-shot and multishot poll, accept, and recv operations.
+- Provided-buffer rings (128 entries per node) for zero-copy recv.
+- SQPOLL mode (experimental) where the kernel polls the SQ without syscalls.
+- Completion-driven task wake: CQE processing identifies the owning shard and re-enqueues the task.
+
+**Darwin backend** (`src/io/darwin/`): each node uses kqueue with `EVFILT_READ`, `EVFILT_WRITE`, and `EVFILT_USER` for wake signaling. Darwin nodes use Mach ports (`semaphore_t`, `mach_port_t`) for cross-thread wake when available.
+
+Both backends support **multishot watches** — a single registered watch serves multiple waiters, avoiding redundant kernel registrations for the same fd. Watch tables track fd identity by `(dev_t, ino_t)` to detect fd reuse.
+
+**I/O request lifecycle**: requests (`llam_io_req_t`) carry an atomic `wait_mode` that transitions through `NONE → SUBMIT_QUEUE → INFLIGHT → (completion)` or `NONE → POLL_WATCH/ACCEPT_WATCH/RECV_WATCH → (completion)`. An atomic `abort_reason` field handles cancellation and timeout races without locks.
+
+### Memory Management
+
+**Per-shard allocator** (`llam_allocator_t`): each shard maintains free lists for 5 object types:
+
+| Object | Slab size | Purpose |
+| --- | --- | --- |
+| `llam_task_t` | 16 per slab | Task metadata + embedded wait node, I/O req, timer |
+| `llam_wait_node_t` | 64 per slab | Mutex/cond/channel waiter nodes |
+| `llam_timer_node_t` | 64 per slab | Timer heap entries |
+| `llam_io_req_t` | 64 per slab | I/O operation descriptors |
+| `llam_io_buffer_t` | 16 per slab | Owned I/O buffers (4KB inline data each) |
+
+**Remote-free queues**: when a task completes on a different shard than it was allocated on, the deallocation goes through a lock-free atomic MPSC list (`task_remote_free`, `wait_remote_free`, etc.) and is drained into the local free list during `llam_allocator_quiescent()` at safe points. Each remote-free queue sits on its own cache line (`_Alignas(64)`) to avoid false sharing.
+
+**Stack cache**: two-tier cache with per-shard local pools and a runtime-global fallback:
+
+| Stack class | Size | Shard cache limit | Global cache limit |
+| --- | --- | --- | --- |
+| Default | 64 KB | 256 (512 in release-fast) | 4096 |
+| Large | 256 KB | 64 | 512 |
+| Huge | 1 MB | 16 | 128 |
+
+Stack mappings use `mmap(MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK)` with a guard page (`mprotect(PROT_NONE)`) at the bottom. Returned stacks are cached for reuse; the cache is pre-warmed at init via `llam_runtime_prewarm_stack_cache`.
+
+### Blocking Compensation
+
+When a task calls `llam_enter_blocking()` or `llam_call_blocking()`, the runtime must keep the shard's scheduler running while the worker thread is pinned in foreign code.
+
+**Opaque helper thread**: each shard has a pre-spawned helper thread (`opaque_helper_thread`). When the primary worker enters a blocking region:
+
+```
+Primary worker:
+  1. Increment opaque_compensation_depth
+  2. Wake the helper thread (futex on Linux, Mach semaphore or condvar on Darwin)
+  3. Execute the blocking work
+
+Helper thread:
+  1. Wake up and take over the shard's scheduler loop (using opaque_scheduler_ctx)
+  2. Run tasks from the shard's queues while the primary is blocked
+  3. When the primary calls llam_leave_blocking(), relinquish control
+```
+
+**Blocking thread pool**: a separate pool of `block_worker_count` threads handles `llam_call_blocking` jobs via a global FIFO job queue (`block_head`/`block_tail`). Jobs transition through `QUEUED → RUNNING → FINISHED/ABORTED`.
+
+The connect fallback (`llam_blocking_connect_impl`) drives a nonblocking `connect()` + `poll(POLLOUT, 10ms)` loop with `SO_ERROR` verification, running in the blocking pool rather than pinning a scheduler worker.
+
+### Watchdog System
+
+The watchdog thread (`src/engine/`) runs at 1ms intervals (`LLAM_WATCHDOG_INTERVAL_NS`) and performs:
+
+| Module | File | Function |
+| --- | --- | --- |
+| **Probe** | `runtime_watchdog_probe.c` | Detect stalled safepoints, measure queue pressure, suspect deadlocks after 4 consecutive observations |
+| **Scale** | `runtime_watchdog_scale.c` | Dynamic worker scaling: scale up after 2 consecutive pressure observations, scale down after 12 consecutive idle observations, with a 4-tick cooldown |
+| **Merge** | `runtime_watchdog_merge.c` | Offline a shard by draining its queues and migrating tasks to a target shard |
+| **Rehome** | `runtime_watchdog_rehome.c` | Atomically transfer ownership of parked waiters, in-flight I/O, submit-queue entries, and multishot watch state from an offline shard to a target shard |
+
+Rehome validates the entire waiter list before any migration. If a single entry cannot be rehomed (pinned task, incompatible I/O state), the entire list migration is aborted to prevent partial ownership inconsistency.
+
+### Synchronization Primitives
+
+All sync primitives are **runtime-aware**: when called from a managed task, blocking waits park the task (freeing the worker thread) instead of blocking the OS thread.
+
+- **Mutex** (`llam_mutex_t`): atomic owner fast path + `llam_wait_queue_t` for contention. Non-recursive. `EDEADLK` on self-lock, `EPERM` on non-owner unlock.
+- **Condition variable** (`llam_cond_t`): FIFO waiter queue. Signal/broadcast can be called from outside managed tasks.
+- **Channel** (`llam_channel_t`): bounded pointer-valued ring buffer with separate send and receive wait queues. Supports close semantics (sends fail with `EPIPE`, buffered values remain drainable).
+- **Cancel token** (`llam_cancel_token_t`): explicit cancellation handle with a waiter list. Registered tasks and I/O operations observe cancellation through `ECANCELED`.
+
 
 ## License
 

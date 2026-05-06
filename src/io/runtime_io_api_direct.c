@@ -41,9 +41,9 @@
  * @return Request object on success, or @c NULL with @c errno set by the
  *         allocator.
  */
-nm_io_req_t *nm_api_io_req_acquire(nm_shard_t *shard) {
-    nm_task_t *task = g_nm_tls_task;
-    nm_io_req_t *req;
+llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard) {
+    llam_task_t *task = g_llam_tls_task;
+    llam_io_req_t *req;
 
     if (task != NULL && task->active_io_req == NULL) {
         req = &task->embedded_io_req;
@@ -56,11 +56,11 @@ nm_io_req_t *nm_api_io_req_acquire(nm_shard_t *shard) {
         return req;
     }
 
-    return nm_io_req_alloc(shard);
+    return llam_io_req_alloc(shard);
 }
 
 /**
- * @brief Release an I/O request acquired by ::nm_api_io_req_acquire.
+ * @brief Release an I/O request acquired by ::llam_api_io_req_acquire.
  *
  * Embedded task requests are cleared in place. Heap-backed requests return to
  * the shard-local allocator.
@@ -68,7 +68,7 @@ nm_io_req_t *nm_api_io_req_acquire(nm_shard_t *shard) {
  * @param shard Shard owning the allocator.
  * @param req   Request to release; may be @c NULL.
  */
-void nm_api_io_req_release(nm_shard_t *shard, nm_io_req_t *req) {
+void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req) {
     if (req == NULL) {
         return;
     }
@@ -76,7 +76,7 @@ void nm_api_io_req_release(nm_shard_t *shard, nm_io_req_t *req) {
         memset(req, 0, sizeof(*req));
         return;
     }
-    nm_io_req_free(shard, req);
+    llam_io_req_free(shard, req);
 }
 
 /**
@@ -92,7 +92,7 @@ void nm_api_io_req_release(nm_shard_t *shard, nm_io_req_t *req) {
  *
  * @return Platform poll result.
  */
-int nm_platform_poll_fd(int fd, short events, int timeout_ms, short *revents) {
+int llam_platform_poll_fd(int fd, short events, int timeout_ms, short *revents) {
 #if defined(__APPLE__)
     struct kevent changes[2];
     struct kevent fired[2];
@@ -182,7 +182,7 @@ int nm_platform_poll_fd(int fd, short events, int timeout_ms, short *revents) {
  *
  * @return Platform poll result.
  */
-int nm_platform_poll_now(int fd, short events, short *revents) {
+int llam_platform_poll_now(int fd, short events, short *revents) {
     struct pollfd pfd;
     int rc;
 
@@ -222,7 +222,7 @@ int nm_platform_poll_now(int fd, short events, short *revents) {
  *
  * @return 1 for completed, 0 for would-block, or -1 for hard error.
  */
-int nm_try_direct_rw(int fd,
+int llam_try_direct_rw(int fd,
                             void *buf,
                             size_t count,
                             bool write_op,
@@ -334,7 +334,7 @@ int nm_try_direct_rw(int fd,
  * @param fd Socket descriptor whose connection status should be checked.
  * @return 0 when connected, -1 with @c errno set to the connection error.
  */
-int nm_socket_connect_error(int fd) {
+int llam_socket_connect_error(int fd) {
     int error_code = 0;
     socklen_t error_len = sizeof(error_code);
 

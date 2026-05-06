@@ -16,7 +16,18 @@
  *  - and release global runtime resources with ::llam_runtime_shutdown.
  *
  * All absolute deadlines use ::llam_now_ns units. Unless explicitly documented,
- * functions returning @c -1 set @c errno to the failure reason.
+ * functions returning @c -1 set @c errno to the failure reason. Managed task
+ * context switches preserve @c errno as task-local state so a task does not
+ * inherit another worker thread's TLS error value when it resumes.
+ *
+ * Common errno values:
+ *  - @c EINVAL: invalid argument, invalid enum/policy value, or invalid handle use.
+ *  - @c ETIMEDOUT: absolute deadline or relative timeout expired.
+ *  - @c ECANCELED: cancellation token or cooperative runtime stop was observed.
+ *  - @c EPIPE: channel closed or peer-closed equivalent.
+ *  - @c EBUSY: object still has live users/waiters or incompatible concurrent use.
+ *  - @c ENOTSUP: unsupported backend feature or invalid calling context.
+ *  - @c ENOMEM: allocation failure.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -47,9 +58,9 @@ extern "C" {
 #endif
 
 /** @brief LLAM source/API version major component. */
-#define LLAM_VERSION_MAJOR 0U
+#define LLAM_VERSION_MAJOR 1U
 /** @brief LLAM source/API version minor component. */
-#define LLAM_VERSION_MINOR 1U
+#define LLAM_VERSION_MINOR 0U
 /** @brief LLAM source/API version patch component. */
 #define LLAM_VERSION_PATCH 0U
 
@@ -178,30 +189,45 @@ enum {
     LLAM_SPAWN_F_LATENCY_CRITICAL = 1U << 3, /**< Promote wakeup and dispatch priority. */
 };
 
+/** @brief Give workers their own I/O rings/queues where supported. */
+#define LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS UINT64_C(1)
+/** @brief Allow multishot watches in worker-ring mode. */
+#define LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT (UINT64_C(1) << 1)
+/** @brief Soft-park idle workers and reactivate on pressure. */
+#define LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS (UINT64_C(1) << 2)
+/** @brief Use the lock-free normal run queue. */
+#define LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ (UINT64_C(1) << 3)
+/** @brief Prefer hugepage-friendly backing for selected allocators. */
+#define LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC (UINT64_C(1) << 4)
+/** @brief Linux io_uring SQPOLL experiment for node-owned rings. */
+#define LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL (UINT64_C(1) << 5)
+
 /** @brief Optional per-task spawn policy. */
 typedef struct llam_spawn_opts {
-    llam_task_class_t task_class;       /**< Scheduler class for the new task. */
-    llam_stack_class_t stack_class;     /**< Fiber stack size class. */
-    unsigned flags;                     /**< Bitwise OR of LLAM_SPAWN_F_* values. */
+    uint32_t task_class;                /**< Scheduler class; one of ::llam_task_class_t. */
+    uint32_t stack_class;               /**< Fiber stack class; one of ::llam_stack_class_t. */
+    uint32_t flags;                     /**< Bitwise OR of LLAM_SPAWN_F_* values. */
     uint64_t deadline_ns;               /**< Optional absolute deadline in llam_now_ns() units; 0 disables it. */
     llam_cancel_token_t *cancel_token;  /**< Optional cancellation token observed by waits and I/O. */
 } llam_spawn_opts_t;
 
+/** @brief Current size to pass to ::llam_spawn_ex and ::llam_spawn_opts_init. */
+#define LLAM_SPAWN_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_spawn_opts_t))
+
 /** @brief Runtime initialization options. */
 typedef struct llam_runtime_opts {
-    unsigned deterministic;                         /**< Prefer repeatable scheduling decisions. */
-    unsigned forced_yield_every;                    /**< Force cooperative yield after this many scheduler ticks; 0 disables it. */
-    unsigned experimental_worker_rings;             /**< Give workers their own I/O rings/queues where supported. */
-    unsigned experimental_worker_rings_multishot;   /**< Allow multishot watches in worker-ring mode. */
-    unsigned experimental_dynamic_workers;          /**< Soft-park idle workers and reactivate on pressure. */
-    unsigned experimental_lockfree_normq;           /**< Use the lock-free normal run queue. */
-    unsigned experimental_huge_alloc;               /**< Prefer hugepage-friendly backing for selected allocators. */
+    uint32_t deterministic;                         /**< Prefer repeatable scheduling decisions. */
+    uint32_t forced_yield_every;                    /**< Force cooperative yield after this many scheduler ticks; 0 disables it. */
+    uint64_t experimental_flags;                    /**< Bitwise OR of LLAM_RUNTIME_EXPERIMENTAL_F_* values. */
     uint64_t idle_spin_ns;                          /**< Bounded idle spin duration before kernel sleep. */
-    unsigned idle_spin_max_iters;                   /**< Maximum idle-spin iterations. */
-    unsigned experimental_sqpoll;                   /**< Linux io_uring SQPOLL experiment for node-owned rings. */
-    int sqpoll_cpu;                                 /**< Requested SQPOLL CPU, or -1 for automatic selection. */
-    llam_runtime_profile_t profile;                 /**< High-level runtime policy profile. */
+    uint32_t idle_spin_max_iters;                   /**< Maximum idle-spin iterations. */
+    int32_t sqpoll_cpu;                             /**< Requested SQPOLL CPU, or -1 for automatic selection. */
+    uint32_t profile;                               /**< High-level policy; one of ::llam_runtime_profile_t. */
+    uint32_t reserved0;                             /**< Reserved for future fixed-width fields; initialize to 0. */
 } llam_runtime_opts_t;
+
+/** @brief Current size to pass to ::llam_runtime_init_ex and ::llam_runtime_opts_init. */
+#define LLAM_RUNTIME_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_runtime_opts_t))
 
 /** @brief Cumulative runtime statistics snapshot. */
 typedef struct llam_runtime_stats {
@@ -224,18 +250,18 @@ typedef struct llam_runtime_stats {
     uint64_t idle_spin_ns;              /**< Total idle spin time in nanoseconds. */
     uint64_t queue_overflows;           /**< Scheduler queue overflow events. */
     uint64_t overflow_depth;            /**< Current overflow queue depth. */
-    unsigned active_workers;            /**< Configured worker count. */
-    unsigned online_workers;            /**< Workers currently online. */
-    unsigned online_workers_floor;      /**< Minimum online-worker floor. */
-    unsigned online_workers_min;        /**< Minimum online workers observed. */
-    unsigned online_workers_max;        /**< Maximum online workers observed. */
-    unsigned active_nodes;              /**< Active platform I/O nodes. */
-    unsigned dynamic_workers;           /**< Whether dynamic workers are active. */
-    unsigned worker_rings;              /**< Whether worker ring mode is active. */
-    unsigned worker_rings_multishot;    /**< Whether worker-ring multishot mode is active. */
-    unsigned lockfree_normq;            /**< Whether lock-free normal queues are active. */
-    unsigned huge_alloc;                /**< Whether huge allocation mode is active. */
-    unsigned sqpoll;                    /**< Whether Linux SQPOLL mode is active. */
+    uint32_t active_workers;            /**< Configured worker count. */
+    uint32_t online_workers;            /**< Workers currently online. */
+    uint32_t online_workers_floor;      /**< Minimum online-worker floor. */
+    uint32_t online_workers_min;        /**< Minimum online workers observed. */
+    uint32_t online_workers_max;        /**< Maximum online workers observed. */
+    uint32_t active_nodes;              /**< Active platform I/O nodes. */
+    uint32_t dynamic_workers;           /**< Whether dynamic workers are active. */
+    uint32_t worker_rings;              /**< Whether worker ring mode is active. */
+    uint32_t worker_rings_multishot;    /**< Whether worker-ring multishot mode is active. */
+    uint32_t lockfree_normq;            /**< Whether lock-free normal queues are active. */
+    uint32_t huge_alloc;                /**< Whether huge allocation mode is active. */
+    uint32_t sqpoll;                    /**< Whether Linux SQPOLL mode is active. */
     uint64_t opaque_block_ns;           /**< Total opaque blocking time in nanoseconds. */
     uint64_t opaque_block_samples;      /**< Opaque blocking sample count. */
     uint64_t opaque_block_max_ns;       /**< Maximum opaque blocking duration. */
@@ -247,49 +273,167 @@ typedef struct llam_runtime_stats {
     uint64_t opaque_leave_wait_max_ns;  /**< Maximum leave-wait duration. */
 } llam_runtime_stats_t;
 
+/** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */
+#define LLAM_RUNTIME_STATS_CURRENT_SIZE ((size_t)sizeof(llam_runtime_stats_t))
+
 /* ============================================================================
  * Runtime lifecycle and task scheduling
  * ============================================================================
  */
 
 /**
+ * @brief Initialize runtime options to the library defaults.
+ *
+ * @details
+ * This is the ABI-stable option initializer preferred by dynamic loaders and
+ * FFI bindings. LLAM writes only the overlapping prefix of @p opts and zeroes
+ * any caller-side tail beyond the current library's ::llam_runtime_opts_t.
+ *
+ * @param opts Destination options object. Must not be NULL.
+ * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
+ * @return 0 on success, -1 with @c errno set on invalid arguments.
+ */
+int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size);
+
+/**
+ * @brief Initialize spawn options to the library defaults.
+ *
+ * @details
+ * This is the ABI-stable option initializer preferred by dynamic loaders and
+ * FFI bindings. LLAM writes only the overlapping prefix of @p opts and zeroes
+ * any caller-side tail beyond the current library's ::llam_spawn_opts_t.
+ *
+ * @param opts Destination options object. Must not be NULL.
+ * @param opts_size Size of the caller's ::llam_spawn_opts_t definition.
+ * @return 0 on success, -1 with @c errno set on invalid arguments.
+ */
+int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size);
+
+/**
+ * @brief Initialize global runtime state with an explicit option size.
+ *
+ * @details
+ * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
+ * LLAM copies only the overlapping prefix of @p opts and treats missing tail
+ * fields as runtime defaults, so older bindings can run against newer
+ * libraries that appended fields to ::llam_runtime_opts_t.
+ *
+ * @param opts Optional runtime options; pass NULL for defaults.
+ * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
+ * @return 0 on success, -1 on failure with errno set.
+ */
+int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size);
+
+/**
  * @brief Initialize global runtime state.
  * @param opts Optional runtime options; pass NULL for defaults.
+ * @details Convenience wrapper around ::llam_runtime_init_ex.
  * @return 0 on success, -1 on failure with errno set.
  */
 int llam_runtime_init(const llam_runtime_opts_t *opts);
 
-/** @brief Stop workers and release runtime-owned resources. */
+/**
+ * @brief Request cooperative runtime stop and wake all workers.
+ *
+ * @details
+ * This requests a clean scheduler stop. It does not forcibly terminate live
+ * tasks; cancellable waits may observe @c ECANCELED and user code is expected
+ * to unwind cooperatively.
+ *
+ * @return 0 on success, -1 with @c errno set when the runtime is not initialized.
+ */
+int llam_runtime_request_stop(void);
+
+/**
+ * @brief Stop workers and release runtime-owned resources.
+ *
+ * @details
+ * Shutdown is idempotent and is also valid after a failed or partial
+ * initialization. It requests cooperative stop, joins runtime-owned OS threads
+ * that were started, releases backend resources, and invalidates all remaining
+ * runtime-owned handles. It is not a task-join API: callers that need graceful
+ * task completion should request stop and drive ::llam_run before shutdown.
+ */
 void llam_runtime_shutdown(void);
+
+/**
+ * @brief Collect a best-effort snapshot of runtime counters with explicit size.
+ *
+ * @details
+ * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
+ * LLAM writes only the overlapping prefix of @p stats and zeroes any caller
+ * tail beyond the current library's ::llam_runtime_stats_t.
+ *
+ * @param stats Destination statistics object. Must not be NULL.
+ * @param stats_size Size of the caller's ::llam_runtime_stats_t definition.
+ * @return 0 on success, -1 on failure with errno set.
+ */
+int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size);
 
 /**
  * @brief Collect a best-effort snapshot of runtime counters.
  * @param stats Destination statistics object. Must not be NULL.
+ * @details Convenience wrapper around ::llam_runtime_collect_stats_ex.
  * @return 0 on success, -1 on failure with errno set.
  */
 int llam_runtime_collect_stats(llam_runtime_stats_t *stats);
+
+/**
+ * @brief Create a task and make it runnable with an explicit option size.
+ *
+ * @details
+ * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
+ * LLAM copies only the overlapping prefix of @p opts and treats missing tail
+ * fields as spawn defaults, so older bindings can run against newer
+ * libraries that appended fields to ::llam_spawn_opts_t.
+ *
+ * @param fn Task entry point. Must not be NULL.
+ * @param arg User pointer passed to fn.
+ * @param opts Optional spawn options; pass NULL for defaults.
+ * @param opts_size Size of the caller's ::llam_spawn_opts_t definition.
+ * @return Task handle on success, NULL on failure with errno set.
+ */
+llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size);
 
 /**
  * @brief Create a task and make it runnable.
  * @param fn Task entry point. Must not be NULL.
  * @param arg User pointer passed to fn.
  * @param opts Optional spawn options; pass NULL for defaults.
+ * @details Convenience wrapper around ::llam_spawn_ex.
  * @return Task handle on success, NULL on failure with errno set.
  */
 llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts);
 
 /**
  * @brief Run the scheduler until all runtime work completes or an error occurs.
- * @return 0 on clean completion, -1 on failure with errno set.
+ *
+ * @details
+ * A runtime stop requested by ::llam_runtime_request_stop is a clean scheduler
+ * outcome and returns @c 0. Backend or fatal runtime failures return @c -1 and
+ * set @c errno. This function drives the scheduler on the calling OS thread;
+ * joins from unmanaged OS threads do not drive scheduler progress by
+ * themselves.
+ *
+ * @return 0 on clean completion or cooperative stop, -1 on failure with errno set.
  */
 int llam_run(void);
 
-/** @brief Cooperatively yield the current task. */
+/**
+ * @brief Cooperatively yield the current task.
+ *
+ * @details Calls outside a managed LLAM task are a no-op.
+ */
 void llam_yield(void);
 
 /**
  * @brief Wait indefinitely for task completion.
  * @param task Task returned by llam_spawn().
+ * @details
+ * A successful join consumes @p task; the pointer must not be used again.
+ * Managed-task callers park cooperatively. Unmanaged OS-thread callers block
+ * until the target is already complete or another thread is actively driving
+ * ::llam_run; unmanaged joins do not run the scheduler.
  * @return 0 on completion, -1 on failure with errno set.
  */
 int llam_join(llam_task_t *task);
@@ -298,12 +442,34 @@ int llam_join(llam_task_t *task);
  * @brief Wait for task completion until an absolute deadline.
  * @param task Task returned by llam_spawn().
  * @param deadline_ns Absolute deadline in llam_now_ns() units.
+ * @details
+ * A successful timed join consumes @p task. If the call fails with @c ETIMEDOUT,
+ * the task remains joinable by the same handle. @p deadline_ns is an absolute
+ * ::llam_now_ns deadline; @c 0 is treated as an already-expired deadline.
  * @return 0 on completion, -1 on timeout/failure with errno set.
  */
 int llam_join_until(llam_task_t *task, uint64_t deadline_ns);
 
 /**
+ * @brief Detach a task handle so completion no longer requires join.
+ * @param task Task returned by llam_spawn().
+ * @details
+ * A successful detach consumes @p task; the pointer must not be used again.
+ * Detached tasks still run to completion and remain counted as live runtime
+ * work until their entry function returns.
+ * @return 0 on detach, -1 on failure with errno set.
+ */
+int llam_detach(llam_task_t *task);
+
+/**
  * @brief Sleep the current task until an absolute deadline.
+ *
+ * @details
+ * Calls from managed LLAM tasks park cooperatively. Calls outside a managed
+ * task block the calling OS thread after runtime initialization; before
+ * initialization they fail with @c EINVAL. @p deadline_ns is an absolute
+ * ::llam_now_ns deadline; @c 0 is treated as an already-expired deadline.
+ *
  * @param deadline_ns Absolute deadline in llam_now_ns() units.
  * @return 0 on wake, -1 on cancellation/failure with errno set.
  */
@@ -311,6 +477,12 @@ int llam_sleep_until(uint64_t deadline_ns);
 
 /**
  * @brief Sleep the current task for a relative duration.
+ *
+ * @details
+ * Calls from managed LLAM tasks park cooperatively. Calls outside a managed
+ * task block the calling OS thread after runtime initialization; before
+ * initialization they fail with @c EINVAL.
+ *
  * @param duration_ns Sleep duration in nanoseconds.
  * @return 0 on wake, -1 on cancellation/failure with errno set.
  */
@@ -318,6 +490,27 @@ int llam_sleep_ns(uint64_t duration_ns);
 
 /**
  * @brief Execute a blocking callback through the runtime blocking path.
+ *
+ * @details
+ * This is the unambiguous FFI-safe blocking API. A callback that legitimately
+ * returns @c NULL still succeeds and stores @c NULL in @p out.
+ *
+ * @param fn Blocking callback. Must not be NULL.
+ * @param arg User pointer passed to fn.
+ * @param out Destination for the callback result. Must not be NULL.
+ * @return 0 on callback completion, -1 on submission/cancellation failure with
+ *         @c errno set.
+ */
+int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out);
+
+/**
+ * @brief Execute a blocking callback through the runtime blocking path.
+ *
+ * @details
+ * Convenience wrapper around ::llam_call_blocking_result. It cannot distinguish
+ * a successful callback result of @c NULL from an API failure; FFI bindings and
+ * production code should prefer ::llam_call_blocking_result.
+ *
  * @param fn Blocking callback. Must not be NULL.
  * @param arg User pointer passed to fn.
  * @return Callback result, or NULL if the callback returned NULL or submission failed.
@@ -326,18 +519,27 @@ void *llam_call_blocking(llam_blocking_fn fn, void *arg);
 
 /**
  * @brief Mark the current task as entering an opaque blocking region.
+ *
+ * @details Calls outside a managed LLAM task are no-ops and return @c 0.
+ *
  * @return 0 on success, -1 on failure with errno set.
  */
 int llam_enter_blocking(void);
 
 /**
  * @brief Mark the current task as leaving an opaque blocking region.
+ *
+ * @details Calls outside a managed LLAM task are no-ops and return @c 0.
+ *
  * @return 0 on success, -1 on failure with errno set.
  */
 int llam_leave_blocking(void);
 
-/** @brief Change the current task's scheduler class. */
-void llam_task_set_class(llam_task_class_t task_class);
+/**
+ * @brief Change the current task's scheduler class using a ::llam_task_class_t value.
+ * @return 0 on success, -1 with @c errno set to @c EINVAL or @c ENOTSUP.
+ */
+int llam_task_set_class(uint32_t task_class);
 
 /**
  * @brief Write a human-readable runtime dump to an fd.
@@ -350,7 +552,7 @@ void llam_dump_runtime_state(int fd);
  * @param task Task handle.
  * @return Bitwise OR of LLAM_SPAWN_F_* values, or 0 for NULL.
  */
-unsigned llam_task_flags(const llam_task_t *task);
+uint32_t llam_task_flags(const llam_task_t *task);
 
 /* ============================================================================
  * Cancellation tokens
@@ -360,7 +562,14 @@ unsigned llam_task_flags(const llam_task_t *task);
 /** @brief Create a cancellation token. */
 llam_cancel_token_t *llam_cancel_token_create(void);
 
-/** @brief Destroy a cancellation token. */
+/**
+ * @brief Destroy a cancellation token.
+ *
+ * @details
+ * The token must not have live waiters or task/I/O observers. Destroying a
+ * token with active observers fails with @c EBUSY; it does not invalidate
+ * active observers behind the caller's back.
+ */
 int llam_cancel_token_destroy(llam_cancel_token_t *token);
 
 /** @brief Request cancellation for all current and future observers of token. */
@@ -377,37 +586,107 @@ int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token);
 /** @brief Create a runtime-aware mutex. */
 llam_mutex_t *llam_mutex_create(void);
 
-/** @brief Destroy a runtime-aware mutex. */
-void llam_mutex_destroy(llam_mutex_t *mutex);
+/**
+ * @brief Destroy a runtime-aware mutex.
+ *
+ * @details
+ * Destroy fails with @c EBUSY while a task owns or waits on the mutex.
+ */
+int llam_mutex_destroy(llam_mutex_t *mutex);
 
-/** @brief Lock a runtime-aware mutex, parking the task if needed. */
+/**
+ * @brief Lock a runtime-aware mutex, parking the task if needed.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. LLAM mutexes are non-recursive; locking a mutex already
+ * owned by the current task fails with @c EDEADLK.
+ */
 int llam_mutex_lock(llam_mutex_t *mutex);
 
-/** @brief Lock a runtime-aware mutex until an absolute deadline. */
+/**
+ * @brief Lock a runtime-aware mutex until an absolute deadline.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
+ * is treated as an already-expired deadline. LLAM mutexes are non-recursive;
+ * locking a mutex already owned by the current task fails with @c EDEADLK.
+ */
 int llam_mutex_lock_until(llam_mutex_t *mutex, uint64_t deadline_ns);
 
-/** @brief Try to lock a runtime-aware mutex without parking. */
+/**
+ * @brief Try to lock a runtime-aware mutex without parking.
+ *
+ * @return 0 on lock acquisition, or -1 with @c errno set to @c EBUSY when
+ * already locked, @c EINVAL for invalid arguments, or @c ENOTSUP outside a
+ * managed task.
+ */
 int llam_mutex_trylock(llam_mutex_t *mutex);
 
-/** @brief Unlock a runtime-aware mutex and wake a waiter if one exists. */
+/**
+ * @brief Unlock a runtime-aware mutex and wake a waiter if one exists.
+ *
+ * @return 0 on success, or -1 with @c errno set to @c EPERM when the current
+ * task does not own the mutex, @c EINVAL for invalid arguments, or @c ENOTSUP
+ * outside a managed task.
+ */
 int llam_mutex_unlock(llam_mutex_t *mutex);
 
 /** @brief Create a runtime-aware condition variable. */
 llam_cond_t *llam_cond_create(void);
 
-/** @brief Destroy a runtime-aware condition variable. */
-void llam_cond_destroy(llam_cond_t *cond);
+/**
+ * @brief Destroy a runtime-aware condition variable.
+ *
+ * @details
+ * Destroy fails with @c EBUSY while a task is currently waiting on the
+ * condition.
+ */
+int llam_cond_destroy(llam_cond_t *cond);
 
-/** @brief Wait on a condition variable and atomically release/reacquire mutex. */
+/**
+ * @brief Wait on a condition variable and atomically release/reacquire mutex.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. The caller must own @p mutex on entry. LLAM atomically
+ * releases it while waiting and reacquires it before returning, including
+ * signal, broadcast, timeout, cancellation, and spurious wake paths. Callers
+ * must wait in a predicate loop.
+ */
 int llam_cond_wait(llam_cond_t *cond, llam_mutex_t *mutex);
 
-/** @brief Wait on a condition variable until an absolute deadline. */
+/**
+ * @brief Wait on a condition variable until an absolute deadline.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. The caller must own @p mutex on entry. LLAM atomically
+ * releases it while waiting and reacquires it before returning, including
+ * signal, broadcast, timeout, cancellation, and spurious wake paths. Callers
+ * must wait in a predicate loop.
+ * @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0 is treated as an
+ * already-expired deadline.
+ */
 int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64_t deadline_ns);
 
-/** @brief Wake one condition-variable waiter. */
+/**
+ * @brief Wake one condition-variable waiter.
+ *
+ * @details May be called with or without the associated mutex held. Calls
+ * outside a managed LLAM task are allowed.
+ *
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
+ * arguments.
+ */
 int llam_cond_signal(llam_cond_t *cond);
 
-/** @brief Wake all condition-variable waiters. */
+/**
+ * @brief Wake all condition-variable waiters.
+ *
+ * @details May be called with or without the associated mutex held. Calls
+ * outside a managed LLAM task are allowed.
+ *
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
+ * arguments.
+ */
 int llam_cond_broadcast(llam_cond_t *cond);
 
 /* ============================================================================
@@ -417,27 +696,94 @@ int llam_cond_broadcast(llam_cond_t *cond);
 
 /**
  * @brief Create a pointer-valued channel.
- * @param capacity 0 for rendezvous behavior, non-zero for bounded buffering.
+ * @param capacity Number of bounded buffer slots. Must be at least 1.
  * @return Channel handle on success, NULL on failure with errno set.
  */
 llam_channel_t *llam_channel_create(size_t capacity);
 
-/** @brief Destroy a channel after all users have stopped accessing it. */
-void llam_channel_destroy(llam_channel_t *channel);
+/**
+ * @brief Destroy a channel after all users have stopped accessing it.
+ *
+ * @details Destroy fails with @c EBUSY while buffered values or parked
+ * senders/receivers remain. Close the channel and drain buffered values before
+ * destroying when producers may have sent data.
+ */
+int llam_channel_destroy(llam_channel_t *channel);
 
-/** @brief Send a pointer value, parking the task if the channel is full. */
+/**
+ * @brief Send a pointer value, parking the task if the channel is full.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP.
+ */
 int llam_channel_send(llam_channel_t *channel, void *value);
 
-/** @brief Send a pointer value until an absolute deadline. */
+/**
+ * @brief Send a pointer value until an absolute deadline.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
+ * is treated as an already-expired deadline.
+ */
 int llam_channel_send_until(llam_channel_t *channel, void *value, uint64_t deadline_ns);
 
-/** @brief Receive a pointer value, parking the task if the channel is empty. */
+/**
+ * @brief Receive a pointer value, parking the task if the channel is empty.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP.
+ *
+ * @param channel Channel to receive from.
+ * @param out Destination for the received pointer. Must not be NULL.
+ * @return 0 on receive, -1 on close/cancellation/failure with @c errno set.
+ */
+int llam_channel_recv_result(llam_channel_t *channel, void **out);
+
+/**
+ * @brief Receive a pointer value until an absolute deadline.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
+ * is treated as an already-expired deadline.
+ *
+ * @param channel Channel to receive from.
+ * @param deadline_ns Absolute deadline in llam_now_ns() units.
+ * @param out Destination for the received pointer. Must not be NULL.
+ * @return 0 on receive, -1 on close/timeout/cancellation/failure with @c errno set.
+ */
+int llam_channel_recv_until_result(llam_channel_t *channel, uint64_t deadline_ns, void **out);
+
+/**
+ * @brief Receive a pointer value, parking the task if the channel is empty.
+ *
+ * @details
+ * Convenience wrapper around ::llam_channel_recv_result. If @c NULL is a valid
+ * payload for your channel, use ::llam_channel_recv_result to avoid ambiguity.
+ * Outside task context returns @c NULL with @c errno set to @c ENOTSUP.
+ */
 void *llam_channel_recv(llam_channel_t *channel);
 
-/** @brief Receive a pointer value until an absolute deadline. */
+/**
+ * @brief Receive a pointer value until an absolute deadline.
+ *
+ * @details
+ * Convenience wrapper around ::llam_channel_recv_until_result. If @c NULL is a
+ * valid payload for your channel, use ::llam_channel_recv_until_result.
+ * Outside task context returns @c NULL with @c errno set to @c ENOTSUP.
+ * @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0 is treated as an
+ * already-expired deadline.
+ */
 void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns);
 
-/** @brief Close a channel and wake blocked senders/receivers. */
+/**
+ * @brief Close a channel and wake blocked senders/receivers.
+ *
+ * @details
+ * Closing is idempotent. Sends after close fail with @c EPIPE. Buffered values
+ * sent before close remain drainable; receives fail with @c EPIPE only after
+ * the buffer is empty and no parked sender can hand off a value. @c NULL is a
+ * valid payload; use result-style receive APIs to distinguish it from failure.
+ */
 int llam_channel_close(llam_channel_t *channel);
 
 /* ============================================================================
@@ -445,16 +791,46 @@ int llam_channel_close(llam_channel_t *channel);
  * ============================================================================
  */
 
-/** @brief Read from fd using the runtime I/O backend where possible. */
+/**
+ * @brief Read from fd using the runtime I/O backend where possible.
+ *
+ * @details Managed tasks first try a direct nonblocking fast path, then the
+ * platform backend, then a blocking helper so the scheduler worker is not
+ * pinned. Calls outside a managed LLAM task delegate to the platform read
+ * primitive directly and may block the calling OS thread.
+ */
 ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
 
-/** @brief Write to fd using the runtime I/O backend where possible. */
+/**
+ * @brief Write to fd using the runtime I/O backend where possible.
+ *
+ * @details Managed tasks first try a direct nonblocking fast path, then the
+ * platform backend, then a blocking helper so the scheduler worker is not
+ * pinned. Calls outside a managed LLAM task delegate to the platform write
+ * primitive directly and may block the calling OS thread.
+ */
 ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count);
 
-/** @brief Read into a runtime-owned buffer. */
+/**
+ * @brief Read into a runtime-owned buffer.
+ *
+ * @details
+ * On success with a positive byte count, @p out receives a non-NULL buffer that
+ * must be released with ::llam_io_buffer_release. On EOF or zero-byte read, the
+ * function returns @c 0 and stores @c NULL in @p out. On failure, the function
+ * returns @c -1, stores @c NULL in @p out, and sets @c errno.
+ */
 ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_t **out);
 
-/** @brief Receive into a runtime-owned buffer with recv flags. */
+/**
+ * @brief Receive into a runtime-owned buffer with recv flags.
+ *
+ * @details
+ * On success with a positive byte count, @p out receives a non-NULL buffer that
+ * must be released with ::llam_io_buffer_release. On EOF or zero-byte receive,
+ * the function returns @c 0 and stores @c NULL in @p out. On failure, the
+ * function returns @c -1, stores @c NULL in @p out, and sets @c errno.
+ */
 ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out);
 
 /** @brief Release a runtime-owned I/O buffer. */
@@ -469,7 +845,17 @@ size_t llam_io_buffer_size(const llam_io_buffer_t *buffer);
 /** @brief Return total capacity of a runtime-owned I/O buffer. */
 size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer);
 
-/** @brief Accept a connection from a listener fd using the runtime I/O backend where possible. */
+/**
+ * @brief Accept a connection from a listener fd using the runtime I/O backend where possible.
+ *
+ * @details Managed tasks submit to the platform backend where possible and
+ * otherwise use a blocking helper so the scheduler worker is not pinned. Calls
+ * outside a managed LLAM task delegate to the platform accept primitive directly
+ * and may block the calling OS thread.
+ *
+ * @return Accepted descriptor on success, or @c LLAM_INVALID_FD on failure with
+ * @c errno set.
+ */
 llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen);
 
 /**
@@ -486,7 +872,16 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen);
  */
 int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 
-/** @brief Wait for fd readiness. */
+/**
+ * @brief Wait for fd readiness.
+ *
+ * @details
+ * Calls from managed LLAM tasks park cooperatively. Calls outside a managed
+ * task delegate to the platform poll/select backend and may block the calling
+ * OS thread. @p timeout_ms < 0 waits indefinitely, @p timeout_ms == 0 performs
+ * a non-blocking readiness check, and positive values bound the wait in
+ * milliseconds.
+ */
 int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
 
 /* ============================================================================
@@ -503,8 +898,8 @@ uint64_t llam_task_id(const llam_task_t *task);
 /** @brief Return a stable string for the task's current state. */
 const char *llam_task_state_name(const llam_task_t *task);
 
-/** @brief Return the task's scheduler class. */
-llam_task_class_t llam_task_class(const llam_task_t *task);
+/** @brief Return the task's scheduler class as a ::llam_task_class_t value. */
+uint32_t llam_task_class(const llam_task_t *task);
 
 /** @brief Return the currently running task, or NULL outside a LLAM task. */
 llam_task_t *llam_current_task(void);

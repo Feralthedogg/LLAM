@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_linux_state.c
+ * @file src/io/linux/runtime_io_watch_linux_state.c
  * @brief Linux watch state queues, wait-list ownership, and ready-buffer bookkeeping.
  *
  * @details
@@ -32,7 +32,7 @@
  * @param node Destination I/O node.
  * @param req  Request to enqueue.
  */
-void nm_queue_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
+void llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req) {
     req->next = NULL;
     if (node->submit_tail != NULL) {
         node->submit_tail->next = req;
@@ -49,9 +49,9 @@ void nm_queue_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
  * @param req  Request to remove.
  * @return true if the request was removed before submission.
  */
-bool nm_remove_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = node->submit_head;
+bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = node->submit_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -78,9 +78,9 @@ bool nm_remove_node_submit_locked(nm_node_t *node, nm_io_req_t *req) {
  * @param node Node whose submit queue should be drained.
  * @return Head of detached request list.
  */
-nm_io_req_t *nm_take_node_submissions(nm_node_t *node) {
-    nm_io_req_t *head;
-    nm_io_req_t *cursor;
+llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
+    llam_io_req_t *head;
+    llam_io_req_t *cursor;
 
     pthread_mutex_lock(&node->submit_lock);
     head = node->submit_head;
@@ -91,8 +91,8 @@ nm_io_req_t *nm_take_node_submissions(nm_node_t *node) {
         // Ownership changes from submit queue to backend in-flight state before
         // the list is returned to the submitter thread.
         atomic_store_explicit(&cursor->inflight_owner_shard, cursor->owner_shard, memory_order_release);
-        atomic_store(&cursor->wait_mode, NM_IO_WAIT_MODE_INFLIGHT);
-        nm_shard_note_inflight_io_waiter(cursor->owner_shard, 1);
+        atomic_store(&cursor->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
+        llam_shard_note_inflight_io_waiter(cursor->owner_shard, 1);
         cursor = cursor->next;
     }
     pthread_mutex_unlock(&node->submit_lock);
@@ -100,7 +100,7 @@ nm_io_req_t *nm_take_node_submissions(nm_node_t *node) {
 }
 
 /** @brief Append a poll waiter while watch_lock is held. */
-void nm_poll_watch_enqueue_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
+void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
     req->next = NULL;
     if (watch->wait_tail != NULL) {
         watch->wait_tail->next = req;
@@ -115,9 +115,9 @@ void nm_poll_watch_enqueue_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
  *
  * @return true if removed.
  */
-bool nm_poll_watch_remove_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = watch->wait_head;
+bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -144,8 +144,8 @@ bool nm_poll_watch_remove_waiter(nm_poll_watch_t *watch, nm_io_req_t *req) {
  * @param watch Poll watch whose waiters are taken.
  * @return Detached waiter list.
  */
-nm_io_req_t *nm_poll_watch_take_waiters(nm_poll_watch_t *watch) {
-    nm_io_req_t *head = watch->wait_head;
+llam_io_req_t *llam_poll_watch_take_waiters(llam_poll_watch_t *watch) {
+    llam_io_req_t *head = watch->wait_head;
 
     watch->wait_head = NULL;
     watch->wait_tail = NULL;
@@ -158,8 +158,8 @@ nm_io_req_t *nm_poll_watch_take_waiters(nm_poll_watch_t *watch) {
  * @param node  Node owning the watch list.
  * @param watch Watch to remove.
  */
-void nm_destroy_poll_watch_locked(nm_node_t *node, nm_poll_watch_t *watch) {
-    nm_poll_watch_t **cursor = &node->poll_watches;
+void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch) {
+    llam_poll_watch_t **cursor = &node->poll_watches;
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
@@ -172,7 +172,7 @@ void nm_destroy_poll_watch_locked(nm_node_t *node, nm_poll_watch_t *watch) {
 }
 
 /** @brief Append an accept waiter while watch_lock is held. */
-void nm_accept_watch_enqueue_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) {
+void llam_accept_watch_enqueue_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
     req->next = NULL;
     if (watch->wait_tail != NULL) {
         watch->wait_tail->next = req;
@@ -187,9 +187,9 @@ void nm_accept_watch_enqueue_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) 
  *
  * @return true if removed.
  */
-bool nm_accept_watch_remove_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = watch->wait_head;
+bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -211,7 +211,7 @@ bool nm_accept_watch_remove_waiter(nm_accept_watch_t *watch, nm_io_req_t *req) {
 }
 
 /** @brief Append a receive waiter while watch_lock is held. */
-void nm_recv_watch_enqueue_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
+void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
     req->next = NULL;
     if (watch->wait_tail != NULL) {
         watch->wait_tail->next = req;
@@ -226,9 +226,9 @@ void nm_recv_watch_enqueue_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
  *
  * @return true if removed.
  */
-bool nm_recv_watch_remove_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = watch->wait_head;
+bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -255,8 +255,8 @@ bool nm_recv_watch_remove_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
  * @param watch Accept watch.
  * @return Waiter request, or NULL.
  */
-nm_io_req_t *nm_accept_watch_pop_waiter(nm_accept_watch_t *watch) {
-    nm_io_req_t *req = watch->wait_head;
+llam_io_req_t *llam_accept_watch_pop_waiter(llam_accept_watch_t *watch) {
+    llam_io_req_t *req = watch->wait_head;
 
     if (req == NULL) {
         return NULL;
@@ -275,8 +275,8 @@ nm_io_req_t *nm_accept_watch_pop_waiter(nm_accept_watch_t *watch) {
  * @param watch Receive watch.
  * @return Waiter request, or NULL.
  */
-nm_io_req_t *nm_recv_watch_pop_waiter(nm_recv_watch_t *watch) {
-    nm_io_req_t *req = watch->wait_head;
+llam_io_req_t *llam_recv_watch_pop_waiter(llam_recv_watch_t *watch) {
+    llam_io_req_t *req = watch->wait_head;
 
     if (req == NULL) {
         return NULL;
@@ -296,8 +296,8 @@ nm_io_req_t *nm_recv_watch_pop_waiter(nm_recv_watch_t *watch) {
  * @param fd    Accepted fd whose ownership transfers to the watch.
  * @return true on success, false if allocation failed.
  */
-bool nm_accept_watch_push_ready_owned(nm_accept_watch_t *watch, int fd) {
-    nm_accept_ready_t *ready = calloc(1, sizeof(*ready));
+bool llam_accept_watch_push_ready_owned(llam_accept_watch_t *watch, int fd) {
+    llam_accept_ready_t *ready = calloc(1, sizeof(*ready));
 
     if (ready == NULL) {
         return false;
@@ -320,8 +320,8 @@ bool nm_accept_watch_push_ready_owned(nm_accept_watch_t *watch, int fd) {
  * @param watch Accept watch.
  * @param fd    Accepted fd.
  */
-void nm_accept_watch_push_ready(nm_accept_watch_t *watch, int fd) {
-    if (!nm_accept_watch_push_ready_owned(watch, fd)) {
+void llam_accept_watch_push_ready(llam_accept_watch_t *watch, int fd) {
+    if (!llam_accept_watch_push_ready_owned(watch, fd)) {
         close(fd);
     }
 }
@@ -332,8 +332,8 @@ void nm_accept_watch_push_ready(nm_accept_watch_t *watch, int fd) {
  * @param watch Accept watch.
  * @return Accepted fd, or -1 when no ready fd exists.
  */
-int nm_accept_watch_pop_ready(nm_accept_watch_t *watch) {
-    nm_accept_ready_t *ready = watch->ready_head;
+int llam_accept_watch_pop_ready(llam_accept_watch_t *watch) {
+    llam_accept_ready_t *ready = watch->ready_head;
     int fd;
 
     if (ready == NULL) {
@@ -356,14 +356,14 @@ int nm_accept_watch_pop_ready(nm_accept_watch_t *watch) {
  * Buffered accepted fds are closed because their ownership never reached user
  * code.
  */
-void nm_destroy_accept_watch_locked(nm_node_t *node, nm_accept_watch_t *watch) {
-    nm_accept_watch_t **cursor = &node->accept_watches;
+void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch) {
+    llam_accept_watch_t **cursor = &node->accept_watches;
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
-                nm_accept_ready_t *next = watch->ready_head->next;
+                llam_accept_ready_t *next = watch->ready_head->next;
 
                 close(watch->ready_head->fd);
                 free(watch->ready_head);
@@ -383,8 +383,8 @@ void nm_destroy_accept_watch_locked(nm_node_t *node, nm_accept_watch_t *watch) {
  * @param fallback_node Node used when the ready entry has no owner index.
  * @param ready         Ready entry to release.
  */
-void nm_release_recv_ready(nm_runtime_t *rt, nm_node_t *fallback_node, nm_recv_ready_t *ready) {
-    nm_node_t *owner = fallback_node;
+void llam_release_recv_ready(llam_runtime_t *rt, llam_node_t *fallback_node, llam_recv_ready_t *ready) {
+    llam_node_t *owner = fallback_node;
 
     if (ready == NULL) {
         return;
@@ -395,7 +395,7 @@ void nm_release_recv_ready(nm_runtime_t *rt, nm_node_t *fallback_node, nm_recv_r
     if (ready->has_buffer && owner != NULL) {
         // Provided buffers must return to the node whose ring owns the buffer
         // group, which can differ after live watch migration.
-        (void)nm_node_recycle_recv_buffer(owner, ready->bid);
+        (void)llam_node_recycle_recv_buffer(owner, ready->bid);
     }
     free(ready->copy_data);
     free(ready);
@@ -413,14 +413,14 @@ void nm_release_recv_ready(nm_runtime_t *rt, nm_node_t *fallback_node, nm_recv_r
  * @param copy_capacity Capacity of @p copy_data.
  * @return true on success, false on allocation failure.
  */
-bool nm_recv_watch_push_ready(nm_recv_watch_t *watch,
+bool llam_recv_watch_push_ready(llam_recv_watch_t *watch,
                                      size_t size,
                                      unsigned short bid,
                                      bool has_buffer,
                                      unsigned node_index,
                                      unsigned char *copy_data,
                                      size_t copy_capacity) {
-    nm_recv_ready_t *ready = calloc(1, sizeof(*ready));
+    llam_recv_ready_t *ready = calloc(1, sizeof(*ready));
 
     if (ready == NULL) {
         // copy_data ownership was passed to this function; release on failure.
@@ -450,14 +450,14 @@ bool nm_recv_watch_push_ready(nm_recv_watch_t *watch,
  * Output pointers are optional. If @p copy_data_out is provided, ownership of
  * copied payload memory transfers to the caller.
  */
-bool nm_recv_watch_pop_ready(nm_recv_watch_t *watch,
+bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              size_t *size_out,
                              unsigned short *bid_out,
                              bool *has_buffer_out,
                              unsigned *node_index_out,
                              unsigned char **copy_data_out,
                              size_t *copy_capacity_out) {
-    nm_recv_ready_t *ready = watch->ready_head;
+    llam_recv_ready_t *ready = watch->ready_head;
 
     if (ready == NULL) {
         return false;

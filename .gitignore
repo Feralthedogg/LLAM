@@ -11,7 +11,11 @@ demo
 stress
 test_abi_contract
 test_connect_io
+test_io_buffers
+test_nm_compat_runtime
+test_runtime_core
 test_shared_load
+test_sync_primitives
 libllam_runtime.a
 libllam_runtime.dylib
 libllam_runtime.*.dylib

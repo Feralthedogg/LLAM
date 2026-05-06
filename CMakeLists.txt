@@ -6,6 +6,9 @@ set(LLAM_ABI_VERSION_MAJOR 1)
 set(LLAM_ABI_VERSION_MINOR 0)
 set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.0")
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -23,6 +26,7 @@ endif()
 set(LLAM_RUNTIME_SOURCES
     src/core/runtime.c
     src/core/runtime_abi.c
+    src/core/runtime_errno.c
     src/core/runtime_alloc.c
     src/core/runtime_allocator_quiescent.c
     src/core/runtime_api.c
@@ -85,27 +89,27 @@ set(LLAM_RUNTIME_SOURCES
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/runtime_io_watch_darwin_state.c
-        src/io/runtime_io_watch_darwin_migration_live.c
-        src/io/runtime_io_watch_darwin_migration_rehome.c
-        src/io/runtime_io_watch_darwin_control.c
-        src/io/runtime_io_watch_darwin_completion.c
-        src/io/runtime_io_watch_darwin_events.c
-        src/io/runtime_io_watch_darwin_worker.c
+        src/io/darwin/runtime_io_watch_darwin_state.c
+        src/io/darwin/runtime_io_watch_darwin_migration_live.c
+        src/io/darwin/runtime_io_watch_darwin_migration_rehome.c
+        src/io/darwin/runtime_io_watch_darwin_control.c
+        src/io/darwin/runtime_io_watch_darwin_completion.c
+        src/io/darwin/runtime_io_watch_darwin_events.c
+        src/io/darwin/runtime_io_watch_darwin_worker.c
     )
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/runtime_io_watch_linux_prelude.c
-        src/io/runtime_io_watch_linux_state.c
-        src/io/runtime_io_watch_linux_lookup.c
-        src/io/runtime_io_watch_linux_migration_live.c
-        src/io/runtime_io_watch_linux_migration_rehome.c
-        src/io/runtime_io_watch_linux_control.c
-        src/io/runtime_io_watch_linux_submit.c
-        src/io/runtime_io_watch_linux_cqe.c
-        src/io/runtime_io_watch_linux_worker.c
+        src/io/linux/runtime_io_watch_linux_prelude.c
+        src/io/linux/runtime_io_watch_linux_state.c
+        src/io/linux/runtime_io_watch_linux_lookup.c
+        src/io/linux/runtime_io_watch_linux_migration_live.c
+        src/io/linux/runtime_io_watch_linux_migration_rehome.c
+        src/io/linux/runtime_io_watch_linux_control.c
+        src/io/linux/runtime_io_watch_linux_submit.c
+        src/io/linux/runtime_io_watch_linux_cqe.c
+        src/io/linux/runtime_io_watch_linux_worker.c
     )
 endif()
 
@@ -132,16 +136,20 @@ endif()
 
 add_library(llam_runtime STATIC ${LLAM_RUNTIME_SOURCES})
 add_library(llam_runtime_shared SHARED ${LLAM_RUNTIME_SOURCES})
+add_library(llam::runtime ALIAS llam_runtime)
+add_library(llam::runtime_shared ALIAS llam_runtime_shared)
 
 set_target_properties(llam_runtime
     PROPERTIES
         OUTPUT_NAME llam_runtime
+        EXPORT_NAME runtime
         POSITION_INDEPENDENT_CODE ON
 )
 
 set_target_properties(llam_runtime_shared
     PROPERTIES
         OUTPUT_NAME llam_runtime
+        EXPORT_NAME runtime_shared
         VERSION ${LLAM_LIBRARY_VERSION}
         SOVERSION ${LLAM_ABI_VERSION_MAJOR}
         POSITION_INDEPENDENT_CODE ON
@@ -150,7 +158,8 @@ set_target_properties(llam_runtime_shared
 foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
     target_include_directories(${LLAM_TARGET}
         PUBLIC
-            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
             ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
@@ -227,13 +236,40 @@ add_executable(test_connect_io
 )
 target_link_libraries(test_connect_io PRIVATE llam_runtime)
 
+add_executable(test_runtime_core
+    tests/test_runtime_core.c
+)
+target_link_libraries(test_runtime_core PRIVATE llam_runtime)
+
+add_executable(test_sync_primitives
+    tests/test_sync_primitives.c
+)
+target_link_libraries(test_sync_primitives PRIVATE llam_runtime)
+
+add_executable(test_io_buffers
+    tests/test_io_buffers.c
+)
+target_link_libraries(test_io_buffers PRIVATE llam_runtime)
+
+add_executable(test_nm_compat_runtime
+    tests/test_nm_compat_runtime.c
+)
+target_link_libraries(test_nm_compat_runtime PRIVATE llam_runtime)
+
 add_executable(test_shared_load
     tests/test_shared_load.c
 )
 target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS})
 add_dependencies(test_shared_load llam_runtime_shared)
 
-foreach(LLAM_TEST_TARGET test_abi_contract test_connect_io test_shared_load)
+foreach(LLAM_TEST_TARGET
+        test_abi_contract
+        test_connect_io
+        test_runtime_core
+        test_sync_primitives
+        test_io_buffers
+        test_nm_compat_runtime
+        test_shared_load)
     target_include_directories(${LLAM_TEST_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
@@ -247,4 +283,85 @@ endforeach()
 
 add_test(NAME test_abi_contract COMMAND test_abi_contract)
 add_test(NAME test_connect_io COMMAND test_connect_io)
+add_test(NAME test_runtime_core COMMAND test_runtime_core)
+add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
+add_test(NAME test_io_buffers COMMAND test_io_buffers)
+add_test(NAME test_nm_compat_runtime COMMAND test_nm_compat_runtime)
 add_test(NAME test_shared_load COMMAND test_shared_load $<TARGET_FILE:llam_runtime_shared>)
+
+set(LLAM_PC_PRIVATE_LIBS "-pthread")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(LLAM_PC_PRIVATE_LIBS "-pthread -luring -lm")
+endif()
+
+configure_file(
+    cmake/llam.pc.in
+    ${CMAKE_CURRENT_BINARY_DIR}/llam.pc
+    @ONLY
+)
+
+configure_package_config_file(
+    cmake/llam-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/llam-config.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/llam
+)
+
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/llam-config-version.cmake
+    VERSION ${LLAM_LIBRARY_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(
+    TARGETS llam_runtime llam_runtime_shared
+    EXPORT llam-targets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(
+    TARGETS demo stress bench
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(
+    DIRECTORY include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(
+    DIRECTORY docs/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/llam/docs
+)
+
+install(
+    FILES README.md LICENSE
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/llam
+)
+
+install(
+    DIRECTORY examples/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/llam/examples
+    FILES_MATCHING
+        PATTERN "*.c"
+        PATTERN "*.h"
+)
+
+install(
+    FILES ${CMAKE_CURRENT_BINARY_DIR}/llam.pc
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+)
+
+install(
+    FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/llam-config.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/llam-config-version.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/llam
+)
+
+install(
+    EXPORT llam-targets
+    NAMESPACE llam::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/llam
+)

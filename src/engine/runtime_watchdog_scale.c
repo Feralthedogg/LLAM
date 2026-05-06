@@ -32,7 +32,7 @@
  *
  * @param rt Runtime whose nodes may contain marked live-transferred watches.
  */
-void nm_runtime_nudge_marked_watch_migrations(nm_runtime_t *rt) {
+void llam_runtime_nudge_marked_watch_migrations(llam_runtime_t *rt) {
     unsigned i;
 
     if (rt == NULL || rt->experimental_shard_rings_multishot == 0U || rt->active_nodes <= 1U) {
@@ -45,7 +45,7 @@ void nm_runtime_nudge_marked_watch_migrations(nm_runtime_t *rt) {
         if (fallback_index == i) {
             continue;
         }
-        (void)nm_io_rehome_marked_watch_state(&rt->nodes[i], &rt->nodes[fallback_index]);
+        (void)llam_io_rehome_marked_watch_state(&rt->nodes[i], &rt->nodes[fallback_index]);
     }
 }
 
@@ -56,18 +56,18 @@ void nm_runtime_nudge_marked_watch_migrations(nm_runtime_t *rt) {
  *
  * @return @c true when a shard was brought online.
  */
-static bool nm_runtime_online_one_shard(nm_runtime_t *rt) {
+static bool llam_runtime_online_one_shard(llam_runtime_t *rt) {
     unsigned i;
 
     for (i = 1U; i < rt->active_shards; ++i) {
-        nm_shard_t *shard = &rt->shards[i];
+        llam_shard_t *shard = &rt->shards[i];
 
         if (atomic_load_explicit(&shard->online, memory_order_acquire) != 0U) {
             continue;
         }
         atomic_store_explicit(&shard->online, 1U, memory_order_release);
-        nm_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
-        nm_kick_shard(shard);
+        llam_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
+        llam_kick_shard(shard);
         return true;
     }
     return false;
@@ -85,16 +85,16 @@ static bool nm_runtime_online_one_shard(nm_runtime_t *rt) {
  *
  * @return @c true when one shard was successfully offlined.
  */
-static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
+static bool llam_runtime_offline_one_shard(llam_runtime_t *rt) {
     unsigned i;
 
     // Prefer taking high-index shards offline so shard 0 and low ids stay stable.
     for (i = rt->active_shards; i-- > 1U;) {
-        nm_shard_t *shard = &rt->shards[i];
-        nm_shard_t *target;
-        nm_node_t *io_node;
-        nm_shard_t *first;
-        nm_shard_t *second;
+        llam_shard_t *shard = &rt->shards[i];
+        llam_shard_t *target;
+        llam_node_t *io_node;
+        llam_shard_t *first;
+        llam_shard_t *second;
         unsigned io_wait_migrated = 0U;
         unsigned submit_evacuated = 0U;
         unsigned inflight_migrated = 0U;
@@ -114,9 +114,9 @@ static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
         if (atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
             continue;
         }
-        target = nm_runtime_pick_merge_target(rt, shard);
+        target = llam_runtime_pick_merge_target(rt, shard);
         if (target == NULL) {
-            if (nm_dynamic_trace_enabled()) {
+            if (llam_dynamic_trace_enabled()) {
                 fprintf(stderr, "[dynamic] offline skip shard=%u reason=no_target\n", shard->id);
             }
             continue;
@@ -125,28 +125,28 @@ static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
         // reject it if the target stops accepting work in the meantime.
         io_node = &rt->nodes[shard->io_node_index];
         same_io_target = target->io_node_index == shard->io_node_index;
-        need_lockfree_quiesce = nm_lockfree_normq_enabled(rt) && nm_norm_queue_depth(shard) > 0U;
-        pause_deadline_ns = nm_now_ns() + (NM_WATCHDOG_INTERVAL_NS * 8U);
+        need_lockfree_quiesce = llam_lockfree_normq_enabled(rt) && llam_norm_queue_depth(shard) > 0U;
+        pause_deadline_ns = llam_now_ns() + (LLAM_WATCHDOG_INTERVAL_NS * 8U);
         if (need_lockfree_quiesce) {
             // Lock-free normal queues can be stolen concurrently, so pause
             // stealing globally before draining the source queue.
-            nm_runtime_set_steal_pause(rt, true);
+            llam_runtime_set_steal_pause(rt, true);
             steal_pause_set = true;
-            if (!nm_runtime_wait_steal_pause_ack(rt, pause_deadline_ns)) {
+            if (!llam_runtime_wait_steal_pause_ack(rt, pause_deadline_ns)) {
                 blocked_reason = "steal_pause_ack";
                 goto release_pause;
             }
         }
         // Stop the source scheduler at a merge-safe point before touching queues.
-        nm_shard_request_merge_pause(shard);
+        llam_shard_request_merge_pause(shard);
         merge_pause_set = true;
-        if (!nm_shard_wait_merge_pause_ack(shard, pause_deadline_ns)) {
+        if (!llam_shard_wait_merge_pause_ack(shard, pause_deadline_ns)) {
             blocked_reason = "merge_pause_ack";
             goto release_pause;
         }
-        if (nm_shard_inflight_io_waiters(shard) > 0U) {
-            nm_rehome_inflight_io_waiters(rt, shard, target, &inflight_migrated);
-            if (nm_shard_inflight_io_waiters(shard) > 0U) {
+        if (llam_shard_inflight_io_waiters(shard) > 0U) {
+            llam_rehome_inflight_io_waiters(rt, shard, target, &inflight_migrated);
+            if (llam_shard_inflight_io_waiters(shard) > 0U) {
                 blocked_reason = "inflight_io_waiters";
                 goto release_pause;
             }
@@ -157,13 +157,13 @@ static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
 
             // Submit queues and multishot watches carry owner_shard metadata;
             // rewrite that ownership before the shard can disappear.
-            if (!nm_rehome_node_submit_waiters(io_node, shard, target, &submit_migrated) ||
-                !nm_rehome_runtime_watch_waiters(rt, shard, target, &watch_migrated)) {
+            if (!llam_rehome_node_submit_waiters(io_node, shard, target, &submit_migrated) ||
+                !llam_rehome_runtime_watch_waiters(rt, shard, target, &watch_migrated)) {
                 blocked_reason = "rehome_io_waiters";
                 goto release_pause;
             }
             if (!same_io_target &&
-                !nm_evacuate_rehomed_submit_waiters(io_node,
+                !llam_evacuate_rehomed_submit_waiters(io_node,
                                                     &rt->nodes[target->io_node_index],
                                                     shard,
                                                     target,
@@ -176,15 +176,15 @@ static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
                 kick_target_node = true;
             }
             if (watch_migrated > 0U) {
-                nm_runtime_nudge_marked_watch_migrations(rt);
+                llam_runtime_nudge_marked_watch_migrations(rt);
             }
         }
-        if (nm_shard_inflight_io_waiters(shard) > 0U) {
+        if (llam_shard_inflight_io_waiters(shard) > 0U) {
             blocked_reason = "post_rehome_inflight_io_waiters";
             goto release_pause;
         }
         if (!same_io_target &&
-            !nm_quiesce_cross_io_watch_state(io_node, &rt->nodes[target->io_node_index], pause_deadline_ns)) {
+            !llam_quiesce_cross_io_watch_state(io_node, &rt->nodes[target->io_node_index], pause_deadline_ns)) {
             blocked_reason = "cross_io_watch_state";
             goto release_pause;
         }
@@ -196,17 +196,17 @@ static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
         pthread_mutex_lock(&second->lock);
 
         if (atomic_load_explicit(&shard->online, memory_order_acquire) == 0U ||
-            !nm_shard_accepts_new_work(target) ||
-            !nm_shard_can_start_merge_locked(shard)) {
+            !llam_shard_accepts_new_work(target) ||
+            !llam_shard_can_start_merge_locked(shard)) {
             blocked_reason = "locked_start_state";
             pthread_mutex_unlock(&second->lock);
             pthread_mutex_unlock(&first->lock);
             goto release_pause;
         }
 
-        if (!nm_merge_runnable_queues_locked(shard, target, &runnable_migrated) ||
-            !nm_merge_shard_timers_locked(shard, target, &migrated) ||
-            !nm_shard_can_offline_locked(shard)) {
+        if (!llam_merge_runnable_queues_locked(shard, target, &runnable_migrated) ||
+            !llam_merge_shard_timers_locked(shard, target, &migrated) ||
+            !llam_shard_can_offline_locked(shard)) {
             blocked_reason = "merge_or_offline_state";
             pthread_mutex_unlock(&second->lock);
             pthread_mutex_unlock(&first->lock);
@@ -215,14 +215,14 @@ static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
 
         // Only publish offline after every locked state check has passed.
         atomic_store_explicit(&shard->online, 0U, memory_order_release);
-        nm_runtime_note_online_shards(rt, atomic_fetch_sub_explicit(&rt->online_shards, 1U, memory_order_acq_rel) - 1U);
+        llam_runtime_note_online_shards(rt, atomic_fetch_sub_explicit(&rt->online_shards, 1U, memory_order_acq_rel) - 1U);
         offlined = true;
         kick_target = inflight_migrated > 0U || io_wait_migrated > 0U || runnable_migrated > 0U || migrated > 0U;
         pthread_mutex_unlock(&second->lock);
         pthread_mutex_unlock(&first->lock);
 
         if (offlined) {
-            nm_rehome_parked_waiters(rt, shard, target, &parked_migrated);
+            llam_rehome_parked_waiters(rt, shard, target, &parked_migrated);
             if (parked_migrated > 0U) {
                 kick_target = true;
             }
@@ -230,7 +230,7 @@ static bool nm_runtime_offline_one_shard(nm_runtime_t *rt) {
 release_pause:
         // One cleanup path keeps partially failed merge attempts from leaking
         // pause state. Pauses are released even when offlining succeeds.
-        if (!offlined && blocked_reason != NULL && nm_dynamic_trace_enabled()) {
+        if (!offlined && blocked_reason != NULL && llam_dynamic_trace_enabled()) {
             unsigned norm_depth;
             unsigned hot_depth;
             unsigned inject_depth;
@@ -238,7 +238,7 @@ release_pause:
             unsigned has_timers;
 
             pthread_mutex_lock(&shard->lock);
-            norm_depth = nm_norm_queue_depth(shard);
+            norm_depth = llam_norm_queue_depth(shard);
             hot_depth = shard->hot_q.depth;
             inject_depth = shard->inject_q.depth;
             has_current = atomic_load_explicit(&shard->current, memory_order_acquire) != NULL ? 1U : 0U;
@@ -249,9 +249,9 @@ release_pause:
                     shard->id,
                     target != NULL ? target->id : UINT_MAX,
                     blocked_reason,
-                    nm_runtime_online_shards(rt),
+                    llam_runtime_online_shards(rt),
                     atomic_load(&rt->live_tasks),
-                    nm_runtime_active_io_waiters(rt),
+                    llam_runtime_active_io_waiters(rt),
                     norm_depth,
                     hot_depth,
                     inject_depth,
@@ -259,16 +259,16 @@ release_pause:
                     has_timers);
         }
         if (merge_pause_set) {
-            nm_shard_release_merge_pause(shard);
+            llam_shard_release_merge_pause(shard);
         }
         if (steal_pause_set) {
-            nm_runtime_set_steal_pause(rt, false);
+            llam_runtime_set_steal_pause(rt, false);
         }
         if (kick_target) {
-            nm_kick_shard(target);
+            llam_kick_shard(target);
         }
         if (kick_target_node) {
-            nm_kick_node(&rt->nodes[target->io_node_index]);
+            llam_kick_node(&rt->nodes[target->io_node_index]);
         }
         if (offlined) {
             return true;
@@ -286,7 +286,7 @@ release_pause:
  *
  * @param rt Runtime to adjust.
  */
-void nm_runtime_adjust_online_shards(nm_runtime_t *rt) {
+void llam_runtime_adjust_online_shards(llam_runtime_t *rt) {
     unsigned online;
     unsigned live;
     unsigned active_io_waiters;
@@ -302,28 +302,28 @@ void nm_runtime_adjust_online_shards(nm_runtime_t *rt) {
         return;
     }
 
-    online = nm_runtime_online_shards(rt);
+    online = llam_runtime_online_shards(rt);
     if (online == 0U) {
         atomic_store_explicit(&rt->shards[0].online, 1U, memory_order_release);
         atomic_store_explicit(&rt->online_shards, 1U, memory_order_release);
-        nm_runtime_note_online_shards(rt, 1U);
-        nm_kick_shard(&rt->shards[0]);
+        llam_runtime_note_online_shards(rt, 1U);
+        llam_kick_shard(&rt->shards[0]);
         return;
     }
 
     live = atomic_load(&rt->live_tasks);
-    active_io_waiters = nm_runtime_active_io_waiters(rt);
+    active_io_waiters = llam_runtime_active_io_waiters(rt);
     // I/O waiters are live tasks, but they are not consuming CPU while parked.
     effective_live = live > active_io_waiters ? live - active_io_waiters : 0U;
-    timers_pending = nm_runtime_has_pending_timers(rt);
-    online_floor = nm_runtime_online_shards_floor(rt);
+    timers_pending = llam_runtime_has_pending_timers(rt);
+    online_floor = llam_runtime_online_shards_floor(rt);
     if (active_io_waiters > 0U && rt->active_shards > 8U) {
         // Keep more workers online during I/O-heavy phases so completions can
         // resume tasks without waiting for the scaler to ramp back up.
-        online_floor = nm_max_unsigned(online_floor, rt->active_shards - (rt->active_shards / 4U));
+        online_floor = llam_max_unsigned(online_floor, rt->active_shards - (rt->active_shards / 4U));
     }
-    pressure = nm_runtime_pressure_signal(rt);
-    runnable_backlog = nm_runtime_has_runnable_backlog(rt);
+    pressure = llam_runtime_pressure_signal(rt);
+    runnable_backlog = llam_runtime_has_runnable_backlog(rt);
     want_up = (pressure ||
                effective_live > online * 2U ||
                (active_io_waiters > 0U && runnable_backlog) ||
@@ -334,8 +334,8 @@ void nm_runtime_adjust_online_shards(nm_runtime_t *rt) {
                 (effective_live + 1U < online || timers_pending) &&
                 atomic_load(&rt->block_pending) == 0U &&
                 !runnable_backlog &&
-                !nm_runtime_has_opaque_blocking(rt);
-    if (nm_dynamic_trace_enabled() && online > online_floor) {
+                !llam_runtime_has_opaque_blocking(rt);
+    if (llam_dynamic_trace_enabled() && online > online_floor) {
         fprintf(stderr,
                 "[dynamic] adjust online=%u floor=%u live=%u active_io=%u effective=%u timers=%u pressure=%u backlog=%u block_pending=%u want_up=%u want_down=%u up_streak=%u down_streak=%u cooldown=%u\n",
                 online,
@@ -371,9 +371,9 @@ void nm_runtime_adjust_online_shards(nm_runtime_t *rt) {
 
     if (want_up &&
         rt->dynamic_scale_cooldown == 0U &&
-        rt->dynamic_scale_up_streak >= NM_DYNAMIC_SCALE_UP_STREAK) {
-        if (nm_runtime_online_one_shard(rt)) {
-            rt->dynamic_scale_cooldown = NM_DYNAMIC_SCALE_COOLDOWN_TICKS;
+        rt->dynamic_scale_up_streak >= LLAM_DYNAMIC_SCALE_UP_STREAK) {
+        if (llam_runtime_online_one_shard(rt)) {
+            rt->dynamic_scale_cooldown = LLAM_DYNAMIC_SCALE_COOLDOWN_TICKS;
         }
         rt->dynamic_scale_up_streak = 0U;
         return;
@@ -381,9 +381,9 @@ void nm_runtime_adjust_online_shards(nm_runtime_t *rt) {
 
     if (want_down &&
         rt->dynamic_scale_cooldown == 0U &&
-        rt->dynamic_scale_down_streak >= NM_DYNAMIC_SCALE_DOWN_STREAK) {
-        if (nm_runtime_offline_one_shard(rt)) {
-            rt->dynamic_scale_cooldown = NM_DYNAMIC_SCALE_COOLDOWN_TICKS;
+        rt->dynamic_scale_down_streak >= LLAM_DYNAMIC_SCALE_DOWN_STREAK) {
+        if (llam_runtime_offline_one_shard(rt)) {
+            rt->dynamic_scale_cooldown = LLAM_DYNAMIC_SCALE_COOLDOWN_TICKS;
         }
         rt->dynamic_scale_down_streak = 0U;
     }

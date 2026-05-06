@@ -31,25 +31,25 @@
  *
  * @return Static string name.
  */
-const char *nm_trace_kind_name(nm_trace_kind_t kind) {
+const char *llam_trace_kind_name(llam_trace_kind_t kind) {
     switch (kind) {
-    case NM_TRACE_STATE:
+    case LLAM_TRACE_STATE:
         return "state";
-    case NM_TRACE_WAKE:
+    case LLAM_TRACE_WAKE:
         return "wake";
-    case NM_TRACE_BLOCK_SUBMIT:
+    case LLAM_TRACE_BLOCK_SUBMIT:
         return "block_submit";
-    case NM_TRACE_BLOCK_COMPLETE:
+    case LLAM_TRACE_BLOCK_COMPLETE:
         return "block_complete";
-    case NM_TRACE_IO_SUBMIT:
+    case LLAM_TRACE_IO_SUBMIT:
         return "io_submit";
-    case NM_TRACE_IO_COMPLETE:
+    case LLAM_TRACE_IO_COMPLETE:
         return "io_complete";
-    case NM_TRACE_IDLE:
+    case LLAM_TRACE_IDLE:
         return "idle";
-    case NM_TRACE_STEAL:
+    case LLAM_TRACE_STEAL:
         return "steal";
-    case NM_TRACE_WATCHDOG:
+    case LLAM_TRACE_WATCHDOG:
         return "watchdog";
     default:
         return "unknown";
@@ -63,19 +63,19 @@ const char *nm_trace_kind_name(nm_trace_kind_t kind) {
  *
  * @return Static string name.
  */
-const char *nm_state_name_from_id(nm_task_state_id_t state) {
+const char *llam_state_name_from_id(llam_task_state_id_t state) {
     switch (state) {
-    case NM_TASK_STATE_NEW:
+    case LLAM_TASK_STATE_NEW:
         return "NEW";
-    case NM_TASK_STATE_RUNNABLE:
+    case LLAM_TASK_STATE_RUNNABLE:
         return "RUNNABLE";
-    case NM_TASK_STATE_RUNNING:
+    case LLAM_TASK_STATE_RUNNING:
         return "RUNNING";
-    case NM_TASK_STATE_PARKED:
+    case LLAM_TASK_STATE_PARKED:
         return "PARKED";
-    case NM_TASK_STATE_BLOCKED_OPAQUE:
+    case LLAM_TASK_STATE_BLOCKED_OPAQUE:
         return "BLOCKED_OPAQUE";
-    case NM_TASK_STATE_DEAD:
+    case LLAM_TASK_STATE_DEAD:
         return "DEAD";
     default:
         return "UNKNOWN";
@@ -89,31 +89,31 @@ const char *nm_state_name_from_id(nm_task_state_id_t state) {
  *
  * @return Static string name.
  */
-const char *nm_wait_reason_name(nm_wait_reason_t reason) {
+const char *llam_wait_reason_name(llam_wait_reason_t reason) {
     switch (reason) {
-    case NM_WAIT_NONE:
+    case LLAM_WAIT_NONE:
         return "none";
-    case NM_WAIT_YIELD:
+    case LLAM_WAIT_YIELD:
         return "yield";
-    case NM_WAIT_JOIN:
+    case LLAM_WAIT_JOIN:
         return "join";
-    case NM_WAIT_SLEEP:
+    case LLAM_WAIT_SLEEP:
         return "sleep";
-    case NM_WAIT_BLOCKING:
+    case LLAM_WAIT_BLOCKING:
         return "blocking";
-    case NM_WAIT_IO:
+    case LLAM_WAIT_IO:
         return "io";
-    case NM_WAIT_CANCEL:
+    case LLAM_WAIT_CANCEL:
         return "cancel";
-    case NM_WAIT_MUTEX:
+    case LLAM_WAIT_MUTEX:
         return "mutex";
-    case NM_WAIT_COND:
+    case LLAM_WAIT_COND:
         return "cond";
-    case NM_WAIT_CHANNEL_SEND:
+    case LLAM_WAIT_CHANNEL_SEND:
         return "channel_send";
-    case NM_WAIT_CHANNEL_RECV:
+    case LLAM_WAIT_CHANNEL_RECV:
         return "channel_recv";
-    case NM_WAIT_TIMEOUT:
+    case LLAM_WAIT_TIMEOUT:
         return "timeout";
     default:
         return "unknown";

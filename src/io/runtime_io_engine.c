@@ -43,7 +43,7 @@
  *
  * @return CPU id suitable for io_uring SQPOLL affinity.
  */
-static unsigned nm_node_default_sqpoll_cpu(nm_runtime_t *rt, unsigned node_index) {
+static unsigned llam_node_default_sqpoll_cpu(llam_runtime_t *rt, unsigned node_index) {
     unsigned i;
 
     for (i = 0; i < rt->active_shards; ++i) {
@@ -59,7 +59,7 @@ static unsigned nm_node_default_sqpoll_cpu(nm_runtime_t *rt, unsigned node_index
  *
  * @param node Node to update; may be @c NULL.
  */
-static void nm_node_disable_sqpoll(nm_node_t *node) {
+static void llam_node_disable_sqpoll(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
@@ -72,7 +72,7 @@ static void nm_node_disable_sqpoll(nm_node_t *node) {
  *
  * @param node Node to update; may be @c NULL.
  */
-static void nm_node_disable_cq_eventfd(nm_node_t *node) {
+static void llam_node_disable_cq_eventfd(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
@@ -84,7 +84,7 @@ static void nm_node_disable_cq_eventfd(nm_node_t *node) {
  *
  * @param node Node to update; may be @c NULL.
  */
-static void nm_node_disable_recv_buf_ring(nm_node_t *node) {
+static void llam_node_disable_recv_buf_ring(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
@@ -106,7 +106,7 @@ static void nm_node_disable_recv_buf_ring(nm_node_t *node) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
+int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     struct io_uring_params params;
     int rc;
 
@@ -117,17 +117,17 @@ int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
 
     memset(&params, 0, sizeof(params));
     if (rt->experimental_sqpoll_requested != 0U && rt->experimental_shard_rings == 0U) {
-        unsigned sqpoll_cpu = rt->sqpoll_cpu >= 0 ? (unsigned)rt->sqpoll_cpu : nm_node_default_sqpoll_cpu(rt, node->index);
+        unsigned sqpoll_cpu = rt->sqpoll_cpu >= 0 ? (unsigned)rt->sqpoll_cpu : llam_node_default_sqpoll_cpu(rt, node->index);
 
         params.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
         params.sq_thread_cpu = sqpoll_cpu;
         params.sq_thread_idle = 2000U;
-        rc = io_uring_queue_init_params(NM_IO_RING_DEPTH, &node->ring, &params);
+        rc = io_uring_queue_init_params(LLAM_IO_RING_DEPTH, &node->ring, &params);
         if (rc == 0) {
             if (io_uring_register_eventfd(&node->ring, node->event_fd) == 0) {
                 node->cq_eventfd_registered = true;
             } else {
-                nm_node_disable_cq_eventfd(node);
+                llam_node_disable_cq_eventfd(node);
             }
             node->ring_ready = true;
             node->sqpoll_enabled = true;
@@ -135,16 +135,16 @@ int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
             rt->experimental_sqpoll_active = 1U;
             return 0;
         }
-        nm_node_disable_sqpoll(node);
-        if (!nm_io_sqpoll_setup_error(-rc)) {
+        llam_node_disable_sqpoll(node);
+        if (!llam_io_sqpoll_setup_error(-rc)) {
             errno = -rc;
             return -1;
         }
     }
 
-    rc = io_uring_queue_init(NM_IO_RING_DEPTH, &node->ring, 0);
+    rc = io_uring_queue_init(LLAM_IO_RING_DEPTH, &node->ring, 0);
     if (rc == 0) {
-        nm_node_disable_cq_eventfd(node);
+        llam_node_disable_cq_eventfd(node);
         node->ring_ready = true;
         return 0;
     }
@@ -160,17 +160,17 @@ int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
  *
  * @return @c true when the backend can submit @p kind.
  */
-bool nm_node_supports_kind(const nm_node_t *node, nm_io_kind_t kind) {
+bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
     switch (kind) {
-    case NM_IO_KIND_READ:
+    case LLAM_IO_KIND_READ:
         return node->supports_read;
-    case NM_IO_KIND_WRITE:
+    case LLAM_IO_KIND_WRITE:
         return node->supports_write;
-    case NM_IO_KIND_ACCEPT:
+    case LLAM_IO_KIND_ACCEPT:
         return node->supports_accept;
-    case NM_IO_KIND_CONNECT:
+    case LLAM_IO_KIND_CONNECT:
         return node->supports_connect;
-    case NM_IO_KIND_POLL:
+    case LLAM_IO_KIND_POLL:
         return node->supports_poll;
     default:
         return false;
@@ -189,17 +189,17 @@ bool nm_node_supports_kind(const nm_node_t *node, nm_io_kind_t kind) {
  * @return 0 when the feature is ready or intentionally disabled.
  * @return -1 when allocation or kernel setup failed.
  */
-int nm_node_setup_recv_buf_ring(nm_node_t *node) {
+int llam_node_setup_recv_buf_ring(llam_node_t *node) {
     int err = 0;
     unsigned i;
 
     if (node == NULL || !node->ring_ready || !node->supports_recv) {
-        nm_node_disable_recv_buf_ring(node);
+        llam_node_disable_recv_buf_ring(node);
         return 0;
     }
 
     node->recv_buf_group = (int)(node->index + 1U);
-    node->recv_buf_entries = NM_IO_RECV_BUF_RING_ENTRIES;
+    node->recv_buf_entries = LLAM_IO_RECV_BUF_RING_ENTRIES;
     node->recv_buf_mask = (unsigned)io_uring_buf_ring_mask(node->recv_buf_entries);
     node->recv_buf_ring = io_uring_setup_buf_ring(&node->ring,
                                                   node->recv_buf_entries,
@@ -207,15 +207,15 @@ int nm_node_setup_recv_buf_ring(nm_node_t *node) {
                                                   0U,
                                                   &err);
     if (node->recv_buf_ring == NULL) {
-        nm_node_disable_recv_buf_ring(node);
+        llam_node_disable_recv_buf_ring(node);
         return -1;
     }
 
-    node->recv_buf_storage = calloc(node->recv_buf_entries, NM_IO_BUFFER_INLINE_BYTES);
+    node->recv_buf_storage = calloc(node->recv_buf_entries, LLAM_IO_BUFFER_INLINE_BYTES);
     if (node->recv_buf_storage == NULL) {
         (void)io_uring_free_buf_ring(&node->ring, node->recv_buf_ring, node->recv_buf_entries, node->recv_buf_group);
         node->recv_buf_ring = NULL;
-        nm_node_disable_recv_buf_ring(node);
+        llam_node_disable_recv_buf_ring(node);
         errno = ENOMEM;
         return -1;
     }
@@ -223,8 +223,8 @@ int nm_node_setup_recv_buf_ring(nm_node_t *node) {
     io_uring_buf_ring_init(node->recv_buf_ring);
     for (i = 0; i < node->recv_buf_entries; ++i) {
         io_uring_buf_ring_add(node->recv_buf_ring,
-                              node->recv_buf_storage + (i * NM_IO_BUFFER_INLINE_BYTES),
-                              NM_IO_BUFFER_INLINE_BYTES,
+                              node->recv_buf_storage + (i * LLAM_IO_BUFFER_INLINE_BYTES),
+                              LLAM_IO_BUFFER_INLINE_BYTES,
                               (unsigned short)i,
                               (int)node->recv_buf_mask,
                               (int)i);
@@ -242,7 +242,7 @@ int nm_node_setup_recv_buf_ring(nm_node_t *node) {
  *
  * @return 0 on success, or -1 with @c errno set for invalid input.
  */
-int nm_node_recycle_recv_buffer(nm_node_t *node, unsigned short bid) {
+int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
     if (node == NULL || !node->ring_ready || !node->supports_provided_buffers || node->recv_buf_ring == NULL ||
         node->recv_buf_storage == NULL || bid >= node->recv_buf_entries) {
         errno = EINVAL;
@@ -251,8 +251,8 @@ int nm_node_recycle_recv_buffer(nm_node_t *node, unsigned short bid) {
 
     pthread_mutex_lock(&node->recv_buf_lock);
     io_uring_buf_ring_add(node->recv_buf_ring,
-                          node->recv_buf_storage + ((size_t)bid * NM_IO_BUFFER_INLINE_BYTES),
-                          NM_IO_BUFFER_INLINE_BYTES,
+                          node->recv_buf_storage + ((size_t)bid * LLAM_IO_BUFFER_INLINE_BYTES),
+                          LLAM_IO_BUFFER_INLINE_BYTES,
                           bid,
                           (int)node->recv_buf_mask,
                           0);
@@ -267,7 +267,7 @@ int nm_node_recycle_recv_buffer(nm_node_t *node, unsigned short bid) {
  *
  * @param node Node to clean up; may be @c NULL.
  */
-void nm_node_destroy_recv_buf_ring(nm_node_t *node) {
+void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
@@ -277,7 +277,7 @@ void nm_node_destroy_recv_buf_ring(nm_node_t *node) {
     }
     free(node->recv_buf_storage);
     node->recv_buf_storage = NULL;
-    nm_node_disable_recv_buf_ring(node);
+    llam_node_disable_recv_buf_ring(node);
 }
 
 /**
@@ -285,7 +285,7 @@ void nm_node_destroy_recv_buf_ring(nm_node_t *node) {
  *
  * @param node Node to update; may be @c NULL.
  */
-void nm_node_unregister_cq_eventfd(nm_node_t *node) {
+void llam_node_unregister_cq_eventfd(llam_node_t *node) {
     if (node == NULL || !node->ring_ready || !node->cq_eventfd_registered) {
         return;
     }
@@ -302,7 +302,7 @@ void nm_node_unregister_cq_eventfd(nm_node_t *node) {
  *
  * @param node Node whose ring should be probed.
  */
-void nm_probe_ring_support(nm_node_t *node) {
+void llam_probe_ring_support(llam_node_t *node) {
     struct io_uring_probe *probe = io_uring_get_probe_ring(&node->ring);
 
     if (probe == NULL) {
@@ -341,7 +341,7 @@ void nm_probe_ring_support(nm_node_t *node) {
  * @param port Receive/send right port to deallocate.
  * @param pset Port set used by kqueue Mach-port wake integration.
  */
-static void nm_node_destroy_mach_wake(mach_port_t port, mach_port_t pset) {
+static void llam_node_destroy_mach_wake(mach_port_t port, mach_port_t pset) {
     if (port != MACH_PORT_NULL) {
         (void)mach_port_deallocate(mach_task_self(), port);
         (void)mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
@@ -362,7 +362,7 @@ static void nm_node_destroy_mach_wake(mach_port_t port, mach_port_t pset) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-static int nm_node_init_mach_wake(nm_node_t *node) {
+static int llam_node_init_mach_wake(llam_node_t *node) {
     mach_port_t port = MACH_PORT_NULL;
     mach_port_t pset = MACH_PORT_NULL;
     struct kevent change;
@@ -380,19 +380,19 @@ static int nm_node_init_mach_wake(nm_node_t *node) {
     }
     kr = mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
     if (kr != KERN_SUCCESS) {
-        nm_node_destroy_mach_wake(port, MACH_PORT_NULL);
+        llam_node_destroy_mach_wake(port, MACH_PORT_NULL);
         errno = EINVAL;
         return -1;
     }
     kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &pset);
     if (kr != KERN_SUCCESS) {
-        nm_node_destroy_mach_wake(port, MACH_PORT_NULL);
+        llam_node_destroy_mach_wake(port, MACH_PORT_NULL);
         errno = EINVAL;
         return -1;
     }
     kr = mach_port_move_member(mach_task_self(), port, pset);
     if (kr != KERN_SUCCESS) {
-        nm_node_destroy_mach_wake(port, pset);
+        llam_node_destroy_mach_wake(port, pset);
         errno = EINVAL;
         return -1;
     }
@@ -401,7 +401,7 @@ static int nm_node_init_mach_wake(nm_node_t *node) {
     if (kevent(node->event_fd, &change, 1, NULL, 0, NULL) != 0) {
         int saved_errno = errno;
 
-        nm_node_destroy_mach_wake(port, pset);
+        llam_node_destroy_mach_wake(port, pset);
         errno = saved_errno;
         return -1;
     }
@@ -424,7 +424,7 @@ static int nm_node_init_mach_wake(nm_node_t *node) {
  *
  * @return 0 on success, or -1 with @c errno set for invalid input.
  */
-int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
+int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     (void)rt;
     if (node == NULL) {
         errno = EINVAL;
@@ -437,7 +437,13 @@ int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;
-    node->supports_multishot_recv = true;
+    /*
+     * Darwin recv-watch currently uses level-triggered kqueue readiness.
+     * Under repeated owned-read stress it can strand a waiter after an early
+     * completion/rearm race, so keep recv on the one-shot/fallback path until
+     * the watcher has an explicit drain-and-rearm handshake.
+     */
+    node->supports_multishot_recv = false;
     node->supports_multishot_accept = true;
     node->supports_multishot_poll = true;
     node->supports_provided_buffers = false;
@@ -445,7 +451,7 @@ int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
     node->mach_wake_enabled = false;
     node->mach_wake_port = 0U;
     node->mach_wake_pset = 0U;
-    (void)nm_node_init_mach_wake(node);
+    (void)llam_node_init_mach_wake(node);
     return 0;
 }
 
@@ -457,20 +463,20 @@ int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
  *
  * @return @c true when @p kind is supported.
  */
-bool nm_node_supports_kind(const nm_node_t *node, nm_io_kind_t kind) {
+bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
     if (node == NULL) {
         return false;
     }
     switch (kind) {
-    case NM_IO_KIND_READ:
+    case LLAM_IO_KIND_READ:
         return node->supports_read;
-    case NM_IO_KIND_WRITE:
+    case LLAM_IO_KIND_WRITE:
         return node->supports_write;
-    case NM_IO_KIND_ACCEPT:
+    case LLAM_IO_KIND_ACCEPT:
         return node->supports_accept;
-    case NM_IO_KIND_CONNECT:
+    case LLAM_IO_KIND_CONNECT:
         return node->supports_connect;
-    case NM_IO_KIND_POLL:
+    case LLAM_IO_KIND_POLL:
         return node->supports_poll;
     default:
         return false;
@@ -484,7 +490,7 @@ bool nm_node_supports_kind(const nm_node_t *node, nm_io_kind_t kind) {
  *
  * @return Always 0.
  */
-int nm_node_setup_recv_buf_ring(nm_node_t *node) {
+int llam_node_setup_recv_buf_ring(llam_node_t *node) {
     if (node != NULL) {
         node->supports_provided_buffers = false;
         node->recv_buf_entries = 0U;
@@ -502,7 +508,7 @@ int nm_node_setup_recv_buf_ring(nm_node_t *node) {
  *
  * @return Always -1 with @c errno set to @c ENOSYS.
  */
-int nm_node_recycle_recv_buffer(nm_node_t *node, unsigned short bid) {
+int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
     (void)node;
     (void)bid;
     errno = ENOSYS;
@@ -514,7 +520,7 @@ int nm_node_recycle_recv_buffer(nm_node_t *node, unsigned short bid) {
  *
  * @param node Node to clean up; may be @c NULL.
  */
-void nm_node_destroy_recv_buf_ring(nm_node_t *node) {
+void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
@@ -529,13 +535,13 @@ void nm_node_destroy_recv_buf_ring(nm_node_t *node) {
  *
  * @param node Node to update; may be @c NULL.
  */
-void nm_node_unregister_cq_eventfd(nm_node_t *node) {
+void llam_node_unregister_cq_eventfd(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
     node->cq_eventfd_registered = false;
     if (node->mach_wake_enabled) {
-        nm_node_destroy_mach_wake((mach_port_t)node->mach_wake_port, (mach_port_t)node->mach_wake_pset);
+        llam_node_destroy_mach_wake((mach_port_t)node->mach_wake_port, (mach_port_t)node->mach_wake_pset);
         node->mach_wake_enabled = false;
         node->mach_wake_port = 0U;
         node->mach_wake_pset = 0U;
@@ -550,7 +556,7 @@ void nm_node_unregister_cq_eventfd(nm_node_t *node) {
  *
  * @param node Node to update; may be @c NULL.
  */
-void nm_probe_ring_support(nm_node_t *node) {
+void llam_probe_ring_support(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
@@ -560,7 +566,11 @@ void nm_probe_ring_support(nm_node_t *node) {
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;
-    node->supports_multishot_recv = true;
+    /*
+     * Keep recv-watch disabled on Darwin for the same reason as init: poll and
+     * accept watches are stable, but recv needs a stricter rearm contract.
+     */
+    node->supports_multishot_recv = false;
     node->supports_multishot_accept = true;
     node->supports_multishot_poll = true;
 }

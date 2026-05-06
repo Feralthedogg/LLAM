@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_linux_migration_rehome.c
+ * @file src/io/linux/runtime_io_watch_linux_migration_rehome.c
  * @brief Linux I/O watch rehoming between nodes for load and idle balancing.
  *
  * @details
@@ -35,14 +35,14 @@
  * @param fd                    File descriptor used for ownership hashing.
  * @return Node index that should receive the watch.
  */
-unsigned nm_watch_migration_target_index(nm_runtime_t *rt,
+unsigned llam_watch_migration_target_index(llam_runtime_t *rt,
                                                 unsigned fallback_target_index,
                                                 unsigned current_target_index,
                                                 int fd) {
     if (current_target_index != UINT_MAX) {
         return current_target_index;
     }
-    return nm_multishot_owner_node_index(rt, fallback_target_index, fd);
+    return llam_multishot_owner_node_index(rt, fallback_target_index, fd);
 }
 
 /**
@@ -54,31 +54,31 @@ unsigned nm_watch_migration_target_index(nm_runtime_t *rt,
  * @return true if the pass completed without an unrecoverable allocation/state
  *         failure.
  */
-bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, bool only_marked) {
+bool llam_io_rehome_watch_state_filtered(llam_node_t *source, llam_node_t *target, bool only_marked) {
     if (source == NULL || target == NULL || source == target) {
         return false;
     }
     for (;;) {
         enum {
-            NM_DEFER_NONE = 0,
-            NM_DEFER_POLL = 1,
-            NM_DEFER_ACCEPT = 2,
-            NM_DEFER_RECV = 3,
-        } deferred_kind = NM_DEFER_NONE;
+            LLAM_DEFER_NONE = 0,
+            LLAM_DEFER_POLL = 1,
+            LLAM_DEFER_ACCEPT = 2,
+            LLAM_DEFER_RECV = 3,
+        } deferred_kind = LLAM_DEFER_NONE;
         void *deferred_watch = NULL;
         unsigned deferred_target_index = UINT_MAX;
-        nm_poll_watch_completion_t *poll_completions = NULL;
-        nm_poll_watch_completion_t *poll_completion_tail = NULL;
-        nm_accept_watch_completion_t *accept_completions = NULL;
-        nm_accept_watch_completion_t *accept_completion_tail = NULL;
-        nm_recv_watch_completion_t *recv_completions = NULL;
-        nm_recv_watch_completion_t *recv_completion_tail = NULL;
+        llam_poll_watch_completion_t *poll_completions = NULL;
+        llam_poll_watch_completion_t *poll_completion_tail = NULL;
+        llam_accept_watch_completion_t *accept_completions = NULL;
+        llam_accept_watch_completion_t *accept_completion_tail = NULL;
+        llam_recv_watch_completion_t *recv_completions = NULL;
+        llam_recv_watch_completion_t *recv_completion_tail = NULL;
         bool kick_source = false;
         bool kick_target = false;
-        nm_node_t *first = source->index < target->index ? source : target;
-        nm_node_t *second = first == source ? target : source;
-        nm_node_t *source_locked;
-        nm_node_t *target_locked;
+        llam_node_t *first = source->index < target->index ? source : target;
+        llam_node_t *second = first == source ? target : source;
+        llam_node_t *source_locked;
+        llam_node_t *target_locked;
         bool ok = true;
 
         pthread_mutex_lock(&first->watch_lock);
@@ -89,17 +89,17 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
         target_locked = source_locked == source ? target : source;
 
         {
-            nm_poll_watch_t **cursor = &source_locked->poll_watches;
+            llam_poll_watch_t **cursor = &source_locked->poll_watches;
 
             while (*cursor != NULL) {
-                nm_poll_watch_t *watch = *cursor;
+                llam_poll_watch_t *watch = *cursor;
                 unsigned desired_target_index;
 
                 if (only_marked && watch->migrate_target_node_index == UINT_MAX) {
                     cursor = &watch->next;
                     continue;
                 }
-                desired_target_index = nm_watch_migration_target_index(source_locked->runtime,
+                desired_target_index = llam_watch_migration_target_index(source_locked->runtime,
                                                                        target_locked->index,
                                                                        watch->migrate_target_node_index,
                                                                        watch->fd);
@@ -123,25 +123,25 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     // hashed target, or create/arm equivalent state on target.
                     if (desired_target_index == source_locked->index) {
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_poll_watch_locked(source_locked, watch);
+                        llam_destroy_poll_watch_locked(source_locked, watch);
                         continue;
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_POLL;
+                        deferred_kind = LLAM_DEFER_POLL;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_poll_watch_t *target_watch = nm_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
+                        llam_poll_watch_t *target_watch = llam_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
 
-                        if (target_watch == NULL || !nm_arm_poll_watch_locked(target_locked, target_watch, &kick_target)) {
+                        if (target_watch == NULL || !llam_arm_poll_watch_locked(target_locked, target_watch, &kick_target)) {
                             ok = false;
                             break;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_poll_watch_locked(source_locked, watch);
+                        llam_destroy_poll_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -149,31 +149,31 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     watch->activating &&
                     !watch->deactivate_queued &&
                     watch->sticky_revents == 0 &&
-                    nm_drop_node_control_locked(source_locked, NM_IO_CONTROL_POLL_ACTIVATE, watch)) {
+                    llam_drop_node_control_locked(source_locked, LLAM_IO_CONTROL_POLL_ACTIVATE, watch)) {
                     // Activation has not reached the backend yet, so it can be
                     // canceled locally and recreated on the target.
                     watch->activating = false;
                     if (desired_target_index == source_locked->index) {
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_poll_watch_locked(source_locked, watch);
+                        llam_destroy_poll_watch_locked(source_locked, watch);
                         continue;
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_POLL;
+                        deferred_kind = LLAM_DEFER_POLL;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_poll_watch_t *target_watch = nm_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
+                        llam_poll_watch_t *target_watch = llam_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
 
-                        if (target_watch == NULL || !nm_arm_poll_watch_locked(target_locked, target_watch, &kick_target)) {
+                        if (target_watch == NULL || !llam_arm_poll_watch_locked(target_locked, target_watch, &kick_target)) {
                             ok = false;
                             break;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_poll_watch_locked(source_locked, watch);
+                        llam_destroy_poll_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -181,31 +181,31 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     !watch->activating &&
                     watch->deactivate_queued &&
                     watch->sticky_revents == 0) {
-                    if (nm_drop_node_control_locked(source_locked, NM_IO_CONTROL_POLL_DEACTIVATE, watch)) {
+                    if (llam_drop_node_control_locked(source_locked, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch)) {
                         // Deactivation was still queued, so the watch is already
                         // backend-idle and can be moved immediately.
                         watch->deactivate_queued = false;
                         if (desired_target_index == source_locked->index) {
                             watch->migrate_target_node_index = UINT_MAX;
-                            nm_destroy_poll_watch_locked(source_locked, watch);
+                            llam_destroy_poll_watch_locked(source_locked, watch);
                             continue;
                         }
                         if (desired_target_index != target_locked->index) {
                             watch->migrate_target_node_index = desired_target_index;
-                            deferred_kind = NM_DEFER_POLL;
+                            deferred_kind = LLAM_DEFER_POLL;
                             deferred_watch = watch;
                             deferred_target_index = desired_target_index;
                             break;
                         }
                         {
-                            nm_poll_watch_t *target_watch = nm_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
+                            llam_poll_watch_t *target_watch = llam_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
 
-                            if (target_watch == NULL || !nm_arm_poll_watch_locked(target_locked, target_watch, &kick_target)) {
+                            if (target_watch == NULL || !llam_arm_poll_watch_locked(target_locked, target_watch, &kick_target)) {
                                 ok = false;
                                 break;
                             }
                             watch->migrate_target_node_index = UINT_MAX;
-                            nm_destroy_poll_watch_locked(source_locked, watch);
+                            llam_destroy_poll_watch_locked(source_locked, watch);
                             continue;
                         }
                     }
@@ -225,24 +225,24 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_POLL;
+                        deferred_kind = LLAM_DEFER_POLL;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_poll_watch_t *target_watch =
-                            nm_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
+                        llam_poll_watch_t *target_watch =
+                            llam_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
 
                         if (target_watch == NULL) {
                             ok = false;
                             break;
                         }
                         if (target_watch->wait_head != NULL) {
-                            nm_io_req_t *waiters = nm_poll_watch_take_waiters(target_watch);
+                            llam_io_req_t *waiters = llam_poll_watch_take_waiters(target_watch);
                             int revents = watch->sticky_revents | target_watch->sticky_revents;
 
-                            if (!nm_poll_watch_completion_push(&poll_completions, &poll_completion_tail, waiters, revents)) {
+                            if (!llam_poll_watch_completion_push(&poll_completions, &poll_completion_tail, waiters, revents)) {
                                 if (waiters != NULL) {
                                     target_watch->wait_head = waiters;
                                     target_watch->wait_tail = waiters;
@@ -258,7 +258,7 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                             target_watch->sticky_revents |= watch->sticky_revents;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_poll_watch_locked(source_locked, watch);
+                        llam_destroy_poll_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -269,7 +269,7 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     watch->live_transferred = watch->migrate_target_node_index != UINT_MAX;
                     if (watch->active && !watch->deactivate_queued) {
                         watch->deactivate_queued = true;
-                        if (nm_node_queue_control_locked(source_locked, NM_IO_CONTROL_POLL_DEACTIVATE, watch) != 0) {
+                        if (llam_node_queue_control_locked(source_locked, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch) != 0) {
                             watch->deactivate_queued = false;
                             watch->migrate_target_node_index = UINT_MAX;
                             watch->live_transferred = false;
@@ -283,18 +283,18 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
             }
         }
 
-        if (ok && deferred_kind == NM_DEFER_NONE) {
-            nm_accept_watch_t **cursor = &source_locked->accept_watches;
+        if (ok && deferred_kind == LLAM_DEFER_NONE) {
+            llam_accept_watch_t **cursor = &source_locked->accept_watches;
 
             while (*cursor != NULL) {
-                nm_accept_watch_t *watch = *cursor;
+                llam_accept_watch_t *watch = *cursor;
                 unsigned desired_target_index;
 
                 if (only_marked && watch->migrate_target_node_index == UINT_MAX) {
                     cursor = &watch->next;
                     continue;
                 }
-                desired_target_index = nm_watch_migration_target_index(source_locked->runtime,
+                desired_target_index = llam_watch_migration_target_index(source_locked->runtime,
                                                                        target_locked->index,
                                                                        watch->migrate_target_node_index,
                                                                        watch->fd);
@@ -318,25 +318,25 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     // on the target without moving user-visible state.
                     if (desired_target_index == source_locked->index) {
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_accept_watch_locked(source_locked, watch);
+                        llam_destroy_accept_watch_locked(source_locked, watch);
                         continue;
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_ACCEPT;
+                        deferred_kind = LLAM_DEFER_ACCEPT;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_accept_watch_t *target_watch = nm_get_or_create_accept_watch_locked(target_locked, watch->fd);
+                        llam_accept_watch_t *target_watch = llam_get_or_create_accept_watch_locked(target_locked, watch->fd);
 
-                        if (target_watch == NULL || !nm_arm_accept_watch_locked(target_locked, target_watch, &kick_target)) {
+                        if (target_watch == NULL || !llam_arm_accept_watch_locked(target_locked, target_watch, &kick_target)) {
                             ok = false;
                             break;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_accept_watch_locked(source_locked, watch);
+                        llam_destroy_accept_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -344,29 +344,29 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     watch->activating &&
                     !watch->deactivate_queued &&
                     watch->ready_head == NULL &&
-                    nm_drop_node_control_locked(source_locked, NM_IO_CONTROL_ACCEPT_ACTIVATE, watch)) {
+                    llam_drop_node_control_locked(source_locked, LLAM_IO_CONTROL_ACCEPT_ACTIVATE, watch)) {
                     watch->activating = false;
                     if (desired_target_index == source_locked->index) {
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_accept_watch_locked(source_locked, watch);
+                        llam_destroy_accept_watch_locked(source_locked, watch);
                         continue;
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_ACCEPT;
+                        deferred_kind = LLAM_DEFER_ACCEPT;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_accept_watch_t *target_watch = nm_get_or_create_accept_watch_locked(target_locked, watch->fd);
+                        llam_accept_watch_t *target_watch = llam_get_or_create_accept_watch_locked(target_locked, watch->fd);
 
-                        if (target_watch == NULL || !nm_arm_accept_watch_locked(target_locked, target_watch, &kick_target)) {
+                        if (target_watch == NULL || !llam_arm_accept_watch_locked(target_locked, target_watch, &kick_target)) {
                             ok = false;
                             break;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_accept_watch_locked(source_locked, watch);
+                        llam_destroy_accept_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -374,29 +374,29 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     !watch->activating &&
                     watch->deactivate_queued &&
                     watch->ready_head == NULL) {
-                    if (nm_drop_node_control_locked(source_locked, NM_IO_CONTROL_ACCEPT_DEACTIVATE, watch)) {
+                    if (llam_drop_node_control_locked(source_locked, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch)) {
                         watch->deactivate_queued = false;
                         if (desired_target_index == source_locked->index) {
                             watch->migrate_target_node_index = UINT_MAX;
-                            nm_destroy_accept_watch_locked(source_locked, watch);
+                            llam_destroy_accept_watch_locked(source_locked, watch);
                             continue;
                         }
                         if (desired_target_index != target_locked->index) {
                             watch->migrate_target_node_index = desired_target_index;
-                            deferred_kind = NM_DEFER_ACCEPT;
+                            deferred_kind = LLAM_DEFER_ACCEPT;
                             deferred_watch = watch;
                             deferred_target_index = desired_target_index;
                             break;
                         }
                         {
-                            nm_accept_watch_t *target_watch = nm_get_or_create_accept_watch_locked(target_locked, watch->fd);
+                            llam_accept_watch_t *target_watch = llam_get_or_create_accept_watch_locked(target_locked, watch->fd);
 
-                            if (target_watch == NULL || !nm_arm_accept_watch_locked(target_locked, target_watch, &kick_target)) {
+                            if (target_watch == NULL || !llam_arm_accept_watch_locked(target_locked, target_watch, &kick_target)) {
                                 ok = false;
                                 break;
                             }
                             watch->migrate_target_node_index = UINT_MAX;
-                            nm_destroy_accept_watch_locked(source_locked, watch);
+                            llam_destroy_accept_watch_locked(source_locked, watch);
                             continue;
                         }
                     }
@@ -414,24 +414,24 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_ACCEPT;
+                        deferred_kind = LLAM_DEFER_ACCEPT;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_accept_watch_t *target_watch = nm_get_or_create_accept_watch_locked(target_locked, watch->fd);
+                        llam_accept_watch_t *target_watch = llam_get_or_create_accept_watch_locked(target_locked, watch->fd);
 
                         if (target_watch == NULL) {
                             ok = false;
                             break;
                         }
                         while (watch->ready_head != NULL && target_watch->wait_head != NULL) {
-                            nm_accept_ready_t *ready = watch->ready_head;
-                            nm_io_req_t *waiter = nm_accept_watch_pop_waiter(target_watch);
+                            llam_accept_ready_t *ready = watch->ready_head;
+                            llam_io_req_t *waiter = llam_accept_watch_pop_waiter(target_watch);
 
                             if (waiter == NULL ||
-                                !nm_accept_watch_completion_push(&accept_completions, &accept_completion_tail, waiter, ready->fd)) {
+                                !llam_accept_watch_completion_push(&accept_completions, &accept_completion_tail, waiter, ready->fd)) {
                                 if (waiter != NULL) {
                                     waiter->next = target_watch->wait_head;
                                     target_watch->wait_head = waiter;
@@ -465,7 +465,7 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                             watch->ready_depth = 0U;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_accept_watch_locked(source_locked, watch);
+                        llam_destroy_accept_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -474,7 +474,7 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     watch->live_transferred = watch->migrate_target_node_index != UINT_MAX;
                     if (watch->active && !watch->deactivate_queued) {
                         watch->deactivate_queued = true;
-                        if (nm_node_queue_control_locked(source_locked, NM_IO_CONTROL_ACCEPT_DEACTIVATE, watch) != 0) {
+                        if (llam_node_queue_control_locked(source_locked, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch) != 0) {
                             watch->deactivate_queued = false;
                             watch->migrate_target_node_index = UINT_MAX;
                             watch->live_transferred = false;
@@ -488,18 +488,18 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
             }
         }
 
-        if (ok && deferred_kind == NM_DEFER_NONE) {
-            nm_recv_watch_t **cursor = &source_locked->recv_watches;
+        if (ok && deferred_kind == LLAM_DEFER_NONE) {
+            llam_recv_watch_t **cursor = &source_locked->recv_watches;
 
             while (*cursor != NULL) {
-                nm_recv_watch_t *watch = *cursor;
+                llam_recv_watch_t *watch = *cursor;
                 unsigned desired_target_index;
 
                 if (only_marked && watch->migrate_target_node_index == UINT_MAX) {
                     cursor = &watch->next;
                     continue;
                 }
-                desired_target_index = nm_watch_migration_target_index(source_locked->runtime,
+                desired_target_index = llam_watch_migration_target_index(source_locked->runtime,
                                                                        target_locked->index,
                                                                        watch->migrate_target_node_index,
                                                                        watch->fd);
@@ -519,25 +519,25 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     watch->ready_head == NULL) {
                     if (desired_target_index == source_locked->index) {
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_recv_watch_locked(source_locked, watch);
+                        llam_destroy_recv_watch_locked(source_locked, watch);
                         continue;
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_RECV;
+                        deferred_kind = LLAM_DEFER_RECV;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_recv_watch_t *target_watch = nm_get_or_create_recv_watch_locked(target_locked, watch->fd);
+                        llam_recv_watch_t *target_watch = llam_get_or_create_recv_watch_locked(target_locked, watch->fd);
 
-                        if (target_watch == NULL || !nm_arm_recv_watch_locked(target_locked, target_watch, &kick_target)) {
+                        if (target_watch == NULL || !llam_arm_recv_watch_locked(target_locked, target_watch, &kick_target)) {
                             ok = false;
                             break;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_recv_watch_locked(source_locked, watch);
+                        llam_destroy_recv_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -545,29 +545,29 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     watch->activating &&
                     !watch->deactivate_queued &&
                     watch->ready_head == NULL &&
-                    nm_drop_node_control_locked(source_locked, NM_IO_CONTROL_RECV_ACTIVATE, watch)) {
+                    llam_drop_node_control_locked(source_locked, LLAM_IO_CONTROL_RECV_ACTIVATE, watch)) {
                     watch->activating = false;
                     if (desired_target_index == source_locked->index) {
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_recv_watch_locked(source_locked, watch);
+                        llam_destroy_recv_watch_locked(source_locked, watch);
                         continue;
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_RECV;
+                        deferred_kind = LLAM_DEFER_RECV;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_recv_watch_t *target_watch = nm_get_or_create_recv_watch_locked(target_locked, watch->fd);
+                        llam_recv_watch_t *target_watch = llam_get_or_create_recv_watch_locked(target_locked, watch->fd);
 
-                        if (target_watch == NULL || !nm_arm_recv_watch_locked(target_locked, target_watch, &kick_target)) {
+                        if (target_watch == NULL || !llam_arm_recv_watch_locked(target_locked, target_watch, &kick_target)) {
                             ok = false;
                             break;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_recv_watch_locked(source_locked, watch);
+                        llam_destroy_recv_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -575,29 +575,29 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     !watch->activating &&
                     watch->deactivate_queued &&
                     watch->ready_head == NULL) {
-                    if (nm_drop_node_control_locked(source_locked, NM_IO_CONTROL_RECV_DEACTIVATE, watch)) {
+                    if (llam_drop_node_control_locked(source_locked, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch)) {
                         watch->deactivate_queued = false;
                         if (desired_target_index == source_locked->index) {
                             watch->migrate_target_node_index = UINT_MAX;
-                            nm_destroy_recv_watch_locked(source_locked, watch);
+                            llam_destroy_recv_watch_locked(source_locked, watch);
                             continue;
                         }
                         if (desired_target_index != target_locked->index) {
                             watch->migrate_target_node_index = desired_target_index;
-                            deferred_kind = NM_DEFER_RECV;
+                            deferred_kind = LLAM_DEFER_RECV;
                             deferred_watch = watch;
                             deferred_target_index = desired_target_index;
                             break;
                         }
                         {
-                            nm_recv_watch_t *target_watch = nm_get_or_create_recv_watch_locked(target_locked, watch->fd);
+                            llam_recv_watch_t *target_watch = llam_get_or_create_recv_watch_locked(target_locked, watch->fd);
 
-                            if (target_watch == NULL || !nm_arm_recv_watch_locked(target_locked, target_watch, &kick_target)) {
+                            if (target_watch == NULL || !llam_arm_recv_watch_locked(target_locked, target_watch, &kick_target)) {
                                 ok = false;
                                 break;
                             }
                             watch->migrate_target_node_index = UINT_MAX;
-                            nm_destroy_recv_watch_locked(source_locked, watch);
+                            llam_destroy_recv_watch_locked(source_locked, watch);
                             continue;
                         }
                     }
@@ -615,24 +615,24 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     }
                     if (desired_target_index != target_locked->index) {
                         watch->migrate_target_node_index = desired_target_index;
-                        deferred_kind = NM_DEFER_RECV;
+                        deferred_kind = LLAM_DEFER_RECV;
                         deferred_watch = watch;
                         deferred_target_index = desired_target_index;
                         break;
                     }
                     {
-                        nm_recv_watch_t *target_watch = nm_get_or_create_recv_watch_locked(target_locked, watch->fd);
+                        llam_recv_watch_t *target_watch = llam_get_or_create_recv_watch_locked(target_locked, watch->fd);
 
                         if (target_watch == NULL) {
                             ok = false;
                             break;
                         }
                         while (watch->ready_head != NULL && target_watch->wait_head != NULL) {
-                            nm_recv_ready_t *ready = watch->ready_head;
-                            nm_io_req_t *waiter = nm_recv_watch_pop_waiter(target_watch);
+                            llam_recv_ready_t *ready = watch->ready_head;
+                            llam_io_req_t *waiter = llam_recv_watch_pop_waiter(target_watch);
 
                             if (waiter == NULL ||
-                                !nm_recv_watch_completion_push(&recv_completions,
+                                !llam_recv_watch_completion_push(&recv_completions,
                                                                &recv_completion_tail,
                                                                waiter,
                                                                ready->size,
@@ -672,7 +672,7 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                             watch->ready_depth = 0U;
                         }
                         watch->migrate_target_node_index = UINT_MAX;
-                        nm_destroy_recv_watch_locked(source_locked, watch);
+                        llam_destroy_recv_watch_locked(source_locked, watch);
                         continue;
                     }
                 }
@@ -681,7 +681,7 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                     watch->live_transferred = watch->migrate_target_node_index != UINT_MAX;
                     if (watch->active && !watch->deactivate_queued) {
                         watch->deactivate_queued = true;
-                        if (nm_node_queue_control_locked(source_locked, NM_IO_CONTROL_RECV_DEACTIVATE, watch) != 0) {
+                        if (llam_node_queue_control_locked(source_locked, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch) != 0) {
                             watch->deactivate_queued = false;
                             watch->migrate_target_node_index = UINT_MAX;
                             watch->live_transferred = false;
@@ -699,19 +699,19 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
         pthread_mutex_unlock(&first->watch_lock);
 
         if (kick_source) {
-            nm_kick_node(source);
+            llam_kick_node(source);
         }
         if (kick_target) {
-            nm_kick_node(target);
+            llam_kick_node(target);
         }
-        nm_poll_watch_completion_drain(target, poll_completions);
-        nm_accept_watch_completion_drain(target, accept_completions);
-        nm_recv_watch_completion_drain(target->runtime, target, recv_completions);
+        llam_poll_watch_completion_drain(target, poll_completions);
+        llam_accept_watch_completion_drain(target, accept_completions);
+        llam_recv_watch_completion_drain(target->runtime, target, recv_completions);
 
         if (!ok) {
             return false;
         }
-        if (deferred_kind == NM_DEFER_NONE) {
+        if (deferred_kind == LLAM_DEFER_NONE) {
             return true;
         }
 
@@ -719,14 +719,14 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
             bool deferred_kick = false;
 
             switch (deferred_kind) {
-            case NM_DEFER_POLL:
-                ok = nm_finalize_poll_watch_migration(source, deferred_watch, deferred_target_index, &deferred_kick);
+            case LLAM_DEFER_POLL:
+                ok = llam_finalize_poll_watch_migration(source, deferred_watch, deferred_target_index, &deferred_kick);
                 break;
-            case NM_DEFER_ACCEPT:
-                ok = nm_finalize_accept_watch_migration(source, deferred_watch, deferred_target_index, &deferred_kick);
+            case LLAM_DEFER_ACCEPT:
+                ok = llam_finalize_accept_watch_migration(source, deferred_watch, deferred_target_index, &deferred_kick);
                 break;
-            case NM_DEFER_RECV:
-                ok = nm_finalize_recv_watch_migration(source, deferred_watch, deferred_target_index, &deferred_kick);
+            case LLAM_DEFER_RECV:
+                ok = llam_finalize_recv_watch_migration(source, deferred_watch, deferred_target_index, &deferred_kick);
                 break;
             default:
                 ok = false;
@@ -736,16 +736,16 @@ bool nm_io_rehome_watch_state_filtered(nm_node_t *source, nm_node_t *target, boo
                 return false;
             }
             if (deferred_kick && deferred_target_index < source->runtime->active_nodes) {
-                nm_kick_node(&source->runtime->nodes[deferred_target_index]);
+                llam_kick_node(&source->runtime->nodes[deferred_target_index]);
             }
         }
     }
 }
 
-bool nm_io_rehome_idle_watch_state(nm_node_t *source, nm_node_t *target) {
-    return nm_io_rehome_watch_state_filtered(source, target, false);
+bool llam_io_rehome_idle_watch_state(llam_node_t *source, llam_node_t *target) {
+    return llam_io_rehome_watch_state_filtered(source, target, false);
 }
 
-bool nm_io_rehome_marked_watch_state(nm_node_t *source, nm_node_t *target) {
-    return nm_io_rehome_watch_state_filtered(source, target, true);
+bool llam_io_rehome_marked_watch_state(llam_node_t *source, llam_node_t *target) {
+    return llam_io_rehome_watch_state_filtered(source, target, true);
 }

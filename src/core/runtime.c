@@ -27,20 +27,20 @@
 #include "runtime_internal.h"
 
 /** @brief Runtime-wide singleton state; behavior lives in subsystem modules. */
-nm_runtime_t g_nm_runtime;
+llam_runtime_t g_llam_runtime;
 /** @brief Low 32 bits of the enabled x86 XSAVE mask. */
-uint32_t g_nm_xsave_mask_lo;
+uint32_t g_llam_xsave_mask_lo;
 /** @brief High 32 bits of the enabled x86 XSAVE mask. */
-uint32_t g_nm_xsave_mask_hi;
+uint32_t g_llam_xsave_mask_hi;
 /** @brief FP-control context flag used by platform context switch code. */
-uint32_t g_nm_fp_control_context;
+uint32_t g_llam_fp_control_context;
 /** @brief Thread-local shard currently running on this native thread. */
-_Thread_local nm_shard_t *g_nm_tls_shard;
+_Thread_local llam_shard_t *g_llam_tls_shard;
 /** @brief Thread-local task currently executing on this native thread. */
-_Thread_local nm_task_t *g_nm_tls_task;
+_Thread_local llam_task_t *g_llam_tls_task;
 /** @brief Thread-local scheduler context for returning from task fibers. */
-_Thread_local nm_ctx_t *g_nm_tls_scheduler_ctx;
+_Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
 /** @brief Thread-local hint requesting a yield after I/O handoff. */
-_Thread_local unsigned g_nm_tls_io_handoff_yield;
+_Thread_local unsigned g_llam_tls_io_handoff_yield;
 /** @brief Thread-local redirect target hint while leaving opaque blocking. */
-_Thread_local unsigned g_nm_tls_opaque_redirect_hint;
+_Thread_local unsigned g_llam_tls_opaque_redirect_hint;

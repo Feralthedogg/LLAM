@@ -4,7 +4,6 @@ permissions:
   contents: write
 
 on:
-  pull_request:
   workflow_dispatch:
   push:
     tags:
@@ -53,7 +52,11 @@ jobs:
 
       - name: Build and test
         run: |
-          make clean all test CC="${{ matrix.cc }}"
+          version="1.0.0"
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          make clean all test CC="${{ matrix.cc }}" LLAM_VERSION="$version"
 
       - name: Smoke test runtime executables
         run: |
@@ -68,7 +71,12 @@ jobs:
 
       - name: Package release archive
         run: |
+          version="1.0.0"
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
           LLAM_RELEASE_VERSION="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}" \
+          LLAM_VERSION="$version" \
             ./scripts/package_release.sh "${{ matrix.target }}"
 
       - name: Upload platform artifact
@@ -113,12 +121,15 @@ jobs:
             echo "# LLAM ${version}"
             echo
             echo "LLAM ${version} publishes native runtime builds for Linux and macOS."
+            echo "Native Windows 10/11 support is planned but not shipped in this release."
             echo
             echo "## Highlights"
             echo
             echo "- Native Darwin x86_64 assembly context switching for Intel Mac builds."
             echo "- kqueue-based macOS I/O backend for both Apple Silicon and Intel Mac."
             echo "- io_uring/liburing Linux I/O backend for x86_64 and aarch64."
+            echo "- Windows roadmap documented for the planned IOCP/Fiber backend."
+            echo "- SDK metadata for CMake and pkg-config consumers."
             echo
             echo "## Downloads"
             echo
@@ -143,7 +154,13 @@ jobs:
             echo "- Public headers under \`include/\`."
             echo "- Static runtime library: \`libllam_runtime.a\`."
             echo "- Platform shared runtime library: \`libllam_runtime.so\` or \`libllam_runtime.dylib\`."
+            echo "- CMake package files under \`share/llam/cmake/\` and pkg-config metadata under \`lib/pkgconfig/\`."
+            echo "- Optional archive installer: \`install.sh --prefix <dir>\`."
             echo "- Docs, examples, and the bundled \`demo\`, \`stress\`, and \`bench\` executables."
+            echo
+            echo "## Windows Status"
+            echo
+            echo "Native Windows archives are not published for ${version}. Use WSL to verify the Linux backend on Windows hosts until the native IOCP/Fiber backend lands."
             echo
             echo "## Verification"
             echo

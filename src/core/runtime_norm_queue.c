@@ -32,8 +32,8 @@
  * @param shard Shard to inspect.
  * @return Current normal-lane depth, or 0 for NULL.
  */
-unsigned nm_norm_queue_depth(const nm_shard_t *shard) {
-    return shard != NULL ? atomic_load_explicit(&((nm_shard_t *)shard)->norm_depth, memory_order_acquire) : 0U;
+unsigned llam_norm_queue_depth(const llam_shard_t *shard) {
+    return shard != NULL ? atomic_load_explicit(&((llam_shard_t *)shard)->norm_depth, memory_order_acquire) : 0U;
 }
 
 /**
@@ -43,7 +43,7 @@ unsigned nm_norm_queue_depth(const nm_shard_t *shard) {
  *
  * @param deque Deque storage to initialize.
  */
-void nm_cldeque_init(nm_cldeque_t *deque) {
+void llam_cldeque_init(llam_cldeque_t *deque) {
     size_t i;
 
     if (deque == NULL) {
@@ -51,7 +51,7 @@ void nm_cldeque_init(nm_cldeque_t *deque) {
     }
     atomic_init(&deque->top, 0U);
     atomic_init(&deque->bottom, 0U);
-    for (i = 0; i < NM_NORM_QUEUE_CAP; ++i) {
+    for (i = 0; i < LLAM_NORM_QUEUE_CAP; ++i) {
         deque->buffer[i] = NULL;
     }
 }
@@ -63,7 +63,7 @@ void nm_cldeque_init(nm_cldeque_t *deque) {
  * @param task  Task to enqueue.
  * @return true on success, false if the bounded deque is full.
  */
-bool nm_cldeque_push_bottom(nm_cldeque_t *deque, nm_task_t *task) {
+bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
     size_t bottom;
     size_t top;
 
@@ -73,11 +73,11 @@ bool nm_cldeque_push_bottom(nm_cldeque_t *deque, nm_task_t *task) {
 
     bottom = atomic_load_explicit(&deque->bottom, memory_order_relaxed);
     top = atomic_load_explicit(&deque->top, memory_order_acquire);
-    if (bottom - top >= NM_NORM_QUEUE_CAP) {
+    if (bottom - top >= LLAM_NORM_QUEUE_CAP) {
         return false;
     }
 
-    deque->buffer[bottom & (NM_NORM_QUEUE_CAP - 1U)] = task;
+    deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)] = task;
     // Publish the task pointer before moving bottom so thieves never observe an
     // initialized slot as available without the payload.
     atomic_thread_fence(memory_order_release);
@@ -91,10 +91,10 @@ bool nm_cldeque_push_bottom(nm_cldeque_t *deque, nm_task_t *task) {
  * @param deque Deque owned by the current shard.
  * @return Task on success, or NULL on empty/lost last-item race.
  */
-static nm_task_t *nm_cldeque_pop_bottom(nm_cldeque_t *deque) {
+static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     size_t bottom;
     size_t top;
-    nm_task_t *task;
+    llam_task_t *task;
 
     if (deque == NULL) {
         return NULL;
@@ -114,7 +114,7 @@ static nm_task_t *nm_cldeque_pop_bottom(nm_cldeque_t *deque) {
         return NULL;
     }
 
-    task = deque->buffer[bottom & (NM_NORM_QUEUE_CAP - 1U)];
+    task = deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)];
     if (top == bottom) {
         size_t expected = top;
 
@@ -131,7 +131,7 @@ static nm_task_t *nm_cldeque_pop_bottom(nm_cldeque_t *deque) {
     }
 
     if (task != NULL) {
-        deque->buffer[bottom & (NM_NORM_QUEUE_CAP - 1U)] = NULL;
+        deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)] = NULL;
     }
     return task;
 }
@@ -142,10 +142,10 @@ static nm_task_t *nm_cldeque_pop_bottom(nm_cldeque_t *deque) {
  * @param deque Victim deque.
  * @return Stolen task on success, or NULL on empty/lost race.
  */
-static nm_task_t *nm_cldeque_steal_top(nm_cldeque_t *deque) {
+static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
     size_t top;
     size_t bottom;
-    nm_task_t *task;
+    llam_task_t *task;
 
     if (deque == NULL) {
         return NULL;
@@ -158,7 +158,7 @@ static nm_task_t *nm_cldeque_steal_top(nm_cldeque_t *deque) {
         return NULL;
     }
 
-    task = deque->buffer[top & (NM_NORM_QUEUE_CAP - 1U)];
+    task = deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)];
     if (task == NULL) {
         return NULL;
     }
@@ -175,7 +175,7 @@ static nm_task_t *nm_cldeque_steal_top(nm_cldeque_t *deque) {
         }
     }
 
-    deque->buffer[top & (NM_NORM_QUEUE_CAP - 1U)] = NULL;
+    deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)] = NULL;
     return task;
 }
 
@@ -186,17 +186,17 @@ static nm_task_t *nm_cldeque_steal_top(nm_cldeque_t *deque) {
  * @param task  Task to enqueue.
  * @return true on queue success, false if overflow handling was needed.
  */
-bool nm_norm_queue_push_owner_locked(nm_shard_t *shard, nm_task_t *task) {
+bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
     bool pushed;
 
     if (shard == NULL || task == NULL) {
         return false;
     }
 
-    if (nm_lockfree_normq_enabled(shard->runtime)) {
-        pushed = nm_cldeque_push_bottom(&shard->norm_cldeque, task);
+    if (llam_lockfree_normq_enabled(shard->runtime)) {
+        pushed = llam_cldeque_push_bottom(&shard->norm_cldeque, task);
     } else {
-        pushed = nm_queue_push_bounded_locked(shard, &shard->norm_q, NM_NORM_QUEUE_CAP, task);
+        pushed = llam_queue_push_bounded_locked(shard, &shard->norm_q, LLAM_NORM_QUEUE_CAP, task);
     }
 
     if (pushed) {
@@ -205,11 +205,11 @@ bool nm_norm_queue_push_owner_locked(nm_shard_t *shard, nm_task_t *task) {
         return true;
     }
 
-    if (nm_lockfree_normq_enabled(shard->runtime)) {
+    if (llam_lockfree_normq_enabled(shard->runtime)) {
         shard->metrics.queue_overflows += 1U;
         // Lock-free deque overflow spills to the runtime overflow queue so the
         // task is not lost when the bounded deque is saturated.
-        nm_enqueue_overflow_task(shard->runtime, task);
+        llam_enqueue_overflow_task(shard->runtime, task);
     }
     return false;
 }
@@ -221,21 +221,21 @@ bool nm_norm_queue_push_owner_locked(nm_shard_t *shard, nm_task_t *task) {
  * @param task  Yielding task.
  * @return true on success.
  */
-bool nm_norm_queue_push_yield_locked(nm_shard_t *shard, nm_task_t *task) {
+bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task) {
     bool pushed;
 
     if (shard == NULL || task == NULL) {
         return false;
     }
-    if (!nm_lockfree_normq_enabled(shard->runtime)) {
-        return nm_norm_queue_push_owner_locked(shard, task);
+    if (!llam_lockfree_normq_enabled(shard->runtime)) {
+        return llam_norm_queue_push_owner_locked(shard, task);
     }
 
     /*
      * Owner pops the Chase-Lev deque LIFO. Yielded tasks need FIFO behavior so
      * a cooperative handoff can run older peer work before resuming itself.
      */
-    pushed = nm_queue_push_bounded_locked(shard, &shard->norm_q, NM_NORM_QUEUE_CAP, task);
+    pushed = llam_queue_push_bounded_locked(shard, &shard->norm_q, LLAM_NORM_QUEUE_CAP, task);
     if (pushed) {
         atomic_fetch_add_explicit(&shard->norm_depth, 1U, memory_order_release);
         shard->metrics.norm_enqueues += 1U;
@@ -249,20 +249,20 @@ bool nm_norm_queue_push_yield_locked(nm_shard_t *shard, nm_task_t *task) {
  * @param shard Owner shard.
  * @return Runnable task, or NULL when the normal lane is empty.
  */
-nm_task_t *nm_norm_queue_pop_owner_locked(nm_shard_t *shard) {
-    nm_task_t *task;
+llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard) {
+    llam_task_t *task;
 
     if (shard == NULL) {
         return NULL;
     }
 
-    if (nm_lockfree_normq_enabled(shard->runtime)) {
-        task = nm_cldeque_pop_bottom(&shard->norm_cldeque);
+    if (llam_lockfree_normq_enabled(shard->runtime)) {
+        task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
         if (task == NULL) {
-            task = nm_queue_pop_head(&shard->norm_q);
+            task = llam_queue_pop_head(&shard->norm_q);
         }
     } else {
-        task = nm_queue_pop_head(&shard->norm_q);
+        task = llam_queue_pop_head(&shard->norm_q);
     }
 
     if (task != NULL) {
@@ -277,14 +277,14 @@ nm_task_t *nm_norm_queue_pop_owner_locked(nm_shard_t *shard) {
  * @param victim Victim shard.
  * @return Stolen task, or NULL if stealing is unavailable or lost a race.
  */
-nm_task_t *nm_norm_queue_steal(nm_shard_t *victim) {
-    nm_task_t *task;
+llam_task_t *llam_norm_queue_steal(llam_shard_t *victim) {
+    llam_task_t *task;
 
-    if (victim == NULL || !nm_lockfree_normq_enabled(victim->runtime)) {
+    if (victim == NULL || !llam_lockfree_normq_enabled(victim->runtime)) {
         return NULL;
     }
 
-    task = nm_cldeque_steal_top(&victim->norm_cldeque);
+    task = llam_cldeque_steal_top(&victim->norm_cldeque);
     if (task != NULL) {
         atomic_fetch_sub_explicit(&victim->norm_depth, 1U, memory_order_release);
     }

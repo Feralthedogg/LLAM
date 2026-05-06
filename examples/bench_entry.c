@@ -65,11 +65,7 @@ int main(void) {
     llam_runtime_opts_t runtime_opts = {
         .deterministic = 0U,
         .forced_yield_every = 0U,
-        .experimental_worker_rings = 0U,
-        .experimental_worker_rings_multishot = 0U,
-        .experimental_dynamic_workers = 0U,
-        .experimental_lockfree_normq = 1U,
-        .experimental_huge_alloc = 0U,
+        .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ,
     };
     unsigned rounds = bench_env_u32("LLAM_BENCH_ROUNDS", 21U, 512U);
     unsigned warmup_rounds = bench_env_u32_allow_zero("LLAM_BENCH_WARMUP_ROUNDS", 0U, 128U);
@@ -87,16 +83,41 @@ int main(void) {
     int sqpoll_cpu = bench_env_i32("LLAM_SQPOLL_CPU", -1, -1, 4096);
     const char *runtime_profile = llam_example_env_get("LLAM_RUNTIME_PROFILE");
     uint64_t *samples = calloc(total_rounds, sizeof(*samples));
+    unsigned worker_rings;
+    unsigned worker_rings_multishot;
+    unsigned dynamic_workers;
+    unsigned lockfree_normq;
+    unsigned huge_alloc;
+    unsigned sqpoll;
     int rc = 0;
 
-    runtime_opts.experimental_worker_rings = bench_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS", 0U);
-    runtime_opts.experimental_worker_rings_multishot = bench_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS_MULTISHOT", 0U);
-    runtime_opts.experimental_dynamic_workers = bench_env_flag_default("LLAM_EXPERIMENTAL_DYNAMIC_WORKERS", 1U);
-    runtime_opts.experimental_lockfree_normq = bench_env_flag_default("LLAM_EXPERIMENTAL_LOCKFREE_NORMQ", 1U);
-    runtime_opts.experimental_huge_alloc = bench_env_flag_default("LLAM_EXPERIMENTAL_HUGE_ALLOC", 0U);
+    worker_rings = bench_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS", 0U);
+    worker_rings_multishot = bench_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS_MULTISHOT", 0U);
+    dynamic_workers = bench_env_flag_default("LLAM_EXPERIMENTAL_DYNAMIC_WORKERS", 1U);
+    lockfree_normq = bench_env_flag_default("LLAM_EXPERIMENTAL_LOCKFREE_NORMQ", 1U);
+    huge_alloc = bench_env_flag_default("LLAM_EXPERIMENTAL_HUGE_ALLOC", 0U);
+    sqpoll = bench_env_flag_default("LLAM_EXPERIMENTAL_SQPOLL", 0U);
+    runtime_opts.experimental_flags = 0U;
+    if (worker_rings != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS;
+    }
+    if (worker_rings_multishot != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT;
+    }
+    if (dynamic_workers != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
+    }
+    if (lockfree_normq != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    }
+    if (huge_alloc != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC;
+    }
+    if (sqpoll != 0U) {
+        runtime_opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL;
+    }
     runtime_opts.idle_spin_ns = idle_spin_ns;
     runtime_opts.idle_spin_max_iters = idle_spin_iters;
-    runtime_opts.experimental_sqpoll = bench_env_flag_default("LLAM_EXPERIMENTAL_SQPOLL", 0U);
     runtime_opts.sqpoll_cpu = sqpoll_cpu;
     if (samples == NULL) {
         perror("calloc");
@@ -107,12 +128,12 @@ int main(void) {
            rounds,
            warmup_rounds,
            runtime_profile != NULL && runtime_profile[0] != '\0' ? runtime_profile : "balanced",
-           runtime_opts.experimental_worker_rings,
-           runtime_opts.experimental_worker_rings_multishot,
-           runtime_opts.experimental_dynamic_workers,
-           runtime_opts.experimental_lockfree_normq,
-           runtime_opts.experimental_huge_alloc,
-           runtime_opts.experimental_sqpoll,
+           worker_rings,
+           worker_rings_multishot,
+           dynamic_workers,
+           lockfree_normq,
+           huge_alloc,
+           sqpoll,
            runtime_opts.sqpoll_cpu,
            idle_spin_ns,
            idle_spin_iters,

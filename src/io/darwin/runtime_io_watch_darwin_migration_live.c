@@ -1,12 +1,12 @@
 /**
- * @file src/io/runtime_io_watch_linux_migration_live.c
- * @brief Linux live I/O watch migration checks and inflight ownership handling.
+ * @file src/io/darwin/runtime_io_watch_darwin_migration_live.c
+ * @brief Darwin live I/O watch migration checks and inflight ownership handling.
  *
  * @details
- * Live migration handles events that arrive on a source node while watch state is
- * moving to a target node. To avoid deadlocks, source and target watch locks are
- * always acquired by ascending node index, and task completions are deferred
- * until after both locks are released.
+ * Darwin live migration mirrors the Linux watch migration model, but receive
+ * readiness is copied payload data instead of provided-buffer ownership. Source
+ * and target watch locks are always acquired by node index; completions are
+ * queued and drained after both locks are released.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -24,23 +24,23 @@
  * limitations under the License.
  */
 
-#include "runtime_io_watch_linux_internal.h"
+#include "runtime_io_watch_darwin_internal.h"
 
 /** @brief Ensure a poll watch has an activation control queued if needed. */
-bool nm_arm_poll_watch_locked(nm_node_t *node, nm_poll_watch_t *watch, bool *kick_node) {
+bool llam_arm_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch, bool *kick_node) {
     if (node == NULL || watch == NULL) {
         return false;
     }
     if (!watch->active && !watch->activating && watch->deactivate_queued) {
-        // Drop a not-yet-submitted deactivate when new demand arrives before the
-        // worker consumes it.
-        if (!nm_drop_node_control_locked(node, NM_IO_CONTROL_POLL_DEACTIVATE, watch)) {
+        // If deactivate has not reached the worker yet, remove it and reuse the
+        // existing watch object.
+        if (!llam_drop_node_control_locked(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch)) {
             return false;
         }
         watch->deactivate_queued = false;
     }
     if (!watch->active && !watch->activating) {
-        if (nm_node_queue_control_locked(node, NM_IO_CONTROL_POLL_ACTIVATE, watch) != 0) {
+        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch) != 0) {
             return false;
         }
         watch->activating = true;
@@ -52,18 +52,18 @@ bool nm_arm_poll_watch_locked(nm_node_t *node, nm_poll_watch_t *watch, bool *kic
 }
 
 /** @brief Ensure an accept watch has an activation control queued if needed. */
-bool nm_arm_accept_watch_locked(nm_node_t *node, nm_accept_watch_t *watch, bool *kick_node) {
+bool llam_arm_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch, bool *kick_node) {
     if (node == NULL || watch == NULL) {
         return false;
     }
     if (!watch->active && !watch->activating && watch->deactivate_queued) {
-        if (!nm_drop_node_control_locked(node, NM_IO_CONTROL_ACCEPT_DEACTIVATE, watch)) {
+        if (!llam_drop_node_control_locked(node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch)) {
             return false;
         }
         watch->deactivate_queued = false;
     }
     if (!watch->active && !watch->activating) {
-        if (nm_node_queue_control_locked(node, NM_IO_CONTROL_ACCEPT_ACTIVATE, watch) != 0) {
+        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_ACCEPT_ACTIVATE, watch) != 0) {
             return false;
         }
         watch->activating = true;
@@ -75,18 +75,18 @@ bool nm_arm_accept_watch_locked(nm_node_t *node, nm_accept_watch_t *watch, bool 
 }
 
 /** @brief Ensure a receive watch has an activation control queued if needed. */
-bool nm_arm_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch, bool *kick_node) {
+bool llam_arm_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch, bool *kick_node) {
     if (node == NULL || watch == NULL) {
         return false;
     }
     if (!watch->active && !watch->activating && watch->deactivate_queued) {
-        if (!nm_drop_node_control_locked(node, NM_IO_CONTROL_RECV_DEACTIVATE, watch)) {
+        if (!llam_drop_node_control_locked(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch)) {
             return false;
         }
         watch->deactivate_queued = false;
     }
     if (!watch->active && !watch->activating) {
-        if (nm_node_queue_control_locked(node, NM_IO_CONTROL_RECV_ACTIVATE, watch) != 0) {
+        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_RECV_ACTIVATE, watch) != 0) {
             return false;
         }
         watch->activating = true;
@@ -97,26 +97,53 @@ bool nm_arm_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch, bool *kic
     return true;
 }
 
+/** @brief Pick the owner node for multishot watch state. */
+unsigned llam_multishot_owner_node_index(llam_runtime_t *rt, unsigned fallback_node_index, int fd) {
+    struct stat st;
+    uint64_t hash;
+
+    if (rt == NULL) {
+        return 0U;
+    }
+    if (fallback_node_index >= rt->active_nodes) {
+        fallback_node_index = rt->active_nodes > 0U ? 0U : fallback_node_index;
+    }
+    if (rt->experimental_shard_rings == 0U ||
+        rt->experimental_shard_rings_multishot == 0U ||
+        rt->active_nodes <= 1U ||
+        fd < 0) {
+        return fallback_node_index;
+    }
+    if (fstat(fd, &st) != 0) {
+        return fallback_node_index;
+    }
+
+    hash = llam_hash_watch_identity_u64((uint64_t)st.st_dev);
+    hash ^= llam_hash_watch_identity_u64((uint64_t)st.st_ino);
+    hash ^= llam_hash_watch_identity_u64((uint64_t)(unsigned)fd);
+    return (unsigned)(hash % rt->active_nodes);
+}
+
 /**
- * @brief Forward poll readiness from a source watch to a target node.
+ * @brief Forward poll readiness from a source node to a migration target.
  *
- * @return true if the target consumed or buffered the event.
+ * @return true if the target consumed or buffered the readiness.
  */
-bool nm_forward_live_poll_watch_event(nm_node_t *source,
+bool llam_forward_live_poll_watch_event(llam_node_t *source,
                                              int fd,
                                              short events,
                                              unsigned target_index,
                                              short revents) {
-    nm_poll_watch_completion_t *poll_completions = NULL;
-    nm_poll_watch_completion_t *poll_completion_tail = NULL;
-    nm_runtime_t *rt;
-    nm_node_t *target;
-    nm_node_t *first;
-    nm_node_t *second;
-    nm_node_t *source_locked;
-    nm_node_t *target_locked;
-    nm_poll_watch_t *source_watch;
-    nm_poll_watch_t *target_watch;
+    llam_darwin_poll_completion_t *poll_completions = NULL;
+    llam_darwin_poll_completion_t *poll_completion_tail = NULL;
+    llam_runtime_t *rt;
+    llam_node_t *target;
+    llam_node_t *first;
+    llam_node_t *second;
+    llam_node_t *source_locked;
+    llam_node_t *target_locked;
+    llam_poll_watch_t *source_watch;
+    llam_poll_watch_t *target_watch;
     bool ok = false;
 
     if (source == NULL || source->runtime == NULL) {
@@ -130,28 +157,27 @@ bool nm_forward_live_poll_watch_event(nm_node_t *source,
     target = &rt->nodes[target_index];
     first = source->index < target->index ? source : target;
     second = first == source ? target : source;
-    // Lock order by node index is required because migrations can be initiated
-    // from either side.
+    // Lock in stable node order to avoid migration deadlocks.
     pthread_mutex_lock(&first->watch_lock);
     pthread_mutex_lock(&second->watch_lock);
     source_locked = first == source ? first : second;
     target_locked = source_locked == source ? target : source;
 
-    source_watch = nm_find_poll_watch_locked(source_locked, fd, events);
+    source_watch = llam_find_poll_watch_locked(source_locked, fd, events);
     if (source_watch != NULL && source_watch->migrate_target_node_index != target_index) {
         goto out;
     }
-    target_watch = nm_get_or_create_poll_watch_locked(target_locked, fd, events);
+    target_watch = llam_get_or_create_poll_watch_locked(target_locked, fd, events);
     if (target_watch == NULL) {
         goto out;
     }
     if (target_watch->wait_head != NULL) {
-        nm_io_req_t *waiters = nm_poll_watch_take_waiters(target_watch);
+        llam_io_req_t *waiters = llam_poll_watch_take_waiters(target_watch);
         int merged_revents = revents | target_watch->sticky_revents;
 
-        // Complete outside the watch locks. If allocation fails, restore the
-        // waiter list so no parked task is lost.
-        if (!nm_poll_watch_completion_push(&poll_completions, &poll_completion_tail, waiters, merged_revents)) {
+        // Complete waiters after releasing watch locks. Restore the waiter list
+        // if completion-node allocation fails.
+        if (!llam_darwin_poll_completion_push(&poll_completions, &poll_completion_tail, waiters, merged_revents)) {
             if (waiters != NULL) {
                 target_watch->wait_head = waiters;
                 target_watch->wait_tail = waiters;
@@ -172,26 +198,26 @@ bool nm_forward_live_poll_watch_event(nm_node_t *source,
 out:
     pthread_mutex_unlock(&second->watch_lock);
     pthread_mutex_unlock(&first->watch_lock);
-    nm_poll_watch_completion_drain(target, poll_completions);
+    llam_darwin_poll_completion_drain(target, poll_completions);
     return ok;
 }
 
 /**
- * @brief Forward an accepted fd from a source watch to a target node.
+ * @brief Forward an accepted fd from source to target during migration.
  *
  * @return true if ownership of @p accepted_fd transferred.
  */
-bool nm_forward_live_accept_watch_ready(nm_node_t *source, int fd, unsigned target_index, int accepted_fd) {
-    nm_accept_watch_completion_t *accept_completions = NULL;
-    nm_accept_watch_completion_t *accept_completion_tail = NULL;
-    nm_runtime_t *rt;
-    nm_node_t *target;
-    nm_node_t *first;
-    nm_node_t *second;
-    nm_node_t *source_locked;
-    nm_node_t *target_locked;
-    nm_accept_watch_t *source_watch;
-    nm_accept_watch_t *target_watch;
+bool llam_forward_live_accept_watch_ready(llam_node_t *source, int fd, unsigned target_index, int accepted_fd) {
+    llam_darwin_accept_completion_t *accept_completions = NULL;
+    llam_darwin_accept_completion_t *accept_completion_tail = NULL;
+    llam_runtime_t *rt;
+    llam_node_t *target;
+    llam_node_t *first;
+    llam_node_t *second;
+    llam_node_t *source_locked;
+    llam_node_t *target_locked;
+    llam_accept_watch_t *source_watch;
+    llam_accept_watch_t *target_watch;
     bool ok = false;
 
     if (source == NULL || source->runtime == NULL) {
@@ -210,21 +236,19 @@ bool nm_forward_live_accept_watch_ready(nm_node_t *source, int fd, unsigned targ
     source_locked = first == source ? first : second;
     target_locked = source_locked == source ? target : source;
 
-    source_watch = nm_find_accept_watch_locked(source_locked, fd);
+    source_watch = llam_find_accept_watch_locked(source_locked, fd);
     if (source_watch != NULL && source_watch->migrate_target_node_index != target_index) {
         goto out;
     }
-    target_watch = nm_get_or_create_accept_watch_locked(target_locked, fd);
+    target_watch = llam_get_or_create_accept_watch_locked(target_locked, fd);
     if (target_watch == NULL) {
         goto out;
     }
     if (target_watch->wait_head != NULL) {
-        nm_io_req_t *waiter = nm_accept_watch_pop_waiter(target_watch);
+        llam_io_req_t *waiter = llam_accept_watch_pop_waiter(target_watch);
 
-        // Completion list ownership transfers accepted_fd to the waiter after
-        // locks are released.
         if (waiter == NULL ||
-            !nm_accept_watch_completion_push(&accept_completions, &accept_completion_tail, waiter, accepted_fd)) {
+            !llam_darwin_accept_completion_push(&accept_completions, &accept_completion_tail, waiter, accepted_fd)) {
             if (waiter != NULL) {
                 waiter->next = target_watch->wait_head;
                 target_watch->wait_head = waiter;
@@ -238,7 +262,7 @@ bool nm_forward_live_accept_watch_ready(nm_node_t *source, int fd, unsigned targ
         goto out;
     }
 
-    if (!nm_accept_watch_push_ready_owned(target_watch, accepted_fd)) {
+    if (!llam_accept_watch_push_ready_owned(target_watch, accepted_fd)) {
         goto out;
     }
     ok = true;
@@ -246,34 +270,32 @@ bool nm_forward_live_accept_watch_ready(nm_node_t *source, int fd, unsigned targ
 out:
     pthread_mutex_unlock(&second->watch_lock);
     pthread_mutex_unlock(&first->watch_lock);
-    nm_accept_watch_completion_drain(target, accept_completions);
+    llam_darwin_complete_accept_completions(target, accept_completions);
     return ok;
 }
 
 /**
- * @brief Forward receive readiness from a source watch to a target node.
+ * @brief Forward copied receive readiness from source to target during migration.
  *
- * @return true if the target consumed or buffered the readiness entry.
+ * @return true if target consumed or buffered the payload.
  */
-bool nm_forward_live_recv_watch_ready(nm_node_t *source,
+bool llam_forward_live_recv_watch_ready(llam_node_t *source,
                                              int fd,
                                              dev_t st_dev,
                                              ino_t st_ino,
                                              unsigned target_index,
-                                             size_t size,
-                                             unsigned short bid,
-                                             bool has_buffer,
-                                             unsigned ready_node_index) {
-    nm_recv_watch_completion_t *recv_completions = NULL;
-    nm_recv_watch_completion_t *recv_completion_tail = NULL;
-    nm_runtime_t *rt;
-    nm_node_t *target;
-    nm_node_t *first;
-    nm_node_t *second;
-    nm_node_t *source_locked;
-    nm_node_t *target_locked;
-    nm_recv_watch_t *source_watch;
-    nm_recv_watch_t *target_watch;
+                                             const unsigned char *data,
+                                             size_t size) {
+    llam_darwin_recv_completion_t *recv_completions = NULL;
+    llam_darwin_recv_completion_t *recv_completion_tail = NULL;
+    llam_runtime_t *rt;
+    llam_node_t *target;
+    llam_node_t *first;
+    llam_node_t *second;
+    llam_node_t *source_locked;
+    llam_node_t *target_locked;
+    llam_recv_watch_t *source_watch;
+    llam_recv_watch_t *target_watch;
     bool ok = false;
 
     if (source == NULL || source->runtime == NULL) {
@@ -292,27 +314,25 @@ bool nm_forward_live_recv_watch_ready(nm_node_t *source,
     source_locked = first == source ? first : second;
     target_locked = source_locked == source ? target : source;
 
-    source_watch = nm_find_recv_watch_locked(source_locked, fd, st_dev, st_ino);
+    source_watch = llam_find_recv_watch_locked(source_locked, fd, st_dev, st_ino);
     if (source_watch != NULL && source_watch->migrate_target_node_index != target_index) {
         goto out;
     }
-    target_watch = nm_get_or_create_recv_watch_locked(target_locked, fd);
+    target_watch = llam_get_or_create_recv_watch_locked(target_locked, fd);
     if (target_watch == NULL) {
         goto out;
     }
     if (target_watch->wait_head != NULL) {
-        nm_io_req_t *waiter = nm_recv_watch_pop_waiter(target_watch);
+        llam_io_req_t *waiter = llam_recv_watch_pop_waiter(target_watch);
 
-        // Preserve provided-buffer ownership through the deferred completion so
-        // the normal completion path attaches/recycles it correctly.
+        // Darwin forwards a copied packet; ownership is transferred through the
+        // deferred completion list.
         if (waiter == NULL ||
-            !nm_recv_watch_completion_push(&recv_completions,
-                                           &recv_completion_tail,
-                                           waiter,
-                                           size,
-                                           bid,
-                                           has_buffer,
-                                           ready_node_index)) {
+            !llam_darwin_recv_completion_push_copy(&recv_completions,
+                                                 &recv_completion_tail,
+                                                 waiter,
+                                                 data,
+                                                 size)) {
             if (waiter != NULL) {
                 waiter->next = target_watch->wait_head;
                 target_watch->wait_head = waiter;
@@ -326,7 +346,7 @@ bool nm_forward_live_recv_watch_ready(nm_node_t *source,
         goto out;
     }
 
-    if (!nm_recv_watch_push_ready(target_watch, size, bid, has_buffer, ready_node_index, NULL, 0U)) {
+    if (!llam_recv_watch_push_ready_copy(target_watch, data, size)) {
         goto out;
     }
     ok = true;
@@ -334,31 +354,23 @@ bool nm_forward_live_recv_watch_ready(nm_node_t *source,
 out:
     pthread_mutex_unlock(&second->watch_lock);
     pthread_mutex_unlock(&first->watch_lock);
-    nm_recv_watch_completion_drain(rt, target, recv_completions);
+    llam_darwin_recv_completion_drain(target, recv_completions);
     return ok;
 }
 
-/**
- * @brief Finish poll watch migration after source deactivation completes.
- *
- * @param source       Source node.
- * @param watch        Source watch that is no longer active.
- * @param target_index Target node index.
- * @param kick_target  Set true when target worker should be woken.
- * @return true if migration completed.
- */
-bool nm_finalize_poll_watch_migration(nm_node_t *source,
-                                             nm_poll_watch_t *watch,
+/** @brief Finish poll watch migration after source deactivation. */
+bool llam_finalize_poll_watch_migration(llam_node_t *source,
+                                             llam_poll_watch_t *watch,
                                              unsigned target_index,
                                              bool *kick_target) {
-    nm_poll_watch_completion_t *poll_completions = NULL;
-    nm_poll_watch_completion_t *poll_completion_tail = NULL;
-    nm_runtime_t *rt;
-    nm_node_t *target;
-    nm_node_t *first;
-    nm_node_t *second;
-    nm_node_t *source_locked;
-    nm_node_t *target_locked;
+    llam_darwin_poll_completion_t *poll_completions = NULL;
+    llam_darwin_poll_completion_t *poll_completion_tail = NULL;
+    llam_runtime_t *rt;
+    llam_node_t *target;
+    llam_node_t *first;
+    llam_node_t *second;
+    llam_node_t *source_locked;
+    llam_node_t *target_locked;
     bool ok = false;
 
     if (kick_target != NULL) {
@@ -383,15 +395,15 @@ bool nm_finalize_poll_watch_migration(nm_node_t *source,
         !watch->active &&
         !watch->activating &&
         !watch->deactivate_queued) {
-        nm_poll_watch_t *target_watch = nm_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
+        llam_poll_watch_t *target_watch = llam_get_or_create_poll_watch_locked(target_locked, watch->fd, watch->events);
 
         if (target_watch != NULL) {
             if (watch->sticky_revents != 0) {
                 if (target_watch->wait_head != NULL) {
-                    nm_io_req_t *waiters = nm_poll_watch_take_waiters(target_watch);
+                    llam_io_req_t *waiters = llam_poll_watch_take_waiters(target_watch);
                     int revents = watch->sticky_revents | target_watch->sticky_revents;
 
-                    if (!nm_poll_watch_completion_push(&poll_completions, &poll_completion_tail, waiters, revents)) {
+                    if (!llam_darwin_poll_completion_push(&poll_completions, &poll_completion_tail, waiters, revents)) {
                         if (waiters != NULL) {
                             target_watch->wait_head = waiters;
                             target_watch->wait_tail = waiters;
@@ -408,40 +420,36 @@ bool nm_finalize_poll_watch_migration(nm_node_t *source,
                     ok = true;
                 }
             } else {
-                // No sticky event to transfer; arm the target watch so future
-                // readiness arrives on the target node.
-                ok = nm_arm_poll_watch_locked(target_locked, target_watch, kick_target);
+                // No sticky event remains; arm target so future readiness lands
+                // on the new node.
+                ok = llam_arm_poll_watch_locked(target_locked, target_watch, kick_target);
             }
         }
         if (ok) {
             watch->migrate_target_node_index = UINT_MAX;
-            nm_destroy_poll_watch_locked(source_locked, watch);
+            llam_destroy_poll_watch_locked(source_locked, watch);
         }
     }
 
     pthread_mutex_unlock(&second->watch_lock);
     pthread_mutex_unlock(&first->watch_lock);
-    nm_poll_watch_completion_drain(target, poll_completions);
+    llam_darwin_poll_completion_drain(target, poll_completions);
     return ok;
 }
 
-/**
- * @brief Finish accept watch migration after source deactivation completes.
- *
- * @return true if migration completed.
- */
-bool nm_finalize_accept_watch_migration(nm_node_t *source,
-                                               nm_accept_watch_t *watch,
+/** @brief Finish accept watch migration after source deactivation. */
+bool llam_finalize_accept_watch_migration(llam_node_t *source,
+                                               llam_accept_watch_t *watch,
                                                unsigned target_index,
                                                bool *kick_target) {
-    nm_accept_watch_completion_t *accept_completions = NULL;
-    nm_accept_watch_completion_t *accept_completion_tail = NULL;
-    nm_runtime_t *rt;
-    nm_node_t *target;
-    nm_node_t *first;
-    nm_node_t *second;
-    nm_node_t *source_locked;
-    nm_node_t *target_locked;
+    llam_darwin_accept_completion_t *accept_completions = NULL;
+    llam_darwin_accept_completion_t *accept_completion_tail = NULL;
+    llam_runtime_t *rt;
+    llam_node_t *target;
+    llam_node_t *first;
+    llam_node_t *second;
+    llam_node_t *source_locked;
+    llam_node_t *target_locked;
     bool ok = false;
 
     if (kick_target != NULL) {
@@ -466,18 +474,21 @@ bool nm_finalize_accept_watch_migration(nm_node_t *source,
         !watch->active &&
         !watch->activating &&
         !watch->deactivate_queued) {
-        nm_accept_watch_t *target_watch = nm_get_or_create_accept_watch_locked(target_locked, watch->fd);
+        llam_accept_watch_t *target_watch = llam_get_or_create_accept_watch_locked(target_locked, watch->fd);
 
         if (target_watch != NULL) {
             if (watch->ready_head != NULL) {
-                // First satisfy target waiters from source ready queue, then
-                // splice remaining accepted fds into target's ready queue.
+                // First deliver buffered accepted fds to target waiters, then
+                // splice any leftovers into the target ready queue.
                 while (watch->ready_head != NULL && target_watch->wait_head != NULL) {
-                    nm_accept_ready_t *ready = watch->ready_head;
-                    nm_io_req_t *waiter = nm_accept_watch_pop_waiter(target_watch);
+                    llam_accept_ready_t *ready = watch->ready_head;
+                    llam_io_req_t *waiter = llam_accept_watch_pop_waiter(target_watch);
 
                     if (waiter == NULL ||
-                        !nm_accept_watch_completion_push(&accept_completions, &accept_completion_tail, waiter, ready->fd)) {
+                        !llam_darwin_accept_completion_push(&accept_completions,
+                                                          &accept_completion_tail,
+                                                          waiter,
+                                                          ready->fd)) {
                         if (waiter != NULL) {
                             waiter->next = target_watch->wait_head;
                             target_watch->wait_head = waiter;
@@ -508,38 +519,34 @@ bool nm_finalize_accept_watch_migration(nm_node_t *source,
                 }
                 ok = true;
             } else {
-                ok = nm_arm_accept_watch_locked(target_locked, target_watch, kick_target);
+                ok = llam_arm_accept_watch_locked(target_locked, target_watch, kick_target);
             }
         }
         if (ok) {
             watch->migrate_target_node_index = UINT_MAX;
-            nm_destroy_accept_watch_locked(source_locked, watch);
+            llam_destroy_accept_watch_locked(source_locked, watch);
         }
     }
 
     pthread_mutex_unlock(&second->watch_lock);
     pthread_mutex_unlock(&first->watch_lock);
-    nm_accept_watch_completion_drain(target, accept_completions);
+    llam_darwin_complete_accept_completions(target, accept_completions);
     return ok;
 }
 
-/**
- * @brief Finish receive watch migration after source deactivation completes.
- *
- * @return true if migration completed.
- */
-bool nm_finalize_recv_watch_migration(nm_node_t *source,
-                                             nm_recv_watch_t *watch,
+/** @brief Finish receive watch migration after source deactivation. */
+bool llam_finalize_recv_watch_migration(llam_node_t *source,
+                                             llam_recv_watch_t *watch,
                                              unsigned target_index,
                                              bool *kick_target) {
-    nm_recv_watch_completion_t *recv_completions = NULL;
-    nm_recv_watch_completion_t *recv_completion_tail = NULL;
-    nm_runtime_t *rt;
-    nm_node_t *target;
-    nm_node_t *first;
-    nm_node_t *second;
-    nm_node_t *source_locked;
-    nm_node_t *target_locked;
+    llam_darwin_recv_completion_t *recv_completions = NULL;
+    llam_darwin_recv_completion_t *recv_completion_tail = NULL;
+    llam_runtime_t *rt;
+    llam_node_t *target;
+    llam_node_t *first;
+    llam_node_t *second;
+    llam_node_t *source_locked;
+    llam_node_t *target_locked;
     bool ok = false;
 
     if (kick_target != NULL) {
@@ -564,24 +571,24 @@ bool nm_finalize_recv_watch_migration(nm_node_t *source,
         !watch->active &&
         !watch->activating &&
         !watch->deactivate_queued) {
-        nm_recv_watch_t *target_watch = nm_get_or_create_recv_watch_locked(target_locked, watch->fd);
+        llam_recv_watch_t *target_watch = llam_get_or_create_recv_watch_locked(target_locked, watch->fd);
 
         if (target_watch != NULL) {
             if (watch->ready_head != NULL) {
-                // Move ready entries without copying. Provided-buffer ownership
-                // remains encoded in each ready entry's node_index/bid pair.
+                // Move buffered copied payloads without another copy by
+                // transferring copy_data ownership to deferred completions or
+                // the target ready queue.
                 while (watch->ready_head != NULL && target_watch->wait_head != NULL) {
-                    nm_recv_ready_t *ready = watch->ready_head;
-                    nm_io_req_t *waiter = nm_recv_watch_pop_waiter(target_watch);
+                    llam_recv_ready_t *ready = watch->ready_head;
+                    llam_io_req_t *waiter = llam_recv_watch_pop_waiter(target_watch);
 
                     if (waiter == NULL ||
-                        !nm_recv_watch_completion_push(&recv_completions,
-                                                       &recv_completion_tail,
-                                                       waiter,
-                                                       ready->size,
-                                                       ready->bid,
-                                                       ready->has_buffer,
-                                                       ready->node_index)) {
+                        !llam_darwin_recv_completion_push(&recv_completions,
+                                                        &recv_completion_tail,
+                                                        waiter,
+                                                        ready->size,
+                                                        ready->copy_data,
+                                                        ready->copy_capacity)) {
                         if (waiter != NULL) {
                             waiter->next = target_watch->wait_head;
                             target_watch->wait_head = waiter;
@@ -591,6 +598,7 @@ bool nm_finalize_recv_watch_migration(nm_node_t *source,
                         }
                         break;
                     }
+                    ready->copy_data = NULL;
                     watch->ready_head = ready->next;
                     if (watch->ready_head == NULL) {
                         watch->ready_tail = NULL;
@@ -612,17 +620,17 @@ bool nm_finalize_recv_watch_migration(nm_node_t *source,
                 }
                 ok = true;
             } else {
-                ok = nm_arm_recv_watch_locked(target_locked, target_watch, kick_target);
+                ok = llam_arm_recv_watch_locked(target_locked, target_watch, kick_target);
             }
         }
         if (ok) {
             watch->migrate_target_node_index = UINT_MAX;
-            nm_destroy_recv_watch_locked(source_locked, watch);
+            llam_destroy_recv_watch_locked(source_locked, watch);
         }
     }
 
     pthread_mutex_unlock(&second->watch_lock);
     pthread_mutex_unlock(&first->watch_lock);
-    nm_recv_watch_completion_drain(rt, target, recv_completions);
+    llam_darwin_recv_completion_drain(target, recv_completions);
     return ok;
 }

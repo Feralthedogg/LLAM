@@ -25,15 +25,17 @@
 
 #include "llam/runtime.h"
 
+#include "llam/nm_runtime.h"
+
 #include "runtime_internal.h"
 
 #include <errno.h>
 #include <string.h>
 
-#define LLAM_VERSION_STRING_LITERAL "0.1.0"
+#define LLAM_VERSION_STRING_LITERAL "1.0.0"
 
 /** @brief Return the smaller of two byte counts. */
-static size_t nm_min_size(size_t a, size_t b) {
+static size_t llam_min_size(size_t a, size_t b) {
     return a < b ? a : b;
 }
 
@@ -43,6 +45,45 @@ uint32_t nm_abi_version(void) {
 
 const char *nm_version_string(void) {
     return LLAM_VERSION_STRING_LITERAL;
+}
+
+int nm_runtime_opts_init(nm_runtime_opts_t *opts, size_t opts_size) {
+    nm_runtime_opts_t defaults;
+    size_t copy_size;
+
+    if (opts == NULL || opts_size == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(&defaults, 0, sizeof(defaults));
+    defaults.deterministic = 1U;
+    defaults.sqpoll_cpu = -1;
+    defaults.profile = NM_RUNTIME_PROFILE_BALANCED;
+
+    memset(opts, 0, opts_size);
+    copy_size = llam_min_size(opts_size, sizeof(defaults));
+    memcpy(opts, &defaults, copy_size);
+    return 0;
+}
+
+int nm_spawn_opts_init(nm_spawn_opts_t *opts, size_t opts_size) {
+    nm_spawn_opts_t defaults;
+    size_t copy_size;
+
+    if (opts == NULL || opts_size == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(&defaults, 0, sizeof(defaults));
+    defaults.task_class = NM_TASK_CLASS_DEFAULT;
+    defaults.stack_class = NM_STACK_CLASS_DEFAULT;
+
+    memset(opts, 0, opts_size);
+    copy_size = llam_min_size(opts_size, sizeof(defaults));
+    memcpy(opts, &defaults, copy_size);
+    return 0;
 }
 
 int nm_abi_get_info(nm_abi_info_t *info, size_t info_size) {
@@ -69,7 +110,7 @@ int nm_abi_get_info(nm_abi_info_t *info, size_t info_size) {
     current.platform_name = NM_PLATFORM_NAME;
 
     memset(info, 0, info_size);
-    copy_size = nm_min_size(info_size, sizeof(current));
+    copy_size = llam_min_size(info_size, sizeof(current));
     memcpy(info, &current, copy_size);
     return 0;
 }
@@ -80,6 +121,45 @@ uint32_t llam_abi_version(void) {
 
 const char *llam_version_string(void) {
     return LLAM_VERSION_STRING_LITERAL;
+}
+
+int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
+    llam_runtime_opts_t defaults;
+    size_t copy_size;
+
+    if (opts == NULL || opts_size == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(&defaults, 0, sizeof(defaults));
+    defaults.deterministic = 1U;
+    defaults.sqpoll_cpu = -1;
+    defaults.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+
+    memset(opts, 0, opts_size);
+    copy_size = llam_min_size(opts_size, sizeof(defaults));
+    memcpy(opts, &defaults, copy_size);
+    return 0;
+}
+
+int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size) {
+    llam_spawn_opts_t defaults;
+    size_t copy_size;
+
+    if (opts == NULL || opts_size == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    memset(&defaults, 0, sizeof(defaults));
+    defaults.task_class = LLAM_TASK_CLASS_DEFAULT;
+    defaults.stack_class = LLAM_STACK_CLASS_DEFAULT;
+
+    memset(opts, 0, opts_size);
+    copy_size = llam_min_size(opts_size, sizeof(defaults));
+    memcpy(opts, &defaults, copy_size);
+    return 0;
 }
 
 int llam_abi_get_info(llam_abi_info_t *info, size_t info_size) {
@@ -106,7 +186,7 @@ int llam_abi_get_info(llam_abi_info_t *info, size_t info_size) {
     current.platform_name = LLAM_PLATFORM_NAME;
 
     memset(info, 0, info_size);
-    copy_size = nm_min_size(info_size, sizeof(current));
+    copy_size = llam_min_size(info_size, sizeof(current));
     memcpy(info, &current, copy_size);
     return 0;
 }

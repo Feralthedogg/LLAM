@@ -227,9 +227,11 @@ void sleeper_task(void *arg) {
 
 void blocking_task(void *arg) {
     struct slow_job *job = arg;
+    void *result = NULL;
 
     printf("[block] offloading slow square for %d\n", job->input);
-    llam_call_blocking(slow_square, job);
+    (void)llam_call_blocking_result(slow_square, job, &result);
+    (void)result;
     printf("[block] result=%d\n", job->output);
 }
 
@@ -479,10 +481,13 @@ void io_cancel_trigger_task(void *arg) {
 }
 
 void block_cancel_waiter_task(void *arg) {
+    void *result = NULL;
+
     (void)arg;
-    if (llam_call_blocking(blocking_pause, NULL) == NULL && errno == ECANCELED) {
+    if (llam_call_blocking_result(blocking_pause, NULL, &result) != 0 && errno == ECANCELED) {
         printf("[block-cancel] errno=%d\n", errno);
     } else {
+        (void)result;
         printf("[block-cancel] unexpected completion errno=%d\n", errno);
     }
 }

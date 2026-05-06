@@ -37,7 +37,7 @@
  * @param task       Task pointer passed in callee-saved register x19.
  * @return 0 on success, -1 on invalid arguments.
  */
-int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task_t *task) {
+int llam_ctx_make_task(llam_ctx_t *ctx, void *stack_base, size_t stack_size, llam_task_t *task) {
     uintptr_t stack_top;
 
     if (ctx == NULL || stack_base == NULL || stack_size == 0U || task == NULL) {
@@ -49,7 +49,7 @@ int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task
     stack_top &= ~(uintptr_t)0xFUL;
 
     // The AArch64 ABI requires 16-byte stack alignment. The assembly bootstrap
-    // expects x19 to contain the task pointer and lr to enter nm_fiber_bootstrap.
+    // expects x19 to contain the task pointer and lr to enter llam_fiber_bootstrap.
     ctx->sp = (uint64_t)stack_top;
     ctx->x19 = (uint64_t)(uintptr_t)task;
     ctx->x20 = 0U;
@@ -62,7 +62,7 @@ int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task
     ctx->x27 = 0U;
     ctx->x28 = 0U;
     ctx->fp = 0U;
-    ctx->lr = (uint64_t)(uintptr_t)nm_fiber_bootstrap;
+    ctx->lr = (uint64_t)(uintptr_t)llam_fiber_bootstrap;
     return 0;
 }
 
@@ -73,7 +73,7 @@ int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task
  *
  * @return -1 with @c errno set to ENOSYS.
  */
-int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task_t *task) {
+int llam_ctx_make_task(llam_ctx_t *ctx, void *stack_base, size_t stack_size, llam_task_t *task) {
     (void)ctx;
     (void)stack_base;
     (void)stack_size;

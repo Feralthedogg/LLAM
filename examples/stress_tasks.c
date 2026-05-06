@@ -25,7 +25,7 @@ void storm_child_task(void *arg) {
     unsigned i;
 
     for (i = 0; i < state->yields_per_task; ++i) {
-        nm_yield();
+        llam_yield();
     }
     atomic_fetch_add(&state->completed, 1U);
 }
@@ -35,14 +35,14 @@ void ping_peer_task(void *arg) {
     unsigned i;
 
     for (i = 0; i < state->rounds; ++i) {
-        void *value = nm_channel_recv(state->request);
+        void *value = llam_channel_recv(state->request);
 
         if (value == NULL) {
             stress_fail_msg("ping-peer recv returned NULL");
             return;
         }
         atomic_fetch_add(&state->echoed, 1U);
-        if (nm_channel_send(state->response, value) != 0) {
+        if (llam_channel_send(state->response, value) != 0) {
             stress_fail_msg("ping-peer send failed");
             return;
         }
@@ -54,17 +54,17 @@ void convoy_worker_task(void *arg) {
     unsigned i;
 
     for (i = 0; i < state->iterations; ++i) {
-        if (nm_mutex_lock(state->mutex) != 0) {
+        if (llam_mutex_lock(state->mutex) != 0) {
             stress_fail_msg("convoy mutex lock failed");
             return;
         }
         state->counter += 1U;
-        if (nm_mutex_unlock(state->mutex) != 0) {
+        if (llam_mutex_unlock(state->mutex) != 0) {
             stress_fail_msg("convoy mutex unlock failed");
             return;
         }
         if ((i & 3U) == 0U) {
-            nm_yield();
+            llam_yield();
         }
     }
 }
@@ -72,7 +72,7 @@ void convoy_worker_task(void *arg) {
 void cancel_waiter_task(void *arg) {
     (void)arg;
 
-    if (nm_sleep_ns(50ULL * 1000ULL * 1000ULL) != 0) {
+    if (llam_sleep_ns(50ULL * 1000ULL * 1000ULL) != 0) {
         if (errno == ECANCELED) {
             atomic_fetch_add(&((cancel_state_t *)arg)->cancelled, 1U);
             return;
@@ -86,8 +86,8 @@ void cancel_waiter_task(void *arg) {
 void cancel_trigger_task(void *arg) {
     cancel_state_t *state = arg;
 
-    nm_sleep_ns(1ULL * 1000ULL * 1000ULL);
-    if (nm_cancel_token_cancel(state->token) != 0) {
+    llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
+    if (llam_cancel_token_cancel(state->token) != 0) {
         stress_fail_msg("cancel trigger failed");
         return;
     }
@@ -97,7 +97,7 @@ void cancel_trigger_task(void *arg) {
 void io_cancel_waiter_task(void *arg) {
     io_cancel_state_t *state = arg;
     char byte = 0;
-    ssize_t rc = nm_read(state->reader_fd, &byte, 1U);
+    ssize_t rc = llam_read(state->reader_fd, &byte, 1U);
 
     if (rc < 0) {
         if (errno == ECANCELED) {
@@ -113,8 +113,8 @@ void io_cancel_waiter_task(void *arg) {
 void io_cancel_trigger_task(void *arg) {
     io_cancel_state_t *state = arg;
 
-    nm_sleep_ns(1ULL * 1000ULL * 1000ULL);
-    if (nm_cancel_token_cancel(state->token) != 0) {
+    llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
+    if (llam_cancel_token_cancel(state->token) != 0) {
         stress_fail_msg("io cancel trigger failed");
         return;
     }
@@ -125,7 +125,7 @@ void owned_read_writer_task(void *arg) {
     owned_read_state_t *state = arg;
     ssize_t rc;
 
-    if (state->delay_ns > 0U && nm_sleep_ns(state->delay_ns) != 0) {
+    if (state->delay_ns > 0U && llam_sleep_ns(state->delay_ns) != 0) {
         stress_fail_msg("owned read writer sleep failed");
         return;
     }
@@ -141,9 +141,9 @@ void dynamic_sleep_child_task(void *arg) {
     unsigned i;
 
     for (i = 0; i < yields; ++i) {
-        nm_yield();
+        llam_yield();
     }
-    if (nm_sleep_ns(state->wave->sleep_ns) != 0) {
+    if (llam_sleep_ns(state->wave->sleep_ns) != 0) {
         stress_fail_msg("dynamic sleep child sleep failed");
         return;
     }
@@ -154,6 +154,14 @@ void *stress_blocking_pause(void *arg) {
     (void)arg;
     usleep(10U * 1000U);
     return arg;
+}
+
+static void *stress_blocking_cancel_pause(void *arg) {
+    block_cancel_state_t *state = arg;
+
+    atomic_store_explicit(&state->blocking_started, 1U, memory_order_release);
+    usleep(100U * 1000U);
+    return NULL;
 }
 
 int stress_connect_loopback(dynamic_accept_connector_state_t *state) {
@@ -177,7 +185,7 @@ int stress_connect_loopback(dynamic_accept_connector_state_t *state) {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(state->port);
-    rc = nm_connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    rc = llam_connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     if (rc != 0) {
         state->result = errno != 0 ? errno : EIO;
     }
@@ -187,8 +195,9 @@ int stress_connect_loopback(dynamic_accept_connector_state_t *state) {
 
 void block_cancel_waiter_task(void *arg) {
     block_cancel_state_t *state = arg;
+    void *result = NULL;
 
-    if (nm_call_blocking(stress_blocking_pause, NULL) == NULL) {
+    if (llam_call_blocking_result(stress_blocking_cancel_pause, state, &result) != 0) {
         if (errno == ECANCELED) {
             atomic_fetch_add(&state->cancelled, 1U);
             return;
@@ -196,14 +205,28 @@ void block_cancel_waiter_task(void *arg) {
         stress_fail_msg("block cancel waiter woke with wrong errno");
         return;
     }
+    (void)result;
     stress_fail_msg("block cancel waiter unexpectedly completed");
 }
 
 void block_cancel_trigger_task(void *arg) {
     block_cancel_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + 500ULL * 1000ULL * 1000ULL;
 
-    nm_sleep_ns(1ULL * 1000ULL * 1000ULL);
-    if (nm_cancel_token_cancel(state->token) != 0) {
+    while (!llam_deadline_passed(deadline_ns)) {
+        if (atomic_load_explicit(&state->blocking_started, memory_order_acquire) != 0U) {
+            break;
+        }
+        if (llam_sleep_ns(100ULL * 1000ULL) != 0) {
+            stress_fail_msg("block cancel trigger wait failed");
+            return;
+        }
+    }
+    if (atomic_load_explicit(&state->blocking_started, memory_order_acquire) == 0U) {
+        stress_fail_msg("block cancel callback did not start");
+        return;
+    }
+    if (llam_cancel_token_cancel(state->token) != 0) {
         stress_fail_msg("block cancel trigger failed");
         return;
     }
@@ -213,7 +236,7 @@ void block_cancel_trigger_task(void *arg) {
 void stress_sleep_task(void *arg) {
     uint64_t duration_ns = *(uint64_t *)arg;
 
-    if (nm_sleep_ns(duration_ns) != 0) {
+    if (llam_sleep_ns(duration_ns) != 0) {
         stress_fail_msg("sleep task failed");
     }
 }
@@ -221,14 +244,15 @@ void stress_sleep_task(void *arg) {
 void mutex_holder_task(void *arg) {
     mutex_timeout_state_t *state = arg;
 
-    if (nm_mutex_lock(state->mutex) != 0) {
+    if (llam_mutex_lock(state->mutex) != 0) {
         stress_fail_msg("mutex holder lock failed");
         return;
     }
-    if (nm_sleep_ns(state->hold_ns) != 0) {
+    atomic_store_explicit(&state->locked, 1U, memory_order_release);
+    if (llam_sleep_ns(state->hold_ns) != 0) {
         stress_fail_msg("mutex holder sleep failed");
     }
-    if (nm_mutex_unlock(state->mutex) != 0) {
+    if (llam_mutex_unlock(state->mutex) != 0) {
         stress_fail_msg("mutex holder unlock failed");
     }
 }
@@ -238,13 +262,13 @@ void cond_cancel_waiter_task(void *arg) {
     int rc;
     int saved_errno = 0;
 
-    if (nm_mutex_lock(state->mutex) != 0) {
+    if (llam_mutex_lock(state->mutex) != 0) {
         stress_fail_msg("cond cancel waiter lock failed");
         return;
     }
-    rc = nm_cond_wait(state->cond, state->mutex);
+    rc = llam_cond_wait(state->cond, state->mutex);
     saved_errno = errno;
-    if (nm_mutex_unlock(state->mutex) != 0) {
+    if (llam_mutex_unlock(state->mutex) != 0) {
         stress_fail_msg("cond cancel waiter unlock failed");
         return;
     }
@@ -263,8 +287,8 @@ void cond_cancel_waiter_task(void *arg) {
 void cond_cancel_trigger_task(void *arg) {
     cond_cancel_state_t *state = arg;
 
-    nm_sleep_ns(1ULL * 1000ULL * 1000ULL);
-    if (nm_cancel_token_cancel(state->token) != 0) {
+    llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
+    if (llam_cancel_token_cancel(state->token) != 0) {
         stress_fail_msg("cond cancel trigger failed");
         return;
     }
@@ -276,7 +300,7 @@ void poll_writer_task(void *arg) {
     char byte = 'x';
     ssize_t rc;
 
-    nm_sleep_ns(1ULL * 1000ULL * 1000ULL);
+    llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
     rc = write(fd, &byte, 1U);
     if (rc != 1) {
         stress_fail_msg("poll writer failed");
@@ -288,7 +312,7 @@ void dynamic_poll_writer_task(void *arg) {
     char byte = 'd';
     ssize_t rc;
 
-    if (state->delay_ns > 0U && nm_sleep_ns(state->delay_ns) != 0) {
+    if (state->delay_ns > 0U && llam_sleep_ns(state->delay_ns) != 0) {
         stress_fail_msg("dynamic poll writer sleep failed");
         return;
     }
@@ -298,15 +322,15 @@ void dynamic_poll_writer_task(void *arg) {
     }
 }
 
-unsigned stress_dynamic_live_wait_floor(const nm_runtime_stats_t *stats) {
+unsigned stress_dynamic_live_wait_floor(const llam_runtime_stats_t *stats) {
     unsigned floor;
 
     if (stats == NULL) {
         return 0U;
     }
-    floor = stats->online_shards_floor;
-    if (stats->active_shards > 8U) {
-        unsigned io_floor = stats->active_shards - (stats->active_shards / 4U);
+    floor = stats->online_workers_floor;
+    if (stats->active_workers > 8U) {
+        unsigned io_floor = stats->active_workers - (stats->active_workers / 4U);
 
         if (io_floor > floor) {
             floor = io_floor;
@@ -325,7 +349,7 @@ void dynamic_live_poll_waiter_task(void *arg) {
         return;
     }
 
-    rc = nm_poll_fd(state->fd, POLLIN, -1, &revents);
+    rc = llam_poll_fd(state->fd, POLLIN, -1, &revents);
     if (rc != 1 || (revents & (POLLIN | POLLHUP)) == 0) {
         stress_fail_msg("dynamic live poll waiter failed");
         return;
@@ -343,7 +367,7 @@ void dynamic_live_inflight_waiter_task(void *arg) {
         return;
     }
 
-    rc = nm_read(state->fd, &byte, 1U);
+    rc = llam_read(state->fd, &byte, 1U);
     if (rc != 1 || byte != 'i') {
         stress_fail_msg("dynamic live inflight waiter failed");
         return;
@@ -360,7 +384,7 @@ void dynamic_live_accept_waiter_task(void *arg) {
         return;
     }
 
-    fd = nm_accept(state->listener_fd, NULL, NULL);
+    fd = llam_accept(state->listener_fd, NULL, NULL);
     if (fd < 0) {
         stress_fail_msg("dynamic live accept waiter failed");
         return;
@@ -376,7 +400,7 @@ void dynamic_accept_connector_task(void *arg) {
         stress_fail_msg("dynamic accept connector state missing");
         return;
     }
-    if (state->delay_ns > 0U && nm_sleep_ns(state->delay_ns) != 0) {
+    if (state->delay_ns > 0U && llam_sleep_ns(state->delay_ns) != 0) {
         stress_fail_msg("dynamic accept connector sleep failed");
         return;
     }
@@ -403,7 +427,7 @@ void fp_round_task(void *arg) {
             stress_fail_u32("fp isolation mode", stress_fp_round_mode(), state->mode);
             return;
         }
-        nm_yield();
+        llam_yield();
     }
     if (stress_fp_round_mode() != state->mode) {
         stress_fail_u32("fp isolation final mode", stress_fp_round_mode(), state->mode);
@@ -422,14 +446,14 @@ void fp_inherit_child_task(void *arg) {
         return;
     }
     stress_set_fp_round((state->expected_mode + 1U) & 3U);
-    nm_yield();
+    llam_yield();
     atomic_fetch_add(&state->completed, 1U);
 }
 
 void poll_cancel_race_waiter_task(void *arg) {
     poll_cancel_race_state_t *state = arg;
     short revents = 0;
-    int rc = nm_poll_fd(state->fd, POLLIN, 1, &revents);
+    int rc = llam_poll_fd(state->fd, POLLIN, 1, &revents);
 
     if (rc == 0 && revents == 0) {
         atomic_fetch_add(&state->timeout_hits, 1U);
@@ -445,8 +469,8 @@ void poll_cancel_race_waiter_task(void *arg) {
 void poll_cancel_race_trigger_task(void *arg) {
     poll_cancel_race_state_t *state = arg;
 
-    nm_sleep_ns(1ULL * 1000ULL * 1000ULL);
-    if (nm_cancel_token_cancel(state->token) != 0) {
+    llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
+    if (llam_cancel_token_cancel(state->token) != 0) {
         stress_fail_msg("poll cancel-timeout trigger failed");
         return;
     }
@@ -459,7 +483,7 @@ void opaque_companion_task(void *arg) {
 
     for (i = 0; i < 4U; ++i) {
         atomic_fetch_add(&state->companion_steps, 1U);
-        nm_yield();
+        llam_yield();
     }
 }
 
@@ -469,7 +493,7 @@ void nested_opaque_companion_task(void *arg) {
 
     for (i = 0; i < 4U; ++i) {
         atomic_fetch_add(&state->companion_steps, 1U);
-        nm_yield();
+        llam_yield();
     }
 }
 
@@ -478,31 +502,31 @@ void opaque_scope_task(void *arg) {
     unsigned i;
 
     for (i = 0; i < state->scopes; ++i) {
-        nm_task_t *companion = nm_spawn(nested_opaque_companion_task,
+        llam_task_t *companion = llam_spawn(nested_opaque_companion_task,
                                         state,
-                                        &(nm_spawn_opts_t){
-                                            .task_class = NM_TASK_CLASS_DEFAULT,
-                                            .stack_class = NM_STACK_CLASS_DEFAULT,
+                                        &(llam_spawn_opts_t){
+                                            .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                            .stack_class = LLAM_STACK_CLASS_DEFAULT,
                                         });
 
         if (companion == NULL) {
             stress_fail_msg("opaque companion spawn failed");
             return;
         }
-        if (nm_enter_blocking() != 0) {
+        if (llam_enter_blocking() != 0) {
             stress_fail_msg("opaque enter blocking failed");
             return;
         }
         usleep(2U * 1000U);
-        if (nm_leave_blocking() != 0) {
+        if (llam_leave_blocking() != 0) {
             stress_fail_msg("opaque leave blocking failed");
             return;
         }
-        if (nm_join(companion) != 0) {
+        if (llam_join(companion) != 0) {
             stress_fail_msg("opaque companion join failed");
             return;
         }
-        nm_yield();
+        llam_yield();
     }
 }
 
@@ -511,40 +535,40 @@ void nested_opaque_scope_task(void *arg) {
     unsigned i;
 
     for (i = 0; i < state->scopes; ++i) {
-        nm_task_t *companion = nm_spawn(opaque_companion_task,
+        llam_task_t *companion = llam_spawn(opaque_companion_task,
                                         state,
-                                        &(nm_spawn_opts_t){
-                                            .task_class = NM_TASK_CLASS_DEFAULT,
-                                            .stack_class = NM_STACK_CLASS_DEFAULT,
+                                        &(llam_spawn_opts_t){
+                                            .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                            .stack_class = LLAM_STACK_CLASS_DEFAULT,
                                         });
 
         if (companion == NULL) {
             stress_fail_msg("nested opaque companion spawn failed");
             return;
         }
-        if (nm_enter_blocking() != 0) {
+        if (llam_enter_blocking() != 0) {
             stress_fail_msg("nested opaque enter failed");
             return;
         }
-        if (nm_enter_blocking() != 0) {
+        if (llam_enter_blocking() != 0) {
             stress_fail_msg("nested opaque re-enter failed");
             return;
         }
         usleep(1000U);
-        if (nm_leave_blocking() != 0) {
+        if (llam_leave_blocking() != 0) {
             stress_fail_msg("nested opaque inner leave failed");
             return;
         }
         usleep(1000U);
-        if (nm_leave_blocking() != 0) {
+        if (llam_leave_blocking() != 0) {
             stress_fail_msg("nested opaque outer leave failed");
             return;
         }
-        if (nm_join(companion) != 0) {
+        if (llam_join(companion) != 0) {
             stress_fail_msg("nested opaque companion join failed");
             return;
         }
         atomic_fetch_add(&state->completed_scopes, 1U);
-        nm_yield();
+        llam_yield();
     }
 }

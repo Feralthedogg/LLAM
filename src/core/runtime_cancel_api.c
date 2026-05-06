@@ -26,18 +26,35 @@
 
 #include "runtime_internal.h"
 
+/** @brief Return true when @p task_class is a supported public task class. */
+static bool llam_public_task_class_valid(uint32_t task_class) {
+    return task_class == (uint32_t)LLAM_TASK_CLASS_LATENCY ||
+           task_class == (uint32_t)LLAM_TASK_CLASS_DEFAULT ||
+           task_class == (uint32_t)LLAM_TASK_CLASS_BATCH;
+}
+
 /**
  * @brief Set the scheduling class for the current task.
  *
- * Calls outside a managed task are no-ops.
+ * Calls outside a managed task fail because there is no current task to mutate.
  *
  * @param task_class New class to store on the current task.
+ *
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c ENOTSUP.
  */
-void nm_task_set_class(nm_task_class_t task_class) {
-    nm_task_safepoint();
-    if (g_nm_tls_task != NULL) {
-        g_nm_tls_task->task_class = task_class;
+int llam_task_set_class(uint32_t task_class) {
+    if (!llam_public_task_class_valid(task_class)) {
+        errno = EINVAL;
+        return -1;
     }
+
+    llam_task_safepoint();
+    if (g_llam_tls_task == NULL) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    g_llam_tls_task->task_class = (llam_task_class_t)task_class;
+    return 0;
 }
 
 /**
@@ -47,8 +64,8 @@ void nm_task_set_class(nm_task_class_t task_class) {
  *
  * @return Task flags, or 0 for @c NULL.
  */
-unsigned nm_task_flags(const nm_task_t *task) {
-    return task != NULL ? task->flags : 0U;
+uint32_t llam_task_flags(const llam_task_t *task) {
+    return task != NULL ? (uint32_t)task->flags : 0U;
 }
 
 /**
@@ -56,8 +73,8 @@ unsigned nm_task_flags(const nm_task_t *task) {
  *
  * @return New token on success, or @c NULL with @c errno set on failure.
  */
-nm_cancel_token_t *nm_cancel_token_create(void) {
-    nm_cancel_token_t *token = calloc(1, sizeof(*token));
+llam_cancel_token_t *llam_cancel_token_create(void) {
+    llam_cancel_token_t *token = calloc(1, sizeof(*token));
 
     if (token == NULL) {
         return NULL;
@@ -80,7 +97,7 @@ nm_cancel_token_t *nm_cancel_token_create(void) {
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
  */
-int nm_cancel_token_destroy(nm_cancel_token_t *token) {
+int llam_cancel_token_destroy(llam_cancel_token_t *token) {
     if (token == NULL) {
         errno = EINVAL;
         return -1;
@@ -109,8 +126,8 @@ int nm_cancel_token_destroy(nm_cancel_token_t *token) {
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL.
  */
-int nm_cancel_token_cancel(nm_cancel_token_t *token) {
-    nm_task_t *waiters;
+int llam_cancel_token_cancel(llam_cancel_token_t *token) {
+    llam_task_t *waiters;
 
     if (token == NULL) {
         errno = EINVAL;
@@ -131,12 +148,12 @@ int nm_cancel_token_cancel(nm_cancel_token_t *token) {
     pthread_mutex_unlock(&token->lock);
 
     while (waiters != NULL) {
-        nm_task_t *next = waiters->cancel_next;
+        llam_task_t *next = waiters->cancel_next;
 
         waiters->cancel_prev = NULL;
         waiters->cancel_next = NULL;
         waiters->cancel_registered = false;
-        nm_cancel_task_wait(waiters);
+        llam_cancel_task_wait(waiters);
         waiters = next;
     }
 
@@ -151,16 +168,16 @@ int nm_cancel_token_cancel(nm_cancel_token_t *token) {
  * @return 1 if cancelled, 0 if not cancelled, or -1 with @c errno set to
  *         @c EINVAL for @c NULL input.
  */
-int nm_cancel_token_is_cancelled(const nm_cancel_token_t *token) {
+int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token) {
     int cancelled;
-    nm_cancel_token_t *mutable_token;
+    llam_cancel_token_t *mutable_token;
 
     if (token == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    mutable_token = (nm_cancel_token_t *)token;
+    mutable_token = (llam_cancel_token_t *)token;
     pthread_mutex_lock(&mutable_token->lock);
     cancelled = mutable_token->cancelled ? 1 : 0;
     pthread_mutex_unlock(&mutable_token->lock);

@@ -36,7 +36,7 @@
  *
  * @return Encoded user-data value.
  */
-uint64_t nm_io_udata_encode(void *ptr, unsigned tag) {
+uint64_t llam_io_udata_encode(void *ptr, unsigned tag) {
     return ((uint64_t)(uintptr_t)ptr) | (uint64_t)(tag & 0x7U);
 }
 
@@ -47,7 +47,7 @@ uint64_t nm_io_udata_encode(void *ptr, unsigned tag) {
  *
  * @return Tag value in the range [0, 7].
  */
-unsigned nm_io_udata_tag(uint64_t user_data) {
+unsigned llam_io_udata_tag(uint64_t user_data) {
     return (unsigned)(user_data & 0x7U);
 }
 
@@ -58,6 +58,6 @@ unsigned nm_io_udata_tag(uint64_t user_data) {
  *
  * @return Decoded pointer with tag bits cleared.
  */
-void *nm_io_udata_ptr(uint64_t user_data) {
+void *llam_io_udata_ptr(uint64_t user_data) {
     return (void *)(uintptr_t)(user_data & ~(uint64_t)0x7U);
 }

@@ -3,7 +3,7 @@
  * @brief Blocking compensation engine for tasks that enter opaque blocking regions.
  *
  * @details
- * Blocking workers execute callbacks submitted by ::nm_call_blocking. The
+ * Blocking workers execute callbacks submitted by ::llam_call_blocking. The
  * scheduler task that submitted the job is parked while a background worker runs
  * the callback, captures its result and errno, and reinjects the task. Jobs may
  * be cancelled before or during execution through an atomic state transition.
@@ -30,21 +30,21 @@
  * @brief Main loop for a blocking-worker thread.
  *
  * Workers sleep until a block job is queued or shutdown is requested. A queued
- * job must transition from @c NM_BLOCK_JOB_QUEUED to
- * @c NM_BLOCK_JOB_RUNNING before execution; cancelled jobs fail that transition
+ * job must transition from @c LLAM_BLOCK_JOB_QUEUED to
+ * @c LLAM_BLOCK_JOB_RUNNING before execution; cancelled jobs fail that transition
  * and are released without running the callback.
  *
  * @param arg Runtime pointer.
  *
  * @return Always @c NULL.
  */
-void *nm_block_worker_main(void *arg) {
-    nm_runtime_t *rt = arg;
+void *llam_block_worker_main(void *arg) {
+    llam_runtime_t *rt = arg;
 
-    nm_tune_block_worker_thread();
+    llam_tune_block_worker_thread();
 
     for (;;) {
-        nm_block_job_t *job;
+        llam_block_job_t *job;
 
         pthread_mutex_lock(&rt->block_lock);
         while (rt->block_head == NULL && !atomic_load(&rt->stop_requested)) {
@@ -53,7 +53,7 @@ void *nm_block_worker_main(void *arg) {
 
             /* Sleep on a monotonic wake sequence so producers can signal without condvar bookkeeping. */
             pthread_mutex_unlock(&rt->block_lock);
-            (void)nm_linux_futex_wait_private(&rt->block_wake_seq, wait_seq);
+            (void)llam_linux_futex_wait_private(&rt->block_wake_seq, wait_seq);
             pthread_mutex_lock(&rt->block_lock);
 #else
             pthread_cond_wait(&rt->block_cv, &rt->block_lock);
@@ -72,11 +72,11 @@ void *nm_block_worker_main(void *arg) {
         pthread_mutex_unlock(&rt->block_lock);
 
         {
-            unsigned expected = NM_BLOCK_JOB_QUEUED;
+            unsigned expected = LLAM_BLOCK_JOB_QUEUED;
 
-            if (!atomic_compare_exchange_strong(&job->state, &expected, NM_BLOCK_JOB_RUNNING)) {
+            if (!atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_RUNNING)) {
                 atomic_fetch_sub(&rt->block_pending, 1U);
-                nm_block_job_release(rt, job);
+                llam_block_job_release(rt, job);
                 continue;
             }
         }
@@ -84,7 +84,7 @@ void *nm_block_worker_main(void *arg) {
         {
             unsigned active = atomic_fetch_add(&rt->block_active, 1U) + 1U;
 
-            nm_atomic_update_peak(&rt->block_active_peak, active);
+            llam_atomic_update_peak(&rt->block_active_peak, active);
         }
         errno = 0;
         job->result = job->fn(job->arg);
@@ -93,18 +93,18 @@ void *nm_block_worker_main(void *arg) {
         atomic_fetch_sub(&rt->block_pending, 1U);
 
         {
-            unsigned expected = NM_BLOCK_JOB_RUNNING;
+            unsigned expected = LLAM_BLOCK_JOB_RUNNING;
 
-            if (!atomic_compare_exchange_strong(&job->state, &expected, NM_BLOCK_JOB_FINISHED)) {
-                nm_block_job_release(rt, job);
+            if (!atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_FINISHED)) {
+                llam_block_job_release(rt, job);
                 continue;
             }
         }
 
         job->task->blocking_result = job->result;
         job->task->blocking_errno = job->error_code;
-        nm_reinject_task(rt, job->task, true, NM_TRACE_BLOCK_COMPLETE, NM_WAIT_BLOCKING);
-        nm_block_job_release(rt, job);
+        llam_reinject_task(rt, job->task, true, LLAM_TRACE_BLOCK_COMPLETE, LLAM_WAIT_BLOCKING);
+        llam_block_job_release(rt, job);
     }
 
     return NULL;

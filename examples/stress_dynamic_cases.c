@@ -20,11 +20,30 @@
 
 #include "stress_internal.h"
 
+static int stress_join_until_retry_oom(llam_task_t *task, uint64_t deadline_ns) {
+    unsigned attempts;
+
+    for (attempts = 0U; attempts < 32U; ++attempts) {
+        int saved_errno;
+
+        if (llam_join_until(task, deadline_ns) == 0) {
+            return 0;
+        }
+        if (errno != ENOMEM || llam_deadline_passed(deadline_ns)) {
+            return -1;
+        }
+        saved_errno = errno;
+        llam_yield();
+        errno = saved_errno;
+    }
+    return -1;
+}
+
 void dynamic_live_poll_watch_task(void *arg) {
     dynamic_live_poll_watch_state_t *state = arg;
     dynamic_live_poll_waiter_state_t *waiter_states = NULL;
-    nm_task_t **waiters = NULL;
-    nm_runtime_stats_t stats;
+    llam_task_t **waiters = NULL;
+    llam_runtime_stats_t stats;
     atomic_uint completed;
     unsigned live_wait_floor = 0U;
     unsigned spawned = 0U;
@@ -64,11 +83,11 @@ void dynamic_live_poll_watch_task(void *arg) {
     for (i = 0; i < state->waiter_count; ++i) {
         waiter_states[i].fd = state->sv[0];
         waiter_states[i].completed = &completed;
-        waiters[i] = nm_spawn(dynamic_live_poll_waiter_task,
+        waiters[i] = llam_spawn(dynamic_live_poll_waiter_task,
                               &waiter_states[i],
-                              &(nm_spawn_opts_t){
-                                  .task_class = NM_TASK_CLASS_DEFAULT,
-                                  .stack_class = NM_STACK_CLASS_DEFAULT,
+                              &(llam_spawn_opts_t){
+                                  .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                  .stack_class = LLAM_STACK_CLASS_DEFAULT,
                               });
         if (waiters[i] == NULL) {
             stress_fail_msg("dynamic live poll waiter spawn failed");
@@ -77,7 +96,7 @@ void dynamic_live_poll_watch_task(void *arg) {
         spawned += 1U;
     }
 
-    if (nm_runtime_collect_stats(&stats) != 0) {
+    if (llam_runtime_collect_stats(&stats) != 0) {
         stress_fail_msg("dynamic live poll stats collect failed");
         goto cleanup;
     }
@@ -85,27 +104,27 @@ void dynamic_live_poll_watch_task(void *arg) {
     run_dynamic_sleep_fanout(state->sleep_tasks, state->sleep_yields, state->sleep_ns);
 
     for (monitor_round = 0U; monitor_round < state->monitor_rounds; ++monitor_round) {
-        if (nm_runtime_collect_stats(&stats) != 0) {
+        if (llam_runtime_collect_stats(&stats) != 0) {
             stress_fail_msg("dynamic live poll monitor stats failed");
             goto cleanup;
         }
-        saw_scale_up = saw_scale_up || stats.online_shards > live_wait_floor;
+        saw_scale_up = saw_scale_up || stats.online_workers > live_wait_floor;
         if (saw_scale_up &&
-            stats.active_shards > live_wait_floor &&
-            stats.online_shards <= live_wait_floor &&
+            stats.active_workers > live_wait_floor &&
+            stats.online_workers <= live_wait_floor &&
             atomic_load(&completed) == 0U) {
             reached_live_floor = true;
             break;
         }
-        if (state->monitor_sleep_ns > 0U && nm_sleep_ns(state->monitor_sleep_ns) != 0) {
+        if (state->monitor_sleep_ns > 0U && llam_sleep_ns(state->monitor_sleep_ns) != 0) {
             stress_fail_msg("dynamic live poll monitor sleep failed");
             goto cleanup;
         }
     }
 
-    if (stats.dynamic_shards != 0U &&
-        stats.active_shards > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+    if (stats.dynamic_workers != 0U &&
+        stats.active_workers > live_wait_floor &&
+        saw_scale_up && !reached_live_floor) {
         stress_fail_msg("dynamic live poll waiters did not downscale while parked");
     }
 
@@ -125,8 +144,15 @@ cleanup:
     }
 
     for (i = 0; i < spawned; ++i) {
-        if (nm_join_until(waiters[i], nm_now_ns() + 1000000000ULL) != 0) {
-            stress_fail_msg("dynamic live poll waiter join failed");
+        if (stress_join_until_retry_oom(waiters[i], llam_now_ns() + 5ULL * 1000ULL * 1000ULL * 1000ULL) != 0) {
+            char message[128];
+
+            (void)snprintf(message,
+                           sizeof(message),
+                           "dynamic live poll waiter join failed errno=%d index=%u",
+                           errno,
+                           i);
+            stress_fail_msg(message);
         }
     }
     if (spawned == state->waiter_count && atomic_load(&completed) != state->waiter_count) {
@@ -145,11 +171,11 @@ void dynamic_foreign_poll_watch_setup_task(void *arg) {
     unsigned monitor_round;
     unsigned i;
 
-    if (state == NULL || g_nm_tls_shard == NULL) {
+    if (state == NULL || g_llam_tls_shard == NULL) {
         stress_fail_msg("dynamic foreign poll setup state missing");
         return;
     }
-    if (g_nm_runtime.experimental_shard_rings_multishot == 0U || g_nm_runtime.active_nodes <= 1U) {
+    if (g_llam_runtime.experimental_shard_rings_multishot == 0U || g_llam_runtime.active_nodes <= 1U) {
         atomic_store(&state->skipped, 1U);
         atomic_store(&state->setup_done, 1U);
         return;
@@ -161,8 +187,8 @@ void dynamic_foreign_poll_watch_setup_task(void *arg) {
         return;
     }
 
-    source_shard = g_nm_tls_shard->id;
-    source_node = g_nm_tls_shard->io_node_index;
+    source_shard = g_llam_tls_shard->id;
+    source_node = g_llam_tls_shard->io_node_index;
     atomic_store(&state->source_shard, source_shard);
     atomic_store(&state->source_node, source_node);
 
@@ -177,11 +203,11 @@ void dynamic_foreign_poll_watch_setup_task(void *arg) {
     for (i = 0U; i < state->waiter_count; ++i) {
         state->waiter_states[i].fd = state->sv[0];
         state->waiter_states[i].completed = &state->completed;
-        state->waiters[i] = nm_spawn(dynamic_live_poll_waiter_task,
+        state->waiters[i] = llam_spawn(dynamic_live_poll_waiter_task,
                                      &state->waiter_states[i],
-                                     &(nm_spawn_opts_t){
-                                         .task_class = NM_TASK_CLASS_DEFAULT,
-                                         .stack_class = NM_STACK_CLASS_DEFAULT,
+                                     &(llam_spawn_opts_t){
+                                         .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                         .stack_class = LLAM_STACK_CLASS_DEFAULT,
                                      });
         if (state->waiters[i] == NULL) {
             stress_fail_msg("dynamic foreign poll waiter spawn failed");
@@ -207,22 +233,22 @@ void dynamic_foreign_poll_watch_setup_task(void *arg) {
                 break;
             }
             if (state->monitor_sleep_ns > 0U) {
-                if (nm_sleep_ns(state->monitor_sleep_ns) != 0) {
+                if (llam_sleep_ns(state->monitor_sleep_ns) != 0) {
                     stress_fail_msg("dynamic foreign poll setup observe wait failed");
                     atomic_store(&state->setup_failed, 1U);
                     break;
                 }
             } else {
-                nm_yield();
+                llam_yield();
             }
         }
     }
 
     atomic_store(&state->setup_done, 1U);
     if (atomic_load(&state->setup_failed) == 0U && state->monitor_sleep_ns > 0U) {
-        (void)nm_sleep_ns(state->monitor_sleep_ns);
+        (void)llam_sleep_ns(state->monitor_sleep_ns);
     } else if (atomic_load(&state->setup_failed) == 0U) {
-        nm_yield();
+        llam_yield();
     }
 }
 
@@ -239,9 +265,9 @@ void dynamic_foreign_poll_watch_scale_task(void *arg) {
 void dynamic_foreign_poll_watch_monitor_task(void *arg) {
     dynamic_foreign_poll_watch_state_t *state = arg;
     dynamic_poll_writer_state_t writer_state;
-    nm_runtime_stats_t stats;
-    nm_task_t *setup = NULL;
-    nm_task_t *writer = NULL;
+    llam_runtime_stats_t stats;
+    llam_task_t *setup = NULL;
+    llam_task_t *writer = NULL;
     unsigned setup_shard = UINT_MAX;
     unsigned spawned;
     unsigned source_shard;
@@ -260,21 +286,21 @@ void dynamic_foreign_poll_watch_monitor_task(void *arg) {
     }
 
     for (monitor_round = 0U; monitor_round < state->monitor_rounds; ++monitor_round) {
-        if (nm_runtime_collect_stats(&stats) != 0) {
+        if (llam_runtime_collect_stats(&stats) != 0) {
             stress_fail_msg("dynamic foreign poll scale-up stats failed");
             goto cleanup;
         }
-        if (stats.online_shards > stats.online_shards_floor) {
+        if (stats.online_workers > stats.online_workers_floor) {
             saw_setup_scale_up = true;
             break;
         }
         if (state->monitor_sleep_ns > 0U) {
-            if (nm_sleep_ns(state->monitor_sleep_ns) != 0) {
+            if (llam_sleep_ns(state->monitor_sleep_ns) != 0) {
                 stress_fail_msg("dynamic foreign poll scale-up wait failed");
                 goto cleanup;
             }
         } else {
-            nm_yield();
+            llam_yield();
         }
     }
 
@@ -283,17 +309,17 @@ void dynamic_foreign_poll_watch_monitor_task(void *arg) {
         goto cleanup;
     }
 
-    setup_shard = g_nm_runtime.active_shards > 0U ? g_nm_runtime.active_shards - 1U : 0U;
-    if (g_nm_tls_shard != NULL && setup_shard == g_nm_tls_shard->id && setup_shard > 0U) {
+    setup_shard = g_llam_runtime.active_shards > 0U ? g_llam_runtime.active_shards - 1U : 0U;
+    if (g_llam_tls_shard != NULL && setup_shard == g_llam_tls_shard->id && setup_shard > 0U) {
         setup_shard -= 1U;
     }
     setup = stress_spawn_on_shard(setup_shard,
                                   dynamic_foreign_poll_watch_setup_task,
                                   state,
-                                  &(nm_spawn_opts_t){
-                                      .task_class = NM_TASK_CLASS_DEFAULT,
-                                      .stack_class = NM_STACK_CLASS_DEFAULT,
-                                      .flags = NM_SPAWN_F_PINNED,
+                                  &(llam_spawn_opts_t){
+                                      .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                      .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                                      .flags = LLAM_SPAWN_F_PINNED,
                                   });
     if (setup == NULL) {
         stress_fail_msg("dynamic foreign poll setup spawn on target shard failed");
@@ -305,12 +331,12 @@ void dynamic_foreign_poll_watch_monitor_task(void *arg) {
             break;
         }
         if (state->monitor_sleep_ns > 0U) {
-            if (nm_sleep_ns(state->monitor_sleep_ns) != 0) {
+            if (llam_sleep_ns(state->monitor_sleep_ns) != 0) {
                 stress_fail_msg("dynamic foreign poll monitor wait failed");
                 goto cleanup;
             }
         } else {
-            nm_yield();
+            llam_yield();
         }
     }
 
@@ -329,7 +355,7 @@ void dynamic_foreign_poll_watch_monitor_task(void *arg) {
         goto cleanup;
     }
 
-    if (nm_runtime_collect_stats(&stats) != 0) {
+    if (llam_runtime_collect_stats(&stats) != 0) {
         stress_fail_msg("dynamic foreign poll stats collect failed");
         goto cleanup;
     }
@@ -340,7 +366,7 @@ void dynamic_foreign_poll_watch_monitor_task(void *arg) {
         unsigned total_waiters = 0U;
         unsigned source_owned_waiters = 0U;
 
-        if (nm_runtime_collect_stats(&stats) != 0) {
+        if (llam_runtime_collect_stats(&stats) != 0) {
             stress_fail_msg("dynamic foreign poll monitor stats failed");
             goto cleanup;
         }
@@ -355,27 +381,27 @@ void dynamic_foreign_poll_watch_monitor_task(void *arg) {
             atomic_load(&state->completed) == 0U) {
             saw_waiter_rehome = true;
         }
-        saw_scale_up = saw_scale_up || stats.online_shards > live_wait_floor;
+        saw_scale_up = saw_scale_up || stats.online_workers > live_wait_floor;
         if (saw_waiter_rehome &&
             saw_scale_up &&
-            stats.active_shards > live_wait_floor &&
-            stats.online_shards <= live_wait_floor &&
+            stats.active_workers > live_wait_floor &&
+            stats.online_workers <= live_wait_floor &&
             atomic_load(&state->completed) == 0U) {
             reached_live_floor = true;
             break;
         }
-        if (state->monitor_sleep_ns > 0U && nm_sleep_ns(state->monitor_sleep_ns) != 0) {
+        if (state->monitor_sleep_ns > 0U && llam_sleep_ns(state->monitor_sleep_ns) != 0) {
             stress_fail_msg("dynamic foreign poll monitor sleep failed");
             goto cleanup;
         }
     }
 
-    if (stats.dynamic_shards != 0U && !saw_waiter_rehome) {
+    if (stats.dynamic_workers != 0U && !saw_waiter_rehome) {
         stress_fail_msg("dynamic foreign poll waiters did not rehome off source shard");
     }
-    if (stats.dynamic_shards != 0U &&
-        stats.active_shards > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+    if (stats.dynamic_workers != 0U &&
+        stats.active_workers > live_wait_floor &&
+        saw_scale_up && !reached_live_floor) {
         stress_fail_msg("dynamic foreign poll waiters did not downscale while rehomed");
     }
 
@@ -383,31 +409,31 @@ cleanup:
     writer_state.fd = state->sv[1];
     writer_state.delay_ns = 0U;
     if (state->sv[1] >= 0) {
-        writer = nm_spawn(dynamic_poll_writer_task,
+        writer = llam_spawn(dynamic_poll_writer_task,
                           &writer_state,
-                          &(nm_spawn_opts_t){
-                              .task_class = NM_TASK_CLASS_DEFAULT,
-                              .stack_class = NM_STACK_CLASS_DEFAULT,
+                          &(llam_spawn_opts_t){
+                              .task_class = LLAM_TASK_CLASS_DEFAULT,
+                              .stack_class = LLAM_STACK_CLASS_DEFAULT,
                           });
         if (writer == NULL) {
             stress_fail_msg("dynamic foreign poll writer spawn failed");
             close(state->sv[1]);
             state->sv[1] = -1;
-        } else if (nm_join(writer) != 0) {
+        } else if (llam_join(writer) != 0) {
             stress_fail_msg("dynamic foreign poll writer join failed");
         }
     }
 
     spawned = atomic_load(&state->spawned);
     for (i = 0U; i < spawned; ++i) {
-        if (state->waiters[i] != NULL && nm_join(state->waiters[i]) != 0) {
+        if (state->waiters[i] != NULL && llam_join(state->waiters[i]) != 0) {
             stress_fail_msg("dynamic foreign poll waiter join failed");
         }
     }
     if (spawned == state->waiter_count && atomic_load(&state->completed) != spawned) {
         stress_fail_u32("dynamic foreign poll waiter completions", atomic_load(&state->completed), spawned);
     }
-    if (setup != NULL && nm_join(setup) != 0) {
+    if (setup != NULL && llam_join(setup) != 0) {
         stress_fail_msg("dynamic foreign poll setup join failed");
     }
     stress_close_fd_pair(state->sv);
@@ -417,9 +443,9 @@ void dynamic_live_accept_watch_task(void *arg) {
     dynamic_live_accept_watch_state_t *state = arg;
     dynamic_live_accept_waiter_state_t *waiter_states = NULL;
     dynamic_accept_connector_state_t *connector_states = NULL;
-    nm_task_t **waiters = NULL;
-    nm_task_t **connectors = NULL;
-    nm_runtime_stats_t stats;
+    llam_task_t **waiters = NULL;
+    llam_task_t **connectors = NULL;
+    llam_runtime_stats_t stats;
     atomic_uint completed;
     atomic_uint connected;
     unsigned live_wait_floor = 0U;
@@ -469,11 +495,11 @@ void dynamic_live_accept_watch_task(void *arg) {
     for (i = 0; i < state->waiter_count; ++i) {
         waiter_states[i].listener_fd = state->listener_fd;
         waiter_states[i].completed = &completed;
-        waiters[i] = nm_spawn(dynamic_live_accept_waiter_task,
+        waiters[i] = llam_spawn(dynamic_live_accept_waiter_task,
                               &waiter_states[i],
-                              &(nm_spawn_opts_t){
-                                  .task_class = NM_TASK_CLASS_DEFAULT,
-                                  .stack_class = NM_STACK_CLASS_DEFAULT,
+                              &(llam_spawn_opts_t){
+                                  .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                  .stack_class = LLAM_STACK_CLASS_DEFAULT,
                               });
         if (waiters[i] == NULL) {
             stress_fail_msg("dynamic live accept waiter spawn failed");
@@ -482,7 +508,7 @@ void dynamic_live_accept_watch_task(void *arg) {
         spawned_waiters += 1U;
     }
 
-    if (nm_runtime_collect_stats(&stats) != 0) {
+    if (llam_runtime_collect_stats(&stats) != 0) {
         stress_fail_msg("dynamic live accept stats collect failed");
         goto cleanup;
     }
@@ -490,34 +516,34 @@ void dynamic_live_accept_watch_task(void *arg) {
     run_dynamic_sleep_fanout(state->sleep_tasks, state->sleep_yields, state->sleep_ns);
 
     for (monitor_round = 0U; monitor_round < state->monitor_rounds; ++monitor_round) {
-        if (nm_runtime_collect_stats(&stats) != 0) {
+        if (llam_runtime_collect_stats(&stats) != 0) {
             stress_fail_msg("dynamic live accept monitor stats failed");
             goto cleanup;
         }
-        last_online = stats.online_shards;
-        if (stats.online_shards < min_online) {
-            min_online = stats.online_shards;
+        last_online = stats.online_workers;
+        if (stats.online_workers < min_online) {
+            min_online = stats.online_workers;
         }
-        if (stats.online_shards > max_online) {
-            max_online = stats.online_shards;
+        if (stats.online_workers > max_online) {
+            max_online = stats.online_workers;
         }
-        saw_scale_up = saw_scale_up || stats.online_shards > live_wait_floor;
+        saw_scale_up = saw_scale_up || stats.online_workers > live_wait_floor;
         if (saw_scale_up &&
-            stats.active_shards > live_wait_floor &&
-            stats.online_shards <= live_wait_floor &&
+            stats.active_workers > live_wait_floor &&
+            stats.online_workers <= live_wait_floor &&
             atomic_load(&completed) == 0U) {
             reached_live_floor = true;
             break;
         }
-        if (state->monitor_sleep_ns > 0U && nm_sleep_ns(state->monitor_sleep_ns) != 0) {
+        if (state->monitor_sleep_ns > 0U && llam_sleep_ns(state->monitor_sleep_ns) != 0) {
             stress_fail_msg("dynamic live accept monitor sleep failed");
             goto cleanup;
         }
     }
 
-    if (stats.dynamic_shards != 0U &&
-        stats.active_shards > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+    if (stats.dynamic_workers != 0U &&
+        stats.active_workers > live_wait_floor &&
+        saw_scale_up && !reached_live_floor) {
         fprintf(stderr,
                 "[stress] dynamic live accept stats floor=%u last_online=%u min_online=%u max_online=%u saw_scale_up=%u reached_floor=%u completed=%u\n",
                 live_wait_floor,
@@ -536,11 +562,11 @@ cleanup:
             connector_states[i].port = state->port;
             connector_states[i].delay_ns = 0U;
             connector_states[i].completed = &connected;
-            connectors[i] = nm_spawn(dynamic_accept_connector_task,
+            connectors[i] = llam_spawn(dynamic_accept_connector_task,
                                      &connector_states[i],
-                                     &(nm_spawn_opts_t){
-                                         .task_class = NM_TASK_CLASS_DEFAULT,
-                                         .stack_class = NM_STACK_CLASS_DEFAULT,
+                                     &(llam_spawn_opts_t){
+                                         .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                         .stack_class = LLAM_STACK_CLASS_DEFAULT,
                                      });
             if (connectors[i] == NULL) {
                 stress_fail_msg("dynamic live accept connector spawn failed");
@@ -554,7 +580,7 @@ cleanup:
         state->listener_fd = -1;
     }
     for (i = 0; i < spawned_connectors; ++i) {
-        if (nm_join(connectors[i]) != 0) {
+        if (llam_join(connectors[i]) != 0) {
             stress_fail_msg("dynamic live accept connector join failed");
         }
     }
@@ -562,7 +588,7 @@ cleanup:
         stress_fail_u32("dynamic live accept connector completions", atomic_load(&connected), state->waiter_count);
     }
     for (i = 0; i < spawned_waiters; ++i) {
-        if (nm_join(waiters[i]) != 0) {
+        if (llam_join(waiters[i]) != 0) {
             stress_fail_msg("dynamic live accept waiter join failed");
         }
     }
@@ -582,9 +608,9 @@ cleanup:
 void dynamic_live_inflight_io_task(void *arg) {
     dynamic_live_inflight_io_state_t *state = arg;
     dynamic_live_inflight_waiter_state_t *waiter_states = NULL;
-    nm_task_t **waiters = NULL;
+    llam_task_t **waiters = NULL;
     int (*pairs)[2] = NULL;
-    nm_runtime_stats_t stats;
+    llam_runtime_stats_t stats;
     atomic_uint completed;
     unsigned live_wait_floor = 0U;
     unsigned spawned = 0U;
@@ -624,11 +650,11 @@ void dynamic_live_inflight_io_task(void *arg) {
         }
         waiter_states[i].fd = pairs[i][0];
         waiter_states[i].completed = &completed;
-        waiters[i] = nm_spawn(dynamic_live_inflight_waiter_task,
+        waiters[i] = llam_spawn(dynamic_live_inflight_waiter_task,
                               &waiter_states[i],
-                              &(nm_spawn_opts_t){
-                                  .task_class = NM_TASK_CLASS_DEFAULT,
-                                  .stack_class = NM_STACK_CLASS_DEFAULT,
+                              &(llam_spawn_opts_t){
+                                  .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                  .stack_class = LLAM_STACK_CLASS_DEFAULT,
                               });
         if (waiters[i] == NULL) {
             stress_fail_msg("dynamic live inflight waiter spawn failed");
@@ -637,7 +663,7 @@ void dynamic_live_inflight_io_task(void *arg) {
         spawned += 1U;
     }
 
-    if (nm_runtime_collect_stats(&stats) != 0) {
+    if (llam_runtime_collect_stats(&stats) != 0) {
         stress_fail_msg("dynamic live inflight stats collect failed");
         goto cleanup;
     }
@@ -645,27 +671,27 @@ void dynamic_live_inflight_io_task(void *arg) {
     run_dynamic_sleep_fanout(state->sleep_tasks, state->sleep_yields, state->sleep_ns);
 
     for (monitor_round = 0U; monitor_round < state->monitor_rounds; ++monitor_round) {
-        if (nm_runtime_collect_stats(&stats) != 0) {
+        if (llam_runtime_collect_stats(&stats) != 0) {
             stress_fail_msg("dynamic live inflight monitor stats failed");
             goto cleanup;
         }
-        saw_scale_up = saw_scale_up || stats.online_shards > live_wait_floor;
+        saw_scale_up = saw_scale_up || stats.online_workers > live_wait_floor;
         if (saw_scale_up &&
-            stats.active_shards > live_wait_floor &&
-            stats.online_shards <= live_wait_floor &&
+            stats.active_workers > live_wait_floor &&
+            stats.online_workers <= live_wait_floor &&
             atomic_load(&completed) == 0U) {
             reached_live_floor = true;
             break;
         }
-        if (state->monitor_sleep_ns > 0U && nm_sleep_ns(state->monitor_sleep_ns) != 0) {
+        if (state->monitor_sleep_ns > 0U && llam_sleep_ns(state->monitor_sleep_ns) != 0) {
             stress_fail_msg("dynamic live inflight monitor sleep failed");
             goto cleanup;
         }
     }
 
-    if (stats.dynamic_shards != 0U &&
-        stats.active_shards > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+    if (stats.dynamic_workers != 0U &&
+        stats.active_workers > live_wait_floor &&
+        saw_scale_up && !reached_live_floor) {
         stress_fail_msg("dynamic live inflight waiters did not downscale while parked");
     }
 
@@ -681,7 +707,7 @@ cleanup:
         }
     }
     for (i = 0; i < spawned; ++i) {
-        if (nm_join(waiters[i]) != 0) {
+        if (llam_join(waiters[i]) != 0) {
             stress_fail_msg("dynamic live inflight waiter join failed");
         }
     }

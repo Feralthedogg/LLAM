@@ -36,54 +36,54 @@
  * @param reason       Wait reason being resolved.
  * @param direct_local Whether the caller already runs on @p shard.
  */
-void nm_mark_runnable_locked(nm_shard_t *shard,
-                                    nm_task_t *task,
+void llam_mark_runnable_locked(llam_shard_t *shard,
+                                    llam_task_t *task,
                                     bool hot,
-                                    nm_trace_kind_t kind,
-                                    nm_wait_reason_t reason,
+                                    llam_trace_kind_t kind,
+                                    llam_wait_reason_t reason,
                                     bool direct_local) {
-    nm_task_state_id_t from = task->state;
+    llam_task_state_id_t from = task->state;
     if (shard->runtime->experimental_dynamic_shards != 0U &&
         atomic_load_explicit(&shard->online, memory_order_relaxed) == 0U) {
         // Waking work onto an offline dynamic shard brings it back online and
         // updates the runtime's min/max online-shard diagnostics.
         atomic_store_explicit(&shard->online, 1U, memory_order_release);
-        nm_runtime_note_online_shards(shard->runtime,
+        llam_runtime_note_online_shards(shard->runtime,
                                       atomic_fetch_add_explicit(&shard->runtime->online_shards, 1U, memory_order_acq_rel) + 1U);
     }
 
-    task->state = NM_TASK_STATE_RUNNABLE;
-    task->wait_reason = NM_WAIT_NONE;
+    task->state = LLAM_TASK_STATE_RUNNABLE;
+    task->wait_reason = LLAM_WAIT_NONE;
     task->enqueue_hot = hot ? 1U : 0U;
-    task->last_runnable_ns = shard->runtime->wake_latency_metrics_enabled != 0U ? nm_now_ns() : 0U;
+    task->last_runnable_ns = shard->runtime->wake_latency_metrics_enabled != 0U ? llam_now_ns() : 0U;
 
     if (shard->opaque_redirect_active) {
         // A shard in opaque-block redirect mode should not receive local work;
         // send the task to its redirect target or spill to overflow.
         shard->metrics.migrations += 1U;
-        if (!nm_enqueue_opaque_redirect_task_locked(shard, task, hot)) {
+        if (!llam_enqueue_opaque_redirect_task_locked(shard, task, hot)) {
             task->enqueue_hot = 0U;
-            nm_enqueue_overflow_task(shard->runtime, task);
+            llam_enqueue_overflow_task(shard->runtime, task);
         }
     } else if (direct_local) {
         // Same-shard wake can bypass inject_q because the owner lock is held and
         // the current worker will immediately see local queue state.
         task->enqueue_hot = 0U;
         if (hot) {
-            if (nm_queue_push_bounded_locked(shard, &shard->hot_q, NM_HOT_QUEUE_CAP, task)) {
+            if (llam_queue_push_bounded_locked(shard, &shard->hot_q, LLAM_HOT_QUEUE_CAP, task)) {
                 shard->metrics.hot_enqueues += 1U;
             }
         } else {
-            (void)nm_norm_queue_push_owner_locked(shard, task);
+            (void)llam_norm_queue_push_owner_locked(shard, task);
         }
-    } else if (nm_queue_push_bounded_locked(shard, &shard->inject_q, NM_INJECT_QUEUE_CAP, task)) {
+    } else if (llam_queue_push_bounded_locked(shard, &shard->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
         shard->metrics.inject_enqueues += 1U;
     }
     shard->metrics.wakes += 1U;
-    if (reason > NM_WAIT_NONE && reason <= NM_WAIT_TIMEOUT) {
+    if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
         shard->metrics.wake_reason_hist[reason] += 1U;
     }
-    nm_trace_shard(shard, task, kind, from, NM_TASK_STATE_RUNNABLE, reason);
+    llam_trace_shard(shard, task, kind, from, LLAM_TASK_STATE_RUNNABLE, reason);
 }
 
 /**
@@ -95,14 +95,14 @@ void nm_mark_runnable_locked(nm_shard_t *shard,
  * @param kind   Trace event kind.
  * @param reason Wait reason being resolved.
  */
-void nm_reinject_task(nm_runtime_t *rt,
-                             nm_task_t *task,
+void llam_reinject_task(llam_runtime_t *rt,
+                             llam_task_t *task,
                              bool hot,
-                             nm_trace_kind_t kind,
-                             nm_wait_reason_t reason) {
-    unsigned target_id = nm_pick_runnable_shard(rt, task);
+                             llam_trace_kind_t kind,
+                             llam_wait_reason_t reason) {
+    unsigned target_id = llam_pick_runnable_shard(rt, task);
 
-    nm_reinject_task_on_shard(rt, task, target_id, hot, kind, reason);
+    llam_reinject_task_on_shard(rt, task, target_id, hot, kind, reason);
 }
 
 /**
@@ -115,13 +115,13 @@ void nm_reinject_task(nm_runtime_t *rt,
  * @param kind      Trace event kind.
  * @param reason    Wait reason being resolved.
  */
-void nm_reinject_task_on_shard(nm_runtime_t *rt,
-                                      nm_task_t *task,
+void llam_reinject_task_on_shard(llam_runtime_t *rt,
+                                      llam_task_t *task,
                                       unsigned target_id,
                                       bool hot,
-                                      nm_trace_kind_t kind,
-                                      nm_wait_reason_t reason) {
-    nm_shard_t *target;
+                                      llam_trace_kind_t kind,
+                                      llam_wait_reason_t reason) {
+    llam_shard_t *target;
     bool pressure;
     bool effective_hot;
     bool direct_local;
@@ -129,27 +129,27 @@ void nm_reinject_task_on_shard(nm_runtime_t *rt,
     if (rt == NULL || task == NULL || rt->active_shards == 0U) {
         return;
     }
-    if (target_id >= rt->active_shards || !nm_shard_accepts_new_work(&rt->shards[target_id])) {
-        target_id = nm_pick_runnable_shard(rt, task);
+    if (target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
+        target_id = llam_pick_runnable_shard(rt, task);
     }
 
     target = &rt->shards[target_id];
-    pressure = nm_runtime_pressure_signal(rt);
-    effective_hot = hot || task->task_class == NM_TASK_CLASS_LATENCY;
-    direct_local = (g_nm_tls_shard == target && g_nm_tls_task != NULL);
+    pressure = llam_runtime_pressure_signal(rt);
+    effective_hot = hot || task->task_class == LLAM_TASK_CLASS_LATENCY;
+    direct_local = (g_llam_tls_shard == target && g_llam_tls_task != NULL);
 
     if (task->active_timer != NULL) {
-        nm_disarm_task_wait_deadline(task);
+        llam_disarm_task_wait_deadline(task);
     }
     // Wake ownership transfers from the wait primitive/I/O request back to the
     // scheduler queue before the task becomes runnable.
-    nm_task_clear_wait_tracking(task);
+    llam_task_clear_wait_tracking(task);
     pthread_mutex_lock(&target->lock);
-    effective_hot = nm_should_enqueue_hot_locked(target, task, effective_hot, pressure);
-    nm_mark_runnable_locked(target, task, effective_hot, kind, reason, direct_local);
+    effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, pressure);
+    llam_mark_runnable_locked(target, task, effective_hot, kind, reason, direct_local);
     pthread_mutex_unlock(&target->lock);
     if (!direct_local) {
-        nm_kick_shard(target);
+        llam_kick_shard(target);
     }
 }
 
@@ -164,49 +164,70 @@ void nm_reinject_task_on_shard(nm_runtime_t *rt,
  * @param reason    Wait reason being resolved.
  * @return true if the handoff happened, false if normal wake should be used.
  */
-bool nm_reinject_task_on_shard_and_yield_current(nm_runtime_t *rt,
-                                                 nm_task_t *task,
+bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
+                                                 llam_task_t *task,
                                                  unsigned target_id,
                                                  bool hot,
-                                                 nm_trace_kind_t kind,
-                                                 nm_wait_reason_t reason) {
-    nm_shard_t *target;
-    nm_task_t *current = g_nm_tls_task;
+                                                 llam_trace_kind_t kind,
+                                                 llam_wait_reason_t reason) {
+    llam_shard_t *target;
+    llam_task_t *current = g_llam_tls_task;
+    llam_task_state_id_t task_from;
     bool effective_hot;
 
     if (rt == NULL || task == NULL || current == NULL || rt->active_shards == 0U ||
-        target_id >= rt->active_shards || !nm_shard_accepts_new_work(&rt->shards[target_id])) {
+        target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
         return false;
     }
 
     target = &rt->shards[target_id];
-    if (g_nm_tls_shard != target || current == task) {
+    if (g_llam_tls_shard != target || current == task) {
         return false;
     }
 
-    effective_hot = hot || task->task_class == NM_TASK_CLASS_LATENCY;
-
-    if (task->active_timer != NULL) {
-        nm_disarm_task_wait_deadline(task);
+    if (rt->run_timing_enabled != 0U || rt->wake_latency_metrics_enabled != 0U ||
+        task->active_timer != NULL) {
+        return false;
     }
-    nm_task_clear_wait_tracking(task);
 
-    current->forced_yield_budget = rt->forced_yield_every;
-    current->state = NM_TASK_STATE_RUNNABLE;
-    current->wait_reason = NM_WAIT_NONE;
-    current->last_yield_ns = 0U;
+    effective_hot = hot || task->task_class == LLAM_TASK_CLASS_LATENCY;
+
+    llam_task_clear_wait_tracking(task);
 
     pthread_mutex_lock(&target->lock);
-    effective_hot = nm_should_enqueue_hot_locked(target, task, effective_hot, false);
-    nm_mark_runnable_locked(target, task, effective_hot, kind, reason, true);
+    if (target->opaque_redirect_active || target->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+        pthread_mutex_unlock(&target->lock);
+        return false;
+    }
+
+    current->forced_yield_budget = rt->forced_yield_every;
+    current->state = LLAM_TASK_STATE_RUNNABLE;
+    current->wait_reason = LLAM_WAIT_NONE;
+    current->last_yield_ns = 0U;
+
+    effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, false);
     // Put the yielding task on the normal FIFO side so the just-woken peer can
     // run promptly without starving older normal work.
-    (void)nm_norm_queue_push_yield_locked(target, current);
+    (void)llam_norm_queue_push_yield_locked(target, current);
+    task_from = task->state;
+    task->state = LLAM_TASK_STATE_RUNNING;
+    task->wait_reason = LLAM_WAIT_NONE;
+    task->enqueue_hot = effective_hot ? 1U : 0U;
+    task->last_shard = target->id;
+    task->last_started_ns = 0U;
+    atomic_store_explicit(&target->current, task, memory_order_release);
+    g_llam_tls_task = task;
+    target->metrics.wakes += 1U;
+    if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
+        target->metrics.wake_reason_hist[reason] += 1U;
+    }
     target->metrics.yields += 1U;
-    nm_trace_shard(target, current, NM_TRACE_STATE, NM_TASK_STATE_RUNNING, NM_TASK_STATE_RUNNABLE, NM_WAIT_YIELD);
+    target->metrics.ctx_switches += 1U;
+    llam_trace_shard(target, task, kind, task_from, LLAM_TASK_STATE_RUNNING, reason);
+    llam_trace_shard(target, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&target->lock);
 
-    nm_task_sample_live_stack(current);
-    nm_ctx_switch(&current->ctx, g_nm_tls_scheduler_ctx != NULL ? g_nm_tls_scheduler_ctx : &target->scheduler_ctx);
+    llam_task_sample_live_stack(current);
+    llam_switch_task_to_task(current, task);
     return true;
 }

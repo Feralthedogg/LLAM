@@ -4,7 +4,7 @@
  *
  * @details
  * These callbacks run on the runtime blocking-worker pool via
- * ::nm_call_blocking. They are used only after direct completion and async
+ * ::llam_call_blocking. They are used only after direct completion and async
  * backend submission cannot handle the descriptor or operation. The callbacks
  * keep descriptors non-blocking while they poll in short slices, allowing task
  * cancellation to be observed without pinning a scheduler worker.
@@ -28,18 +28,27 @@
 #include "runtime_io_api_internal.h"
 
 /**
+ * @brief Run an owned-buffer blocking fallback through the unambiguous API.
+ */
+static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
+    void *ignored = NULL;
+
+    return llam_call_blocking_result(fn, req, &ignored);
+}
+
+/**
  * @brief Blocking-worker fallback for read/recv-style operations.
  *
  * The descriptor is temporarily forced non-blocking when needed. EAGAIN is
  * handled by short poll slices so cancellation can interrupt the fallback
  * without waiting forever in a kernel blocking syscall.
  *
- * @param arg Pointer to an initialized ::nm_io_req_t.
+ * @param arg Pointer to an initialized ::llam_io_req_t.
  *
  * @return @p arg on completion, or @c NULL for invalid input.
  */
-void *nm_blocking_read_impl(void *arg) {
-    nm_io_req_t *req = arg;
+void *llam_blocking_read_impl(void *arg) {
+    llam_io_req_t *req = arg;
     int saved_flags = 0;
     bool restore_flags = false;
 
@@ -69,12 +78,12 @@ void *nm_blocking_read_impl(void *arg) {
             break;
         }
         if (req->task != NULL && req->task->cancel_token != NULL &&
-            nm_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
+            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
             errno = ECANCELED;
             req->result = -1;
             break;
         }
-        if (nm_platform_poll_fd(req->fd, POLLIN, 10, NULL) < 0 && errno != EINTR) {
+        if (llam_platform_poll_fd(req->fd, POLLIN, 10, NULL) < 0 && errno != EINTR) {
             req->result = -1;
             break;
         }
@@ -89,12 +98,12 @@ void *nm_blocking_read_impl(void *arg) {
 /**
  * @brief Blocking-worker fallback wrapper for recv-owned paths.
  *
- * @param arg Pointer to an initialized ::nm_io_req_t.
+ * @param arg Pointer to an initialized ::llam_io_req_t.
  *
  * @return @p arg on completion, or @c NULL for invalid input.
  */
-static void *nm_blocking_recv_impl(void *arg) {
-    return nm_blocking_read_impl(arg);
+static void *llam_blocking_recv_impl(void *arg) {
+    return llam_blocking_read_impl(arg);
 }
 
 /**
@@ -108,8 +117,8 @@ static void *nm_blocking_recv_impl(void *arg) {
  *
  * @return Allocated buffer, or @c NULL on allocation failure.
  */
-static nm_io_buffer_t *nm_io_buffer_alloc_detached(size_t min_capacity) {
-    nm_io_buffer_t *buffer = calloc(1, sizeof(*buffer));
+static llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity) {
+    llam_io_buffer_t *buffer = calloc(1, sizeof(*buffer));
 
     if (buffer == NULL) {
         return NULL;
@@ -117,8 +126,8 @@ static nm_io_buffer_t *nm_io_buffer_alloc_detached(size_t min_capacity) {
 
     buffer->detached_wrapper = true;
     buffer->data = buffer->inline_data;
-    buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
-    if (min_capacity > NM_IO_BUFFER_INLINE_BYTES) {
+    buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+    if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
         buffer->data = calloc(1, min_capacity);
         if (buffer->data == NULL) {
             free(buffer);
@@ -138,7 +147,7 @@ static nm_io_buffer_t *nm_io_buffer_alloc_detached(size_t min_capacity) {
  *
  * @return @c true when @p fd is a socket.
  */
-static bool nm_fd_get_socket_type(int fd, int *so_type_out) {
+static bool llam_fd_get_socket_type(int fd, int *so_type_out) {
     int so_type = 0;
     socklen_t so_type_len = sizeof(so_type);
 
@@ -166,36 +175,39 @@ static bool nm_fd_get_socket_type(int fd, int *so_type_out) {
  *
  * @return Number of bytes read, or -1 with @c errno set.
  */
-ssize_t nm_read_owned_impl(int fd,
+ssize_t llam_read_owned_impl(int fd,
                                   size_t max_count,
                                   int recv_flags,
                                   bool force_recv,
-                                  nm_io_buffer_t **out) {
-    nm_io_buffer_t *buffer;
-    nm_io_req_t *req;
+                                  llam_io_buffer_t **out) {
+    llam_io_buffer_t *buffer;
+    llam_io_req_t *req;
     ssize_t result;
     int saved_errno = 0;
     int socket_type = 0;
-    bool is_socket = nm_fd_get_socket_type(fd, &socket_type);
+    bool is_socket = llam_fd_get_socket_type(fd, &socket_type);
     bool socket_recv = force_recv || is_socket;
     bool prefer_provided = false;
     bool prefer_multishot = false;
 
-    if (out == NULL || max_count == 0U) {
+    if (out == NULL) {
         errno = EINVAL;
         return -1;
     }
-
     *out = NULL;
-    nm_task_safepoint();
+    if (max_count == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    llam_task_safepoint();
 
     if (force_recv && !is_socket) {
         errno = ENOTSOCK;
         return -1;
     }
 
-    if (g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
-        buffer = nm_io_buffer_alloc_detached(max_count);
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
+        buffer = llam_io_buffer_alloc_detached(max_count);
         if (buffer == NULL) {
             errno = ENOMEM;
             return -1;
@@ -203,63 +215,73 @@ ssize_t nm_read_owned_impl(int fd,
         result = socket_recv ? recv(fd, buffer->data, max_count, recv_flags) : read(fd, buffer->data, max_count);
         if (result < 0) {
             saved_errno = errno;
-            nm_io_buffer_release(buffer);
+            llam_io_buffer_release(buffer);
             errno = saved_errno;
             return -1;
+        }
+        if (result == 0) {
+            llam_io_buffer_release(buffer);
+            return 0;
         }
         buffer->size = (size_t)result;
         *out = buffer;
         return result;
     }
 
-    buffer = nm_io_buffer_alloc(g_nm_tls_shard, max_count);
+    buffer = llam_io_buffer_alloc(g_llam_tls_shard, max_count);
     if (buffer == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    if (socket_recv && recv_flags == 0 && max_count <= NM_IO_BUFFER_INLINE_BYTES &&
+    if (socket_recv && recv_flags == 0 && max_count <= LLAM_IO_BUFFER_INLINE_BYTES &&
         (socket_type == SOCK_DGRAM || socket_type == SOCK_SEQPACKET)) {
-        nm_node_t *node = &g_nm_runtime.nodes[g_nm_tls_shard->io_node_index];
+        llam_node_t *node = &g_llam_runtime.nodes[g_llam_tls_shard->io_node_index];
 
         prefer_provided = node->supports_provided_buffers || node->supports_multishot_recv;
         prefer_multishot = !node->supports_provided_buffers && node->supports_multishot_recv;
     }
 
-    req = nm_api_io_req_acquire(g_nm_tls_shard);
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         saved_errno = errno != 0 ? errno : ENOMEM;
-        nm_io_buffer_release(buffer);
+        llam_io_buffer_release(buffer);
         errno = saved_errno;
         return -1;
     }
 
-    req->kind = NM_IO_KIND_READ;
+    req->kind = LLAM_IO_KIND_READ;
     req->fd = fd;
     req->buf = prefer_provided ? NULL : buffer->data;
     req->count = max_count;
     req->recv_flags = recv_flags;
     req->owned_buffer = buffer;
     req->use_recv_op = socket_recv;
-    req->use_provided_buffer = prefer_provided && g_nm_runtime.nodes[g_nm_tls_shard->io_node_index].supports_provided_buffers;
+    req->use_provided_buffer = prefer_provided && g_llam_runtime.nodes[g_llam_tls_shard->io_node_index].supports_provided_buffers;
     req->buf = (req->use_provided_buffer || prefer_multishot) ? NULL : buffer->data;
-    if (prefer_multishot && nm_issue_multishot_recv(req) == 0) {
+    if (prefer_multishot && llam_issue_multishot_recv(req) == 0) {
         result = req->result;
-        if (result < 0 && nm_io_capability_error(req->error_code)) {
+        if (result < 0 && (req->error_code == 0 || llam_io_capability_error(req->error_code))) {
+            /*
+             * A shared multishot watch can be invalidated by a transient
+             * readiness race before it reports a concrete errno. Treat that
+             * incomplete completion as a backend miss and retry on the regular
+             * one-shot path instead of surfacing -1/errno=0 to callers.
+             */
             req->result = -1;
             req->error_code = 0;
             req->owned_buffer->provided_storage = false;
             req->owned_buffer->provided_bid = 0U;
             req->owned_buffer->data = req->owned_buffer->inline_data;
             req->owned_buffer->size = 0U;
-            req->owned_buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
+            req->owned_buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
         } else {
             goto read_owned_done;
         }
-    } else if (prefer_multishot && !nm_io_capability_error(errno)) {
+    } else if (prefer_multishot && !llam_io_capability_error(errno)) {
         saved_errno = errno;
-        nm_api_io_req_release(g_nm_tls_shard, req);
-        nm_io_buffer_release(buffer);
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        llam_io_buffer_release(buffer);
         errno = saved_errno;
         return -1;
     }
@@ -267,26 +289,26 @@ ssize_t nm_read_owned_impl(int fd,
     if (!req->use_provided_buffer) {
         req->buf = buffer->data;
     }
-    if (nm_issue_io(req, false, 0U) != 0) {
-        if (!nm_io_capability_error(errno)) {
+    if (llam_issue_io(req, false, 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
             saved_errno = errno;
-            nm_api_io_req_release(g_nm_tls_shard, req);
-            nm_io_buffer_release(buffer);
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            llam_io_buffer_release(buffer);
             errno = saved_errno;
             return -1;
         }
-        req->kind = NM_IO_KIND_READ;
+        req->kind = LLAM_IO_KIND_READ;
         req->fd = fd;
         req->buf = buffer->data;
         req->count = max_count;
         req->recv_flags = recv_flags;
         req->use_recv_op = socket_recv;
         req->use_provided_buffer = false;
-        req->task = g_nm_tls_task;
-        if (nm_call_blocking(socket_recv ? nm_blocking_recv_impl : nm_blocking_read_impl, req) == NULL) {
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(socket_recv ? llam_blocking_recv_impl : llam_blocking_read_impl, req) != 0) {
             saved_errno = errno;
-            nm_api_io_req_release(g_nm_tls_shard, req);
-            nm_io_buffer_release(buffer);
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            llam_io_buffer_release(buffer);
             errno = saved_errno;
             return -1;
         }
@@ -298,14 +320,19 @@ ssize_t nm_read_owned_impl(int fd,
 read_owned_done:
     if (result < 0) {
         saved_errno = req->error_code != 0 ? req->error_code : errno;
-        nm_api_io_req_release(g_nm_tls_shard, req);
-        nm_io_buffer_release(buffer);
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        llam_io_buffer_release(buffer);
         errno = saved_errno;
         return -1;
     }
+    if (result == 0) {
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        llam_io_buffer_release(buffer);
+        return 0;
+    }
 
     buffer->size = (size_t)result;
-    nm_api_io_req_release(g_nm_tls_shard, req);
+    llam_api_io_req_release(g_llam_tls_shard, req);
     *out = buffer;
     return result;
 }
@@ -316,12 +343,12 @@ read_owned_done:
  * Like the read fallback, this keeps the descriptor non-blocking and polls for
  * output readiness in short slices so cancellation remains observable.
  *
- * @param arg Pointer to an initialized ::nm_io_req_t.
+ * @param arg Pointer to an initialized ::llam_io_req_t.
  *
  * @return @p arg on completion, or @c NULL for invalid input.
  */
-void *nm_blocking_write_impl(void *arg) {
-    nm_io_req_t *req = arg;
+void *llam_blocking_write_impl(void *arg) {
+    llam_io_req_t *req = arg;
     int saved_flags = 0;
     bool restore_flags = false;
 
@@ -350,12 +377,12 @@ void *nm_blocking_write_impl(void *arg) {
             break;
         }
         if (req->task != NULL && req->task->cancel_token != NULL &&
-            nm_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
+            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
             errno = ECANCELED;
             req->result = -1;
             break;
         }
-        if (nm_platform_poll_fd(req->fd, POLLOUT, 10, NULL) < 0 && errno != EINTR) {
+        if (llam_platform_poll_fd(req->fd, POLLOUT, 10, NULL) < 0 && errno != EINTR) {
             req->result = -1;
             break;
         }
@@ -370,12 +397,12 @@ void *nm_blocking_write_impl(void *arg) {
 /**
  * @brief Blocking-worker fallback for accept operations.
  *
- * @param arg Pointer to an initialized ::nm_io_req_t.
+ * @param arg Pointer to an initialized ::llam_io_req_t.
  *
  * @return @p arg on completion, or @c NULL for invalid input.
  */
-void *nm_blocking_accept_impl(void *arg) {
-    nm_io_req_t *req = arg;
+void *llam_blocking_accept_impl(void *arg) {
+    llam_io_req_t *req = arg;
     int saved_flags = 0;
     bool restore_flags = false;
 
@@ -401,12 +428,12 @@ void *nm_blocking_accept_impl(void *arg) {
             break;
         }
         if (req->task != NULL && req->task->cancel_token != NULL &&
-            nm_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
+            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
             errno = ECANCELED;
             req->result = -1;
             break;
         }
-        if (nm_platform_poll_fd(req->fd, POLLIN, 10, NULL) < 0 && errno != EINTR) {
+        if (llam_platform_poll_fd(req->fd, POLLIN, 10, NULL) < 0 && errno != EINTR) {
             req->result = -1;
             break;
         }
@@ -425,12 +452,12 @@ void *nm_blocking_accept_impl(void *arg) {
  * short slices. After readiness, @c SO_ERROR is the authoritative connection
  * result.
  *
- * @param arg Pointer to an initialized ::nm_io_req_t.
+ * @param arg Pointer to an initialized ::llam_io_req_t.
  *
  * @return @p arg on completion, or @c NULL for invalid input.
  */
-void *nm_blocking_connect_impl(void *arg) {
-    nm_io_req_t *req = arg;
+void *llam_blocking_connect_impl(void *arg) {
+    llam_io_req_t *req = arg;
     int saved_flags = 0;
     bool restore_flags = false;
     bool wait_ready = false;
@@ -468,13 +495,13 @@ void *nm_blocking_connect_impl(void *arg) {
             wait_ready = true;
         }
         if (req->task != NULL && req->task->cancel_token != NULL &&
-            nm_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
+            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
             errno = ECANCELED;
             req->result = -1;
             break;
         }
         {
-            int poll_rc = nm_platform_poll_fd(req->fd, POLLOUT, 10, NULL);
+            int poll_rc = llam_platform_poll_fd(req->fd, POLLOUT, 10, NULL);
 
             if (poll_rc < 0 && errno != EINTR) {
                 req->result = -1;
@@ -487,7 +514,7 @@ void *nm_blocking_connect_impl(void *arg) {
                 continue;
             }
         }
-        if (nm_socket_connect_error(req->fd) == 0) {
+        if (llam_socket_connect_error(req->fd) == 0) {
             req->result = 0;
         } else {
             req->result = -1;
@@ -510,30 +537,30 @@ void *nm_blocking_connect_impl(void *arg) {
  * Polling is sliced into at most 10 ms intervals so finite timeouts remain
  * accurate enough while cancellation is still checked frequently.
  *
- * @param arg Pointer to an initialized ::nm_io_req_t.
+ * @param arg Pointer to an initialized ::llam_io_req_t.
  *
  * @return @p arg on completion, or @c NULL for invalid input.
  */
-void *nm_blocking_poll_impl(void *arg) {
-    nm_io_req_t *req = arg;
+void *llam_blocking_poll_impl(void *arg) {
+    llam_io_req_t *req = arg;
     uint64_t deadline_ns;
 
     if (req == NULL) {
         return NULL;
     }
-    deadline_ns = req->timeout_ms >= 0 ? nm_now_ns() + (uint64_t)req->timeout_ms * 1000000ULL : 0U;
+    deadline_ns = req->timeout_ms >= 0 ? llam_now_ns() + (uint64_t)req->timeout_ms * 1000000ULL : 0U;
 
     for (;;) {
         int slice_ms = 10;
 
         if (req->task != NULL && req->task->cancel_token != NULL &&
-            nm_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
+            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
             errno = ECANCELED;
             req->result = -1;
             return req;
         }
         if (req->timeout_ms >= 0) {
-            uint64_t now_ns = nm_now_ns();
+            uint64_t now_ns = llam_now_ns();
             uint64_t remain_ns;
 
             if (now_ns >= deadline_ns) {
@@ -550,7 +577,7 @@ void *nm_blocking_poll_impl(void *arg) {
             }
         }
 
-        req->result = nm_platform_poll_fd(req->fd, req->poll_events, req->timeout_ms < 0 ? 10 : slice_ms, &req->poll_revents);
+        req->result = llam_platform_poll_fd(req->fd, req->poll_events, req->timeout_ms < 0 ? 10 : slice_ms, &req->poll_revents);
         if (req->result > 0) {
             return req;
         }

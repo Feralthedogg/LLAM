@@ -37,8 +37,8 @@
  *
  * @return New channel on success, or @c NULL with @c errno set.
  */
-nm_channel_t *nm_channel_create(size_t capacity) {
-    nm_channel_t *channel;
+llam_channel_t *llam_channel_create(size_t capacity) {
+    llam_channel_t *channel;
 
     if (capacity == 0U) {
         errno = EINVAL;
@@ -46,7 +46,7 @@ nm_channel_t *nm_channel_create(size_t capacity) {
     }
 
     if (capacity == 1U) {
-        channel = nm_channel_cache_acquire();
+        channel = llam_channel_cache_acquire();
         if (channel != NULL) {
             return channel;
         }
@@ -85,14 +85,14 @@ nm_channel_t *nm_channel_create(size_t capacity) {
  *
  * @return @c true when local handoff is eligible.
  */
-static bool nm_channel_should_handoff_to_waiter(const nm_wait_node_t *node, bool has_deadline) {
-    if (g_nm_runtime.channel_local_handoff_enabled == 0U || has_deadline) {
+static bool llam_channel_should_handoff_to_waiter(const llam_wait_node_t *node, bool has_deadline) {
+    if (g_llam_runtime.channel_local_handoff_enabled == 0U || has_deadline) {
         return false;
     }
-    if (node == NULL || node->task == NULL || g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
+    if (node == NULL || node->task == NULL || g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return false;
     }
-    if (node->task->parked_shard != g_nm_tls_shard->id || node->task->last_shard != g_nm_tls_shard->id) {
+    if (node->task->parked_shard != g_llam_tls_shard->id || node->task->last_shard != g_llam_tls_shard->id) {
         return false;
     }
     return true;
@@ -101,10 +101,10 @@ static bool nm_channel_should_handoff_to_waiter(const nm_wait_node_t *node, bool
 /**
  * @brief Yield after a channel handoff without marking it as a normal user yield.
  */
-static void nm_channel_handoff_yield(void) {
-    g_nm_tls_io_handoff_yield += 1U;
-    nm_yield();
-    g_nm_tls_io_handoff_yield -= 1U;
+static void llam_channel_handoff_yield(void) {
+    g_llam_tls_io_handoff_yield += 1U;
+    llam_yield();
+    g_llam_tls_io_handoff_yield -= 1U;
 }
 
 /**
@@ -113,15 +113,15 @@ static void nm_channel_handoff_yield(void) {
  * @param node   Wait node to wake.
  * @param reason Wait reason used for tracing and metrics.
  */
-static void nm_channel_wake_waiter(nm_wait_node_t *node, nm_wait_reason_t reason) {
+static void llam_channel_wake_waiter(llam_wait_node_t *node, llam_wait_reason_t reason) {
     if (node == NULL || node->task == NULL) {
         return;
     }
-    nm_reinject_task_on_shard(&g_nm_runtime,
+    llam_reinject_task_on_shard(&g_llam_runtime,
                               node->task,
                               node->task->parked_shard,
                               true,
-                              NM_TRACE_WAKE,
+                              LLAM_TRACE_WAKE,
                               reason);
 }
 
@@ -133,15 +133,15 @@ static void nm_channel_wake_waiter(nm_wait_node_t *node, nm_wait_reason_t reason
  *
  * @return @c true when the current task yielded directly to the waiter.
  */
-static bool nm_channel_wake_waiter_and_handoff(nm_wait_node_t *node, nm_wait_reason_t reason) {
-    if (node == NULL || node->task == NULL || g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
+static bool llam_channel_wake_waiter_and_handoff(llam_wait_node_t *node, llam_wait_reason_t reason) {
+    if (node == NULL || node->task == NULL || g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return false;
     }
-    return nm_reinject_task_on_shard_and_yield_current(&g_nm_runtime,
+    return llam_reinject_task_on_shard_and_yield_current(&g_llam_runtime,
                                                        node->task,
                                                        node->task->parked_shard,
                                                        true,
-                                                       NM_TRACE_WAKE,
+                                                       LLAM_TRACE_WAKE,
                                                        reason);
 }
 
@@ -150,20 +150,36 @@ static bool nm_channel_wake_waiter_and_handoff(nm_wait_node_t *node, nm_wait_rea
  *
  * The caller must ensure no tasks are currently waiting on the channel.
  *
- * @param channel Channel to destroy; may be @c NULL.
+ * @param channel Channel to destroy.
+ *
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
  */
-void nm_channel_destroy(nm_channel_t *channel) {
+int llam_channel_destroy(llam_channel_t *channel) {
     if (channel == NULL) {
-        return;
+        errno = EINVAL;
+        return -1;
     }
 
-    if (nm_channel_cache_release(channel)) {
-        return;
+    pthread_mutex_lock(&channel->lock);
+    if (channel->count != 0U ||
+        channel->send_waiters.head != NULL ||
+        channel->send_waiters.depth != 0U ||
+        channel->recv_waiters.head != NULL ||
+        channel->recv_waiters.depth != 0U) {
+        pthread_mutex_unlock(&channel->lock);
+        errno = EBUSY;
+        return -1;
+    }
+    pthread_mutex_unlock(&channel->lock);
+
+    if (llam_channel_cache_release(channel)) {
+        return 0;
     }
 
     pthread_mutex_destroy(&channel->lock);
     free(channel->buffer);
     free(channel);
+    return 0;
 }
 
 /**
@@ -180,15 +196,19 @@ void nm_channel_destroy(nm_channel_t *channel) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int nm_channel_send_impl(nm_channel_t *channel, void *value, bool has_deadline, uint64_t deadline_ns) {
-    nm_wait_node_t *receiver;
-    nm_wait_node_t *node;
+int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadline, uint64_t deadline_ns) {
+    llam_wait_node_t *receiver;
+    llam_wait_node_t *node;
     int rc;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (channel == NULL || !g_nm_runtime.initialized || g_nm_tls_task == NULL || g_nm_tls_shard == NULL) {
+    if (channel == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+        errno = ENOTSUP;
         return -1;
     }
 
@@ -199,19 +219,19 @@ int nm_channel_send_impl(nm_channel_t *channel, void *value, bool has_deadline, 
         return -1;
     }
 
-    receiver = nm_wait_queue_pop_head(&channel->recv_waiters);
+    receiver = llam_wait_queue_pop_head(&channel->recv_waiters);
     if (receiver != NULL) {
-        bool handoff = nm_channel_should_handoff_to_waiter(receiver, has_deadline);
+        bool handoff = llam_channel_should_handoff_to_waiter(receiver, has_deadline);
 
         receiver->value = value;
         receiver->error_code = 0;
         pthread_mutex_unlock(&channel->lock);
-        if (handoff && nm_channel_wake_waiter_and_handoff(receiver, NM_WAIT_CHANNEL_RECV)) {
+        if (handoff && llam_channel_wake_waiter_and_handoff(receiver, LLAM_WAIT_CHANNEL_RECV)) {
             return 0;
         }
-        nm_channel_wake_waiter(receiver, NM_WAIT_CHANNEL_RECV);
+        llam_channel_wake_waiter(receiver, LLAM_WAIT_CHANNEL_RECV);
         if (handoff) {
-            nm_channel_handoff_yield();
+            llam_channel_handoff_yield();
         }
         return 0;
     }
@@ -227,56 +247,56 @@ int nm_channel_send_impl(nm_channel_t *channel, void *value, bool has_deadline, 
         pthread_mutex_unlock(&channel->lock);
         return 0;
     }
-    if (has_deadline && nm_deadline_passed(deadline_ns)) {
+    if (has_deadline && llam_deadline_passed(deadline_ns)) {
         pthread_mutex_unlock(&channel->lock);
         errno = ETIMEDOUT;
         return -1;
     }
 
-    node = nm_sync_wait_node_acquire(g_nm_tls_shard);
+    node = llam_sync_wait_node_acquire(g_llam_tls_shard);
     if (node == NULL) {
         pthread_mutex_unlock(&channel->lock);
         errno = ENOMEM;
         return -1;
     }
 
-    node->task = g_nm_tls_task;
-    node->owner_shard = g_nm_tls_shard->id;
+    node->task = g_llam_tls_task;
+    node->owner_shard = g_llam_tls_shard->id;
     node->value = value;
-    nm_wait_queue_push_tail(&channel->send_waiters, node);
+    llam_wait_queue_push_tail(&channel->send_waiters, node);
     pthread_mutex_unlock(&channel->lock);
-    nm_task_set_wait_node_tracking(g_nm_tls_task, node, &channel->send_waiters, &channel->lock, g_nm_tls_shard->id);
-    g_nm_tls_task->state = NM_TASK_STATE_PARKED;
-    g_nm_tls_task->wait_reason = NM_WAIT_CHANNEL_SEND;
-    if (has_deadline && nm_arm_task_wait_deadline(g_nm_tls_task, g_nm_tls_shard, deadline_ns) != 0) {
+    llam_task_set_wait_node_tracking(g_llam_tls_task, node, &channel->send_waiters, &channel->lock, g_llam_tls_shard->id);
+    g_llam_tls_task->state = LLAM_TASK_STATE_PARKED;
+    g_llam_tls_task->wait_reason = LLAM_WAIT_CHANNEL_SEND;
+    if (has_deadline && llam_arm_task_wait_deadline(g_llam_tls_task, g_llam_tls_shard, deadline_ns) != 0) {
         pthread_mutex_lock(&channel->lock);
-        (void)nm_wait_queue_remove(&channel->send_waiters, node);
+        (void)llam_wait_queue_remove(&channel->send_waiters, node);
         pthread_mutex_unlock(&channel->lock);
-        g_nm_tls_task->state = NM_TASK_STATE_RUNNING;
-        g_nm_tls_task->wait_reason = NM_WAIT_NONE;
-        nm_task_clear_wait_tracking(g_nm_tls_task);
-        nm_sync_wait_node_release(g_nm_tls_shard, node);
+        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
+        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(g_llam_tls_task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
         return -1;
     }
-    if (g_nm_tls_task->cancel_token != NULL && nm_cancel_token_register_task(g_nm_tls_task) != 0) {
-        nm_disarm_task_wait_deadline(g_nm_tls_task);
+    if (g_llam_tls_task->cancel_token != NULL && llam_cancel_token_register_task(g_llam_tls_task) != 0) {
+        llam_disarm_task_wait_deadline(g_llam_tls_task);
         pthread_mutex_lock(&channel->lock);
-        (void)nm_wait_queue_remove(&channel->send_waiters, node);
+        (void)llam_wait_queue_remove(&channel->send_waiters, node);
         pthread_mutex_unlock(&channel->lock);
-        g_nm_tls_task->state = NM_TASK_STATE_RUNNING;
-        g_nm_tls_task->wait_reason = NM_WAIT_NONE;
-        nm_task_clear_wait_tracking(g_nm_tls_task);
-        nm_sync_wait_node_release(g_nm_tls_shard, node);
+        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
+        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(g_llam_tls_task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
         return -1;
     }
 
-    nm_park_current_task(NM_WAIT_CHANNEL_SEND, NM_TRACE_STATE);
-    if (g_nm_tls_task->cancel_registered) {
-        nm_cancel_token_unregister_task(g_nm_tls_task);
+    llam_park_current_task(LLAM_WAIT_CHANNEL_SEND, LLAM_TRACE_STATE);
+    if (g_llam_tls_task->cancel_registered) {
+        llam_cancel_token_unregister_task(g_llam_tls_task);
     }
-    nm_task_clear_wait_tracking(g_nm_tls_task);
+    llam_task_clear_wait_tracking(g_llam_tls_task);
     rc = node->error_code;
-    nm_sync_wait_node_release(g_nm_tls_shard, node);
+    llam_sync_wait_node_release(g_llam_tls_shard, node);
     if (rc != 0) {
         errno = rc;
         return -1;
@@ -292,8 +312,8 @@ int nm_channel_send_impl(nm_channel_t *channel, void *value, bool has_deadline, 
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int nm_channel_send(nm_channel_t *channel, void *value) {
-    return nm_channel_send_impl(channel, value, false, 0U);
+int llam_channel_send(llam_channel_t *channel, void *value) {
+    return llam_channel_send_impl(channel, value, false, 0U);
 }
 
 /**
@@ -305,8 +325,8 @@ int nm_channel_send(nm_channel_t *channel, void *value) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int nm_channel_send_until(nm_channel_t *channel, void *value, uint64_t deadline_ns) {
-    return nm_channel_send_impl(channel, value, true, deadline_ns);
+int llam_channel_send_until(llam_channel_t *channel, void *value, uint64_t deadline_ns) {
+    return llam_channel_send_impl(channel, value, true, deadline_ns);
 }
 
 /**
@@ -320,20 +340,28 @@ int nm_channel_send_until(nm_channel_t *channel, void *value, uint64_t deadline_
  * @param has_deadline Whether @p deadline_ns is active.
  * @param deadline_ns  Absolute monotonic deadline in nanoseconds.
  *
- * @return Received pointer on success, or @c NULL with @c errno set on error.
+ * @return 0 on success, or -1 with @c errno set on error.
  */
-static void *nm_channel_recv_impl(nm_channel_t *channel, bool has_deadline, uint64_t deadline_ns) {
-    nm_wait_node_t *sender;
-    nm_wait_node_t *node;
+static int llam_channel_recv_result_impl(llam_channel_t *channel,
+                                         bool has_deadline,
+                                         uint64_t deadline_ns,
+                                         void **out) {
+    llam_wait_node_t *sender;
+    llam_wait_node_t *node;
     void *value;
     int rc;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (channel == NULL || !g_nm_runtime.initialized || g_nm_tls_task == NULL || g_nm_tls_shard == NULL) {
+    if (channel == NULL || out == NULL) {
         errno = EINVAL;
-        return NULL;
+        return -1;
     }
+    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    *out = NULL;
 
     pthread_mutex_lock(&channel->lock);
     if (channel->count > 0U) {
@@ -345,7 +373,7 @@ static void *nm_channel_recv_impl(nm_channel_t *channel, bool has_deadline, uint
         }
         channel->count -= 1U;
 
-        sender = nm_wait_queue_pop_head(&channel->send_waiters);
+        sender = llam_wait_queue_pop_head(&channel->send_waiters);
         if (sender != NULL) {
             if (channel->capacity == 1U) {
                 channel->buffer[0] = sender->value;
@@ -358,81 +386,109 @@ static void *nm_channel_recv_impl(nm_channel_t *channel, bool has_deadline, uint
         }
         pthread_mutex_unlock(&channel->lock);
         if (sender != NULL) {
-            nm_channel_wake_waiter(sender, NM_WAIT_CHANNEL_SEND);
+            llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
         }
-        return value;
+        *out = value;
+        return 0;
     }
 
-    sender = nm_wait_queue_pop_head(&channel->send_waiters);
+    sender = llam_wait_queue_pop_head(&channel->send_waiters);
     if (sender != NULL) {
         value = sender->value;
         sender->error_code = 0;
         pthread_mutex_unlock(&channel->lock);
-        nm_channel_wake_waiter(sender, NM_WAIT_CHANNEL_SEND);
-        return value;
+        llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
+        *out = value;
+        return 0;
     }
 
     if (channel->closed) {
         pthread_mutex_unlock(&channel->lock);
         errno = EPIPE;
-        return NULL;
+        return -1;
     }
-    if (has_deadline && nm_deadline_passed(deadline_ns)) {
+    if (has_deadline && llam_deadline_passed(deadline_ns)) {
         pthread_mutex_unlock(&channel->lock);
         errno = ETIMEDOUT;
-        return NULL;
+        return -1;
     }
 
-    node = nm_sync_wait_node_acquire(g_nm_tls_shard);
+    node = llam_sync_wait_node_acquire(g_llam_tls_shard);
     if (node == NULL) {
         pthread_mutex_unlock(&channel->lock);
         errno = ENOMEM;
-        return NULL;
+        return -1;
     }
 
-    node->task = g_nm_tls_task;
-    node->owner_shard = g_nm_tls_shard->id;
-    nm_wait_queue_push_tail(&channel->recv_waiters, node);
+    node->task = g_llam_tls_task;
+    node->owner_shard = g_llam_tls_shard->id;
+    llam_wait_queue_push_tail(&channel->recv_waiters, node);
     pthread_mutex_unlock(&channel->lock);
-    nm_task_set_wait_node_tracking(g_nm_tls_task, node, &channel->recv_waiters, &channel->lock, g_nm_tls_shard->id);
-    g_nm_tls_task->state = NM_TASK_STATE_PARKED;
-    g_nm_tls_task->wait_reason = NM_WAIT_CHANNEL_RECV;
-    if (has_deadline && nm_arm_task_wait_deadline(g_nm_tls_task, g_nm_tls_shard, deadline_ns) != 0) {
+    llam_task_set_wait_node_tracking(g_llam_tls_task, node, &channel->recv_waiters, &channel->lock, g_llam_tls_shard->id);
+    g_llam_tls_task->state = LLAM_TASK_STATE_PARKED;
+    g_llam_tls_task->wait_reason = LLAM_WAIT_CHANNEL_RECV;
+    if (has_deadline && llam_arm_task_wait_deadline(g_llam_tls_task, g_llam_tls_shard, deadline_ns) != 0) {
         pthread_mutex_lock(&channel->lock);
-        (void)nm_wait_queue_remove(&channel->recv_waiters, node);
+        (void)llam_wait_queue_remove(&channel->recv_waiters, node);
         pthread_mutex_unlock(&channel->lock);
-        g_nm_tls_task->state = NM_TASK_STATE_RUNNING;
-        g_nm_tls_task->wait_reason = NM_WAIT_NONE;
-        nm_task_clear_wait_tracking(g_nm_tls_task);
-        nm_sync_wait_node_release(g_nm_tls_shard, node);
-        return NULL;
+        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
+        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(g_llam_tls_task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        return -1;
     }
-    if (g_nm_tls_task->cancel_token != NULL && nm_cancel_token_register_task(g_nm_tls_task) != 0) {
-        nm_disarm_task_wait_deadline(g_nm_tls_task);
+    if (g_llam_tls_task->cancel_token != NULL && llam_cancel_token_register_task(g_llam_tls_task) != 0) {
+        llam_disarm_task_wait_deadline(g_llam_tls_task);
         pthread_mutex_lock(&channel->lock);
-        (void)nm_wait_queue_remove(&channel->recv_waiters, node);
+        (void)llam_wait_queue_remove(&channel->recv_waiters, node);
         pthread_mutex_unlock(&channel->lock);
-        g_nm_tls_task->state = NM_TASK_STATE_RUNNING;
-        g_nm_tls_task->wait_reason = NM_WAIT_NONE;
-        nm_task_clear_wait_tracking(g_nm_tls_task);
-        nm_sync_wait_node_release(g_nm_tls_shard, node);
+        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
+        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(g_llam_tls_task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
         errno = ECANCELED;
-        return NULL;
+        return -1;
     }
 
-    nm_park_current_task(NM_WAIT_CHANNEL_RECV, NM_TRACE_STATE);
-    if (g_nm_tls_task->cancel_registered) {
-        nm_cancel_token_unregister_task(g_nm_tls_task);
+    llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
+    if (g_llam_tls_task->cancel_registered) {
+        llam_cancel_token_unregister_task(g_llam_tls_task);
     }
-    nm_task_clear_wait_tracking(g_nm_tls_task);
+    llam_task_clear_wait_tracking(g_llam_tls_task);
     value = node->value;
     rc = node->error_code;
-    nm_sync_wait_node_release(g_nm_tls_shard, node);
+    llam_sync_wait_node_release(g_llam_tls_shard, node);
     if (rc != 0) {
         errno = rc;
-        return NULL;
+        return -1;
     }
-    return value;
+    *out = value;
+    return 0;
+}
+
+/**
+ * @brief Receive a pointer from a channel without a timeout.
+ *
+ * @param channel Channel to receive from.
+ * @param out     Destination for the received pointer.
+ *
+ * @return 0 on success, or -1 with @c errno set.
+ */
+int llam_channel_recv_result(llam_channel_t *channel, void **out) {
+    return llam_channel_recv_result_impl(channel, false, 0U, out);
+}
+
+/**
+ * @brief Receive a pointer from a channel until an absolute deadline.
+ *
+ * @param channel     Channel to receive from.
+ * @param deadline_ns Absolute monotonic deadline in nanoseconds.
+ * @param out         Destination for the received pointer.
+ *
+ * @return 0 on success, or -1 with @c errno set.
+ */
+int llam_channel_recv_until_result(llam_channel_t *channel, uint64_t deadline_ns, void **out) {
+    return llam_channel_recv_result_impl(channel, true, deadline_ns, out);
 }
 
 /**
@@ -442,8 +498,16 @@ static void *nm_channel_recv_impl(nm_channel_t *channel, bool has_deadline, uint
  *
  * @return Received pointer on success, or @c NULL with @c errno set.
  */
-void *nm_channel_recv(nm_channel_t *channel) {
-    return nm_channel_recv_impl(channel, false, 0U);
+void *llam_channel_recv(llam_channel_t *channel) {
+    void *value = NULL;
+
+    if (llam_channel_recv_result(channel, &value) != 0) {
+        return NULL;
+    }
+    if (value == NULL) {
+        errno = 0;
+    }
+    return value;
 }
 
 /**
@@ -454,8 +518,16 @@ void *nm_channel_recv(nm_channel_t *channel) {
  *
  * @return Received pointer on success, or @c NULL with @c errno set.
  */
-void *nm_channel_recv_until(nm_channel_t *channel, uint64_t deadline_ns) {
-    return nm_channel_recv_impl(channel, true, deadline_ns);
+void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns) {
+    void *value = NULL;
+
+    if (llam_channel_recv_until_result(channel, deadline_ns, &value) != 0) {
+        return NULL;
+    }
+    if (value == NULL) {
+        errno = 0;
+    }
+    return value;
 }
 
 /**
@@ -467,7 +539,7 @@ void *nm_channel_recv_until(nm_channel_t *channel, uint64_t deadline_ns) {
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL.
  */
-int nm_channel_close(nm_channel_t *channel) {
+int llam_channel_close(llam_channel_t *channel) {
     if (channel == NULL) {
         errno = EINVAL;
         return -1;
@@ -479,8 +551,8 @@ int nm_channel_close(nm_channel_t *channel) {
         return 0;
     }
     channel->closed = true;
-    nm_wake_wait_queue_all(&channel->send_waiters, EPIPE, NM_WAIT_CHANNEL_SEND);
-    nm_wake_wait_queue_all(&channel->recv_waiters, EPIPE, NM_WAIT_CHANNEL_RECV);
+    llam_wake_wait_queue_all(&channel->send_waiters, EPIPE, LLAM_WAIT_CHANNEL_SEND);
+    llam_wake_wait_queue_all(&channel->recv_waiters, EPIPE, LLAM_WAIT_CHANNEL_RECV);
     pthread_mutex_unlock(&channel->lock);
     return 0;
 }

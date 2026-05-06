@@ -31,7 +31,7 @@
 /**
  * @brief Read a runtime environment variable with LLAM/NM compatibility aliases.
  *
- * The project was renamed from @c NM_* to @c LLAM_* public branding. This
+ * The project was renamed from @c LLAM_* to @c LLAM_* public branding. This
  * helper checks the requested name first, then known renamed options, then the
  * equivalent prefix for compatibility.
  *
@@ -40,7 +40,7 @@
  * @return Environment value, or @c NULL when unset or when alias construction
  *         would overflow the local buffer.
  */
-const char *nm_env_get(const char *name) {
+const char *llam_env_get(const char *name) {
     char compat_name[128];
     const char *value;
 
@@ -55,7 +55,7 @@ const char *nm_env_get(const char *name) {
         if (strcmp(name, "LLAM_EXPERIMENTAL_WORKER_RINGS") == 0) {
             value = getenv("LLAM_EXPERIMENTAL_SHARD_RINGS");
             if (value == NULL) {
-                value = getenv("NM_EXPERIMENTAL_SHARD_RINGS");
+                value = getenv("LLAM_EXPERIMENTAL_SHARD_RINGS");
             }
             if (value != NULL) {
                 return value;
@@ -63,7 +63,7 @@ const char *nm_env_get(const char *name) {
         } else if (strcmp(name, "LLAM_EXPERIMENTAL_WORKER_RINGS_MULTISHOT") == 0) {
             value = getenv("LLAM_EXPERIMENTAL_SHARD_RINGS_MULTISHOT");
             if (value == NULL) {
-                value = getenv("NM_EXPERIMENTAL_SHARD_RINGS_MULTISHOT");
+                value = getenv("LLAM_EXPERIMENTAL_SHARD_RINGS_MULTISHOT");
             }
             if (value != NULL) {
                 return value;
@@ -71,20 +71,20 @@ const char *nm_env_get(const char *name) {
         } else if (strcmp(name, "LLAM_EXPERIMENTAL_DYNAMIC_WORKERS") == 0) {
             value = getenv("LLAM_EXPERIMENTAL_DYNAMIC_SHARDS");
             if (value == NULL) {
-                value = getenv("NM_EXPERIMENTAL_DYNAMIC_SHARDS");
+                value = getenv("LLAM_EXPERIMENTAL_DYNAMIC_SHARDS");
             }
             if (value != NULL) {
                 return value;
             }
         }
-        // Generic LLAM_FOO -> NM_FOO fallback for old scripts.
-        if (snprintf(compat_name, sizeof(compat_name), "NM_%s", name + 5) >= (int)sizeof(compat_name)) {
+        // Generic LLAM_FOO -> LLAM_FOO fallback for old scripts.
+        if (snprintf(compat_name, sizeof(compat_name), "LLAM_%s", name + 5) >= (int)sizeof(compat_name)) {
             return NULL;
         }
         return getenv(compat_name);
     }
-    if (strncmp(name, "NM_", 3U) == 0) {
-        // Generic NM_FOO -> LLAM_FOO lookup lets internal code accept old names.
+    if (strncmp(name, "LLAM_", 3U) == 0) {
+        // Generic LLAM_FOO -> LLAM_FOO lookup lets internal code accept old names.
         if (snprintf(compat_name, sizeof(compat_name), "LLAM_%s", name + 3) < (int)sizeof(compat_name)) {
             value = getenv(compat_name);
             if (value != NULL) {
@@ -101,7 +101,7 @@ const char *nm_env_get(const char *name) {
  * @param peak  Atomic peak counter.
  * @param value Candidate value.
  */
-void nm_atomic_update_peak(atomic_uint *peak, unsigned value) {
+void llam_atomic_update_peak(atomic_uint *peak, unsigned value) {
     unsigned current = atomic_load(peak);
 
     while (current < value && !atomic_compare_exchange_weak(peak, &current, value)) {
@@ -116,7 +116,7 @@ void nm_atomic_update_peak(atomic_uint *peak, unsigned value) {
  *
  * @return Maximum of @p a and @p b.
  */
-unsigned nm_max_unsigned(unsigned a, unsigned b) {
+unsigned llam_max_unsigned(unsigned a, unsigned b) {
     return a > b ? a : b;
 }
 
@@ -130,7 +130,7 @@ unsigned nm_max_unsigned(unsigned a, unsigned b) {
  *
  * @note Callers must pass a non-zero power-of-two alignment.
  */
-size_t nm_align_up(size_t value, size_t alignment) {
+size_t llam_align_up(size_t value, size_t alignment) {
     size_t mask = alignment - 1U;
 
     return (value + mask) & ~mask;

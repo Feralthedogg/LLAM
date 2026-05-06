@@ -36,9 +36,9 @@ extern "C" {
 #endif
 
 /** @brief Legacy API source/API version major component. */
-#define NM_VERSION_MAJOR 0U
+#define NM_VERSION_MAJOR 1U
 /** @brief Legacy API source/API version minor component. */
-#define NM_VERSION_MINOR 1U
+#define NM_VERSION_MINOR 0U
 /** @brief Legacy API source/API version patch component. */
 #define NM_VERSION_PATCH 0U
 
@@ -124,28 +124,34 @@ enum {
 
 /** @brief Optional task spawn configuration. */
 typedef struct nm_spawn_opts {
-    nm_task_class_t task_class;       /**< Initial task class. */
-    nm_stack_class_t stack_class;     /**< Requested stack class. */
-    unsigned flags;                   /**< Bitwise OR of @c NM_SPAWN_F_* flags. */
+    uint32_t task_class;              /**< Initial class; one of ::nm_task_class_t. */
+    uint32_t stack_class;             /**< Requested stack class; one of ::nm_stack_class_t. */
+    uint32_t flags;                   /**< Bitwise OR of @c NM_SPAWN_F_* flags. */
     uint64_t deadline_ns;             /**< Optional absolute deadline for caller-defined use. */
     nm_cancel_token_t *cancel_token;  /**< Optional cancellation token inherited by the task. */
 } nm_spawn_opts_t;
 
+/** @brief Current size to pass to ::nm_spawn_ex and ::nm_spawn_opts_init. */
+#define NM_SPAWN_OPTS_CURRENT_SIZE ((size_t)sizeof(nm_spawn_opts_t))
+
 /** @brief Process-wide runtime initialization options. */
 typedef struct nm_runtime_opts {
-    unsigned deterministic;                         /**< Run with one scheduler shard when non-zero. */
-    unsigned forced_yield_every;                    /**< Force cooperative yields every N safepoints. */
-    unsigned experimental_shard_rings;              /**< Use one I/O backend node per shard. */
-    unsigned experimental_shard_rings_multishot;    /**< Allow multishot shared-fd watches with shard rings. */
-    unsigned experimental_dynamic_shards;           /**< Park/reactivate idle shards based on pressure. */
-    unsigned experimental_lockfree_normq;           /**< Use the Chase-Lev normal queue implementation. */
-    unsigned experimental_huge_alloc;               /**< Prefer hugepage-friendly allocator backing. */
+    uint32_t deterministic;                         /**< Run with one scheduler shard when non-zero. */
+    uint32_t forced_yield_every;                    /**< Force cooperative yields every N safepoints. */
+    uint32_t experimental_shard_rings;              /**< Use one I/O backend node per shard. */
+    uint32_t experimental_shard_rings_multishot;    /**< Allow multishot shared-fd watches with shard rings. */
+    uint32_t experimental_dynamic_shards;           /**< Park/reactivate idle shards based on pressure. */
+    uint32_t experimental_lockfree_normq;           /**< Use the Chase-Lev normal queue implementation. */
+    uint32_t experimental_huge_alloc;               /**< Prefer hugepage-friendly allocator backing. */
     uint64_t idle_spin_ns;                          /**< Optional bounded idle spin before sleeping. */
-    unsigned idle_spin_max_iters;                   /**< Maximum pause-loop iterations during idle spin. */
-    unsigned experimental_sqpoll;                   /**< Use io_uring SQPOLL for node-owned rings. */
-    int sqpoll_cpu;                                 /**< SQPOLL CPU, or -1 to let the runtime choose. */
-    nm_runtime_profile_t profile;                   /**< Runtime policy profile; env may override it. */
+    uint32_t idle_spin_max_iters;                   /**< Maximum pause-loop iterations during idle spin. */
+    uint32_t experimental_sqpoll;                   /**< Use io_uring SQPOLL for node-owned rings. */
+    int32_t sqpoll_cpu;                             /**< SQPOLL CPU, or -1 to let the runtime choose. */
+    uint32_t profile;                               /**< Runtime profile; one of ::nm_runtime_profile_t. */
 } nm_runtime_opts_t;
+
+/** @brief Current size to pass to ::nm_runtime_init_ex and ::nm_runtime_opts_init. */
+#define NM_RUNTIME_OPTS_CURRENT_SIZE ((size_t)sizeof(nm_runtime_opts_t))
 
 /** @brief Aggregated runtime counters returned by ::nm_runtime_collect_stats. */
 typedef struct nm_runtime_stats {
@@ -168,18 +174,18 @@ typedef struct nm_runtime_stats {
     uint64_t idle_spin_ns;               /**< Time spent in idle-spin windows. */
     uint64_t queue_overflows;            /**< Runtime overflow queue insertions. */
     uint64_t overflow_depth;             /**< Current overflow queue depth. */
-    unsigned active_shards;              /**< Configured shard count. */
-    unsigned online_shards;              /**< Currently online shard count. */
-    unsigned online_shards_floor;        /**< Dynamic-shard online floor. */
-    unsigned online_shards_min;          /**< Minimum observed online shard count. */
-    unsigned online_shards_max;          /**< Maximum observed online shard count. */
-    unsigned active_nodes;               /**< Active I/O node count. */
-    unsigned dynamic_shards;             /**< Whether dynamic shard scaling is enabled. */
-    unsigned shard_rings;                /**< Whether per-shard I/O rings are enabled. */
-    unsigned shard_rings_multishot;      /**< Whether shard-ring multishot mode is enabled. */
-    unsigned lockfree_normq;             /**< Whether lock-free normal queues are enabled. */
-    unsigned huge_alloc;                 /**< Whether huge allocator backing is active. */
-    unsigned sqpoll;                     /**< Whether SQPOLL is active. */
+    uint32_t active_shards;              /**< Configured shard count. */
+    uint32_t online_shards;              /**< Currently online shard count. */
+    uint32_t online_shards_floor;        /**< Dynamic-shard online floor. */
+    uint32_t online_shards_min;          /**< Minimum observed online shard count. */
+    uint32_t online_shards_max;          /**< Maximum observed online shard count. */
+    uint32_t active_nodes;               /**< Active I/O node count. */
+    uint32_t dynamic_shards;             /**< Whether dynamic shard scaling is enabled. */
+    uint32_t shard_rings;                /**< Whether per-shard I/O rings are enabled. */
+    uint32_t shard_rings_multishot;      /**< Whether shard-ring multishot mode is enabled. */
+    uint32_t lockfree_normq;             /**< Whether lock-free normal queues are enabled. */
+    uint32_t huge_alloc;                 /**< Whether huge allocator backing is active. */
+    uint32_t sqpoll;                     /**< Whether SQPOLL is active. */
     uint64_t opaque_block_ns;            /**< Total opaque-block duration. */
     uint64_t opaque_block_samples;       /**< Number of opaque-block samples. */
     uint64_t opaque_block_max_ns;        /**< Maximum observed opaque-block duration. */
@@ -191,24 +197,35 @@ typedef struct nm_runtime_stats {
     uint64_t opaque_leave_wait_max_ns;   /**< Maximum leave-wait duration. */
 } nm_runtime_stats_t;
 
+/** @brief Current size to pass to ::nm_runtime_collect_stats_ex. */
+#define NM_RUNTIME_STATS_CURRENT_SIZE ((size_t)sizeof(nm_runtime_stats_t))
+
 /* Runtime lifecycle and task scheduling. */
+int nm_runtime_opts_init(nm_runtime_opts_t *opts, size_t opts_size);
+int nm_spawn_opts_init(nm_spawn_opts_t *opts, size_t opts_size);
+int nm_runtime_init_ex(const nm_runtime_opts_t *opts, size_t opts_size);
 int nm_runtime_init(const nm_runtime_opts_t *opts);
+int nm_runtime_request_stop(void);
 void nm_runtime_shutdown(void);
+int nm_runtime_collect_stats_ex(nm_runtime_stats_t *stats, size_t stats_size);
 int nm_runtime_collect_stats(nm_runtime_stats_t *stats);
 
+nm_task_t *nm_spawn_ex(nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts, size_t opts_size);
 nm_task_t *nm_spawn(nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts);
 int nm_run(void);
 void nm_yield(void);
 int nm_join(nm_task_t *task);
 int nm_join_until(nm_task_t *task, uint64_t deadline_ns);
+int nm_detach(nm_task_t *task);
 int nm_sleep_until(uint64_t deadline_ns);
 int nm_sleep_ns(uint64_t duration_ns);
+int nm_call_blocking_result(nm_blocking_fn fn, void *arg, void **out);
 void *nm_call_blocking(nm_blocking_fn fn, void *arg);
 int nm_enter_blocking(void);
 int nm_leave_blocking(void);
-void nm_task_set_class(nm_task_class_t task_class);
+int nm_task_set_class(uint32_t task_class);
 void nm_dump_runtime_state(int fd);
-unsigned nm_task_flags(const nm_task_t *task);
+uint32_t nm_task_flags(const nm_task_t *task);
 
 /* Cancellation tokens. */
 nm_cancel_token_t *nm_cancel_token_create(void);
@@ -218,7 +235,7 @@ int nm_cancel_token_is_cancelled(const nm_cancel_token_t *token);
 
 /* Runtime-aware mutexes. */
 nm_mutex_t *nm_mutex_create(void);
-void nm_mutex_destroy(nm_mutex_t *mutex);
+int nm_mutex_destroy(nm_mutex_t *mutex);
 int nm_mutex_lock(nm_mutex_t *mutex);
 int nm_mutex_lock_until(nm_mutex_t *mutex, uint64_t deadline_ns);
 int nm_mutex_trylock(nm_mutex_t *mutex);
@@ -226,17 +243,19 @@ int nm_mutex_unlock(nm_mutex_t *mutex);
 
 /* Runtime-aware condition variables. */
 nm_cond_t *nm_cond_create(void);
-void nm_cond_destroy(nm_cond_t *cond);
+int nm_cond_destroy(nm_cond_t *cond);
 int nm_cond_wait(nm_cond_t *cond, nm_mutex_t *mutex);
 int nm_cond_wait_until(nm_cond_t *cond, nm_mutex_t *mutex, uint64_t deadline_ns);
 int nm_cond_signal(nm_cond_t *cond);
 int nm_cond_broadcast(nm_cond_t *cond);
 
-/* Bounded pointer channels. */
+/* Bounded pointer channels. Capacity must be at least 1. */
 nm_channel_t *nm_channel_create(size_t capacity);
-void nm_channel_destroy(nm_channel_t *channel);
+int nm_channel_destroy(nm_channel_t *channel);
 int nm_channel_send(nm_channel_t *channel, void *value);
 int nm_channel_send_until(nm_channel_t *channel, void *value, uint64_t deadline_ns);
+int nm_channel_recv_result(nm_channel_t *channel, void **out);
+int nm_channel_recv_until_result(nm_channel_t *channel, uint64_t deadline_ns, void **out);
 void *nm_channel_recv(nm_channel_t *channel);
 void *nm_channel_recv_until(nm_channel_t *channel, uint64_t deadline_ns);
 int nm_channel_close(nm_channel_t *channel);
@@ -250,6 +269,7 @@ void nm_io_buffer_release(nm_io_buffer_t *buffer);
 void *nm_io_buffer_data(nm_io_buffer_t *buffer);
 size_t nm_io_buffer_size(const nm_io_buffer_t *buffer);
 size_t nm_io_buffer_capacity(const nm_io_buffer_t *buffer);
+/** @brief Accept a connection, returning @c NM_INVALID_FD on failure with @c errno set. */
 nm_fd_t nm_accept(nm_fd_t fd, struct sockaddr *addr, socklen_t *addrlen);
 int nm_connect(nm_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 int nm_poll_fd(nm_fd_t fd, short events, int timeout_ms, short *revents);
@@ -258,7 +278,7 @@ int nm_poll_fd(nm_fd_t fd, short events, int timeout_ms, short *revents);
 uint64_t nm_now_ns(void);
 uint64_t nm_task_id(const nm_task_t *task);
 const char *nm_task_state_name(const nm_task_t *task);
-nm_task_class_t nm_task_class(const nm_task_t *task);
+uint32_t nm_task_class(const nm_task_t *task);
 nm_task_t *nm_current_task(void);
 
 #ifdef __cplusplus

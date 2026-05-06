@@ -24,8 +24,8 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_WATCHDOG_INTERNAL_H
-#define NM_RUNTIME_WATCHDOG_INTERNAL_H
+#ifndef LLAM_RUNTIME_WATCHDOG_INTERNAL_H
+#define LLAM_RUNTIME_WATCHDOG_INTERNAL_H
 
 #include "runtime_internal.h"
 
@@ -36,20 +36,20 @@
  * they run periodically and should not take long-lived locks or mutate queues
  * except where explicitly documented in the implementation.
  */
-bool nm_dynamic_trace_enabled(void);
-void nm_watchdog_check_shard(nm_shard_t *shard, uint64_t now_ns);
-void nm_watchdog_pause_briefly(void);
-unsigned nm_watchdog_snapshot_shard_load(nm_shard_t *shard);
+bool llam_dynamic_trace_enabled(void);
+void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns);
+void llam_watchdog_pause_briefly(void);
+unsigned llam_watchdog_snapshot_shard_load(llam_shard_t *shard);
 
 // Runtime-level pressure signals used by deadlock detection and dynamic scaling.
-bool nm_runtime_has_pending_timers(nm_runtime_t *rt);
-bool nm_runtime_has_runnable_work(nm_runtime_t *rt);
-bool nm_runtime_has_runnable_backlog(nm_runtime_t *rt);
-bool nm_runtime_has_io_pending(nm_runtime_t *rt);
-unsigned nm_runtime_active_io_waiters(nm_runtime_t *rt);
-bool nm_runtime_has_opaque_blocking(nm_runtime_t *rt);
-void nm_runtime_nudge_marked_watch_migrations(nm_runtime_t *rt);
-void nm_runtime_adjust_online_shards(nm_runtime_t *rt);
+bool llam_runtime_has_pending_timers(llam_runtime_t *rt);
+bool llam_runtime_has_runnable_work(llam_runtime_t *rt);
+bool llam_runtime_has_runnable_backlog(llam_runtime_t *rt);
+bool llam_runtime_has_io_pending(llam_runtime_t *rt);
+unsigned llam_runtime_active_io_waiters(llam_runtime_t *rt);
+bool llam_runtime_has_opaque_blocking(llam_runtime_t *rt);
+void llam_runtime_nudge_marked_watch_migrations(llam_runtime_t *rt);
+void llam_runtime_adjust_online_shards(llam_runtime_t *rt);
 
 /*
  * Shard merge/offline helpers.
@@ -58,21 +58,21 @@ void nm_runtime_adjust_online_shards(nm_runtime_t *rt);
  * migrated, and it is marked offline only after its runnable queues and current
  * task state are empty under lock.
  */
-nm_shard_t *nm_runtime_pick_merge_target(nm_runtime_t *rt, nm_shard_t *source);
-void nm_runtime_set_steal_pause(nm_runtime_t *rt, bool active);
-bool nm_runtime_wait_steal_pause_ack(nm_runtime_t *rt, uint64_t deadline_ns);
+llam_shard_t *llam_runtime_pick_merge_target(llam_runtime_t *rt, llam_shard_t *source);
+void llam_runtime_set_steal_pause(llam_runtime_t *rt, bool active);
+bool llam_runtime_wait_steal_pause_ack(llam_runtime_t *rt, uint64_t deadline_ns);
 
 // Per-shard pause handshake used before moving queues out of a source shard.
-void nm_shard_request_merge_pause(nm_shard_t *shard);
-void nm_shard_release_merge_pause(nm_shard_t *shard);
-bool nm_shard_wait_merge_pause_ack(nm_shard_t *shard, uint64_t deadline_ns);
+void llam_shard_request_merge_pause(llam_shard_t *shard);
+void llam_shard_release_merge_pause(llam_shard_t *shard);
+bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns);
 
 // Locked-state predicates and migration helpers used by the offlining path.
-bool nm_shard_can_offline_locked(const nm_shard_t *shard);
-bool nm_shard_can_start_merge_locked(const nm_shard_t *shard);
-void nm_merge_rehome_task(nm_shard_t *source, nm_shard_t *target, nm_task_t *task);
-bool nm_merge_runnable_queues_locked(nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out);
-bool nm_merge_shard_timers_locked(nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out);
+bool llam_shard_can_offline_locked(const llam_shard_t *shard);
+bool llam_shard_can_start_merge_locked(const llam_shard_t *shard);
+void llam_merge_rehome_task(llam_shard_t *source, llam_shard_t *target, llam_task_t *task);
+bool llam_merge_runnable_queues_locked(llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out);
+bool llam_merge_shard_timers_locked(llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out);
 
 /*
  * Parked waiter and I/O ownership rehome helpers.
@@ -80,25 +80,25 @@ bool nm_merge_shard_timers_locked(nm_shard_t *source, nm_shard_t *target, unsign
  * These functions move wait ownership before a shard goes offline. Completion
  * paths must be able to reinject parked tasks on the new shard after migration.
  */
-unsigned nm_shard_inflight_io_waiters(const nm_shard_t *shard);
-void nm_rehome_parked_waiters(nm_runtime_t *rt, nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out);
-void nm_rehome_inflight_io_waiters(nm_runtime_t *rt,
-                                   nm_shard_t *source,
-                                   nm_shard_t *target,
+unsigned llam_shard_inflight_io_waiters(const llam_shard_t *shard);
+void llam_rehome_parked_waiters(llam_runtime_t *rt, llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out);
+void llam_rehome_inflight_io_waiters(llam_runtime_t *rt,
+                                   llam_shard_t *source,
+                                   llam_shard_t *target,
                                    unsigned *migrated_out);
-bool nm_rehome_node_submit_waiters(nm_node_t *node,
-                                   nm_shard_t *source,
-                                   nm_shard_t *target,
+bool llam_rehome_node_submit_waiters(llam_node_t *node,
+                                   llam_shard_t *source,
+                                   llam_shard_t *target,
                                    unsigned *migrated_out);
-bool nm_evacuate_rehomed_submit_waiters(nm_node_t *source_node,
-                                        nm_node_t *target_node,
-                                        nm_shard_t *source,
-                                        nm_shard_t *target,
+bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
+                                        llam_node_t *target_node,
+                                        llam_shard_t *source,
+                                        llam_shard_t *target,
                                         unsigned *migrated_out);
-bool nm_rehome_runtime_watch_waiters(nm_runtime_t *rt,
-                                     nm_shard_t *source,
-                                     nm_shard_t *target,
+bool llam_rehome_runtime_watch_waiters(llam_runtime_t *rt,
+                                     llam_shard_t *source,
+                                     llam_shard_t *target,
                                      unsigned *migrated_out);
-bool nm_quiesce_cross_io_watch_state(nm_node_t *source, nm_node_t *target, uint64_t deadline_ns);
+bool llam_quiesce_cross_io_watch_state(llam_node_t *source, llam_node_t *target, uint64_t deadline_ns);
 
 #endif

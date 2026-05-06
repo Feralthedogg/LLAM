@@ -17,7 +17,7 @@ try {
 }
 
 if ($Native) {
-    Write-Error "Native Windows 10/11 backend is scaffolded but not complete. The next backend milestone is IOCP wake/I/O plus Fiber context switching."
+    Write-Error "Native Windows 10/11 backend is planned but not complete. The next backend milestone is IOCP wake/I/O plus Fiber context switching."
     exit 2
 }
 

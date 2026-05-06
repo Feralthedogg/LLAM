@@ -28,15 +28,15 @@
 /**
  * @brief Clear cached global extended-context capability flags.
  */
-void nm_clear_xsave_globals(void) {
-    g_nm_xsave_mask_lo = 0U;
-    g_nm_xsave_mask_hi = 0U;
-    g_nm_fp_control_context = 0U;
+void llam_clear_xsave_globals(void) {
+    g_llam_xsave_mask_lo = 0U;
+    g_llam_xsave_mask_hi = 0U;
+    g_llam_fp_control_context = 0U;
 }
 
 #if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
 /** @brief Read the current SSE MXCSR control/status register. */
-static uint32_t nm_current_mxcsr(void) {
+static uint32_t llam_current_mxcsr(void) {
     uint32_t value;
 
     __asm__ volatile("stmxcsr %0" : "=m"(value));
@@ -44,7 +44,7 @@ static uint32_t nm_current_mxcsr(void) {
 }
 
 /** @brief Read the current x87 control word. */
-static uint16_t nm_current_x87_cw(void) {
+static uint16_t llam_current_x87_cw(void) {
     uint16_t value;
 
     __asm__ volatile("fnstcw %0" : "=m"(value));
@@ -53,7 +53,7 @@ static uint16_t nm_current_x87_cw(void) {
 
 #if defined(__linux__)
 /** @brief Execute xgetbv for the given extended-control register index. */
-static uint64_t nm_xgetbv(uint32_t index) {
+static uint64_t llam_xgetbv(uint32_t index) {
     uint32_t eax;
     uint32_t edx;
 
@@ -64,7 +64,7 @@ static uint64_t nm_xgetbv(uint32_t index) {
 #endif
 
 /** @brief Save extended CPU state into an aligned XSAVE area. */
-static void nm_save_xsave_area(void *area, uint64_t mask) {
+static void llam_save_xsave_area(void *area, uint64_t mask) {
     uint32_t eax = (uint32_t)mask;
     uint32_t edx = (uint32_t)(mask >> 32U);
 
@@ -78,7 +78,7 @@ static void nm_save_xsave_area(void *area, uint64_t mask) {
  *
  * @return Always 0; unsupported features simply leave XSAVE disabled.
  */
-int nm_detect_xsave_support(nm_runtime_t *rt) {
+int llam_detect_xsave_support(llam_runtime_t *rt) {
     const char *fp_env;
 #if defined(__linux__)
     const char *xsave_env;
@@ -91,13 +91,13 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
     uint64_t xcr0;
 #endif
 
-    nm_clear_xsave_globals();
+    llam_clear_xsave_globals();
     if (rt == NULL) {
         return 0;
     }
 
-    fp_env = nm_env_get("LLAM_FP_CONTROL_CONTEXT");
-    g_nm_fp_control_context =
+    fp_env = llam_env_get("LLAM_FP_CONTROL_CONTEXT");
+    g_llam_fp_control_context =
         (fp_env == NULL || fp_env[0] == '\0' || strcmp(fp_env, "0") != 0) ? 1U : 0U;
 
 #if !defined(__linux__)
@@ -112,7 +112,7 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
     rt->xsave_area_alloc_size = 0U;
     return 0;
 #else
-    xsave_env = nm_env_get("LLAM_XSAVE_CONTEXT");
+    xsave_env = llam_env_get("LLAM_XSAVE_CONTEXT");
     // XSAVE is opt-in because it increases per-context allocation and switch cost.
     if (xsave_env == NULL || xsave_env[0] == '\0' || strcmp(xsave_env, "0") == 0) {
         rt->xsave_enabled = false;
@@ -136,7 +136,7 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
         return 0;
     }
 
-    xcr0 = nm_xgetbv(0U);
+    xcr0 = llam_xgetbv(0U);
     supported_mask = ((uint64_t)edx << 32U) | (uint64_t)eax;
     rt->xsave_mask = xcr0 & supported_mask;
     if ((rt->xsave_mask & 0x3U) != 0x3U) {
@@ -150,10 +150,10 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
         rt->xsave_mask = 0U;
         return 0;
     }
-    rt->xsave_area_alloc_size = nm_align_up(rt->xsave_area_size, 64U);
+    rt->xsave_area_alloc_size = llam_align_up(rt->xsave_area_size, 64U);
     rt->xsave_enabled = true;
-    g_nm_xsave_mask_lo = (uint32_t)rt->xsave_mask;
-    g_nm_xsave_mask_hi = (uint32_t)(rt->xsave_mask >> 32U);
+    g_llam_xsave_mask_lo = (uint32_t)rt->xsave_mask;
+    g_llam_xsave_mask_hi = (uint32_t)(rt->xsave_mask >> 32U);
     return 0;
 #endif
 }
@@ -165,7 +165,7 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int nm_ctx_init_fp_state(nm_ctx_t *ctx) {
+int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
     void *area = NULL;
 
     if (ctx == NULL) {
@@ -174,20 +174,20 @@ int nm_ctx_init_fp_state(nm_ctx_t *ctx) {
     }
 
     /* Fresh task/scheduler contexts inherit the current worker FP environment. */
-    ctx->mxcsr = nm_current_mxcsr();
-    ctx->x87_cw = nm_current_x87_cw();
+    ctx->mxcsr = llam_current_mxcsr();
+    ctx->x87_cw = llam_current_x87_cw();
     ctx->pad = 0U;
     ctx->xsave_area = NULL;
-    if (!g_nm_runtime.xsave_enabled) {
+    if (!g_llam_runtime.xsave_enabled) {
         return 0;
     }
 
-    if (posix_memalign(&area, 64U, g_nm_runtime.xsave_area_alloc_size) != 0) {
+    if (posix_memalign(&area, 64U, g_llam_runtime.xsave_area_alloc_size) != 0) {
         errno = ENOMEM;
         return -1;
     }
-    memset(area, 0, g_nm_runtime.xsave_area_alloc_size);
-    nm_save_xsave_area(area, g_nm_runtime.xsave_mask);
+    memset(area, 0, g_llam_runtime.xsave_area_alloc_size);
+    llam_save_xsave_area(area, g_llam_runtime.xsave_mask);
     ctx->xsave_area = area;
     return 0;
 }
@@ -197,7 +197,7 @@ int nm_ctx_init_fp_state(nm_ctx_t *ctx) {
  *
  * @param ctx Context to clean up.
  */
-void nm_ctx_destroy_fp_state(nm_ctx_t *ctx) {
+void llam_ctx_destroy_fp_state(llam_ctx_t *ctx) {
     if (ctx == NULL || ctx->xsave_area == NULL) {
         return;
     }
@@ -207,7 +207,7 @@ void nm_ctx_destroy_fp_state(nm_ctx_t *ctx) {
 }
 #elif defined(__aarch64__)
 /** @brief Read AArch64 FPCR. */
-static uint64_t nm_current_fpcr(void) {
+static uint64_t llam_current_fpcr(void) {
     uint64_t value;
 
     __asm__ volatile("mrs %0, fpcr" : "=r"(value));
@@ -215,7 +215,7 @@ static uint64_t nm_current_fpcr(void) {
 }
 
 /** @brief Read AArch64 FPSR. */
-static uint64_t nm_current_fpsr(void) {
+static uint64_t llam_current_fpsr(void) {
     uint64_t value;
 
     __asm__ volatile("mrs %0, fpsr" : "=r"(value));
@@ -225,35 +225,35 @@ static uint64_t nm_current_fpsr(void) {
 /**
  * @brief Disable XSAVE-style state on AArch64 and clear global flags.
  */
-int nm_detect_xsave_support(nm_runtime_t *rt) {
+int llam_detect_xsave_support(llam_runtime_t *rt) {
     if (rt != NULL) {
         rt->xsave_enabled = false;
         rt->xsave_mask = 0U;
         rt->xsave_area_size = 0U;
         rt->xsave_area_alloc_size = 0U;
     }
-    nm_clear_xsave_globals();
+    llam_clear_xsave_globals();
     return 0;
 }
 
 /**
  * @brief Initialize AArch64 floating-point control/status state.
  */
-int nm_ctx_init_fp_state(nm_ctx_t *ctx) {
+int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
     if (ctx == NULL) {
         errno = EINVAL;
         return -1;
     }
     memset(ctx, 0, sizeof(*ctx));
-    ctx->fpcr = nm_current_fpcr();
-    ctx->fpsr = nm_current_fpsr();
+    ctx->fpcr = llam_current_fpcr();
+    ctx->fpsr = llam_current_fpsr();
     return 0;
 }
 
 /**
  * @brief No-op AArch64 FP-state destructor.
  */
-void nm_ctx_destroy_fp_state(nm_ctx_t *ctx) {
+void llam_ctx_destroy_fp_state(llam_ctx_t *ctx) {
     (void)ctx;
 }
 
@@ -261,21 +261,21 @@ void nm_ctx_destroy_fp_state(nm_ctx_t *ctx) {
 /**
  * @brief Disable XSAVE-style state on portable backends.
  */
-int nm_detect_xsave_support(nm_runtime_t *rt) {
+int llam_detect_xsave_support(llam_runtime_t *rt) {
     if (rt != NULL) {
         rt->xsave_enabled = false;
         rt->xsave_mask = 0U;
         rt->xsave_area_size = 0U;
         rt->xsave_area_alloc_size = 0U;
     }
-    nm_clear_xsave_globals();
+    llam_clear_xsave_globals();
     return 0;
 }
 
 /**
  * @brief Initialize portable floating-point environment state.
  */
-int nm_ctx_init_fp_state(nm_ctx_t *ctx) {
+int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
     if (ctx == NULL) {
         errno = EINVAL;
         return -1;
@@ -290,7 +290,7 @@ int nm_ctx_init_fp_state(nm_ctx_t *ctx) {
 /**
  * @brief No-op portable FP-state destructor.
  */
-void nm_ctx_destroy_fp_state(nm_ctx_t *ctx) {
+void llam_ctx_destroy_fp_state(llam_ctx_t *ctx) {
     (void)ctx;
 }
 #endif

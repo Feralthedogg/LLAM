@@ -6,7 +6,7 @@
  * Cross-shard frees cannot safely splice objects directly into another shard's
  * local free lists without taking that shard's allocator lock. Instead, remote
  * producers push objects onto atomic remote-free lists and set a single pending
- * flag. The owner shard later calls ::nm_allocator_quiescent at a safe point to
+ * flag. The owner shard later calls ::llam_allocator_quiescent at a safe point to
  * drain those lists back into local caches in one locked batch.
  *
  * @copyright Copyright 2026 Feralthedogg
@@ -36,13 +36,13 @@
  *       scheduler safe points where the owner shard is active and can absorb
  *       remote returns without racing local cache users.
  */
-void nm_allocator_quiescent(nm_shard_t *shard) {
-    nm_allocator_t *allocator = &shard->allocator;
-    nm_task_t *task_head;
-    nm_wait_node_t *wait_head;
-    nm_timer_node_t *timer_head;
-    nm_io_req_t *io_head;
-    nm_io_buffer_t *io_buffer_head;
+void llam_allocator_quiescent(llam_shard_t *shard) {
+    llam_allocator_t *allocator = &shard->allocator;
+    llam_task_t *task_head;
+    llam_wait_node_t *wait_head;
+    llam_timer_node_t *timer_head;
+    llam_io_req_t *io_head;
+    llam_io_buffer_t *io_buffer_head;
     uint64_t task_burst = 0U;
     uint64_t wait_burst = 0U;
     uint64_t timer_burst = 0U;
@@ -59,7 +59,7 @@ void nm_allocator_quiescent(nm_shard_t *shard) {
     // Publish a local epoch for diagnostics/reclamation accounting before
     // stealing the remote lists. Object safety is handled by ownership and the
     // atomic list exchange, not by waiting on this epoch.
-    epoch = atomic_fetch_add(&g_nm_runtime.global_epoch, 1U) + 1U;
+    epoch = atomic_fetch_add(&g_llam_runtime.global_epoch, 1U) + 1U;
     atomic_store(&allocator->local_epoch, epoch);
     task_head = atomic_exchange(&allocator->task_remote_free, NULL);
     wait_head = atomic_exchange(&allocator->wait_remote_free, NULL);
@@ -71,11 +71,11 @@ void nm_allocator_quiescent(nm_shard_t *shard) {
         return;
     }
 
-    nm_allocator_lock(allocator);
+    llam_allocator_lock(allocator);
     // Each list was atomically detached above, so the owner can splice nodes
     // into normal local free lists while holding only its allocator lock.
     while (task_head != NULL) {
-        nm_task_t *next = task_head->alloc_next;
+        llam_task_t *next = task_head->alloc_next;
         task_head->alloc_next = allocator->task_free;
         allocator->task_free = task_head;
         allocator->task_remote_drains += 1U;
@@ -83,7 +83,7 @@ void nm_allocator_quiescent(nm_shard_t *shard) {
         task_head = next;
     }
     while (wait_head != NULL) {
-        nm_wait_node_t *next = wait_head->alloc_next;
+        llam_wait_node_t *next = wait_head->alloc_next;
         wait_head->alloc_next = allocator->wait_free;
         allocator->wait_free = wait_head;
         allocator->wait_remote_drains += 1U;
@@ -91,7 +91,7 @@ void nm_allocator_quiescent(nm_shard_t *shard) {
         wait_head = next;
     }
     while (timer_head != NULL) {
-        nm_timer_node_t *next = timer_head->alloc_next;
+        llam_timer_node_t *next = timer_head->alloc_next;
         timer_head->alloc_next = allocator->timer_free;
         allocator->timer_free = timer_head;
         allocator->timer_remote_drains += 1U;
@@ -99,7 +99,7 @@ void nm_allocator_quiescent(nm_shard_t *shard) {
         timer_head = next;
     }
     while (io_head != NULL) {
-        nm_io_req_t *next = io_head->alloc_next;
+        llam_io_req_t *next = io_head->alloc_next;
         io_head->alloc_next = allocator->io_req_free;
         allocator->io_req_free = io_head;
         allocator->io_req_remote_drains += 1U;
@@ -107,7 +107,7 @@ void nm_allocator_quiescent(nm_shard_t *shard) {
         io_head = next;
     }
     while (io_buffer_head != NULL) {
-        nm_io_buffer_t *next = io_buffer_head->alloc_next;
+        llam_io_buffer_t *next = io_buffer_head->alloc_next;
         io_buffer_head->alloc_next = allocator->io_buffer_free;
         allocator->io_buffer_free = io_buffer_head;
         allocator->io_buffer_remote_drains += 1U;
@@ -134,5 +134,5 @@ void nm_allocator_quiescent(nm_shard_t *shard) {
     if (io_buffer_burst > allocator->io_buffer_remote_burst_max) {
         allocator->io_buffer_remote_burst_max = io_buffer_burst;
     }
-    nm_allocator_unlock(allocator);
+    llam_allocator_unlock(allocator);
 }

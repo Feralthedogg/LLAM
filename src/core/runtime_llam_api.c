@@ -1,13 +1,11 @@
 /**
  * @file src/core/runtime_llam_api.c
- * @brief Canonical llam_* API wrappers and translation to the internal nm_* runtime implementation.
+ * @brief Legacy nm_* compatibility wrappers around the canonical llam_* runtime API.
  *
  * @details
- * The implementation originally exposed the @c nm_* API. The canonical public
- * API now uses @c llam_* names, but the underlying runtime types and behavior
- * are still shared. This file performs narrow type/option/stat translations and
- * forwards every call to the internal implementation without duplicating
- * scheduler logic.
+ * The implementation namespace is LLAM-native. This file is the compatibility
+ * boundary for the historical @c nm_* public API, translating legacy option and
+ * statistics structs where names differ while forwarding behavior to @c llam_*.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -25,41 +23,32 @@
  * limitations under the License.
  */
 
-#include "llam/runtime.h"
-
 #include "llam/nm_runtime.h"
 
+#include "llam/runtime.h"
+
+#include <errno.h>
 #include <string.h>
 
-/**
- * @brief Translate public LLAM spawn options into internal nm options.
- *
- * @param opts Public spawn options, or NULL.
- * @return Zero-initialized internal option struct with matching fields copied.
- */
-static nm_spawn_opts_t nm_spawn_opts_from_llam(const llam_spawn_opts_t *opts) {
-    nm_spawn_opts_t out;
+/** @brief Translate legacy spawn options into canonical LLAM options. */
+static llam_spawn_opts_t llam_spawn_opts_from_nm(const nm_spawn_opts_t *opts) {
+    llam_spawn_opts_t out;
 
     memset(&out, 0, sizeof(out));
     if (opts == NULL) {
         return out;
     }
-    out.task_class = (nm_task_class_t)opts->task_class;
-    out.stack_class = (nm_stack_class_t)opts->stack_class;
+    out.task_class = (llam_task_class_t)opts->task_class;
+    out.stack_class = (llam_stack_class_t)opts->stack_class;
     out.flags = opts->flags;
     out.deadline_ns = opts->deadline_ns;
-    out.cancel_token = (nm_cancel_token_t *)opts->cancel_token;
+    out.cancel_token = (llam_cancel_token_t *)opts->cancel_token;
     return out;
 }
 
-/**
- * @brief Translate public LLAM runtime options into internal nm options.
- *
- * @param opts Public runtime options, or NULL.
- * @return Zero-initialized internal option struct with matching fields copied.
- */
-static nm_runtime_opts_t nm_runtime_opts_from_llam(const llam_runtime_opts_t *opts) {
-    nm_runtime_opts_t out;
+/** @brief Translate legacy runtime options into canonical LLAM options. */
+static llam_runtime_opts_t llam_runtime_opts_from_nm(const nm_runtime_opts_t *opts) {
+    llam_runtime_opts_t out;
 
     memset(&out, 0, sizeof(out));
     if (opts == NULL) {
@@ -67,26 +56,33 @@ static nm_runtime_opts_t nm_runtime_opts_from_llam(const llam_runtime_opts_t *op
     }
     out.deterministic = opts->deterministic;
     out.forced_yield_every = opts->forced_yield_every;
-    out.experimental_shard_rings = opts->experimental_worker_rings;
-    out.experimental_shard_rings_multishot = opts->experimental_worker_rings_multishot;
-    out.experimental_dynamic_shards = opts->experimental_dynamic_workers;
-    out.experimental_lockfree_normq = opts->experimental_lockfree_normq;
-    out.experimental_huge_alloc = opts->experimental_huge_alloc;
+    if (opts->experimental_shard_rings != 0U) {
+        out.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS;
+    }
+    if (opts->experimental_shard_rings_multishot != 0U) {
+        out.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT;
+    }
+    if (opts->experimental_dynamic_shards != 0U) {
+        out.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
+    }
+    if (opts->experimental_lockfree_normq != 0U) {
+        out.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    }
+    if (opts->experimental_huge_alloc != 0U) {
+        out.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC;
+    }
     out.idle_spin_ns = opts->idle_spin_ns;
     out.idle_spin_max_iters = opts->idle_spin_max_iters;
-    out.experimental_sqpoll = opts->experimental_sqpoll;
+    if (opts->experimental_sqpoll != 0U) {
+        out.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL;
+    }
     out.sqpoll_cpu = opts->sqpoll_cpu;
-    out.profile = (nm_runtime_profile_t)opts->profile;
+    out.profile = (llam_runtime_profile_t)opts->profile;
     return out;
 }
 
-/**
- * @brief Translate internal runtime stats into the canonical public shape.
- *
- * @param out   Public stats destination.
- * @param stats Internal stats source.
- */
-static void llam_runtime_stats_from_nm(llam_runtime_stats_t *out, const nm_runtime_stats_t *stats) {
+/** @brief Translate canonical runtime stats into the legacy shard-named shape. */
+static void nm_runtime_stats_from_llam(nm_runtime_stats_t *out, const llam_runtime_stats_t *stats) {
     memset(out, 0, sizeof(*out));
     out->ctx_switches = stats->ctx_switches;
     out->yields = stats->yields;
@@ -107,15 +103,15 @@ static void llam_runtime_stats_from_nm(llam_runtime_stats_t *out, const nm_runti
     out->idle_spin_ns = stats->idle_spin_ns;
     out->queue_overflows = stats->queue_overflows;
     out->overflow_depth = stats->overflow_depth;
-    out->active_workers = stats->active_shards;
-    out->online_workers = stats->online_shards;
-    out->online_workers_floor = stats->online_shards_floor;
-    out->online_workers_min = stats->online_shards_min;
-    out->online_workers_max = stats->online_shards_max;
+    out->active_shards = stats->active_workers;
+    out->online_shards = stats->online_workers;
+    out->online_shards_floor = stats->online_workers_floor;
+    out->online_shards_min = stats->online_workers_min;
+    out->online_shards_max = stats->online_workers_max;
     out->active_nodes = stats->active_nodes;
-    out->dynamic_workers = stats->dynamic_shards;
-    out->worker_rings = stats->shard_rings;
-    out->worker_rings_multishot = stats->shard_rings_multishot;
+    out->dynamic_shards = stats->dynamic_workers;
+    out->shard_rings = stats->worker_rings;
+    out->shard_rings_multishot = stats->worker_rings_multishot;
     out->lockfree_normq = stats->lockfree_normq;
     out->huge_alloc = stats->huge_alloc;
     out->sqpoll = stats->sqpoll;
@@ -130,273 +126,315 @@ static void llam_runtime_stats_from_nm(llam_runtime_stats_t *out, const nm_runti
     out->opaque_leave_wait_max_ns = stats->opaque_leave_wait_max_ns;
 }
 
-/* Runtime lifecycle and task scheduling wrappers. */
-
-int llam_runtime_init(const llam_runtime_opts_t *opts) {
-    nm_runtime_opts_t nm_opts;
+int nm_runtime_init_ex(const nm_runtime_opts_t *opts, size_t opts_size) {
+    nm_runtime_opts_t opts_storage;
+    llam_runtime_opts_t llam_opts;
+    size_t opts_copy_size;
 
     if (opts == NULL) {
-        return nm_runtime_init(NULL);
+        return llam_runtime_init_ex(NULL, 0U);
     }
-    nm_opts = nm_runtime_opts_from_llam(opts);
-    return nm_runtime_init(&nm_opts);
+    if (opts_size == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(&opts_storage, 0, sizeof(opts_storage));
+    opts_storage.deterministic = 1U;
+    opts_storage.sqpoll_cpu = -1;
+    opts_storage.profile = NM_RUNTIME_PROFILE_BALANCED;
+    opts_copy_size = opts_size < sizeof(opts_storage) ? opts_size : sizeof(opts_storage);
+    memcpy(&opts_storage, opts, opts_copy_size);
+    llam_opts = llam_runtime_opts_from_nm(&opts_storage);
+    return llam_runtime_init_ex(&llam_opts, sizeof(llam_opts));
 }
 
-void llam_runtime_shutdown(void) {
-    nm_runtime_shutdown();
+int nm_runtime_init(const nm_runtime_opts_t *opts) {
+    return nm_runtime_init_ex(opts, opts != NULL ? sizeof(*opts) : 0U);
 }
 
-int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
+void nm_runtime_shutdown(void) {
+    llam_runtime_shutdown();
+}
+
+int nm_runtime_request_stop(void) {
+    return llam_runtime_request_stop();
+}
+
+int nm_runtime_collect_stats_ex(nm_runtime_stats_t *stats, size_t stats_size) {
+    llam_runtime_stats_t llam_stats;
     nm_runtime_stats_t nm_stats;
+    size_t copy_size;
     int rc;
 
-    if (stats == NULL) {
-        return nm_runtime_collect_stats(NULL);
+    if (stats == NULL || stats_size == 0U) {
+        errno = EINVAL;
+        return -1;
     }
-    rc = nm_runtime_collect_stats(&nm_stats);
+    rc = llam_runtime_collect_stats_ex(&llam_stats, sizeof(llam_stats));
     if (rc == 0) {
-        llam_runtime_stats_from_nm(stats, &nm_stats);
+        nm_runtime_stats_from_llam(&nm_stats, &llam_stats);
+        memset(stats, 0, stats_size);
+        copy_size = stats_size < sizeof(nm_stats) ? stats_size : sizeof(nm_stats);
+        memcpy(stats, &nm_stats, copy_size);
     }
     return rc;
 }
 
-llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {
-    nm_spawn_opts_t nm_opts;
+int nm_runtime_collect_stats(nm_runtime_stats_t *stats) {
+    return nm_runtime_collect_stats_ex(stats, stats != NULL ? sizeof(*stats) : 0U);
+}
+
+nm_task_t *nm_spawn_ex(nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts, size_t opts_size) {
+    nm_spawn_opts_t opts_storage;
+    llam_spawn_opts_t llam_opts;
+    size_t opts_copy_size;
 
     if (opts == NULL) {
-        return (llam_task_t *)nm_spawn((nm_task_fn)fn, arg, NULL);
+        return (nm_task_t *)llam_spawn_ex((llam_task_fn)fn, arg, NULL, 0U);
     }
-    nm_opts = nm_spawn_opts_from_llam(opts);
-    return (llam_task_t *)nm_spawn((nm_task_fn)fn, arg, &nm_opts);
+    if (opts_size == 0U) {
+        errno = EINVAL;
+        return NULL;
+    }
+    memset(&opts_storage, 0, sizeof(opts_storage));
+    opts_copy_size = opts_size < sizeof(opts_storage) ? opts_size : sizeof(opts_storage);
+    memcpy(&opts_storage, opts, opts_copy_size);
+    llam_opts = llam_spawn_opts_from_nm(&opts_storage);
+    return (nm_task_t *)llam_spawn_ex((llam_task_fn)fn, arg, &llam_opts, sizeof(llam_opts));
 }
 
-int llam_run(void) {
-    return nm_run();
+nm_task_t *nm_spawn(nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts) {
+    return nm_spawn_ex(fn, arg, opts, opts != NULL ? sizeof(*opts) : 0U);
 }
 
-void llam_yield(void) {
-    nm_yield();
+int nm_run(void) {
+    return llam_run();
 }
 
-int llam_join(llam_task_t *task) {
-    return nm_join((nm_task_t *)task);
+void nm_yield(void) {
+    llam_yield();
 }
 
-int llam_join_until(llam_task_t *task, uint64_t deadline_ns) {
-    return nm_join_until((nm_task_t *)task, deadline_ns);
+int nm_join(nm_task_t *task) {
+    return llam_join((llam_task_t *)task);
 }
 
-int llam_sleep_until(uint64_t deadline_ns) {
-    return nm_sleep_until(deadline_ns);
+int nm_join_until(nm_task_t *task, uint64_t deadline_ns) {
+    return llam_join_until((llam_task_t *)task, deadline_ns);
 }
 
-int llam_sleep_ns(uint64_t duration_ns) {
-    return nm_sleep_ns(duration_ns);
+int nm_detach(nm_task_t *task) {
+    return llam_detach((llam_task_t *)task);
 }
 
-void *llam_call_blocking(llam_blocking_fn fn, void *arg) {
-    return nm_call_blocking((nm_blocking_fn)fn, arg);
+int nm_sleep_until(uint64_t deadline_ns) {
+    return llam_sleep_until(deadline_ns);
 }
 
-int llam_enter_blocking(void) {
-    return nm_enter_blocking();
+int nm_sleep_ns(uint64_t duration_ns) {
+    return llam_sleep_ns(duration_ns);
 }
 
-int llam_leave_blocking(void) {
-    return nm_leave_blocking();
+void *nm_call_blocking(nm_blocking_fn fn, void *arg) {
+    return llam_call_blocking((llam_blocking_fn)fn, arg);
 }
 
-void llam_task_set_class(llam_task_class_t task_class) {
-    nm_task_set_class((nm_task_class_t)task_class);
+int nm_call_blocking_result(nm_blocking_fn fn, void *arg, void **out) {
+    return llam_call_blocking_result((llam_blocking_fn)fn, arg, out);
 }
 
-void llam_dump_runtime_state(int fd) {
-    nm_dump_runtime_state(fd);
+int nm_enter_blocking(void) {
+    return llam_enter_blocking();
 }
 
-unsigned llam_task_flags(const llam_task_t *task) {
-    return nm_task_flags((const nm_task_t *)task);
+int nm_leave_blocking(void) {
+    return llam_leave_blocking();
 }
 
-/* Cancellation-token wrappers. */
-
-llam_cancel_token_t *llam_cancel_token_create(void) {
-    return (llam_cancel_token_t *)nm_cancel_token_create();
+int nm_task_set_class(uint32_t task_class) {
+    return llam_task_set_class(task_class);
 }
 
-int llam_cancel_token_destroy(llam_cancel_token_t *token) {
-    return nm_cancel_token_destroy((nm_cancel_token_t *)token);
+void nm_dump_runtime_state(int fd) {
+    llam_dump_runtime_state(fd);
 }
 
-int llam_cancel_token_cancel(llam_cancel_token_t *token) {
-    return nm_cancel_token_cancel((nm_cancel_token_t *)token);
+uint32_t nm_task_flags(const nm_task_t *task) {
+    return llam_task_flags((const llam_task_t *)task);
 }
 
-int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token) {
-    return nm_cancel_token_is_cancelled((const nm_cancel_token_t *)token);
+nm_cancel_token_t *nm_cancel_token_create(void) {
+    return (nm_cancel_token_t *)llam_cancel_token_create();
 }
 
-/* Runtime-aware mutex wrappers. */
-
-llam_mutex_t *llam_mutex_create(void) {
-    return (llam_mutex_t *)nm_mutex_create();
+int nm_cancel_token_destroy(nm_cancel_token_t *token) {
+    return llam_cancel_token_destroy((llam_cancel_token_t *)token);
 }
 
-void llam_mutex_destroy(llam_mutex_t *mutex) {
-    nm_mutex_destroy((nm_mutex_t *)mutex);
+int nm_cancel_token_cancel(nm_cancel_token_t *token) {
+    return llam_cancel_token_cancel((llam_cancel_token_t *)token);
 }
 
-int llam_mutex_lock(llam_mutex_t *mutex) {
-    return nm_mutex_lock((nm_mutex_t *)mutex);
+int nm_cancel_token_is_cancelled(const nm_cancel_token_t *token) {
+    return llam_cancel_token_is_cancelled((const llam_cancel_token_t *)token);
 }
 
-int llam_mutex_lock_until(llam_mutex_t *mutex, uint64_t deadline_ns) {
-    return nm_mutex_lock_until((nm_mutex_t *)mutex, deadline_ns);
+nm_mutex_t *nm_mutex_create(void) {
+    return (nm_mutex_t *)llam_mutex_create();
 }
 
-int llam_mutex_trylock(llam_mutex_t *mutex) {
-    return nm_mutex_trylock((nm_mutex_t *)mutex);
+int nm_mutex_destroy(nm_mutex_t *mutex) {
+    return llam_mutex_destroy((llam_mutex_t *)mutex);
 }
 
-int llam_mutex_unlock(llam_mutex_t *mutex) {
-    return nm_mutex_unlock((nm_mutex_t *)mutex);
+int nm_mutex_lock(nm_mutex_t *mutex) {
+    return llam_mutex_lock((llam_mutex_t *)mutex);
 }
 
-/* Runtime-aware condition-variable wrappers. */
-
-llam_cond_t *llam_cond_create(void) {
-    return (llam_cond_t *)nm_cond_create();
+int nm_mutex_lock_until(nm_mutex_t *mutex, uint64_t deadline_ns) {
+    return llam_mutex_lock_until((llam_mutex_t *)mutex, deadline_ns);
 }
 
-void llam_cond_destroy(llam_cond_t *cond) {
-    nm_cond_destroy((nm_cond_t *)cond);
+int nm_mutex_trylock(nm_mutex_t *mutex) {
+    return llam_mutex_trylock((llam_mutex_t *)mutex);
 }
 
-int llam_cond_wait(llam_cond_t *cond, llam_mutex_t *mutex) {
-    return nm_cond_wait((nm_cond_t *)cond, (nm_mutex_t *)mutex);
+int nm_mutex_unlock(nm_mutex_t *mutex) {
+    return llam_mutex_unlock((llam_mutex_t *)mutex);
 }
 
-int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64_t deadline_ns) {
-    return nm_cond_wait_until((nm_cond_t *)cond, (nm_mutex_t *)mutex, deadline_ns);
+nm_cond_t *nm_cond_create(void) {
+    return (nm_cond_t *)llam_cond_create();
 }
 
-int llam_cond_signal(llam_cond_t *cond) {
-    return nm_cond_signal((nm_cond_t *)cond);
+int nm_cond_destroy(nm_cond_t *cond) {
+    return llam_cond_destroy((llam_cond_t *)cond);
 }
 
-int llam_cond_broadcast(llam_cond_t *cond) {
-    return nm_cond_broadcast((nm_cond_t *)cond);
+int nm_cond_wait(nm_cond_t *cond, nm_mutex_t *mutex) {
+    return llam_cond_wait((llam_cond_t *)cond, (llam_mutex_t *)mutex);
 }
 
-/* Channel wrappers. */
-
-llam_channel_t *llam_channel_create(size_t capacity) {
-    return (llam_channel_t *)nm_channel_create(capacity);
+int nm_cond_wait_until(nm_cond_t *cond, nm_mutex_t *mutex, uint64_t deadline_ns) {
+    return llam_cond_wait_until((llam_cond_t *)cond, (llam_mutex_t *)mutex, deadline_ns);
 }
 
-void llam_channel_destroy(llam_channel_t *channel) {
-    nm_channel_destroy((nm_channel_t *)channel);
+int nm_cond_signal(nm_cond_t *cond) {
+    return llam_cond_signal((llam_cond_t *)cond);
 }
 
-int llam_channel_send(llam_channel_t *channel, void *value) {
-    return nm_channel_send((nm_channel_t *)channel, value);
+int nm_cond_broadcast(nm_cond_t *cond) {
+    return llam_cond_broadcast((llam_cond_t *)cond);
 }
 
-int llam_channel_send_until(llam_channel_t *channel, void *value, uint64_t deadline_ns) {
-    return nm_channel_send_until((nm_channel_t *)channel, value, deadline_ns);
+nm_channel_t *nm_channel_create(size_t capacity) {
+    return (nm_channel_t *)llam_channel_create(capacity);
 }
 
-void *llam_channel_recv(llam_channel_t *channel) {
-    return nm_channel_recv((nm_channel_t *)channel);
+int nm_channel_destroy(nm_channel_t *channel) {
+    return llam_channel_destroy((llam_channel_t *)channel);
 }
 
-void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns) {
-    return nm_channel_recv_until((nm_channel_t *)channel, deadline_ns);
+int nm_channel_send(nm_channel_t *channel, void *value) {
+    return llam_channel_send((llam_channel_t *)channel, value);
 }
 
-int llam_channel_close(llam_channel_t *channel) {
-    return nm_channel_close((nm_channel_t *)channel);
+int nm_channel_send_until(nm_channel_t *channel, void *value, uint64_t deadline_ns) {
+    return llam_channel_send_until((llam_channel_t *)channel, value, deadline_ns);
 }
 
-/* Runtime I/O wrappers. */
-
-ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
-    return nm_read((nm_fd_t)fd, buf, count);
+void *nm_channel_recv(nm_channel_t *channel) {
+    return llam_channel_recv((llam_channel_t *)channel);
 }
 
-ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
-    return nm_write((nm_fd_t)fd, buf, count);
+int nm_channel_recv_result(nm_channel_t *channel, void **out) {
+    return llam_channel_recv_result((llam_channel_t *)channel, out);
 }
 
-ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_t **out) {
-    nm_io_buffer_t *buffer = NULL;
-    ssize_t rc = nm_read_owned((nm_fd_t)fd, max_count, out != NULL ? &buffer : NULL);
+void *nm_channel_recv_until(nm_channel_t *channel, uint64_t deadline_ns) {
+    return llam_channel_recv_until((llam_channel_t *)channel, deadline_ns);
+}
+
+int nm_channel_recv_until_result(nm_channel_t *channel, uint64_t deadline_ns, void **out) {
+    return llam_channel_recv_until_result((llam_channel_t *)channel, deadline_ns, out);
+}
+
+int nm_channel_close(nm_channel_t *channel) {
+    return llam_channel_close((llam_channel_t *)channel);
+}
+
+ssize_t nm_read(nm_fd_t fd, void *buf, size_t count) {
+    return llam_read((llam_fd_t)fd, buf, count);
+}
+
+ssize_t nm_write(nm_fd_t fd, const void *buf, size_t count) {
+    return llam_write((llam_fd_t)fd, buf, count);
+}
+
+ssize_t nm_read_owned(nm_fd_t fd, size_t max_count, nm_io_buffer_t **out) {
+    llam_io_buffer_t *buffer = NULL;
+    ssize_t rc = llam_read_owned((llam_fd_t)fd, max_count, out != NULL ? &buffer : NULL);
 
     if (out != NULL) {
-        // Ownership transfers through the same buffer object; only the public
-        // handle type changes.
-        *out = (llam_io_buffer_t *)buffer;
+        *out = (nm_io_buffer_t *)buffer;
     }
     return rc;
 }
 
-ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out) {
-    nm_io_buffer_t *buffer = NULL;
-    ssize_t rc = nm_recv_owned((nm_fd_t)fd, max_count, flags, out != NULL ? &buffer : NULL);
+ssize_t nm_recv_owned(nm_fd_t fd, size_t max_count, int flags, nm_io_buffer_t **out) {
+    llam_io_buffer_t *buffer = NULL;
+    ssize_t rc = llam_recv_owned((llam_fd_t)fd, max_count, flags, out != NULL ? &buffer : NULL);
 
     if (out != NULL) {
-        // Keep NULL propagation identical to nm_recv_owned().
-        *out = (llam_io_buffer_t *)buffer;
+        *out = (nm_io_buffer_t *)buffer;
     }
     return rc;
 }
 
-void llam_io_buffer_release(llam_io_buffer_t *buffer) {
-    nm_io_buffer_release((nm_io_buffer_t *)buffer);
+void nm_io_buffer_release(nm_io_buffer_t *buffer) {
+    llam_io_buffer_release((llam_io_buffer_t *)buffer);
 }
 
-void *llam_io_buffer_data(llam_io_buffer_t *buffer) {
-    return nm_io_buffer_data((nm_io_buffer_t *)buffer);
+void *nm_io_buffer_data(nm_io_buffer_t *buffer) {
+    return llam_io_buffer_data((llam_io_buffer_t *)buffer);
 }
 
-size_t llam_io_buffer_size(const llam_io_buffer_t *buffer) {
-    return nm_io_buffer_size((const nm_io_buffer_t *)buffer);
+size_t nm_io_buffer_size(const nm_io_buffer_t *buffer) {
+    return llam_io_buffer_size((const llam_io_buffer_t *)buffer);
 }
 
-size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer) {
-    return nm_io_buffer_capacity((const nm_io_buffer_t *)buffer);
+size_t nm_io_buffer_capacity(const nm_io_buffer_t *buffer) {
+    return llam_io_buffer_capacity((const llam_io_buffer_t *)buffer);
 }
 
-llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
-    return (llam_fd_t)nm_accept((nm_fd_t)fd, addr, addrlen);
+nm_fd_t nm_accept(nm_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
+    return (nm_fd_t)llam_accept((llam_fd_t)fd, addr, addrlen);
 }
 
-int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen) {
-    return nm_connect((nm_fd_t)fd, addr, addrlen);
+int nm_connect(nm_fd_t fd, const struct sockaddr *addr, socklen_t addrlen) {
+    return llam_connect((llam_fd_t)fd, addr, addrlen);
 }
 
-int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
-    return nm_poll_fd((nm_fd_t)fd, events, timeout_ms, revents);
+int nm_poll_fd(nm_fd_t fd, short events, int timeout_ms, short *revents) {
+    return llam_poll_fd((llam_fd_t)fd, events, timeout_ms, revents);
 }
 
-/* Time and task-introspection wrappers. */
-
-uint64_t llam_now_ns(void) {
-    return nm_now_ns();
+uint64_t nm_now_ns(void) {
+    return llam_now_ns();
 }
 
-uint64_t llam_task_id(const llam_task_t *task) {
-    return nm_task_id((const nm_task_t *)task);
+uint64_t nm_task_id(const nm_task_t *task) {
+    return llam_task_id((const llam_task_t *)task);
 }
 
-const char *llam_task_state_name(const llam_task_t *task) {
-    return nm_task_state_name((const nm_task_t *)task);
+const char *nm_task_state_name(const nm_task_t *task) {
+    return llam_task_state_name((const llam_task_t *)task);
 }
 
-llam_task_class_t llam_task_class(const llam_task_t *task) {
-    return (llam_task_class_t)nm_task_class((const nm_task_t *)task);
+uint32_t nm_task_class(const nm_task_t *task) {
+    return llam_task_class((const llam_task_t *)task);
 }
 
-llam_task_t *llam_current_task(void) {
-    return (llam_task_t *)nm_current_task();
+nm_task_t *nm_current_task(void) {
+    return (nm_task_t *)llam_current_task();
 }

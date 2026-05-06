@@ -22,8 +22,8 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_PROTOS_H
-#define NM_RUNTIME_PROTOS_H
+#ifndef LLAM_RUNTIME_PROTOS_H
+#define LLAM_RUNTIME_PROTOS_H
 
 #include "runtime_proto_core.h"
 #include "runtime_proto_sched.h"

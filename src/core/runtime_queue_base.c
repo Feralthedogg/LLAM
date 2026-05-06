@@ -31,7 +31,7 @@
  * @param queue Queue to mutate.
  * @param task  Task to append.
  */
-void nm_queue_push_tail(nm_queue_t *queue, nm_task_t *task) {
+void llam_queue_push_tail(llam_queue_t *queue, llam_task_t *task) {
     task->queue_next = NULL;
     task->queue_prev = queue->tail;
     if (queue->tail != NULL) {
@@ -49,7 +49,7 @@ void nm_queue_push_tail(nm_queue_t *queue, nm_task_t *task) {
  * @param queue Wait queue to mutate.
  * @param node  Wait node to append.
  */
-void nm_wait_queue_push_tail(nm_wait_queue_t *queue, nm_wait_node_t *node) {
+void llam_wait_queue_push_tail(llam_wait_queue_t *queue, llam_wait_node_t *node) {
     node->next = NULL;
     if (queue->tail != NULL) {
         queue->tail->next = node;
@@ -66,8 +66,8 @@ void nm_wait_queue_push_tail(nm_wait_queue_t *queue, nm_wait_node_t *node) {
  * @param queue Wait queue to mutate.
  * @return Removed wait node, or NULL if empty.
  */
-nm_wait_node_t *nm_wait_queue_pop_head(nm_wait_queue_t *queue) {
-    nm_wait_node_t *node = queue->head;
+llam_wait_node_t *llam_wait_queue_pop_head(llam_wait_queue_t *queue) {
+    llam_wait_node_t *node = queue->head;
 
     if (node == NULL) {
         return NULL;
@@ -89,9 +89,9 @@ nm_wait_node_t *nm_wait_queue_pop_head(nm_wait_queue_t *queue) {
  * @param node  Node to remove.
  * @return true if the node was found and removed.
  */
-bool nm_wait_queue_remove(nm_wait_queue_t *queue, nm_wait_node_t *node) {
-    nm_wait_node_t *prev = NULL;
-    nm_wait_node_t *cur = queue->head;
+bool llam_wait_queue_remove(llam_wait_queue_t *queue, llam_wait_node_t *node) {
+    llam_wait_node_t *prev = NULL;
+    llam_wait_node_t *cur = queue->head;
 
     while (cur != NULL) {
         if (cur == node) {
@@ -120,8 +120,8 @@ bool nm_wait_queue_remove(nm_wait_queue_t *queue, nm_wait_node_t *node) {
  * @param queue Queue to mutate.
  * @return Removed task, or NULL if empty.
  */
-nm_task_t *nm_queue_pop_head(nm_queue_t *queue) {
-    nm_task_t *task = queue->head;
+llam_task_t *llam_queue_pop_head(llam_queue_t *queue) {
+    llam_task_t *task = queue->head;
 
     if (task == NULL) {
         return NULL;
@@ -145,8 +145,8 @@ nm_task_t *nm_queue_pop_head(nm_queue_t *queue) {
  * @param queue Queue to mutate.
  * @return Removed task, or NULL if empty.
  */
-nm_task_t *nm_queue_pop_tail(nm_queue_t *queue) {
-    nm_task_t *task = queue->tail;
+llam_task_t *llam_queue_pop_tail(llam_queue_t *queue) {
+    llam_task_t *task = queue->tail;
 
     if (task == NULL) {
         return NULL;
@@ -170,7 +170,7 @@ nm_task_t *nm_queue_pop_tail(nm_queue_t *queue) {
  * @param rt Runtime to inspect.
  * @return true when lock-free normal queues are active.
  */
-bool nm_lockfree_normq_enabled(const nm_runtime_t *rt) {
+bool llam_lockfree_normq_enabled(const llam_runtime_t *rt) {
     return rt != NULL && rt->experimental_lockfree_normq != 0U;
 }
 
@@ -180,8 +180,8 @@ bool nm_lockfree_normq_enabled(const nm_runtime_t *rt) {
  * @param rt Runtime to inspect.
  * @return true if stealing should currently pause.
  */
-bool nm_runtime_steal_pause_active(const nm_runtime_t *rt) {
-    return rt != NULL && atomic_load_explicit(&((nm_runtime_t *)rt)->steal_pause_active, memory_order_acquire) != 0U;
+bool llam_runtime_steal_pause_active(const llam_runtime_t *rt) {
+    return rt != NULL && atomic_load_explicit(&((llam_runtime_t *)rt)->steal_pause_active, memory_order_acquire) != 0U;
 }
 
 /**
@@ -190,8 +190,8 @@ bool nm_runtime_steal_pause_active(const nm_runtime_t *rt) {
  * @param shard Shard to inspect.
  * @return true if new work should not be pushed to the shard.
  */
-bool nm_shard_merge_pause_requested(const nm_shard_t *shard) {
-    return shard != NULL && atomic_load_explicit(&((nm_shard_t *)shard)->merge_pause_requested, memory_order_acquire) != 0U;
+bool llam_shard_merge_pause_requested(const llam_shard_t *shard) {
+    return shard != NULL && atomic_load_explicit(&((llam_shard_t *)shard)->merge_pause_requested, memory_order_acquire) != 0U;
 }
 
 /**
@@ -200,8 +200,8 @@ bool nm_shard_merge_pause_requested(const nm_shard_t *shard) {
  * @param shard Shard to inspect.
  * @return true when online and not merge-paused.
  */
-bool nm_shard_accepts_new_work(const nm_shard_t *shard) {
-    return nm_shard_is_online(shard) && !nm_shard_merge_pause_requested(shard);
+bool llam_shard_accepts_new_work(const llam_shard_t *shard) {
+    return llam_shard_is_online(shard) && !llam_shard_merge_pause_requested(shard);
 }
 
 /**
@@ -210,14 +210,14 @@ bool nm_shard_accepts_new_work(const nm_shard_t *shard) {
  * @param shard Shard to inspect.
  * @return true when the shard should participate in scheduling.
  */
-bool nm_shard_is_online(const nm_shard_t *shard) {
+bool llam_shard_is_online(const llam_shard_t *shard) {
     if (shard == NULL || shard->runtime == NULL) {
         return false;
     }
     if (shard->runtime->experimental_dynamic_shards == 0U) {
         return true;
     }
-    return atomic_load_explicit(&((nm_shard_t *)shard)->online, memory_order_acquire) != 0U;
+    return atomic_load_explicit(&((llam_shard_t *)shard)->online, memory_order_acquire) != 0U;
 }
 
 /**
@@ -226,14 +226,14 @@ bool nm_shard_is_online(const nm_shard_t *shard) {
  * @param rt Runtime to inspect.
  * @return Active shard count, or dynamic online count when enabled.
  */
-unsigned nm_runtime_online_shards(const nm_runtime_t *rt) {
+unsigned llam_runtime_online_shards(const llam_runtime_t *rt) {
     if (rt == NULL) {
         return 0U;
     }
     if (rt->experimental_dynamic_shards == 0U) {
         return rt->active_shards;
     }
-    return atomic_load_explicit(&((nm_runtime_t *)rt)->online_shards, memory_order_acquire);
+    return atomic_load_explicit(&((llam_runtime_t *)rt)->online_shards, memory_order_acquire);
 }
 
 /**
@@ -242,7 +242,7 @@ unsigned nm_runtime_online_shards(const nm_runtime_t *rt) {
  * @param rt Runtime to inspect.
  * @return Minimum shard count kept online.
  */
-unsigned nm_runtime_online_shards_floor(const nm_runtime_t *rt) {
+unsigned llam_runtime_online_shards_floor(const llam_runtime_t *rt) {
     if (rt == NULL) {
         return 0U;
     }
@@ -258,7 +258,7 @@ unsigned nm_runtime_online_shards_floor(const nm_runtime_t *rt) {
  * @param rt     Runtime to update.
  * @param online Newly observed online shard count.
  */
-void nm_runtime_note_online_shards(nm_runtime_t *rt, unsigned online) {
+void llam_runtime_note_online_shards(llam_runtime_t *rt, unsigned online) {
     unsigned observed;
 
     if (rt == NULL || rt->experimental_dynamic_shards == 0U) {
@@ -296,7 +296,7 @@ void nm_runtime_note_online_shards(nm_runtime_t *rt, unsigned online) {
  * @param rt Runtime to inspect.
  * @return Minimum observed online shard count.
  */
-unsigned nm_runtime_online_shards_min(const nm_runtime_t *rt) {
+unsigned llam_runtime_online_shards_min(const llam_runtime_t *rt) {
     unsigned online;
 
     if (rt == NULL) {
@@ -305,8 +305,8 @@ unsigned nm_runtime_online_shards_min(const nm_runtime_t *rt) {
     if (rt->experimental_dynamic_shards == 0U) {
         return rt->active_shards;
     }
-    online = atomic_load_explicit(&((nm_runtime_t *)rt)->online_shards_min, memory_order_acquire);
-    return online > 0U ? online : nm_runtime_online_shards(rt);
+    online = atomic_load_explicit(&((llam_runtime_t *)rt)->online_shards_min, memory_order_acquire);
+    return online > 0U ? online : llam_runtime_online_shards(rt);
 }
 
 /**
@@ -315,12 +315,12 @@ unsigned nm_runtime_online_shards_min(const nm_runtime_t *rt) {
  * @param rt Runtime to inspect.
  * @return Maximum observed online shard count.
  */
-unsigned nm_runtime_online_shards_max(const nm_runtime_t *rt) {
+unsigned llam_runtime_online_shards_max(const llam_runtime_t *rt) {
     if (rt == NULL) {
         return 0U;
     }
     if (rt->experimental_dynamic_shards == 0U) {
         return rt->active_shards;
     }
-    return atomic_load_explicit(&((nm_runtime_t *)rt)->online_shards_max, memory_order_acquire);
+    return atomic_load_explicit(&((llam_runtime_t *)rt)->online_shards_max, memory_order_acquire);
 }

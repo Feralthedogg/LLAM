@@ -20,10 +20,69 @@
 
 #include "stress_internal.h"
 
+#include <pthread.h>
+
+typedef struct stress_phase_watchdog {
+    atomic_uint done;
+    unsigned timeout_sec;
+    const char *phase_name;
+} stress_phase_watchdog_t;
+
+static unsigned stress_suite_runtime_flag_enabled(const llam_runtime_opts_t *opts, uint64_t flag) {
+    return opts != NULL && (opts->experimental_flags & flag) != 0U ? 1U : 0U;
+}
+
+static void *stress_phase_watchdog_main(void *arg) {
+    stress_phase_watchdog_t *watchdog = arg;
+    unsigned ticks;
+    unsigned limit = watchdog->timeout_sec * 10U;
+
+    for (ticks = 0U; ticks < limit; ++ticks) {
+        if (atomic_load_explicit(&watchdog->done, memory_order_acquire) != 0U) {
+            return NULL;
+        }
+        usleep(100U * 1000U);
+    }
+    if (atomic_load_explicit(&watchdog->done, memory_order_acquire) == 0U) {
+        fprintf(stderr, "[stress] phase watchdog timeout phase=%s seconds=%u\n",
+                watchdog->phase_name,
+                watchdog->timeout_sec);
+        llam_dump_runtime_state(STDERR_FILENO);
+        fflush(stderr);
+    }
+    return NULL;
+}
+
+static int stress_start_phase_watchdog(stress_phase_watchdog_t *watchdog,
+                                       pthread_t *thread,
+                                       const char *phase_name) {
+    unsigned timeout_sec = stress_env_u32("LLAM_STRESS_PHASE_WATCHDOG_SEC", 0U, 3600U);
+
+    if (timeout_sec == 0U) {
+        return 0;
+    }
+    atomic_init(&watchdog->done, 0U);
+    watchdog->timeout_sec = timeout_sec;
+    watchdog->phase_name = phase_name;
+    if (pthread_create(thread, NULL, stress_phase_watchdog_main, watchdog) != 0) {
+        stress_fail_msg("phase watchdog start failed");
+        return -1;
+    }
+    return 1;
+}
+
+static void stress_stop_phase_watchdog(stress_phase_watchdog_t *watchdog, pthread_t thread, int started) {
+    if (started <= 0) {
+        return;
+    }
+    atomic_store_explicit(&watchdog->done, 1U, memory_order_release);
+    (void)pthread_join(thread, NULL);
+}
+
 void run_poll_paths(void) {
     int ready_sv[2];
     int timeout_sv[2];
-    nm_task_t *writer;
+    llam_task_t *writer;
     short revents = 0;
     int rc;
 
@@ -31,11 +90,11 @@ void run_poll_paths(void) {
         stress_fail_msg("poll ready socketpair failed");
         return;
     }
-    writer = nm_spawn(poll_writer_task,
+    writer = llam_spawn(poll_writer_task,
                       &ready_sv[1],
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (writer == NULL) {
         stress_fail_msg("poll writer spawn failed");
@@ -43,11 +102,11 @@ void run_poll_paths(void) {
         close(ready_sv[1]);
         return;
     }
-    rc = nm_poll_fd(ready_sv[0], POLLIN, stress_platform_prefers_indefinite_ready_poll() ? -1 : 20, &revents);
+    rc = llam_poll_fd(ready_sv[0], POLLIN, stress_platform_prefers_indefinite_ready_poll() ? -1 : 20, &revents);
     if (rc != 1 || (revents & POLLIN) == 0) {
         stress_fail_msg("poll ready path failed");
     }
-    if (nm_join(writer) != 0) {
+    if (llam_join(writer) != 0) {
         stress_fail_msg("poll writer join failed");
     }
     close(ready_sv[0]);
@@ -58,7 +117,7 @@ void run_poll_paths(void) {
         return;
     }
     revents = 0;
-    rc = nm_poll_fd(timeout_sv[0], POLLIN, 1, &revents);
+    rc = llam_poll_fd(timeout_sv[0], POLLIN, 1, &revents);
     if (rc != 0 || revents != 0) {
         stress_fail_msg("poll timeout path failed");
     }
@@ -69,8 +128,8 @@ void run_poll_paths(void) {
 void run_fp_isolation_path(void) {
     fp_round_state_t down;
     fp_round_state_t up;
-    nm_task_t *down_task;
-    nm_task_t *up_task;
+    llam_task_t *down_task;
+    llam_task_t *up_task;
 
     down.mode = 1U;
     down.yields = 4U;
@@ -80,31 +139,31 @@ void run_fp_isolation_path(void) {
     atomic_init(&up.completed, 0U);
 
     stress_set_fp_round(0U);
-    down_task = nm_spawn(fp_round_task,
+    down_task = llam_spawn(fp_round_task,
                          &down,
-                         &(nm_spawn_opts_t){
-                             .task_class = NM_TASK_CLASS_DEFAULT,
-                             .stack_class = NM_STACK_CLASS_DEFAULT,
-                             .flags = NM_SPAWN_F_PINNED,
+                         &(llam_spawn_opts_t){
+                             .task_class = LLAM_TASK_CLASS_DEFAULT,
+                             .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                             .flags = LLAM_SPAWN_F_PINNED,
                          });
-    up_task = nm_spawn(fp_round_task,
+    up_task = llam_spawn(fp_round_task,
                        &up,
-                       &(nm_spawn_opts_t){
-                           .task_class = NM_TASK_CLASS_DEFAULT,
-                           .stack_class = NM_STACK_CLASS_DEFAULT,
-                           .flags = NM_SPAWN_F_PINNED,
+                       &(llam_spawn_opts_t){
+                           .task_class = LLAM_TASK_CLASS_DEFAULT,
+                           .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                           .flags = LLAM_SPAWN_F_PINNED,
                        });
     if (down_task == NULL || up_task == NULL) {
         stress_fail_msg("fp isolation task spawn failed");
         if (down_task != NULL) {
-            (void)nm_join(down_task);
+            (void)llam_join(down_task);
         }
         if (up_task != NULL) {
-            (void)nm_join(up_task);
+            (void)llam_join(up_task);
         }
         return;
     }
-    if (nm_join(down_task) != 0 || nm_join(up_task) != 0) {
+    if (llam_join(down_task) != 0 || llam_join(up_task) != 0) {
         stress_fail_msg("fp isolation join failed");
         return;
     }
@@ -119,25 +178,25 @@ void run_fp_isolation_path(void) {
 
 void run_fp_inherit_path(void) {
     fp_inherit_state_t state;
-    nm_task_t *child;
+    llam_task_t *child;
 
     state.expected_mode = 1U;
     atomic_init(&state.observed_mode, 0xFFU);
     atomic_init(&state.completed, 0U);
     stress_set_fp_round(state.expected_mode);
-    child = nm_spawn(fp_inherit_child_task,
+    child = llam_spawn(fp_inherit_child_task,
                      &state,
-                     &(nm_spawn_opts_t){
-                         .task_class = NM_TASK_CLASS_DEFAULT,
-                         .stack_class = NM_STACK_CLASS_DEFAULT,
-                         .flags = NM_SPAWN_F_PINNED,
+                     &(llam_spawn_opts_t){
+                         .task_class = LLAM_TASK_CLASS_DEFAULT,
+                         .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                         .flags = LLAM_SPAWN_F_PINNED,
                      });
     if (child == NULL) {
         stress_fail_msg("fp inherit child spawn failed");
         stress_set_fp_round(0U);
         return;
     }
-    if (nm_join(child) != 0) {
+    if (llam_join(child) != 0) {
         stress_fail_msg("fp inherit child join failed");
         stress_set_fp_round(0U);
         return;
@@ -160,8 +219,8 @@ void run_poll_cancel_timeout_race(void) {
 
     for (i = 0; i < kPollRaceRounds; ++i) {
         poll_cancel_race_state_t state;
-        nm_task_t *waiter;
-        nm_task_t *trigger;
+        llam_task_t *waiter;
+        llam_task_t *trigger;
         int sv[2];
 
         state.fd = -1;
@@ -174,7 +233,7 @@ void run_poll_cancel_timeout_race(void) {
             return;
         }
         state.fd = sv[0];
-        state.token = nm_cancel_token_create();
+        state.token = llam_cancel_token_create();
         if (state.token == NULL) {
             stress_fail_msg("poll cancel-timeout token create failed");
             close(sv[0]);
@@ -182,36 +241,36 @@ void run_poll_cancel_timeout_race(void) {
             return;
         }
 
-        waiter = nm_spawn(poll_cancel_race_waiter_task,
+        waiter = llam_spawn(poll_cancel_race_waiter_task,
                           &state,
-                          &(nm_spawn_opts_t){
-                              .task_class = NM_TASK_CLASS_DEFAULT,
-                              .stack_class = NM_STACK_CLASS_DEFAULT,
+                          &(llam_spawn_opts_t){
+                              .task_class = LLAM_TASK_CLASS_DEFAULT,
+                              .stack_class = LLAM_STACK_CLASS_DEFAULT,
                               .cancel_token = state.token,
                           });
-        trigger = nm_spawn(poll_cancel_race_trigger_task,
+        trigger = llam_spawn(poll_cancel_race_trigger_task,
                            &state,
-                           &(nm_spawn_opts_t){
-                               .task_class = NM_TASK_CLASS_DEFAULT,
-                               .stack_class = NM_STACK_CLASS_DEFAULT,
+                           &(llam_spawn_opts_t){
+                               .task_class = LLAM_TASK_CLASS_DEFAULT,
+                               .stack_class = LLAM_STACK_CLASS_DEFAULT,
                            });
         if (waiter == NULL || trigger == NULL) {
             stress_fail_msg("poll cancel-timeout task spawn failed");
             if (waiter != NULL) {
-                (void)nm_join(waiter);
+                (void)llam_join(waiter);
             }
             if (trigger != NULL) {
-                (void)nm_join(trigger);
+                (void)llam_join(trigger);
             }
-            (void)nm_cancel_token_destroy(state.token);
+            (void)llam_cancel_token_destroy(state.token);
             close(sv[0]);
             close(sv[1]);
             return;
         }
 
-        if (nm_join(waiter) != 0 || nm_join(trigger) != 0) {
+        if (llam_join(waiter) != 0 || llam_join(trigger) != 0) {
             stress_fail_msg("poll cancel-timeout join failed");
-            (void)nm_cancel_token_destroy(state.token);
+            (void)llam_cancel_token_destroy(state.token);
             close(sv[0]);
             close(sv[1]);
             return;
@@ -222,10 +281,10 @@ void run_poll_cancel_timeout_race(void) {
         if (atomic_load(&state.cancel_hits) + atomic_load(&state.timeout_hits) != 1U) {
             stress_fail_msg("poll cancel-timeout outcome count failed");
         }
-        if (nm_sleep_ns(500000ULL) != 0) {
+        if (llam_sleep_ns(500000ULL) != 0) {
             stress_fail_msg("poll cancel-timeout post wait sleep failed");
         }
-        (void)nm_cancel_token_destroy(state.token);
+        (void)llam_cancel_token_destroy(state.token);
         close(sv[0]);
         close(sv[1]);
     }
@@ -233,23 +292,23 @@ void run_poll_cancel_timeout_race(void) {
 
 void run_nested_opaque_path(void) {
     nested_opaque_state_t state;
-    nm_task_t *task;
+    llam_task_t *task;
 
     atomic_init(&state.companion_steps, 0U);
     atomic_init(&state.completed_scopes, 0U);
     state.scopes = 3U;
-    task = nm_spawn(nested_opaque_scope_task,
+    task = llam_spawn(nested_opaque_scope_task,
                     &state,
-                    &(nm_spawn_opts_t){
-                        .task_class = NM_TASK_CLASS_DEFAULT,
-                        .stack_class = NM_STACK_CLASS_DEFAULT,
-                        .flags = NM_SPAWN_F_SYS_TASK | NM_SPAWN_F_PINNED,
+                    &(llam_spawn_opts_t){
+                        .task_class = LLAM_TASK_CLASS_DEFAULT,
+                        .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                        .flags = LLAM_SPAWN_F_SYS_TASK | LLAM_SPAWN_F_PINNED,
                     });
     if (task == NULL) {
         stress_fail_msg("nested opaque task spawn failed");
         return;
     }
-    if (nm_join(task) != 0) {
+    if (llam_join(task) != 0) {
         stress_fail_msg("nested opaque task join failed");
         return;
     }
@@ -313,8 +372,8 @@ void stress_suite_task(void *arg) {
             stress_trace_step("run_nested_opaque_path");
             run_nested_opaque_path();
         }
-        stress_trace_step("nm_yield");
-        nm_yield();
+        stress_trace_step("llam_yield");
+        llam_yield();
     }
 }
 
@@ -343,21 +402,21 @@ void dynamic_suite_task(void *arg) {
             run_io_cancel_path();
         }
         run_opaque_reuse();
-        nm_yield();
+        llam_yield();
     }
 }
 
-void stress_print_phase_stats(const char *phase_name, const nm_runtime_stats_t *stats) {
+void stress_print_phase_stats(const char *phase_name, const llam_runtime_stats_t *stats) {
     printf("[stress] phase=%s active_shards=%u online_floor=%u online_min=%u online_max=%u active_nodes=%u dynamic_shards=%u shard_rings=%u shard_rings_multishot=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u ctx_switches=%llu io_submit_syscalls=%llu\n",
            phase_name,
-           stats->active_shards,
-           stats->online_shards_floor,
-           stats->online_shards_min,
-           stats->online_shards_max,
+           stats->active_workers,
+           stats->online_workers_floor,
+           stats->online_workers_min,
+           stats->online_workers_max,
            stats->active_nodes,
-           stats->dynamic_shards,
-           stats->shard_rings,
-           stats->shard_rings_multishot,
+           stats->dynamic_workers,
+           stats->worker_rings,
+           stats->worker_rings_multishot,
            stats->lockfree_normq,
            stats->huge_alloc,
            stats->sqpoll,
@@ -366,69 +425,79 @@ void stress_print_phase_stats(const char *phase_name, const nm_runtime_stats_t *
 }
 
 int stress_run_phase(const char *phase_name,
-                            nm_task_fn task_fn,
+                            llam_task_fn task_fn,
                             void *arg,
-                            const nm_runtime_opts_t *opts,
+                            const llam_runtime_opts_t *opts,
                             unsigned require_dynamic_motion,
                             unsigned require_floor_reach) {
-    nm_runtime_stats_t stats;
+    llam_runtime_stats_t stats;
+    stress_phase_watchdog_t watchdog;
+    pthread_t watchdog_thread;
+    int watchdog_started = 0;
     unsigned failures_before = atomic_load(&g_failures);
 
     printf("[stress] phase=%s deterministic=%u forced_yield_every=%u shard_rings=%u shard_rings_multishot=%u dynamic_shards=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u sqpoll_cpu=%d\n",
            phase_name,
            opts->deterministic,
            opts->forced_yield_every,
-           opts->experimental_shard_rings,
-           opts->experimental_shard_rings_multishot,
-           opts->experimental_dynamic_shards,
-           opts->experimental_lockfree_normq,
-           opts->experimental_huge_alloc,
-           opts->experimental_sqpoll,
+           stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS),
+           stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT),
+           stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS),
+           stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ),
+           stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_HUGE_ALLOC),
+           stress_suite_runtime_flag_enabled(opts, LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL),
            opts->sqpoll_cpu);
-    if (nm_runtime_init(opts) != 0) {
-        perror("nm_runtime_init");
+    if (llam_runtime_init(opts) != 0) {
+        perror("llam_runtime_init");
         return 1;
     }
-    if (nm_spawn(task_fn,
+    if (llam_spawn(task_fn,
                  arg,
-                 &(nm_spawn_opts_t){
-                     .task_class = NM_TASK_CLASS_DEFAULT,
-                     .stack_class = NM_STACK_CLASS_DEFAULT,
-                     .flags = NM_SPAWN_F_PINNED,
+                 &(llam_spawn_opts_t){
+                     .task_class = LLAM_TASK_CLASS_DEFAULT,
+                     .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                     .flags = LLAM_SPAWN_F_PINNED,
                  }) == NULL) {
-        perror("nm_spawn");
-        nm_runtime_shutdown();
+        perror("llam_spawn");
+        llam_runtime_shutdown();
         return 1;
     }
-    if (nm_run() != 0) {
-        perror("nm_run");
-        nm_dump_runtime_state(STDOUT_FILENO);
-        nm_runtime_shutdown();
+    watchdog_started = stress_start_phase_watchdog(&watchdog, &watchdog_thread, phase_name);
+    if (watchdog_started < 0) {
+        llam_runtime_shutdown();
         return 1;
     }
-    if (nm_runtime_collect_stats(&stats) != 0) {
-        perror("nm_runtime_collect_stats");
-        nm_runtime_shutdown();
+    if (llam_run() != 0) {
+        stress_stop_phase_watchdog(&watchdog, watchdog_thread, watchdog_started);
+        perror("llam_run");
+        llam_dump_runtime_state(STDOUT_FILENO);
+        llam_runtime_shutdown();
+        return 1;
+    }
+    stress_stop_phase_watchdog(&watchdog, watchdog_thread, watchdog_started);
+    if (llam_runtime_collect_stats(&stats) != 0) {
+        perror("llam_runtime_collect_stats");
+        llam_runtime_shutdown();
         return 1;
     }
     stress_print_phase_stats(phase_name, &stats);
     if (require_dynamic_motion != 0U &&
-        stats.dynamic_shards != 0U &&
-        stats.active_shards > stats.online_shards_floor &&
-        stats.online_shards_max <= stats.online_shards_min) {
+        stats.dynamic_workers != 0U &&
+        stats.active_workers > stats.online_workers_floor &&
+        stats.online_workers_max <= stats.online_workers_min) {
         stress_fail_msg("dynamic phase did not move online shard range");
     }
     if (require_floor_reach != 0U &&
-        stats.dynamic_shards != 0U &&
-        stats.active_shards > stats.online_shards_floor &&
-        stats.online_shards_min > stats.online_shards_floor) {
+        stats.dynamic_workers != 0U &&
+        stats.active_workers > stats.online_workers_floor &&
+        stats.online_workers_min > stats.online_workers_floor) {
         stress_fail_msg("dynamic phase did not return to base online floor");
     }
     if (atomic_load(&g_failures) != failures_before) {
-        nm_dump_runtime_state(STDOUT_FILENO);
-        nm_runtime_shutdown();
+        llam_dump_runtime_state(STDOUT_FILENO);
+        llam_runtime_shutdown();
         return 1;
     }
-    nm_runtime_shutdown();
+    llam_runtime_shutdown();
     return 0;
 }
