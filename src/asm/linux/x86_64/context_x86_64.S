@@ -40,15 +40,27 @@ nm_ctx_switch:
     movq 64(%rdi), %rcx
     testq %rcx, %rcx
     jnz .Lnm_ctx_save_xsave
+#ifdef __PIC__
+    movq g_nm_fp_control_context@GOTPCREL(%rip), %rax
+    cmpl $0, (%rax)
+#else
     cmpl $0, g_nm_fp_control_context(%rip)
+#endif
     je .Lnm_ctx_saved
 .Lnm_ctx_save_control:
     stmxcsr 56(%rdi)
     fnstcw 60(%rdi)
     jmp .Lnm_ctx_saved
 .Lnm_ctx_save_xsave:
+#ifdef __PIC__
+    movq g_nm_xsave_mask_lo@GOTPCREL(%rip), %rax
+    movl (%rax), %eax
+    movq g_nm_xsave_mask_hi@GOTPCREL(%rip), %rdx
+    movl (%rdx), %edx
+#else
     movl g_nm_xsave_mask_lo(%rip), %eax
     movl g_nm_xsave_mask_hi(%rip), %edx
+#endif
     xsave64 (%rcx)
     jmp .Lnm_ctx_saved
 .Lnm_ctx_saved:
@@ -63,15 +75,27 @@ nm_ctx_switch:
     movq 64(%rsi), %rcx
     testq %rcx, %rcx
     jnz .Lnm_ctx_restore_xsave
+#ifdef __PIC__
+    movq g_nm_fp_control_context@GOTPCREL(%rip), %rax
+    cmpl $0, (%rax)
+#else
     cmpl $0, g_nm_fp_control_context(%rip)
+#endif
     je .Lnm_ctx_restored
 .Lnm_ctx_restore_control:
     ldmxcsr 56(%rsi)
     fldcw 60(%rsi)
     jmp .Lnm_ctx_restored
 .Lnm_ctx_restore_xsave:
+#ifdef __PIC__
+    movq g_nm_xsave_mask_lo@GOTPCREL(%rip), %rax
+    movl (%rax), %eax
+    movq g_nm_xsave_mask_hi@GOTPCREL(%rip), %rdx
+    movl (%rdx), %edx
+#else
     movl g_nm_xsave_mask_lo(%rip), %eax
     movl g_nm_xsave_mask_hi(%rip), %edx
+#endif
     xrstor64 (%rcx)
     jmp .Lnm_ctx_restored
 .Lnm_ctx_restored:
