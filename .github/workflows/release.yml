@@ -1,0 +1,109 @@
+name: Release
+
+permissions:
+  contents: write
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+      - '[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  build-artifacts:
+    name: build-artifacts (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+            cc: gcc
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            cc: gcc
+          - target: macos-x86_64
+            runner: macos-13
+            cc: clang
+          - target: macos-aarch64
+            runner: macos-14
+            cc: clang
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git python3
+
+      - name: Build liburing
+        if: runner.os == 'Linux'
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: Build and test
+        run: |
+          make clean all test CC="${{ matrix.cc }}"
+
+      - name: Smoke test runtime executables
+        run: |
+          ./demo
+          LLAM_BENCH_ROUNDS=1 LLAM_BENCH_IO_MESSAGES=32 LLAM_BENCH_POLL_EVENTS=32 ./bench
+          LLAM_STRESS_ROUNDS=1 \
+          LLAM_STRESS_DYNAMIC_ROUNDS=1 \
+          LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS=32 \
+          LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS=256 \
+          LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US=1000 \
+          ./stress
+
+      - name: Package release archive
+        run: |
+          LLAM_RELEASE_VERSION="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}" \
+            ./scripts/package_release.sh "${{ matrix.target }}"
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            target/dist/*.tar.gz
+            target/dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: publish-release
+    needs:
+      - build-artifacts
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Build checksum manifest
+        run: |
+          cd release-artifacts
+          cat *.sha256 | sort -k2 > SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            release-artifacts/*.tar.gz
+            release-artifacts/*.tar.gz.sha256
+            release-artifacts/SHA256SUMS

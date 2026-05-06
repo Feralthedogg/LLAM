@@ -7,7 +7,8 @@ if [ "$(uname -s)" != "Linux" ]; then
 fi
 
 JOBS="${JOBS:-4}"
-make -j"$JOBS"
+make clean
+make -j"$JOBS" all test
 
 python3 - <<'PY'
 import os

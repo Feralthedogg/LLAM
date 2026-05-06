@@ -215,7 +215,7 @@ void nm_dump_runtime_state(int fd) {
     dprintf(fd, "nodes:\n");
     for (i = 0; i < rt->active_nodes; ++i) {
         dprintf(fd,
-                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
+                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
                 rt->nodes[i].index,
                 rt->nodes[i].kernel_node_id,
                 rt->nodes[i].ring_ready ? 1U : 0U,
@@ -225,6 +225,7 @@ void nm_dump_runtime_state(int fd) {
                 rt->nodes[i].supports_recv ? 1U : 0U,
                 rt->nodes[i].supports_write ? 1U : 0U,
                 rt->nodes[i].supports_accept ? 1U : 0U,
+                rt->nodes[i].supports_connect ? 1U : 0U,
                 rt->nodes[i].supports_poll ? 1U : 0U,
                 rt->nodes[i].supports_multishot_recv ? 1U : 0U,
                 rt->nodes[i].supports_multishot_accept ? 1U : 0U,

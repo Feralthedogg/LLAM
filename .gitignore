@@ -1,5 +1,7 @@
 object/
+object-pic/
 build/
+target/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -7,6 +9,14 @@ compile_commands.json
 bench
 demo
 stress
+test_abi_contract
+test_connect_io
+test_shared_load
+libllam_runtime.a
+libllam_runtime.dylib
+libllam_runtime.*.dylib
+libllam_runtime.so
+libllam_runtime.so.*
 perf.data
 perf.data.old
 scripts/bench_tokio_compare/target/

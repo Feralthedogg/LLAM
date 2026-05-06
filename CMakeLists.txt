@@ -2,12 +2,17 @@ cmake_minimum_required(VERSION 3.20)
 
 project(llam C ASM)
 
+set(LLAM_ABI_VERSION_MAJOR 1)
+set(LLAM_ABI_VERSION_MINOR 0)
+set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.0")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 set(LLAM_RUNTIME_SOURCES
     src/core/runtime.c
+    src/core/runtime_abi.c
     src/core/runtime_alloc.c
     src/core/runtime_allocator_quiescent.c
     src/core/runtime_api.c
@@ -112,28 +117,47 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aa
 endif()
 
 add_library(llam_runtime STATIC ${LLAM_RUNTIME_SOURCES})
+add_library(llam_runtime_shared SHARED ${LLAM_RUNTIME_SOURCES})
 
-target_include_directories(llam_runtime
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+set_target_properties(llam_runtime
+    PROPERTIES
+        OUTPUT_NAME llam_runtime
+        POSITION_INDEPENDENT_CODE ON
 )
 
-target_compile_definitions(llam_runtime PRIVATE _GNU_SOURCE)
+set_target_properties(llam_runtime_shared
+    PROPERTIES
+        OUTPUT_NAME llam_runtime
+        VERSION ${LLAM_LIBRARY_VERSION}
+        SOVERSION ${LLAM_ABI_VERSION_MAJOR}
+        POSITION_INDEPENDENT_CODE ON
+)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    target_compile_definitions(llam_runtime PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_compile_definitions(llam_runtime PRIVATE _WIN32_WINNT=0x0A00)
-endif()
+foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
+    target_include_directories(${LLAM_TARGET}
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    )
+
+    target_compile_definitions(${LLAM_TARGET} PRIVATE _GNU_SOURCE)
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_compile_definitions(${LLAM_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_compile_definitions(${LLAM_TARGET} PRIVATE _WIN32_WINNT=0x0A00)
+    endif()
+endforeach()
 
 find_package(Threads REQUIRED)
 target_link_libraries(llam_runtime PUBLIC Threads::Threads)
+target_link_libraries(llam_runtime_shared PUBLIC Threads::Threads)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(llam_runtime PUBLIC uring m)
+    target_link_libraries(llam_runtime_shared PUBLIC uring m)
 endif()
 
 add_executable(demo
@@ -176,3 +200,37 @@ target_include_directories(bench PRIVATE
 )
 target_compile_definitions(bench PRIVATE _GNU_SOURCE)
 target_link_libraries(bench PRIVATE llam_runtime)
+
+enable_testing()
+
+add_executable(test_abi_contract
+    tests/test_abi_contract.c
+)
+target_link_libraries(test_abi_contract PRIVATE llam_runtime)
+
+add_executable(test_connect_io
+    tests/test_connect_io.c
+)
+target_link_libraries(test_connect_io PRIVATE llam_runtime)
+
+add_executable(test_shared_load
+    tests/test_shared_load.c
+)
+target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(test_shared_load llam_runtime_shared)
+
+foreach(LLAM_TEST_TARGET test_abi_contract test_connect_io test_shared_load)
+    target_include_directories(${LLAM_TEST_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _GNU_SOURCE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _WIN32_WINNT=0x0A00)
+    endif()
+endforeach()
+
+add_test(NAME test_abi_contract COMMAND test_abi_contract)
+add_test(NAME test_connect_io COMMAND test_connect_io)
+add_test(NAME test_shared_load COMMAND test_shared_load $<TARGET_FILE:llam_runtime_shared>)

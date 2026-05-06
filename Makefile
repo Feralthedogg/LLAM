@@ -1,10 +1,16 @@
 CC ?= cc
+AR ?= ar
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer
 CPPFLAGS ?= -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE
 LDLIBS ?= -pthread -luring
 OBJDIR ?= object
+SHARED_OBJDIR ?= $(OBJDIR)-pic
+PICFLAGS ?= -fPIC
+LLAM_ABI_MAJOR ?= 1
+LLAM_VERSION ?= 1.0.0
 CLEAN_DIRS = \
 	$(OBJDIR) \
+	$(SHARED_OBJDIR) \
 	build \
 	CMakeFiles \
 	cmake-build-* \
@@ -13,9 +19,21 @@ CLEAN_FILES = \
 	demo \
 	stress \
 	bench \
+	test_abi_contract \
+	test_connect_io \
+	test_shared_load \
+	libllam_runtime.a \
 	demo.exe \
 	stress.exe \
 	bench.exe \
+	test_abi_contract.exe \
+	test_connect_io.exe \
+	test_shared_load.exe \
+	libllam_runtime.dylib \
+	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
+	libllam_runtime.so \
+	libllam_runtime.so.$(LLAM_ABI_MAJOR) \
+	libllam_runtime.so.$(LLAM_VERSION) \
 	CMakeCache.txt \
 	cmake_install.cmake \
 	compile_commands.json \
@@ -35,6 +53,19 @@ HOST_PLATFORM := darwin
 else
 HOST_PLATFORM := posix
 endif
+endif
+
+ifeq ($(HOST_PLATFORM),darwin)
+SHLIB_LINK = libllam_runtime.dylib
+SHLIB_REAL = libllam_runtime.$(LLAM_ABI_MAJOR).dylib
+SHLIB_LDFLAGS = -dynamiclib -Wl,-install_name,@rpath/$(SHLIB_REAL)
+DL_LIBS =
+else
+SHLIB_LINK = libllam_runtime.so
+SHLIB_SONAME = libllam_runtime.so.$(LLAM_ABI_MAJOR)
+SHLIB_REAL = libllam_runtime.so.$(LLAM_VERSION)
+SHLIB_LDFLAGS = -shared -Wl,-soname,$(SHLIB_SONAME)
+DL_LIBS = -ldl
 endif
 
 RUNTIME_PRIV_HDRS = \
@@ -59,6 +90,7 @@ RUNTIME_PRIV_HDRS = \
 
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime.o \
+	$(OBJDIR)/src/core/runtime_abi.o \
 	$(OBJDIR)/src/core/runtime_util.o \
 	$(OBJDIR)/src/core/runtime_io_udata.o \
 	$(OBJDIR)/src/core/runtime_fault.o \
@@ -164,6 +196,7 @@ else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -luring,$(LDLIBS))
 endif
+SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 DEMO_OBJS = \
 	$(OBJDIR)/examples/demo.o \
 	$(OBJDIR)/examples/demo_tasks.o \
@@ -181,14 +214,20 @@ BENCH_OBJS = \
 	$(OBJDIR)/examples/bench.o \
 	$(OBJDIR)/examples/bench_support.o \
 	$(OBJDIR)/examples/bench_entry.o
+TEST_ABI_OBJS = \
+	$(OBJDIR)/tests/test_abi_contract.o
+TEST_CONNECT_OBJS = \
+	$(OBJDIR)/tests/test_connect_io.o
+TEST_SHARED_LOAD_OBJS = \
+	$(OBJDIR)/tests/test_shared_load.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 
-.PHONY: all clean bench-matrix verify-darwin verify-linux verify-windows platform-status windows-unsupported
+.PHONY: all clean static shared test check bench-matrix verify-darwin verify-linux verify-windows platform-status windows-unsupported
 
 ifeq ($(HOST_PLATFORM),windows)
 
-all demo stress bench bench-matrix verify-darwin verify-linux: windows-unsupported
+all demo stress bench static shared test check bench-matrix verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -207,7 +246,38 @@ verify-windows:
 
 else
 
-all: demo stress bench
+all: demo stress bench static shared
+
+static: libllam_runtime.a
+
+libllam_runtime.a: $(RUNTIME_OBJS)
+	$(AR) rcs $@ $(RUNTIME_OBJS)
+
+shared: $(SHLIB_LINK)
+
+test: test_abi_contract test_connect_io test_shared_load shared
+	./test_abi_contract
+	./test_connect_io
+	./test_shared_load ./$(SHLIB_REAL)
+
+check: test
+
+ifeq ($(HOST_PLATFORM),darwin)
+$(SHLIB_LINK): $(SHLIB_REAL)
+	ln -sf $(SHLIB_REAL) $(SHLIB_LINK)
+
+$(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)
+	$(CC) $(CFLAGS) $(SHLIB_LDFLAGS) -o $@ $(SHARED_RUNTIME_OBJS) $(LDLIBS)
+else
+$(SHLIB_LINK): $(SHLIB_SONAME)
+	ln -sf $(SHLIB_SONAME) $(SHLIB_LINK)
+
+$(SHLIB_SONAME): $(SHLIB_REAL)
+	ln -sf $(SHLIB_REAL) $(SHLIB_SONAME)
+
+$(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)
+	$(CC) $(CFLAGS) $(SHLIB_LDFLAGS) -o $@ $(SHARED_RUNTIME_OBJS) $(LDLIBS)
+endif
 
 demo: $(RUNTIME_OBJS) $(DEMO_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(DEMO_OBJS) $(LDLIBS)
@@ -218,31 +288,66 @@ stress: $(RUNTIME_OBJS) $(STRESS_OBJS)
 bench: $(RUNTIME_OBJS) $(BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BENCH_OBJS) $(LDLIBS)
 
+test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
+
+test_connect_io: $(RUNTIME_OBJS) $(TEST_CONNECT_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_CONNECT_OBJS) $(LDLIBS)
+
+test_shared_load: $(TEST_SHARED_LOAD_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
+
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(SHARED_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(SHARED_OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+
 $(OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(SHARED_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+
 $(OBJDIR)/src/engine/runtime_watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
+
+$(SHARED_OBJDIR)/src/engine/runtime_watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
 $(OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/nm_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(SHARED_OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/nm_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+
 $(OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/nm_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(SHARED_OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/nm_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+
 $(OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/nm_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(SHARED_OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/nm_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo.o: examples/demo.c include/llam/runtime.h include/llam/nm_runtime.h examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
@@ -300,10 +405,14 @@ $(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c include/llam/runtime.h 
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(OBJDIR)/tests/%.o: tests/%.c include/llam/runtime.h include/llam/nm_runtime.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
 clean:
 	rm -rf $(CLEAN_DIRS)
 	rm -f $(CLEAN_FILES)
-	find src examples -name '*.o' -delete
+	find src examples tests -name '*.o' -delete
 
 bench-matrix: bench
 	python3 scripts/bench_matrix.py

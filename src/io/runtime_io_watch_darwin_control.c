@@ -237,6 +237,7 @@ int nm_darwin_req_register(nm_node_t *node, nm_io_req_t *req) {
         rc = nm_darwin_req_change_one(node, req, EVFILT_READ, EV_ADD | EV_ONESHOT | EV_CLEAR);
         break;
     case NM_IO_KIND_WRITE:
+    case NM_IO_KIND_CONNECT:
         rc = nm_darwin_req_change_one(node, req, EVFILT_WRITE, EV_ADD | EV_ONESHOT | EV_CLEAR);
         break;
     case NM_IO_KIND_POLL:
@@ -278,6 +279,7 @@ void nm_darwin_req_delete(nm_node_t *node, nm_io_req_t *req) {
         }
         break;
     case NM_IO_KIND_WRITE:
+    case NM_IO_KIND_CONNECT:
         if (nm_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 && errno != ENOENT) {
             nm_record_fatal(node->runtime, errno);
         }

@@ -6,7 +6,8 @@ if [ "$(uname -s)" != "Darwin" ]; then
     exit 1
 fi
 
-make -j4
+make clean
+make -j4 all test
 python3 - <<'PY'
 import os
 import subprocess

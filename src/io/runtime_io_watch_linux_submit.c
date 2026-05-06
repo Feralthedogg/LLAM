@@ -71,6 +71,9 @@ void nm_io_submit_one(nm_node_t *node, nm_io_req_t *req) {
     case NM_IO_KIND_ACCEPT:
         io_uring_prep_accept(sqe, req->fd, req->addr, req->addrlen, 0);
         break;
+    case NM_IO_KIND_CONNECT:
+        io_uring_prep_connect(sqe, req->fd, req->addr, req->addr_len);
+        break;
     case NM_IO_KIND_POLL:
         io_uring_prep_poll_add(sqe, req->fd, (unsigned)req->poll_events);
         break;

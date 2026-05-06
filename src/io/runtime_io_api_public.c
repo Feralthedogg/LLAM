@@ -379,6 +379,72 @@ int nm_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
 }
 
 /**
+ * @brief Connect a socket without blocking the scheduler worker.
+ *
+ * Managed tasks submit a one-shot connect request to the platform backend. If
+ * the backend cannot initiate connect for this descriptor, the request falls
+ * back to a blocking helper that drives a nonblocking connect with short poll
+ * slices. Non-runtime callers delegate to @c connect directly.
+ *
+ * @param fd      Socket descriptor.
+ * @param addr    Peer address. Must not be NULL.
+ * @param addrlen Peer address length.
+ *
+ * @return 0 on connection, or -1 with @c errno set.
+ */
+int nm_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
+    nm_io_req_t *req;
+    int result;
+
+    nm_task_safepoint();
+
+    if (addr == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (g_nm_tls_shard == NULL || g_nm_tls_task == NULL) {
+        return connect(fd, addr, addrlen);
+    }
+
+    req = nm_api_io_req_acquire(g_nm_tls_shard);
+    if (req == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    req->kind = NM_IO_KIND_CONNECT;
+    req->fd = fd;
+    req->addr = (struct sockaddr *)addr;
+    req->addr_len = addrlen;
+    req->recv_watch = NULL;
+    if (nm_issue_io(req, false, 0U) != 0) {
+        if (!nm_io_capability_error(errno)) {
+            nm_api_io_req_release(g_nm_tls_shard, req);
+            return -1;
+        }
+        req->kind = NM_IO_KIND_CONNECT;
+        req->fd = fd;
+        req->addr = (struct sockaddr *)addr;
+        req->addr_len = addrlen;
+        req->task = g_nm_tls_task;
+        if (nm_call_blocking(nm_blocking_connect_impl, req) == NULL) {
+            int saved_errno = errno;
+
+            nm_api_io_req_release(g_nm_tls_shard, req);
+            errno = saved_errno;
+            return -1;
+        }
+        result = (int)req->result;
+        nm_api_io_req_release(g_nm_tls_shard, req);
+        return result;
+    }
+
+    result = (int)req->result;
+    nm_api_io_req_release(g_nm_tls_shard, req);
+    return result;
+}
+
+/**
  * @brief Poll a descriptor without unnecessarily parking the scheduler worker.
  *
  * The function first checks immediate readiness, optionally yields when local

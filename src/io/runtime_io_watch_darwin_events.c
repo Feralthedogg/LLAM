@@ -430,6 +430,16 @@ void nm_darwin_handle_req_event(nm_node_t *node, nm_io_req_t *req, const struct 
         nm_io_complete_req(node, req, (int)nm_darwin_poll_revents(event), true);
         return;
     }
+    if (req->kind == NM_IO_KIND_CONNECT) {
+        int connect_result = 0;
+
+        nm_darwin_req_delete(node, req);
+        if (nm_socket_connect_error(req->fd) != 0) {
+            connect_result = -errno;
+        }
+        nm_io_complete_req(node, req, connect_result, true);
+        return;
+    }
 
     switch (nm_darwin_try_req_syscall(req, &result)) {
     case 1:

@@ -35,6 +35,40 @@
 extern "C" {
 #endif
 
+/** @brief Legacy API source/API version major component. */
+#define NM_VERSION_MAJOR 0U
+/** @brief Legacy API source/API version minor component. */
+#define NM_VERSION_MINOR 1U
+/** @brief Legacy API source/API version patch component. */
+#define NM_VERSION_PATCH 0U
+
+/** @brief Legacy public ABI major version. */
+#define NM_ABI_VERSION_MAJOR 1U
+/** @brief Legacy public ABI minor version. */
+#define NM_ABI_VERSION_MINOR 0U
+/** @brief Packed legacy public ABI version. */
+#define NM_ABI_VERSION ((NM_ABI_VERSION_MAJOR << 16U) | NM_ABI_VERSION_MINOR)
+
+/** @brief Legacy ABI metadata returned by ::nm_abi_get_info. */
+typedef struct nm_abi_info {
+    uint32_t abi_major;             /**< Public ABI major version. */
+    uint32_t abi_minor;             /**< Public ABI minor version. */
+    uint32_t version_major;         /**< Source/API version major component. */
+    uint32_t version_minor;         /**< Source/API version minor component. */
+    uint32_t version_patch;         /**< Source/API version patch component. */
+    uint32_t reserved0;             /**< Reserved for future flags; currently 0. */
+    size_t struct_size;             /**< Size of this struct in the loaded library. */
+    size_t runtime_opts_size;       /**< Size of ::nm_runtime_opts_t in the loaded library. */
+    size_t spawn_opts_size;         /**< Size of ::nm_spawn_opts_t in the loaded library. */
+    size_t runtime_stats_size;      /**< Size of ::nm_runtime_stats_t in the loaded library. */
+    const char *runtime_name;       /**< Stable runtime name string, currently "LLAM". */
+    const char *version_string;     /**< Static version string owned by the library. */
+    const char *platform_name;      /**< Static platform name string owned by the library. */
+} nm_abi_info_t;
+
+/** @brief Current size to pass to ::nm_abi_get_info. */
+#define NM_ABI_INFO_CURRENT_SIZE ((size_t)sizeof(nm_abi_info_t))
+
 /** @brief Opaque task handle returned by ::nm_spawn. */
 typedef struct nm_task nm_task_t;
 /** @brief Runtime-aware mutex handle. */
@@ -52,6 +86,11 @@ typedef struct nm_io_buffer nm_io_buffer_t;
 typedef void (*nm_task_fn)(void *arg);
 /** @brief Blocking callback signature used by ::nm_call_blocking. */
 typedef void *(*nm_blocking_fn)(void *arg);
+
+/* ABI and dynamic loading. */
+uint32_t nm_abi_version(void);
+const char *nm_version_string(void);
+int nm_abi_get_info(nm_abi_info_t *info, size_t info_size);
 
 /** @brief Scheduler priority class used for slice and latency policy. */
 typedef enum nm_task_class {
@@ -212,6 +251,7 @@ void *nm_io_buffer_data(nm_io_buffer_t *buffer);
 size_t nm_io_buffer_size(const nm_io_buffer_t *buffer);
 size_t nm_io_buffer_capacity(const nm_io_buffer_t *buffer);
 nm_fd_t nm_accept(nm_fd_t fd, struct sockaddr *addr, socklen_t *addrlen);
+int nm_connect(nm_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 int nm_poll_fd(nm_fd_t fd, short events, int timeout_ms, short *revents);
 
 /* Time and task introspection. */

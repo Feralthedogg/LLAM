@@ -156,31 +156,33 @@ void *stress_blocking_pause(void *arg) {
     return arg;
 }
 
-void *stress_blocking_connect_loopback(void *arg) {
-    dynamic_accept_connector_state_t *state = arg;
+int stress_connect_loopback(dynamic_accept_connector_state_t *state) {
     struct sockaddr_in addr;
     int fd;
+    int rc;
 
     if (state == NULL) {
-        return NULL;
+        errno = EINVAL;
+        return -1;
     }
 
     state->result = 0;
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         state->result = errno != 0 ? errno : EIO;
-        return state;
+        return -1;
     }
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(state->port);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    rc = nm_connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc != 0) {
         state->result = errno != 0 ? errno : EIO;
     }
     close(fd);
-    return state;
+    return rc;
 }
 
 void block_cancel_waiter_task(void *arg) {
@@ -378,8 +380,8 @@ void dynamic_accept_connector_task(void *arg) {
         stress_fail_msg("dynamic accept connector sleep failed");
         return;
     }
-    if (nm_call_blocking(stress_blocking_connect_loopback, state) == NULL) {
-        stress_fail_msg("dynamic accept connector blocking call failed");
+    if (stress_connect_loopback(state) != 0) {
+        stress_fail_msg("dynamic accept connector connect failed");
         return;
     }
     if (state->result != 0) {

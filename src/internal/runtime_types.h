@@ -292,6 +292,7 @@ typedef enum nm_io_kind {
     NM_IO_KIND_WRITE = 1,
     NM_IO_KIND_ACCEPT = 2,
     NM_IO_KIND_POLL = 3,
+    NM_IO_KIND_CONNECT = 4,
 } nm_io_kind_t;
 
 /** @brief Current ownership/wait state for an I/O request. */
@@ -347,6 +348,7 @@ typedef struct nm_io_req {
     size_t count;
     struct sockaddr *addr;
     socklen_t *addrlen;
+    socklen_t addr_len;
     ssize_t result;
     int error_code;
     short poll_events;
@@ -777,6 +779,7 @@ struct nm_node {
     bool supports_recv;
     bool supports_write;
     bool supports_accept;
+    bool supports_connect;
     bool supports_poll;
     bool supports_multishot_recv;
     bool supports_multishot_accept;

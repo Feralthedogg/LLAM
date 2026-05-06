@@ -324,3 +324,26 @@ int nm_try_direct_rw(int fd,
         return -1;
     }
 }
+
+/**
+ * @brief Resolve the completion status for a nonblocking socket connect.
+ *
+ * Writable readiness after @c EINPROGRESS only means the connection attempt has
+ * finished. The real result is reported through @c SO_ERROR.
+ *
+ * @param fd Socket descriptor whose connection status should be checked.
+ * @return 0 when connected, -1 with @c errno set to the connection error.
+ */
+int nm_socket_connect_error(int fd) {
+    int error_code = 0;
+    socklen_t error_len = sizeof(error_code);
+
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error_code, &error_len) != 0) {
+        return -1;
+    }
+    if (error_code != 0) {
+        errno = error_code;
+        return -1;
+    }
+    return 0;
+}

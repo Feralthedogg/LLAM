@@ -134,6 +134,7 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, bool decreme
 void nm_darwin_complete_accept_completions(nm_node_t *node, nm_darwin_accept_completion_t *head);
 int nm_darwin_fd_set_nonblocking(int fd, int *saved_flags_out, bool *restore_out);
 void nm_darwin_fd_restore(int fd, int saved_flags, bool restore);
+int nm_socket_connect_error(int fd);
 bool nm_darwin_assign_owned_buffer(nm_io_req_t *req,
                                    const unsigned char *data,
                                    size_t size,

@@ -48,8 +48,11 @@ void *nm_blocking_read_impl(void *arg) {
     }
 
     saved_flags = fcntl(req->fd, F_GETFL, 0);
-    if (saved_flags >= 0 && (saved_flags & O_NONBLOCK) == 0 &&
-        fcntl(req->fd, F_SETFL, saved_flags | O_NONBLOCK) == 0) {
+    if (saved_flags >= 0 && (saved_flags & O_NONBLOCK) == 0) {
+        if (fcntl(req->fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
+            req->result = -1;
+            return req;
+        }
         restore_flags = true;
     }
 
@@ -327,8 +330,11 @@ void *nm_blocking_write_impl(void *arg) {
     }
 
     saved_flags = fcntl(req->fd, F_GETFL, 0);
-    if (saved_flags >= 0 && (saved_flags & O_NONBLOCK) == 0 &&
-        fcntl(req->fd, F_SETFL, saved_flags | O_NONBLOCK) == 0) {
+    if (saved_flags >= 0 && (saved_flags & O_NONBLOCK) == 0) {
+        if (fcntl(req->fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
+            req->result = -1;
+            return req;
+        }
         restore_flags = true;
     }
 
@@ -408,6 +414,92 @@ void *nm_blocking_accept_impl(void *arg) {
 
     if (restore_flags) {
         (void)fcntl(req->fd, F_SETFL, saved_flags);
+    }
+    return req;
+}
+
+/**
+ * @brief Blocking-worker fallback for connect operations.
+ *
+ * The helper initiates a nonblocking connect and waits for writable readiness in
+ * short slices. After readiness, @c SO_ERROR is the authoritative connection
+ * result.
+ *
+ * @param arg Pointer to an initialized ::nm_io_req_t.
+ *
+ * @return @p arg on completion, or @c NULL for invalid input.
+ */
+void *nm_blocking_connect_impl(void *arg) {
+    nm_io_req_t *req = arg;
+    int saved_flags = 0;
+    bool restore_flags = false;
+    bool wait_ready = false;
+
+    if (req == NULL || req->addr == NULL) {
+        return NULL;
+    }
+
+    saved_flags = fcntl(req->fd, F_GETFL, 0);
+    if (saved_flags >= 0 && (saved_flags & O_NONBLOCK) == 0) {
+        if (fcntl(req->fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
+            req->result = -1;
+            return req;
+        }
+        restore_flags = true;
+    }
+
+    for (;;) {
+        if (!wait_ready) {
+            if (connect(req->fd, req->addr, req->addr_len) == 0) {
+                req->result = 0;
+                break;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EISCONN) {
+                req->result = 0;
+                break;
+            }
+            if (errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK) {
+                req->result = -1;
+                break;
+            }
+            wait_ready = true;
+        }
+        if (req->task != NULL && req->task->cancel_token != NULL &&
+            nm_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
+            errno = ECANCELED;
+            req->result = -1;
+            break;
+        }
+        {
+            int poll_rc = nm_platform_poll_fd(req->fd, POLLOUT, 10, NULL);
+
+            if (poll_rc < 0 && errno != EINTR) {
+                req->result = -1;
+                break;
+            }
+            if (poll_rc < 0) {
+                continue;
+            }
+            if (poll_rc == 0) {
+                continue;
+            }
+        }
+        if (nm_socket_connect_error(req->fd) == 0) {
+            req->result = 0;
+        } else {
+            req->result = -1;
+        }
+        break;
+    }
+
+    if (restore_flags) {
+        int saved_errno = errno;
+
+        (void)fcntl(req->fd, F_SETFL, saved_flags);
+        errno = saved_errno;
     }
     return req;
 }

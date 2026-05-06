@@ -46,6 +46,47 @@
 extern "C" {
 #endif
 
+/** @brief LLAM source/API version major component. */
+#define LLAM_VERSION_MAJOR 0U
+/** @brief LLAM source/API version minor component. */
+#define LLAM_VERSION_MINOR 1U
+/** @brief LLAM source/API version patch component. */
+#define LLAM_VERSION_PATCH 0U
+
+/** @brief Public ABI major version; incompatible binary changes increment this value. */
+#define LLAM_ABI_VERSION_MAJOR 1U
+/** @brief Public ABI minor version; additive binary-compatible changes increment this value. */
+#define LLAM_ABI_VERSION_MINOR 0U
+/** @brief Packed public ABI version used by dynamic loaders. */
+#define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
+
+/**
+ * @brief Runtime ABI metadata returned by ::llam_abi_get_info.
+ *
+ * @details
+ * Callers must pass the size of the struct they were compiled against. LLAM
+ * copies only the overlapping prefix, so newer libraries can add fields without
+ * breaking older language bindings.
+ */
+typedef struct llam_abi_info {
+    uint32_t abi_major;                /**< Public ABI major version. */
+    uint32_t abi_minor;                /**< Public ABI minor version. */
+    uint32_t version_major;            /**< Source/API version major component. */
+    uint32_t version_minor;            /**< Source/API version minor component. */
+    uint32_t version_patch;            /**< Source/API version patch component. */
+    uint32_t reserved0;                /**< Reserved for future flags; currently 0. */
+    size_t struct_size;                /**< Size of this struct in the loaded library. */
+    size_t runtime_opts_size;          /**< Size of ::llam_runtime_opts_t in the loaded library. */
+    size_t spawn_opts_size;            /**< Size of ::llam_spawn_opts_t in the loaded library. */
+    size_t runtime_stats_size;         /**< Size of ::llam_runtime_stats_t in the loaded library. */
+    const char *runtime_name;          /**< Stable runtime name string, currently "LLAM". */
+    const char *version_string;        /**< Static version string owned by the library. */
+    const char *platform_name;         /**< Static platform name string owned by the library. */
+} llam_abi_info_t;
+
+/** @brief Current size to pass to ::llam_abi_get_info. */
+#define LLAM_ABI_INFO_CURRENT_SIZE ((size_t)sizeof(llam_abi_info_t))
+
 /** @brief Opaque handle for a stackful LLAM task. */
 typedef struct llam_task llam_task_t;
 
@@ -76,6 +117,36 @@ typedef void (*llam_task_fn)(void *arg);
  * @return User-defined result pointer returned to the waiting task.
  */
 typedef void *(*llam_blocking_fn)(void *arg);
+
+/* ============================================================================
+ * ABI and dynamic loading
+ * ============================================================================
+ */
+
+/**
+ * @brief Return the packed public ABI version implemented by this library.
+ *
+ * Language runtimes that load LLAM dynamically should resolve this symbol first
+ * and require a matching ::LLAM_ABI_VERSION_MAJOR before calling other symbols.
+ *
+ * @return Packed version `(major << 16) | minor`.
+ */
+uint32_t llam_abi_version(void);
+
+/**
+ * @brief Return the static LLAM source/API version string.
+ * @return String owned by the library and valid until process exit.
+ */
+const char *llam_version_string(void);
+
+/**
+ * @brief Fill ABI metadata for dynamic loaders and FFI bindings.
+ *
+ * @param info      Destination metadata struct.
+ * @param info_size Size of the caller's ::llam_abi_info_t definition.
+ * @return 0 on success, -1 with @c errno set on invalid arguments.
+ */
+int llam_abi_get_info(llam_abi_info_t *info, size_t info_size);
 
 /** @brief Scheduler priority class used as a policy hint. */
 typedef enum llam_task_class {
@@ -400,6 +471,20 @@ size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer);
 
 /** @brief Accept a connection from a listener fd using the runtime I/O backend where possible. */
 llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen);
+
+/**
+ * @brief Connect a socket without blocking the scheduler worker.
+ *
+ * Managed tasks submit the connection attempt to the runtime backend where
+ * possible and otherwise use the blocking-worker fallback. Calls outside a
+ * managed task delegate to @c connect directly.
+ *
+ * @param fd      Socket descriptor.
+ * @param addr    Peer socket address. Must not be NULL.
+ * @param addrlen Size of @p addr in bytes.
+ * @return 0 on connection, -1 with @c errno set on failure.
+ */
+int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 
 /** @brief Wait for fd readiness. */
 int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);

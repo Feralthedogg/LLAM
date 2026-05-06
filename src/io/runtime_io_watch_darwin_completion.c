@@ -264,6 +264,9 @@ int nm_darwin_try_req_syscall(nm_io_req_t *req, int *result_out) {
         case NM_IO_KIND_ACCEPT:
             rc = accept(req->fd, req->addr, req->addrlen);
             break;
+        case NM_IO_KIND_CONNECT:
+            rc = connect(req->fd, req->addr, req->addr_len);
+            break;
         default:
             nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
             errno = EOPNOTSUPP;
@@ -284,6 +287,15 @@ int nm_darwin_try_req_syscall(nm_io_req_t *req, int *result_out) {
             // still block; re-register and wait for the next event.
             nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
             return 0;
+        }
+        if (req->kind == NM_IO_KIND_CONNECT && (errno == EINPROGRESS || errno == EALREADY)) {
+            nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+            return 0;
+        }
+        if (req->kind == NM_IO_KIND_CONNECT && errno == EISCONN) {
+            nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+            *result_out = 0;
+            return 1;
         }
         nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
         *result_out = -errno;

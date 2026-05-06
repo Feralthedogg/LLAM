@@ -10,7 +10,7 @@
 ![Build](https://img.shields.io/badge/build-Make%20%2F%20CMake-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
+LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, `connect`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
 
 LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/Darwin backend uses kqueue-based watch and completion paths.
 
@@ -25,6 +25,8 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/
 - Blocking integration through `llam_call_blocking`, `llam_enter_blocking`, and `llam_leave_blocking`.
 - Runtime tuning through profiles, dynamic workers, worker rings, SQPOLL, and idle-spin controls.
 - Observability through runtime stats and debug dumps.
+- Stable ABI metadata for dynamic language-runtime loaders.
+- Static and shared library build targets.
 - Built-in demo, stress, benchmark, Docker verification, and Go/Tokio comparison scripts.
 
 ## Platform Support
@@ -80,11 +82,20 @@ Run the included programs:
 ./bench
 ```
 
+Run focused API/ABI tests:
+
+```bash
+make test
+```
+
 Build outputs:
 
 - `demo`: runnable examples of the public runtime API.
 - `stress`: regression coverage for scheduling, sync, timeouts, I/O, and dynamic workers.
 - `bench`: microbenchmarks for spawn/join, channels, I/O, poll, sleep fanout, and opaque blocking.
+- `test_abi_contract`: ABI metadata, size handshakes, and legacy compatibility checks.
+- `test_connect_io`: direct and runtime-managed `llam_connect()` success and invalid-input checks.
+- `test_shared_load`: `dlopen()` coverage for the shared library ABI surface.
 
 ## Using LLAM In An Application
 
@@ -97,6 +108,14 @@ add_executable(my_app main.c)
 target_link_libraries(my_app PRIVATE llam_runtime)
 ```
 
+Use `llam_runtime_shared` when a language runtime needs to load LLAM dynamically.
+The Makefile equivalent is `make shared`.
+
+Release archives include the public headers, docs, `demo`, `stress`, `bench`,
+`libllam_runtime.a`, and the platform shared library. Tag pushes such as
+`v0.1.0` build and publish archives for Linux x86_64, Linux aarch64, macOS
+x86_64, and macOS arm64 through `.github/workflows/release.yml`.
+
 Include the canonical public API:
 
 ```c
@@ -104,6 +123,8 @@ Include the canonical public API:
 ```
 
 `include/llam/nm_runtime.h` and `include/nm_runtime.h` provide compatibility for the older `nm_*` API names. New code should prefer the `llam_*` API.
+
+Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. The ABI and semantic contract is documented in `docs/abi.md`.
 
 ## Execution Model
 
@@ -240,7 +261,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, and macOS uses kqueue.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, and macOS uses kqueue. The I/O primitive set covers `read`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads.
 
 ```c
 #include "llam/runtime.h"
@@ -444,6 +465,7 @@ I/O:
 | `llam_io_buffer_size` | Return the number of bytes read. |
 | `llam_io_buffer_capacity` | Return owned buffer capacity. |
 | `llam_accept` | Accept a connection from a listener fd. |
+| `llam_connect` | Connect a socket without blocking the scheduler worker. |
 | `llam_poll_fd` | Wait for fd readiness. |
 
 Time, debug, and platform:
@@ -560,6 +582,19 @@ make bench-matrix
 ```
 
 ## Verification And Cleanup
+
+Run focused tests:
+
+```bash
+make test
+```
+
+Build a local release archive:
+
+```bash
+make clean all test
+./scripts/package_release.sh
+```
 
 Verify Linux:
 

@@ -371,6 +371,10 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
     return (llam_fd_t)nm_accept((nm_fd_t)fd, addr, addrlen);
 }
 
+int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen) {
+    return nm_connect((nm_fd_t)fd, addr, addrlen);
+}
+
 int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
     return nm_poll_fd((nm_fd_t)fd, events, timeout_ms, revents);
 }

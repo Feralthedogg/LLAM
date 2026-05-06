@@ -168,6 +168,8 @@ bool nm_node_supports_kind(const nm_node_t *node, nm_io_kind_t kind) {
         return node->supports_write;
     case NM_IO_KIND_ACCEPT:
         return node->supports_accept;
+    case NM_IO_KIND_CONNECT:
+        return node->supports_connect;
     case NM_IO_KIND_POLL:
         return node->supports_poll;
     default:
@@ -308,6 +310,7 @@ void nm_probe_ring_support(nm_node_t *node) {
         node->supports_recv = true;
         node->supports_write = true;
         node->supports_accept = true;
+        node->supports_connect = true;
         node->supports_poll = true;
         node->supports_multishot_recv = true;
         node->supports_multishot_accept = true;
@@ -319,6 +322,7 @@ void nm_probe_ring_support(nm_node_t *node) {
     node->supports_recv = io_uring_opcode_supported(probe, IORING_OP_RECV) != 0;
     node->supports_write = io_uring_opcode_supported(probe, IORING_OP_WRITE) != 0;
     node->supports_accept = io_uring_opcode_supported(probe, IORING_OP_ACCEPT) != 0;
+    node->supports_connect = io_uring_opcode_supported(probe, IORING_OP_CONNECT) != 0;
     node->supports_poll = io_uring_opcode_supported(probe, IORING_OP_POLL_ADD) != 0;
     node->supports_multishot_recv = node->supports_recv;
     node->supports_multishot_accept = node->supports_accept;
@@ -431,6 +435,7 @@ int nm_node_init_ring(nm_runtime_t *rt, nm_node_t *node) {
     node->supports_recv = true;
     node->supports_write = true;
     node->supports_accept = true;
+    node->supports_connect = true;
     node->supports_poll = true;
     node->supports_multishot_recv = true;
     node->supports_multishot_accept = true;
@@ -463,6 +468,8 @@ bool nm_node_supports_kind(const nm_node_t *node, nm_io_kind_t kind) {
         return node->supports_write;
     case NM_IO_KIND_ACCEPT:
         return node->supports_accept;
+    case NM_IO_KIND_CONNECT:
+        return node->supports_connect;
     case NM_IO_KIND_POLL:
         return node->supports_poll;
     default:
@@ -551,6 +558,7 @@ void nm_probe_ring_support(nm_node_t *node) {
     node->supports_recv = true;
     node->supports_write = true;
     node->supports_accept = true;
+    node->supports_connect = true;
     node->supports_poll = true;
     node->supports_multishot_recv = true;
     node->supports_multishot_accept = true;

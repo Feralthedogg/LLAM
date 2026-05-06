@@ -306,7 +306,7 @@ void io_cancel_trigger_task(void *arg);
 void owned_read_writer_task(void *arg);
 void dynamic_sleep_child_task(void *arg);
 void *stress_blocking_pause(void *arg);
-void *stress_blocking_connect_loopback(void *arg);
+int stress_connect_loopback(dynamic_accept_connector_state_t *state);
 void block_cancel_waiter_task(void *arg);
 void block_cancel_trigger_task(void *arg);
 void stress_sleep_task(void *arg);

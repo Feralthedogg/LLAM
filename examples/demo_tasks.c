@@ -495,25 +495,27 @@ void block_cancel_trigger_task(void *arg) {
     printf("[block-cancel-trigger] requested cancellation\n");
 }
 
-static void *connect_loopback(void *arg) {
-    struct connect_job *job = arg;
+static int connect_loopback(struct connect_job *job) {
     struct sockaddr_in addr;
     int fd;
+    int rc;
 
+    if (job == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        return job;
+        return -1;
     }
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(job->port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-        printf("[accept-connect:%s] connected\n", job->label);
-    }
+    rc = llam_connect(fd, (struct sockaddr *)&addr, sizeof(addr));
     close(fd);
-    return job;
+    return rc;
 }
 
 void accept_waiter_task(void *arg) {
@@ -530,7 +532,9 @@ void accept_connector_task(void *arg) {
     struct connect_job *job = arg;
 
     llam_sleep_ns(9ULL * 1000ULL * 1000ULL);
-    (void)llam_call_blocking(connect_loopback, job);
+    if (connect_loopback(job) == 0) {
+        printf("[accept-connect:%s] connected\n", job->label);
+    }
 }
 
 void mutex_holder_task(void *arg) {

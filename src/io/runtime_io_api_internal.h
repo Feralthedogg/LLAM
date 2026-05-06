@@ -60,6 +60,7 @@ int nm_try_direct_blocking_rw(int fd,
                               bool socket_recv,
                               int recv_flags,
                               ssize_t *result_out);
+int nm_socket_connect_error(int fd);
 int nm_try_socket_pollin_now(int fd, short events, short *revents);
 int nm_try_direct_blocking_poll(int fd, short events, int timeout_ms, short *revents);
 
@@ -67,6 +68,7 @@ int nm_try_direct_blocking_poll(int fd, short events, int timeout_ms, short *rev
 void *nm_blocking_read_impl(void *arg);
 void *nm_blocking_write_impl(void *arg);
 void *nm_blocking_accept_impl(void *arg);
+void *nm_blocking_connect_impl(void *arg);
 void *nm_blocking_poll_impl(void *arg);
 ssize_t nm_read_owned_impl(int fd,
                            size_t max_count,
