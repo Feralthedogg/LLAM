@@ -10,6 +10,16 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+set(LLAM_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_OSX_ARCHITECTURES)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES LLAM_OSX_ARCH_COUNT)
+    if(LLAM_OSX_ARCH_COUNT EQUAL 1)
+        list(GET CMAKE_OSX_ARCHITECTURES 0 LLAM_TARGET_PROCESSOR)
+    else()
+        message(FATAL_ERROR "LLAM does not support universal macOS CMake builds yet; configure one CMAKE_OSX_ARCHITECTURES value at a time.")
+    endif()
+endif()
+
 set(LLAM_RUNTIME_SOURCES
     src/core/runtime.c
     src/core/runtime_abi.c
@@ -99,21 +109,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND LLAM_TARGET_PROCESSOR MATCHES "arm64|aarch64")
     list(APPEND LLAM_RUNTIME_SOURCES
         src/core/runtime_context_arm64.c
         src/asm/darwin/arm64/context_arm64.S
     )
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND LLAM_RUNTIME_SOURCES
         src/asm/darwin/x86_64/context_x86_64.S
     )
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND LLAM_RUNTIME_SOURCES
         src/asm/linux/x86_64/context_x86_64.S
         src/asm/linux/x86_64/runtime_linux_x86_64.S
     )
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND LLAM_RUNTIME_SOURCES
         src/core/runtime_context_arm64.c
         src/asm/linux/arm64/context_arm64.S
