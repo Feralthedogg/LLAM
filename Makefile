@@ -187,6 +187,8 @@ RUNTIME_OBJS += \
 ifeq ($(UNAME_M),arm64)
 RUNTIME_OBJS += $(OBJDIR)/src/core/runtime_context_arm64.o
 RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/arm64/context_arm64.o
+else ifeq ($(UNAME_M),x86_64)
+RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/context_x86_64.o
 endif
 else ifeq ($(HOST_PLATFORM),windows)
 RUNTIME_OBJS =
@@ -346,6 +348,14 @@ $(OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/nm_int
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/nm_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+
+$(OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/nm_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(SHARED_OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/nm_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 

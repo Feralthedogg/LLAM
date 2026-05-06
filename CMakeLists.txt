@@ -104,6 +104,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64
         src/core/runtime_context_arm64.c
         src/asm/darwin/arm64/context_arm64.S
     )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    list(APPEND LLAM_RUNTIME_SOURCES
+        src/asm/darwin/x86_64/context_x86_64.S
+    )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND LLAM_RUNTIME_SOURCES
         src/asm/linux/x86_64/context_x86_64.S

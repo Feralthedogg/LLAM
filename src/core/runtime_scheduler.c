@@ -119,7 +119,7 @@ static void nm_clear_current_task(nm_shard_t *shard, uint64_t run_ns) {
 
             task->last_run_ns = run_ns;
             task->total_run_ns += run_ns;
-#if defined(__linux__) && defined(__x86_64__)
+#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
             nm_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
 #elif defined(__aarch64__)
             nm_task_sample_stack_rsp(task, (uintptr_t)task->ctx.sp);

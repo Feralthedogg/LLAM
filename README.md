@@ -36,7 +36,7 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/
 | Linux x86_64 | Primary Linux path | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | Linux aarch64 | Supported | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
-| macOS x86_64 | Portable context fallback path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
+| macOS x86_64 | Supported | kqueue + x86_64 asm context switch | Apple Clang | `CC=clang make verify-darwin` |
 | Windows | API/build boundary scaffold only | Not complete | MSVC/MinGW planned | `scripts/verify_windows.ps1` |
 
 Native Windows runtime support is not complete. Use WSL/Linux if you need a working Windows-hosted path today.

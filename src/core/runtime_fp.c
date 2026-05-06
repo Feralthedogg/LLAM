@@ -34,7 +34,7 @@ void nm_clear_xsave_globals(void) {
     g_nm_fp_control_context = 0U;
 }
 
-#if defined(__linux__) && defined(__x86_64__)
+#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
 /** @brief Read the current SSE MXCSR control/status register. */
 static uint32_t nm_current_mxcsr(void) {
     uint32_t value;
@@ -51,6 +51,7 @@ static uint16_t nm_current_x87_cw(void) {
     return value;
 }
 
+#if defined(__linux__)
 /** @brief Execute xgetbv for the given extended-control register index. */
 static uint64_t nm_xgetbv(uint32_t index) {
     uint32_t eax;
@@ -59,6 +60,8 @@ static uint64_t nm_xgetbv(uint32_t index) {
     __asm__ volatile("xgetbv" : "=a"(eax), "=d"(edx) : "c"(index));
     return ((uint64_t)edx << 32U) | (uint64_t)eax;
 }
+
+#endif
 
 /** @brief Save extended CPU state into an aligned XSAVE area. */
 static void nm_save_xsave_area(void *area, uint64_t mask) {
@@ -76,8 +79,9 @@ static void nm_save_xsave_area(void *area, uint64_t mask) {
  * @return Always 0; unsupported features simply leave XSAVE disabled.
  */
 int nm_detect_xsave_support(nm_runtime_t *rt) {
-    const char *xsave_env;
     const char *fp_env;
+#if defined(__linux__)
+    const char *xsave_env;
     unsigned max_leaf;
     unsigned eax;
     unsigned ebx;
@@ -85,6 +89,7 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
     unsigned edx;
     uint64_t supported_mask;
     uint64_t xcr0;
+#endif
 
     nm_clear_xsave_globals();
     if (rt == NULL) {
@@ -95,6 +100,18 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
     g_nm_fp_control_context =
         (fp_env == NULL || fp_env[0] == '\0' || strcmp(fp_env, "0") != 0) ? 1U : 0U;
 
+#if !defined(__linux__)
+    /*
+     * Darwin x86-64 uses the same fast register switch but currently preserves
+     * only FP control state. Keep XSAVE disabled until the Darwin capability
+     * probe and signal/ABI interactions are explicitly validated.
+     */
+    rt->xsave_enabled = false;
+    rt->xsave_mask = 0U;
+    rt->xsave_area_size = 0U;
+    rt->xsave_area_alloc_size = 0U;
+    return 0;
+#else
     xsave_env = nm_env_get("LLAM_XSAVE_CONTEXT");
     // XSAVE is opt-in because it increases per-context allocation and switch cost.
     if (xsave_env == NULL || xsave_env[0] == '\0' || strcmp(xsave_env, "0") == 0) {
@@ -138,6 +155,7 @@ int nm_detect_xsave_support(nm_runtime_t *rt) {
     g_nm_xsave_mask_lo = (uint32_t)rt->xsave_mask;
     g_nm_xsave_mask_hi = (uint32_t)(rt->xsave_mask >> 32U);
     return 0;
+#endif
 }
 
 /**

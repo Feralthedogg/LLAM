@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(__linux__) && defined(__x86_64__)
+#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
 /** @brief Internal task states used by tracing, diagnostics, and assembly-visible code. */
 typedef enum nm_task_state_id {
     NM_TASK_STATE_NEW = 0,
@@ -73,10 +73,11 @@ typedef enum nm_trace_kind {
 } nm_trace_kind_t;
 
 /**
- * @brief Linux x86-64 callee-saved context layout.
+ * @brief x86-64 callee-saved context layout.
  *
  * The offsets below are consumed directly by
- * @c asm/linux/x86_64/context_x86_64.S.
+ * @c asm/linux/x86_64/context_x86_64.S and
+ * @c asm/darwin/x86_64/context_x86_64.S.
  */
 typedef struct nm_ctx {
     uint64_t rsp;
@@ -92,17 +93,17 @@ typedef struct nm_ctx {
     void *xsave_area;
 } nm_ctx_t;
 
-_Static_assert(offsetof(nm_ctx_t, rsp) == 0, "nm_ctx_t.rsp offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, rbx) == 8, "nm_ctx_t.rbx offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, rbp) == 16, "nm_ctx_t.rbp offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, r12) == 24, "nm_ctx_t.r12 offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, r13) == 32, "nm_ctx_t.r13 offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, r14) == 40, "nm_ctx_t.r14 offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, r15) == 48, "nm_ctx_t.r15 offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, mxcsr) == 56, "nm_ctx_t.mxcsr offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, x87_cw) == 60, "nm_ctx_t.x87_cw offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(offsetof(nm_ctx_t, xsave_area) == 64, "nm_ctx_t.xsave_area offset must match asm/linux/x86_64/context_x86_64.S");
-_Static_assert(sizeof(nm_ctx_t) == 72, "nm_ctx_t size must match asm/linux/x86_64/context_x86_64.S");
+_Static_assert(offsetof(nm_ctx_t, rsp) == 0, "nm_ctx_t.rsp offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, rbx) == 8, "nm_ctx_t.rbx offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, rbp) == 16, "nm_ctx_t.rbp offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, r12) == 24, "nm_ctx_t.r12 offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, r13) == 32, "nm_ctx_t.r13 offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, r14) == 40, "nm_ctx_t.r14 offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, r15) == 48, "nm_ctx_t.r15 offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, mxcsr) == 56, "nm_ctx_t.mxcsr offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, x87_cw) == 60, "nm_ctx_t.x87_cw offset must match asm/x86_64 context switch");
+_Static_assert(offsetof(nm_ctx_t, xsave_area) == 64, "nm_ctx_t.xsave_area offset must match asm/x86_64 context switch");
+_Static_assert(sizeof(nm_ctx_t) == 72, "nm_ctx_t size must match asm/x86_64 context switch");
 #elif defined(__aarch64__)
 /** @brief Internal task states used by tracing and diagnostics on AArch64. */
 typedef enum nm_task_state_id {

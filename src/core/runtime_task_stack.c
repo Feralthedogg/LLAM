@@ -744,7 +744,7 @@ int nm_alloc_task_stack(nm_task_t *task, nm_stack_class_t stack_class) {
         errno = saved_errno;
         return -1;
     }
-#if defined(__linux__) && defined(__x86_64__)
+#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
     {
         uintptr_t stack_top = (uintptr_t)task->stack_base + task->stack_size;
         uint64_t *sp;

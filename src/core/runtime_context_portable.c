@@ -3,7 +3,7 @@
  * @brief Portable ucontext-based fiber context fallback for unsupported assembly targets.
  *
  * @details
- * Linux x86-64 and AArch64 builds use assembly context switching. Other
+ * Linux/Darwin x86-64 and AArch64 builds use assembly context switching. Other
  * supported targets fall back to @c ucontext so the runtime remains buildable
  * and testable without architecture-specific assembly.
  *
@@ -25,7 +25,7 @@
 
 #include "runtime_internal.h"
 
-#if !(defined(__linux__) && defined(__x86_64__)) && !defined(__aarch64__)
+#if !((defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)) && !defined(__aarch64__)
 
 #if defined(__clang__)
 #pragma clang diagnostic push
