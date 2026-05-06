@@ -114,6 +114,12 @@ jobs:
             echo
             echo "LLAM ${version} publishes native runtime builds for Linux and macOS."
             echo
+            echo "## Highlights"
+            echo
+            echo "- Native Darwin x86_64 assembly context switching for Intel Mac builds."
+            echo "- kqueue-based macOS I/O backend for both Apple Silicon and Intel Mac."
+            echo "- io_uring/liburing Linux I/O backend for x86_64 and aarch64."
+            echo
             echo "## Downloads"
             echo
             echo "| File | Platform | Checksum |"
