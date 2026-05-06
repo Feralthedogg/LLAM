@@ -504,7 +504,9 @@ void *llam_channel_recv(llam_channel_t *channel) {
     if (llam_channel_recv_result(channel, &value) != 0) {
         return NULL;
     }
-    errno = 0;
+    if (value == NULL) {
+        errno = 0;
+    }
     return value;
 }
 
@@ -522,7 +524,9 @@ void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns) {
     if (llam_channel_recv_until_result(channel, deadline_ns, &value) != 0) {
         return NULL;
     }
-    errno = 0;
+    if (value == NULL) {
+        errno = 0;
+    }
     return value;
 }
 

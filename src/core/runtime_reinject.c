@@ -172,6 +172,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
                                                  llam_wait_reason_t reason) {
     llam_shard_t *target;
     llam_task_t *current = g_llam_tls_task;
+    llam_task_state_id_t task_from;
     bool effective_hot;
 
     if (rt == NULL || task == NULL || current == NULL || rt->active_shards == 0U ||
@@ -184,29 +185,49 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         return false;
     }
 
+    if (rt->run_timing_enabled != 0U || rt->wake_latency_metrics_enabled != 0U ||
+        task->active_timer != NULL) {
+        return false;
+    }
+
     effective_hot = hot || task->task_class == LLAM_TASK_CLASS_LATENCY;
 
-    if (task->active_timer != NULL) {
-        llam_disarm_task_wait_deadline(task);
-    }
     llam_task_clear_wait_tracking(task);
+
+    pthread_mutex_lock(&target->lock);
+    if (target->opaque_redirect_active || target->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+        pthread_mutex_unlock(&target->lock);
+        return false;
+    }
 
     current->forced_yield_budget = rt->forced_yield_every;
     current->state = LLAM_TASK_STATE_RUNNABLE;
     current->wait_reason = LLAM_WAIT_NONE;
     current->last_yield_ns = 0U;
 
-    pthread_mutex_lock(&target->lock);
     effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, false);
-    llam_mark_runnable_locked(target, task, effective_hot, kind, reason, true);
     // Put the yielding task on the normal FIFO side so the just-woken peer can
     // run promptly without starving older normal work.
     (void)llam_norm_queue_push_yield_locked(target, current);
+    task_from = task->state;
+    task->state = LLAM_TASK_STATE_RUNNING;
+    task->wait_reason = LLAM_WAIT_NONE;
+    task->enqueue_hot = effective_hot ? 1U : 0U;
+    task->last_shard = target->id;
+    task->last_started_ns = 0U;
+    atomic_store_explicit(&target->current, task, memory_order_release);
+    g_llam_tls_task = task;
+    target->metrics.wakes += 1U;
+    if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
+        target->metrics.wake_reason_hist[reason] += 1U;
+    }
     target->metrics.yields += 1U;
+    target->metrics.ctx_switches += 1U;
+    llam_trace_shard(target, task, kind, task_from, LLAM_TASK_STATE_RUNNING, reason);
     llam_trace_shard(target, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&target->lock);
 
     llam_task_sample_live_stack(current);
-    llam_switch_task_to_scheduler(current, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &target->scheduler_ctx);
+    llam_switch_task_to_task(current, task);
     return true;
 }

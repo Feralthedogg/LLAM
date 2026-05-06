@@ -59,6 +59,7 @@ void llam_task_save_errno(llam_task_t *task);
 void llam_task_restore_errno(const llam_task_t *task);
 void llam_switch_task_to_scheduler(llam_task_t *task, llam_ctx_t *scheduler_ctx);
 void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task);
+void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
 
 /*
  * Slab allocators and per-shard cache quiescence.

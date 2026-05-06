@@ -39,6 +39,8 @@ typedef struct sync_state {
     llam_channel_t *full_channel;
     llam_channel_t *null_channel;
     llam_channel_t *busy_channel;
+    llam_channel_t *errno_request_channel;
+    llam_channel_t *errno_response_channel;
     atomic_uint failures;
     atomic_uint counter;
     atomic_uint cond_waiting;
@@ -47,9 +49,11 @@ typedef struct sync_state {
     atomic_uint busy_cond_waiting;
     atomic_uint busy_cond_release;
     atomic_uint busy_cond_destroy_checked;
+    atomic_uint errno_peer_waiting;
     atomic_uint channel_sum;
     atomic_uint timeout_checks;
     atomic_uint null_checks;
+    atomic_uint errno_checks;
     atomic_uint destroy_checks;
     int first_errno;
     char first_case[128];
@@ -232,6 +236,48 @@ static void null_channel_task(void *arg) {
     atomic_fetch_add_explicit(&state->null_checks, 1U, memory_order_relaxed);
 }
 
+static void channel_errno_peer_task(void *arg) {
+    sync_state_t *state = arg;
+    void *value;
+
+    atomic_store_explicit(&state->errno_peer_waiting, 1U, memory_order_release);
+    errno = EAGAIN;
+    value = llam_channel_recv(state->errno_request_channel);
+    if (value != (void *)(uintptr_t)17U || errno != EAGAIN) {
+        task_fail(state, "direct handoff receiver errno", errno);
+        return;
+    }
+
+    errno = EADDRINUSE;
+    if (llam_channel_send(state->errno_response_channel, value) != 0 || errno != EADDRINUSE) {
+        task_fail(state, "direct handoff response errno", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->errno_checks, 1U, memory_order_relaxed);
+}
+
+static void channel_errno_sender_task(void *arg) {
+    sync_state_t *state = arg;
+    void *value;
+
+    while (atomic_load_explicit(&state->errno_peer_waiting, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    errno = ECHILD;
+    if (llam_channel_send(state->errno_request_channel, (void *)(uintptr_t)17U) != 0 || errno != ECHILD) {
+        task_fail(state, "direct handoff sender errno", errno);
+        return;
+    }
+
+    errno = ENAMETOOLONG;
+    value = llam_channel_recv(state->errno_response_channel);
+    if (value != (void *)(uintptr_t)17U || errno != ENAMETOOLONG) {
+        task_fail(state, "direct handoff sender recv errno", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->errno_checks, 1U, memory_order_relaxed);
+}
+
 static void destroy_contract_task(void *arg) {
     sync_state_t *state = arg;
     void *value = NULL;
@@ -357,6 +403,12 @@ static void destroy_sync_state(sync_state_t *state) {
     if (state->busy_channel != NULL) {
         (void)llam_channel_destroy(state->busy_channel);
     }
+    if (state->errno_response_channel != NULL) {
+        (void)llam_channel_destroy(state->errno_response_channel);
+    }
+    if (state->errno_request_channel != NULL) {
+        (void)llam_channel_destroy(state->errno_request_channel);
+    }
     if (state->null_channel != NULL) {
         (void)llam_channel_destroy(state->null_channel);
     }
@@ -402,9 +454,11 @@ static int init_sync_state(sync_state_t *state) {
     atomic_init(&state->busy_cond_waiting, 0U);
     atomic_init(&state->busy_cond_release, 0U);
     atomic_init(&state->busy_cond_destroy_checked, 0U);
+    atomic_init(&state->errno_peer_waiting, 0U);
     atomic_init(&state->channel_sum, 0U);
     atomic_init(&state->timeout_checks, 0U);
     atomic_init(&state->null_checks, 0U);
+    atomic_init(&state->errno_checks, 0U);
     atomic_init(&state->destroy_checks, 0U);
 
     state->counter_mutex = llam_mutex_create();
@@ -419,6 +473,8 @@ static int init_sync_state(sync_state_t *state) {
     state->full_channel = llam_channel_create(1U);
     state->null_channel = llam_channel_create(1U);
     state->busy_channel = llam_channel_create(1U);
+    state->errno_request_channel = llam_channel_create(1U);
+    state->errno_response_channel = llam_channel_create(1U);
     if (state->counter_mutex == NULL ||
         state->cond_mutex == NULL ||
         state->destroy_mutex == NULL ||
@@ -430,7 +486,9 @@ static int init_sync_state(sync_state_t *state) {
         state->empty_channel == NULL ||
         state->full_channel == NULL ||
         state->null_channel == NULL ||
-        state->busy_channel == NULL) {
+        state->busy_channel == NULL ||
+        state->errno_request_channel == NULL ||
+        state->errno_response_channel == NULL) {
         destroy_sync_state(state);
         return -1;
     }
@@ -495,6 +553,8 @@ int main(void) {
         llam_spawn(channel_receiver_task, &state, NULL) == NULL ||
         llam_spawn(timeout_and_close_task, &state, NULL) == NULL ||
         llam_spawn(null_channel_task, &state, NULL) == NULL ||
+        llam_spawn(channel_errno_peer_task, &state, NULL) == NULL ||
+        llam_spawn(channel_errno_sender_task, &state, NULL) == NULL ||
         llam_spawn(destroy_contract_task, &state, NULL) == NULL ||
         llam_spawn(busy_cond_waiter_task, &state, NULL) == NULL ||
         llam_spawn(busy_cond_destroyer_task, &state, NULL) == NULL) {
@@ -524,6 +584,7 @@ int main(void) {
         atomic_load_explicit(&state.channel_sum, memory_order_relaxed) != 15U ||
         atomic_load_explicit(&state.timeout_checks, memory_order_relaxed) != 3U ||
         atomic_load_explicit(&state.null_checks, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.errno_checks, memory_order_relaxed) != 2U ||
         atomic_load_explicit(&state.destroy_checks, memory_order_relaxed) != 1U) {
         destroy_sync_state(&state);
         llam_runtime_shutdown();

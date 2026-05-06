@@ -81,3 +81,20 @@ void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task)
     llam_ctx_switch(scheduler_ctx, &task->ctx);
     errno = scheduler_errno;
 }
+
+/**
+ * @brief Switch directly from one running task fiber to another task fiber.
+ *
+ * @param from Currently running task whose context is saved.
+ * @param to   Runnable task whose context is restored.
+ */
+void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to) {
+    if (from == NULL || to == NULL) {
+        abort();
+    }
+
+    llam_task_save_errno(from);
+    llam_task_restore_errno(to);
+    llam_ctx_switch(&from->ctx, &to->ctx);
+    llam_task_restore_errno(from);
+}

@@ -298,6 +298,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         started_ns = llam_set_task_running(shard, task);
         shard->metrics.ctx_switches += 1U;
         llam_switch_scheduler_to_task(g_llam_tls_scheduler_ctx, task);
+        task = g_llam_tls_task != NULL ? g_llam_tls_task : task;
         llam_clear_current_task(shard, started_ns != 0U ? llam_now_ns() - started_ns : 0U);
         if (task->state == LLAM_TASK_STATE_DEAD) {
             llam_task_release_stack(task);
@@ -437,6 +438,7 @@ void *llam_opaque_helper_main(void *arg) {
             started_ns = llam_set_task_running(shard, task);
             shard->metrics.ctx_switches += 1U;
             llam_switch_scheduler_to_task(g_llam_tls_scheduler_ctx, task);
+            task = g_llam_tls_task != NULL ? g_llam_tls_task : task;
             llam_clear_current_task(shard, started_ns != 0U ? llam_now_ns() - started_ns : 0U);
             if (task->state == LLAM_TASK_STATE_DEAD) {
                 llam_task_release_stack(task);
