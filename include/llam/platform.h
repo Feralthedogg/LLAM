@@ -6,7 +6,13 @@
  * This header contains only public platform facts required by the LLAM API. It
  * intentionally avoids private runtime configuration so applications can include
  * it directly and write portable code around @c llam_fd_t and the
- * @c LLAM_PLATFORM_* feature macros.
+ * @c LLAM_PLATFORM_* feature macros. It also guarantees the public socket and
+ * ssize contracts used by @c llam/runtime.h: @c struct sockaddr, @c socklen_t,
+ * and @c ssize_t are declared or typedef'd after including this header.
+ *
+ * On Windows, include this header before @c windows.h when possible so the
+ * public contract can select @c winsock2.h without conflicting with the older
+ * @c winsock.h declarations that @c windows.h may pull in.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -63,6 +69,9 @@
  * Windows.
  */
 #if LLAM_PLATFORM_WINDOWS
+#if defined(_WINSOCKAPI_) && !defined(_WINSOCK2API_)
+#error "Include llam/platform.h before windows.h, or define WIN32_LEAN_AND_MEAN before including windows.h."
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -87,11 +96,21 @@ typedef int socklen_t;
 #endif
 typedef SOCKET llam_fd_t;
 #else
-#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 /** @brief Public file/socket descriptor type on POSIX platforms. */
 typedef int llam_fd_t;
 #endif
+
+/** @brief Invalid descriptor/socket sentinel for ::llam_fd_t. */
+#if LLAM_PLATFORM_WINDOWS
+#define LLAM_INVALID_FD ((llam_fd_t)INVALID_SOCKET)
+#else
+#define LLAM_INVALID_FD ((llam_fd_t)-1)
+#endif
+
+/** @brief Non-zero when @p fd is the platform invalid descriptor/socket value. */
+#define LLAM_FD_IS_INVALID(fd) ((fd) == LLAM_INVALID_FD)
 
 /** @brief Human-readable platform name used by diagnostics and simple feature checks. */
 #if LLAM_PLATFORM_WINDOWS

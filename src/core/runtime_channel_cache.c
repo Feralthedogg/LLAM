@@ -27,36 +27,36 @@
 #include "runtime_internal.h"
 
 /** Default process-wide cache size for reusable capacity-one channels. */
-#define NM_CHANNEL_CACHE_CAP_DEFAULT 64U
+#define LLAM_CHANNEL_CACHE_CAP_DEFAULT 64U
 /** Default per-thread cache size for reusable capacity-one channels. */
-#define NM_CHANNEL_TLS_CACHE_CAP_DEFAULT 16U
+#define LLAM_CHANNEL_TLS_CACHE_CAP_DEFAULT 16U
 
 /** Global fallback channel cache lock. */
-static pthread_mutex_t g_nm_channel_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_llam_channel_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 /** Head of the process-wide channel cache. */
-static nm_channel_t *g_nm_channel_cache_head;
+static llam_channel_t *g_llam_channel_cache_head;
 /** Number of entries in the process-wide channel cache. */
-static unsigned g_nm_channel_cache_count;
+static unsigned g_llam_channel_cache_count;
 /** Thread-local channel cache head. */
-static _Thread_local nm_channel_t *g_nm_tls_channel_cache_head;
+static _Thread_local llam_channel_t *g_llam_tls_channel_cache_head;
 /** Thread-local channel cache entry count. */
-static _Thread_local unsigned g_nm_tls_channel_cache_count;
+static _Thread_local unsigned g_llam_tls_channel_cache_count;
 
 /**
  * @brief Return the configured per-thread channel cache capacity.
  *
  * @return Capacity parsed from @c LLAM_CHANNEL_TLS_CACHE_CAP, capped to 1024.
  */
-static unsigned nm_channel_tls_cache_cap(void) {
+static unsigned llam_channel_tls_cache_cap(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_CHANNEL_TLS_CACHE_CAP");
+        const char *env = llam_env_get("LLAM_CHANNEL_TLS_CACHE_CAP");
 
         // Cache the parsed environment value so channel create/destroy stays
         // cheap after the first use on any thread.
-        value = (int)NM_CHANNEL_TLS_CACHE_CAP_DEFAULT;
+        value = (int)LLAM_CHANNEL_TLS_CACHE_CAP_DEFAULT;
         if (env != NULL && env[0] != '\0') {
             char *end = NULL;
             unsigned long parsed = strtoul(env, &end, 10);
@@ -78,14 +78,14 @@ static unsigned nm_channel_tls_cache_cap(void) {
  *
  * @return Capacity parsed from @c LLAM_CHANNEL_CACHE_CAP, capped to 4096.
  */
-static unsigned nm_channel_cache_cap(void) {
+static unsigned llam_channel_cache_cap(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_CHANNEL_CACHE_CAP");
+        const char *env = llam_env_get("LLAM_CHANNEL_CACHE_CAP");
 
-        value = (int)NM_CHANNEL_CACHE_CAP_DEFAULT;
+        value = (int)LLAM_CHANNEL_CACHE_CAP_DEFAULT;
         if (env != NULL && env[0] != '\0') {
             char *end = NULL;
             unsigned long parsed = strtoul(env, &end, 10);
@@ -107,7 +107,7 @@ static unsigned nm_channel_cache_cap(void) {
  *
  * @param channel Channel object to clear for reuse.
  */
-static void nm_channel_reset_for_reuse(nm_channel_t *channel) {
+static void llam_channel_reset_for_reuse(llam_channel_t *channel) {
     if (channel == NULL) {
         return;
     }
@@ -120,8 +120,8 @@ static void nm_channel_reset_for_reuse(nm_channel_t *channel) {
     channel->tail = 0U;
     channel->count = 0U;
     channel->closed = false;
-    channel->send_waiters = (nm_wait_queue_t){0};
-    channel->recv_waiters = (nm_wait_queue_t){0};
+    channel->send_waiters = (llam_wait_queue_t){0};
+    channel->recv_waiters = (llam_wait_queue_t){0};
 }
 
 /**
@@ -129,23 +129,23 @@ static void nm_channel_reset_for_reuse(nm_channel_t *channel) {
  *
  * @return Reusable channel or NULL on miss/disabled cache.
  */
-static nm_channel_t *nm_channel_tls_cache_acquire(void) {
-    nm_channel_t *channel;
+static llam_channel_t *llam_channel_tls_cache_acquire(void) {
+    llam_channel_t *channel;
 
-    if (nm_channel_tls_cache_cap() == 0U) {
+    if (llam_channel_tls_cache_cap() == 0U) {
         return NULL;
     }
 
-    channel = g_nm_tls_channel_cache_head;
+    channel = g_llam_tls_channel_cache_head;
     if (channel == NULL) {
         return NULL;
     }
 
-    g_nm_tls_channel_cache_head = channel->cache_next;
-    if (g_nm_tls_channel_cache_count > 0U) {
-        g_nm_tls_channel_cache_count -= 1U;
+    g_llam_tls_channel_cache_head = channel->cache_next;
+    if (g_llam_tls_channel_cache_count > 0U) {
+        g_llam_tls_channel_cache_count -= 1U;
     }
-    nm_channel_reset_for_reuse(channel);
+    llam_channel_reset_for_reuse(channel);
     return channel;
 }
 
@@ -155,22 +155,22 @@ static nm_channel_t *nm_channel_tls_cache_acquire(void) {
  * @param channel Channel to cache.
  * @return true when cached, false when caller should try the global cache.
  */
-static bool nm_channel_tls_cache_release(nm_channel_t *channel) {
+static bool llam_channel_tls_cache_release(llam_channel_t *channel) {
     unsigned cap;
 
     if (channel == NULL) {
         return false;
     }
 
-    cap = nm_channel_tls_cache_cap();
-    if (cap == 0U || g_nm_tls_channel_cache_count >= cap) {
+    cap = llam_channel_tls_cache_cap();
+    if (cap == 0U || g_llam_tls_channel_cache_count >= cap) {
         return false;
     }
 
-    nm_channel_reset_for_reuse(channel);
-    channel->cache_next = g_nm_tls_channel_cache_head;
-    g_nm_tls_channel_cache_head = channel;
-    g_nm_tls_channel_cache_count += 1U;
+    llam_channel_reset_for_reuse(channel);
+    channel->cache_next = g_llam_tls_channel_cache_head;
+    g_llam_tls_channel_cache_head = channel;
+    g_llam_tls_channel_cache_count += 1U;
     return true;
 }
 
@@ -179,30 +179,30 @@ static bool nm_channel_tls_cache_release(nm_channel_t *channel) {
  *
  * @return Reusable channel on cache hit, or NULL on miss.
  */
-nm_channel_t *nm_channel_cache_acquire(void) {
-    nm_channel_t *channel;
+llam_channel_t *llam_channel_cache_acquire(void) {
+    llam_channel_t *channel;
 
-    channel = nm_channel_tls_cache_acquire();
+    channel = llam_channel_tls_cache_acquire();
     if (channel != NULL) {
         return channel;
     }
 
-    if (nm_channel_cache_cap() == 0U) {
+    if (llam_channel_cache_cap() == 0U) {
         return NULL;
     }
 
     // Global fallback allows reuse across threads without making every channel
     // destroy path pay a malloc/free cost.
-    pthread_mutex_lock(&g_nm_channel_cache_lock);
-    channel = g_nm_channel_cache_head;
+    pthread_mutex_lock(&g_llam_channel_cache_lock);
+    channel = g_llam_channel_cache_head;
     if (channel != NULL) {
-        g_nm_channel_cache_head = channel->cache_next;
-        g_nm_channel_cache_count -= 1U;
+        g_llam_channel_cache_head = channel->cache_next;
+        g_llam_channel_cache_count -= 1U;
     }
-    pthread_mutex_unlock(&g_nm_channel_cache_lock);
+    pthread_mutex_unlock(&g_llam_channel_cache_lock);
 
     if (channel != NULL) {
-        nm_channel_reset_for_reuse(channel);
+        llam_channel_reset_for_reuse(channel);
     }
     return channel;
 }
@@ -213,7 +213,7 @@ nm_channel_t *nm_channel_cache_acquire(void) {
  * @param channel Channel being destroyed.
  * @return true if the channel was cached, false if the caller must free it.
  */
-bool nm_channel_cache_release(nm_channel_t *channel) {
+bool llam_channel_cache_release(llam_channel_t *channel) {
     unsigned cap;
 
     if (channel == NULL || channel->capacity != 1U || channel->send_waiters.depth != 0U ||
@@ -222,24 +222,24 @@ bool nm_channel_cache_release(nm_channel_t *channel) {
         return false;
     }
 
-    if (nm_channel_tls_cache_release(channel)) {
+    if (llam_channel_tls_cache_release(channel)) {
         return true;
     }
 
-    cap = nm_channel_cache_cap();
+    cap = llam_channel_cache_cap();
     if (cap == 0U) {
         return false;
     }
 
-    nm_channel_reset_for_reuse(channel);
-    pthread_mutex_lock(&g_nm_channel_cache_lock);
-    if (g_nm_channel_cache_count >= cap) {
-        pthread_mutex_unlock(&g_nm_channel_cache_lock);
+    llam_channel_reset_for_reuse(channel);
+    pthread_mutex_lock(&g_llam_channel_cache_lock);
+    if (g_llam_channel_cache_count >= cap) {
+        pthread_mutex_unlock(&g_llam_channel_cache_lock);
         return false;
     }
-    channel->cache_next = g_nm_channel_cache_head;
-    g_nm_channel_cache_head = channel;
-    g_nm_channel_cache_count += 1U;
-    pthread_mutex_unlock(&g_nm_channel_cache_lock);
+    channel->cache_next = g_llam_channel_cache_head;
+    g_llam_channel_cache_head = channel;
+    g_llam_channel_cache_count += 1U;
+    pthread_mutex_unlock(&g_llam_channel_cache_lock);
     return true;
 }

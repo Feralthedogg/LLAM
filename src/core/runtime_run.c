@@ -3,7 +3,7 @@
  * @brief Top-level scheduler run loop coordination.
  *
  * @details
- * ::nm_run starts secondary shard workers, runs shard 0 on the calling thread,
+ * ::llam_run starts secondary shard workers, runs shard 0 on the calling thread,
  * joins the workers when the scheduler drains, and propagates any fatal runtime
  * error recorded by worker threads.
  *
@@ -29,7 +29,7 @@
  * @brief Run the initialized runtime until all scheduled work completes.
  *
  * The caller owns shard 0's scheduler loop. Additional shards are started as
- * pthread workers before shard 0 enters ::nm_scheduler_loop. After the primary
+ * pthread workers before shard 0 enters ::llam_scheduler_loop. After the primary
  * scheduler exits, all secondary workers are joined and any recorded fatal error
  * is surfaced through @c errno.
  *
@@ -38,11 +38,11 @@
  *         running, a worker cannot be started, or a worker records a fatal
  *         runtime error.
  *
- * @see nm_runtime_init
- * @see nm_scheduler_loop
+ * @see llam_runtime_init
+ * @see llam_scheduler_loop
  */
-int nm_run(void) {
-    nm_runtime_t *rt = &g_nm_runtime;
+int llam_run(void) {
+    llam_runtime_t *rt = &g_llam_runtime;
     unsigned i;
 
     if (!rt->initialized || rt->exec_started) {
@@ -52,15 +52,15 @@ int nm_run(void) {
 
     rt->exec_started = true;
     for (i = 1; i < rt->active_shards; ++i) {
-        if (pthread_create(&rt->shards[i].thread, NULL, nm_shard_worker_main, &rt->shards[i]) != 0) {
-            nm_record_fatal(rt, errno);
+        if (pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]) != 0) {
+            llam_record_fatal(rt, errno);
             rt->exec_started = false;
             return -1;
         }
         rt->shards[i].thread_started = true;
     }
 
-    nm_scheduler_loop(&rt->shards[0]);
+    llam_scheduler_loop(&rt->shards[0]);
 
     for (i = 1; i < rt->active_shards; ++i) {
         if (rt->shards[i].thread_started) {
@@ -75,5 +75,21 @@ int nm_run(void) {
         return -1;
     }
 
+    return 0;
+}
+
+/**
+ * @brief Request cooperative runtime stop from any thread.
+ *
+ * @return 0 on success, or -1 with @c errno set when the runtime is not initialized.
+ */
+int llam_runtime_request_stop(void) {
+    llam_runtime_t *rt = &g_llam_runtime;
+
+    if (!rt->initialized) {
+        errno = EINVAL;
+        return -1;
+    }
+    llam_request_stop(rt);
     return 0;
 }

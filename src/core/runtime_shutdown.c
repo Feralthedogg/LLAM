@@ -32,9 +32,9 @@
  * The function tolerates partial initialization so failed init paths can reuse
  * normal shutdown cleanup.
  */
-void nm_runtime_shutdown(void) {
-    nm_runtime_t *rt = &g_nm_runtime;
-    nm_task_t *task;
+void llam_runtime_shutdown(void) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_task_t *task;
     unsigned i;
 
     if (!rt->initialized && !rt->exec_started && rt->allowed_cpus == NULL && rt->shards == NULL && rt->nodes == NULL) {
@@ -43,17 +43,17 @@ void nm_runtime_shutdown(void) {
 
     // The calling thread is no longer considered a runtime worker while
     // teardown is in progress.
-    g_nm_tls_shard = NULL;
-    g_nm_tls_task = NULL;
-    g_nm_tls_scheduler_ctx = NULL;
-    nm_request_stop(rt);
+    g_llam_tls_shard = NULL;
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = NULL;
+    llam_request_stop(rt);
 
     if (rt->ctrl_thread_started) {
         pthread_join(rt->ctrl_thread, NULL);
         rt->ctrl_thread_started = false;
     }
 
-    // Shard zero is driven by nm_run() on the caller thread, so only auxiliary
+    // Shard zero is driven by llam_run() on the caller thread, so only auxiliary
     // worker threads are joined here.
     if (rt->exec_started) {
         for (i = 1; i < rt->active_shards; ++i) {
@@ -82,23 +82,23 @@ void nm_runtime_shutdown(void) {
         // Control operations are heap-allocated command nodes owned by the I/O
         // node after enqueue.
         while (rt->nodes[i].control_head != NULL) {
-            nm_io_control_op_t *next = rt->nodes[i].control_head->next;
+            llam_io_control_op_t *next = rt->nodes[i].control_head->next;
             free(rt->nodes[i].control_head);
             rt->nodes[i].control_head = next;
         }
         // Watch tables own their watch objects and any buffered readiness data
         // that has not yet been consumed by a task.
         while (rt->nodes[i].poll_watches != NULL) {
-            nm_poll_watch_t *next = rt->nodes[i].poll_watches->next;
+            llam_poll_watch_t *next = rt->nodes[i].poll_watches->next;
 
             free(rt->nodes[i].poll_watches);
             rt->nodes[i].poll_watches = next;
         }
         while (rt->nodes[i].accept_watches != NULL) {
-            nm_accept_watch_t *next = rt->nodes[i].accept_watches->next;
+            llam_accept_watch_t *next = rt->nodes[i].accept_watches->next;
 
             while (rt->nodes[i].accept_watches->ready_head != NULL) {
-                nm_accept_ready_t *ready_next = rt->nodes[i].accept_watches->ready_head->next;
+                llam_accept_ready_t *ready_next = rt->nodes[i].accept_watches->ready_head->next;
 
                 close(rt->nodes[i].accept_watches->ready_head->fd);
                 free(rt->nodes[i].accept_watches->ready_head);
@@ -108,11 +108,11 @@ void nm_runtime_shutdown(void) {
             rt->nodes[i].accept_watches = next;
         }
             while (rt->nodes[i].recv_watches != NULL) {
-                nm_recv_watch_t *next = rt->nodes[i].recv_watches->next;
+                llam_recv_watch_t *next = rt->nodes[i].recv_watches->next;
 
                 while (rt->nodes[i].recv_watches->ready_head != NULL) {
-                    nm_recv_ready_t *ready_next = rt->nodes[i].recv_watches->ready_head->next;
-                    nm_node_t *owner = &rt->nodes[i];
+                    llam_recv_ready_t *ready_next = rt->nodes[i].recv_watches->ready_head->next;
+                    llam_node_t *owner = &rt->nodes[i];
 
                     if (rt->nodes[i].recv_watches->ready_head->has_buffer &&
                         rt->nodes[i].recv_watches->ready_head->node_index < rt->active_nodes) {
@@ -122,7 +122,7 @@ void nm_runtime_shutdown(void) {
                         rt->nodes[i].recv_watches->ready_head->has_buffer) {
                         // Provided buffers belong to the node that produced
                         // them, which may differ after live watch migration.
-                        (void)nm_node_recycle_recv_buffer(owner, rt->nodes[i].recv_watches->ready_head->bid);
+                        (void)llam_node_recycle_recv_buffer(owner, rt->nodes[i].recv_watches->ready_head->bid);
                     }
                     free(rt->nodes[i].recv_watches->ready_head);
                     rt->nodes[i].recv_watches->ready_head = ready_next;
@@ -134,13 +134,13 @@ void nm_runtime_shutdown(void) {
         if (rt->nodes[i].ring_ready) {
             // liburing resources must be dismantled before node mutexes and
             // wake descriptors disappear.
-            nm_node_unregister_cq_eventfd(&rt->nodes[i]);
-            nm_node_destroy_recv_buf_ring(&rt->nodes[i]);
+            llam_node_unregister_cq_eventfd(&rt->nodes[i]);
+            llam_node_destroy_recv_buf_ring(&rt->nodes[i]);
             io_uring_queue_exit(&rt->nodes[i].ring);
             rt->nodes[i].ring_ready = false;
         }
         if (rt->nodes[i].event_fd >= 0) {
-            nm_wake_handle_close(rt->nodes[i].event_fd);
+            llam_wake_handle_close(rt->nodes[i].event_fd);
         }
         pthread_mutex_destroy(&rt->nodes[i].submit_lock);
         pthread_mutex_destroy(&rt->nodes[i].watch_lock);
@@ -154,42 +154,42 @@ void nm_runtime_shutdown(void) {
                 // the stop flag under lock and signal both helper and shard.
                 pthread_mutex_lock(&rt->shards[i].opaque_lock);
                 rt->shards[i].opaque_helper_stop = true;
-                nm_opaque_wake_signal(&rt->shards[i]);
+                llam_opaque_wake_signal(&rt->shards[i]);
                 pthread_mutex_unlock(&rt->shards[i].opaque_lock);
-                nm_kick_shard(&rt->shards[i]);
+                llam_kick_shard(&rt->shards[i]);
                 pthread_join(rt->shards[i].opaque_helper_thread, NULL);
                 rt->shards[i].opaque_helper_thread_started = false;
             }
             if (rt->shards[i].event_fd >= 0) {
-                nm_wake_handle_close(rt->shards[i].event_fd);
+                llam_wake_handle_close(rt->shards[i].event_fd);
             }
             if (rt->shards[i].signal_stack != NULL) {
                 munmap(rt->shards[i].signal_stack, rt->shards[i].signal_stack_size);
             }
-            nm_ctx_destroy_fp_state(&rt->shards[i].scheduler_ctx);
-            nm_ctx_destroy_fp_state(&rt->shards[i].opaque_scheduler_ctx);
+            llam_ctx_destroy_fp_state(&rt->shards[i].scheduler_ctx);
+            llam_ctx_destroy_fp_state(&rt->shards[i].opaque_scheduler_ctx);
             free(rt->shards[i].timer_heap);
             rt->shards[i].timer_heap = NULL;
             rt->shards[i].timer_heap_len = 0U;
             rt->shards[i].timer_heap_cap = 0U;
             rt->shards[i].timers = NULL;
-            nm_shard_drain_stack_cache(&rt->shards[i]);
+            llam_shard_drain_stack_cache(&rt->shards[i]);
             pthread_mutex_destroy(&rt->shards[i].lock);
-            nm_opaque_wake_destroy(&rt->shards[i]);
+            llam_opaque_wake_destroy(&rt->shards[i]);
             pthread_cond_destroy(&rt->shards[i].opaque_cv);
             pthread_mutex_destroy(&rt->shards[i].opaque_lock);
         }
     }
 
     if (rt->stack_cache_lock_initialized) {
-        nm_runtime_drain_stack_cache(rt);
+        llam_runtime_drain_stack_cache(rt);
     }
 
     task = rt->all_tasks;
     while (task != NULL) {
-        nm_task_t *next = task->all_next;
+        llam_task_t *next = task->all_next;
 
-        nm_free_task(task);
+        llam_free_task(task);
         task = next;
     }
 
@@ -197,19 +197,19 @@ void nm_runtime_shutdown(void) {
         for (i = 0; i < rt->active_shards; ++i) {
             // Allocators are destroyed after tasks are freed because task slabs
             // own the task objects and embedded mutexes.
-            nm_allocator_destroy(&rt->shards[i].allocator);
+            llam_allocator_destroy(&rt->shards[i].allocator);
         }
     }
 
-    nm_restore_process_signal_handlers(rt);
-    nm_restore_init_thread_affinity(rt);
+    llam_restore_process_signal_handlers(rt);
+    llam_restore_init_thread_affinity(rt);
 
     if (rt->block_lock_initialized) {
-        nm_alloc_chunk_t *chunk = rt->block_job_chunks;
+        llam_alloc_chunk_t *chunk = rt->block_job_chunks;
 
         // Blocking-job chunks are runtime-wide, not shard allocator chunks.
         while (chunk != NULL) {
-            nm_alloc_chunk_t *next = chunk->next;
+            llam_alloc_chunk_t *next = chunk->next;
 
             if (chunk->mmapped) {
                 (void)munmap(chunk->storage, chunk->bytes);
@@ -245,7 +245,7 @@ void nm_runtime_shutdown(void) {
     free(rt->nodes);
     free(rt->shards);
     free(rt->allowed_cpus);
-    nm_clear_xsave_globals();
+    llam_clear_xsave_globals();
     // Clear the singleton last so accidental post-shutdown reads fail closed.
     memset(rt, 0, sizeof(*rt));
 }

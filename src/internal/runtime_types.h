@@ -25,10 +25,10 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_TYPES_H
-#define NM_RUNTIME_TYPES_H
+#ifndef LLAM_RUNTIME_TYPES_H
+#define LLAM_RUNTIME_TYPES_H
 
-#include "nm_internal.h"
+#include "llam_internal.h"
 #include "runtime_platform.h"
 
 #include <dirent.h>
@@ -83,12 +83,12 @@ static inline void io_uring_queue_exit(struct io_uring *ring) {
 
 #if defined(__linux__)
 /** @brief CPU set representation used by affinity and NUMA discovery on Linux. */
-typedef cpu_set_t nm_cpu_set_t;
+typedef cpu_set_t llam_cpu_set_t;
 #else
 /** @brief Placeholder CPU set on platforms without Linux @c cpu_set_t. */
-typedef struct nm_cpu_set {
+typedef struct llam_cpu_set {
     unsigned placeholder;
-} nm_cpu_set_t;
+} llam_cpu_set_t;
 #endif
 
 #ifndef MAP_STACK
@@ -104,89 +104,89 @@ typedef struct nm_cpu_set {
 #endif
 
 /** Trace events retained per shard for diagnostics. */
-#define NM_TRACE_RING_CAP 512U
+#define LLAM_TRACE_RING_CAP 512U
 /** Alignment used to separate contended atomics from neighboring fields. */
-#define NM_CACHELINE_BYTES 64U
+#define LLAM_CACHELINE_BYTES 64U
 /** Backend I/O submission/completion ring depth. */
-#define NM_IO_RING_DEPTH 256U
+#define LLAM_IO_RING_DEPTH 256U
 /** Maximum remote-inject tasks drained in one scheduler pass. */
-#define NM_INJECT_DRAIN_BUDGET 32U
+#define LLAM_INJECT_DRAIN_BUDGET 32U
 /** Watchdog tick interval in nanoseconds. */
-#define NM_WATCHDOG_INTERVAL_NS 1000000ULL
+#define LLAM_WATCHDOG_INTERVAL_NS 1000000ULL
 /** Kernel wait timeout used by idle I/O polling loops. */
-#define NM_IDLE_POLL_TIMEOUT_MS 10
+#define LLAM_IDLE_POLL_TIMEOUT_MS 10
 /** Per-thread alternate signal stack size used for fault diagnostics. */
-#define NM_ALTSTACK_BYTES (64U * 1024U)
+#define LLAM_ALTSTACK_BYTES (64U * 1024U)
 /** Bounded queue capacity for cross-shard injected work. */
-#define NM_INJECT_QUEUE_CAP 1024U
+#define LLAM_INJECT_QUEUE_CAP 1024U
 /** Bounded queue capacity for latency-critical runnable work. */
-#define NM_HOT_QUEUE_CAP 1024U
+#define LLAM_HOT_QUEUE_CAP 1024U
 /** Bounded normal queue capacity; must remain a power of two. */
-#define NM_NORM_QUEUE_CAP 4096U
+#define LLAM_NORM_QUEUE_CAP 4096U
 /** Number of task objects allocated per task slab. */
-#define NM_TASK_SLAB_COUNT 16U
+#define LLAM_TASK_SLAB_COUNT 16U
 /** Number of wait nodes allocated per wait-node slab. */
-#define NM_WAIT_NODE_SLAB_COUNT 64U
+#define LLAM_WAIT_NODE_SLAB_COUNT 64U
 /** Number of timer nodes allocated per timer-node slab. */
-#define NM_TIMER_NODE_SLAB_COUNT 64U
+#define LLAM_TIMER_NODE_SLAB_COUNT 64U
 /** Number of I/O requests allocated per request slab. */
-#define NM_IO_REQ_SLAB_COUNT 64U
+#define LLAM_IO_REQ_SLAB_COUNT 64U
 /** Normal number of I/O buffer wrappers allocated per slab. */
-#define NM_IO_BUFFER_SLAB_COUNT 16U
+#define LLAM_IO_BUFFER_SLAB_COUNT 16U
 /** Experimental huge-allocation I/O buffer wrapper slab width. */
-#define NM_IO_BUFFER_HUGE_SLAB_COUNT 512U
+#define LLAM_IO_BUFFER_HUGE_SLAB_COUNT 512U
 /** Inline bytes embedded in each owned I/O buffer wrapper. */
-#define NM_IO_BUFFER_INLINE_BYTES 4096U
+#define LLAM_IO_BUFFER_INLINE_BYTES 4096U
 /** Provided-buffer ring entries per Linux I/O node. */
-#define NM_IO_RECV_BUF_RING_ENTRIES 128U
+#define LLAM_IO_RECV_BUF_RING_ENTRIES 128U
 /** Blocking-job objects allocated per runtime-wide slab. */
-#define NM_BLOCK_JOB_SLAB_COUNT 64U
+#define LLAM_BLOCK_JOB_SLAB_COUNT 64U
 /** Signal used internally to request task preemption. */
-#define NM_PREEMPT_SIGNAL SIGUSR1
+#define LLAM_PREEMPT_SIGNAL SIGUSR1
 /** Consecutive watchdog observations before a deadlock suspicion is recorded. */
-#define NM_DEADLOCK_SUSPECT_STREAK 4U
+#define LLAM_DEADLOCK_SUSPECT_STREAK 4U
 /** Consecutive pressure observations needed to scale dynamic workers up. */
-#define NM_DYNAMIC_SCALE_UP_STREAK 2U
+#define LLAM_DYNAMIC_SCALE_UP_STREAK 2U
 /** Consecutive idle observations needed to scale dynamic workers down. */
-#define NM_DYNAMIC_SCALE_DOWN_STREAK 12U
+#define LLAM_DYNAMIC_SCALE_DOWN_STREAK 12U
 /** Cooldown ticks after changing dynamic worker online count. */
-#define NM_DYNAMIC_SCALE_COOLDOWN_TICKS 4U
+#define LLAM_DYNAMIC_SCALE_COOLDOWN_TICKS 4U
 /** Internal alias for a pinned task flag. */
-#define NM_TASK_FLAG_PINNED NM_SPAWN_F_PINNED
+#define LLAM_TASK_FLAG_PINNED LLAM_SPAWN_F_PINNED
 /** Internal alias for no-preempt task flag. */
-#define NM_TASK_FLAG_NO_PREEMPT NM_SPAWN_F_NO_PREEMPT
+#define LLAM_TASK_FLAG_NO_PREEMPT LLAM_SPAWN_F_NO_PREEMPT
 /** Internal alias for runtime/system task flag. */
-#define NM_TASK_FLAG_SYS_TASK NM_SPAWN_F_SYS_TASK
+#define LLAM_TASK_FLAG_SYS_TASK LLAM_SPAWN_F_SYS_TASK
 /** Internal alias for latency-critical task flag. */
-#define NM_TASK_FLAG_LATENCY_CRITICAL NM_SPAWN_F_LATENCY_CRITICAL
+#define LLAM_TASK_FLAG_LATENCY_CRITICAL LLAM_SPAWN_F_LATENCY_CRITICAL
 
-_Static_assert((NM_NORM_QUEUE_CAP & (NM_NORM_QUEUE_CAP - 1U)) == 0U, "NM_NORM_QUEUE_CAP must be a power of two");
+_Static_assert((LLAM_NORM_QUEUE_CAP & (LLAM_NORM_QUEUE_CAP - 1U)) == 0U, "LLAM_NORM_QUEUE_CAP must be a power of two");
 
 /** @brief Private runtime singleton type. */
-typedef struct nm_runtime nm_runtime_t;
+typedef struct llam_runtime llam_runtime_t;
 /** @brief Scheduler worker/shard state type. */
-typedef struct nm_shard nm_shard_t;
+typedef struct llam_shard llam_shard_t;
 /** @brief Platform I/O node state type. */
-typedef struct nm_node nm_node_t;
+typedef struct llam_node llam_node_t;
 /** @brief Metadata entry describing a cached stack mapping. */
-typedef struct nm_stack_cache_entry nm_stack_cache_entry_t;
+typedef struct llam_stack_cache_entry llam_stack_cache_entry_t;
 
 /** @brief Simple FIFO task queue used for hot, inject, overflow, and blocking queues. */
-typedef struct nm_queue {
-    nm_task_t *head;
-    nm_task_t *tail;
+typedef struct llam_queue {
+    llam_task_t *head;
+    llam_task_t *tail;
     unsigned depth;
-} nm_queue_t;
+} llam_queue_t;
 
 /** @brief Chase-Lev style bounded deque used by the optional lock-free normal queue. */
-typedef struct nm_cldeque {
-    _Alignas(NM_CACHELINE_BYTES) _Atomic size_t top;
-    _Alignas(NM_CACHELINE_BYTES) _Atomic size_t bottom;
-    _Alignas(NM_CACHELINE_BYTES) nm_task_t *buffer[NM_NORM_QUEUE_CAP];
-} nm_cldeque_t;
+typedef struct llam_cldeque {
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic size_t top;
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic size_t bottom;
+    _Alignas(LLAM_CACHELINE_BYTES) llam_task_t *buffer[LLAM_NORM_QUEUE_CAP];
+} llam_cldeque_t;
 
 /** @brief Compact scheduler trace event stored in a per-shard ring buffer. */
-typedef struct nm_trace_event {
+typedef struct llam_trace_event {
     uint64_t ts_ns;
     uint64_t task_id;
     uint32_t kind;
@@ -194,49 +194,49 @@ typedef struct nm_trace_event {
     uint16_t to_state;
     uint16_t reason;
     uint16_t shard;
-} nm_trace_event_t;
+} llam_trace_event_t;
 
 /** @brief Metadata for a cached stack mapping and its usable stack range. */
-struct nm_stack_cache_entry {
+struct llam_stack_cache_entry {
     void *mapping;
     size_t mapping_size;
     void *stack_base;
     size_t stack_size;
-    nm_stack_cache_entry_t *next;
+    llam_stack_cache_entry_t *next;
     bool heap_allocated;
 };
 
 /** @brief Backing allocation tracked for allocator teardown. */
-typedef struct nm_alloc_chunk {
+typedef struct llam_alloc_chunk {
     void *storage;
     size_t bytes;
     unsigned item_kind;
     unsigned item_count;
     bool mmapped;
-    struct nm_alloc_chunk *next;
-} nm_alloc_chunk_t;
+    struct llam_alloc_chunk *next;
+} llam_alloc_chunk_t;
 
 /** @brief Allocation chunk kinds that require specialized cleanup. */
 enum {
-    NM_ALLOC_CHUNK_GENERIC = 0,
-    NM_ALLOC_CHUNK_TASK = 1,
+    LLAM_ALLOC_CHUNK_GENERIC = 0,
+    LLAM_ALLOC_CHUNK_TASK = 1,
 };
 
 /** @brief Deferred I/O control operation sent to an I/O node. */
-typedef struct nm_io_control_op nm_io_control_op_t;
+typedef struct llam_io_control_op llam_io_control_op_t;
 /** @brief Shared poll readiness watch for an fd identity. */
-typedef struct nm_poll_watch nm_poll_watch_t;
+typedef struct llam_poll_watch llam_poll_watch_t;
 /** @brief Shared accept watch for a listener fd. */
-typedef struct nm_accept_watch nm_accept_watch_t;
+typedef struct llam_accept_watch llam_accept_watch_t;
 /** @brief Buffered accepted fd entry. */
-typedef struct nm_accept_ready nm_accept_ready_t;
+typedef struct llam_accept_ready llam_accept_ready_t;
 /** @brief Shared recv/read readiness watch for an fd identity. */
-typedef struct nm_recv_watch nm_recv_watch_t;
+typedef struct llam_recv_watch llam_recv_watch_t;
 /** @brief Buffered receive completion entry. */
-typedef struct nm_recv_ready nm_recv_ready_t;
+typedef struct llam_recv_ready llam_recv_ready_t;
 
 /** @brief Per-shard counters collected into public runtime stats and diagnostics. */
-typedef struct nm_metrics {
+typedef struct llam_metrics {
     uint64_t ctx_switches;
     uint64_t yields;
     uint64_t parks;
@@ -283,57 +283,57 @@ typedef struct nm_metrics {
     uint64_t opaque_leave_wait_samples;
     uint64_t opaque_leave_wait_max_ns;
     uint64_t opaque_redirect_activations;
-    uint64_t wake_reason_hist[NM_WAIT_TIMEOUT + 1U];
-} nm_metrics_t;
+    uint64_t wake_reason_hist[LLAM_WAIT_TIMEOUT + 1U];
+} llam_metrics_t;
 
 /** @brief Logical I/O operation kind. */
-typedef enum nm_io_kind {
-    NM_IO_KIND_READ = 0,
-    NM_IO_KIND_WRITE = 1,
-    NM_IO_KIND_ACCEPT = 2,
-    NM_IO_KIND_POLL = 3,
-    NM_IO_KIND_CONNECT = 4,
-} nm_io_kind_t;
+typedef enum llam_io_kind {
+    LLAM_IO_KIND_READ = 0,
+    LLAM_IO_KIND_WRITE = 1,
+    LLAM_IO_KIND_ACCEPT = 2,
+    LLAM_IO_KIND_POLL = 3,
+    LLAM_IO_KIND_CONNECT = 4,
+} llam_io_kind_t;
 
 /** @brief Current ownership/wait state for an I/O request. */
-typedef enum nm_io_wait_mode {
-    NM_IO_WAIT_MODE_NONE = 0,
-    NM_IO_WAIT_MODE_SUBMIT_QUEUE = 1,
-    NM_IO_WAIT_MODE_INFLIGHT = 2,
-    NM_IO_WAIT_MODE_POLL_WATCH = 3,
-    NM_IO_WAIT_MODE_ACCEPT_WATCH = 4,
-    NM_IO_WAIT_MODE_RECV_WATCH = 5,
-} nm_io_wait_mode_t;
+typedef enum llam_io_wait_mode {
+    LLAM_IO_WAIT_MODE_NONE = 0,
+    LLAM_IO_WAIT_MODE_SUBMIT_QUEUE = 1,
+    LLAM_IO_WAIT_MODE_INFLIGHT = 2,
+    LLAM_IO_WAIT_MODE_POLL_WATCH = 3,
+    LLAM_IO_WAIT_MODE_ACCEPT_WATCH = 4,
+    LLAM_IO_WAIT_MODE_RECV_WATCH = 5,
+} llam_io_wait_mode_t;
 
 /** @brief Reason an I/O request was aborted before normal completion. */
-typedef enum nm_io_abort_reason {
-    NM_IO_ABORT_NONE = 0,
-    NM_IO_ABORT_CANCEL = 1,
-    NM_IO_ABORT_TIMEOUT = 2,
-} nm_io_abort_reason_t;
+typedef enum llam_io_abort_reason {
+    LLAM_IO_ABORT_NONE = 0,
+    LLAM_IO_ABORT_CANCEL = 1,
+    LLAM_IO_ABORT_TIMEOUT = 2,
+} llam_io_abort_reason_t;
 
 /** @brief State machine for runtime-wide blocking jobs. */
-typedef enum nm_block_job_state {
-    NM_BLOCK_JOB_QUEUED = 0,
-    NM_BLOCK_JOB_RUNNING = 1,
-    NM_BLOCK_JOB_FINISHED = 2,
-    NM_BLOCK_JOB_ABORTED = 3,
-} nm_block_job_state_t;
+typedef enum llam_block_job_state {
+    LLAM_BLOCK_JOB_QUEUED = 0,
+    LLAM_BLOCK_JOB_RUNNING = 1,
+    LLAM_BLOCK_JOB_FINISHED = 2,
+    LLAM_BLOCK_JOB_ABORTED = 3,
+} llam_block_job_state_t;
 
 /**
  * @brief Blocking jobs bridge cooperative tasks and OS-level blocking work.  The task
  * parks while a helper thread runs fn(arg), then the scheduler wakes the task
  * once state reaches FINISHED or ABORTED.
  */
-typedef struct nm_block_job {
-    nm_blocking_fn fn;
+typedef struct llam_block_job {
+    llam_blocking_fn fn;
     void *arg;
     void *result;
     int error_code;
-    nm_task_t *task;
+    llam_task_t *task;
     atomic_uint state;
-    struct nm_block_job *next;
-} nm_block_job_t;
+    struct llam_block_job *next;
+} llam_block_job_t;
 
 /**
  * @brief One logical I/O operation.  Requests are allocated per shard but may become
@@ -341,9 +341,9 @@ typedef struct nm_block_job {
  * abort_reason atomics are the cross-thread handshake used by cancellation,
  * timeout, migration, and completion paths.
  */
-typedef struct nm_io_req {
-    nm_io_kind_t kind;
-    nm_fd_t fd;
+typedef struct llam_io_req {
+    llam_io_kind_t kind;
+    llam_fd_t fd;
     void *buf;
     size_t count;
     struct sockaddr *addr;
@@ -355,13 +355,13 @@ typedef struct nm_io_req {
     short poll_revents;
     int timeout_ms;
     int recv_flags;
-    nm_task_t *task;
-    struct nm_io_req *next;
-    struct nm_io_req *alloc_next;
-    nm_poll_watch_t *poll_watch;
-    nm_accept_watch_t *accept_watch;
-    nm_recv_watch_t *recv_watch;
-    nm_io_buffer_t *owned_buffer;
+    llam_task_t *task;
+    struct llam_io_req *next;
+    struct llam_io_req *alloc_next;
+    llam_poll_watch_t *poll_watch;
+    llam_accept_watch_t *accept_watch;
+    llam_recv_watch_t *recv_watch;
+    llam_io_buffer_t *owned_buffer;
     unsigned owner_shard;
     unsigned alloc_owner_shard;
     unsigned attached_node_index;
@@ -374,52 +374,52 @@ typedef struct nm_io_req {
     atomic_uint cancel_queued;
     bool use_recv_op;
     bool use_provided_buffer;
-} nm_io_req_t;
+} llam_io_req_t;
 
 /**
  * @brief Generic wait-list node used by mutexes, condition variables, channels, and
  * timed waits.  The value/scalar fields let higher-level primitives return a
  * small payload without allocating a separate completion object.
  */
-typedef struct nm_wait_node {
-    nm_task_t *task;
-    struct nm_wait_node *next;
-    struct nm_wait_node *alloc_next;
+typedef struct llam_wait_node {
+    llam_task_t *task;
+    struct llam_wait_node *next;
+    struct llam_wait_node *alloc_next;
     void *value;
     int error_code;
     intptr_t scalar_value;
     unsigned owner_shard;
-} nm_wait_node_t;
+} llam_wait_node_t;
 
 /** @brief FIFO waiter queue guarded by the owning primitive's lock. */
-typedef struct nm_wait_queue {
-    nm_wait_node_t *head;
-    nm_wait_node_t *tail;
+typedef struct llam_wait_queue {
+    llam_wait_node_t *head;
+    llam_wait_node_t *tail;
     unsigned depth;
-} nm_wait_queue_t;
+} llam_wait_queue_t;
 
 /** @brief Control messages processed by an I/O node thread. */
-typedef enum nm_io_control_kind {
-    NM_IO_CONTROL_POLL_ACTIVATE = 1,     /**< Activate a poll watch in the backend. */
-    NM_IO_CONTROL_POLL_DEACTIVATE = 2,   /**< Deactivate a poll watch in the backend. */
-    NM_IO_CONTROL_ACCEPT_ACTIVATE = 3,   /**< Activate an accept watch in the backend. */
-    NM_IO_CONTROL_ACCEPT_DEACTIVATE = 4, /**< Deactivate an accept watch in the backend. */
-    NM_IO_CONTROL_RECV_ACTIVATE = 5,     /**< Activate a receive watch in the backend. */
-    NM_IO_CONTROL_RECV_DEACTIVATE = 6,   /**< Deactivate a receive watch in the backend. */
-    NM_IO_CONTROL_REQ_CANCEL = 7,        /**< Cancel a specific in-flight request. */
-} nm_io_control_kind_t;
+typedef enum llam_io_control_kind {
+    LLAM_IO_CONTROL_POLL_ACTIVATE = 1,     /**< Activate a poll watch in the backend. */
+    LLAM_IO_CONTROL_POLL_DEACTIVATE = 2,   /**< Deactivate a poll watch in the backend. */
+    LLAM_IO_CONTROL_ACCEPT_ACTIVATE = 3,   /**< Activate an accept watch in the backend. */
+    LLAM_IO_CONTROL_ACCEPT_DEACTIVATE = 4, /**< Deactivate an accept watch in the backend. */
+    LLAM_IO_CONTROL_RECV_ACTIVATE = 5,     /**< Activate a receive watch in the backend. */
+    LLAM_IO_CONTROL_RECV_DEACTIVATE = 6,   /**< Deactivate a receive watch in the backend. */
+    LLAM_IO_CONTROL_REQ_CANCEL = 7,        /**< Cancel a specific in-flight request. */
+} llam_io_control_kind_t;
 
 /** @brief Intrusive I/O control queue node. */
-struct nm_io_control_op {
-    nm_io_control_kind_t kind;
+struct llam_io_control_op {
+    llam_io_control_kind_t kind;
     void *target;
-    nm_io_control_op_t *next;
+    llam_io_control_op_t *next;
 };
 
 /** @brief Completed accept results buffered by a watch until a task consumes them. */
-struct nm_accept_ready {
-    nm_fd_t fd;
-    nm_accept_ready_t *next;
+struct llam_accept_ready {
+    llam_fd_t fd;
+    llam_accept_ready_t *next;
 };
 
 /**
@@ -427,22 +427,22 @@ struct nm_accept_ready {
  * buffers; portable paths can fall back to copy_data when ownership must cross
  * node boundaries safely.
  */
-struct nm_recv_ready {
+struct llam_recv_ready {
     size_t size;
     unsigned short bid;
     unsigned node_index;
     size_t copy_capacity;
     unsigned char *copy_data;
     bool has_buffer;
-    nm_recv_ready_t *next;
+    llam_recv_ready_t *next;
 };
 
 /**
  * @brief Readiness watch shared by poll waiters for the same fd identity.  Device and
  * inode are tracked so fd reuse does not accidentally satisfy stale waiters.
  */
-struct nm_poll_watch {
-    nm_fd_t fd;
+struct llam_poll_watch {
+    llam_fd_t fd;
     dev_t st_dev;
     ino_t st_ino;
     short events;
@@ -452,30 +452,30 @@ struct nm_poll_watch {
     bool active;
     bool activating;
     bool deactivate_queued;
-    nm_io_req_t *wait_head;
-    nm_io_req_t *wait_tail;
-    nm_poll_watch_t *next;
+    llam_io_req_t *wait_head;
+    llam_io_req_t *wait_tail;
+    llam_poll_watch_t *next;
 };
 
 /** @brief Accept watch with a ready queue for accepted sockets and a waiter queue. */
-struct nm_accept_watch {
-    nm_fd_t fd;
+struct llam_accept_watch {
+    llam_fd_t fd;
     unsigned migrate_target_node_index;
     bool live_transferred;
     bool active;
     bool activating;
     bool deactivate_queued;
     unsigned ready_depth;
-    nm_io_req_t *wait_head;
-    nm_io_req_t *wait_tail;
-    nm_accept_ready_t *ready_head;
-    nm_accept_ready_t *ready_tail;
-    nm_accept_watch_t *next;
+    llam_io_req_t *wait_head;
+    llam_io_req_t *wait_tail;
+    llam_accept_ready_t *ready_head;
+    llam_accept_ready_t *ready_tail;
+    llam_accept_watch_t *next;
 };
 
 /** @brief Receive watch with ready-buffer ownership and waiter tracking. */
-struct nm_recv_watch {
-    nm_fd_t fd;
+struct llam_recv_watch {
+    llam_fd_t fd;
     dev_t st_dev;
     ino_t st_ino;
     unsigned migrate_target_node_index;
@@ -484,42 +484,42 @@ struct nm_recv_watch {
     bool activating;
     bool deactivate_queued;
     unsigned ready_depth;
-    nm_io_req_t *wait_head;
-    nm_io_req_t *wait_tail;
-    nm_recv_ready_t *ready_head;
-    nm_recv_ready_t *ready_tail;
-    nm_recv_watch_t *next;
+    llam_io_req_t *wait_head;
+    llam_io_req_t *wait_tail;
+    llam_recv_ready_t *ready_head;
+    llam_recv_ready_t *ready_tail;
+    llam_recv_watch_t *next;
 };
 
 /** @brief Timer heap node embedded in tasks when possible and allocated otherwise. */
-typedef struct nm_timer_node {
-    nm_task_t *task;
+typedef struct llam_timer_node {
+    llam_task_t *task;
     uint64_t deadline_ns;
-    struct nm_timer_node *next;
-    struct nm_timer_node *alloc_next;
+    struct llam_timer_node *next;
+    struct llam_timer_node *alloc_next;
     size_t heap_index;
     unsigned owner_shard;
-} nm_timer_node_t;
+} llam_timer_node_t;
 
 /**
  * @brief Per-shard allocator with remote-free queues.  Objects are usually returned
  * to the shard that allocated them; cross-shard frees are batched through
  * lock-free remote lists and drained at safe points.
  */
-typedef struct nm_allocator {
+typedef struct llam_allocator {
     pthread_mutex_t lock;
-    nm_alloc_chunk_t *chunks;
-    nm_task_t *task_free;
-    nm_wait_node_t *wait_free;
-    nm_timer_node_t *timer_free;
-    nm_io_req_t *io_req_free;
-    nm_io_buffer_t *io_buffer_free;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint remote_free_pending;
-    _Alignas(NM_CACHELINE_BYTES) _Atomic(nm_task_t *) task_remote_free;
-    _Alignas(NM_CACHELINE_BYTES) _Atomic(nm_wait_node_t *) wait_remote_free;
-    _Alignas(NM_CACHELINE_BYTES) _Atomic(nm_timer_node_t *) timer_remote_free;
-    _Alignas(NM_CACHELINE_BYTES) _Atomic(nm_io_req_t *) io_req_remote_free;
-    _Alignas(NM_CACHELINE_BYTES) _Atomic(nm_io_buffer_t *) io_buffer_remote_free;
+    llam_alloc_chunk_t *chunks;
+    llam_task_t *task_free;
+    llam_wait_node_t *wait_free;
+    llam_timer_node_t *timer_free;
+    llam_io_req_t *io_req_free;
+    llam_io_buffer_t *io_buffer_free;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint remote_free_pending;
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_task_t *) task_remote_free;
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_wait_node_t *) wait_remote_free;
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_timer_node_t *) timer_remote_free;
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_io_req_t *) io_req_remote_free;
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_io_buffer_t *) io_buffer_remote_free;
     atomic_uint_fast64_t local_epoch;
     uint64_t task_allocs;
     uint64_t task_reuses;
@@ -555,11 +555,11 @@ typedef struct nm_allocator {
     uint64_t timer_remote_burst_max;
     uint64_t io_req_remote_burst_max;
     uint64_t io_buffer_remote_burst_max;
-} nm_allocator_t;
+} llam_allocator_t;
 
 /** @brief Runtime-owned I/O buffer.  Small reads use inline_data; large/provided buffers can attach external storage. */
-struct nm_io_buffer {
-    struct nm_io_buffer *alloc_next;
+struct llam_io_buffer {
+    struct llam_io_buffer *alloc_next;
     unsigned alloc_owner_shard;
     unsigned provided_node_index;
     size_t size;
@@ -569,42 +569,42 @@ struct nm_io_buffer {
     bool detached_wrapper;
     bool provided_storage;
     unsigned short provided_bid;
-    unsigned char inline_data[NM_IO_BUFFER_INLINE_BYTES];
+    unsigned char inline_data[LLAM_IO_BUFFER_INLINE_BYTES];
 };
 
 /** @brief Shared cancellation state.  Waiters are task links protected by lock. */
-struct nm_cancel_token {
+struct llam_cancel_token {
     pthread_mutex_t lock;
     bool cancelled;
     unsigned refcount;
-    nm_task_t *waiters;
+    llam_task_t *waiters;
 };
 
 /** @brief Runtime-aware mutex: owner is atomic for the fast path, waiters are lock protected. */
-struct nm_mutex {
+struct llam_mutex {
     atomic_uintptr_t owner;
     pthread_mutex_t lock;
-    nm_wait_queue_t waiters;
+    llam_wait_queue_t waiters;
 };
 
 /** @brief Runtime-aware condition variable with a FIFO waiter queue. */
-struct nm_cond {
+struct llam_cond {
     pthread_mutex_t lock;
-    nm_wait_queue_t waiters;
+    llam_wait_queue_t waiters;
 };
 
 /** @brief Bounded pointer channel with separate sender and receiver wait queues. */
-struct nm_channel {
+struct llam_channel {
     pthread_mutex_t lock;
     void **buffer;
-    struct nm_channel *cache_next;
+    struct llam_channel *cache_next;
     size_t capacity;
     size_t head;
     size_t tail;
     size_t count;
     bool closed;
-    nm_wait_queue_t send_waiters;
-    nm_wait_queue_t recv_waiters;
+    llam_wait_queue_t send_waiters;
+    llam_wait_queue_t recv_waiters;
 };
 
 /**
@@ -612,45 +612,45 @@ struct nm_channel {
  * context, stack allocation, scheduler links, wait state, optional active I/O
  * request, optional blocking job, and diagnostic timing counters.
  */
-struct nm_task {
+struct llam_task {
     uint64_t id;
-    nm_task_state_id_t state;
-    nm_wait_reason_t wait_reason;
+    llam_task_state_id_t state;
+    llam_wait_reason_t wait_reason;
     unsigned flags;
     unsigned home_shard;
     unsigned last_shard;
     unsigned parked_shard;
-    nm_task_class_t task_class;
+    llam_task_class_t task_class;
     uint64_t deadline_ns;
-    nm_cancel_token_t *cancel_token;
-    nm_task_fn entry;
+    llam_cancel_token_t *cancel_token;
+    llam_task_fn entry;
     void *arg;
-    nm_ctx_t ctx;
+    llam_ctx_t ctx;
     void *stack_mapping;
     size_t mapping_size;
     void *stack_base;
     size_t stack_size;
-    nm_stack_cache_entry_t stack_cache_entry;
+    llam_stack_cache_entry_t stack_cache_entry;
     pthread_mutex_t lock;
     bool lock_initialized;
-    nm_task_t *all_next;
-    nm_task_t *all_prev;
-    nm_task_t *alloc_next;
-    nm_task_t *queue_next;
-    nm_task_t *queue_prev;
-    nm_task_t *join_waiters;
+    llam_task_t *all_next;
+    llam_task_t *all_prev;
+    llam_task_t *alloc_next;
+    llam_task_t *queue_next;
+    llam_task_t *queue_prev;
+    llam_task_t *join_waiters;
     unsigned join_waiter_count;
-    nm_task_t *join_target;
-    nm_task_t *wait_next;
-    nm_task_t *cancel_next;
-    nm_task_t *cancel_prev;
-    nm_wait_node_t embedded_wait_node;
-    nm_wait_node_t *active_wait_node;
-    nm_wait_queue_t *active_wait_queue;
+    llam_task_t *join_target;
+    llam_task_t *wait_next;
+    llam_task_t *cancel_next;
+    llam_task_t *cancel_prev;
+    llam_wait_node_t embedded_wait_node;
+    llam_wait_node_t *active_wait_node;
+    llam_wait_queue_t *active_wait_queue;
     pthread_mutex_t *active_wait_queue_lock;
-    nm_io_req_t embedded_io_req;
-    nm_io_req_t *active_io_req;
-    nm_block_job_t *active_block_job;
+    llam_io_req_t embedded_io_req;
+    llam_io_req_t *active_io_req;
+    llam_block_job_t *active_block_job;
     bool cancel_registered;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
@@ -664,6 +664,7 @@ struct nm_task {
     uint64_t max_opaque_block_ns;
     uint64_t opaque_block_count;
     void *blocking_result;
+    int saved_errno;
     int blocking_errno;
     int wake_error_code;
     unsigned opaque_blocking_depth;
@@ -673,11 +674,12 @@ struct nm_task {
     unsigned preempt_poll_tick;
     size_t last_stack_used;
     size_t stack_high_water;
-    nm_timer_node_t embedded_timer_node;
-    nm_timer_node_t *active_timer;
+    llam_timer_node_t embedded_timer_node;
+    llam_timer_node_t *active_timer;
     atomic_uint preempt_requested;
     atomic_uint reclaim_ready;
     atomic_uint reclaim_claimed;
+    atomic_uint detached;
     unsigned join_waiter_count_at_exit;
     unsigned forced_yield_budget;
 };
@@ -687,8 +689,8 @@ struct nm_task {
  * heap, allocator, stack caches, metrics, and opaque-blocking compensation
  * state.  Most hot scheduler state is shard-local to avoid global locks.
  */
-struct nm_shard {
-    nm_runtime_t *runtime;
+struct llam_shard {
+    llam_runtime_t *runtime;
     unsigned id;
     unsigned cpu_id;
     unsigned node_index;
@@ -701,7 +703,7 @@ struct nm_shard {
     bool thread_started;
     pthread_t thread;
     int event_fd;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint event_pending;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t lock;
     pthread_mutex_t opaque_lock;
     pthread_cond_t opaque_cv;
@@ -733,34 +735,34 @@ struct nm_shard {
     unsigned opaque_compensation_depth_peak;
     unsigned opaque_redirect_depth;
     unsigned opaque_redirect_depth_peak;
-    nm_queue_t inject_q;
+    llam_queue_t inject_q;
     atomic_uint inject_depth;
-    nm_queue_t hot_q;
-    nm_queue_t norm_q;
-    nm_cldeque_t norm_cldeque;
-    nm_timer_node_t *timers;
-    nm_timer_node_t **timer_heap;
+    llam_queue_t hot_q;
+    llam_queue_t norm_q;
+    llam_cldeque_t norm_cldeque;
+    llam_timer_node_t *timers;
+    llam_timer_node_t **timer_heap;
     size_t timer_heap_len;
     size_t timer_heap_cap;
     atomic_uint timer_count;
-    nm_stack_cache_entry_t *stack_cache_default;
-    nm_stack_cache_entry_t *stack_cache_large;
-    nm_stack_cache_entry_t *stack_cache_huge;
-    nm_stack_cache_entry_t *stack_cache_entry_free;
+    llam_stack_cache_entry_t *stack_cache_default;
+    llam_stack_cache_entry_t *stack_cache_large;
+    llam_stack_cache_entry_t *stack_cache_huge;
+    llam_stack_cache_entry_t *stack_cache_entry_free;
     unsigned stack_cache_default_count;
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;
-    nm_ctx_t scheduler_ctx;
-    nm_ctx_t opaque_scheduler_ctx;
-    _Atomic(nm_task_t *) current;
+    llam_ctx_t scheduler_ctx;
+    llam_ctx_t opaque_scheduler_ctx;
+    _Atomic(llam_task_t *) current;
     atomic_uint_fast64_t last_safepoint_ns;
     atomic_uint_fast64_t last_run_started_ns;
     uint64_t last_idle_wake_ns;
     atomic_uint norm_depth;
     unsigned hot_streak;
-    nm_allocator_t allocator;
-    nm_metrics_t metrics;
-    nm_trace_event_t trace_ring[NM_TRACE_RING_CAP];
+    llam_allocator_t allocator;
+    llam_metrics_t metrics;
+    llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
     unsigned trace_head;
 };
 
@@ -769,8 +771,8 @@ struct nm_shard {
  * state on Darwin) plus watch tables and submission/control queues.  Shards
  * submit requests to nodes, and nodes complete requests back to task owners.
  */
-struct nm_node {
-    nm_runtime_t *runtime;
+struct llam_node {
+    llam_runtime_t *runtime;
     unsigned index;
     unsigned kernel_node_id;
     bool ring_ready;
@@ -791,24 +793,24 @@ struct nm_node {
     int event_fd;
     uint32_t mach_wake_port;
     uint32_t mach_wake_pset;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint event_pending;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t submit_lock;
     pthread_mutex_t watch_lock;
     pthread_mutex_t recv_buf_lock;
-    nm_io_req_t *submit_head;
-    nm_io_req_t *submit_tail;
-    nm_io_control_op_t *control_head;
-    nm_io_control_op_t *control_tail;
-    nm_poll_watch_t *poll_watches;
-    nm_accept_watch_t *accept_watches;
-    nm_recv_watch_t *recv_watches;
+    llam_io_req_t *submit_head;
+    llam_io_req_t *submit_tail;
+    llam_io_control_op_t *control_head;
+    llam_io_control_op_t *control_tail;
+    llam_poll_watch_t *poll_watches;
+    llam_accept_watch_t *accept_watches;
+    llam_recv_watch_t *recv_watches;
     struct io_uring ring;
     struct io_uring_buf_ring *recv_buf_ring;
     unsigned char *recv_buf_storage;
     unsigned recv_buf_entries;
     unsigned recv_buf_mask;
     int recv_buf_group;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint pending_ops;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint pending_ops;
     bool sqpoll_enabled;
     unsigned sqpoll_cpu;
     uint64_t submit_batches;
@@ -828,7 +830,7 @@ struct nm_node {
  * shards, I/O nodes, helper threads, global task lists, overflow queues, and
  * process-wide signal/affinity state until shutdown.
  */
-struct nm_runtime {
+struct llam_runtime {
     bool initialized;
     bool exec_started;
     unsigned observed_shards;
@@ -848,7 +850,7 @@ struct nm_runtime {
     unsigned experimental_huge_alloc_active;
     unsigned experimental_sqpoll_requested;
     unsigned experimental_sqpoll_active;
-    nm_runtime_profile_t profile;
+    llam_runtime_profile_t profile;
     unsigned sqpoll_cpu_reserved;
     int sqpoll_cpu;
     bool xsave_enabled;
@@ -860,12 +862,12 @@ struct nm_runtime {
     unsigned next_spawn_shard;
     unsigned block_worker_count;
     pthread_t init_thread;
-    nm_cpu_set_t init_thread_affinity;
+    llam_cpu_set_t init_thread_affinity;
     bool init_thread_affinity_valid;
     unsigned *allowed_cpus;
     unsigned *kernel_node_ids;
-    nm_shard_t *shards;
-    nm_node_t *nodes;
+    llam_shard_t *shards;
+    llam_node_t *nodes;
     pthread_t *block_threads;
     pthread_t ctrl_thread;
     bool ctrl_thread_started;
@@ -875,35 +877,35 @@ struct nm_runtime {
     bool overflow_lock_initialized;
     pthread_mutex_t task_list_lock;
     pthread_mutex_t stack_cache_lock;
-    nm_task_t *all_tasks;
-    nm_stack_cache_entry_t *stack_cache_default;
-    nm_stack_cache_entry_t *stack_cache_large;
-    nm_stack_cache_entry_t *stack_cache_huge;
-    nm_stack_cache_entry_t *stack_cache_entry_free;
+    llam_task_t *all_tasks;
+    llam_stack_cache_entry_t *stack_cache_default;
+    llam_stack_cache_entry_t *stack_cache_large;
+    llam_stack_cache_entry_t *stack_cache_huge;
+    llam_stack_cache_entry_t *stack_cache_entry_free;
     unsigned stack_cache_default_count;
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;
     pthread_mutex_t block_lock;
     pthread_cond_t block_cv;
     pthread_mutex_t overflow_lock;
-    nm_queue_t overflow_q;
-    nm_block_job_t *block_head;
-    nm_block_job_t *block_tail;
-    nm_alloc_chunk_t *block_job_chunks;
-    _Alignas(NM_CACHELINE_BYTES) _Atomic(nm_block_job_t *) block_job_free;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint block_wake_seq;
+    llam_queue_t overflow_q;
+    llam_block_job_t *block_head;
+    llam_block_job_t *block_tail;
+    llam_alloc_chunk_t *block_job_chunks;
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_block_job_t *) block_job_free;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_wake_seq;
     struct sigaction previous_preempt_action;
     struct sigaction previous_segv_action;
     bool preempt_signal_installed;
     bool segv_signal_installed;
     bool block_cv_initialized;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint block_pending;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint block_active;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint block_active_peak;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint live_tasks;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint active_io_waiters;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint next_task_id;
-    _Alignas(NM_CACHELINE_BYTES) atomic_uint overflow_depth;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_pending;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active_peak;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint active_io_waiters;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint next_task_id;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint overflow_depth;
     atomic_uint_fast64_t global_epoch;
     atomic_bool stop_requested;
     atomic_int fatal_errno;

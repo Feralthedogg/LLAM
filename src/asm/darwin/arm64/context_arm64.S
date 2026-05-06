@@ -4,8 +4,8 @@
  *
  * @details
  * Darwin arm64 uses the same logical context layout as Linux arm64, with Mach-O
- * symbol naming. The offsets must match the AArch64 @c nm_ctx_t layout in
- * src/internal/nm_internal.h.
+ * symbol naming. The offsets must match the AArch64 @c llam_ctx_t layout in
+ * src/internal/llam_internal.h.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -25,8 +25,8 @@
 
     .text
     .align 2
-    .globl _nm_ctx_switch
-_nm_ctx_switch:
+    .globl _llam_ctx_switch
+_llam_ctx_switch:
     /*
      * x0 = context to save
      * x1 = context to restore
@@ -76,12 +76,12 @@ _nm_ctx_switch:
     mov sp, x9
     ret
 
-    .globl _nm_fiber_bootstrap
-_nm_fiber_bootstrap:
+    .globl _llam_fiber_bootstrap
+_llam_fiber_bootstrap:
     /*
-     * nm_ctx_make_task seeds x19 with nm_task_t*. Enter C bootstrap, then jump
+     * llam_ctx_make_task seeds x19 with llam_task_t*. Enter C bootstrap, then jump
      * to task-exit cleanup when the user function returns.
      */
     mov x0, x19
-    bl _nm_task_bootstrap
-    b _nm_task_exit_internal
+    bl _llam_task_bootstrap
+    b _llam_task_exit_internal

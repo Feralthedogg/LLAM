@@ -1,6 +1,6 @@
 /**
  * @file src/core/runtime_api.c
- * @brief Legacy nm_* public runtime API entry points and argument validation.
+ * @brief Legacy llam_* public runtime API entry points and argument validation.
  *
  * @details
  * The legacy public API is split across subsystem-specific translation units

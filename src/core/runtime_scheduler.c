@@ -4,8 +4,8 @@
  *
  * @details
  * This translation unit contains the worker-side scheduler loops:
- *  - ::nm_scheduler_loop for primary shard workers,
- *  - ::nm_opaque_helper_main for temporary opaque-blocking compensation.
+ *  - ::llam_scheduler_loop for primary shard workers,
+ *  - ::llam_opaque_helper_main for temporary opaque-blocking compensation.
  *
  * Scheduler loop outline:
  *  - Establish thread-local shard/task/scheduler context.
@@ -52,18 +52,18 @@
  * @return Start timestamp in nanoseconds when run timing is enabled, otherwise
  *         0.
  */
-static uint64_t nm_set_task_running(nm_shard_t *shard, nm_task_t *task) {
+static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     bool run_timing = shard->runtime->run_timing_enabled != 0U;
     bool wake_timing = task->last_runnable_ns > 0U && shard->runtime->wake_latency_metrics_enabled != 0U;
-    bool sample_safepoint = g_nm_runtime.profile == NM_RUNTIME_PROFILE_DEBUG_SAFE ||
+    bool sample_safepoint = g_llam_runtime.profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ||
                             (shard->metrics.ctx_switches & 63ULL) == 0U;
-    uint64_t now_ns = (run_timing || wake_timing || sample_safepoint) ? nm_now_ns() : 0U;
+    uint64_t now_ns = (run_timing || wake_timing || sample_safepoint) ? llam_now_ns() : 0U;
 
     atomic_store_explicit(&shard->current, task, memory_order_release);
 
-    g_nm_tls_task = task;
+    g_llam_tls_task = task;
     task->last_shard = shard->id;
-    task->state = NM_TASK_STATE_RUNNING;
+    task->state = LLAM_TASK_STATE_RUNNING;
     task->last_started_ns = now_ns;
     if (wake_timing && now_ns >= task->last_runnable_ns) {
         shard->metrics.wake_latency_ns += now_ns - task->last_runnable_ns;
@@ -73,7 +73,7 @@ static uint64_t nm_set_task_running(nm_shard_t *shard, nm_task_t *task) {
     if (now_ns != 0U) {
         atomic_store_explicit(&shard->last_safepoint_ns, now_ns, memory_order_relaxed);
     }
-    nm_trace_shard(shard, task, NM_TRACE_STATE, NM_TASK_STATE_RUNNABLE, NM_TASK_STATE_RUNNING, NM_WAIT_NONE);
+    llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_RUNNING, LLAM_WAIT_NONE);
     return run_timing ? now_ns : 0U;
 }
 
@@ -86,11 +86,11 @@ static uint64_t nm_set_task_running(nm_shard_t *shard, nm_task_t *task) {
  * @param shard Scheduler shard to inspect.
  * @return true if the shard has work that requires an online worker.
  */
-static bool nm_shard_has_local_work(nm_shard_t *shard) {
+static bool llam_shard_has_local_work(llam_shard_t *shard) {
     bool has_work;
 
     pthread_mutex_lock(&shard->lock);
-    has_work = shard->inject_q.depth > 0U || shard->hot_q.depth > 0U || nm_norm_queue_depth(shard) > 0U ||
+    has_work = shard->inject_q.depth > 0U || shard->hot_q.depth > 0U || llam_norm_queue_depth(shard) > 0U ||
                shard->timers != NULL ||
                atomic_load_explicit(&shard->current, memory_order_acquire) != NULL ||
                shard->opaque_redirect_active;
@@ -108,21 +108,21 @@ static bool nm_shard_has_local_work(nm_shard_t *shard) {
  * @param shard Scheduler shard that just ran a task.
  * @param run_ns Measured run duration, or 0 when timing is disabled.
  */
-static void nm_clear_current_task(nm_shard_t *shard, uint64_t run_ns) {
-    nm_task_t *task = g_nm_tls_task;
+static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
+    llam_task_t *task = g_llam_tls_task;
 
     pthread_mutex_lock(&shard->lock);
     atomic_store_explicit(&shard->current, NULL, memory_order_release);
     if (task != NULL) {
         if (run_ns != 0U) {
-            uint64_t slice_ns = nm_slice_ns(task->task_class);
+            uint64_t slice_ns = llam_slice_ns(task->task_class);
 
             task->last_run_ns = run_ns;
             task->total_run_ns += run_ns;
 #if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
-            nm_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
+            llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
 #elif defined(__aarch64__)
-            nm_task_sample_stack_rsp(task, (uintptr_t)task->ctx.sp);
+            llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.sp);
 #endif
             shard->metrics.slice_budget_ns += slice_ns;
             if (run_ns > shard->metrics.max_run_ns) {
@@ -137,7 +137,7 @@ static void nm_clear_current_task(nm_shard_t *shard, uint64_t run_ns) {
         shard->metrics.total_run_ns += run_ns;
     }
     pthread_mutex_unlock(&shard->lock);
-    g_nm_tls_task = NULL;
+    g_llam_tls_task = NULL;
 }
 
 /**
@@ -150,30 +150,30 @@ static void nm_clear_current_task(nm_shard_t *shard, uint64_t run_ns) {
  * @param shard Scheduler shard checking pause state.
  * @return true if the loop paused and should restart its iteration.
  */
-static bool nm_shard_pause_for_merge(nm_shard_t *shard) {
-    nm_runtime_t *rt = shard->runtime;
+static bool llam_shard_pause_for_merge(llam_shard_t *shard) {
+    llam_runtime_t *rt = shard->runtime;
 
     if (rt == NULL) {
         return false;
     }
 
-    if (nm_runtime_steal_pause_active(rt)) {
+    if (llam_runtime_steal_pause_active(rt)) {
         atomic_store_explicit(&shard->steal_pause_ack, 1U, memory_order_release);
     } else {
         atomic_store_explicit(&shard->steal_pause_ack, 0U, memory_order_release);
     }
 
-    if (!nm_shard_merge_pause_requested(shard)) {
+    if (!llam_shard_merge_pause_requested(shard)) {
         return false;
     }
 
     atomic_store_explicit(&shard->merge_pause_ack, 1U, memory_order_release);
-    while (nm_shard_merge_pause_requested(shard)) {
+    while (llam_shard_merge_pause_requested(shard)) {
         if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
             break;
         }
-        nm_idle_wait(shard);
-        if (nm_runtime_steal_pause_active(rt)) {
+        llam_idle_wait(shard);
+        if (llam_runtime_steal_pause_active(rt)) {
             atomic_store_explicit(&shard->steal_pause_ack, 1U, memory_order_release);
         } else {
             atomic_store_explicit(&shard->steal_pause_ack, 0U, memory_order_release);
@@ -190,7 +190,7 @@ static bool nm_shard_pause_for_merge(nm_shard_t *shard) {
  * @param shard Scheduler shard owned by the helper.
  * @return true when no timers require the helper to use the ordinary idle path.
  */
-static bool nm_opaque_helper_can_opaque_wait(nm_shard_t *shard) {
+static bool llam_opaque_helper_can_opaque_wait(llam_shard_t *shard) {
     return atomic_load_explicit(&shard->timer_count, memory_order_acquire) == 0U;
 }
 
@@ -202,17 +202,17 @@ static bool nm_opaque_helper_can_opaque_wait(nm_shard_t *shard) {
  * @note Caller holds shard->opaque_lock.  The function briefly publishes
  *       opaque-helper wait state so wake producers can avoid lost signals.
  */
-static void nm_opaque_helper_wait_for_signal_locked(nm_shard_t *shard) {
+static void llam_opaque_helper_wait_for_signal_locked(llam_shard_t *shard) {
     atomic_store_explicit(&shard->opaque_helper_opaque_wait, 1U, memory_order_release);
     if (atomic_exchange_explicit(&shard->event_pending, 0U, memory_order_acq_rel) != 0U) {
         atomic_store_explicit(&shard->opaque_helper_opaque_wait, 0U, memory_order_release);
-        shard->last_idle_wake_ns = nm_now_ns();
+        shard->last_idle_wake_ns = llam_now_ns();
         return;
     }
-    nm_opaque_wake_wait(shard);
+    llam_opaque_wake_wait(shard);
     atomic_store_explicit(&shard->opaque_helper_opaque_wait, 0U, memory_order_release);
     if (atomic_exchange_explicit(&shard->event_pending, 0U, memory_order_acq_rel) != 0U) {
-        shard->last_idle_wake_ns = nm_now_ns();
+        shard->last_idle_wake_ns = llam_now_ns();
     }
 }
 #endif
@@ -229,82 +229,83 @@ static void nm_opaque_helper_wait_for_signal_locked(nm_shard_t *shard) {
  * @param shard Scheduler shard assigned to this worker.
  *
  * @note This function never runs inside a LLAM task.  It owns
- *       g_nm_tls_scheduler_ctx for its worker thread.
+ *       g_llam_tls_scheduler_ctx for its worker thread.
  */
-void nm_scheduler_loop(nm_shard_t *shard) {
-    nm_runtime_t *rt = shard->runtime;
+void llam_scheduler_loop(llam_shard_t *shard) {
+    llam_runtime_t *rt = shard->runtime;
 
-    g_nm_tls_shard = shard;
-    g_nm_tls_task = NULL;
-    g_nm_tls_scheduler_ctx = &shard->scheduler_ctx;
+    g_llam_tls_shard = shard;
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = &shard->scheduler_ctx;
     shard->thread = pthread_self();
     shard->primary_thread = pthread_self();
-    nm_bind_current_thread_to_cpu(shard->cpu_id);
-    nm_tune_scheduler_thread(shard, false);
-    if (nm_install_thread_signal_stack(shard) != 0) {
-        nm_record_fatal(rt, errno);
+    llam_bind_current_thread_to_cpu(shard->cpu_id);
+    llam_tune_scheduler_thread(shard, false);
+    if (llam_install_thread_signal_stack(shard) != 0) {
+        llam_record_fatal(rt, errno);
         return;
     }
 
     while (!atomic_load(&rt->stop_requested) || atomic_load(&rt->live_tasks) > 0U) {
-        nm_task_t *task;
+        llam_task_t *task;
         uint64_t started_ns;
         bool pressure;
 
-        if (nm_shard_pause_for_merge(shard)) {
+        if (llam_shard_pause_for_merge(shard)) {
             continue;
         }
         if (rt->experimental_dynamic_shards != 0U &&
             atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
-            if (!nm_shard_has_local_work(shard)) {
+            if (!llam_shard_has_local_work(shard)) {
                 if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
                     break;
                 }
-                nm_idle_wait(shard);
+                llam_idle_wait(shard);
                 continue;
             }
             atomic_store_explicit(&shard->online, 1U, memory_order_release);
-            nm_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
+            llam_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
         }
 
-        nm_allocator_quiescent(shard);
-        nm_drain_inject_queue(shard);
-        nm_fire_expired_timers(shard);
-        pressure = nm_runtime_pressure_signal(rt);
+        llam_allocator_quiescent(shard);
+        llam_drain_inject_queue(shard);
+        llam_fire_expired_timers(shard);
+        pressure = llam_runtime_pressure_signal(rt);
 
-        task = nm_take_local_task_with_pressure(shard, pressure);
+        task = llam_take_local_task_with_pressure(shard, pressure);
         if (task == NULL) {
             if (pressure) {
-                task = nm_take_overflow_task(rt);
+                task = llam_take_overflow_task(rt);
             }
         }
         if (task == NULL) {
-            task = nm_try_steal_task(rt, shard);
+            task = llam_try_steal_task(rt, shard);
         }
         if (task == NULL) {
-            task = nm_take_overflow_task(rt);
+            task = llam_take_overflow_task(rt);
         }
 
         if (task == NULL) {
             if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
                 break;
             }
-            nm_idle_wait(shard);
+            llam_idle_wait(shard);
             continue;
         }
 
-        started_ns = nm_set_task_running(shard, task);
+        started_ns = llam_set_task_running(shard, task);
         shard->metrics.ctx_switches += 1U;
-        nm_ctx_switch(g_nm_tls_scheduler_ctx, &task->ctx);
-        nm_clear_current_task(shard, started_ns != 0U ? nm_now_ns() - started_ns : 0U);
-        if (task->state == NM_TASK_STATE_DEAD) {
-            nm_task_release_stack(task);
-            nm_task_mark_reclaim_ready(task);
+        llam_switch_scheduler_to_task(g_llam_tls_scheduler_ctx, task);
+        llam_clear_current_task(shard, started_ns != 0U ? llam_now_ns() - started_ns : 0U);
+        if (task->state == LLAM_TASK_STATE_DEAD) {
+            llam_task_release_stack(task);
+            llam_task_mark_reclaim_ready(task);
+            llam_try_reclaim_detached_task(rt, task);
         }
     }
 
-    nm_uninstall_thread_signal_stack(shard);
-    g_nm_tls_scheduler_ctx = NULL;
+    llam_uninstall_thread_signal_stack(shard);
+    g_llam_tls_scheduler_ctx = NULL;
 }
 
 /**
@@ -318,23 +319,23 @@ void nm_scheduler_loop(nm_shard_t *shard) {
  * @param arg Scheduler shard pointer.
  * @return NULL when the helper exits.
  */
-void *nm_opaque_helper_main(void *arg) {
-    nm_shard_t *shard = arg;
-    nm_runtime_t *rt = shard->runtime;
+void *llam_opaque_helper_main(void *arg) {
+    llam_shard_t *shard = arg;
+    llam_runtime_t *rt = shard->runtime;
 
-    g_nm_tls_shard = shard;
-    g_nm_tls_task = NULL;
-    g_nm_tls_scheduler_ctx = &shard->opaque_scheduler_ctx;
-    nm_bind_current_thread_to_cpu(shard->cpu_id);
-    nm_tune_scheduler_thread(shard, true);
-    if (nm_install_thread_signal_stack(shard) != 0) {
+    g_llam_tls_shard = shard;
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = &shard->opaque_scheduler_ctx;
+    llam_bind_current_thread_to_cpu(shard->cpu_id);
+    llam_tune_scheduler_thread(shard, true);
+    if (llam_install_thread_signal_stack(shard) != 0) {
         pthread_mutex_lock(&shard->opaque_lock);
         shard->opaque_helper_failed = true;
         shard->opaque_helper_ready = false;
         atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-        nm_opaque_wake_signal(shard);
+        llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
-        nm_record_fatal(rt, errno);
+        llam_record_fatal(rt, errno);
         return NULL;
     }
 
@@ -343,7 +344,7 @@ void *nm_opaque_helper_main(void *arg) {
     shard->opaque_helper_ready = true;
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-    nm_opaque_wake_signal(shard);
+    llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
 
     for (;;) {
@@ -353,53 +354,53 @@ void *nm_opaque_helper_main(void *arg) {
                 shard->opaque_helper_active = false;
                 atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
                 shard->thread = shard->primary_thread;
-                nm_opaque_wake_signal(shard);
+                llam_opaque_wake_signal(shard);
             }
-            nm_opaque_wake_wait(shard);
+            llam_opaque_wake_wait(shard);
         }
         if (shard->opaque_helper_stop) {
             shard->opaque_helper_active = false;
             atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
             shard->thread = shard->primary_thread;
-            nm_opaque_wake_signal(shard);
+            llam_opaque_wake_signal(shard);
             pthread_mutex_unlock(&shard->opaque_lock);
             break;
         }
         shard->opaque_helper_active = true;
         atomic_store_explicit(&shard->opaque_helper_active_hint, 1U, memory_order_release);
         shard->thread = pthread_self();
-        nm_opaque_wake_signal(shard);
+        llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
 
         while (!atomic_load(&rt->stop_requested) || atomic_load(&rt->live_tasks) > 0U) {
-            nm_task_t *task;
+            llam_task_t *task;
             uint64_t started_ns;
             bool pressure;
             bool keep_running;
             bool stop_requested;
 
-            if (nm_shard_pause_for_merge(shard)) {
+            if (llam_shard_pause_for_merge(shard)) {
                 continue;
             }
-            nm_allocator_quiescent(shard);
-            nm_drain_inject_queue(shard);
-            nm_fire_expired_timers(shard);
-            pressure = nm_runtime_pressure_signal(rt);
+            llam_allocator_quiescent(shard);
+            llam_drain_inject_queue(shard);
+            llam_fire_expired_timers(shard);
+            pressure = llam_runtime_pressure_signal(rt);
 
-            task = nm_take_local_task_with_pressure(shard, pressure);
+            task = llam_take_local_task_with_pressure(shard, pressure);
             if (task == NULL) {
                 if (pressure) {
-                    task = nm_take_overflow_task(rt);
+                    task = llam_take_overflow_task(rt);
                 }
             }
             if (task == NULL) {
                 if (pressure) {
-                    task = nm_try_steal_task(rt, shard);
+                    task = llam_try_steal_task(rt, shard);
                 }
             }
             if (task == NULL) {
                 if (pressure) {
-                    task = nm_take_overflow_task(rt);
+                    task = llam_take_overflow_task(rt);
                 }
             }
 
@@ -411,13 +412,13 @@ void *nm_opaque_helper_main(void *arg) {
                     shard->opaque_helper_active = false;
                     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
                     shard->thread = shard->primary_thread;
-                    nm_opaque_wake_signal(shard);
+                    llam_opaque_wake_signal(shard);
                     pthread_mutex_unlock(&shard->opaque_lock);
                     break;
                 }
 #if defined(__linux__)
-                if (nm_opaque_helper_can_opaque_wait(shard)) {
-                    nm_opaque_helper_wait_for_signal_locked(shard);
+                if (llam_opaque_helper_can_opaque_wait(shard)) {
+                    llam_opaque_helper_wait_for_signal_locked(shard);
                     pthread_mutex_unlock(&shard->opaque_lock);
                     continue;
                 }
@@ -427,17 +428,18 @@ void *nm_opaque_helper_main(void *arg) {
                 if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
                     break;
                 }
-                nm_idle_wait(shard);
+                llam_idle_wait(shard);
                 continue;
             }
 
-            started_ns = nm_set_task_running(shard, task);
+            started_ns = llam_set_task_running(shard, task);
             shard->metrics.ctx_switches += 1U;
-            nm_ctx_switch(g_nm_tls_scheduler_ctx, &task->ctx);
-            nm_clear_current_task(shard, started_ns != 0U ? nm_now_ns() - started_ns : 0U);
-            if (task->state == NM_TASK_STATE_DEAD) {
-                nm_task_release_stack(task);
-                nm_task_mark_reclaim_ready(task);
+            llam_switch_scheduler_to_task(g_llam_tls_scheduler_ctx, task);
+            llam_clear_current_task(shard, started_ns != 0U ? llam_now_ns() - started_ns : 0U);
+            if (task->state == LLAM_TASK_STATE_DEAD) {
+                llam_task_release_stack(task);
+                llam_task_mark_reclaim_ready(task);
+                llam_try_reclaim_detached_task(rt, task);
             }
 
             pthread_mutex_lock(&shard->opaque_lock);
@@ -447,7 +449,7 @@ void *nm_opaque_helper_main(void *arg) {
                 shard->opaque_helper_active = false;
                 atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
                 shard->thread = shard->primary_thread;
-                nm_opaque_wake_signal(shard);
+                llam_opaque_wake_signal(shard);
                 pthread_mutex_unlock(&shard->opaque_lock);
                 if (stop_requested) {
                     goto out;
@@ -459,21 +461,21 @@ void *nm_opaque_helper_main(void *arg) {
     }
 
 out:
-    nm_uninstall_thread_signal_stack(shard);
-    g_nm_tls_scheduler_ctx = NULL;
+    llam_uninstall_thread_signal_stack(shard);
+    g_llam_tls_scheduler_ctx = NULL;
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
     shard->thread = shard->primary_thread;
-    nm_opaque_wake_signal(shard);
+    llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
     return NULL;
 }
 
-void *nm_shard_worker_main(void *arg) {
-    nm_shard_t *shard = arg;
+void *llam_shard_worker_main(void *arg) {
+    llam_shard_t *shard = arg;
 
-    nm_scheduler_loop(shard);
+    llam_scheduler_loop(shard);
     return NULL;
 }

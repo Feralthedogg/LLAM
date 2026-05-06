@@ -1,0 +1,86 @@
+name: Runtime Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Benchmark measurement rounds
+        required: false
+        default: "9"
+      warmup:
+        description: Benchmark warmup rounds
+        required: false
+        default: "1"
+  schedule:
+    - cron: "0 18 * * 0"
+
+jobs:
+  compare:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            cc: gcc
+          - name: macos-aarch64
+            runner: macos-14
+            cc: clang
+
+    env:
+      ROUNDS: ${{ github.event.inputs.rounds || '9' }}
+      WARMUP: ${{ github.event.inputs.warmup || '1' }}
+      OUT_DIR: .artifacts/bench-runtime/${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates git python3 python3-pip xz-utils
+
+      - name: Build liburing
+        if: runner.os == 'Linux'
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: Install graph dependencies
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python3 -m pip install --upgrade pip
+          python3 -m pip install matplotlib
+
+      - name: Compare LLAM, Go, and Tokio
+        run: |
+          . .venv/bin/activate
+          python3 scripts/bench_runtime_compare.py \
+            --runtime all \
+            --rounds "$ROUNDS" \
+            --warmup "$WARMUP" \
+            --timeout 240 \
+            --out-dir "$OUT_DIR"
+        env:
+          CC: ${{ matrix.cc }}
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: runtime-bench-${{ matrix.name }}
+          path: .artifacts/bench-runtime/${{ matrix.name }}
+          if-no-files-found: error

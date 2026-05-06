@@ -34,7 +34,7 @@
 #include "runtime_internal.h"
 
 /** Minimum allocation size where the experimental huge-allocation path is used. */
-#define NM_HUGE_ALLOC_MIN_BYTES (2U * 1024U * 1024U)
+#define LLAM_HUGE_ALLOC_MIN_BYTES (2U * 1024U * 1024U)
 
 /**
  * @brief Return the I/O buffer slab width for a shard.
@@ -43,21 +43,21 @@
  * @return Huge slab count when experimental huge allocation is requested,
  *         otherwise the normal buffer slab count.
  */
-static unsigned nm_io_buffer_slab_count(const nm_shard_t *shard) {
+static unsigned llam_io_buffer_slab_count(const llam_shard_t *shard) {
     if (shard != NULL && shard->runtime != NULL && shard->runtime->experimental_huge_alloc_requested != 0U) {
-        return NM_IO_BUFFER_HUGE_SLAB_COUNT;
+        return LLAM_IO_BUFFER_HUGE_SLAB_COUNT;
     }
-    return NM_IO_BUFFER_SLAB_COUNT;
+    return LLAM_IO_BUFFER_SLAB_COUNT;
 }
 
 /**
- * @brief Release storage allocated by ::nm_alloc_slab_storage.
+ * @brief Release storage allocated by ::llam_alloc_slab_storage.
  *
  * @param storage Base pointer returned by the slab allocator.
  * @param bytes   Allocation size, required for @c munmap.
  * @param mmapped Whether @p storage came from @c mmap instead of @c calloc.
  */
-static void nm_release_alloc_storage(void *storage, size_t bytes, bool mmapped) {
+static void llam_release_alloc_storage(void *storage, size_t bytes, bool mmapped) {
     if (storage == NULL) {
         return;
     }
@@ -82,15 +82,15 @@ static void nm_release_alloc_storage(void *storage, size_t bytes, bool mmapped) 
  * @return Zero-initialized storage on success, or NULL on failure with @c errno
  *         preserved from the failing allocator where possible.
  */
-static void *nm_alloc_slab_storage(nm_runtime_t *rt, size_t bytes, size_t *alloc_bytes, bool *mmapped) {
+static void *llam_alloc_slab_storage(llam_runtime_t *rt, size_t bytes, size_t *alloc_bytes, bool *mmapped) {
     if (alloc_bytes == NULL || mmapped == NULL) {
         errno = EINVAL;
         return NULL;
     }
 
-    if (rt != NULL && rt->experimental_huge_alloc_requested != 0U && bytes >= NM_HUGE_ALLOC_MIN_BYTES) {
-        long page_size = nm_page_size();
-        size_t mapped_bytes = nm_align_up(bytes, (size_t)page_size);
+    if (rt != NULL && rt->experimental_huge_alloc_requested != 0U && bytes >= LLAM_HUGE_ALLOC_MIN_BYTES) {
+        long page_size = llam_page_size();
+        size_t mapped_bytes = llam_align_up(bytes, (size_t)page_size);
         void *storage = mmap(NULL, mapped_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
         if (storage != MAP_FAILED) {
@@ -122,7 +122,7 @@ static void *nm_alloc_slab_storage(nm_runtime_t *rt, size_t bytes, size_t *alloc
 /**
  * @brief Add a newly allocated slab/chunk to allocator teardown bookkeeping.
  *
- * The allocator records every backing allocation so ::nm_allocator_destroy can
+ * The allocator records every backing allocation so ::llam_allocator_destroy can
  * release slabs in one pass. Task chunks carry extra metadata because each task
  * embeds a pthread mutex that must be destroyed before the backing storage is
  * unmapped/freed.
@@ -135,13 +135,13 @@ static void *nm_alloc_slab_storage(nm_runtime_t *rt, size_t bytes, size_t *alloc
  * @param item_count Number of typed items in the chunk when needed.
  * @return 0 on success, -1 on allocation failure.
  */
-int nm_allocator_record_chunk(nm_allocator_t *allocator,
+int llam_allocator_record_chunk(llam_allocator_t *allocator,
                               void *storage,
                               size_t bytes,
                               bool mmapped,
                               unsigned item_kind,
                               unsigned item_count) {
-    nm_alloc_chunk_t *chunk = calloc(1, sizeof(*chunk));
+    llam_alloc_chunk_t *chunk = calloc(1, sizeof(*chunk));
 
     if (chunk == NULL) {
         return -1;
@@ -176,7 +176,7 @@ int nm_allocator_record_chunk(nm_allocator_t *allocator,
  *
  * @param allocator Allocator to lock.
  */
-void nm_allocator_lock(nm_allocator_t *allocator) {
+void llam_allocator_lock(llam_allocator_t *allocator) {
     pthread_mutex_lock(&allocator->lock);
     allocator->lock_acquires += 1U;
 }
@@ -186,7 +186,7 @@ void nm_allocator_lock(nm_allocator_t *allocator) {
  *
  * @param allocator Allocator to unlock.
  */
-void nm_allocator_unlock(nm_allocator_t *allocator) {
+void llam_allocator_unlock(llam_allocator_t *allocator) {
     pthread_mutex_unlock(&allocator->lock);
 }
 
@@ -195,7 +195,7 @@ void nm_allocator_unlock(nm_allocator_t *allocator) {
  *
  * @param allocator Allocator storage to initialize.
  */
-void nm_allocator_init(nm_allocator_t *allocator) {
+void llam_allocator_init(llam_allocator_t *allocator) {
     memset(allocator, 0, sizeof(*allocator));
     (void)pthread_mutex_init(&allocator->lock, NULL);
     atomic_store(&allocator->remote_free_pending, 0U);
@@ -216,13 +216,13 @@ void nm_allocator_init(nm_allocator_t *allocator) {
  *       is released. Other slab kinds contain only plain storage owned by the
  *       runtime allocator.
  */
-void nm_allocator_destroy(nm_allocator_t *allocator) {
-    nm_alloc_chunk_t *chunk = allocator->chunks;
+void llam_allocator_destroy(llam_allocator_t *allocator) {
+    llam_alloc_chunk_t *chunk = allocator->chunks;
 
     while (chunk != NULL) {
-        nm_alloc_chunk_t *next = chunk->next;
-        if (chunk->item_kind == NM_ALLOC_CHUNK_TASK && chunk->storage != NULL) {
-            nm_task_t *tasks = chunk->storage;
+        llam_alloc_chunk_t *next = chunk->next;
+        if (chunk->item_kind == LLAM_ALLOC_CHUNK_TASK && chunk->storage != NULL) {
+            llam_task_t *tasks = chunk->storage;
 
             // Task locks are initialized when the slab is grown; they must be
             // destroyed even for task objects that never reached user code.
@@ -233,7 +233,7 @@ void nm_allocator_destroy(nm_allocator_t *allocator) {
                 }
             }
         }
-        nm_release_alloc_storage(chunk->storage, chunk->bytes, chunk->mmapped);
+        llam_release_alloc_storage(chunk->storage, chunk->bytes, chunk->mmapped);
         free(chunk);
         chunk = next;
     }
@@ -250,14 +250,14 @@ void nm_allocator_destroy(nm_allocator_t *allocator) {
  * @param rt Runtime whose blocking-job pool should grow.
  * @return 0 on success, -1 on allocation failure.
  */
-static int nm_block_job_grow_pool(nm_runtime_t *rt) {
+static int llam_block_job_grow_pool(llam_runtime_t *rt) {
     size_t alloc_bytes = 0U;
     bool mmapped = false;
-    nm_block_job_t *items = nm_alloc_slab_storage(rt, NM_BLOCK_JOB_SLAB_COUNT * sizeof(*items), &alloc_bytes, &mmapped);
-    nm_alloc_chunk_t *chunk;
-    nm_block_job_t *head;
-    nm_block_job_t *tail;
-    nm_block_job_t *old_head;
+    llam_block_job_t *items = llam_alloc_slab_storage(rt, LLAM_BLOCK_JOB_SLAB_COUNT * sizeof(*items), &alloc_bytes, &mmapped);
+    llam_alloc_chunk_t *chunk;
+    llam_block_job_t *head;
+    llam_block_job_t *tail;
+    llam_block_job_t *old_head;
     unsigned i;
 
     if (items == NULL) {
@@ -266,7 +266,7 @@ static int nm_block_job_grow_pool(nm_runtime_t *rt) {
 
     chunk = calloc(1, sizeof(*chunk));
     if (chunk == NULL) {
-        nm_release_alloc_storage(items, alloc_bytes, mmapped);
+        llam_release_alloc_storage(items, alloc_bytes, mmapped);
         return -1;
     }
 
@@ -282,7 +282,7 @@ static int nm_block_job_grow_pool(nm_runtime_t *rt) {
     // CAS so racing producers can continue using the global free list.
     head = NULL;
     tail = &items[0];
-    for (i = 0; i < NM_BLOCK_JOB_SLAB_COUNT; ++i) {
+    for (i = 0; i < LLAM_BLOCK_JOB_SLAB_COUNT; ++i) {
         items[i].next = head;
         head = &items[i];
     }
@@ -308,9 +308,9 @@ static int nm_block_job_grow_pool(nm_runtime_t *rt) {
  * @note This path is lock-free after the pool has free entries. It grows the
  *       pool lazily when contention drains the free list.
  */
-nm_block_job_t *nm_block_job_alloc(nm_runtime_t *rt) {
-    nm_block_job_t *job;
-    nm_block_job_t *next;
+llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt) {
+    llam_block_job_t *job;
+    llam_block_job_t *next;
 
     if (rt == NULL) {
         errno = EINVAL;
@@ -320,7 +320,7 @@ nm_block_job_t *nm_block_job_alloc(nm_runtime_t *rt) {
     for (;;) {
         job = atomic_load_explicit(&rt->block_job_free, memory_order_acquire);
         if (job == NULL) {
-            if (nm_block_job_grow_pool(rt) != 0) {
+            if (llam_block_job_grow_pool(rt) != 0) {
                 return NULL;
             }
             continue;
@@ -343,8 +343,8 @@ nm_block_job_t *nm_block_job_alloc(nm_runtime_t *rt) {
  * @param rt  Runtime that owns @p job.
  * @param job Job object to recycle.
  */
-void nm_block_job_release(nm_runtime_t *rt, nm_block_job_t *job) {
-    nm_block_job_t *head;
+void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
+    llam_block_job_t *head;
 
     if (rt == NULL || job == NULL) {
         return;
@@ -366,24 +366,24 @@ void nm_block_job_release(nm_runtime_t *rt, nm_block_job_t *job) {
  * @param shard Shard whose task free list should receive the new objects.
  * @return 0 on success, -1 on allocation or mutex-initialization failure.
  */
-int nm_allocator_grow_task_slab(nm_shard_t *shard) {
+int llam_allocator_grow_task_slab(llam_shard_t *shard) {
     size_t alloc_bytes = 0U;
     bool mmapped = false;
-    nm_task_t *items = nm_alloc_slab_storage(shard->runtime,
-                                             NM_TASK_SLAB_COUNT * sizeof(*items),
+    llam_task_t *items = llam_alloc_slab_storage(shard->runtime,
+                                             LLAM_TASK_SLAB_COUNT * sizeof(*items),
                                              &alloc_bytes,
                                              &mmapped);
     unsigned i;
 
     if (items == NULL) {
-        nm_allocator_lock(&shard->allocator);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
     // Task locks are part of the object contract, so initialize every item
     // before exposing the slab to the allocator free list.
-    for (i = 0; i < NM_TASK_SLAB_COUNT; ++i) {
+    for (i = 0; i < LLAM_TASK_SLAB_COUNT; ++i) {
         int rc = pthread_mutex_init(&items[i].lock, NULL);
 
         if (rc != 0) {
@@ -391,43 +391,43 @@ int nm_allocator_grow_task_slab(nm_shard_t *shard) {
                 i -= 1U;
                 pthread_mutex_destroy(&items[i].lock);
             }
-            nm_release_alloc_storage(items, alloc_bytes, mmapped);
-            nm_allocator_lock(&shard->allocator);
+            llam_release_alloc_storage(items, alloc_bytes, mmapped);
+            llam_allocator_lock(&shard->allocator);
             shard->allocator.slab_grow_failures += 1U;
-            nm_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->allocator);
             errno = rc;
             return -1;
         }
         items[i].lock_initialized = true;
     }
-    if (nm_allocator_record_chunk(&shard->allocator,
+    if (llam_allocator_record_chunk(&shard->allocator,
                                   items,
                                   alloc_bytes,
                                   mmapped,
-                                  NM_ALLOC_CHUNK_TASK,
-                                  NM_TASK_SLAB_COUNT) != 0) {
-        for (i = 0; i < NM_TASK_SLAB_COUNT; ++i) {
+                                  LLAM_ALLOC_CHUNK_TASK,
+                                  LLAM_TASK_SLAB_COUNT) != 0) {
+        for (i = 0; i < LLAM_TASK_SLAB_COUNT; ++i) {
             pthread_mutex_destroy(&items[i].lock);
             items[i].lock_initialized = false;
         }
-        nm_release_alloc_storage(items, alloc_bytes, mmapped);
-        nm_allocator_lock(&shard->allocator);
+        llam_release_alloc_storage(items, alloc_bytes, mmapped);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
 
     // Publish all items only after bookkeeping succeeds; otherwise teardown
     // would not know how to release this backing allocation.
-    nm_allocator_lock(&shard->allocator);
+    llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
-    for (i = 0; i < NM_TASK_SLAB_COUNT; ++i) {
+    for (i = 0; i < LLAM_TASK_SLAB_COUNT; ++i) {
         items[i].alloc_owner_shard = shard->id;
         items[i].alloc_next = shard->allocator.task_free;
         shard->allocator.task_free = &items[i];
         shard->allocator.task_allocs += 1U;
     }
-    nm_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->allocator);
     return 0;
 }
 
@@ -439,7 +439,7 @@ int nm_allocator_grow_task_slab(nm_shard_t *shard) {
  *
  * @param rt Runtime whose shard task caches should be prefilled.
  */
-void nm_runtime_prewarm_task_allocators(nm_runtime_t *rt) {
+void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt) {
     const char *value;
     unsigned target = 128U;
     unsigned shard_id;
@@ -448,7 +448,7 @@ void nm_runtime_prewarm_task_allocators(nm_runtime_t *rt) {
     if (rt == NULL || rt->shards == NULL || rt->active_shards == 0U) {
         return;
     }
-    value = nm_env_get("LLAM_TASK_CACHE_PREWARM");
+    value = llam_env_get("LLAM_TASK_CACHE_PREWARM");
     if (value != NULL && value[0] != '\0') {
         char *end = NULL;
         unsigned long parsed = strtoul(value, &end, 10);
@@ -463,14 +463,14 @@ void nm_runtime_prewarm_task_allocators(nm_runtime_t *rt) {
     if (target == 0U) {
         return;
     }
-    slabs = (target + NM_TASK_SLAB_COUNT - 1U) / NM_TASK_SLAB_COUNT;
+    slabs = (target + LLAM_TASK_SLAB_COUNT - 1U) / LLAM_TASK_SLAB_COUNT;
     // Prewarm evenly per shard so first-use latency does not concentrate on
     // shard zero during spawn-heavy startup benchmarks.
     for (shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
         unsigned i;
 
         for (i = 0U; i < slabs; ++i) {
-            if (nm_allocator_grow_task_slab(&rt->shards[shard_id]) != 0) {
+            if (llam_allocator_grow_task_slab(&rt->shards[shard_id]) != 0) {
                 return;
             }
         }
@@ -483,38 +483,38 @@ void nm_runtime_prewarm_task_allocators(nm_runtime_t *rt) {
  * @param shard Shard whose wait-node cache should grow.
  * @return 0 on success, -1 on allocation failure.
  */
-int nm_allocator_grow_wait_slab(nm_shard_t *shard) {
+int llam_allocator_grow_wait_slab(llam_shard_t *shard) {
     size_t alloc_bytes = 0U;
     bool mmapped = false;
-    nm_wait_node_t *items = nm_alloc_slab_storage(shard->runtime,
-                                                  NM_WAIT_NODE_SLAB_COUNT * sizeof(*items),
+    llam_wait_node_t *items = llam_alloc_slab_storage(shard->runtime,
+                                                  LLAM_WAIT_NODE_SLAB_COUNT * sizeof(*items),
                                                   &alloc_bytes,
                                                   &mmapped);
     unsigned i;
 
     if (items == NULL) {
-        nm_allocator_lock(&shard->allocator);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
-    if (nm_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, NM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
-        nm_release_alloc_storage(items, alloc_bytes, mmapped);
-        nm_allocator_lock(&shard->allocator);
+    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+        llam_release_alloc_storage(items, alloc_bytes, mmapped);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
 
-    nm_allocator_lock(&shard->allocator);
+    llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
-    for (i = 0; i < NM_WAIT_NODE_SLAB_COUNT; ++i) {
+    for (i = 0; i < LLAM_WAIT_NODE_SLAB_COUNT; ++i) {
         items[i].owner_shard = shard->id;
         items[i].alloc_next = shard->allocator.wait_free;
         shard->allocator.wait_free = &items[i];
         shard->allocator.wait_allocs += 1U;
     }
-    nm_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->allocator);
     return 0;
 }
 
@@ -524,38 +524,38 @@ int nm_allocator_grow_wait_slab(nm_shard_t *shard) {
  * @param shard Shard whose timer-node cache should grow.
  * @return 0 on success, -1 on allocation failure.
  */
-int nm_allocator_grow_timer_slab(nm_shard_t *shard) {
+int llam_allocator_grow_timer_slab(llam_shard_t *shard) {
     size_t alloc_bytes = 0U;
     bool mmapped = false;
-    nm_timer_node_t *items = nm_alloc_slab_storage(shard->runtime,
-                                                   NM_TIMER_NODE_SLAB_COUNT * sizeof(*items),
+    llam_timer_node_t *items = llam_alloc_slab_storage(shard->runtime,
+                                                   LLAM_TIMER_NODE_SLAB_COUNT * sizeof(*items),
                                                    &alloc_bytes,
                                                    &mmapped);
     unsigned i;
 
     if (items == NULL) {
-        nm_allocator_lock(&shard->allocator);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
-    if (nm_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, NM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
-        nm_release_alloc_storage(items, alloc_bytes, mmapped);
-        nm_allocator_lock(&shard->allocator);
+    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+        llam_release_alloc_storage(items, alloc_bytes, mmapped);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
 
-    nm_allocator_lock(&shard->allocator);
+    llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
-    for (i = 0; i < NM_TIMER_NODE_SLAB_COUNT; ++i) {
+    for (i = 0; i < LLAM_TIMER_NODE_SLAB_COUNT; ++i) {
         items[i].owner_shard = shard->id;
         items[i].alloc_next = shard->allocator.timer_free;
         shard->allocator.timer_free = &items[i];
         shard->allocator.timer_allocs += 1U;
     }
-    nm_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->allocator);
     return 0;
 }
 
@@ -565,32 +565,32 @@ int nm_allocator_grow_timer_slab(nm_shard_t *shard) {
  * @param shard Shard whose I/O request cache should grow.
  * @return 0 on success, -1 on allocation failure.
  */
-int nm_allocator_grow_io_req_slab(nm_shard_t *shard) {
+int llam_allocator_grow_io_req_slab(llam_shard_t *shard) {
     size_t alloc_bytes = 0U;
     bool mmapped = false;
-    nm_io_req_t *items = nm_alloc_slab_storage(shard->runtime,
-                                               NM_IO_REQ_SLAB_COUNT * sizeof(*items),
+    llam_io_req_t *items = llam_alloc_slab_storage(shard->runtime,
+                                               LLAM_IO_REQ_SLAB_COUNT * sizeof(*items),
                                                &alloc_bytes,
                                                &mmapped);
     unsigned i;
 
     if (items == NULL) {
-        nm_allocator_lock(&shard->allocator);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
-    if (nm_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, NM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
-        nm_release_alloc_storage(items, alloc_bytes, mmapped);
-        nm_allocator_lock(&shard->allocator);
+    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+        llam_release_alloc_storage(items, alloc_bytes, mmapped);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
 
-    nm_allocator_lock(&shard->allocator);
+    llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
-    for (i = 0; i < NM_IO_REQ_SLAB_COUNT; ++i) {
+    for (i = 0; i < LLAM_IO_REQ_SLAB_COUNT; ++i) {
         // Requests track both logical owner and allocation owner because live
         // I/O can migrate/rehome while the backing object still returns to the
         // original slab owner.
@@ -602,7 +602,7 @@ int nm_allocator_grow_io_req_slab(nm_shard_t *shard) {
         shard->allocator.io_req_free = &items[i];
         shard->allocator.io_req_allocs += 1U;
     }
-    nm_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->allocator);
     return 0;
 }
 
@@ -612,42 +612,42 @@ int nm_allocator_grow_io_req_slab(nm_shard_t *shard) {
  * @param shard Shard whose I/O buffer cache should grow.
  * @return 0 on success, -1 on allocation failure.
  */
-int nm_allocator_grow_io_buffer_slab(nm_shard_t *shard) {
+int llam_allocator_grow_io_buffer_slab(llam_shard_t *shard) {
     size_t alloc_bytes = 0U;
     bool mmapped = false;
-    unsigned slab_count = nm_io_buffer_slab_count(shard);
-    nm_io_buffer_t *items = nm_alloc_slab_storage(shard->runtime,
+    unsigned slab_count = llam_io_buffer_slab_count(shard);
+    llam_io_buffer_t *items = llam_alloc_slab_storage(shard->runtime,
                                                   (size_t)slab_count * sizeof(*items),
                                                   &alloc_bytes,
                                                   &mmapped);
     unsigned i;
 
     if (items == NULL) {
-        nm_allocator_lock(&shard->allocator);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
-    if (nm_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, NM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
-        nm_release_alloc_storage(items, alloc_bytes, mmapped);
-        nm_allocator_lock(&shard->allocator);
+    if (llam_allocator_record_chunk(&shard->allocator, items, alloc_bytes, mmapped, LLAM_ALLOC_CHUNK_GENERIC, 0U) != 0) {
+        llam_release_alloc_storage(items, alloc_bytes, mmapped);
+        llam_allocator_lock(&shard->allocator);
         shard->allocator.slab_grow_failures += 1U;
-        nm_allocator_unlock(&shard->allocator);
+        llam_allocator_unlock(&shard->allocator);
         return -1;
     }
 
-    nm_allocator_lock(&shard->allocator);
+    llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
     for (i = 0; i < slab_count; ++i) {
         // Buffer objects start with inline storage. Larger request payloads may
         // attach external storage later and release it before cache return.
         items[i].alloc_owner_shard = shard->id;
         items[i].data = items[i].inline_data;
-        items[i].capacity = NM_IO_BUFFER_INLINE_BYTES;
+        items[i].capacity = LLAM_IO_BUFFER_INLINE_BYTES;
         items[i].alloc_next = shard->allocator.io_buffer_free;
         shard->allocator.io_buffer_free = &items[i];
         shard->allocator.io_buffer_allocs += 1U;
     }
-    nm_allocator_unlock(&shard->allocator);
+    llam_allocator_unlock(&shard->allocator);
     return 0;
 }

@@ -35,6 +35,7 @@ mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/l
 
 printf '%s\n' "$version" > "$stage/VERSION"
 cp "$root_dir/LICENSE" "$root_dir/README.md" "$stage/"
+cp "$root_dir/scripts/install.sh" "$stage/"
 cp -R "$root_dir/docs/." "$stage/docs/"
 cp -R "$root_dir/include/llam" "$stage/include/"
 cp "$root_dir/include/nm_runtime.h" "$root_dir/include/nm_platform.h" "$stage/include/"
@@ -57,6 +58,9 @@ case "$(uname -s)" in
         exit 1
         ;;
 esac
+
+LLAM_VERSION="$library_version" LLAM_ABI_MAJOR="$abi_major" \
+    "$root_dir/scripts/generate_sdk_metadata.sh" "$stage" "$target"
 
 tar -C "$out_dir" -cJf "$archive" "$package_name"
 if command -v sha256sum >/dev/null 2>&1; then

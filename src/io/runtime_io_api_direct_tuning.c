@@ -31,12 +31,12 @@
  *
  * @return true when @c LLAM_DIRECT_BLOCKING_IO is set to a non-zero value.
  */
-static bool nm_direct_blocking_io_enabled(void) {
+static bool llam_direct_blocking_io_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_DIRECT_BLOCKING_IO");
+        const char *env = llam_env_get("LLAM_DIRECT_BLOCKING_IO");
 
         // Cache env parsing once; this predicate is on I/O hot paths.
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -51,12 +51,12 @@ static bool nm_direct_blocking_io_enabled(void) {
  * @param timeout_ms Requested poll timeout.
  * @return true when direct blocking poll should be attempted.
  */
-static bool nm_direct_blocking_poll_enabled(int timeout_ms) {
+static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_DIRECT_BLOCKING_POLL");
+        const char *env = llam_env_get("LLAM_DIRECT_BLOCKING_POLL");
 
         if (env != NULL && env[0] != '\0') {
             value = strcmp(env, "0") != 0 ? 1 : 0;
@@ -71,9 +71,9 @@ static bool nm_direct_blocking_poll_enabled(int timeout_ms) {
     }
     if (value == 2) {
 #if defined(__linux__)
-        nm_runtime_t *rt = &g_nm_runtime;
-        nm_shard_t *shard = g_nm_tls_shard;
-        nm_node_t *node;
+        llam_runtime_t *rt = &g_llam_runtime;
+        llam_shard_t *shard = g_llam_tls_shard;
+        llam_node_t *node;
 
         // Auto mode on Linux uses direct blocking poll for long finite waits,
         // and for infinite waits only when the backend poll path is unavailable.
@@ -99,12 +99,12 @@ static bool nm_direct_blocking_poll_enabled(int timeout_ms) {
  *
  * @return Millisecond threshold; 0 disables redirect hinting.
  */
-static unsigned nm_direct_poll_redirect_timeout_ms(void) {
+static unsigned llam_direct_poll_redirect_timeout_ms(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_IO_POLL_REDIRECT_TIMEOUT_MS");
+        const char *env = llam_env_get("LLAM_IO_POLL_REDIRECT_TIMEOUT_MS");
 
 #if defined(__linux__)
         value = 1000;
@@ -136,12 +136,12 @@ static unsigned nm_direct_poll_redirect_timeout_ms(void) {
  *
  * @return true if small blocking socket writes may yield after completion.
  */
-static bool nm_write_handoff_enabled(void) {
+static bool llam_write_handoff_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_IO_WRITE_HANDOFF");
+        const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF");
 
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -160,12 +160,12 @@ static bool nm_write_handoff_enabled(void) {
  *
  * @return true if enabled by platform default or environment override.
  */
-bool nm_io_coop_yield_enabled(void) {
+bool llam_io_coop_yield_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_IO_COOP_YIELD");
+        const char *env = llam_env_get("LLAM_IO_COOP_YIELD");
 
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -184,12 +184,12 @@ bool nm_io_coop_yield_enabled(void) {
  *
  * @return true if enabled by platform default or environment override.
  */
-bool nm_io_poll_coop_yield_enabled(void) {
+bool llam_io_poll_coop_yield_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_IO_POLL_COOP_YIELD");
+        const char *env = llam_env_get("LLAM_IO_POLL_COOP_YIELD");
 
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -208,12 +208,12 @@ bool nm_io_poll_coop_yield_enabled(void) {
  *
  * @return true if enabled.
  */
-bool nm_io_poll_extra_yield_enabled(void) {
+bool llam_io_poll_extra_yield_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_IO_POLL_EXTRA_YIELD");
+        const char *env = llam_env_get("LLAM_IO_POLL_EXTRA_YIELD");
 
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -230,12 +230,12 @@ bool nm_io_poll_extra_yield_enabled(void) {
  *
  * @return true if enabled.
  */
-static bool nm_poll_socket_peek_enabled(void) {
+static bool llam_poll_socket_peek_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_POLL_SOCKET_PEEK");
+        const char *env = llam_env_get("LLAM_POLL_SOCKET_PEEK");
 
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -253,7 +253,7 @@ static bool nm_poll_socket_peek_enabled(void) {
  * @param fd File descriptor.
  * @return true if it is a socket without O_NONBLOCK.
  */
-static bool nm_fd_is_blocking_socket(int fd) {
+static bool llam_fd_is_blocking_socket(int fd) {
     int flags;
     int so_type = 0;
     socklen_t so_type_len = sizeof(so_type);
@@ -271,7 +271,7 @@ static bool nm_fd_is_blocking_socket(int fd) {
  * @param fd File descriptor.
  * @return true if O_NONBLOCK is not set.
  */
-static bool nm_fd_is_blocking(int fd) {
+static bool llam_fd_is_blocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
 
     return flags >= 0 && (flags & O_NONBLOCK) == 0;
@@ -282,20 +282,20 @@ static bool nm_fd_is_blocking(int fd) {
  *
  * @return true if local queues are non-empty.
  */
-bool nm_io_shard_has_local_work(void) {
+bool llam_io_shard_has_local_work(void) {
     bool has_local_work;
-    nm_shard_t *shard = g_nm_tls_shard;
+    llam_shard_t *shard = g_llam_tls_shard;
 
     if (shard == NULL) {
         return false;
     }
-    if (nm_norm_queue_depth(shard) > 0U) {
+    if (llam_norm_queue_depth(shard) > 0U) {
         return true;
     }
     // Recheck under shard lock to include hot/inject queues and avoid missing a
     // just-enqueued task when deciding whether to hand off after a write.
     pthread_mutex_lock(&shard->lock);
-    has_local_work = nm_norm_queue_depth(shard) > 0U || shard->hot_q.depth > 0U || shard->inject_q.depth > 0U;
+    has_local_work = llam_norm_queue_depth(shard) > 0U || shard->hot_q.depth > 0U || shard->inject_q.depth > 0U;
     pthread_mutex_unlock(&shard->lock);
     return has_local_work;
 }
@@ -305,12 +305,12 @@ bool nm_io_shard_has_local_work(void) {
  *
  * @return true if handoff should be skipped when the shard is otherwise idle.
  */
-static bool nm_write_handoff_requires_work(void) {
+static bool llam_write_handoff_requires_work(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_IO_WRITE_HANDOFF_REQUIRE_WORK");
+        const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_REQUIRE_WORK");
 
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
@@ -323,12 +323,12 @@ static bool nm_write_handoff_requires_work(void) {
  *
  * @return Nanosecond window; 0 disables suppression.
  */
-static uint64_t nm_write_handoff_recent_yield_ns(void) {
+static uint64_t llam_write_handoff_recent_yield_ns(void) {
     static atomic_ullong cached = ATOMIC_VAR_INIT(UINT64_MAX);
     uint64_t value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value == UINT64_MAX) {
-        const char *env = nm_env_get("LLAM_IO_WRITE_HANDOFF_RECENT_YIELD_NS");
+        const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_RECENT_YIELD_NS");
 
 #if defined(__APPLE__)
         value = 1000000ULL;
@@ -355,12 +355,12 @@ static uint64_t nm_write_handoff_recent_yield_ns(void) {
  *
  * @return true if fd validation should run before yielding.
  */
-static bool nm_write_handoff_check_fd_enabled(void) {
+static bool llam_write_handoff_check_fd_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_IO_WRITE_HANDOFF_CHECK_FD");
+        const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_CHECK_FD");
 
 #if defined(__APPLE__) || defined(__linux__)
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -379,48 +379,48 @@ static bool nm_write_handoff_check_fd_enabled(void) {
  * @param count        Bytes attempted/written by the caller.
  * @param known_socket Whether caller already knows @p fd is a socket.
  */
-void nm_maybe_handoff_after_socket_write(int fd, size_t count, bool known_socket) {
+void llam_maybe_handoff_after_socket_write(int fd, size_t count, bool known_socket) {
     uint64_t recent_yield_ns;
 
-    if (!nm_write_handoff_enabled() || count > 256U || g_nm_tls_task == NULL || g_nm_tls_shard == NULL) {
+    if (!llam_write_handoff_enabled() || count > 256U || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
         return;
     }
-    recent_yield_ns = nm_write_handoff_recent_yield_ns();
-    if (recent_yield_ns > 0U && g_nm_tls_task->last_yield_ns > 0U) {
-        // nm_yield uses UINT64_MAX to mark the first post-yield write without a
+    recent_yield_ns = llam_write_handoff_recent_yield_ns();
+    if (recent_yield_ns > 0U && g_llam_tls_task->last_yield_ns > 0U) {
+        // llam_yield uses UINT64_MAX to mark the first post-yield write without a
         // clock read.
-        if (g_nm_tls_task->last_yield_ns == UINT64_MAX) {
-            g_nm_tls_task->last_yield_ns = 0U;
+        if (g_llam_tls_task->last_yield_ns == UINT64_MAX) {
+            g_llam_tls_task->last_yield_ns = 0U;
             return;
         } else {
-            uint64_t now_ns = nm_now_ns();
+            uint64_t now_ns = llam_now_ns();
 
-            if (now_ns >= g_nm_tls_task->last_yield_ns && now_ns - g_nm_tls_task->last_yield_ns <= recent_yield_ns) {
+            if (now_ns >= g_llam_tls_task->last_yield_ns && now_ns - g_llam_tls_task->last_yield_ns <= recent_yield_ns) {
                 return;
             }
         }
     }
-    if (nm_write_handoff_requires_work()) {
-        if (!nm_io_shard_has_local_work()) {
+    if (llam_write_handoff_requires_work()) {
+        if (!llam_io_shard_has_local_work()) {
             return;
         }
     }
-    if (known_socket && !nm_write_handoff_check_fd_enabled()) {
-        g_nm_tls_io_handoff_yield += 1U;
-        nm_yield();
-        g_nm_tls_io_handoff_yield -= 1U;
+    if (known_socket && !llam_write_handoff_check_fd_enabled()) {
+        g_llam_tls_io_handoff_yield += 1U;
+        llam_yield();
+        g_llam_tls_io_handoff_yield -= 1U;
         return;
     }
     if (known_socket) {
-        if (!nm_fd_is_blocking(fd)) {
+        if (!llam_fd_is_blocking(fd)) {
             return;
         }
-    } else if (!nm_fd_is_blocking_socket(fd)) {
+    } else if (!llam_fd_is_blocking_socket(fd)) {
         return;
     }
-    g_nm_tls_io_handoff_yield += 1U;
-    nm_yield();
-    g_nm_tls_io_handoff_yield -= 1U;
+    g_llam_tls_io_handoff_yield += 1U;
+    llam_yield();
+    g_llam_tls_io_handoff_yield -= 1U;
 }
 
 /**
@@ -428,7 +428,7 @@ void nm_maybe_handoff_after_socket_write(int fd, size_t count, bool known_socket
  *
  * @return 1 if handled, 0 if caller should use normal path, -1 on error.
  */
-int nm_try_direct_blocking_rw(int fd,
+int llam_try_direct_blocking_rw(int fd,
                                      void *buf,
                                      size_t count,
                                      bool write_op,
@@ -441,17 +441,17 @@ int nm_try_direct_blocking_rw(int fd,
     if (result_out != NULL) {
         *result_out = -1;
     }
-    if (!nm_direct_blocking_io_enabled() || g_nm_tls_task == NULL || g_nm_tls_shard == NULL ||
-        g_nm_tls_task->cancel_token != NULL || !nm_fd_is_blocking_socket(fd)) {
+    if (!llam_direct_blocking_io_enabled() || g_llam_tls_task == NULL || g_llam_tls_shard == NULL ||
+        g_llam_tls_task->cancel_token != NULL || !llam_fd_is_blocking_socket(fd)) {
         return 0;
     }
-    if (nm_enter_blocking() != 0) {
+    if (llam_enter_blocking() != 0) {
         return -1;
     }
-    if (!g_nm_tls_task->opaque_uses_helper && !g_nm_tls_task->opaque_uses_redirect) {
+    if (!g_llam_tls_task->opaque_uses_helper && !g_llam_tls_task->opaque_uses_redirect) {
         // Runtime policy refused helper/redirect compensation, so do not block
         // the scheduler thread directly.
-        (void)nm_leave_blocking();
+        (void)llam_leave_blocking();
         return 0;
     }
 
@@ -473,7 +473,7 @@ int nm_try_direct_blocking_rw(int fd,
         break;
     }
 
-    if (nm_leave_blocking() != 0 && rc >= 0) {
+    if (llam_leave_blocking() != 0 && rc >= 0) {
         return -1;
     }
     if (rc >= 0) {
@@ -491,12 +491,12 @@ int nm_try_direct_blocking_rw(int fd,
  *
  * @return 1 ready, 0 not ready, or INT_MIN when unsupported/unhandled.
  */
-int nm_try_socket_pollin_now(int fd, short events, short *revents) {
+int llam_try_socket_pollin_now(int fd, short events, short *revents) {
 #if defined(MSG_PEEK) && defined(MSG_DONTWAIT)
     char byte;
     ssize_t rc;
 
-    if (!nm_poll_socket_peek_enabled() || (events & POLLIN) == 0 || (events & POLLOUT) != 0) {
+    if (!llam_poll_socket_peek_enabled() || (events & POLLIN) == 0 || (events & POLLOUT) != 0) {
         return INT_MIN;
     }
     for (;;) {
@@ -535,38 +535,38 @@ int nm_try_socket_pollin_now(int fd, short events, short *revents) {
  * @return poll result if handled, INT_MIN if caller should use normal path, or
  *         -1 on error.
  */
-int nm_try_direct_blocking_poll(int fd, short events, int timeout_ms, short *revents) {
+int llam_try_direct_blocking_poll(int fd, short events, int timeout_ms, short *revents) {
     struct pollfd pfd;
     int rc;
     int saved_errno = 0;
     unsigned redirect_threshold_ms;
     bool redirect_hint = false;
 
-    if (!nm_direct_blocking_poll_enabled(timeout_ms) || timeout_ms == 0 || g_nm_tls_task == NULL || g_nm_tls_shard == NULL ||
-        g_nm_tls_task->cancel_token != NULL || !nm_fd_is_blocking(fd)) {
+    if (!llam_direct_blocking_poll_enabled(timeout_ms) || timeout_ms == 0 || g_llam_tls_task == NULL || g_llam_tls_shard == NULL ||
+        g_llam_tls_task->cancel_token != NULL || !llam_fd_is_blocking(fd)) {
         return INT_MIN;
     }
-    redirect_threshold_ms = nm_direct_poll_redirect_timeout_ms();
+    redirect_threshold_ms = llam_direct_poll_redirect_timeout_ms();
     if (timeout_ms > 0 && redirect_threshold_ms > 0U && (unsigned)timeout_ms < redirect_threshold_ms) {
         return INT_MIN;
     }
     if (timeout_ms > 0 && redirect_threshold_ms > 0U && (unsigned)timeout_ms >= redirect_threshold_ms) {
         // Long finite polls benefit from redirecting this shard's runnable work
         // while the task blocks in the kernel.
-        g_nm_tls_opaque_redirect_hint += 1U;
+        g_llam_tls_opaque_redirect_hint += 1U;
         redirect_hint = true;
     }
-    if (nm_enter_blocking() != 0) {
-        if (redirect_hint && g_nm_tls_opaque_redirect_hint > 0U) {
-            g_nm_tls_opaque_redirect_hint -= 1U;
+    if (llam_enter_blocking() != 0) {
+        if (redirect_hint && g_llam_tls_opaque_redirect_hint > 0U) {
+            g_llam_tls_opaque_redirect_hint -= 1U;
         }
         return -1;
     }
-    if (redirect_hint && g_nm_tls_opaque_redirect_hint > 0U) {
-        g_nm_tls_opaque_redirect_hint -= 1U;
+    if (redirect_hint && g_llam_tls_opaque_redirect_hint > 0U) {
+        g_llam_tls_opaque_redirect_hint -= 1U;
     }
-    if (!g_nm_tls_task->opaque_uses_helper && !g_nm_tls_task->opaque_uses_redirect) {
-        (void)nm_leave_blocking();
+    if (!g_llam_tls_task->opaque_uses_helper && !g_llam_tls_task->opaque_uses_redirect) {
+        (void)llam_leave_blocking();
         return INT_MIN;
     }
 
@@ -579,7 +579,7 @@ int nm_try_direct_blocking_poll(int fd, short events, int timeout_ms, short *rev
     if (rc < 0) {
         saved_errno = errno;
     }
-    if (nm_leave_blocking() != 0 && rc >= 0) {
+    if (llam_leave_blocking() != 0 && rc >= 0) {
         return -1;
     }
     if (revents != NULL) {

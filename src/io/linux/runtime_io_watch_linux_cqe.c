@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_linux_cqe.c
+ * @file src/io/linux/runtime_io_watch_linux_cqe.c
  * @brief Linux io_uring completion processing and request wakeup paths.
  *
  * @details
@@ -32,27 +32,27 @@
  * @param node Node whose ring produced the CQE.
  * @param cqe  Completion entry; consumed by this function.
  */
-void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
+void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
     uint64_t user_data = cqe->user_data;
     int res = cqe->res;
     unsigned cqe_flags = cqe->flags;
-    unsigned tag = nm_io_udata_tag(user_data);
+    unsigned tag = llam_io_udata_tag(user_data);
 
     io_uring_cqe_seen(&node->ring, cqe);
     // Low bits in user_data identify the object type without needing separate
     // completion queues per operation kind.
     switch (tag) {
-        case NM_IO_UDATA_REQ: {
-            nm_io_req_t *req = nm_io_udata_ptr(user_data);
+        case LLAM_IO_UDATA_REQ: {
+            llam_io_req_t *req = llam_io_udata_ptr(user_data);
 
             if (req != NULL) {
-                nm_io_complete_req(node, req, res, cqe_flags, true);
+                llam_io_complete_req(node, req, res, cqe_flags, true);
             }
             break;
         }
-        case NM_IO_UDATA_POLL_WATCH: {
-            nm_poll_watch_t *watch = nm_io_udata_ptr(user_data);
-            nm_io_req_t *waiters = NULL;
+        case LLAM_IO_UDATA_POLL_WATCH: {
+            llam_poll_watch_t *watch = llam_io_udata_ptr(user_data);
+            llam_io_req_t *waiters = NULL;
             bool release_pending = false;
             bool queue_activate = false;
             bool queue_deactivate = false;
@@ -80,15 +80,15 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     watch->deactivate_queued = false;
                     if (was_activating) {
                         watch->activating = true;
-                    } else if (nm_node_queue_control_locked(node, NM_IO_CONTROL_POLL_ACTIVATE, watch) == 0) {
+                    } else if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch) == 0) {
                         watch->activating = true;
                         queue_activate = true;
                     } else {
-                        waiters = nm_poll_watch_take_waiters(watch);
+                        waiters = llam_poll_watch_take_waiters(watch);
                         res = -ENOMEM;
                     }
                 } else {
-                    waiters = nm_poll_watch_take_waiters(watch);
+                    waiters = llam_poll_watch_take_waiters(watch);
                     watch->sticky_revents = 0;
                     if (watch->active) {
                         watch->active = false;
@@ -106,7 +106,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     watch->active = false;
                     release_pending = true;
                 }
-                waiters = nm_poll_watch_take_waiters(watch);
+                waiters = llam_poll_watch_take_waiters(watch);
                 if (waiters == NULL) {
                     if (watch->migrate_target_node_index != UINT_MAX &&
                         watch->migrate_target_node_index != node->index) {
@@ -137,19 +137,19 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 atomic_fetch_sub(&node->pending_ops, 1U);
             }
             if (queue_activate) {
-                nm_kick_node(node);
+                llam_kick_node(node);
             }
             if (live_target != UINT_MAX &&
-                !nm_forward_live_poll_watch_event(node, live_fd, live_events, live_target, (short)res)) {
+                !llam_forward_live_poll_watch_event(node, live_fd, live_events, live_target, (short)res)) {
                 bool fallback_kick = false;
 
                 pthread_mutex_lock(&node->watch_lock);
-                watch = nm_find_poll_watch_locked(node, live_fd, live_events);
+                watch = llam_find_poll_watch_locked(node, live_fd, live_events);
                 if (watch != NULL && watch->wait_head == NULL) {
                     watch->sticky_revents = (short)res;
                     if (watch->active && !watch->deactivate_queued) {
                         watch->deactivate_queued = true;
-                        if (nm_node_queue_control_locked(node, NM_IO_CONTROL_POLL_DEACTIVATE, watch) == 0) {
+                        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch) == 0) {
                             fallback_kick = true;
                         } else {
                             watch->deactivate_queued = false;
@@ -158,25 +158,25 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 }
                 pthread_mutex_unlock(&node->watch_lock);
                 if (fallback_kick) {
-                    nm_kick_node(node);
+                    llam_kick_node(node);
                 }
             }
             if (queue_deactivate) {
-                (void)nm_node_queue_control(node, NM_IO_CONTROL_POLL_DEACTIVATE, watch);
+                (void)llam_node_queue_control(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch);
             }
             while (waiters != NULL) {
-                nm_io_req_t *next = waiters->next;
+                llam_io_req_t *next = waiters->next;
 
                 waiters->next = NULL;
-                nm_io_complete_req(node, waiters, res, cqe_flags, false);
+                llam_io_complete_req(node, waiters, res, cqe_flags, false);
                 waiters = next;
             }
             break;
         }
-        case NM_IO_UDATA_ACCEPT_WATCH: {
-            nm_accept_watch_t *watch = nm_io_udata_ptr(user_data);
-            nm_io_req_t *waiter = NULL;
-            nm_io_req_t *waiters = NULL;
+        case LLAM_IO_UDATA_ACCEPT_WATCH: {
+            llam_accept_watch_t *watch = llam_io_udata_ptr(user_data);
+            llam_io_req_t *waiter = NULL;
+            llam_io_req_t *waiters = NULL;
             bool release_pending = false;
             bool queue_deactivate = false;
             unsigned live_target = UINT_MAX;
@@ -209,7 +209,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     watch->active = false;
                     release_pending = true;
                 }
-                waiter = nm_accept_watch_pop_waiter(watch);
+                waiter = llam_accept_watch_pop_waiter(watch);
                 if (waiter == NULL) {
                     if (watch->migrate_target_node_index != UINT_MAX &&
                         watch->migrate_target_node_index != node->index) {
@@ -222,7 +222,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                             queue_deactivate = true;
                         }
                     } else {
-                        nm_accept_watch_push_ready(watch, res);
+                        llam_accept_watch_push_ready(watch, res);
                         if (watch->active && !watch->deactivate_queued) {
                             watch->deactivate_queued = true;
                             queue_deactivate = true;
@@ -236,13 +236,13 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 atomic_fetch_sub(&node->pending_ops, 1U);
             }
             if (live_target != UINT_MAX) {
-                if (nm_forward_live_accept_watch_ready(node, live_fd, live_target, res)) {
+                if (llam_forward_live_accept_watch_ready(node, live_fd, live_target, res)) {
                     live_consumed = true;
                 } else {
                     pthread_mutex_lock(&node->watch_lock);
-                    watch = nm_find_accept_watch_locked(node, live_fd);
+                    watch = llam_find_accept_watch_locked(node, live_fd);
                     if (watch != NULL && watch->wait_head == NULL) {
-                        nm_accept_watch_push_ready(watch, res);
+                        llam_accept_watch_push_ready(watch, res);
                         live_consumed = true;
                     }
                     pthread_mutex_unlock(&node->watch_lock);
@@ -253,24 +253,24 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 }
             }
             if (queue_deactivate) {
-                (void)nm_node_queue_control(node, NM_IO_CONTROL_ACCEPT_DEACTIVATE, watch);
+                (void)llam_node_queue_control(node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch);
             }
             if (waiter != NULL) {
-                nm_io_complete_req(node, waiter, res, cqe_flags, false);
+                llam_io_complete_req(node, waiter, res, cqe_flags, false);
             }
             while (waiters != NULL) {
-                nm_io_req_t *next = waiters->next;
+                llam_io_req_t *next = waiters->next;
 
                 waiters->next = NULL;
-                nm_io_complete_req(node, waiters, res, cqe_flags, false);
+                llam_io_complete_req(node, waiters, res, cqe_flags, false);
                 waiters = next;
             }
             break;
         }
-        case NM_IO_UDATA_RECV_WATCH: {
-            nm_recv_watch_t *watch = nm_io_udata_ptr(user_data);
-            nm_io_req_t *waiter = NULL;
-            nm_io_req_t *waiters = NULL;
+        case LLAM_IO_UDATA_RECV_WATCH: {
+            llam_recv_watch_t *watch = llam_io_udata_ptr(user_data);
+            llam_io_req_t *waiter = NULL;
+            llam_io_req_t *waiters = NULL;
             bool release_pending = false;
             bool queue_deactivate = false;
             bool queued_ready = false;
@@ -318,7 +318,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     watch->active = false;
                     release_pending = true;
                 }
-                waiter = nm_recv_watch_pop_waiter(watch);
+                waiter = llam_recv_watch_pop_waiter(watch);
                 if (waiter == NULL) {
                     if (watch->migrate_target_node_index != UINT_MAX &&
                         watch->migrate_target_node_index != node->index) {
@@ -334,7 +334,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                             queue_deactivate = true;
                         }
                     } else {
-                        queued_ready = nm_recv_watch_push_ready(watch, (size_t)res, bid, has_buffer, node->index, NULL, 0U);
+                        queued_ready = llam_recv_watch_push_ready(watch, (size_t)res, bid, has_buffer, node->index, NULL, 0U);
                         if (watch->active && !watch->deactivate_queued) {
                             watch->deactivate_queued = true;
                             queue_deactivate = true;
@@ -348,7 +348,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 }
             }
             if (!queue_deactivate) {
-                nm_maybe_destroy_recv_watch_locked(node, watch);
+                llam_maybe_destroy_recv_watch_locked(node, watch);
             }
             pthread_mutex_unlock(&node->watch_lock);
 
@@ -356,7 +356,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 atomic_fetch_sub(&node->pending_ops, 1U);
             }
             if (live_target != UINT_MAX) {
-                if (!nm_forward_live_recv_watch_ready(node,
+                if (!llam_forward_live_recv_watch_ready(node,
                                                      live_fd,
                                                      live_st_dev,
                                                      live_st_ino,
@@ -366,9 +366,9 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                                                      has_buffer,
                                                      live_node_index)) {
                     pthread_mutex_lock(&node->watch_lock);
-                    watch = nm_find_recv_watch_locked(node, live_fd, live_st_dev, live_st_ino);
+                    watch = llam_find_recv_watch_locked(node, live_fd, live_st_dev, live_st_ino);
                     if (watch != NULL && watch->wait_head == NULL) {
-                        queued_ready = nm_recv_watch_push_ready(watch, (size_t)res, bid, has_buffer, live_node_index, NULL, 0U);
+                        queued_ready = llam_recv_watch_push_ready(watch, (size_t)res, bid, has_buffer, live_node_index, NULL, 0U);
                     }
                     pthread_mutex_unlock(&node->watch_lock);
                 } else {
@@ -376,7 +376,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 }
             }
             if (queue_deactivate) {
-                (void)nm_node_queue_control(node, NM_IO_CONTROL_RECV_DEACTIVATE, watch);
+                (void)llam_node_queue_control(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch);
             }
             if (waiter != NULL) {
                 if (has_buffer && waiter->owned_buffer != NULL && node->recv_buf_storage != NULL) {
@@ -386,8 +386,8 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     waiter->owned_buffer->provided_node_index = node->index;
                     waiter->owned_buffer->provided_bid = bid;
                     waiter->owned_buffer->data =
-                        node->recv_buf_storage + ((size_t)bid * NM_IO_BUFFER_INLINE_BYTES);
-                    waiter->owned_buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
+                        node->recv_buf_storage + ((size_t)bid * LLAM_IO_BUFFER_INLINE_BYTES);
+                    waiter->owned_buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
                     waiter->owned_buffer->size = (size_t)res;
                     waiter->provided_bid = bid;
                 } else if (waiter->owned_buffer != NULL) {
@@ -396,23 +396,23 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     waiter->owned_buffer->size = (size_t)(res >= 0 ? res : 0);
                     waiter->use_provided_buffer = false;
                 }
-                nm_io_complete_req(node, waiter, res, cqe_flags, false);
+                llam_io_complete_req(node, waiter, res, cqe_flags, false);
             } else if (!queued_ready && has_buffer) {
                 // No waiter and no ready queue took ownership; return the
                 // provided buffer immediately.
-                (void)nm_node_recycle_recv_buffer(node, bid);
+                (void)llam_node_recycle_recv_buffer(node, bid);
             }
             while (waiters != NULL) {
-                nm_io_req_t *next = waiters->next;
+                llam_io_req_t *next = waiters->next;
 
                 waiters->next = NULL;
-                nm_io_complete_req(node, waiters, res, cqe_flags, false);
+                llam_io_complete_req(node, waiters, res, cqe_flags, false);
                 waiters = next;
             }
             break;
         }
-        case NM_IO_UDATA_CONTROL: {
-            nm_io_control_op_t *op = nm_io_udata_ptr(user_data);
+        case LLAM_IO_UDATA_CONTROL: {
+            llam_io_control_op_t *op = llam_io_udata_ptr(user_data);
 
             if (op != NULL) {
                 unsigned poll_migrate_target = UINT_MAX;
@@ -424,8 +424,8 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 // Control completions finalize deactivate/cancel state and then
                 // may trigger migration finalization outside the lock.
                 switch (op->kind) {
-                case NM_IO_CONTROL_POLL_DEACTIVATE: {
-                    nm_poll_watch_t *watch = op->target;
+                case LLAM_IO_CONTROL_POLL_DEACTIVATE: {
+                    llam_poll_watch_t *watch = op->target;
 
                     if (watch != NULL) {
                         watch->deactivate_queued = false;
@@ -439,8 +439,8 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     }
                     break;
                 }
-                case NM_IO_CONTROL_ACCEPT_DEACTIVATE: {
-                    nm_accept_watch_t *watch = op->target;
+                case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE: {
+                    llam_accept_watch_t *watch = op->target;
 
                     if (watch != NULL) {
                         watch->deactivate_queued = false;
@@ -454,8 +454,8 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                     }
                     break;
                 }
-                case NM_IO_CONTROL_RECV_DEACTIVATE: {
-                    nm_recv_watch_t *watch = op->target;
+                case LLAM_IO_CONTROL_RECV_DEACTIVATE: {
+                    llam_recv_watch_t *watch = op->target;
 
                     if (watch != NULL) {
                         watch->deactivate_queued = false;
@@ -466,7 +466,7 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                         if (watch->migrate_target_node_index != UINT_MAX) {
                             recv_migrate_target = watch->migrate_target_node_index;
                         } else {
-                            nm_maybe_destroy_recv_watch_locked(node, watch);
+                            llam_maybe_destroy_recv_watch_locked(node, watch);
                         }
                     }
                     break;
@@ -476,18 +476,18 @@ void nm_io_handle_cqe(nm_node_t *node, struct io_uring_cqe *cqe) {
                 }
                 pthread_mutex_unlock(&node->watch_lock);
                 if (poll_migrate_target != UINT_MAX) {
-                    (void)nm_finalize_poll_watch_migration(node, op->target, poll_migrate_target, &kick_target);
+                    (void)llam_finalize_poll_watch_migration(node, op->target, poll_migrate_target, &kick_target);
                 } else if (accept_migrate_target != UINT_MAX) {
-                    (void)nm_finalize_accept_watch_migration(node, op->target, accept_migrate_target, &kick_target);
+                    (void)llam_finalize_accept_watch_migration(node, op->target, accept_migrate_target, &kick_target);
                 } else if (recv_migrate_target != UINT_MAX) {
-                    (void)nm_finalize_recv_watch_migration(node, op->target, recv_migrate_target, &kick_target);
+                    (void)llam_finalize_recv_watch_migration(node, op->target, recv_migrate_target, &kick_target);
                 }
                 if (kick_target) {
                     unsigned target_index = poll_migrate_target != UINT_MAX ? poll_migrate_target :
                                             (accept_migrate_target != UINT_MAX ? accept_migrate_target : recv_migrate_target);
 
                     if (target_index < node->runtime->active_nodes) {
-                        nm_kick_node(&node->runtime->nodes[target_index]);
+                        llam_kick_node(&node->runtime->nodes[target_index]);
                     }
                 }
                 free(op);

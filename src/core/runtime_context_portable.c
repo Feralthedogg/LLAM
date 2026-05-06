@@ -38,11 +38,11 @@
  * @param lo Low 32 bits of the task pointer.
  * @param hi High 32 bits of the task pointer.
  */
-static void nm_portable_fiber_entry(uint32_t lo, uint32_t hi) {
+static void llam_portable_fiber_entry(uint32_t lo, uint32_t hi) {
     uintptr_t packed = (uintptr_t)lo | ((uintptr_t)hi << 32U);
-    nm_task_t *task = (nm_task_t *)(uintptr_t)packed;
+    llam_task_t *task = (llam_task_t *)(uintptr_t)packed;
 
-    nm_task_bootstrap(task);
+    llam_task_bootstrap(task);
 }
 
 /**
@@ -54,7 +54,7 @@ static void nm_portable_fiber_entry(uint32_t lo, uint32_t hi) {
  * @param task       Task passed to the bootstrap trampoline.
  * @return 0 on success, -1 on invalid arguments or @c getcontext failure.
  */
-int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task_t *task) {
+int llam_ctx_make_task(llam_ctx_t *ctx, void *stack_base, size_t stack_size, llam_task_t *task) {
     uintptr_t packed;
 
     if (ctx == NULL || stack_base == NULL || stack_size == 0U || task == NULL) {
@@ -74,7 +74,7 @@ int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task
     // makecontext has integer arguments only on many platforms, so split the
     // pointer into two 32-bit words and reconstruct it in the trampoline.
     makecontext(&ctx->uc,
-                (void (*)(void))nm_portable_fiber_entry,
+                (void (*)(void))llam_portable_fiber_entry,
                 2,
                 (uint32_t)(packed & 0xffffffffU),
                 (uint32_t)(packed >> 32U));
@@ -87,7 +87,7 @@ int nm_ctx_make_task(nm_ctx_t *ctx, void *stack_base, size_t stack_size, nm_task
  * @param from Context to save.
  * @param to   Context to restore.
  */
-void nm_ctx_switch(nm_ctx_t *from, const nm_ctx_t *to) {
+void llam_ctx_switch(llam_ctx_t *from, const llam_ctx_t *to) {
     if (from == NULL || to == NULL) {
         abort();
     }
@@ -107,9 +107,9 @@ void nm_ctx_switch(nm_ctx_t *from, const nm_ctx_t *to) {
 /**
  * @brief Assembly-only bootstrap placeholder.
  *
- * Portable ucontext builds enter through ::nm_portable_fiber_entry instead.
+ * Portable ucontext builds enter through ::llam_portable_fiber_entry instead.
  */
-void nm_fiber_bootstrap(void) {
+void llam_fiber_bootstrap(void) {
     abort();
 }
 

@@ -5,7 +5,7 @@
  * @details
  * This file implements the hot context-switch ABI for Linux x86-64. The C
  * runtime owns task/stack allocation; assembly saves/restores callee-saved
- * registers and optional floating-point state described by @c nm_ctx_t.
+ * registers and optional floating-point state described by @c llam_ctx_t.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -28,42 +28,42 @@
      *   rdi = context to save
      *   rsi = context to restore
      *
-     * Callee-saved GPRs plus optional FP control/xstate live in nm_ctx_t. The
-     * layout offsets here must match src/internal/nm_internal.h.
+     * Callee-saved GPRs plus optional FP control/xstate live in llam_ctx_t. The
+     * layout offsets here must match src/internal/llam_internal.h.
      */
     .text
-    .globl nm_ctx_switch
-    .type nm_ctx_switch, @function
-nm_ctx_switch:
+    .globl llam_ctx_switch
+    .type llam_ctx_switch, @function
+llam_ctx_switch:
     .cfi_startproc
     .cfi_def_cfa %rsp, 8
     movq 64(%rdi), %rcx
     testq %rcx, %rcx
-    jnz .Lnm_ctx_save_xsave
+    jnz .Lllam_ctx_save_xsave
 #ifdef __PIC__
-    movq g_nm_fp_control_context@GOTPCREL(%rip), %rax
+    movq g_llam_fp_control_context@GOTPCREL(%rip), %rax
     cmpl $0, (%rax)
 #else
-    cmpl $0, g_nm_fp_control_context(%rip)
+    cmpl $0, g_llam_fp_control_context(%rip)
 #endif
-    je .Lnm_ctx_saved
-.Lnm_ctx_save_control:
+    je .Lllam_ctx_saved
+.Lllam_ctx_save_control:
     stmxcsr 56(%rdi)
     fnstcw 60(%rdi)
-    jmp .Lnm_ctx_saved
-.Lnm_ctx_save_xsave:
+    jmp .Lllam_ctx_saved
+.Lllam_ctx_save_xsave:
 #ifdef __PIC__
-    movq g_nm_xsave_mask_lo@GOTPCREL(%rip), %rax
+    movq g_llam_xsave_mask_lo@GOTPCREL(%rip), %rax
     movl (%rax), %eax
-    movq g_nm_xsave_mask_hi@GOTPCREL(%rip), %rdx
+    movq g_llam_xsave_mask_hi@GOTPCREL(%rip), %rdx
     movl (%rdx), %edx
 #else
-    movl g_nm_xsave_mask_lo(%rip), %eax
-    movl g_nm_xsave_mask_hi(%rip), %edx
+    movl g_llam_xsave_mask_lo(%rip), %eax
+    movl g_llam_xsave_mask_hi(%rip), %edx
 #endif
     xsave64 (%rcx)
-    jmp .Lnm_ctx_saved
-.Lnm_ctx_saved:
+    jmp .Lllam_ctx_saved
+.Lllam_ctx_saved:
     movq %rsp, 0(%rdi)
     movq %rbx, 8(%rdi)
     movq %rbp, 16(%rdi)
@@ -74,31 +74,31 @@ nm_ctx_switch:
 
     movq 64(%rsi), %rcx
     testq %rcx, %rcx
-    jnz .Lnm_ctx_restore_xsave
+    jnz .Lllam_ctx_restore_xsave
 #ifdef __PIC__
-    movq g_nm_fp_control_context@GOTPCREL(%rip), %rax
+    movq g_llam_fp_control_context@GOTPCREL(%rip), %rax
     cmpl $0, (%rax)
 #else
-    cmpl $0, g_nm_fp_control_context(%rip)
+    cmpl $0, g_llam_fp_control_context(%rip)
 #endif
-    je .Lnm_ctx_restored
-.Lnm_ctx_restore_control:
+    je .Lllam_ctx_restored
+.Lllam_ctx_restore_control:
     ldmxcsr 56(%rsi)
     fldcw 60(%rsi)
-    jmp .Lnm_ctx_restored
-.Lnm_ctx_restore_xsave:
+    jmp .Lllam_ctx_restored
+.Lllam_ctx_restore_xsave:
 #ifdef __PIC__
-    movq g_nm_xsave_mask_lo@GOTPCREL(%rip), %rax
+    movq g_llam_xsave_mask_lo@GOTPCREL(%rip), %rax
     movl (%rax), %eax
-    movq g_nm_xsave_mask_hi@GOTPCREL(%rip), %rdx
+    movq g_llam_xsave_mask_hi@GOTPCREL(%rip), %rdx
     movl (%rdx), %edx
 #else
-    movl g_nm_xsave_mask_lo(%rip), %eax
-    movl g_nm_xsave_mask_hi(%rip), %edx
+    movl g_llam_xsave_mask_lo(%rip), %eax
+    movl g_llam_xsave_mask_hi(%rip), %edx
 #endif
     xrstor64 (%rcx)
-    jmp .Lnm_ctx_restored
-.Lnm_ctx_restored:
+    jmp .Lllam_ctx_restored
+.Lllam_ctx_restored:
     movq 0(%rsi), %rsp
     movq 8(%rsi), %rbx
     movq 16(%rsi), %rbp
@@ -109,12 +109,12 @@ nm_ctx_switch:
     ret
     .cfi_endproc
 
-    .globl nm_fiber_bootstrap
-    .type nm_fiber_bootstrap, @function
-nm_fiber_bootstrap:
+    .globl llam_fiber_bootstrap
+    .type llam_fiber_bootstrap, @function
+llam_fiber_bootstrap:
     /*
-     * New task contexts enter here with r12 holding nm_task_t*. Align the stack
-     * for the C ABI before calling nm_task_bootstrap().
+     * New task contexts enter here with r12 holding llam_task_t*. Align the stack
+     * for the C ABI before calling llam_task_bootstrap().
      */
     .cfi_startproc
     .cfi_def_cfa %rsp, 8
@@ -122,16 +122,16 @@ nm_fiber_bootstrap:
     subq $8, %rsp
     .cfi_def_cfa_offset 16
     testq $0xF, %rsp
-    jnz .Lnm_fiber_alignment_violation
-    call nm_task_bootstrap
+    jnz .Lllam_fiber_alignment_violation
+    call llam_task_bootstrap
     addq $8, %rsp
     .cfi_def_cfa_offset 8
     ret
 
-.Lnm_fiber_alignment_violation:
+.Lllam_fiber_alignment_violation:
     movq %rsp, %rdi
     andq $-16, %rsp
-    call nm_fiber_alignment_violation
+    call llam_fiber_alignment_violation
     ud2
     .cfi_endproc
 

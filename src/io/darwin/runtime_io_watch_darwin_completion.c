@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_darwin_completion.c
+ * @file src/io/darwin/runtime_io_watch_darwin_completion.c
  * @brief Darwin/kqueue completion helpers and request finalization.
  *
  * @details
@@ -27,7 +27,7 @@
 #include "runtime_io_watch_darwin_internal.h"
 
 /** @brief Convert a kevent filter/flags pair into poll-style revents. */
-short nm_darwin_poll_revents(const struct kevent *event) {
+short llam_darwin_poll_revents(const struct kevent *event) {
     short revents = 0;
 
     if (event->filter == EVFILT_READ) {
@@ -52,9 +52,9 @@ short nm_darwin_poll_revents(const struct kevent *event) {
  * @param res               Result value, or negative errno.
  * @param decrement_pending Whether pending_ops should be decremented.
  */
-void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, bool decrement_pending) {
-    nm_io_abort_reason_t abort_reason;
-    nm_wait_reason_t wake_reason = NM_WAIT_IO;
+void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool decrement_pending) {
+    llam_io_abort_reason_t abort_reason;
+    llam_wait_reason_t wake_reason = LLAM_WAIT_IO;
     unsigned inflight_owner = UINT_MAX;
     unsigned wait_mode;
 
@@ -62,32 +62,32 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, bool decreme
         atomic_fetch_sub(&node->pending_ops, 1U);
     }
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
-    if (wait_mode == NM_IO_WAIT_MODE_INFLIGHT) {
+    if (wait_mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
         // Balance the in-flight owner counter established by submission.
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
         if (inflight_owner < node->runtime->active_shards) {
-            nm_shard_note_inflight_io_waiter(inflight_owner, -1);
+            llam_shard_note_inflight_io_waiter(inflight_owner, -1);
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
     }
-    abort_reason = (nm_io_abort_reason_t)atomic_exchange(&req->abort_reason, NM_IO_ABORT_NONE);
-    atomic_store(&req->wait_mode, NM_IO_WAIT_MODE_NONE);
+    abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
     atomic_store(&req->cancel_queued, 0U);
     req->poll_watch = NULL;
     req->accept_watch = NULL;
     req->recv_watch = NULL;
 
     if (res >= 0) {
-        req->result = req->kind == NM_IO_KIND_POLL ? (res != 0 ? 1 : 0) : res;
+        req->result = req->kind == LLAM_IO_KIND_POLL ? (res != 0 ? 1 : 0) : res;
         req->error_code = 0;
-        req->poll_revents = req->kind == NM_IO_KIND_POLL ? (short)res : 0;
-        if (req->owned_buffer != NULL && req->kind == NM_IO_KIND_READ) {
+        req->poll_revents = req->kind == LLAM_IO_KIND_POLL ? (short)res : 0;
+        if (req->owned_buffer != NULL && req->kind == LLAM_IO_KIND_READ) {
             req->owned_buffer->size = (size_t)res;
         }
-    } else if (res == -ECANCELED && abort_reason != NM_IO_ABORT_NONE) {
-        nm_io_set_abort_result(req, abort_reason);
-        wake_reason = nm_io_abort_wait_reason(abort_reason);
+    } else if (res == -ECANCELED && abort_reason != LLAM_IO_ABORT_NONE) {
+        llam_io_set_abort_result(req, abort_reason);
+        wake_reason = llam_io_abort_wait_reason(abort_reason);
     } else {
         req->result = -1;
         req->error_code = -res;
@@ -95,13 +95,13 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, bool decreme
     }
 
     if (req->owner_shard < node->runtime->active_shards) {
-        nm_shard_t *shard = &node->runtime->shards[req->owner_shard];
-        uint64_t now_ns = nm_now_ns();
+        llam_shard_t *shard = &node->runtime->shards[req->owner_shard];
+        uint64_t now_ns = llam_now_ns();
 
         pthread_mutex_lock(&shard->lock);
-        if (wake_reason == NM_WAIT_CANCEL) {
+        if (wake_reason == LLAM_WAIT_CANCEL) {
             shard->metrics.cancel_wakes += 1U;
-        } else if (wake_reason == NM_WAIT_TIMEOUT) {
+        } else if (wake_reason == LLAM_WAIT_TIMEOUT) {
             shard->metrics.timeout_wakes += 1U;
         }
         if (now_ns >= req->submit_ts_ns) {
@@ -111,20 +111,20 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, bool decreme
         pthread_mutex_unlock(&shard->lock);
     }
 
-    nm_reinject_task_on_shard(node->runtime,
+    llam_reinject_task_on_shard(node->runtime,
                               req->task,
                               req->owner_shard,
                               true,
-                              NM_TRACE_IO_COMPLETE,
+                              LLAM_TRACE_IO_COMPLETE,
                               wake_reason);
 }
 
 /** @brief Drain deferred accept completions outside watch locks. */
-void nm_darwin_complete_accept_completions(nm_node_t *node, nm_darwin_accept_completion_t *head) {
+void llam_darwin_complete_accept_completions(llam_node_t *node, llam_darwin_accept_completion_t *head) {
     while (head != NULL) {
-        nm_darwin_accept_completion_t *next = head->next;
+        llam_darwin_accept_completion_t *next = head->next;
 
-        nm_io_complete_req(node, head->req, head->result, false);
+        llam_io_complete_req(node, head->req, head->result, false);
         free(head);
         head = next;
     }
@@ -135,7 +135,7 @@ void nm_darwin_complete_accept_completions(nm_node_t *node, nm_darwin_accept_com
  *
  * @return 0 on success, -1 on fcntl failure.
  */
-int nm_darwin_fd_set_nonblocking(int fd, int *saved_flags_out, bool *restore_out) {
+int llam_darwin_fd_set_nonblocking(int fd, int *saved_flags_out, bool *restore_out) {
     int saved_flags;
 
     if (saved_flags_out != NULL) {
@@ -167,8 +167,8 @@ int nm_darwin_fd_set_nonblocking(int fd, int *saved_flags_out, bool *restore_out
     return 0;
 }
 
-/** @brief Restore an fd's previous flags if ::nm_darwin_fd_set_nonblocking changed them. */
-void nm_darwin_fd_restore(int fd, int saved_flags, bool restore) {
+/** @brief Restore an fd's previous flags if ::llam_darwin_fd_set_nonblocking changed them. */
+void llam_darwin_fd_restore(int fd, int saved_flags, bool restore) {
     if (restore) {
         (void)fcntl(fd, F_SETFL, saved_flags);
     }
@@ -184,12 +184,12 @@ void nm_darwin_fd_restore(int fd, int saved_flags, bool restore) {
  * @param owned_capacity Capacity of @p owned_data.
  * @return true on success.
  */
-bool nm_darwin_assign_owned_buffer(nm_io_req_t *req,
+bool llam_darwin_assign_owned_buffer(llam_io_req_t *req,
                                           const unsigned char *data,
                                           size_t size,
                                           unsigned char *owned_data,
                                           size_t owned_capacity) {
-    nm_io_buffer_t *buffer;
+    llam_io_buffer_t *buffer;
 
     if (req == NULL || req->owned_buffer == NULL) {
         return false;
@@ -207,18 +207,18 @@ bool nm_darwin_assign_owned_buffer(nm_io_req_t *req,
         buffer->data = owned_data;
         buffer->capacity = owned_capacity;
         buffer->external_storage = true;
-    } else if (size <= NM_IO_BUFFER_INLINE_BYTES) {
+    } else if (size <= LLAM_IO_BUFFER_INLINE_BYTES) {
         if (size > 0U && data != NULL) {
             memcpy(buffer->inline_data, data, size);
         }
         buffer->data = buffer->inline_data;
-        buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
+        buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
         buffer->external_storage = false;
     } else {
         buffer->data = malloc(size);
         if (buffer->data == NULL) {
             buffer->data = buffer->inline_data;
-            buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
+            buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
             buffer->external_storage = false;
             return false;
         }
@@ -237,7 +237,7 @@ bool nm_darwin_assign_owned_buffer(nm_io_req_t *req,
  * @param result_out Receives result or negative errno.
  * @return 1 completed, 0 would block and should register kqueue, -1 hard error.
  */
-int nm_darwin_try_req_syscall(nm_io_req_t *req, int *result_out) {
+int llam_darwin_try_req_syscall(llam_io_req_t *req, int *result_out) {
     int saved_flags = 0;
     bool restore_flags = false;
     int rc = 0;
@@ -247,35 +247,35 @@ int nm_darwin_try_req_syscall(nm_io_req_t *req, int *result_out) {
         return -1;
     }
 
-    if (nm_darwin_fd_set_nonblocking(req->fd, &saved_flags, &restore_flags) != 0) {
+    if (llam_darwin_fd_set_nonblocking(req->fd, &saved_flags, &restore_flags) != 0) {
         *result_out = -errno;
         return -1;
     }
 
     for (;;) {
         switch (req->kind) {
-        case NM_IO_KIND_READ:
+        case LLAM_IO_KIND_READ:
             rc = req->use_recv_op ? (int)recv(req->fd, req->buf, req->count, req->recv_flags) :
                                     (int)read(req->fd, req->buf, req->count);
             break;
-        case NM_IO_KIND_WRITE:
+        case LLAM_IO_KIND_WRITE:
             rc = (int)write(req->fd, req->buf, req->count);
             break;
-        case NM_IO_KIND_ACCEPT:
+        case LLAM_IO_KIND_ACCEPT:
             rc = accept(req->fd, req->addr, req->addrlen);
             break;
-        case NM_IO_KIND_CONNECT:
+        case LLAM_IO_KIND_CONNECT:
             rc = connect(req->fd, req->addr, req->addr_len);
             break;
         default:
-            nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+            llam_darwin_fd_restore(req->fd, saved_flags, restore_flags);
             errno = EOPNOTSUPP;
             *result_out = -EOPNOTSUPP;
             return -1;
         }
 
         if (rc >= 0) {
-            nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+            llam_darwin_fd_restore(req->fd, saved_flags, restore_flags);
             *result_out = rc;
             return 1;
         }
@@ -285,19 +285,19 @@ int nm_darwin_try_req_syscall(nm_io_req_t *req, int *result_out) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // kqueue reported readiness but the nonblocking operation would
             // still block; re-register and wait for the next event.
-            nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+            llam_darwin_fd_restore(req->fd, saved_flags, restore_flags);
             return 0;
         }
-        if (req->kind == NM_IO_KIND_CONNECT && (errno == EINPROGRESS || errno == EALREADY)) {
-            nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+        if (req->kind == LLAM_IO_KIND_CONNECT && (errno == EINPROGRESS || errno == EALREADY)) {
+            llam_darwin_fd_restore(req->fd, saved_flags, restore_flags);
             return 0;
         }
-        if (req->kind == NM_IO_KIND_CONNECT && errno == EISCONN) {
-            nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+        if (req->kind == LLAM_IO_KIND_CONNECT && errno == EISCONN) {
+            llam_darwin_fd_restore(req->fd, saved_flags, restore_flags);
             *result_out = 0;
             return 1;
         }
-        nm_darwin_fd_restore(req->fd, saved_flags, restore_flags);
+        llam_darwin_fd_restore(req->fd, saved_flags, restore_flags);
         *result_out = -errno;
         return -1;
     }

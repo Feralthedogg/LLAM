@@ -6,7 +6,7 @@
  * Probe helpers provide cheap yes/no signals used by the controller thread:
  * runnable work, timer backlog, pending I/O, opaque blocking compensation, and
  * per-shard load estimates. They deliberately avoid mutating scheduler state
- * except for preemption requests made by ::nm_watchdog_check_shard.
+ * except for preemption requests made by ::llam_watchdog_check_shard.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -31,12 +31,12 @@
  *
  * @return @c true when @c LLAM_DYNAMIC_TRACE is set to a non-zero value.
  */
-bool nm_dynamic_trace_enabled(void) {
+bool llam_dynamic_trace_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_DYNAMIC_TRACE");
+        const char *env = llam_env_get("LLAM_DYNAMIC_TRACE");
 
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
@@ -55,16 +55,16 @@ bool nm_dynamic_trace_enabled(void) {
  * @param shard  Shard to inspect.
  * @param now_ns Current monotonic timestamp.
  */
-void nm_watchdog_check_shard(nm_shard_t *shard, uint64_t now_ns) {
-    nm_task_t *current;
+void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
+    llam_task_t *current;
 
     pthread_mutex_lock(&shard->lock);
     current = atomic_load_explicit(&shard->current, memory_order_acquire);
     if (current != NULL) {
         uint64_t last_safepoint = atomic_load_explicit(&shard->last_safepoint_ns, memory_order_relaxed);
-        uint64_t slice_ns = nm_slice_ns(current->task_class);
+        uint64_t slice_ns = llam_slice_ns(current->task_class);
 
-        if (current->opaque_blocking_depth > 0U || current->state == NM_TASK_STATE_BLOCKED_OPAQUE) {
+        if (current->opaque_blocking_depth > 0U || current->state == LLAM_TASK_STATE_BLOCKED_OPAQUE) {
             pthread_mutex_unlock(&shard->lock);
             return;
         }
@@ -73,13 +73,13 @@ void nm_watchdog_check_shard(nm_shard_t *shard, uint64_t now_ns) {
             if (atomic_exchange(&current->preempt_requested, 1U) == 0U) {
                 shard->metrics.watchdog_hits += 1U;
                 shard->metrics.long_no_safepoint += 1U;
-                nm_trace_shard(shard,
+                llam_trace_shard(shard,
                                current,
-                               NM_TRACE_WATCHDOG,
-                               NM_TASK_STATE_RUNNING,
-                               NM_TASK_STATE_RUNNING,
-                               NM_WAIT_NONE);
-                (void)pthread_kill(shard->thread, NM_PREEMPT_SIGNAL);
+                               LLAM_TRACE_WATCHDOG,
+                               LLAM_TASK_STATE_RUNNING,
+                               LLAM_TASK_STATE_RUNNING,
+                               LLAM_WAIT_NONE);
+                (void)pthread_kill(shard->thread, LLAM_PREEMPT_SIGNAL);
             }
         }
     }
@@ -93,7 +93,7 @@ void nm_watchdog_check_shard(nm_shard_t *shard, uint64_t now_ns) {
  *
  * @return @c true when at least one timer root is present.
  */
-bool nm_runtime_has_pending_timers(nm_runtime_t *rt) {
+bool llam_runtime_has_pending_timers(llam_runtime_t *rt) {
     unsigned i;
 
     for (i = 0; i < rt->active_shards; ++i) {
@@ -116,7 +116,7 @@ bool nm_runtime_has_pending_timers(nm_runtime_t *rt) {
  *
  * @return @c true when work exists outside parked/timer/I/O-only states.
  */
-bool nm_runtime_has_runnable_work(nm_runtime_t *rt) {
+bool llam_runtime_has_runnable_work(llam_runtime_t *rt) {
     unsigned i;
 
     if (rt->overflow_lock_initialized) {
@@ -134,7 +134,7 @@ bool nm_runtime_has_runnable_work(nm_runtime_t *rt) {
         bool has_work;
 
         pthread_mutex_lock(&rt->shards[i].lock);
-        has_work = rt->shards[i].inject_q.depth > 0U || rt->shards[i].hot_q.depth > 0U || nm_norm_queue_depth(&rt->shards[i]) > 0U ||
+        has_work = rt->shards[i].inject_q.depth > 0U || rt->shards[i].hot_q.depth > 0U || llam_norm_queue_depth(&rt->shards[i]) > 0U ||
                    atomic_load_explicit(&rt->shards[i].current, memory_order_acquire) != NULL;
         pthread_mutex_unlock(&rt->shards[i].lock);
         if (has_work) {
@@ -151,7 +151,7 @@ bool nm_runtime_has_runnable_work(nm_runtime_t *rt) {
  *
  * @return @c true when any overflow, inject, hot, or normal queue is non-empty.
  */
-bool nm_runtime_has_runnable_backlog(nm_runtime_t *rt) {
+bool llam_runtime_has_runnable_backlog(llam_runtime_t *rt) {
     unsigned i;
 
     if (rt == NULL) {
@@ -175,7 +175,7 @@ bool nm_runtime_has_runnable_backlog(nm_runtime_t *rt) {
         pthread_mutex_lock(&rt->shards[i].lock);
         has_backlog = rt->shards[i].inject_q.depth > 0U ||
                       rt->shards[i].hot_q.depth > 0U ||
-                      nm_norm_queue_depth(&rt->shards[i]) > 0U;
+                      llam_norm_queue_depth(&rt->shards[i]) > 0U;
         pthread_mutex_unlock(&rt->shards[i].lock);
         if (has_backlog) {
             return true;
@@ -191,7 +191,7 @@ bool nm_runtime_has_runnable_backlog(nm_runtime_t *rt) {
  *
  * @return @c true when a node pending counter is non-zero.
  */
-bool nm_runtime_has_io_pending(nm_runtime_t *rt) {
+bool llam_runtime_has_io_pending(llam_runtime_t *rt) {
     unsigned i;
 
     for (i = 0; i < rt->active_nodes; ++i) {
@@ -209,7 +209,7 @@ bool nm_runtime_has_io_pending(nm_runtime_t *rt) {
  *
  * @return Active I/O waiter count, or 0 for @c NULL.
  */
-unsigned nm_runtime_active_io_waiters(nm_runtime_t *rt) {
+unsigned llam_runtime_active_io_waiters(llam_runtime_t *rt) {
     if (rt == NULL) {
         return 0U;
     }
@@ -223,7 +223,7 @@ unsigned nm_runtime_active_io_waiters(nm_runtime_t *rt) {
  *
  * @return @c true when helper or redirect compensation is active.
  */
-bool nm_runtime_has_opaque_blocking(nm_runtime_t *rt) {
+bool llam_runtime_has_opaque_blocking(llam_runtime_t *rt) {
     unsigned i;
 
     for (i = 0; i < rt->active_shards; ++i) {
@@ -251,7 +251,7 @@ bool nm_runtime_has_opaque_blocking(nm_runtime_t *rt) {
  *
  * @return Load estimate, or @c UINT_MAX for @c NULL.
  */
-unsigned nm_watchdog_snapshot_shard_load(nm_shard_t *shard) {
+unsigned llam_watchdog_snapshot_shard_load(llam_shard_t *shard) {
     unsigned load = 0U;
 
     if (shard == NULL) {
@@ -259,7 +259,7 @@ unsigned nm_watchdog_snapshot_shard_load(nm_shard_t *shard) {
     }
 
     pthread_mutex_lock(&shard->lock);
-    load = shard->inject_q.depth + shard->hot_q.depth + nm_norm_queue_depth(shard);
+    load = shard->inject_q.depth + shard->hot_q.depth + llam_norm_queue_depth(shard);
     if (atomic_load_explicit(&shard->current, memory_order_acquire) != NULL) {
         load += 1U;
     }
@@ -267,7 +267,7 @@ unsigned nm_watchdog_snapshot_shard_load(nm_shard_t *shard) {
         load += 1U;
     }
     if (shard->opaque_redirect_active) {
-        load += NM_INJECT_QUEUE_CAP;
+        load += LLAM_INJECT_QUEUE_CAP;
     }
     pthread_mutex_unlock(&shard->lock);
     return load;

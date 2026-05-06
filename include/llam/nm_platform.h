@@ -5,6 +5,13 @@
  * @details
  * This header exposes platform facts for code using the legacy @c nm_* public
  * API. It mirrors @c <llam/platform.h> with @c NM_PLATFORM_* macro names.
+ * It also guarantees the socket and ssize contracts used by
+ * @c <llam/nm_runtime.h>: @c struct sockaddr, @c socklen_t, and @c ssize_t are
+ * declared or typedef'd after including this header.
+ *
+ * On Windows, include this header before @c windows.h when possible so the
+ * public contract can select @c winsock2.h without conflicting with the older
+ * @c winsock.h declarations that @c windows.h may pull in.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -58,6 +65,9 @@
 
 /** @brief Cross-platform file/socket descriptor type used by the legacy API. */
 #if NM_PLATFORM_WINDOWS
+#if defined(_WINSOCKAPI_) && !defined(_WINSOCK2API_)
+#error "Include llam/nm_platform.h before windows.h, or define WIN32_LEAN_AND_MEAN before including windows.h."
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -82,10 +92,20 @@ typedef int socklen_t;
 #endif
 typedef SOCKET nm_fd_t;
 #else
-#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/socket.h>
 typedef int nm_fd_t;
 #endif
+
+/** @brief Invalid descriptor/socket sentinel for ::nm_fd_t. */
+#if NM_PLATFORM_WINDOWS
+#define NM_INVALID_FD ((nm_fd_t)INVALID_SOCKET)
+#else
+#define NM_INVALID_FD ((nm_fd_t)-1)
+#endif
+
+/** @brief Non-zero when @p fd is the platform invalid descriptor/socket value. */
+#define NM_FD_IS_INVALID(fd) ((fd) == NM_INVALID_FD)
 
 /** @brief Human-readable platform name used by diagnostics. */
 #if NM_PLATFORM_WINDOWS

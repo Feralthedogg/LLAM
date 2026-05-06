@@ -30,11 +30,11 @@
  * @brief Require that the caller is running inside a managed task context.
  *
  * @return 0 when runtime, task, and shard TLS are all present.
- * @return -1 with @c errno set to @c EINVAL otherwise.
+ * @return -1 with @c errno set to @c ENOTSUP otherwise.
  */
-int nm_require_task_context(void) {
-    if (!g_nm_runtime.initialized || g_nm_tls_task == NULL || g_nm_tls_shard == NULL) {
-        errno = EINVAL;
+int llam_require_task_context(void) {
+    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+        errno = ENOTSUP;
         return -1;
     }
     return 0;
@@ -50,9 +50,9 @@ int nm_require_task_context(void) {
  *
  * @return Wait node on success, or @c NULL on allocation failure.
  */
-nm_wait_node_t *nm_sync_wait_node_acquire(nm_shard_t *shard) {
-    nm_task_t *task = g_nm_tls_task;
-    nm_wait_node_t *node;
+llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard) {
+    llam_task_t *task = g_llam_tls_task;
+    llam_wait_node_t *node;
 
     if (task != NULL && task->active_wait_node == NULL) {
         node = &task->embedded_wait_node;
@@ -62,7 +62,7 @@ nm_wait_node_t *nm_sync_wait_node_acquire(nm_shard_t *shard) {
         return node;
     }
 
-    node = nm_wait_node_alloc(shard);
+    node = llam_wait_node_alloc(shard);
     if (node != NULL) {
         node->task = task;
         node->owner_shard = shard != NULL ? shard->id : UINT_MAX;
@@ -71,7 +71,7 @@ nm_wait_node_t *nm_sync_wait_node_acquire(nm_shard_t *shard) {
 }
 
 /**
- * @brief Release a wait node acquired by ::nm_sync_wait_node_acquire.
+ * @brief Release a wait node acquired by ::llam_sync_wait_node_acquire.
  *
  * Embedded nodes are zeroed in place. Heap nodes are returned to the shard-local
  * allocator.
@@ -79,7 +79,7 @@ nm_wait_node_t *nm_sync_wait_node_acquire(nm_shard_t *shard) {
  * @param shard Shard owning the allocator.
  * @param node  Wait node to release; may be @c NULL.
  */
-void nm_sync_wait_node_release(nm_shard_t *shard, nm_wait_node_t *node) {
+void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node) {
     if (node == NULL) {
         return;
     }
@@ -87,7 +87,7 @@ void nm_sync_wait_node_release(nm_shard_t *shard, nm_wait_node_t *node) {
         memset(node, 0, sizeof(*node));
         return;
     }
-    nm_wait_node_free(shard, node);
+    llam_wait_node_free(shard, node);
 }
 
 /**
@@ -97,11 +97,11 @@ void nm_sync_wait_node_release(nm_shard_t *shard, nm_wait_node_t *node) {
  * @param error_code Completion error stored in each wait node.
  * @param reason     Trace/wake reason associated with the wakeup.
  */
-void nm_wake_wait_queue_all(nm_wait_queue_t *queue, int error_code, nm_wait_reason_t reason) {
-    nm_wait_node_t *node;
+void llam_wake_wait_queue_all(llam_wait_queue_t *queue, int error_code, llam_wait_reason_t reason) {
+    llam_wait_node_t *node;
 
-    while ((node = nm_wait_queue_pop_head(queue)) != NULL) {
+    while ((node = llam_wait_queue_pop_head(queue)) != NULL) {
         node->error_code = error_code;
-        nm_wake_wait_node(node, true, reason);
+        llam_wake_wait_node(node, true, reason);
     }
 }

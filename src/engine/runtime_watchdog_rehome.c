@@ -37,7 +37,7 @@
  *
  * @return @c true only when the source has no timers.
  */
-bool nm_merge_shard_timers_locked(nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out) {
+bool llam_merge_shard_timers_locked(llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
     if (migrated_out != NULL) {
         *migrated_out = 0U;
     }
@@ -57,14 +57,14 @@ bool nm_merge_shard_timers_locked(nm_shard_t *source, nm_shard_t *target, unsign
  *
  * @return @c true when the task is parked on @p source and can be rehomed.
  */
-static bool nm_task_can_rehome_parked_wait(const nm_shard_t *source, const nm_shard_t *target, const nm_task_t *task) {
+static bool llam_task_can_rehome_parked_wait(const llam_shard_t *source, const llam_shard_t *target, const llam_task_t *task) {
     if (source == NULL || target == NULL || task == NULL) {
         return false;
     }
-    if ((task->flags & NM_TASK_FLAG_PINNED) != 0U) {
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
         return false;
     }
-    if (task->state != NM_TASK_STATE_PARKED || task->parked_shard != source->id) {
+    if (task->state != LLAM_TASK_STATE_PARKED || task->parked_shard != source->id) {
         return false;
     }
     if (task->active_io_req != NULL || task->active_timer != NULL) {
@@ -84,8 +84,8 @@ static bool nm_task_can_rehome_parked_wait(const nm_shard_t *source, const nm_sh
  * @param target       Target shard receiving parked waiters.
  * @param migrated_out Optional migrated-count output.
  */
-void nm_rehome_parked_waiters(nm_runtime_t *rt, nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out) {
-    nm_task_t *task;
+void llam_rehome_parked_waiters(llam_runtime_t *rt, llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
+    llam_task_t *task;
     unsigned migrated = 0U;
 
     if (migrated_out != NULL) {
@@ -98,11 +98,11 @@ void nm_rehome_parked_waiters(nm_runtime_t *rt, nm_shard_t *source, nm_shard_t *
     pthread_mutex_lock(&rt->task_list_lock);
     for (task = rt->all_tasks; task != NULL; task = task->all_next) {
         // The wait structure keeps the same node; only the resume shard changes.
-        if (!nm_task_can_rehome_parked_wait(source, target, task)) {
+        if (!llam_task_can_rehome_parked_wait(source, target, task)) {
             continue;
         }
         task->parked_shard = target->id;
-        nm_merge_rehome_task(source, target, task);
+        llam_merge_rehome_task(source, target, task);
         migrated += 1U;
     }
     pthread_mutex_unlock(&rt->task_list_lock);
@@ -120,11 +120,11 @@ void nm_rehome_parked_waiters(nm_runtime_t *rt, nm_shard_t *source, nm_shard_t *
  *
  * @return In-flight I/O waiter count.
  */
-unsigned nm_shard_inflight_io_waiters(const nm_shard_t *shard) {
+unsigned llam_shard_inflight_io_waiters(const llam_shard_t *shard) {
     if (shard == NULL) {
         return 0U;
     }
-    return atomic_load_explicit(&((nm_shard_t *)shard)->inflight_io_waiters, memory_order_acquire);
+    return atomic_load_explicit(&((llam_shard_t *)shard)->inflight_io_waiters, memory_order_acquire);
 }
 
 /**
@@ -138,18 +138,18 @@ unsigned nm_shard_inflight_io_waiters(const nm_shard_t *shard) {
  *
  * @return @c true when all ownership fields match the source shard.
  */
-static bool nm_task_can_rehome_io_wait(const nm_shard_t *source,
-                                       const nm_shard_t *target,
-                                       const nm_task_t *task,
-                                       const nm_io_req_t *req,
-                                       nm_io_wait_mode_t expected_mode) {
+static bool llam_task_can_rehome_io_wait(const llam_shard_t *source,
+                                       const llam_shard_t *target,
+                                       const llam_task_t *task,
+                                       const llam_io_req_t *req,
+                                       llam_io_wait_mode_t expected_mode) {
     if (source == NULL || target == NULL || task == NULL || req == NULL) {
         return false;
     }
-    if ((task->flags & NM_TASK_FLAG_PINNED) != 0U) {
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
         return false;
     }
-    if (task->state != NM_TASK_STATE_PARKED || task->wait_reason != NM_WAIT_IO || task->parked_shard != source->id) {
+    if (task->state != LLAM_TASK_STATE_PARKED || task->wait_reason != LLAM_WAIT_IO || task->parked_shard != source->id) {
         return false;
     }
     if (task->active_io_req != req || req->owner_shard != source->id) {
@@ -166,8 +166,8 @@ static bool nm_task_can_rehome_io_wait(const nm_shard_t *source,
  * @param target Target shard.
  * @param req    Request whose task should be rehomed.
  */
-static void nm_rehome_io_wait_req(nm_shard_t *source, nm_shard_t *target, nm_io_req_t *req) {
-    nm_task_t *task;
+static void llam_rehome_io_wait_req(llam_shard_t *source, llam_shard_t *target, llam_io_req_t *req) {
+    llam_task_t *task;
 
     if (source == NULL || target == NULL || req == NULL || req->task == NULL) {
         return;
@@ -177,7 +177,7 @@ static void nm_rehome_io_wait_req(nm_shard_t *source, nm_shard_t *target, nm_io_
     // Completion paths read both task->parked_shard and req->owner_shard.
     task->parked_shard = target->id;
     req->owner_shard = target->id;
-    nm_merge_rehome_task(source, target, task);
+    llam_merge_rehome_task(source, target, task);
 }
 
 /**
@@ -191,8 +191,8 @@ static void nm_rehome_io_wait_req(nm_shard_t *source, nm_shard_t *target, nm_io_
  * @param target       Target shard.
  * @param migrated_out Optional migrated-count output.
  */
-void nm_rehome_inflight_io_waiters(nm_runtime_t *rt, nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out) {
-    nm_task_t *task;
+void llam_rehome_inflight_io_waiters(llam_runtime_t *rt, llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
+    llam_task_t *task;
     unsigned migrated = 0U;
 
     if (migrated_out != NULL) {
@@ -204,18 +204,18 @@ void nm_rehome_inflight_io_waiters(nm_runtime_t *rt, nm_shard_t *source, nm_shar
 
     pthread_mutex_lock(&rt->task_list_lock);
     for (task = rt->all_tasks; task != NULL; task = task->all_next) {
-        nm_io_req_t *req = task->active_io_req;
+        llam_io_req_t *req = task->active_io_req;
 
-        if (!nm_task_can_rehome_io_wait(source, target, task, req, NM_IO_WAIT_MODE_INFLIGHT)) {
+        if (!llam_task_can_rehome_io_wait(source, target, task, req, LLAM_IO_WAIT_MODE_INFLIGHT)) {
             continue;
         }
         // In-flight completions race with rehome; transfer only if owner still matches.
-        if (!nm_io_req_transfer_inflight_owner(req, source->id, target->id)) {
+        if (!llam_io_req_transfer_inflight_owner(req, source->id, target->id)) {
             continue;
         }
         task->parked_shard = target->id;
         req->owner_shard = target->id;
-        nm_merge_rehome_task(source, target, task);
+        llam_merge_rehome_task(source, target, task);
         migrated += 1U;
     }
     pthread_mutex_unlock(&rt->task_list_lock);
@@ -240,12 +240,12 @@ void nm_rehome_inflight_io_waiters(nm_runtime_t *rt, nm_shard_t *source, nm_shar
  *
  * @return @c true when the list was valid and migrated.
  */
-static bool nm_rehome_io_waiter_list(nm_shard_t *source,
-                                     nm_shard_t *target,
-                                     nm_io_req_t *head,
-                                     nm_io_wait_mode_t expected_mode,
+static bool llam_rehome_io_waiter_list(llam_shard_t *source,
+                                     llam_shard_t *target,
+                                     llam_io_req_t *head,
+                                     llam_io_wait_mode_t expected_mode,
                                      unsigned *migrated_out) {
-    nm_io_req_t *req;
+    llam_io_req_t *req;
     unsigned migrated = 0U;
 
     if (migrated_out != NULL) {
@@ -261,7 +261,7 @@ static bool nm_rehome_io_waiter_list(nm_shard_t *source,
         if (req->owner_shard != source->id) {
             continue;
         }
-        if (!nm_task_can_rehome_io_wait(source, target, req->task, req, expected_mode)) {
+        if (!llam_task_can_rehome_io_wait(source, target, req->task, req, expected_mode)) {
             return false;
         }
     }
@@ -270,7 +270,7 @@ static bool nm_rehome_io_waiter_list(nm_shard_t *source,
         if (req->owner_shard != source->id) {
             continue;
         }
-        nm_rehome_io_wait_req(source, target, req);
+        llam_rehome_io_wait_req(source, target, req);
         migrated += 1U;
     }
 
@@ -288,8 +288,8 @@ static bool nm_rehome_io_waiter_list(nm_shard_t *source,
  *
  * @return @c true when the non-empty list is fully owned by @p shard_id.
  */
-static bool nm_io_waiters_all_owned_by_shard(const nm_io_req_t *head, unsigned shard_id) {
-    const nm_io_req_t *req;
+static bool llam_io_waiters_all_owned_by_shard(const llam_io_req_t *head, unsigned shard_id) {
+    const llam_io_req_t *req;
 
     if (head == NULL) {
         return false;
@@ -312,7 +312,7 @@ static bool nm_io_waiters_all_owned_by_shard(const nm_io_req_t *head, unsigned s
  *
  * @return @c true when submit waiters were safely rehomed.
  */
-bool nm_rehome_node_submit_waiters(nm_node_t *node, nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out) {
+bool llam_rehome_node_submit_waiters(llam_node_t *node, llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
     bool ok;
 
     if (migrated_out != NULL) {
@@ -323,7 +323,7 @@ bool nm_rehome_node_submit_waiters(nm_node_t *node, nm_shard_t *source, nm_shard
     }
 
     pthread_mutex_lock(&node->submit_lock);
-    ok = nm_rehome_io_waiter_list(source, target, node->submit_head, NM_IO_WAIT_MODE_SUBMIT_QUEUE, migrated_out);
+    ok = llam_rehome_io_waiter_list(source, target, node->submit_head, LLAM_IO_WAIT_MODE_SUBMIT_QUEUE, migrated_out);
     pthread_mutex_unlock(&node->submit_lock);
     if (ok && migrated_out != NULL && *migrated_out > 0U) {
         source->metrics.migrations += *migrated_out;
@@ -339,17 +339,17 @@ bool nm_rehome_node_submit_waiters(nm_node_t *node, nm_shard_t *source, nm_shard
  *
  * @return @c true when the node supports the request kind.
  */
-static bool nm_node_supports_submit_req(const nm_node_t *node, const nm_io_req_t *req) {
+static bool llam_node_supports_submit_req(const llam_node_t *node, const llam_io_req_t *req) {
     if (node == NULL || req == NULL) {
         return false;
     }
     if (!node->ring_ready) {
         return false;
     }
-    if (req->kind == NM_IO_KIND_READ && req->use_recv_op) {
+    if (req->kind == LLAM_IO_KIND_READ && req->use_recv_op) {
         return node->supports_recv;
     }
-    return nm_node_supports_kind(node, req->kind);
+    return llam_node_supports_kind(node, req->kind);
 }
 
 /**
@@ -367,17 +367,17 @@ static bool nm_node_supports_submit_req(const nm_node_t *node, const nm_io_req_t
  *
  * @return @c true when evacuation completed safely.
  */
-bool nm_evacuate_rehomed_submit_waiters(nm_node_t *source_node,
-                                               nm_node_t *target_node,
-                                               nm_shard_t *source_shard,
-                                               nm_shard_t *target_shard,
+bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
+                                               llam_node_t *target_node,
+                                               llam_shard_t *source_shard,
+                                               llam_shard_t *target_shard,
                                                unsigned *migrated_out) {
-    nm_node_t *first;
-    nm_node_t *second;
-    nm_node_t *source_locked;
-    nm_node_t *target_locked;
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur;
+    llam_node_t *first;
+    llam_node_t *second;
+    llam_node_t *source_locked;
+    llam_node_t *target_locked;
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur;
     unsigned migrated = 0U;
 
     if (migrated_out != NULL) {
@@ -396,15 +396,15 @@ bool nm_evacuate_rehomed_submit_waiters(nm_node_t *source_node,
     target_locked = source_locked == source_node ? target_node : source_node;
 
     for (cur = source_locked->submit_head; cur != NULL; cur = cur->next) {
-        nm_task_t *task = cur->task;
+        llam_task_t *task = cur->task;
 
         if (cur->owner_shard != target_shard->id || cur->attached_node_index != source_locked->index) {
             continue;
         }
-        if (task == NULL || task->state != NM_TASK_STATE_PARKED || task->wait_reason != NM_WAIT_IO ||
+        if (task == NULL || task->state != LLAM_TASK_STATE_PARKED || task->wait_reason != LLAM_WAIT_IO ||
             task->parked_shard != target_shard->id || task->active_io_req != cur ||
-            atomic_load_explicit(&cur->wait_mode, memory_order_acquire) != (unsigned)NM_IO_WAIT_MODE_SUBMIT_QUEUE ||
-            !nm_node_supports_submit_req(target_locked, cur)) {
+            atomic_load_explicit(&cur->wait_mode, memory_order_acquire) != (unsigned)LLAM_IO_WAIT_MODE_SUBMIT_QUEUE ||
+            !llam_node_supports_submit_req(target_locked, cur)) {
             pthread_mutex_unlock(&second->submit_lock);
             pthread_mutex_unlock(&first->submit_lock);
             return false;
@@ -413,7 +413,7 @@ bool nm_evacuate_rehomed_submit_waiters(nm_node_t *source_node,
 
     cur = source_locked->submit_head;
     while (cur != NULL) {
-        nm_io_req_t *next = cur->next;
+        llam_io_req_t *next = cur->next;
 
         if (cur->owner_shard != target_shard->id || cur->attached_node_index != source_locked->index) {
             prev = cur;
@@ -431,7 +431,7 @@ bool nm_evacuate_rehomed_submit_waiters(nm_node_t *source_node,
         cur->next = NULL;
         // The request is already target-shard-owned; now move node ownership too.
         cur->attached_node_index = target_locked->index;
-        nm_queue_node_submit_locked(target_locked, cur);
+        llam_queue_node_submit_locked(target_locked, cur);
         migrated += 1U;
         cur = next;
     }
@@ -457,11 +457,11 @@ bool nm_evacuate_rehomed_submit_waiters(nm_node_t *source_node,
  *
  * @return @c true when non-transferred control or watch state remains.
  */
-static bool nm_node_has_watch_state_locked(const nm_node_t *node) {
-    const nm_io_control_op_t *control;
-    const nm_poll_watch_t *poll_watch;
-    const nm_accept_watch_t *accept_watch;
-    const nm_recv_watch_t *recv_watch;
+static bool llam_node_has_watch_state_locked(const llam_node_t *node) {
+    const llam_io_control_op_t *control;
+    const llam_poll_watch_t *poll_watch;
+    const llam_accept_watch_t *accept_watch;
+    const llam_recv_watch_t *recv_watch;
 
     if (node == NULL) {
         return false;
@@ -470,19 +470,19 @@ static bool nm_node_has_watch_state_locked(const nm_node_t *node) {
         bool transferred = false;
 
         switch (control->kind) {
-        case NM_IO_CONTROL_POLL_ACTIVATE:
-        case NM_IO_CONTROL_POLL_DEACTIVATE:
-            transferred = control->target != NULL && ((const nm_poll_watch_t *)control->target)->live_transferred;
+        case LLAM_IO_CONTROL_POLL_ACTIVATE:
+        case LLAM_IO_CONTROL_POLL_DEACTIVATE:
+            transferred = control->target != NULL && ((const llam_poll_watch_t *)control->target)->live_transferred;
             break;
-        case NM_IO_CONTROL_ACCEPT_ACTIVATE:
-        case NM_IO_CONTROL_ACCEPT_DEACTIVATE:
-            transferred = control->target != NULL && ((const nm_accept_watch_t *)control->target)->live_transferred;
+        case LLAM_IO_CONTROL_ACCEPT_ACTIVATE:
+        case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE:
+            transferred = control->target != NULL && ((const llam_accept_watch_t *)control->target)->live_transferred;
             break;
-        case NM_IO_CONTROL_RECV_ACTIVATE:
-        case NM_IO_CONTROL_RECV_DEACTIVATE:
-            transferred = control->target != NULL && ((const nm_recv_watch_t *)control->target)->live_transferred;
+        case LLAM_IO_CONTROL_RECV_ACTIVATE:
+        case LLAM_IO_CONTROL_RECV_DEACTIVATE:
+            transferred = control->target != NULL && ((const llam_recv_watch_t *)control->target)->live_transferred;
             break;
-        case NM_IO_CONTROL_REQ_CANCEL:
+        case LLAM_IO_CONTROL_REQ_CANCEL:
             transferred = true;
             break;
         default:
@@ -534,10 +534,10 @@ static bool nm_node_has_watch_state_locked(const nm_node_t *node) {
  *
  * @return @c true when all watch waiters were safely rehomed.
  */
-static bool nm_rehome_node_watch_waiters(nm_node_t *node, nm_shard_t *source, nm_shard_t *target, unsigned *migrated_out) {
-    nm_poll_watch_t *poll_watch;
-    nm_accept_watch_t *accept_watch;
-    nm_recv_watch_t *recv_watch;
+static bool llam_rehome_node_watch_waiters(llam_node_t *node, llam_shard_t *source, llam_shard_t *target, unsigned *migrated_out) {
+    llam_poll_watch_t *poll_watch;
+    llam_accept_watch_t *accept_watch;
+    llam_recv_watch_t *recv_watch;
     unsigned migrated = 0U;
     unsigned target_node_index;
 
@@ -550,14 +550,14 @@ static bool nm_rehome_node_watch_waiters(nm_node_t *node, nm_shard_t *source, nm
 
     pthread_mutex_lock(&node->watch_lock);
     for (poll_watch = node->poll_watches; poll_watch != NULL; poll_watch = poll_watch->next) {
-        bool target_owned = nm_io_waiters_all_owned_by_shard(poll_watch->wait_head, target->id);
+        bool target_owned = llam_io_waiters_all_owned_by_shard(poll_watch->wait_head, target->id);
 
-        if (!nm_rehome_io_waiter_list(source, target, poll_watch->wait_head, NM_IO_WAIT_MODE_POLL_WATCH, &migrated)) {
+        if (!llam_rehome_io_waiter_list(source, target, poll_watch->wait_head, LLAM_IO_WAIT_MODE_POLL_WATCH, &migrated)) {
             pthread_mutex_unlock(&node->watch_lock);
             return false;
         }
-        target_node_index = nm_multishot_owner_node_index(node->runtime, target->io_node_index, poll_watch->fd);
-        target_owned = nm_io_waiters_all_owned_by_shard(poll_watch->wait_head, target->id);
+        target_node_index = llam_multishot_owner_node_index(node->runtime, target->io_node_index, poll_watch->fd);
+        target_owned = llam_io_waiters_all_owned_by_shard(poll_watch->wait_head, target->id);
         if (poll_watch->wait_head != NULL &&
             node->index != target_node_index &&
             target_owned) {
@@ -574,14 +574,14 @@ static bool nm_rehome_node_watch_waiters(nm_node_t *node, nm_shard_t *source, nm
         migrated = 0U;
     }
     for (accept_watch = node->accept_watches; accept_watch != NULL; accept_watch = accept_watch->next) {
-        bool target_owned = nm_io_waiters_all_owned_by_shard(accept_watch->wait_head, target->id);
+        bool target_owned = llam_io_waiters_all_owned_by_shard(accept_watch->wait_head, target->id);
 
-        if (!nm_rehome_io_waiter_list(source, target, accept_watch->wait_head, NM_IO_WAIT_MODE_ACCEPT_WATCH, &migrated)) {
+        if (!llam_rehome_io_waiter_list(source, target, accept_watch->wait_head, LLAM_IO_WAIT_MODE_ACCEPT_WATCH, &migrated)) {
             pthread_mutex_unlock(&node->watch_lock);
             return false;
         }
-        target_node_index = nm_multishot_owner_node_index(node->runtime, target->io_node_index, accept_watch->fd);
-        target_owned = nm_io_waiters_all_owned_by_shard(accept_watch->wait_head, target->id);
+        target_node_index = llam_multishot_owner_node_index(node->runtime, target->io_node_index, accept_watch->fd);
+        target_owned = llam_io_waiters_all_owned_by_shard(accept_watch->wait_head, target->id);
         if (accept_watch->wait_head != NULL &&
             node->index != target_node_index &&
             target_owned) {
@@ -598,14 +598,14 @@ static bool nm_rehome_node_watch_waiters(nm_node_t *node, nm_shard_t *source, nm
         migrated = 0U;
     }
     for (recv_watch = node->recv_watches; recv_watch != NULL; recv_watch = recv_watch->next) {
-        bool target_owned = nm_io_waiters_all_owned_by_shard(recv_watch->wait_head, target->id);
+        bool target_owned = llam_io_waiters_all_owned_by_shard(recv_watch->wait_head, target->id);
 
-        if (!nm_rehome_io_waiter_list(source, target, recv_watch->wait_head, NM_IO_WAIT_MODE_RECV_WATCH, &migrated)) {
+        if (!llam_rehome_io_waiter_list(source, target, recv_watch->wait_head, LLAM_IO_WAIT_MODE_RECV_WATCH, &migrated)) {
             pthread_mutex_unlock(&node->watch_lock);
             return false;
         }
-        target_node_index = nm_multishot_owner_node_index(node->runtime, target->io_node_index, recv_watch->fd);
-        target_owned = nm_io_waiters_all_owned_by_shard(recv_watch->wait_head, target->id);
+        target_node_index = llam_multishot_owner_node_index(node->runtime, target->io_node_index, recv_watch->fd);
+        target_owned = llam_io_waiters_all_owned_by_shard(recv_watch->wait_head, target->id);
         if (recv_watch->wait_head != NULL &&
             node->index != target_node_index &&
             target_owned) {
@@ -643,9 +643,9 @@ static bool nm_rehome_node_watch_waiters(nm_node_t *node, nm_shard_t *source, nm
  *
  * @return @c true when all relevant watch waiters were rehomed.
  */
-bool nm_rehome_runtime_watch_waiters(nm_runtime_t *rt,
-                                            nm_shard_t *source,
-                                            nm_shard_t *target,
+bool llam_rehome_runtime_watch_waiters(llam_runtime_t *rt,
+                                            llam_shard_t *source,
+                                            llam_shard_t *target,
                                             unsigned *migrated_out) {
     unsigned migrated = 0U;
     unsigned i;
@@ -658,13 +658,13 @@ bool nm_rehome_runtime_watch_waiters(nm_runtime_t *rt,
     }
 
     if (rt->experimental_shard_rings_multishot == 0U || rt->active_nodes <= 1U) {
-        return nm_rehome_node_watch_waiters(&rt->nodes[source->io_node_index], source, target, migrated_out);
+        return llam_rehome_node_watch_waiters(&rt->nodes[source->io_node_index], source, target, migrated_out);
     }
 
     for (i = 0U; i < rt->active_nodes; ++i) {
         unsigned node_migrated = 0U;
 
-        if (!nm_rehome_node_watch_waiters(&rt->nodes[i], source, target, &node_migrated)) {
+        if (!llam_rehome_node_watch_waiters(&rt->nodes[i], source, target, &node_migrated)) {
             return false;
         }
         migrated += node_migrated;
@@ -683,7 +683,7 @@ bool nm_rehome_runtime_watch_waiters(nm_runtime_t *rt,
  *
  * @return @c true when watch/control state remains.
  */
-static bool nm_node_has_cross_io_state(nm_node_t *node) {
+static bool llam_node_has_cross_io_state(llam_node_t *node) {
     bool has_watch_state;
 
     if (node == NULL) {
@@ -691,7 +691,7 @@ static bool nm_node_has_cross_io_state(nm_node_t *node) {
     }
 
     pthread_mutex_lock(&node->watch_lock);
-    has_watch_state = nm_node_has_watch_state_locked(node);
+    has_watch_state = llam_node_has_watch_state_locked(node);
     pthread_mutex_unlock(&node->watch_lock);
     return has_watch_state;
 }
@@ -703,7 +703,7 @@ static bool nm_node_has_cross_io_state(nm_node_t *node) {
  *
  * @return @c true when controls or pending operations may still complete.
  */
-static bool nm_node_has_cross_io_async_progress(nm_node_t *node) {
+static bool llam_node_has_cross_io_async_progress(llam_node_t *node) {
     bool has_controls = false;
 
     if (node == NULL) {
@@ -731,28 +731,28 @@ static bool nm_node_has_cross_io_async_progress(nm_node_t *node) {
  *
  * @return @c true when no blocking watch state remains on @p source.
  */
-bool nm_quiesce_cross_io_watch_state(nm_node_t *source, nm_node_t *target, uint64_t deadline_ns) {
+bool llam_quiesce_cross_io_watch_state(llam_node_t *source, llam_node_t *target, uint64_t deadline_ns) {
     if (source == NULL || target == NULL || source == target) {
         return false;
     }
 
     for (;;) {
-        if (!nm_io_rehome_idle_watch_state(source, target)) {
+        if (!llam_io_rehome_idle_watch_state(source, target)) {
             return false;
         }
-        if (!nm_node_has_cross_io_state(source)) {
+        if (!llam_node_has_cross_io_state(source)) {
             return true;
         }
-        if (nm_now_ns() >= deadline_ns || !nm_node_has_cross_io_async_progress(source)) {
+        if (llam_now_ns() >= deadline_ns || !llam_node_has_cross_io_async_progress(source)) {
             break;
         }
         // Give the source I/O worker a chance to process queued migration controls.
-        nm_kick_node(source);
-        nm_watchdog_pause_briefly();
+        llam_kick_node(source);
+        llam_watchdog_pause_briefly();
     }
 
-    if (!nm_io_rehome_idle_watch_state(source, target)) {
+    if (!llam_io_rehome_idle_watch_state(source, target)) {
         return false;
     }
-    return !nm_node_has_cross_io_state(source);
+    return !llam_node_has_cross_io_state(source);
 }

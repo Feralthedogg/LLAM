@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_linux_control.c
+ * @file src/io/linux/runtime_io_watch_linux_control.c
  * @brief Linux io_uring control-operation submission and watch cancellation helpers.
  *
  * @details
@@ -34,8 +34,8 @@
  * @param target Watch or request pointer consumed by the worker.
  * @return 0 on success, -1 on allocation failure.
  */
-int nm_node_queue_control_locked(nm_node_t *node, nm_io_control_kind_t kind, void *target) {
-    nm_io_control_op_t *op = calloc(1, sizeof(*op));
+int llam_node_queue_control_locked(llam_node_t *node, llam_io_control_kind_t kind, void *target) {
+    llam_io_control_op_t *op = calloc(1, sizeof(*op));
 
     if (op == NULL) {
         return -1;
@@ -60,14 +60,14 @@ int nm_node_queue_control_locked(nm_node_t *node, nm_io_control_kind_t kind, voi
  * @param target Watch or request pointer consumed by the worker.
  * @return 0 on success, -1 on allocation failure.
  */
-int nm_node_queue_control(nm_node_t *node, nm_io_control_kind_t kind, void *target) {
+int llam_node_queue_control(llam_node_t *node, llam_io_control_kind_t kind, void *target) {
     int rc;
 
     pthread_mutex_lock(&node->watch_lock);
-    rc = nm_node_queue_control_locked(node, kind, target);
+    rc = llam_node_queue_control_locked(node, kind, target);
     pthread_mutex_unlock(&node->watch_lock);
     if (rc == 0) {
-        nm_kick_node(node);
+        llam_kick_node(node);
     }
     return rc;
 }
@@ -78,8 +78,8 @@ int nm_node_queue_control(nm_node_t *node, nm_io_control_kind_t kind, void *targ
  * @param node Node whose control queue should be drained.
  * @return Head of detached control list.
  */
-nm_io_control_op_t *nm_take_node_controls(nm_node_t *node) {
-    nm_io_control_op_t *head;
+llam_io_control_op_t *llam_take_node_controls(llam_node_t *node) {
+    llam_io_control_op_t *head;
 
     pthread_mutex_lock(&node->watch_lock);
     head = node->control_head;
@@ -98,9 +98,9 @@ nm_io_control_op_t *nm_take_node_controls(nm_node_t *node) {
  * @param cqe_flags         io_uring CQE flags.
  * @param decrement_pending Whether to decrement node pending operation count.
  */
-void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, unsigned cqe_flags, bool decrement_pending) {
-    nm_io_abort_reason_t abort_reason;
-    nm_wait_reason_t wake_reason = NM_WAIT_IO;
+void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsigned cqe_flags, bool decrement_pending) {
+    llam_io_abort_reason_t abort_reason;
+    llam_wait_reason_t wake_reason = LLAM_WAIT_IO;
     unsigned inflight_owner = UINT_MAX;
     unsigned wait_mode;
 
@@ -108,18 +108,18 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, unsigned cqe
         atomic_fetch_sub(&node->pending_ops, 1U);
     }
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
-    if (wait_mode == NM_IO_WAIT_MODE_INFLIGHT) {
+    if (wait_mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
         // Clear in-flight ownership exactly once so shard pressure accounting is
-        // balanced with nm_take_node_submissions().
+        // balanced with llam_take_node_submissions().
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
         if (inflight_owner < node->runtime->active_shards) {
-            nm_shard_note_inflight_io_waiter(inflight_owner, -1);
+            llam_shard_note_inflight_io_waiter(inflight_owner, -1);
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
     }
-    abort_reason = (nm_io_abort_reason_t)atomic_exchange(&req->abort_reason, NM_IO_ABORT_NONE);
-    atomic_store(&req->wait_mode, NM_IO_WAIT_MODE_NONE);
+    abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
     atomic_store(&req->cancel_queued, 0U);
     req->poll_watch = NULL;
     req->accept_watch = NULL;
@@ -137,8 +137,8 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, unsigned cqe
                     req->owned_buffer->provided_node_index = node->index;
                     req->owned_buffer->provided_bid = bid;
                     req->owned_buffer->data =
-                        node->recv_buf_storage + ((size_t)bid * NM_IO_BUFFER_INLINE_BYTES);
-                    req->owned_buffer->capacity = NM_IO_BUFFER_INLINE_BYTES;
+                        node->recv_buf_storage + ((size_t)bid * LLAM_IO_BUFFER_INLINE_BYTES);
+                    req->owned_buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
                     req->owned_buffer->size = (size_t)res;
                     req->provided_bid = bid;
                     node->provided_buf_acquires += 1U;
@@ -156,17 +156,17 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, unsigned cqe
                 req->poll_revents = 0;
             }
         } else {
-            req->result = req->kind == NM_IO_KIND_POLL ? (res != 0 ? 1 : 0) : res;
+            req->result = req->kind == LLAM_IO_KIND_POLL ? (res != 0 ? 1 : 0) : res;
             req->error_code = 0;
-            req->poll_revents = req->kind == NM_IO_KIND_POLL ? (short)res : 0;
-            if (req->owned_buffer != NULL && req->kind == NM_IO_KIND_READ) {
+            req->poll_revents = req->kind == LLAM_IO_KIND_POLL ? (short)res : 0;
+            if (req->owned_buffer != NULL && req->kind == LLAM_IO_KIND_READ) {
                 req->owned_buffer->size = (size_t)res;
             }
         }
     } else {
-        if (res == -ECANCELED && abort_reason != NM_IO_ABORT_NONE) {
-            nm_io_set_abort_result(req, abort_reason);
-            wake_reason = nm_io_abort_wait_reason(abort_reason);
+        if (res == -ECANCELED && abort_reason != LLAM_IO_ABORT_NONE) {
+            llam_io_set_abort_result(req, abort_reason);
+            wake_reason = llam_io_abort_wait_reason(abort_reason);
         } else {
             req->result = -1;
             req->error_code = -res;
@@ -174,13 +174,13 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, unsigned cqe
         }
     }
     if (req->owner_shard < node->runtime->active_shards) {
-        nm_shard_t *shard = &node->runtime->shards[req->owner_shard];
-        uint64_t now_ns = nm_now_ns();
+        llam_shard_t *shard = &node->runtime->shards[req->owner_shard];
+        uint64_t now_ns = llam_now_ns();
 
         pthread_mutex_lock(&shard->lock);
-        if (wake_reason == NM_WAIT_CANCEL) {
+        if (wake_reason == LLAM_WAIT_CANCEL) {
             shard->metrics.cancel_wakes += 1U;
-        } else if (wake_reason == NM_WAIT_TIMEOUT) {
+        } else if (wake_reason == LLAM_WAIT_TIMEOUT) {
             shard->metrics.timeout_wakes += 1U;
         }
         if (now_ns >= req->submit_ts_ns) {
@@ -189,11 +189,11 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, unsigned cqe
         }
         pthread_mutex_unlock(&shard->lock);
     }
-    nm_reinject_task_on_shard(node->runtime,
+    llam_reinject_task_on_shard(node->runtime,
                               req->task,
                               req->owner_shard,
                               true,
-                              NM_TRACE_IO_COMPLETE,
+                              LLAM_TRACE_IO_COMPLETE,
                               wake_reason);
 }
 
@@ -204,13 +204,13 @@ void nm_io_complete_req(nm_node_t *node, nm_io_req_t *req, int res, unsigned cqe
  * @param op   Control operation; ownership is consumed by this function or by
  *             the resulting control completion.
  */
-void nm_io_submit_control_op(nm_node_t *node, nm_io_control_op_t *op) {
+void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&node->ring);
 
     if (sqe == NULL) {
-        int rc = nm_node_submit_ring(node);
+        int rc = llam_node_submit_ring(node);
         if (rc < 0) {
-            nm_record_fatal(node->runtime, -rc);
+            llam_record_fatal(node->runtime, -rc);
             free(op);
             return;
         }
@@ -222,11 +222,11 @@ void nm_io_submit_control_op(nm_node_t *node, nm_io_control_op_t *op) {
     }
 
     switch (op->kind) {
-    case NM_IO_CONTROL_POLL_ACTIVATE: {
-        nm_poll_watch_t *watch = op->target;
+    case LLAM_IO_CONTROL_POLL_ACTIVATE: {
+        llam_poll_watch_t *watch = op->target;
 
         io_uring_prep_poll_multishot(sqe, watch->fd, (unsigned)watch->events);
-        io_uring_sqe_set_data64(sqe, nm_io_udata_encode(watch, NM_IO_UDATA_POLL_WATCH));
+        io_uring_sqe_set_data64(sqe, llam_io_udata_encode(watch, LLAM_IO_UDATA_POLL_WATCH));
         pthread_mutex_lock(&node->watch_lock);
         // Mark active before submission is visible so a racing deactivation can
         // issue a remove/cancel operation instead of losing the watch.
@@ -238,18 +238,18 @@ void nm_io_submit_control_op(nm_node_t *node, nm_io_control_op_t *op) {
         free(op);
         return;
     }
-    case NM_IO_CONTROL_POLL_DEACTIVATE: {
-        nm_poll_watch_t *watch = op->target;
+    case LLAM_IO_CONTROL_POLL_DEACTIVATE: {
+        llam_poll_watch_t *watch = op->target;
 
-        io_uring_prep_poll_remove(sqe, nm_io_udata_encode(watch, NM_IO_UDATA_POLL_WATCH));
-        io_uring_sqe_set_data64(sqe, nm_io_udata_encode(op, NM_IO_UDATA_CONTROL));
+        io_uring_prep_poll_remove(sqe, llam_io_udata_encode(watch, LLAM_IO_UDATA_POLL_WATCH));
+        io_uring_sqe_set_data64(sqe, llam_io_udata_encode(op, LLAM_IO_UDATA_CONTROL));
         return;
     }
-    case NM_IO_CONTROL_ACCEPT_ACTIVATE: {
-        nm_accept_watch_t *watch = op->target;
+    case LLAM_IO_CONTROL_ACCEPT_ACTIVATE: {
+        llam_accept_watch_t *watch = op->target;
 
         io_uring_prep_multishot_accept(sqe, watch->fd, NULL, NULL, 0);
-        io_uring_sqe_set_data64(sqe, nm_io_udata_encode(watch, NM_IO_UDATA_ACCEPT_WATCH));
+        io_uring_sqe_set_data64(sqe, llam_io_udata_encode(watch, LLAM_IO_UDATA_ACCEPT_WATCH));
         pthread_mutex_lock(&node->watch_lock);
         watch->active = true;
         watch->activating = false;
@@ -259,22 +259,22 @@ void nm_io_submit_control_op(nm_node_t *node, nm_io_control_op_t *op) {
         free(op);
         return;
     }
-    case NM_IO_CONTROL_ACCEPT_DEACTIVATE: {
-        nm_accept_watch_t *watch = op->target;
+    case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE: {
+        llam_accept_watch_t *watch = op->target;
 
-        io_uring_prep_cancel64(sqe, nm_io_udata_encode(watch, NM_IO_UDATA_ACCEPT_WATCH), 0);
-        io_uring_sqe_set_data64(sqe, nm_io_udata_encode(op, NM_IO_UDATA_CONTROL));
+        io_uring_prep_cancel64(sqe, llam_io_udata_encode(watch, LLAM_IO_UDATA_ACCEPT_WATCH), 0);
+        io_uring_sqe_set_data64(sqe, llam_io_udata_encode(op, LLAM_IO_UDATA_CONTROL));
         return;
     }
-    case NM_IO_CONTROL_RECV_ACTIVATE: {
-        nm_recv_watch_t *watch = op->target;
+    case LLAM_IO_CONTROL_RECV_ACTIVATE: {
+        llam_recv_watch_t *watch = op->target;
 
-        io_uring_prep_recv_multishot(sqe, watch->fd, NULL, NM_IO_BUFFER_INLINE_BYTES, 0);
-        nm_io_uring_sqe_set_buf_group_compat(sqe, node->recv_buf_group);
+        io_uring_prep_recv_multishot(sqe, watch->fd, NULL, LLAM_IO_BUFFER_INLINE_BYTES, 0);
+        llam_io_uring_sqe_set_buf_group_compat(sqe, node->recv_buf_group);
         // Multishot recv uses io_uring provided buffers so completions can hand
-        // ownership to an nm_io_buffer_t without copying.
+        // ownership to an llam_io_buffer_t without copying.
         io_uring_sqe_set_flags(sqe, IOSQE_BUFFER_SELECT);
-        io_uring_sqe_set_data64(sqe, nm_io_udata_encode(watch, NM_IO_UDATA_RECV_WATCH));
+        io_uring_sqe_set_data64(sqe, llam_io_udata_encode(watch, LLAM_IO_UDATA_RECV_WATCH));
         pthread_mutex_lock(&node->watch_lock);
         watch->active = true;
         watch->activating = false;
@@ -284,20 +284,20 @@ void nm_io_submit_control_op(nm_node_t *node, nm_io_control_op_t *op) {
         free(op);
         return;
     }
-    case NM_IO_CONTROL_RECV_DEACTIVATE: {
-        nm_recv_watch_t *watch = op->target;
+    case LLAM_IO_CONTROL_RECV_DEACTIVATE: {
+        llam_recv_watch_t *watch = op->target;
 
-        io_uring_prep_cancel64(sqe, nm_io_udata_encode(watch, NM_IO_UDATA_RECV_WATCH), 0);
-        io_uring_sqe_set_data64(sqe, nm_io_udata_encode(op, NM_IO_UDATA_CONTROL));
+        io_uring_prep_cancel64(sqe, llam_io_udata_encode(watch, LLAM_IO_UDATA_RECV_WATCH), 0);
+        io_uring_sqe_set_data64(sqe, llam_io_udata_encode(op, LLAM_IO_UDATA_CONTROL));
         return;
     }
-    case NM_IO_CONTROL_REQ_CANCEL: {
-        nm_io_req_t *req = op->target;
+    case LLAM_IO_CONTROL_REQ_CANCEL: {
+        llam_io_req_t *req = op->target;
 
         // Request cancellation targets the encoded request user-data used by the
         // original SQE.
-        io_uring_prep_cancel64(sqe, nm_io_udata_encode(req, NM_IO_UDATA_REQ), 0);
-        io_uring_sqe_set_data64(sqe, nm_io_udata_encode(op, NM_IO_UDATA_CONTROL));
+        io_uring_prep_cancel64(sqe, llam_io_udata_encode(req, LLAM_IO_UDATA_REQ), 0);
+        io_uring_sqe_set_data64(sqe, llam_io_udata_encode(op, LLAM_IO_UDATA_CONTROL));
         return;
     }
     default:

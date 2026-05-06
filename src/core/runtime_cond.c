@@ -31,8 +31,8 @@
  *
  * @return New condition variable on success, or @c NULL with @c errno set.
  */
-nm_cond_t *nm_cond_create(void) {
-    nm_cond_t *cond = calloc(1, sizeof(*cond));
+llam_cond_t *llam_cond_create(void) {
+    llam_cond_t *cond = calloc(1, sizeof(*cond));
 
     if (cond == NULL) {
         return NULL;
@@ -52,15 +52,26 @@ nm_cond_t *nm_cond_create(void) {
  *
  * The caller must ensure no tasks remain parked on the condition wait queue.
  *
- * @param cond Condition variable to destroy; may be @c NULL.
+ * @param cond Condition variable to destroy.
+ *
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
  */
-void nm_cond_destroy(nm_cond_t *cond) {
+int llam_cond_destroy(llam_cond_t *cond) {
     if (cond == NULL) {
-        return;
+        errno = EINVAL;
+        return -1;
     }
 
+    pthread_mutex_lock(&cond->lock);
+    if (cond->waiters.head != NULL || cond->waiters.depth != 0U) {
+        pthread_mutex_unlock(&cond->lock);
+        errno = EBUSY;
+        return -1;
+    }
+    pthread_mutex_unlock(&cond->lock);
     pthread_mutex_destroy(&cond->lock);
     free(cond);
+    return 0;
 }
 
 /**
@@ -77,48 +88,52 @@ void nm_cond_destroy(nm_cond_t *cond) {
  *
  * @return 0 on signal/broadcast success, or -1 with @c errno set.
  */
-int nm_cond_wait_impl(nm_cond_t *cond, nm_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns) {
-    nm_wait_node_t *node;
-    nm_wait_node_t *mutex_waiter;
+int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns) {
+    llam_wait_node_t *node;
+    llam_wait_node_t *mutex_waiter;
     uintptr_t owner;
     int rc;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (cond == NULL || mutex == NULL || nm_require_task_context() != 0) {
+    if (cond == NULL || mutex == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_require_task_context() != 0) {
         return -1;
     }
 
-    if (atomic_load(&mutex->owner) != (uintptr_t)g_nm_tls_task) {
+    if (atomic_load(&mutex->owner) != (uintptr_t)g_llam_tls_task) {
         errno = EPERM;
         return -1;
     }
-    if (has_deadline && nm_deadline_passed(deadline_ns)) {
+    if (has_deadline && llam_deadline_passed(deadline_ns)) {
         errno = ETIMEDOUT;
         return -1;
     }
 
-    node = nm_sync_wait_node_acquire(g_nm_tls_shard);
+    node = llam_sync_wait_node_acquire(g_llam_tls_shard);
     if (node == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    node->task = g_nm_tls_task;
-    node->owner_shard = g_nm_tls_shard->id;
+    node->task = g_llam_tls_task;
+    node->owner_shard = g_llam_tls_shard->id;
 
     pthread_mutex_lock(&cond->lock);
-    nm_wait_queue_push_tail(&cond->waiters, node);
+    llam_wait_queue_push_tail(&cond->waiters, node);
     owner = atomic_load(&mutex->owner);
-    if (owner != (uintptr_t)g_nm_tls_task) {
+    if (owner != (uintptr_t)g_llam_tls_task) {
         pthread_mutex_unlock(&cond->lock);
-        nm_sync_wait_node_release(g_nm_tls_shard, node);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
         errno = EPERM;
         return -1;
     }
 
     pthread_mutex_lock(&mutex->lock);
-    mutex_waiter = nm_wait_queue_pop_head(&mutex->waiters);
+    mutex_waiter = llam_wait_queue_pop_head(&mutex->waiters);
     if (mutex_waiter != NULL) {
         atomic_store(&mutex->owner, (uintptr_t)mutex_waiter->task);
     } else {
@@ -127,44 +142,44 @@ int nm_cond_wait_impl(nm_cond_t *cond, nm_mutex_t *mutex, bool has_deadline, uin
     pthread_mutex_unlock(&mutex->lock);
     if (mutex_waiter != NULL) {
         mutex_waiter->error_code = 0;
-        nm_wake_wait_node(mutex_waiter, true, NM_WAIT_MUTEX);
+        llam_wake_wait_node(mutex_waiter, true, LLAM_WAIT_MUTEX);
     }
     pthread_mutex_unlock(&cond->lock);
-    nm_task_set_wait_node_tracking(g_nm_tls_task, node, &cond->waiters, &cond->lock, g_nm_tls_shard->id);
-    g_nm_tls_task->state = NM_TASK_STATE_PARKED;
-    g_nm_tls_task->wait_reason = NM_WAIT_COND;
-    if (has_deadline && nm_arm_task_wait_deadline(g_nm_tls_task, g_nm_tls_shard, deadline_ns) != 0) {
+    llam_task_set_wait_node_tracking(g_llam_tls_task, node, &cond->waiters, &cond->lock, g_llam_tls_shard->id);
+    g_llam_tls_task->state = LLAM_TASK_STATE_PARKED;
+    g_llam_tls_task->wait_reason = LLAM_WAIT_COND;
+    if (has_deadline && llam_arm_task_wait_deadline(g_llam_tls_task, g_llam_tls_shard, deadline_ns) != 0) {
         pthread_mutex_lock(&cond->lock);
-        (void)nm_wait_queue_remove(&cond->waiters, node);
+        (void)llam_wait_queue_remove(&cond->waiters, node);
         pthread_mutex_unlock(&cond->lock);
-        g_nm_tls_task->state = NM_TASK_STATE_RUNNING;
-        g_nm_tls_task->wait_reason = NM_WAIT_NONE;
-        nm_task_clear_wait_tracking(g_nm_tls_task);
-        nm_sync_wait_node_release(g_nm_tls_shard, node);
-        (void)nm_mutex_lock_impl(mutex, false, 0U, false);
+        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
+        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(g_llam_tls_task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        (void)llam_mutex_lock_impl(mutex, false, 0U, false);
         return -1;
     }
-    if (g_nm_tls_task->cancel_token != NULL && nm_cancel_token_register_task(g_nm_tls_task) != 0) {
-        nm_disarm_task_wait_deadline(g_nm_tls_task);
+    if (g_llam_tls_task->cancel_token != NULL && llam_cancel_token_register_task(g_llam_tls_task) != 0) {
+        llam_disarm_task_wait_deadline(g_llam_tls_task);
         pthread_mutex_lock(&cond->lock);
-        (void)nm_wait_queue_remove(&cond->waiters, node);
+        (void)llam_wait_queue_remove(&cond->waiters, node);
         pthread_mutex_unlock(&cond->lock);
-        g_nm_tls_task->state = NM_TASK_STATE_RUNNING;
-        g_nm_tls_task->wait_reason = NM_WAIT_NONE;
-        nm_task_clear_wait_tracking(g_nm_tls_task);
-        nm_sync_wait_node_release(g_nm_tls_shard, node);
-        (void)nm_mutex_lock_impl(mutex, false, 0U, false);
+        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
+        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(g_llam_tls_task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        (void)llam_mutex_lock_impl(mutex, false, 0U, false);
         return -1;
     }
 
-    nm_park_current_task(NM_WAIT_COND, NM_TRACE_STATE);
-    if (g_nm_tls_task->cancel_registered) {
-        nm_cancel_token_unregister_task(g_nm_tls_task);
+    llam_park_current_task(LLAM_WAIT_COND, LLAM_TRACE_STATE);
+    if (g_llam_tls_task->cancel_registered) {
+        llam_cancel_token_unregister_task(g_llam_tls_task);
     }
-    nm_task_clear_wait_tracking(g_nm_tls_task);
+    llam_task_clear_wait_tracking(g_llam_tls_task);
     rc = node->error_code;
-    nm_sync_wait_node_release(g_nm_tls_shard, node);
-    if (nm_mutex_lock_impl(mutex, false, 0U, false) != 0) {
+    llam_sync_wait_node_release(g_llam_tls_shard, node);
+    if (llam_mutex_lock_impl(mutex, false, 0U, false) != 0) {
         return -1;
     }
     if (rc != 0) {
@@ -182,8 +197,8 @@ int nm_cond_wait_impl(nm_cond_t *cond, nm_mutex_t *mutex, bool has_deadline, uin
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int nm_cond_wait(nm_cond_t *cond, nm_mutex_t *mutex) {
-    return nm_cond_wait_impl(cond, mutex, false, 0U);
+int llam_cond_wait(llam_cond_t *cond, llam_mutex_t *mutex) {
+    return llam_cond_wait_impl(cond, mutex, false, 0U);
 }
 
 /**
@@ -196,8 +211,8 @@ int nm_cond_wait(nm_cond_t *cond, nm_mutex_t *mutex) {
  * @return 0 on success, or -1 with @c errno set to @c ETIMEDOUT or another
  *         propagated wait error.
  */
-int nm_cond_wait_until(nm_cond_t *cond, nm_mutex_t *mutex, uint64_t deadline_ns) {
-    return nm_cond_wait_impl(cond, mutex, true, deadline_ns);
+int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64_t deadline_ns) {
+    return llam_cond_wait_impl(cond, mutex, true, deadline_ns);
 }
 
 /**
@@ -207,10 +222,10 @@ int nm_cond_wait_until(nm_cond_t *cond, nm_mutex_t *mutex, uint64_t deadline_ns)
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL.
  */
-int nm_cond_signal(nm_cond_t *cond) {
-    nm_wait_node_t *node;
+int llam_cond_signal(llam_cond_t *cond) {
+    llam_wait_node_t *node;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
     if (cond == NULL) {
         errno = EINVAL;
@@ -218,12 +233,12 @@ int nm_cond_signal(nm_cond_t *cond) {
     }
 
     pthread_mutex_lock(&cond->lock);
-    node = nm_wait_queue_pop_head(&cond->waiters);
+    node = llam_wait_queue_pop_head(&cond->waiters);
     pthread_mutex_unlock(&cond->lock);
 
     if (node != NULL) {
         node->error_code = 0;
-        nm_wake_wait_node(node, true, NM_WAIT_COND);
+        llam_wake_wait_node(node, true, LLAM_WAIT_COND);
     }
     return 0;
 }
@@ -235,14 +250,14 @@ int nm_cond_signal(nm_cond_t *cond) {
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL.
  */
-int nm_cond_broadcast(nm_cond_t *cond) {
+int llam_cond_broadcast(llam_cond_t *cond) {
     if (cond == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     pthread_mutex_lock(&cond->lock);
-    nm_wake_wait_queue_all(&cond->waiters, 0, NM_WAIT_COND);
+    llam_wake_wait_queue_all(&cond->waiters, 0, LLAM_WAIT_COND);
     pthread_mutex_unlock(&cond->lock);
     return 0;
 }

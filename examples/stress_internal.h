@@ -21,7 +21,7 @@
 #ifndef LLAM_EXAMPLES_STRESS_INTERNAL_H
 #define LLAM_EXAMPLES_STRESS_INTERNAL_H
 
-#include "llam/nm_runtime.h"
+#include "llam/runtime.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -48,21 +48,21 @@ typedef struct storm_state {
 } storm_state_t;
 
 typedef struct ping_state {
-    nm_channel_t *request;
-    nm_channel_t *response;
+    llam_channel_t *request;
+    llam_channel_t *response;
     unsigned rounds;
     atomic_uint echoed;
 } ping_state_t;
 
 typedef struct convoy_state {
-    nm_mutex_t *mutex;
+    llam_mutex_t *mutex;
     unsigned iterations;
     unsigned workers;
     unsigned counter;
 } convoy_state_t;
 
 typedef struct cancel_state {
-    nm_cancel_token_t *token;
+    llam_cancel_token_t *token;
     atomic_uint cancelled;
     atomic_uint triggered;
 } cancel_state_t;
@@ -73,9 +73,9 @@ typedef struct opaque_state {
 } opaque_state_t;
 
 typedef struct cond_cancel_state {
-    nm_mutex_t *mutex;
-    nm_cond_t *cond;
-    nm_cancel_token_t *token;
+    llam_mutex_t *mutex;
+    llam_cond_t *cond;
+    llam_cancel_token_t *token;
     atomic_uint cancelled;
     atomic_uint triggered;
     atomic_uint reacquired;
@@ -84,19 +84,19 @@ typedef struct cond_cancel_state {
 typedef struct io_cancel_state {
     int reader_fd;
     int writer_fd;
-    nm_cancel_token_t *token;
+    llam_cancel_token_t *token;
     atomic_uint cancelled;
     atomic_uint triggered;
 } io_cancel_state_t;
 
 typedef struct block_cancel_state {
-    nm_cancel_token_t *token;
+    llam_cancel_token_t *token;
     atomic_uint cancelled;
     atomic_uint triggered;
 } block_cancel_state_t;
 
 typedef struct mutex_timeout_state {
-    nm_mutex_t *mutex;
+    llam_mutex_t *mutex;
     uint64_t hold_ns;
 } mutex_timeout_state_t;
 
@@ -114,7 +114,7 @@ typedef struct fp_inherit_state {
 
 typedef struct poll_cancel_race_state {
     int fd;
-    nm_cancel_token_t *token;
+    llam_cancel_token_t *token;
     atomic_uint cancel_hits;
     atomic_uint timeout_hits;
     atomic_uint triggered;
@@ -231,7 +231,7 @@ typedef struct dynamic_foreign_poll_watch_state {
     unsigned monitor_rounds;
     uint64_t monitor_sleep_ns;
     dynamic_live_poll_waiter_state_t *waiter_states;
-    nm_task_t **waiters;
+    llam_task_t **waiters;
     int sv[2];
     atomic_uint completed;
     atomic_uint spawned;
@@ -252,7 +252,7 @@ typedef struct dynamic_accept_connector_state {
 } dynamic_accept_connector_state_t;
 
 typedef struct stress_phase_entry {
-    nm_task_fn task_fn;
+    llam_task_fn task_fn;
     void *arg;
 } stress_phase_entry_t;
 
@@ -264,7 +264,7 @@ void stress_fail_errno(const char *label, int got, int expected);
 void stress_close_fd_pair(int sv[2]);
 void stress_reset_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_t *state);
 void stress_cleanup_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_t *state);
-nm_task_t *stress_spawn_on_shard(unsigned shard_id, nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts);
+llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts);
 bool stress_open_foreign_poll_pair(unsigned source_node_index, int sv_out[2], unsigned *owner_node_out);
 bool stress_poll_watch_waiter_counts(unsigned node_index,
                                      int fd,
@@ -315,7 +315,7 @@ void cond_cancel_waiter_task(void *arg);
 void cond_cancel_trigger_task(void *arg);
 void poll_writer_task(void *arg);
 void dynamic_poll_writer_task(void *arg);
-unsigned stress_dynamic_live_wait_floor(const nm_runtime_stats_t *stats);
+unsigned stress_dynamic_live_wait_floor(const llam_runtime_stats_t *stats);
 void dynamic_live_poll_waiter_task(void *arg);
 void dynamic_live_inflight_waiter_task(void *arg);
 void dynamic_live_accept_waiter_task(void *arg);
@@ -365,11 +365,11 @@ void run_poll_cancel_timeout_race(void);
 void run_nested_opaque_path(void);
 void stress_suite_task(void *arg);
 void dynamic_suite_task(void *arg);
-void stress_print_phase_stats(const char *phase_name, const nm_runtime_stats_t *stats);
+void stress_print_phase_stats(const char *phase_name, const llam_runtime_stats_t *stats);
 int stress_run_phase(const char *phase_name,
-                     nm_task_fn task_fn,
+                     llam_task_fn task_fn,
                      void *arg,
-                     const nm_runtime_opts_t *opts,
+                     const llam_runtime_opts_t *opts,
                      unsigned require_dynamic_motion,
                      unsigned require_floor_reach);
 int stress_run_multi_phase(const char *phase_name,
@@ -377,7 +377,7 @@ int stress_run_multi_phase(const char *phase_name,
                            unsigned entry_count,
                            unsigned spawn_start_shard,
                            unsigned override_online_floor,
-                           const nm_runtime_opts_t *opts,
+                           const llam_runtime_opts_t *opts,
                            unsigned require_dynamic_motion,
                            unsigned require_floor_reach);
 

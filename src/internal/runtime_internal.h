@@ -23,8 +23,8 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_INTERNAL_H
-#define NM_RUNTIME_INTERNAL_H
+#ifndef LLAM_RUNTIME_INTERNAL_H
+#define LLAM_RUNTIME_INTERNAL_H
 
 #include "runtime_types.h"
 #include "runtime_state.h"

@@ -4,8 +4,8 @@
  *
  * @details
  * Darwin x86_64 uses the System V register ABI with Mach-O symbol names. The
- * context layout matches the shared x86-64 @c nm_ctx_t definition in
- * src/internal/nm_internal.h.
+ * context layout matches the shared x86-64 @c llam_ctx_t definition in
+ * src/internal/llam_internal.h.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -33,29 +33,29 @@
      * the Linux x86-64 path.
      */
     .text
-    .globl _nm_ctx_switch
+    .globl _llam_ctx_switch
     .p2align 4, 0x90
-_nm_ctx_switch:
+_llam_ctx_switch:
     .cfi_startproc
     .cfi_def_cfa %rsp, 8
     movq 64(%rdi), %rcx
     testq %rcx, %rcx
-    jnz Lnm_ctx_save_xsave
-    movq _g_nm_fp_control_context@GOTPCREL(%rip), %rax
+    jnz Lllam_ctx_save_xsave
+    movq _g_llam_fp_control_context@GOTPCREL(%rip), %rax
     cmpl $0, (%rax)
-    je Lnm_ctx_saved
-Lnm_ctx_save_control:
+    je Lllam_ctx_saved
+Lllam_ctx_save_control:
     stmxcsr 56(%rdi)
     fnstcw 60(%rdi)
-    jmp Lnm_ctx_saved
-Lnm_ctx_save_xsave:
-    movq _g_nm_xsave_mask_lo@GOTPCREL(%rip), %rax
+    jmp Lllam_ctx_saved
+Lllam_ctx_save_xsave:
+    movq _g_llam_xsave_mask_lo@GOTPCREL(%rip), %rax
     movl (%rax), %eax
-    movq _g_nm_xsave_mask_hi@GOTPCREL(%rip), %rdx
+    movq _g_llam_xsave_mask_hi@GOTPCREL(%rip), %rdx
     movl (%rdx), %edx
     xsave64 (%rcx)
-    jmp Lnm_ctx_saved
-Lnm_ctx_saved:
+    jmp Lllam_ctx_saved
+Lllam_ctx_saved:
     movq %rsp, 0(%rdi)
     movq %rbx, 8(%rdi)
     movq %rbp, 16(%rdi)
@@ -66,22 +66,22 @@ Lnm_ctx_saved:
 
     movq 64(%rsi), %rcx
     testq %rcx, %rcx
-    jnz Lnm_ctx_restore_xsave
-    movq _g_nm_fp_control_context@GOTPCREL(%rip), %rax
+    jnz Lllam_ctx_restore_xsave
+    movq _g_llam_fp_control_context@GOTPCREL(%rip), %rax
     cmpl $0, (%rax)
-    je Lnm_ctx_restored
-Lnm_ctx_restore_control:
+    je Lllam_ctx_restored
+Lllam_ctx_restore_control:
     ldmxcsr 56(%rsi)
     fldcw 60(%rsi)
-    jmp Lnm_ctx_restored
-Lnm_ctx_restore_xsave:
-    movq _g_nm_xsave_mask_lo@GOTPCREL(%rip), %rax
+    jmp Lllam_ctx_restored
+Lllam_ctx_restore_xsave:
+    movq _g_llam_xsave_mask_lo@GOTPCREL(%rip), %rax
     movl (%rax), %eax
-    movq _g_nm_xsave_mask_hi@GOTPCREL(%rip), %rdx
+    movq _g_llam_xsave_mask_hi@GOTPCREL(%rip), %rdx
     movl (%rdx), %edx
     xrstor64 (%rcx)
-    jmp Lnm_ctx_restored
-Lnm_ctx_restored:
+    jmp Lllam_ctx_restored
+Lllam_ctx_restored:
     movq 0(%rsi), %rsp
     movq 8(%rsi), %rbx
     movq 16(%rsi), %rbp
@@ -92,12 +92,12 @@ Lnm_ctx_restored:
     ret
     .cfi_endproc
 
-    .globl _nm_fiber_bootstrap
+    .globl _llam_fiber_bootstrap
     .p2align 4, 0x90
-_nm_fiber_bootstrap:
+_llam_fiber_bootstrap:
     /*
-     * New task contexts enter here with r12 holding nm_task_t*. Align the stack
-     * for the C ABI before calling nm_task_bootstrap().
+     * New task contexts enter here with r12 holding llam_task_t*. Align the stack
+     * for the C ABI before calling llam_task_bootstrap().
      */
     .cfi_startproc
     .cfi_def_cfa %rsp, 8
@@ -105,15 +105,15 @@ _nm_fiber_bootstrap:
     subq $8, %rsp
     .cfi_def_cfa_offset 16
     testq $0xF, %rsp
-    jnz Lnm_fiber_alignment_violation
-    call _nm_task_bootstrap
+    jnz Lllam_fiber_alignment_violation
+    call _llam_task_bootstrap
     addq $8, %rsp
     .cfi_def_cfa_offset 8
     ret
 
-Lnm_fiber_alignment_violation:
+Lllam_fiber_alignment_violation:
     movq %rsp, %rdi
     andq $-16, %rsp
-    call _nm_fiber_alignment_violation
+    call _llam_fiber_alignment_violation
     ud2
     .cfi_endproc

@@ -22,22 +22,22 @@
 
 void run_opaque_reuse(void) {
     opaque_state_t state;
-    nm_task_t *task;
+    llam_task_t *task;
 
     atomic_init(&state.companion_steps, 0U);
     state.scopes = 3U;
-    task = nm_spawn(opaque_scope_task,
+    task = llam_spawn(opaque_scope_task,
                     &state,
-                    &(nm_spawn_opts_t){
-                        .task_class = NM_TASK_CLASS_DEFAULT,
-                        .stack_class = NM_STACK_CLASS_DEFAULT,
-                        .flags = NM_SPAWN_F_SYS_TASK | NM_SPAWN_F_PINNED,
+                    &(llam_spawn_opts_t){
+                        .task_class = LLAM_TASK_CLASS_DEFAULT,
+                        .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                        .flags = LLAM_SPAWN_F_SYS_TASK | LLAM_SPAWN_F_PINNED,
                     });
     if (task == NULL) {
         stress_fail_msg("opaque scope task spawn failed");
         return;
     }
-    if (nm_join(task) != 0) {
+    if (llam_join(task) != 0) {
         stress_fail_msg("opaque scope task join failed");
         return;
     }
@@ -48,121 +48,121 @@ void run_opaque_reuse(void) {
 
 void run_join_timeout_path(void) {
     uint64_t sleep_ns = 5ULL * 1000ULL * 1000ULL;
-    nm_task_t *target = nm_spawn(stress_sleep_task,
+    llam_task_t *target = llam_spawn(stress_sleep_task,
                                  &sleep_ns,
-                                 &(nm_spawn_opts_t){
-                                     .task_class = NM_TASK_CLASS_DEFAULT,
-                                     .stack_class = NM_STACK_CLASS_DEFAULT,
+                                 &(llam_spawn_opts_t){
+                                     .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                     .stack_class = LLAM_STACK_CLASS_DEFAULT,
                                  });
 
     if (target == NULL) {
         stress_fail_msg("join timeout target spawn failed");
         return;
     }
-    if (nm_join_until(target, nm_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
+    if (llam_join_until(target, llam_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
         stress_fail_msg("join timeout unexpectedly succeeded");
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("join timeout errno", errno, ETIMEDOUT);
     }
-    if (nm_join(target) != 0) {
+    if (llam_join(target) != 0) {
         stress_fail_msg("join timeout target join failed");
     }
 }
 
 void run_mutex_timeout_path(void) {
     mutex_timeout_state_t state;
-    nm_task_t *holder;
+    llam_task_t *holder;
 
-    state.mutex = nm_mutex_create();
+    state.mutex = llam_mutex_create();
     state.hold_ns = 5ULL * 1000ULL * 1000ULL;
     if (state.mutex == NULL) {
         stress_fail_msg("mutex timeout create failed");
         return;
     }
 
-    holder = nm_spawn(mutex_holder_task,
+    holder = llam_spawn(mutex_holder_task,
                       &state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (holder == NULL) {
         stress_fail_msg("mutex timeout holder spawn failed");
-        nm_mutex_destroy(state.mutex);
+        llam_mutex_destroy(state.mutex);
         return;
     }
 
-    if (nm_sleep_ns(1ULL * 1000ULL * 1000ULL) != 0) {
+    if (llam_sleep_ns(1ULL * 1000ULL * 1000ULL) != 0) {
         stress_fail_msg("mutex timeout sync sleep failed");
     }
-    if (nm_mutex_lock_until(state.mutex, nm_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
+    if (llam_mutex_lock_until(state.mutex, llam_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
         stress_fail_msg("mutex timeout unexpectedly succeeded");
-        (void)nm_mutex_unlock(state.mutex);
+        (void)llam_mutex_unlock(state.mutex);
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("mutex timeout errno", errno, ETIMEDOUT);
     }
-    if (nm_join(holder) != 0) {
+    if (llam_join(holder) != 0) {
         stress_fail_msg("mutex timeout holder join failed");
     }
-    nm_mutex_destroy(state.mutex);
+    llam_mutex_destroy(state.mutex);
 }
 
 void run_cond_cancel_path(void) {
     cond_cancel_state_t state;
-    nm_task_t *waiter;
-    nm_task_t *trigger;
+    llam_task_t *waiter;
+    llam_task_t *trigger;
 
-    state.mutex = nm_mutex_create();
-    state.cond = nm_cond_create();
-    state.token = nm_cancel_token_create();
+    state.mutex = llam_mutex_create();
+    state.cond = llam_cond_create();
+    state.token = llam_cancel_token_create();
     atomic_init(&state.cancelled, 0U);
     atomic_init(&state.triggered, 0U);
     atomic_init(&state.reacquired, 0U);
     if (state.mutex == NULL || state.cond == NULL || state.token == NULL) {
         stress_fail_msg("cond cancel objects create failed");
         if (state.token != NULL) {
-            (void)nm_cancel_token_destroy(state.token);
+            (void)llam_cancel_token_destroy(state.token);
         }
         if (state.cond != NULL) {
-            nm_cond_destroy(state.cond);
+            llam_cond_destroy(state.cond);
         }
         if (state.mutex != NULL) {
-            nm_mutex_destroy(state.mutex);
+            llam_mutex_destroy(state.mutex);
         }
         return;
     }
 
-    waiter = nm_spawn(cond_cancel_waiter_task,
+    waiter = llam_spawn(cond_cancel_waiter_task,
                       &state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                           .cancel_token = state.token,
                       });
-    trigger = nm_spawn(cond_cancel_trigger_task,
+    trigger = llam_spawn(cond_cancel_trigger_task,
                        &state,
-                       &(nm_spawn_opts_t){
-                           .task_class = NM_TASK_CLASS_DEFAULT,
-                           .stack_class = NM_STACK_CLASS_DEFAULT,
+                       &(llam_spawn_opts_t){
+                           .task_class = LLAM_TASK_CLASS_DEFAULT,
+                           .stack_class = LLAM_STACK_CLASS_DEFAULT,
                        });
     if (waiter == NULL || trigger == NULL) {
         stress_fail_msg("cond cancel task spawn failed");
         if (waiter != NULL) {
-            (void)nm_join(waiter);
+            (void)llam_join(waiter);
         }
         if (trigger != NULL) {
-            (void)nm_join(trigger);
+            (void)llam_join(trigger);
         }
-        (void)nm_cancel_token_destroy(state.token);
-        nm_cond_destroy(state.cond);
-        nm_mutex_destroy(state.mutex);
+        (void)llam_cancel_token_destroy(state.token);
+        llam_cond_destroy(state.cond);
+        llam_mutex_destroy(state.mutex);
         return;
     }
 
-    if (nm_join(waiter) != 0) {
+    if (llam_join(waiter) != 0) {
         stress_fail_msg("cond cancel waiter join failed");
     }
-    if (nm_join(trigger) != 0) {
+    if (llam_join(trigger) != 0) {
         stress_fail_msg("cond cancel trigger join failed");
     }
     if (atomic_load(&state.triggered) != 1U) {
@@ -174,135 +174,135 @@ void run_cond_cancel_path(void) {
     if (atomic_load(&state.reacquired) != 1U) {
         stress_fail_u32("cond cancel reacquired count", atomic_load(&state.reacquired), 1U);
     }
-    (void)nm_cancel_token_destroy(state.token);
-    nm_cond_destroy(state.cond);
-    nm_mutex_destroy(state.mutex);
+    (void)llam_cancel_token_destroy(state.token);
+    llam_cond_destroy(state.cond);
+    llam_mutex_destroy(state.mutex);
 }
 
 void run_channel_timeout_paths(void) {
-    nm_channel_t *recv_channel = nm_channel_create(1U);
-    nm_channel_t *send_channel = nm_channel_create(1U);
+    llam_channel_t *recv_channel = llam_channel_create(1U);
+    llam_channel_t *send_channel = llam_channel_create(1U);
     void *value;
 
     if (recv_channel == NULL || send_channel == NULL) {
         stress_fail_msg("channel timeout create failed");
         if (recv_channel != NULL) {
-            nm_channel_destroy(recv_channel);
+            llam_channel_destroy(recv_channel);
         }
         if (send_channel != NULL) {
-            nm_channel_destroy(send_channel);
+            llam_channel_destroy(send_channel);
         }
         return;
     }
 
-    value = nm_channel_recv_until(recv_channel, nm_now_ns() + 1ULL * 1000ULL * 1000ULL);
+    value = llam_channel_recv_until(recv_channel, llam_now_ns() + 1ULL * 1000ULL * 1000ULL);
     if (value != NULL) {
         stress_fail_msg("channel recv timeout unexpectedly received value");
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("channel recv timeout errno", errno, ETIMEDOUT);
     }
 
-    if (nm_channel_send(send_channel, (void *)(intptr_t)1) != 0) {
+    if (llam_channel_send(send_channel, (void *)(intptr_t)1) != 0) {
         stress_fail_msg("channel timeout prefill failed");
-    } else if (nm_channel_send_until(send_channel, (void *)(intptr_t)2, nm_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
+    } else if (llam_channel_send_until(send_channel, (void *)(intptr_t)2, llam_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
         stress_fail_msg("channel send timeout unexpectedly succeeded");
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("channel send timeout errno", errno, ETIMEDOUT);
     }
 
-    nm_channel_destroy(recv_channel);
-    nm_channel_destroy(send_channel);
+    llam_channel_destroy(recv_channel);
+    llam_channel_destroy(send_channel);
 }
 
 void run_dynamic_join_timeout_path(void) {
     uint64_t sleep_ns = 20ULL * 1000ULL * 1000ULL;
-    nm_task_t *target = nm_spawn(stress_sleep_task,
+    llam_task_t *target = llam_spawn(stress_sleep_task,
                                  &sleep_ns,
-                                 &(nm_spawn_opts_t){
-                                     .task_class = NM_TASK_CLASS_DEFAULT,
-                                     .stack_class = NM_STACK_CLASS_DEFAULT,
+                                 &(llam_spawn_opts_t){
+                                     .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                     .stack_class = LLAM_STACK_CLASS_DEFAULT,
                                  });
 
     if (target == NULL) {
         stress_fail_msg("dynamic join timeout target spawn failed");
         return;
     }
-    if (nm_join_until(target, nm_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
+    if (llam_join_until(target, llam_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
         stress_fail_msg("dynamic join timeout unexpectedly succeeded");
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("dynamic join timeout errno", errno, ETIMEDOUT);
     }
-    if (nm_join(target) != 0) {
+    if (llam_join(target) != 0) {
         stress_fail_msg("dynamic join timeout target join failed");
     }
 }
 
 void run_dynamic_mutex_timeout_path(void) {
     mutex_timeout_state_t state;
-    nm_task_t *holder;
+    llam_task_t *holder;
 
-    state.mutex = nm_mutex_create();
+    state.mutex = llam_mutex_create();
     state.hold_ns = 20ULL * 1000ULL * 1000ULL;
     if (state.mutex == NULL) {
         stress_fail_msg("dynamic mutex timeout create failed");
         return;
     }
 
-    holder = nm_spawn(mutex_holder_task,
+    holder = llam_spawn(mutex_holder_task,
                       &state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (holder == NULL) {
         stress_fail_msg("dynamic mutex timeout holder spawn failed");
-        nm_mutex_destroy(state.mutex);
+        llam_mutex_destroy(state.mutex);
         return;
     }
 
-    if (nm_sleep_ns(2ULL * 1000ULL * 1000ULL) != 0) {
+    if (llam_sleep_ns(2ULL * 1000ULL * 1000ULL) != 0) {
         stress_fail_msg("dynamic mutex timeout sync sleep failed");
     }
-    if (nm_mutex_lock_until(state.mutex, nm_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
+    if (llam_mutex_lock_until(state.mutex, llam_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
         stress_fail_msg("dynamic mutex timeout unexpectedly succeeded");
-        (void)nm_mutex_unlock(state.mutex);
+        (void)llam_mutex_unlock(state.mutex);
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("dynamic mutex timeout errno", errno, ETIMEDOUT);
     }
-    if (nm_join(holder) != 0) {
+    if (llam_join(holder) != 0) {
         stress_fail_msg("dynamic mutex timeout holder join failed");
     }
-    nm_mutex_destroy(state.mutex);
+    llam_mutex_destroy(state.mutex);
 }
 
 void run_dynamic_cond_timeout_path(void) {
-    nm_mutex_t *mutex = nm_mutex_create();
-    nm_cond_t *cond = nm_cond_create();
+    llam_mutex_t *mutex = llam_mutex_create();
+    llam_cond_t *cond = llam_cond_create();
     int rc;
     int saved_errno;
 
     if (mutex == NULL || cond == NULL) {
         stress_fail_msg("dynamic cond timeout create failed");
         if (cond != NULL) {
-            nm_cond_destroy(cond);
+            llam_cond_destroy(cond);
         }
         if (mutex != NULL) {
-            nm_mutex_destroy(mutex);
+            llam_mutex_destroy(mutex);
         }
         return;
     }
-    if (nm_mutex_lock(mutex) != 0) {
+    if (llam_mutex_lock(mutex) != 0) {
         stress_fail_msg("dynamic cond timeout lock failed");
-        nm_cond_destroy(cond);
-        nm_mutex_destroy(mutex);
+        llam_cond_destroy(cond);
+        llam_mutex_destroy(mutex);
         return;
     }
-    rc = nm_cond_wait_until(cond, mutex, nm_now_ns() + 4ULL * 1000ULL * 1000ULL);
+    rc = llam_cond_wait_until(cond, mutex, llam_now_ns() + 4ULL * 1000ULL * 1000ULL);
     saved_errno = errno;
-    if (nm_mutex_unlock(mutex) != 0) {
+    if (llam_mutex_unlock(mutex) != 0) {
         stress_fail_msg("dynamic cond timeout unlock failed");
-        nm_cond_destroy(cond);
-        nm_mutex_destroy(mutex);
+        llam_cond_destroy(cond);
+        llam_mutex_destroy(mutex);
         return;
     }
     if (rc == 0) {
@@ -310,50 +310,50 @@ void run_dynamic_cond_timeout_path(void) {
     } else if (saved_errno != ETIMEDOUT) {
         stress_fail_errno("dynamic cond timeout errno", saved_errno, ETIMEDOUT);
     }
-    nm_cond_destroy(cond);
-    nm_mutex_destroy(mutex);
+    llam_cond_destroy(cond);
+    llam_mutex_destroy(mutex);
 }
 
 void run_dynamic_channel_timeout_paths(void) {
-    nm_channel_t *recv_channel = nm_channel_create(1U);
-    nm_channel_t *send_channel = nm_channel_create(1U);
+    llam_channel_t *recv_channel = llam_channel_create(1U);
+    llam_channel_t *send_channel = llam_channel_create(1U);
     void *value;
 
     if (recv_channel == NULL || send_channel == NULL) {
         stress_fail_msg("dynamic channel timeout create failed");
         if (recv_channel != NULL) {
-            nm_channel_destroy(recv_channel);
+            llam_channel_destroy(recv_channel);
         }
         if (send_channel != NULL) {
-            nm_channel_destroy(send_channel);
+            llam_channel_destroy(send_channel);
         }
         return;
     }
 
-    value = nm_channel_recv_until(recv_channel, nm_now_ns() + 4ULL * 1000ULL * 1000ULL);
+    value = llam_channel_recv_until(recv_channel, llam_now_ns() + 4ULL * 1000ULL * 1000ULL);
     if (value != NULL) {
         stress_fail_msg("dynamic channel recv timeout unexpectedly received value");
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("dynamic channel recv timeout errno", errno, ETIMEDOUT);
     }
 
-    if (nm_channel_send(send_channel, (void *)(intptr_t)1) != 0) {
+    if (llam_channel_send(send_channel, (void *)(intptr_t)1) != 0) {
         stress_fail_msg("dynamic channel timeout prefill failed");
-    } else if (nm_channel_send_until(send_channel, (void *)(intptr_t)2, nm_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
+    } else if (llam_channel_send_until(send_channel, (void *)(intptr_t)2, llam_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
         stress_fail_msg("dynamic channel send timeout unexpectedly succeeded");
     } else if (errno != ETIMEDOUT) {
         stress_fail_errno("dynamic channel send timeout errno", errno, ETIMEDOUT);
     }
 
-    nm_channel_destroy(recv_channel);
-    nm_channel_destroy(send_channel);
+    llam_channel_destroy(recv_channel);
+    llam_channel_destroy(send_channel);
 }
 
 void run_dynamic_poll_paths(void) {
     int ready_sv[2];
     int timeout_sv[2];
     dynamic_poll_writer_state_t writer_state;
-    nm_task_t *writer;
+    llam_task_t *writer;
     short revents = 0;
     int rc;
 
@@ -363,11 +363,11 @@ void run_dynamic_poll_paths(void) {
     }
     writer_state.fd = ready_sv[1];
     writer_state.delay_ns = 2ULL * 1000ULL * 1000ULL;
-    writer = nm_spawn(dynamic_poll_writer_task,
+    writer = llam_spawn(dynamic_poll_writer_task,
                       &writer_state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (writer == NULL) {
         stress_fail_msg("dynamic poll writer spawn failed");
@@ -375,11 +375,11 @@ void run_dynamic_poll_paths(void) {
         close(ready_sv[1]);
         return;
     }
-    rc = nm_poll_fd(ready_sv[0], POLLIN, stress_platform_prefers_indefinite_ready_poll() ? -1 : 20, &revents);
+    rc = llam_poll_fd(ready_sv[0], POLLIN, stress_platform_prefers_indefinite_ready_poll() ? -1 : 20, &revents);
     if (rc != 1 || (revents & POLLIN) == 0) {
         stress_fail_msg("dynamic poll ready path failed");
     }
-    if (nm_join(writer) != 0) {
+    if (llam_join(writer) != 0) {
         stress_fail_msg("dynamic poll writer join failed");
     }
     close(ready_sv[0]);
@@ -390,7 +390,7 @@ void run_dynamic_poll_paths(void) {
         return;
     }
     revents = 0;
-    rc = nm_poll_fd(timeout_sv[0], POLLIN, 4, &revents);
+    rc = llam_poll_fd(timeout_sv[0], POLLIN, 4, &revents);
     if (rc != 0 || revents != 0) {
         stress_fail_msg("dynamic poll timeout path failed");
     }
@@ -401,7 +401,7 @@ void run_dynamic_poll_paths(void) {
 void dynamic_idle_poll_watch_task(void *arg) {
     dynamic_idle_poll_watch_state_t *state = arg;
     dynamic_poll_writer_state_t writer_state;
-    nm_task_t *writer;
+    llam_task_t *writer;
     short revents = 0;
     char byte = 0;
     int rc;
@@ -424,27 +424,27 @@ void dynamic_idle_poll_watch_task(void *arg) {
 
     writer_state.fd = state->sv[1];
     writer_state.delay_ns = 2ULL * 1000ULL * 1000ULL;
-    writer = nm_spawn(dynamic_poll_writer_task,
+    writer = llam_spawn(dynamic_poll_writer_task,
                       &writer_state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (writer == NULL) {
         stress_fail_msg("dynamic idle poll writer spawn failed");
         return;
     }
 
-    rc = nm_poll_fd(state->sv[0], POLLIN, -1, &revents);
+    rc = llam_poll_fd(state->sv[0], POLLIN, -1, &revents);
     if (rc != 1 || (revents & POLLIN) == 0) {
         stress_fail_msg("dynamic idle poll wait failed");
         return;
     }
-    if (nm_read(state->sv[0], &byte, 1U) != 1 || byte != 'd') {
+    if (llam_read(state->sv[0], &byte, 1U) != 1 || byte != 'd') {
         stress_fail_msg("dynamic idle poll read failed");
         return;
     }
-    if (nm_join(writer) != 0) {
+    if (llam_join(writer) != 0) {
         stress_fail_msg("dynamic idle poll writer join failed");
         return;
     }
@@ -455,7 +455,7 @@ void dynamic_idle_poll_watch_task(void *arg) {
 void dynamic_idle_recv_watch_task(void *arg) {
     static const char *payloads[] = {"alpha", "bravo", "charlie"};
     dynamic_idle_recv_watch_state_t *state = arg;
-    nm_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *buffer = NULL;
     int sock_type = SOCK_SEQPACKET;
     ssize_t rc;
     size_t i;
@@ -488,16 +488,16 @@ void dynamic_idle_recv_watch_task(void *arg) {
         }
     }
 
-    rc = nm_read_owned(state->sv[0], 16U, &buffer);
+    rc = llam_read_owned(state->sv[0], 16U, &buffer);
     if (rc != (ssize_t)strlen(payloads[0])) {
         stress_fail_msg("dynamic idle recv first rc failed");
         goto cleanup;
     }
-    if (buffer == NULL || memcmp(nm_io_buffer_data(buffer), payloads[0], strlen(payloads[0])) != 0) {
+    if (buffer == NULL || memcmp(llam_io_buffer_data(buffer), payloads[0], strlen(payloads[0])) != 0) {
         stress_fail_msg("dynamic idle recv first payload failed");
         goto cleanup;
     }
-    nm_io_buffer_release(buffer);
+    llam_io_buffer_release(buffer);
     buffer = NULL;
 
     run_dynamic_sleep_fanout(state->sleep_tasks, state->sleep_yields, state->sleep_ns);
@@ -505,28 +505,28 @@ void dynamic_idle_recv_watch_task(void *arg) {
     for (i = 1U; i < (sizeof(payloads) / sizeof(payloads[0])); ++i) {
         size_t len = strlen(payloads[i]);
 
-        rc = nm_read_owned(state->sv[0], 16U, &buffer);
+        rc = llam_read_owned(state->sv[0], 16U, &buffer);
         if (rc != (ssize_t)len) {
             stress_fail_msg("dynamic idle recv follow rc failed");
             goto cleanup;
         }
-        if (buffer == NULL || memcmp(nm_io_buffer_data(buffer), payloads[i], len) != 0) {
+        if (buffer == NULL || memcmp(llam_io_buffer_data(buffer), payloads[i], len) != 0) {
             stress_fail_msg("dynamic idle recv follow payload failed");
             goto cleanup;
         }
-        nm_io_buffer_release(buffer);
+        llam_io_buffer_release(buffer);
         buffer = NULL;
     }
 
 cleanup:
-    nm_io_buffer_release(buffer);
+    llam_io_buffer_release(buffer);
     stress_close_fd_pair(state->sv);
 }
 
 void dynamic_idle_accept_watch_task(void *arg) {
     dynamic_idle_accept_watch_state_t *state = arg;
     dynamic_accept_connector_state_t connectors[3];
-    nm_task_t *connector_tasks[3] = {NULL, NULL, NULL};
+    llam_task_t *connector_tasks[3] = {NULL, NULL, NULL};
     static const uint64_t connector_delays_ns[] = {
         2ULL * 1000ULL * 1000ULL,
         4ULL * 1000ULL * 1000ULL,
@@ -555,11 +555,11 @@ void dynamic_idle_accept_watch_task(void *arg) {
     for (i = 0; i < (sizeof(connectors) / sizeof(connectors[0])); ++i) {
         connectors[i].port = state->port;
         connectors[i].delay_ns = connector_delays_ns[i];
-        connector_tasks[i] = nm_spawn(dynamic_accept_connector_task,
+        connector_tasks[i] = llam_spawn(dynamic_accept_connector_task,
                                       &connectors[i],
-                                      &(nm_spawn_opts_t){
-                                          .task_class = NM_TASK_CLASS_DEFAULT,
-                                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                                      &(llam_spawn_opts_t){
+                                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                                       });
         if (connector_tasks[i] == NULL) {
             stress_fail_msg("dynamic idle accept connector spawn failed");
@@ -568,7 +568,7 @@ void dynamic_idle_accept_watch_task(void *arg) {
         spawned += 1U;
     }
 
-    accepted_fd = nm_accept(state->listener_fd, NULL, NULL);
+    accepted_fd = llam_accept(state->listener_fd, NULL, NULL);
     if (accepted_fd < 0) {
         stress_fail_msg("dynamic idle accept first accept failed");
         goto cleanup;
@@ -579,7 +579,7 @@ void dynamic_idle_accept_watch_task(void *arg) {
     run_dynamic_sleep_fanout(state->sleep_tasks, state->sleep_yields, state->sleep_ns);
 
     for (i = 1U; i < (sizeof(connectors) / sizeof(connectors[0])); ++i) {
-        accepted_fd = nm_accept(state->listener_fd, NULL, NULL);
+        accepted_fd = llam_accept(state->listener_fd, NULL, NULL);
         if (accepted_fd < 0) {
             stress_fail_msg("dynamic idle accept follow accept failed");
             goto cleanup;
@@ -593,7 +593,7 @@ cleanup:
         close(accepted_fd);
     }
     for (i = 0; i < spawned; ++i) {
-        if (nm_join(connector_tasks[i]) != 0) {
+        if (llam_join(connector_tasks[i]) != 0) {
             stress_fail_msg("dynamic idle accept connector join failed");
         }
     }

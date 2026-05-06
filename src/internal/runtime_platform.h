@@ -3,7 +3,7 @@
  * @brief Internal platform abstraction for threads, atomics-adjacent helpers, timing, and OS integration.
  *
  * @details
- * Public platform detection lives in @c include/llam/nm_platform.h. This private
+ * Public platform detection lives in @c include/llam/platform.h. This private
  * header converts those public platform macros into backend-selection flags used
  * by runtime implementation files.
  *
@@ -23,36 +23,36 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_PLATFORM_H
-#define NM_RUNTIME_PLATFORM_H
+#ifndef LLAM_RUNTIME_PLATFORM_H
+#define LLAM_RUNTIME_PLATFORM_H
 
-#include "llam/nm_platform.h"
+#include "llam/platform.h"
 
 // Backend flags are intentionally numeric macros so they work in #if expressions.
-#if NM_PLATFORM_WINDOWS
-#define NM_RUNTIME_BACKEND_WINDOWS 1
-#define NM_RUNTIME_BACKEND_POSIX 0
-#define NM_RUNTIME_BACKEND_LINUX 0
-#define NM_RUNTIME_BACKEND_DARWIN 0
-#elif NM_PLATFORM_LINUX
-#define NM_RUNTIME_BACKEND_WINDOWS 0
-#define NM_RUNTIME_BACKEND_POSIX 1
-#define NM_RUNTIME_BACKEND_LINUX 1
-#define NM_RUNTIME_BACKEND_DARWIN 0
-#elif NM_PLATFORM_DARWIN
-#define NM_RUNTIME_BACKEND_WINDOWS 0
-#define NM_RUNTIME_BACKEND_POSIX 1
-#define NM_RUNTIME_BACKEND_LINUX 0
-#define NM_RUNTIME_BACKEND_DARWIN 1
+#if LLAM_PLATFORM_WINDOWS
+#define LLAM_RUNTIME_BACKEND_WINDOWS 1
+#define LLAM_RUNTIME_BACKEND_POSIX 0
+#define LLAM_RUNTIME_BACKEND_LINUX 0
+#define LLAM_RUNTIME_BACKEND_DARWIN 0
+#elif LLAM_PLATFORM_LINUX
+#define LLAM_RUNTIME_BACKEND_WINDOWS 0
+#define LLAM_RUNTIME_BACKEND_POSIX 1
+#define LLAM_RUNTIME_BACKEND_LINUX 1
+#define LLAM_RUNTIME_BACKEND_DARWIN 0
+#elif LLAM_PLATFORM_DARWIN
+#define LLAM_RUNTIME_BACKEND_WINDOWS 0
+#define LLAM_RUNTIME_BACKEND_POSIX 1
+#define LLAM_RUNTIME_BACKEND_LINUX 0
+#define LLAM_RUNTIME_BACKEND_DARWIN 1
 #else
-#define NM_RUNTIME_BACKEND_WINDOWS 0
-#define NM_RUNTIME_BACKEND_POSIX 1
-#define NM_RUNTIME_BACKEND_LINUX 0
-#define NM_RUNTIME_BACKEND_DARWIN 0
+#define LLAM_RUNTIME_BACKEND_WINDOWS 0
+#define LLAM_RUNTIME_BACKEND_POSIX 1
+#define LLAM_RUNTIME_BACKEND_LINUX 0
+#define LLAM_RUNTIME_BACKEND_DARWIN 0
 #endif
 
 // The Windows backend is declared at the platform layer but not implemented yet.
-#if NM_RUNTIME_BACKEND_WINDOWS && !defined(NM_ENABLE_WINDOWS_BACKEND)
+#if LLAM_RUNTIME_BACKEND_WINDOWS && !defined(LLAM_ENABLE_WINDOWS_BACKEND)
 #error "Native Windows 10/11 backend is not implemented yet; use WSL/Linux or build after the IOCP/Fiber backend lands."
 #endif
 

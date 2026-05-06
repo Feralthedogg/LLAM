@@ -4,10 +4,10 @@
  *
  * @details
  * This translation unit covers two separate blocking integration paths:
- *  - ::nm_call_blocking submits a user callback to the runtime's blocking
+ *  - ::llam_call_blocking submits a user callback to the runtime's blocking
  *    worker pool, parks the current task, and resumes it when the callback
  *    completes or cancellation wins the race.
- *  - ::nm_enter_blocking and ::nm_leave_blocking bracket opaque foreign code
+ *  - ::llam_enter_blocking and ::llam_leave_blocking bracket opaque foreign code
  *    that blocks the current scheduler worker directly.
  *
  * Opaque blocking is compensated so the shard does not become idle while the
@@ -42,11 +42,11 @@
 
 #include "runtime_internal.h"
 
-#define NM_OPAQUE_HANDOFF_SPIN_ITERS_DEFAULT 16U
+#define LLAM_OPAQUE_HANDOFF_SPIN_ITERS_DEFAULT 16U
 #if defined(__linux__)
-#define NM_OPAQUE_REDIRECT_FASTPATH_DEFAULT 1U
+#define LLAM_OPAQUE_REDIRECT_FASTPATH_DEFAULT 1U
 #else
-#define NM_OPAQUE_REDIRECT_FASTPATH_DEFAULT 0U
+#define LLAM_OPAQUE_REDIRECT_FASTPATH_DEFAULT 0U
 #endif
 
 /**
@@ -59,14 +59,14 @@
  * @return Number of pause-loop iterations to try before sleeping on the helper
  *         condition variable/futex path.
  */
-static unsigned nm_opaque_handoff_spin_iters(void) {
+static unsigned llam_opaque_handoff_spin_iters(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_OPAQUE_HANDOFF_SPIN_ITERS");
+        const char *env = llam_env_get("LLAM_OPAQUE_HANDOFF_SPIN_ITERS");
 
-        value = (int)NM_OPAQUE_HANDOFF_SPIN_ITERS_DEFAULT;
+        value = (int)LLAM_OPAQUE_HANDOFF_SPIN_ITERS_DEFAULT;
         if (env != NULL && env[0] != '\0') {
             char *end = NULL;
             unsigned long parsed = strtoul(env, &end, 10);
@@ -92,14 +92,14 @@ static unsigned nm_opaque_handoff_spin_iters(void) {
  *
  * @return @c true when redirect should be attempted before helper handoff.
  */
-static bool nm_opaque_redirect_fastpath_enabled(void) {
+static bool llam_opaque_redirect_fastpath_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_OPAQUE_REDIRECT_FASTPATH");
+        const char *env = llam_env_get("LLAM_OPAQUE_REDIRECT_FASTPATH");
 
-        value = (int)NM_OPAQUE_REDIRECT_FASTPATH_DEFAULT;
+        value = (int)LLAM_OPAQUE_REDIRECT_FASTPATH_DEFAULT;
         if (env != NULL && env[0] != '\0') {
             value = strcmp(env, "0") != 0 ? 1 : 0;
         }
@@ -116,12 +116,12 @@ static bool nm_opaque_redirect_fastpath_enabled(void) {
  *
  * @return @c true when @c LLAM_OPAQUE_TIMING is set to a non-zero value.
  */
-static bool nm_opaque_timing_enabled(void) {
+static bool llam_opaque_timing_enabled(void) {
     static atomic_int cached = ATOMIC_VAR_INIT(-1);
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
-        const char *env = nm_env_get("LLAM_OPAQUE_TIMING");
+        const char *env = llam_env_get("LLAM_OPAQUE_TIMING");
 
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
@@ -140,7 +140,7 @@ static bool nm_opaque_timing_enabled(void) {
  * @param rt      Runtime containing the shard set.
  * @param blocked Shard whose primary worker entered an opaque blocking region.
  */
-static void nm_wake_opaque_redirect_worker(nm_runtime_t *rt, nm_shard_t *blocked) {
+static void llam_wake_opaque_redirect_worker(llam_runtime_t *rt, llam_shard_t *blocked) {
     unsigned target_id;
     unsigned start;
     unsigned i;
@@ -150,21 +150,21 @@ static void nm_wake_opaque_redirect_worker(nm_runtime_t *rt, nm_shard_t *blocked
     }
     target_id = blocked->opaque_redirect_target_id;
     if (target_id < rt->active_shards && target_id != blocked->id &&
-        nm_shard_accepts_new_work(&rt->shards[target_id])) {
-        nm_kick_shard(&rt->shards[target_id]);
+        llam_shard_accepts_new_work(&rt->shards[target_id])) {
+        llam_kick_shard(&rt->shards[target_id]);
         return;
     }
     start = (blocked->id + 1U) % rt->active_shards;
     for (i = 0U; i < rt->active_shards; ++i) {
-        nm_shard_t *candidate = &rt->shards[(start + i) % rt->active_shards];
+        llam_shard_t *candidate = &rt->shards[(start + i) % rt->active_shards];
 
-        if (candidate == blocked || !nm_shard_accepts_new_work(candidate)) {
+        if (candidate == blocked || !llam_shard_accepts_new_work(candidate)) {
             continue;
         }
-        nm_kick_shard(candidate);
+        llam_kick_shard(candidate);
         return;
     }
-    nm_wake_all_shards(rt);
+    llam_wake_all_shards(rt);
 }
 
 /**
@@ -177,8 +177,8 @@ static void nm_wake_opaque_redirect_worker(nm_runtime_t *rt, nm_shard_t *blocked
  * @param shard    Shard owning the helper state.
  * @param expected Expected value of @c opaque_helper_active_hint.
  */
-static void nm_opaque_spin_until_helper_hint(nm_shard_t *shard, unsigned expected) {
-    unsigned spins = nm_opaque_handoff_spin_iters();
+static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned expected) {
+    unsigned spins = llam_opaque_handoff_spin_iters();
     unsigned i;
 
     if (spins == 0U) {
@@ -189,7 +189,7 @@ static void nm_opaque_spin_until_helper_hint(nm_shard_t *shard, unsigned expecte
         if (atomic_load_explicit(&shard->opaque_helper_active_hint, memory_order_acquire) == expected) {
             break;
         }
-        nm_pause_cpu();
+        llam_pause_cpu();
     }
     pthread_mutex_lock(&shard->opaque_lock);
 }
@@ -214,52 +214,54 @@ static void nm_opaque_spin_until_helper_hint(nm_shard_t *shard, unsigned expecte
  *         cancellation, invalid callback, or a callback that legitimately
  *         returns @c NULL. @c errno carries the disambiguating status.
  */
-void *nm_call_blocking(nm_blocking_fn fn, void *arg) {
-    nm_runtime_t *rt = &g_nm_runtime;
-    nm_task_t *task = g_nm_tls_task;
-    nm_cancel_token_t *token;
-    nm_block_job_t *job;
+int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_task_t *task = g_llam_tls_task;
+    llam_cancel_token_t *token;
+    llam_block_job_t *job;
     int wake_error;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
-    if (fn == NULL) {
+    if (fn == NULL || out == NULL) {
         errno = EINVAL;
-        return NULL;
+        return -1;
     }
+    *out = NULL;
 
-    if (task == NULL || g_nm_tls_shard == NULL) {
+    if (task == NULL || g_llam_tls_shard == NULL) {
         errno = 0;
-        return fn(arg);
+        *out = fn(arg);
+        return 0;
     }
 
-    job = nm_block_job_alloc(rt);
+    job = llam_block_job_alloc(rt);
     if (job == NULL) {
-        return NULL;
+        return -1;
     }
 
     job->fn = fn;
     job->arg = arg;
     job->task = task;
-    atomic_init(&job->state, NM_BLOCK_JOB_QUEUED);
+    atomic_init(&job->state, LLAM_BLOCK_JOB_QUEUED);
 
     task->blocking_result = NULL;
     task->blocking_errno = 0;
-    nm_task_set_block_tracking(task, job, g_nm_tls_shard->id);
-    task->state = NM_TASK_STATE_PARKED;
-    task->wait_reason = NM_WAIT_BLOCKING;
+    llam_task_set_block_tracking(task, job, g_llam_tls_shard->id);
+    task->state = LLAM_TASK_STATE_PARKED;
+    task->wait_reason = LLAM_WAIT_BLOCKING;
     token = task->cancel_token;
 
     if (token != NULL) {
         pthread_mutex_lock(&token->lock);
         if (token->cancelled) {
             pthread_mutex_unlock(&token->lock);
-            task->state = NM_TASK_STATE_RUNNING;
-            task->wait_reason = NM_WAIT_NONE;
-            nm_task_clear_wait_tracking(task);
-            nm_block_job_release(rt, job);
+            task->state = LLAM_TASK_STATE_RUNNING;
+            task->wait_reason = LLAM_WAIT_NONE;
+            llam_task_clear_wait_tracking(task);
+            llam_block_job_release(rt, job);
             errno = ECANCELED;
-            return NULL;
+            return -1;
         }
 
         if (!task->cancel_registered) {
@@ -291,35 +293,45 @@ void *nm_call_blocking(nm_blocking_fn fn, void *arg) {
 #endif
     pthread_mutex_unlock(&rt->block_lock);
 #if defined(__linux__)
-    (void)nm_linux_futex_wake_private(&rt->block_wake_seq, 1U);
+    (void)llam_linux_futex_wake_private(&rt->block_wake_seq, 1U);
 #endif
     if (token != NULL) {
         pthread_mutex_unlock(&token->lock);
     }
 
-    g_nm_tls_shard->metrics.blocking_calls += 1U;
-    g_nm_tls_shard->metrics.parks += 1U;
-    nm_trace_shard(g_nm_tls_shard,
+    g_llam_tls_shard->metrics.blocking_calls += 1U;
+    g_llam_tls_shard->metrics.parks += 1U;
+    llam_trace_shard(g_llam_tls_shard,
                    task,
-                   NM_TRACE_BLOCK_SUBMIT,
-                   NM_TASK_STATE_RUNNING,
-                   NM_TASK_STATE_PARKED,
-                   NM_WAIT_BLOCKING);
-    nm_task_sample_live_stack(task);
-    nm_ctx_switch(&task->ctx,
-                  g_nm_tls_scheduler_ctx != NULL ? g_nm_tls_scheduler_ctx : &g_nm_tls_shard->scheduler_ctx);
+                   LLAM_TRACE_BLOCK_SUBMIT,
+                   LLAM_TASK_STATE_RUNNING,
+                   LLAM_TASK_STATE_PARKED,
+                   LLAM_WAIT_BLOCKING);
+    llam_task_sample_live_stack(task);
+    llam_switch_task_to_scheduler(task,
+                                g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
     if (task->cancel_registered) {
-        nm_cancel_token_unregister_task(task);
+        llam_cancel_token_unregister_task(task);
     }
-    nm_task_clear_wait_tracking(task);
-    wake_error = nm_consume_task_wake_error(task);
+    llam_task_clear_wait_tracking(task);
+    wake_error = llam_consume_task_wake_error(task);
     if (wake_error != 0) {
         errno = wake_error;
-        return NULL;
+        return -1;
     }
     errno = task->blocking_errno;
-    g_nm_tls_shard->metrics.blocking_completions += 1U;
-    return task->blocking_result;
+    *out = task->blocking_result;
+    g_llam_tls_shard->metrics.blocking_completions += 1U;
+    return 0;
+}
+
+void *llam_call_blocking(llam_blocking_fn fn, void *arg) {
+    void *result = NULL;
+
+    if (llam_call_blocking_result(fn, arg, &result) != 0) {
+        return NULL;
+    }
+    return result;
 }
 
 /**
@@ -329,14 +341,14 @@ void *nm_call_blocking(nm_blocking_fn fn, void *arg) {
  * on the shard's primary scheduler context, the runtime either starts/wakes the
  * opaque helper or activates redirect so other shards can drain work while the
  * primary thread is stuck in foreign code. Nested enters only increase the task
- * depth; compensation is released by the matching outermost ::nm_leave_blocking.
+ * depth; compensation is released by the matching outermost ::llam_leave_blocking.
  *
  * @return 0 on success. Calls made outside a managed runtime task are treated
  *         as no-ops and also return 0.
  */
-int nm_enter_blocking(void) {
-    nm_task_t *task = g_nm_tls_task;
-    nm_shard_t *shard = g_nm_tls_shard;
+int llam_enter_blocking(void) {
+    llam_task_t *task = g_llam_tls_task;
+    llam_shard_t *shard = g_llam_tls_shard;
     bool helper_active = false;
     bool redirect_active = false;
     bool from_primary = false;
@@ -346,7 +358,7 @@ int nm_enter_blocking(void) {
     uint64_t enter_wait_ns = 0U;
     uint64_t enter_wait_start_ns = 0U;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
     /* Keep the shard productive while this task blocks in foreign code. */
     if (task == NULL || shard == NULL) {
@@ -354,40 +366,40 @@ int nm_enter_blocking(void) {
     }
 
     if (task->opaque_blocking_depth == 0U) {
-        timing = nm_opaque_timing_enabled();
-        task->opaque_block_started_ns = timing ? nm_now_ns() : 0U;
-        task->state = NM_TASK_STATE_BLOCKED_OPAQUE;
-        task->wait_reason = NM_WAIT_BLOCKING;
+        timing = llam_opaque_timing_enabled();
+        task->opaque_block_started_ns = timing ? llam_now_ns() : 0U;
+        task->state = LLAM_TASK_STATE_BLOCKED_OPAQUE;
+        task->wait_reason = LLAM_WAIT_BLOCKING;
         task->opaque_uses_helper = false;
         task->opaque_uses_redirect = false;
-        from_primary = g_nm_tls_scheduler_ctx == &shard->scheduler_ctx;
+        from_primary = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
         prefer_redirect = from_primary &&
                           shard->runtime->active_shards > 1U &&
-                          (nm_opaque_redirect_fastpath_enabled() || g_nm_tls_opaque_redirect_hint != 0U);
+                          (llam_opaque_redirect_fastpath_enabled() || g_llam_tls_opaque_redirect_hint != 0U);
 
         pthread_mutex_lock(&shard->opaque_lock);
         if (from_primary && !prefer_redirect) {
             shard->primary_thread = pthread_self();
             if (timing) {
-                enter_wait_start_ns = nm_now_ns();
+                enter_wait_start_ns = llam_now_ns();
             }
-            if (nm_ensure_opaque_helper_locked(shard) == 0) {
+            if (llam_ensure_opaque_helper_locked(shard) == 0) {
                 shard->opaque_compensation_depth += 1U;
                 if (shard->opaque_compensation_depth > shard->opaque_compensation_depth_peak) {
                     shard->opaque_compensation_depth_peak = shard->opaque_compensation_depth;
                 }
-                nm_opaque_wake_signal(shard);
+                llam_opaque_wake_signal(shard);
                 while (!shard->opaque_helper_active && !shard->opaque_helper_failed) {
-                    nm_opaque_spin_until_helper_hint(shard, 1U);
+                    llam_opaque_spin_until_helper_hint(shard, 1U);
                     if (shard->opaque_helper_active || shard->opaque_helper_failed) {
                         break;
                     }
-                    nm_opaque_wake_wait(shard);
+                    llam_opaque_wake_wait(shard);
                 }
                 helper_active = shard->opaque_helper_active && !shard->opaque_helper_failed;
             }
             if (timing && enter_wait_start_ns != 0U) {
-                uint64_t wait_end_ns = nm_now_ns();
+                uint64_t wait_end_ns = llam_now_ns();
 
                 if (wait_end_ns >= enter_wait_start_ns) {
                     enter_wait_ns = wait_end_ns - enter_wait_start_ns;
@@ -419,23 +431,23 @@ int nm_enter_blocking(void) {
                     shard->metrics.opaque_enter_wait_max_ns = enter_wait_ns;
                 }
             }
-            nm_trace_shard(shard,
+            llam_trace_shard(shard,
                            task,
-                           NM_TRACE_STATE,
-                           NM_TASK_STATE_RUNNING,
-                           NM_TASK_STATE_BLOCKED_OPAQUE,
-                           NM_WAIT_BLOCKING);
+                           LLAM_TRACE_STATE,
+                           LLAM_TASK_STATE_RUNNING,
+                           LLAM_TASK_STATE_BLOCKED_OPAQUE,
+                           LLAM_WAIT_BLOCKING);
         }
         if (redirect_active) {
             task->opaque_uses_redirect = true;
             if (shard->opaque_redirect_depth == 1U) {
                 shard->metrics.opaque_redirect_activations += 1U;
             }
-            nm_activate_opaque_redirect_locked(shard, task);
+            llam_activate_opaque_redirect_locked(shard, task);
         }
         pthread_mutex_unlock(&shard->lock);
         if (wake_redirect_workers) {
-            nm_wake_opaque_redirect_worker(shard->runtime, shard);
+            llam_wake_opaque_redirect_worker(shard->runtime, shard);
         }
     }
     task->opaque_blocking_depth += 1U;
@@ -446,7 +458,7 @@ int nm_enter_blocking(void) {
  * @brief Leave a previously entered opaque blocking region.
  *
  * Nested calls decrement only the task-local depth. The outermost leave tears
- * down the compensation selected by ::nm_enter_blocking: helper-backed blocks
+ * down the compensation selected by ::llam_enter_blocking: helper-backed blocks
  * wait for the helper to yield the shard back, while redirect-backed blocks
  * deactivate redirect when the shard's redirect depth reaches zero. Timing and
  * trace state are published before the task returns to normal running state.
@@ -455,9 +467,9 @@ int nm_enter_blocking(void) {
  * @return -1 with @c errno set to @c EINVAL if leave is called without a
  *         matching enter.
  */
-int nm_leave_blocking(void) {
-    nm_task_t *task = g_nm_tls_task;
-    nm_shard_t *shard = g_nm_tls_shard;
+int llam_leave_blocking(void) {
+    llam_task_t *task = g_llam_tls_task;
+    llam_shard_t *shard = g_llam_tls_shard;
 
     if (task == NULL || shard == NULL) {
         return 0;
@@ -472,10 +484,10 @@ int nm_leave_blocking(void) {
         bool helper_started;
         bool used_helper = task->opaque_uses_helper;
         bool used_redirect = task->opaque_uses_redirect;
-        bool from_opaque_helper = g_nm_tls_scheduler_ctx == &shard->opaque_scheduler_ctx;
+        bool from_opaque_helper = g_llam_tls_scheduler_ctx == &shard->opaque_scheduler_ctx;
         bool deactivate_redirect = false;
-        bool timing = nm_opaque_timing_enabled();
-        uint64_t now_ns = timing ? nm_now_ns() : 0U;
+        bool timing = llam_opaque_timing_enabled();
+        uint64_t now_ns = timing ? llam_now_ns() : 0U;
         uint64_t block_ns = 0U;
         uint64_t leave_wait_ns = 0U;
         uint64_t leave_wait_start_ns = 0U;
@@ -498,26 +510,26 @@ int nm_leave_blocking(void) {
         helper_started = shard->opaque_helper_thread_started;
         if (used_helper && shard->opaque_compensation_depth > 0U) {
             if (timing && !from_opaque_helper) {
-                leave_wait_start_ns = nm_now_ns();
+                leave_wait_start_ns = llam_now_ns();
             }
             shard->opaque_compensation_depth -= 1U;
-            nm_opaque_wake_signal(shard);
+            llam_opaque_wake_signal(shard);
             if (helper_started
 #if defined(__linux__)
                 && atomic_load_explicit(&shard->opaque_helper_opaque_wait, memory_order_acquire) == 0U
 #endif
             ) {
-                nm_kick_shard(shard);
+                llam_kick_shard(shard);
             }
             while (!from_opaque_helper && shard->opaque_helper_active && !shard->opaque_helper_failed) {
-                nm_opaque_spin_until_helper_hint(shard, 0U);
+                llam_opaque_spin_until_helper_hint(shard, 0U);
                 if (!shard->opaque_helper_active || shard->opaque_helper_failed) {
                     break;
                 }
-                nm_opaque_wake_wait(shard);
+                llam_opaque_wake_wait(shard);
             }
             if (timing && leave_wait_start_ns != 0U) {
-                uint64_t wait_end_ns = nm_now_ns();
+                uint64_t wait_end_ns = llam_now_ns();
 
                 if (wait_end_ns >= leave_wait_start_ns) {
                     leave_wait_ns = wait_end_ns - leave_wait_start_ns;
@@ -546,20 +558,20 @@ int nm_leave_blocking(void) {
             }
         }
         if (deactivate_redirect) {
-            nm_deactivate_opaque_redirect_locked(shard);
+            llam_deactivate_opaque_redirect_locked(shard);
         }
         atomic_store_explicit(&shard->current, task, memory_order_release);
-        task->state = NM_TASK_STATE_RUNNING;
-        task->wait_reason = NM_WAIT_NONE;
-        nm_trace_shard(shard,
+        task->state = LLAM_TASK_STATE_RUNNING;
+        task->wait_reason = LLAM_WAIT_NONE;
+        llam_trace_shard(shard,
                        task,
-                       NM_TRACE_STATE,
-                       NM_TASK_STATE_BLOCKED_OPAQUE,
-                       NM_TASK_STATE_RUNNING,
-                       NM_WAIT_BLOCKING);
+                       LLAM_TRACE_STATE,
+                       LLAM_TASK_STATE_BLOCKED_OPAQUE,
+                       LLAM_TASK_STATE_RUNNING,
+                       LLAM_WAIT_BLOCKING);
         pthread_mutex_unlock(&shard->lock);
         atomic_store_explicit(&shard->last_safepoint_ns,
-                              timing && now_ns != 0U ? now_ns : nm_now_ns(),
+                              timing && now_ns != 0U ? now_ns : llam_now_ns(),
                               memory_order_relaxed);
     }
     return 0;

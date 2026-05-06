@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_linux_lookup.c
+ * @file src/io/linux/runtime_io_watch_linux_lookup.c
  * @brief Linux watch lookup and registration helpers for fd-based operations.
  *
  * @details
@@ -33,7 +33,7 @@
  * @param st_ino Optional inode id output.
  * @return true on successful @c fstat.
  */
-bool nm_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
+bool llam_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
     struct stat st;
 
     if (fstat(fd, &st) != 0) {
@@ -56,12 +56,12 @@ bool nm_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
  * @param events Requested poll event mask.
  * @return Matching watch, or NULL.
  */
-nm_poll_watch_t *nm_find_poll_watch_locked(nm_node_t *node, int fd, short events) {
-    nm_poll_watch_t *watch = node->poll_watches;
+llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short events) {
+    llam_poll_watch_t *watch = node->poll_watches;
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (!nm_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
     while (watch != NULL) {
@@ -80,8 +80,8 @@ nm_poll_watch_t *nm_find_poll_watch_locked(nm_node_t *node, int fd, short events
  * @param fd   Listener descriptor.
  * @return Matching watch, or NULL.
  */
-nm_accept_watch_t *nm_find_accept_watch_locked(nm_node_t *node, int fd) {
-    nm_accept_watch_t *watch = node->accept_watches;
+llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd) {
+    llam_accept_watch_t *watch = node->accept_watches;
 
     while (watch != NULL) {
         if (watch->fd == fd) {
@@ -101,8 +101,8 @@ nm_accept_watch_t *nm_find_accept_watch_locked(nm_node_t *node, int fd) {
  * @param st_ino Captured inode id.
  * @return Matching watch, or NULL.
  */
-nm_recv_watch_t *nm_find_recv_watch_locked(nm_node_t *node, int fd, dev_t st_dev, ino_t st_ino) {
-    nm_recv_watch_t *watch = node->recv_watches;
+llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t st_dev, ino_t st_ino) {
+    llam_recv_watch_t *watch = node->recv_watches;
 
     while (watch != NULL) {
         if (watch->fd == fd && watch->st_dev == st_dev && watch->st_ino == st_ino) {
@@ -121,12 +121,12 @@ nm_recv_watch_t *nm_find_recv_watch_locked(nm_node_t *node, int fd, dev_t st_dev
  * @param events Poll event mask.
  * @return Watch on success, NULL on fstat/allocation failure.
  */
-nm_poll_watch_t *nm_get_or_create_poll_watch_locked(nm_node_t *node, int fd, short events) {
-    nm_poll_watch_t *watch = node->poll_watches;
+llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int fd, short events) {
+    llam_poll_watch_t *watch = node->poll_watches;
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (!nm_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
     while (watch != NULL) {
@@ -160,8 +160,8 @@ nm_poll_watch_t *nm_get_or_create_poll_watch_locked(nm_node_t *node, int fd, sho
  * @param fd   Listener descriptor.
  * @return Watch on success, NULL on allocation failure.
  */
-nm_accept_watch_t *nm_get_or_create_accept_watch_locked(nm_node_t *node, int fd) {
-    nm_accept_watch_t *watch = nm_find_accept_watch_locked(node, fd);
+llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, int fd) {
+    llam_accept_watch_t *watch = llam_find_accept_watch_locked(node, fd);
 
     if (watch != NULL) {
         return watch;
@@ -186,16 +186,16 @@ nm_accept_watch_t *nm_get_or_create_accept_watch_locked(nm_node_t *node, int fd)
  * @param fd   File descriptor.
  * @return Watch on success, NULL on fstat/allocation failure.
  */
-nm_recv_watch_t *nm_get_or_create_recv_watch_locked(nm_node_t *node, int fd) {
-    nm_recv_watch_t *watch;
+llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int fd) {
+    llam_recv_watch_t *watch;
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (!nm_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
 
-    watch = nm_find_recv_watch_locked(node, fd, st_dev, st_ino);
+    watch = llam_find_recv_watch_locked(node, fd, st_dev, st_ino);
 
     if (watch != NULL) {
         return watch;
@@ -221,16 +221,16 @@ nm_recv_watch_t *nm_get_or_create_recv_watch_locked(nm_node_t *node, int fd) {
  * @param node  Node owning the watch.
  * @param watch Watch to destroy.
  */
-void nm_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch) {
-    nm_recv_watch_t **cursor = &node->recv_watches;
+void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch) {
+    llam_recv_watch_t **cursor = &node->recv_watches;
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
-                nm_recv_ready_t *next = watch->ready_head->next;
+                llam_recv_ready_t *next = watch->ready_head->next;
 
-                nm_release_recv_ready(node->runtime, node, watch->ready_head);
+                llam_release_recv_ready(node->runtime, node, watch->ready_head);
                 watch->ready_head = next;
             }
             free(watch);
@@ -246,7 +246,7 @@ void nm_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch) {
  * @param node  Node owning the watch.
  * @param watch Candidate watch.
  */
-void nm_maybe_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch) {
+void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch) {
     if (watch == NULL) {
         return;
     }
@@ -256,7 +256,7 @@ void nm_maybe_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch)
     if (watch->wait_head != NULL || watch->ready_head != NULL) {
         return;
     }
-    nm_destroy_recv_watch_locked(node, watch);
+    llam_destroy_recv_watch_locked(node, watch);
 }
 
 /**
@@ -264,11 +264,11 @@ void nm_maybe_destroy_recv_watch_locked(nm_node_t *node, nm_recv_watch_t *watch)
  *
  * @return true on success.
  */
-bool nm_accept_watch_completion_push(nm_accept_watch_completion_t **head,
-                                            nm_accept_watch_completion_t **tail,
-                                            nm_io_req_t *req,
+bool llam_accept_watch_completion_push(llam_accept_watch_completion_t **head,
+                                            llam_accept_watch_completion_t **tail,
+                                            llam_io_req_t *req,
                                             int result) {
-    nm_accept_watch_completion_t *completion = calloc(1, sizeof(*completion));
+    llam_accept_watch_completion_t *completion = calloc(1, sizeof(*completion));
 
     if (completion == NULL) {
         return false;
@@ -290,11 +290,11 @@ bool nm_accept_watch_completion_push(nm_accept_watch_completion_t **head,
  * @param node Node used for completion accounting.
  * @param head Completion list.
  */
-void nm_accept_watch_completion_drain(nm_node_t *node, nm_accept_watch_completion_t *head) {
+void llam_accept_watch_completion_drain(llam_node_t *node, llam_accept_watch_completion_t *head) {
     while (head != NULL) {
-        nm_accept_watch_completion_t *next = head->next;
+        llam_accept_watch_completion_t *next = head->next;
 
-        nm_io_complete_req(node, head->req, head->result, 0U, false);
+        llam_io_complete_req(node, head->req, head->result, 0U, false);
         free(head);
         head = next;
     }
@@ -305,11 +305,11 @@ void nm_accept_watch_completion_drain(nm_node_t *node, nm_accept_watch_completio
  *
  * @return true on success or when @p waiters is NULL.
  */
-bool nm_poll_watch_completion_push(nm_poll_watch_completion_t **head,
-                                          nm_poll_watch_completion_t **tail,
-                                          nm_io_req_t *waiters,
+bool llam_poll_watch_completion_push(llam_poll_watch_completion_t **head,
+                                          llam_poll_watch_completion_t **tail,
+                                          llam_io_req_t *waiters,
                                           int revents) {
-    nm_poll_watch_completion_t *completion;
+    llam_poll_watch_completion_t *completion;
 
     if (waiters == NULL) {
         return true;
@@ -335,16 +335,16 @@ bool nm_poll_watch_completion_push(nm_poll_watch_completion_t **head,
  * @param node Node used for completion accounting.
  * @param head Completion list.
  */
-void nm_poll_watch_completion_drain(nm_node_t *node, nm_poll_watch_completion_t *head) {
+void llam_poll_watch_completion_drain(llam_node_t *node, llam_poll_watch_completion_t *head) {
     while (head != NULL) {
-        nm_poll_watch_completion_t *next_group = head->next;
-        nm_io_req_t *waiters = head->waiters;
+        llam_poll_watch_completion_t *next_group = head->next;
+        llam_io_req_t *waiters = head->waiters;
 
         while (waiters != NULL) {
-            nm_io_req_t *next = waiters->next;
+            llam_io_req_t *next = waiters->next;
 
             waiters->next = NULL;
-            nm_io_complete_req(node, waiters, head->revents, 0U, false);
+            llam_io_complete_req(node, waiters, head->revents, 0U, false);
             waiters = next;
         }
         free(head);
@@ -357,14 +357,14 @@ void nm_poll_watch_completion_drain(nm_node_t *node, nm_poll_watch_completion_t 
  *
  * @return true on success.
  */
-bool nm_recv_watch_completion_push(nm_recv_watch_completion_t **head,
-                                          nm_recv_watch_completion_t **tail,
-                                          nm_io_req_t *req,
+bool llam_recv_watch_completion_push(llam_recv_watch_completion_t **head,
+                                          llam_recv_watch_completion_t **tail,
+                                          llam_io_req_t *req,
                                           size_t size,
                                           unsigned short bid,
                                           bool has_buffer,
                                           unsigned node_index) {
-    nm_recv_watch_completion_t *completion = calloc(1, sizeof(*completion));
+    llam_recv_watch_completion_t *completion = calloc(1, sizeof(*completion));
 
     if (completion == NULL) {
         return false;
@@ -390,21 +390,21 @@ bool nm_recv_watch_completion_push(nm_recv_watch_completion_t **head,
  * @param fallback_node Node used when no owner node is encoded.
  * @param head          Completion list.
  */
-void nm_recv_watch_completion_drain(nm_runtime_t *rt,
-                                           nm_node_t *fallback_node,
-                                           nm_recv_watch_completion_t *head) {
+void llam_recv_watch_completion_drain(llam_runtime_t *rt,
+                                           llam_node_t *fallback_node,
+                                           llam_recv_watch_completion_t *head) {
     while (head != NULL) {
-        nm_recv_watch_completion_t *next = head->next;
-        nm_node_t *owner = fallback_node;
+        llam_recv_watch_completion_t *next = head->next;
+        llam_node_t *owner = fallback_node;
         unsigned flags = 0U;
 
         if (head->has_buffer && rt != NULL && head->node_index < rt->active_nodes) {
             owner = &rt->nodes[head->node_index];
-            // Recreate the CQE buffer flag shape expected by nm_io_complete_req
+            // Recreate the CQE buffer flag shape expected by llam_io_complete_req
             // so owned-buffer attachment follows the normal completion path.
             flags = IORING_CQE_F_BUFFER | ((unsigned)head->bid << IORING_CQE_BUFFER_SHIFT);
         }
-        nm_io_complete_req(owner, head->req, (int)head->size, flags, false);
+        llam_io_complete_req(owner, head->req, (int)head->size, flags, false);
         free(head);
         head = next;
     }
@@ -418,9 +418,9 @@ void nm_recv_watch_completion_drain(nm_runtime_t *rt,
  * @param target Target pointer.
  * @return true if an operation was removed.
  */
-bool nm_drop_node_control_locked(nm_node_t *node, nm_io_control_kind_t kind, const void *target) {
-    nm_io_control_op_t *prev = NULL;
-    nm_io_control_op_t *cur;
+bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kind, const void *target) {
+    llam_io_control_op_t *prev = NULL;
+    llam_io_control_op_t *cur;
 
     if (node == NULL) {
         return false;

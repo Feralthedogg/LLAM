@@ -31,15 +31,15 @@
  *
  * @param task Task whose wait tracking should be reset.
  */
-void nm_task_clear_wait_tracking(nm_task_t *task) {
+void llam_task_clear_wait_tracking(llam_task_t *task) {
     if (task == NULL) {
         return;
     }
 
-    if (task->active_io_req != NULL && g_nm_runtime.initialized) {
+    if (task->active_io_req != NULL && g_llam_runtime.initialized) {
         // active_io_waiters tracks tasks, not requests. Decrement once when the
         // task leaves any I/O wait state.
-        atomic_fetch_sub_explicit(&g_nm_runtime.active_io_waiters, 1U, memory_order_acq_rel);
+        atomic_fetch_sub_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
     }
 
     task->active_wait_node = NULL;
@@ -60,9 +60,9 @@ void nm_task_clear_wait_tracking(nm_task_t *task) {
  * @param queue_lock   Mutex protecting @p queue.
  * @param parked_shard Shard where the task parked.
  */
-void nm_task_set_wait_node_tracking(nm_task_t *task,
-                                           nm_wait_node_t *node,
-                                           nm_wait_queue_t *queue,
+void llam_task_set_wait_node_tracking(llam_task_t *task,
+                                           llam_wait_node_t *node,
+                                           llam_wait_queue_t *queue,
                                            pthread_mutex_t *queue_lock,
                                            unsigned parked_shard) {
     task->active_wait_node = node;
@@ -82,7 +82,7 @@ void nm_task_set_wait_node_tracking(nm_task_t *task,
  * @param target       Join target.
  * @param parked_shard Shard where the waiter parked.
  */
-void nm_task_set_join_tracking(nm_task_t *task, nm_task_t *target, unsigned parked_shard) {
+void llam_task_set_join_tracking(llam_task_t *task, llam_task_t *target, unsigned parked_shard) {
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
@@ -99,7 +99,7 @@ void nm_task_set_join_tracking(nm_task_t *task, nm_task_t *target, unsigned park
  * @param task         Parked task.
  * @param parked_shard Shard where the task parked.
  */
-void nm_task_set_sleep_tracking(nm_task_t *task, unsigned parked_shard) {
+void llam_task_set_sleep_tracking(llam_task_t *task, unsigned parked_shard) {
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
@@ -117,13 +117,13 @@ void nm_task_set_sleep_tracking(nm_task_t *task, unsigned parked_shard) {
  * @param req          Active I/O request.
  * @param parked_shard Shard where the task parked.
  */
-void nm_task_set_io_tracking(nm_task_t *task, nm_io_req_t *req, unsigned parked_shard) {
+void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard) {
     if (task == NULL) {
         return;
     }
-    if (task->active_io_req == NULL && g_nm_runtime.initialized) {
+    if (task->active_io_req == NULL && g_llam_runtime.initialized) {
         // Count the transition into I/O wait once per task.
-        atomic_fetch_add_explicit(&g_nm_runtime.active_io_waiters, 1U, memory_order_acq_rel);
+        atomic_fetch_add_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
     }
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
@@ -142,7 +142,7 @@ void nm_task_set_io_tracking(nm_task_t *task, nm_io_req_t *req, unsigned parked_
  * @param job          Blocking job being executed by a helper.
  * @param parked_shard Shard where the task parked.
  */
-void nm_task_set_block_tracking(nm_task_t *task, nm_block_job_t *job, unsigned parked_shard) {
+void llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsigned parked_shard) {
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
@@ -156,11 +156,11 @@ void nm_task_set_block_tracking(nm_task_t *task, nm_block_job_t *job, unsigned p
 /**
  * @brief Check whether an absolute deadline has passed.
  *
- * @param deadline_ns Absolute deadline in ::nm_now_ns units.
+ * @param deadline_ns Absolute deadline in ::llam_now_ns units.
  * @return true when the deadline is now or in the past.
  */
-bool nm_deadline_passed(uint64_t deadline_ns) {
-    return deadline_ns <= nm_now_ns();
+bool llam_deadline_passed(uint64_t deadline_ns) {
+    return deadline_ns <= llam_now_ns();
 }
 
 /**
@@ -174,7 +174,7 @@ bool nm_deadline_passed(uint64_t deadline_ns) {
  * @param deadline_ns Absolute wake deadline.
  * @return 0 on success, -1 on invalid args or timer allocation failure.
  */
-int nm_arm_task_wait_deadline(nm_task_t *task, nm_shard_t *shard, uint64_t deadline_ns) {
+int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t deadline_ns) {
     if (task == NULL || shard == NULL) {
         errno = EINVAL;
         return -1;
@@ -182,7 +182,7 @@ int nm_arm_task_wait_deadline(nm_task_t *task, nm_shard_t *shard, uint64_t deadl
 
     task->deadline_ns = deadline_ns;
     pthread_mutex_lock(&shard->lock);
-    nm_timer_insert_locked(shard, task);
+    llam_timer_insert_locked(shard, task);
     pthread_mutex_unlock(&shard->lock);
     if (task->active_timer == NULL) {
         task->deadline_ns = 0U;
@@ -197,24 +197,24 @@ int nm_arm_task_wait_deadline(nm_task_t *task, nm_shard_t *shard, uint64_t deadl
  *
  * @param task Task whose timer should be removed.
  */
-void nm_disarm_task_wait_deadline(nm_task_t *task) {
-    nm_shard_t *shard;
+void llam_disarm_task_wait_deadline(llam_task_t *task) {
+    llam_shard_t *shard;
 
-    if (task == NULL || task->active_timer == NULL || g_nm_runtime.active_shards == 0U) {
+    if (task == NULL || task->active_timer == NULL || g_llam_runtime.active_shards == 0U) {
         return;
     }
 
-    if (task->parked_shard < g_nm_runtime.active_shards) {
-        shard = &g_nm_runtime.shards[task->parked_shard];
+    if (task->parked_shard < g_llam_runtime.active_shards) {
+        shard = &g_llam_runtime.shards[task->parked_shard];
     } else {
         // Fallback for defensive cleanup when parked_shard was not set or has
         // become invalid due to teardown/rehome state.
-        shard = &g_nm_runtime.shards[task->last_shard % g_nm_runtime.active_shards];
+        shard = &g_llam_runtime.shards[task->last_shard % g_llam_runtime.active_shards];
     }
 
     pthread_mutex_lock(&shard->lock);
     if (task->active_timer != NULL) {
-        (void)nm_timer_remove_locked(shard, task);
+        (void)llam_timer_remove_locked(shard, task);
     }
     pthread_mutex_unlock(&shard->lock);
 }
@@ -225,8 +225,8 @@ void nm_disarm_task_wait_deadline(nm_task_t *task) {
  * @param task Task with an optional cancel token.
  * @return 0 on success/no token, -1 with ECANCELED if already canceled.
  */
-int nm_cancel_token_register_task(nm_task_t *task) {
-    nm_cancel_token_t *token;
+int llam_cancel_token_register_task(llam_task_t *task) {
+    llam_cancel_token_t *token;
 
     if (task == NULL || task->cancel_token == NULL) {
         return 0;
@@ -259,8 +259,8 @@ int nm_cancel_token_register_task(nm_task_t *task) {
  *
  * @param task Task to unregister.
  */
-void nm_cancel_token_unregister_task(nm_task_t *task) {
-    nm_cancel_token_t *token;
+void llam_cancel_token_unregister_task(llam_task_t *task) {
+    llam_cancel_token_t *token;
 
     if (task == NULL || task->cancel_token == NULL || !task->cancel_registered) {
         return;
@@ -290,7 +290,7 @@ void nm_cancel_token_unregister_task(nm_task_t *task) {
  * @param task Task to inspect.
  * @return Stored wake error, or 0.
  */
-int nm_consume_task_wake_error(nm_task_t *task) {
+int llam_consume_task_wake_error(llam_task_t *task) {
     int error_code = 0;
 
     if (task == NULL) {
@@ -308,13 +308,13 @@ int nm_consume_task_wake_error(nm_task_t *task) {
  * @param req    Request being aborted.
  * @param reason Abort reason.
  */
-void nm_io_set_abort_result(nm_io_req_t *req, nm_io_abort_reason_t reason) {
+void llam_io_set_abort_result(llam_io_req_t *req, llam_io_abort_reason_t reason) {
     if (req == NULL) {
         return;
     }
 
     req->poll_revents = 0;
-    if (reason == NM_IO_ABORT_TIMEOUT && req->kind == NM_IO_KIND_POLL) {
+    if (reason == LLAM_IO_ABORT_TIMEOUT && req->kind == LLAM_IO_KIND_POLL) {
         // poll(2) reports timeout as a successful zero-result completion.
         req->result = 0;
         req->error_code = 0;
@@ -322,7 +322,7 @@ void nm_io_set_abort_result(nm_io_req_t *req, nm_io_abort_reason_t reason) {
     }
 
     req->result = -1;
-    req->error_code = reason == NM_IO_ABORT_TIMEOUT ? ETIMEDOUT : ECANCELED;
+    req->error_code = reason == LLAM_IO_ABORT_TIMEOUT ? ETIMEDOUT : ECANCELED;
 }
 
 /**
@@ -331,14 +331,14 @@ void nm_io_set_abort_result(nm_io_req_t *req, nm_io_abort_reason_t reason) {
  * @param reason I/O abort reason.
  * @return Wait reason for metrics/tracing.
  */
-nm_wait_reason_t nm_io_abort_wait_reason(nm_io_abort_reason_t reason) {
+llam_wait_reason_t llam_io_abort_wait_reason(llam_io_abort_reason_t reason) {
     switch (reason) {
-    case NM_IO_ABORT_CANCEL:
-        return NM_WAIT_CANCEL;
-    case NM_IO_ABORT_TIMEOUT:
-        return NM_WAIT_TIMEOUT;
+    case LLAM_IO_ABORT_CANCEL:
+        return LLAM_WAIT_CANCEL;
+    case LLAM_IO_ABORT_TIMEOUT:
+        return LLAM_WAIT_TIMEOUT;
     default:
-        return NM_WAIT_IO;
+        return LLAM_WAIT_IO;
     }
 }
 
@@ -348,15 +348,15 @@ nm_wait_reason_t nm_io_abort_wait_reason(nm_io_abort_reason_t reason) {
  * @param shard  Shard that will wake the task.
  * @param reason I/O abort reason.
  */
-void nm_account_io_abort_wake(nm_shard_t *shard, nm_io_abort_reason_t reason) {
+void llam_account_io_abort_wake(llam_shard_t *shard, llam_io_abort_reason_t reason) {
     if (shard == NULL) {
         return;
     }
 
     pthread_mutex_lock(&shard->lock);
-    if (reason == NM_IO_ABORT_CANCEL) {
+    if (reason == LLAM_IO_ABORT_CANCEL) {
         shard->metrics.cancel_wakes += 1U;
-    } else if (reason == NM_IO_ABORT_TIMEOUT) {
+    } else if (reason == LLAM_IO_ABORT_TIMEOUT) {
         shard->metrics.timeout_wakes += 1U;
     }
     pthread_mutex_unlock(&shard->lock);
@@ -368,20 +368,20 @@ void nm_account_io_abort_wake(nm_shard_t *shard, nm_io_abort_reason_t reason) {
  * @param req Request to inspect.
  * @return Node index on success, -1 if no node can be resolved.
  */
-int nm_io_req_node_index(const nm_io_req_t *req) {
+int llam_io_req_node_index(const llam_io_req_t *req) {
     unsigned shard_id;
 
-    if (req == NULL || g_nm_runtime.active_shards == 0U || g_nm_runtime.active_nodes == 0U) {
+    if (req == NULL || g_llam_runtime.active_shards == 0U || g_llam_runtime.active_nodes == 0U) {
         return -1;
     }
-    if (req->attached_node_index < g_nm_runtime.active_nodes) {
+    if (req->attached_node_index < g_llam_runtime.active_nodes) {
         return (int)req->attached_node_index;
     }
 
     // Requests that have not attached to a node yet route through their owner
     // shard's assigned I/O node.
-    shard_id = req->owner_shard < g_nm_runtime.active_shards ? req->owner_shard : (req->owner_shard % g_nm_runtime.active_shards);
-    return (int)g_nm_runtime.shards[shard_id].io_node_index;
+    shard_id = req->owner_shard < g_llam_runtime.active_shards ? req->owner_shard : (req->owner_shard % g_llam_runtime.active_shards);
+    return (int)g_llam_runtime.shards[shard_id].io_node_index;
 }
 
 /**
@@ -391,69 +391,69 @@ int nm_io_req_node_index(const nm_io_req_t *req) {
  * @param reason Abort reason.
  * @return true if the task was detached and reinjected immediately.
  */
-bool nm_abort_io_wait(nm_task_t *task, nm_io_abort_reason_t reason) {
-    nm_io_req_t *req;
+bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
+    llam_io_req_t *req;
     int node_index;
-    nm_node_t *node;
-    nm_shard_t *shard;
+    llam_node_t *node;
+    llam_shard_t *shard;
     unsigned mode;
     bool removed = false;
 
-    if (task == NULL || task->active_io_req == NULL || g_nm_runtime.active_shards == 0U) {
+    if (task == NULL || task->active_io_req == NULL || g_llam_runtime.active_shards == 0U) {
         return false;
     }
 
     req = task->active_io_req;
-    node_index = nm_io_req_node_index(req);
+    node_index = llam_io_req_node_index(req);
     if (node_index < 0) {
         return false;
     }
-    node = &g_nm_runtime.nodes[node_index];
-    shard = &g_nm_runtime.shards[task->parked_shard % g_nm_runtime.active_shards];
+    node = &g_llam_runtime.nodes[node_index];
+    shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
     mode = atomic_load(&req->wait_mode);
 
-    if (mode == NM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+    if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
         // Still queued for submission: remove directly from node submit queue.
         pthread_mutex_lock(&node->submit_lock);
-        removed = nm_remove_node_submit_locked(node, req);
+        removed = llam_remove_node_submit_locked(node, req);
         if (removed) {
-            atomic_store(&req->wait_mode, NM_IO_WAIT_MODE_NONE);
+            atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
             atomic_store(&req->inflight_owner_shard, UINT_MAX);
         }
         pthread_mutex_unlock(&node->submit_lock);
         if (removed) {
             atomic_fetch_sub(&node->pending_ops, 1U);
         }
-    } else if (mode == NM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
+    } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
         pthread_mutex_lock(&node->watch_lock);
-        removed = nm_poll_watch_remove_waiter(req->poll_watch, req);
+        removed = llam_poll_watch_remove_waiter(req->poll_watch, req);
         if (removed) {
-            atomic_store(&req->wait_mode, NM_IO_WAIT_MODE_NONE);
+            atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
             atomic_store(&req->inflight_owner_shard, UINT_MAX);
         }
         pthread_mutex_unlock(&node->watch_lock);
-    } else if (mode == NM_IO_WAIT_MODE_ACCEPT_WATCH && req->accept_watch != NULL) {
+    } else if (mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH && req->accept_watch != NULL) {
         pthread_mutex_lock(&node->watch_lock);
-        removed = nm_accept_watch_remove_waiter(req->accept_watch, req);
+        removed = llam_accept_watch_remove_waiter(req->accept_watch, req);
         if (removed) {
-            atomic_store(&req->wait_mode, NM_IO_WAIT_MODE_NONE);
+            atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
             atomic_store(&req->inflight_owner_shard, UINT_MAX);
         }
         pthread_mutex_unlock(&node->watch_lock);
-    } else if (mode == NM_IO_WAIT_MODE_RECV_WATCH && req->recv_watch != NULL) {
+    } else if (mode == LLAM_IO_WAIT_MODE_RECV_WATCH && req->recv_watch != NULL) {
         pthread_mutex_lock(&node->watch_lock);
-        removed = nm_recv_watch_remove_waiter(req->recv_watch, req);
+        removed = llam_recv_watch_remove_waiter(req->recv_watch, req);
         if (removed) {
-            atomic_store(&req->wait_mode, NM_IO_WAIT_MODE_NONE);
+            atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
             atomic_store(&req->inflight_owner_shard, UINT_MAX);
         }
         pthread_mutex_unlock(&node->watch_lock);
-    } else if (mode == NM_IO_WAIT_MODE_INFLIGHT) {
+    } else if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
         // In-flight operations require backend cancellation. Completion will do
         // the actual wake once the backend acknowledges or reports the request.
         atomic_store(&req->abort_reason, (unsigned)reason);
         if (atomic_exchange(&req->cancel_queued, 1U) == 0U) {
-            (void)nm_node_queue_control(node, NM_IO_CONTROL_REQ_CANCEL, req);
+            (void)llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req);
         }
         return false;
     }
@@ -462,15 +462,15 @@ bool nm_abort_io_wait(nm_task_t *task, nm_io_abort_reason_t reason) {
         return false;
     }
 
-    nm_io_set_abort_result(req, reason);
-    nm_account_io_abort_wake(shard, reason);
-    nm_task_clear_wait_tracking(task);
-    nm_reinject_task_on_shard(&g_nm_runtime,
+    llam_io_set_abort_result(req, reason);
+    llam_account_io_abort_wake(shard, reason);
+    llam_task_clear_wait_tracking(task);
+    llam_reinject_task_on_shard(&g_llam_runtime,
                               task,
                               task->parked_shard,
                               true,
-                              NM_TRACE_WAKE,
-                              nm_io_abort_wait_reason(reason));
+                              LLAM_TRACE_WAKE,
+                              llam_io_abort_wait_reason(reason));
     return true;
 }
 
@@ -481,11 +481,11 @@ bool nm_abort_io_wait(nm_task_t *task, nm_io_abort_reason_t reason) {
  * @param hot    Whether to prefer hot-lane enqueue.
  * @param reason Wait reason being resolved.
  */
-void nm_wake_wait_node(nm_wait_node_t *node, bool hot, nm_wait_reason_t reason) {
+void llam_wake_wait_node(llam_wait_node_t *node, bool hot, llam_wait_reason_t reason) {
     if (node == NULL || node->task == NULL) {
         return;
     }
-    nm_reinject_task(&g_nm_runtime, node->task, hot, NM_TRACE_WAKE, reason);
+    llam_reinject_task(&g_llam_runtime, node->task, hot, LLAM_TRACE_WAKE, reason);
 }
 
 /**
@@ -494,24 +494,24 @@ void nm_wake_wait_node(nm_wait_node_t *node, bool hot, nm_wait_reason_t reason) 
  * @param reason Wait reason recorded on the task.
  * @param kind   Trace event kind.
  */
-void nm_park_current_task(nm_wait_reason_t reason, nm_trace_kind_t kind) {
-    nm_shard_t *shard = g_nm_tls_shard;
-    nm_task_t *task = g_nm_tls_task;
-    nm_ctx_t *scheduler_ctx;
+void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind) {
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_task_t *task = g_llam_tls_task;
+    llam_ctx_t *scheduler_ctx;
 
     if (shard == NULL || task == NULL) {
         return;
     }
 
-    scheduler_ctx = g_nm_tls_scheduler_ctx != NULL ? g_nm_tls_scheduler_ctx : &shard->scheduler_ctx;
-    task->state = NM_TASK_STATE_PARKED;
+    scheduler_ctx = g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx;
+    task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = reason;
     shard->metrics.parks += 1U;
-    nm_trace_shard(shard, task, kind, NM_TASK_STATE_RUNNING, NM_TASK_STATE_PARKED, reason);
-    nm_task_sample_live_stack(task);
+    llam_trace_shard(shard, task, kind, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, reason);
+    llam_task_sample_live_stack(task);
     // The scheduler resumes after this context switch and will later reinject
     // the task when its wait completes.
-    nm_ctx_switch(&task->ctx, scheduler_ctx);
+    llam_switch_task_to_scheduler(task, scheduler_ctx);
 }
 
 /**
@@ -520,8 +520,8 @@ void nm_park_current_task(nm_wait_reason_t reason, nm_trace_kind_t kind) {
  * @param rt   Runtime owning the tasks.
  * @param task Completed task whose join waiters should be woken.
  */
-void nm_reinject_join_waiters(nm_runtime_t *rt, nm_task_t *task) {
-    nm_task_t *waiters;
+void llam_reinject_join_waiters(llam_runtime_t *rt, llam_task_t *task) {
+    llam_task_t *waiters;
 
     pthread_mutex_lock(&task->lock);
     waiters = task->join_waiters;
@@ -532,9 +532,9 @@ void nm_reinject_join_waiters(nm_runtime_t *rt, nm_task_t *task) {
     pthread_mutex_unlock(&task->lock);
 
     while (waiters != NULL) {
-        nm_task_t *next = waiters->wait_next;
+        llam_task_t *next = waiters->wait_next;
         waiters->wait_next = NULL;
-        nm_reinject_task_on_shard(rt, waiters, waiters->parked_shard, true, NM_TRACE_WAKE, NM_WAIT_JOIN);
+        llam_reinject_task_on_shard(rt, waiters, waiters->parked_shard, true, LLAM_TRACE_WAKE, LLAM_WAIT_JOIN);
         waiters = next;
     }
 }
@@ -546,9 +546,9 @@ void nm_reinject_join_waiters(nm_runtime_t *rt, nm_task_t *task) {
  * @param waiter Waiter task to remove.
  * @return true if the waiter was found and removed.
  */
-bool nm_join_waiter_remove_locked(nm_task_t *target, nm_task_t *waiter) {
-    nm_task_t *prev = NULL;
-    nm_task_t *cur = target->join_waiters;
+bool llam_join_waiter_remove_locked(llam_task_t *target, llam_task_t *waiter) {
+    llam_task_t *prev = NULL;
+    llam_task_t *cur = target->join_waiters;
 
     while (cur != NULL) {
         if (cur == waiter) {

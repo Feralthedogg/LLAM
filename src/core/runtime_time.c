@@ -36,7 +36,7 @@
  *
  * @return Monotonic nanoseconds, or 0 when the platform clock call fails.
  */
-uint64_t nm_now_ns(void) {
+uint64_t llam_now_ns(void) {
 #if defined(__APPLE__)
     static mach_timebase_info_data_t timebase;
     uint64_t ticks;

@@ -31,8 +31,8 @@
  * @param shard Preferred owner shard.
  * @return Cleared wait node on success, or NULL on allocation failure.
  */
-nm_wait_node_t *nm_wait_node_alloc(nm_shard_t *shard) {
-    nm_wait_node_t *node = NULL;
+llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard) {
+    llam_wait_node_t *node = NULL;
 
     if (shard == NULL) {
         errno = EINVAL;
@@ -40,7 +40,7 @@ nm_wait_node_t *nm_wait_node_alloc(nm_shard_t *shard) {
     }
 
     for (;;) {
-        if (g_nm_tls_shard == shard) {
+        if (g_llam_tls_shard == shard) {
             // Most wait nodes are created by the scheduler shard that will own
             // them, so this path avoids allocator locking.
             node = shard->allocator.wait_free;
@@ -53,20 +53,20 @@ nm_wait_node_t *nm_wait_node_alloc(nm_shard_t *shard) {
             }
         } else {
             // Cold external path for API/bootstrap callers not bound to shard TLS.
-            nm_allocator_lock(&shard->allocator);
+            llam_allocator_lock(&shard->allocator);
             node = shard->allocator.wait_free;
             if (node != NULL) {
                 shard->allocator.wait_free = node->alloc_next;
                 shard->allocator.wait_reuses += 1U;
-                nm_allocator_unlock(&shard->allocator);
+                llam_allocator_unlock(&shard->allocator);
                 memset(node, 0, sizeof(*node));
                 node->owner_shard = shard->id;
                 return node;
             }
-            nm_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->allocator);
         }
         // Empty free list: grow one slab and retry the normal pop path.
-        if (nm_allocator_grow_wait_slab(shard) != 0) {
+        if (llam_allocator_grow_wait_slab(shard) != 0) {
             return NULL;
         }
     }
@@ -78,10 +78,10 @@ nm_wait_node_t *nm_wait_node_alloc(nm_shard_t *shard) {
  * @param shard Current shard hint (unused; ownership is stored in @p node).
  * @param node  Wait node to recycle.
  */
-void nm_wait_node_free(nm_shard_t *shard, nm_wait_node_t *node) {
-    nm_runtime_t *rt = &g_nm_runtime;
-    nm_shard_t *owner;
-    nm_wait_node_t *head;
+void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_shard_t *owner;
+    llam_wait_node_t *head;
 
     (void)shard;
     if (node == NULL || node->owner_shard >= rt->active_shards) {
@@ -91,7 +91,7 @@ void nm_wait_node_free(nm_shard_t *shard, nm_wait_node_t *node) {
     owner = &rt->shards[node->owner_shard];
     node->next = NULL;
     node->alloc_next = NULL;
-    if (g_nm_tls_shard != NULL && g_nm_tls_shard->id == owner->id) {
+    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
         // Owner-local free goes straight back to the shard cache.
         node->alloc_next = owner->allocator.wait_free;
         owner->allocator.wait_free = node;
@@ -113,8 +113,8 @@ void nm_wait_node_free(nm_shard_t *shard, nm_wait_node_t *node) {
  * @param shard Preferred owner shard.
  * @return Cleared timer node on success, or NULL on allocation failure.
  */
-nm_timer_node_t *nm_timer_node_alloc(nm_shard_t *shard) {
-    nm_timer_node_t *node = NULL;
+llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard) {
+    llam_timer_node_t *node = NULL;
 
     if (shard == NULL) {
         errno = EINVAL;
@@ -122,7 +122,7 @@ nm_timer_node_t *nm_timer_node_alloc(nm_shard_t *shard) {
     }
 
     for (;;) {
-        if (g_nm_tls_shard == shard) {
+        if (g_llam_tls_shard == shard) {
             // Timer allocation is on scheduler hot paths; keep same-shard reuse
             // lock-free.
             node = shard->allocator.timer_free;
@@ -135,20 +135,20 @@ nm_timer_node_t *nm_timer_node_alloc(nm_shard_t *shard) {
             }
         } else {
             // Cold path when a foreign caller needs a timer node from this shard.
-            nm_allocator_lock(&shard->allocator);
+            llam_allocator_lock(&shard->allocator);
             node = shard->allocator.timer_free;
             if (node != NULL) {
                 shard->allocator.timer_free = node->alloc_next;
                 shard->allocator.timer_reuses += 1U;
-                nm_allocator_unlock(&shard->allocator);
+                llam_allocator_unlock(&shard->allocator);
                 memset(node, 0, sizeof(*node));
                 node->owner_shard = shard->id;
                 return node;
             }
-            nm_allocator_unlock(&shard->allocator);
+            llam_allocator_unlock(&shard->allocator);
         }
         // Grow lazily when the timer cache is exhausted.
-        if (nm_allocator_grow_timer_slab(shard) != 0) {
+        if (llam_allocator_grow_timer_slab(shard) != 0) {
             return NULL;
         }
     }
@@ -160,10 +160,10 @@ nm_timer_node_t *nm_timer_node_alloc(nm_shard_t *shard) {
  * @param shard Current shard hint (unused; ownership is stored in @p node).
  * @param node  Timer node to recycle.
  */
-void nm_timer_node_free(nm_shard_t *shard, nm_timer_node_t *node) {
-    nm_runtime_t *rt = &g_nm_runtime;
-    nm_shard_t *owner;
-    nm_timer_node_t *head;
+void llam_timer_node_free(llam_shard_t *shard, llam_timer_node_t *node) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_shard_t *owner;
+    llam_timer_node_t *head;
 
     (void)shard;
     if (node == NULL || node->owner_shard >= rt->active_shards) {
@@ -173,7 +173,7 @@ void nm_timer_node_free(nm_shard_t *shard, nm_timer_node_t *node) {
     owner = &rt->shards[node->owner_shard];
     node->next = NULL;
     node->alloc_next = NULL;
-    if (g_nm_tls_shard != NULL && g_nm_tls_shard->id == owner->id) {
+    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
         // Common path: timer fires/cancels on its owner shard.
         node->alloc_next = owner->allocator.timer_free;
         owner->allocator.timer_free = node;

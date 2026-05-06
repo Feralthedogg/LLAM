@@ -79,14 +79,14 @@ void stress_cleanup_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_
     state->waiters = NULL;
 }
 
-nm_task_t *stress_spawn_on_shard(unsigned shard_id, nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts) {
-    nm_runtime_t *rt = &g_nm_runtime;
-    nm_task_t *task;
-    nm_stack_class_t stack_class = NM_STACK_CLASS_DEFAULT;
-    nm_task_class_t task_class = NM_TASK_CLASS_DEFAULT;
-    nm_shard_t *target;
+llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_task_t *task;
+    llam_stack_class_t stack_class = LLAM_STACK_CLASS_DEFAULT;
+    llam_task_class_t task_class = LLAM_TASK_CLASS_DEFAULT;
+    llam_shard_t *target;
 
-    nm_task_safepoint();
+    llam_task_safepoint();
 
     if (!rt->initialized || fn == NULL || shard_id >= rt->active_shards) {
         errno = EINVAL;
@@ -99,23 +99,23 @@ nm_task_t *stress_spawn_on_shard(unsigned shard_id, nm_task_fn fn, void *arg, co
     }
 
     target = &rt->shards[shard_id];
-    task = nm_task_alloc(target);
+    task = llam_task_alloc(target);
     if (task == NULL) {
         return NULL;
     }
 
     if (pthread_mutex_init(&task->lock, NULL) != 0) {
-        nm_task_allocator_free(task);
+        llam_task_allocator_free(task);
         errno = ENOMEM;
         return NULL;
     }
 
     task->id = atomic_fetch_add(&rt->next_task_id, 1U) + 1U;
-    task->state = NM_TASK_STATE_NEW;
-    task->wait_reason = NM_WAIT_NONE;
+    task->state = LLAM_TASK_STATE_NEW;
+    task->wait_reason = LLAM_WAIT_NONE;
     task->flags = opts != NULL ? opts->flags : 0U;
-    if ((task->flags & NM_TASK_FLAG_LATENCY_CRITICAL) != 0U) {
-        task_class = NM_TASK_CLASS_LATENCY;
+    if ((task->flags & LLAM_TASK_FLAG_LATENCY_CRITICAL) != 0U) {
+        task_class = LLAM_TASK_CLASS_LATENCY;
     }
     task->task_class = task_class;
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
@@ -130,46 +130,46 @@ nm_task_t *stress_spawn_on_shard(unsigned shard_id, nm_task_fn fn, void *arg, co
     task->forced_yield_budget = rt->forced_yield_every;
     atomic_init(&task->preempt_requested, 0U);
 
-    if (nm_alloc_task_stack(task, stack_class) != 0) {
+    if (llam_alloc_task_stack(task, stack_class) != 0) {
         int saved_errno = errno;
 
         pthread_mutex_destroy(&task->lock);
-        nm_task_allocator_free(task);
+        llam_task_allocator_free(task);
         errno = saved_errno;
         return NULL;
     }
 
     task->home_shard = shard_id;
     task->last_shard = shard_id;
-    task->last_runnable_ns = nm_now_ns();
+    task->last_runnable_ns = llam_now_ns();
 
-    nm_add_task_to_list(rt, task);
+    llam_add_task_to_list(rt, task);
     atomic_fetch_add(&rt->live_tasks, 1U);
 
     pthread_mutex_lock(&target->lock);
     if (rt->experimental_dynamic_shards != 0U &&
         atomic_load_explicit(&target->online, memory_order_relaxed) == 0U) {
         atomic_store_explicit(&target->online, 1U, memory_order_release);
-        nm_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
+        llam_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
     }
-    task->state = NM_TASK_STATE_RUNNABLE;
+    task->state = LLAM_TASK_STATE_RUNNABLE;
     if (target->opaque_redirect_active) {
         target->metrics.migrations += 1U;
         task->enqueue_hot = 0U;
-        if (!nm_enqueue_opaque_redirect_task_locked(target, task, false)) {
-            nm_enqueue_overflow_task(rt, task);
+        if (!llam_enqueue_opaque_redirect_task_locked(target, task, false)) {
+            llam_enqueue_overflow_task(rt, task);
         }
-    } else if (nm_lockfree_normq_enabled(rt) && (g_nm_tls_shard != target || g_nm_tls_task == NULL)) {
+    } else if (llam_lockfree_normq_enabled(rt) && (g_llam_tls_shard != target || g_llam_tls_task == NULL)) {
         task->enqueue_hot = 0U;
-        if (nm_queue_push_bounded_locked(target, &target->inject_q, NM_INJECT_QUEUE_CAP, task)) {
+        if (llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
             target->metrics.inject_enqueues += 1U;
         }
     } else {
-        (void)nm_norm_queue_push_owner_locked(target, task);
+        (void)llam_norm_queue_push_owner_locked(target, task);
     }
-    nm_trace_shard(target, task, NM_TRACE_STATE, NM_TASK_STATE_NEW, NM_TASK_STATE_RUNNABLE, NM_WAIT_NONE);
+    llam_trace_shard(target, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_NEW, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_NONE);
     pthread_mutex_unlock(&target->lock);
-    nm_kick_shard(target);
+    llam_kick_shard(target);
     return task;
 }
 
@@ -189,7 +189,7 @@ bool stress_open_foreign_poll_pair(unsigned source_node_index, int sv_out[2], un
         if (socketpair(AF_UNIX, SOCK_STREAM, 0, candidate) != 0) {
             return false;
         }
-        owner_node = nm_multishot_owner_node_index(&g_nm_runtime, source_node_index, candidate[0]);
+        owner_node = llam_multishot_owner_node_index(&g_llam_runtime, source_node_index, candidate[0]);
         if (owner_node != source_node_index) {
             sv_out[0] = candidate[0];
             sv_out[1] = candidate[1];
@@ -210,7 +210,7 @@ bool stress_poll_watch_waiter_counts(unsigned node_index,
                                             unsigned source_shard,
                                             unsigned *total_waiters_out,
                                             unsigned *source_owned_waiters_out) {
-    nm_runtime_t *rt = &g_nm_runtime;
+    llam_runtime_t *rt = &g_llam_runtime;
     unsigned total_waiters = 0U;
     unsigned source_owned_waiters = 0U;
     bool found = false;
@@ -230,11 +230,11 @@ bool stress_poll_watch_waiter_counts(unsigned node_index,
         unsigned current = (node_index < rt->active_nodes) ? ((node_index + i) % rt->active_nodes) : i;
 
         pthread_mutex_lock(&rt->nodes[current].watch_lock);
-        for (nm_poll_watch_t *watch = rt->nodes[current].poll_watches; watch != NULL; watch = watch->next) {
+        for (llam_poll_watch_t *watch = rt->nodes[current].poll_watches; watch != NULL; watch = watch->next) {
             if (watch->fd != fd || watch->events != events) {
                 continue;
             }
-            for (nm_io_req_t *req = watch->wait_head; req != NULL; req = req->next) {
+            for (llam_io_req_t *req = watch->wait_head; req != NULL; req = req->next) {
                 total_waiters += 1U;
                 if (req->owner_shard == source_shard) {
                     source_owned_waiters += 1U;
@@ -428,11 +428,11 @@ bool stress_platform_supports_seqpacket_socketpair(void) {
 bool stress_runtime_supports_multishot_accept(void) {
     unsigned i;
 
-    if (!g_nm_runtime.initialized || g_nm_runtime.nodes == NULL) {
+    if (!g_llam_runtime.initialized || g_llam_runtime.nodes == NULL) {
         return false;
     }
-    for (i = 0U; i < g_nm_runtime.active_nodes; ++i) {
-        if (g_nm_runtime.nodes[i].ring_ready && g_nm_runtime.nodes[i].supports_multishot_accept) {
+    for (i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+        if (g_llam_runtime.nodes[i].ring_ready && g_llam_runtime.nodes[i].supports_multishot_accept) {
             return true;
         }
     }
@@ -442,11 +442,11 @@ bool stress_runtime_supports_multishot_accept(void) {
 bool stress_runtime_supports_multishot_poll(void) {
     unsigned i;
 
-    if (!g_nm_runtime.initialized || g_nm_runtime.nodes == NULL) {
+    if (!g_llam_runtime.initialized || g_llam_runtime.nodes == NULL) {
         return false;
     }
-    for (i = 0U; i < g_nm_runtime.active_nodes; ++i) {
-        if (g_nm_runtime.nodes[i].ring_ready && g_nm_runtime.nodes[i].supports_multishot_poll) {
+    for (i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+        if (g_llam_runtime.nodes[i].ring_ready && g_llam_runtime.nodes[i].supports_multishot_poll) {
             return true;
         }
     }
@@ -456,11 +456,11 @@ bool stress_runtime_supports_multishot_poll(void) {
 bool stress_runtime_supports_multishot_recv(void) {
     unsigned i;
 
-    if (!g_nm_runtime.initialized || g_nm_runtime.nodes == NULL) {
+    if (!g_llam_runtime.initialized || g_llam_runtime.nodes == NULL) {
         return false;
     }
-    for (i = 0U; i < g_nm_runtime.active_nodes; ++i) {
-        if (g_nm_runtime.nodes[i].ring_ready && g_nm_runtime.nodes[i].supports_multishot_recv) {
+    for (i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+        if (g_llam_runtime.nodes[i].ring_ready && g_llam_runtime.nodes[i].supports_multishot_recv) {
             return true;
         }
     }
@@ -470,12 +470,12 @@ bool stress_runtime_supports_multishot_recv(void) {
 bool stress_runtime_supports_async_read(void) {
     unsigned i;
 
-    if (!g_nm_runtime.initialized || g_nm_runtime.nodes == NULL) {
+    if (!g_llam_runtime.initialized || g_llam_runtime.nodes == NULL) {
         return false;
     }
-    for (i = 0U; i < g_nm_runtime.active_nodes; ++i) {
-        if (g_nm_runtime.nodes[i].ring_ready &&
-            (g_nm_runtime.nodes[i].supports_read || g_nm_runtime.nodes[i].supports_recv)) {
+    for (i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+        if (g_llam_runtime.nodes[i].ring_ready &&
+            (g_llam_runtime.nodes[i].supports_read || g_llam_runtime.nodes[i].supports_recv)) {
             return true;
         }
     }

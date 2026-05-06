@@ -1,5 +1,5 @@
 /**
- * @file src/io/runtime_io_watch_darwin_control.c
+ * @file src/io/darwin/runtime_io_watch_darwin_control.c
  * @brief Darwin/kqueue control-operation registration and cancellation helpers.
  *
  * @details
@@ -26,21 +26,21 @@
 #include "runtime_io_watch_darwin_internal.h"
 
 /** @brief Enqueue a control operation and wake the node worker. */
-int nm_node_queue_control(nm_node_t *node, nm_io_control_kind_t kind, void *target) {
+int llam_node_queue_control(llam_node_t *node, llam_io_control_kind_t kind, void *target) {
     int rc;
 
     pthread_mutex_lock(&node->watch_lock);
-    rc = nm_node_queue_control_locked(node, kind, target);
+    rc = llam_node_queue_control_locked(node, kind, target);
     pthread_mutex_unlock(&node->watch_lock);
     if (rc == 0) {
-        nm_kick_node(node);
+        llam_kick_node(node);
     }
     return rc;
 }
 
 /** @brief Enqueue a control operation while watch_lock is held. */
-int nm_node_queue_control_locked(nm_node_t *node, nm_io_control_kind_t kind, void *target) {
-    nm_io_control_op_t *op = calloc(1, sizeof(*op));
+int llam_node_queue_control_locked(llam_node_t *node, llam_io_control_kind_t kind, void *target) {
+    llam_io_control_op_t *op = calloc(1, sizeof(*op));
 
     if (op == NULL) {
         return -1;
@@ -57,7 +57,7 @@ int nm_node_queue_control_locked(nm_node_t *node, nm_io_control_kind_t kind, voi
 }
 
 /** @brief Append a receive waiter while watch_lock is held. */
-void nm_recv_watch_enqueue_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
+void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
     req->next = NULL;
     if (watch->wait_tail != NULL) {
         watch->wait_tail->next = req;
@@ -68,9 +68,9 @@ void nm_recv_watch_enqueue_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
 }
 
 /** @brief Remove a receive waiter while watch_lock is held. */
-bool nm_recv_watch_remove_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
-    nm_io_req_t *prev = NULL;
-    nm_io_req_t *cur = watch->wait_head;
+bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
+    llam_io_req_t *prev = NULL;
+    llam_io_req_t *cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -92,14 +92,14 @@ bool nm_recv_watch_remove_waiter(nm_recv_watch_t *watch, nm_io_req_t *req) {
 }
 
 /** @brief Pop buffered receive readiness, optionally transferring copy ownership. */
-bool nm_recv_watch_pop_ready(nm_recv_watch_t *watch,
+bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              size_t *size_out,
                              unsigned short *bid_out,
                              bool *has_buffer_out,
                              unsigned *node_index_out,
                              unsigned char **copy_data_out,
                              size_t *copy_capacity_out) {
-    nm_recv_ready_t *ready = watch->ready_head;
+    llam_recv_ready_t *ready = watch->ready_head;
 
     if (ready == NULL) {
         return false;
@@ -134,8 +134,8 @@ bool nm_recv_watch_pop_ready(nm_recv_watch_t *watch,
 }
 
 /** @brief Detach all queued control operations from a node. */
-nm_io_control_op_t *nm_take_node_controls(nm_node_t *node) {
-    nm_io_control_op_t *head;
+llam_io_control_op_t *llam_take_node_controls(llam_node_t *node) {
+    llam_io_control_op_t *head;
 
     pthread_mutex_lock(&node->watch_lock);
     head = node->control_head;
@@ -146,7 +146,7 @@ nm_io_control_op_t *nm_take_node_controls(nm_node_t *node) {
 }
 
 /** @brief Apply one or more kevent changes, retrying EINTR. */
-int nm_darwin_kevent_apply(nm_node_t *node, struct kevent *changes, int change_count) {
+int llam_darwin_kevent_apply(llam_node_t *node, struct kevent *changes, int change_count) {
     int rc;
 
     do {
@@ -156,7 +156,7 @@ int nm_darwin_kevent_apply(nm_node_t *node, struct kevent *changes, int change_c
 }
 
 /** @brief Add/delete kqueue filters for a poll watch. */
-int nm_darwin_poll_watch_change(nm_node_t *node, nm_poll_watch_t *watch, uint16_t flags) {
+int llam_darwin_poll_watch_change(llam_node_t *node, llam_poll_watch_t *watch, uint16_t flags) {
     struct kevent changes[2];
     int change_count = 0;
 
@@ -167,7 +167,7 @@ int nm_darwin_poll_watch_change(nm_node_t *node, nm_poll_watch_t *watch, uint16_
                flags,
                0U,
                0,
-               (void *)(uintptr_t)nm_io_udata_encode(watch, NM_IO_UDATA_POLL_WATCH));
+               (void *)(uintptr_t)llam_io_udata_encode(watch, LLAM_IO_UDATA_POLL_WATCH));
     }
     if ((watch->events & POLLOUT) != 0) {
         EV_SET(&changes[change_count++],
@@ -176,17 +176,17 @@ int nm_darwin_poll_watch_change(nm_node_t *node, nm_poll_watch_t *watch, uint16_
                flags,
                0U,
                0,
-               (void *)(uintptr_t)nm_io_udata_encode(watch, NM_IO_UDATA_POLL_WATCH));
+               (void *)(uintptr_t)llam_io_udata_encode(watch, LLAM_IO_UDATA_POLL_WATCH));
     }
     if (change_count == 0) {
         errno = EINVAL;
         return -1;
     }
-    return nm_darwin_kevent_apply(node, changes, change_count);
+    return llam_darwin_kevent_apply(node, changes, change_count);
 }
 
 /** @brief Add/delete the kqueue filter for an accept watch. */
-int nm_darwin_accept_watch_change(nm_node_t *node, nm_accept_watch_t *watch, uint16_t flags) {
+int llam_darwin_accept_watch_change(llam_node_t *node, llam_accept_watch_t *watch, uint16_t flags) {
     struct kevent change;
 
     EV_SET(&change,
@@ -195,12 +195,12 @@ int nm_darwin_accept_watch_change(nm_node_t *node, nm_accept_watch_t *watch, uin
            flags,
            0U,
            0,
-           (void *)(uintptr_t)nm_io_udata_encode(watch, NM_IO_UDATA_ACCEPT_WATCH));
-    return nm_darwin_kevent_apply(node, &change, 1);
+           (void *)(uintptr_t)llam_io_udata_encode(watch, LLAM_IO_UDATA_ACCEPT_WATCH));
+    return llam_darwin_kevent_apply(node, &change, 1);
 }
 
 /** @brief Add/delete the kqueue filter for a receive watch. */
-int nm_darwin_recv_watch_change(nm_node_t *node, nm_recv_watch_t *watch, uint16_t flags) {
+int llam_darwin_recv_watch_change(llam_node_t *node, llam_recv_watch_t *watch, uint16_t flags) {
     struct kevent change;
 
     EV_SET(&change,
@@ -209,12 +209,12 @@ int nm_darwin_recv_watch_change(nm_node_t *node, nm_recv_watch_t *watch, uint16_
            flags,
            0U,
            0,
-           (void *)(uintptr_t)nm_io_udata_encode(watch, NM_IO_UDATA_RECV_WATCH));
-    return nm_darwin_kevent_apply(node, &change, 1);
+           (void *)(uintptr_t)llam_io_udata_encode(watch, LLAM_IO_UDATA_RECV_WATCH));
+    return llam_darwin_kevent_apply(node, &change, 1);
 }
 
 /** @brief Apply one kqueue filter change for a one-shot request. */
-int nm_darwin_req_change_one(nm_node_t *node, nm_io_req_t *req, int16_t filter, uint16_t flags) {
+int llam_darwin_req_change_one(llam_node_t *node, llam_io_req_t *req, int16_t filter, uint16_t flags) {
     struct kevent change;
 
     EV_SET(&change,
@@ -223,32 +223,32 @@ int nm_darwin_req_change_one(nm_node_t *node, nm_io_req_t *req, int16_t filter, 
            (uint16_t)(flags | EV_UDATA_SPECIFIC),
            0U,
            0,
-           (void *)(uintptr_t)nm_io_udata_encode(req, NM_IO_UDATA_REQ));
-    return nm_darwin_kevent_apply(node, &change, 1);
+           (void *)(uintptr_t)llam_io_udata_encode(req, LLAM_IO_UDATA_REQ));
+    return llam_darwin_kevent_apply(node, &change, 1);
 }
 
 /** @brief Register kqueue readiness for a one-shot request. */
-int nm_darwin_req_register(nm_node_t *node, nm_io_req_t *req) {
+int llam_darwin_req_register(llam_node_t *node, llam_io_req_t *req) {
     int rc = 0;
 
     switch (req->kind) {
-    case NM_IO_KIND_READ:
-    case NM_IO_KIND_ACCEPT:
-        rc = nm_darwin_req_change_one(node, req, EVFILT_READ, EV_ADD | EV_ONESHOT | EV_CLEAR);
+    case LLAM_IO_KIND_READ:
+    case LLAM_IO_KIND_ACCEPT:
+        rc = llam_darwin_req_change_one(node, req, EVFILT_READ, EV_ADD | EV_ONESHOT | EV_CLEAR);
         break;
-    case NM_IO_KIND_WRITE:
-    case NM_IO_KIND_CONNECT:
-        rc = nm_darwin_req_change_one(node, req, EVFILT_WRITE, EV_ADD | EV_ONESHOT | EV_CLEAR);
+    case LLAM_IO_KIND_WRITE:
+    case LLAM_IO_KIND_CONNECT:
+        rc = llam_darwin_req_change_one(node, req, EVFILT_WRITE, EV_ADD | EV_ONESHOT | EV_CLEAR);
         break;
-    case NM_IO_KIND_POLL:
+    case LLAM_IO_KIND_POLL:
         if ((req->poll_events & (POLLIN | POLLPRI)) != 0) {
-            rc = nm_darwin_req_change_one(node, req, EVFILT_READ, EV_ADD | EV_ONESHOT | EV_CLEAR);
+            rc = llam_darwin_req_change_one(node, req, EVFILT_READ, EV_ADD | EV_ONESHOT | EV_CLEAR);
             if (rc != 0) {
                 return -1;
             }
         }
         if ((req->poll_events & POLLOUT) != 0) {
-            rc = nm_darwin_req_change_one(node, req, EVFILT_WRITE, EV_ADD | EV_ONESHOT | EV_CLEAR);
+            rc = llam_darwin_req_change_one(node, req, EVFILT_WRITE, EV_ADD | EV_ONESHOT | EV_CLEAR);
             if (rc != 0) {
                 return -1;
             }
@@ -266,34 +266,34 @@ int nm_darwin_req_register(nm_node_t *node, nm_io_req_t *req) {
 }
 
 /** @brief Delete kqueue readiness entries for a one-shot request. */
-void nm_darwin_req_delete(nm_node_t *node, nm_io_req_t *req) {
+void llam_darwin_req_delete(llam_node_t *node, llam_io_req_t *req) {
     int saved_errno = errno;
 
     // Preserve caller errno because delete is often best-effort cleanup after an
     // operation has already produced its real result.
     switch (req->kind) {
-    case NM_IO_KIND_READ:
-    case NM_IO_KIND_ACCEPT:
-        if (nm_darwin_req_change_one(node, req, EVFILT_READ, EV_DELETE) != 0 && errno != ENOENT) {
-            nm_record_fatal(node->runtime, errno);
+    case LLAM_IO_KIND_READ:
+    case LLAM_IO_KIND_ACCEPT:
+        if (llam_darwin_req_change_one(node, req, EVFILT_READ, EV_DELETE) != 0 && errno != ENOENT) {
+            llam_record_fatal(node->runtime, errno);
         }
         break;
-    case NM_IO_KIND_WRITE:
-    case NM_IO_KIND_CONNECT:
-        if (nm_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 && errno != ENOENT) {
-            nm_record_fatal(node->runtime, errno);
+    case LLAM_IO_KIND_WRITE:
+    case LLAM_IO_KIND_CONNECT:
+        if (llam_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 && errno != ENOENT) {
+            llam_record_fatal(node->runtime, errno);
         }
         break;
-    case NM_IO_KIND_POLL:
+    case LLAM_IO_KIND_POLL:
         if ((req->poll_events & (POLLIN | POLLPRI)) != 0 &&
-            nm_darwin_req_change_one(node, req, EVFILT_READ, EV_DELETE) != 0 &&
+            llam_darwin_req_change_one(node, req, EVFILT_READ, EV_DELETE) != 0 &&
             errno != ENOENT) {
-            nm_record_fatal(node->runtime, errno);
+            llam_record_fatal(node->runtime, errno);
         }
         if ((req->poll_events & POLLOUT) != 0 &&
-            nm_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 &&
+            llam_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 &&
             errno != ENOENT) {
-            nm_record_fatal(node->runtime, errno);
+            llam_record_fatal(node->runtime, errno);
         }
         break;
     default:

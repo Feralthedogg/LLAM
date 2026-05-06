@@ -24,8 +24,8 @@
  * limitations under the License.
  */
 
-#ifndef NM_RUNTIME_PROTO_CORE_H
-#define NM_RUNTIME_PROTO_CORE_H
+#ifndef LLAM_RUNTIME_PROTO_CORE_H
+#define LLAM_RUNTIME_PROTO_CORE_H
 
 #include "runtime_state.h"
 
@@ -36,15 +36,29 @@
  * and rehome operations. Stack allocation is intentionally separate from task
  * object allocation so stacks can be cached and reclaimed independently.
  */
-void nm_add_task_to_list(nm_runtime_t *rt, nm_task_t *task);
-int nm_alloc_task_stack(nm_task_t *task, nm_stack_class_t stack_class);
-void nm_free_task(nm_task_t *task);
-void nm_task_release_stack(nm_task_t *task);
-void nm_task_mark_reclaim_ready(nm_task_t *task);
-void nm_try_reclaim_joined_task(nm_runtime_t *rt, nm_task_t *task);
-nm_task_t *nm_task_alloc(nm_shard_t *shard);
-void nm_task_allocator_free(nm_task_t *task);
-void nm_runtime_prewarm_task_allocators(nm_runtime_t *rt);
+void llam_add_task_to_list(llam_runtime_t *rt, llam_task_t *task);
+int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class);
+void llam_free_task(llam_task_t *task);
+void llam_task_release_stack(llam_task_t *task);
+void llam_task_mark_reclaim_ready(llam_task_t *task);
+void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task);
+void llam_try_reclaim_detached_task(llam_runtime_t *rt, llam_task_t *task);
+void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task);
+llam_task_t *llam_task_alloc(llam_shard_t *shard);
+void llam_task_allocator_free(llam_task_t *task);
+void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt);
+
+/*
+ * Task-local errno and fiber context-switch boundaries.
+ *
+ * These helpers are the only scheduler/task switch entry points used outside
+ * architecture context implementations.  They preserve POSIX errno as logical
+ * task state even when tasks move between worker threads.
+ */
+void llam_task_save_errno(llam_task_t *task);
+void llam_task_restore_errno(const llam_task_t *task);
+void llam_switch_task_to_scheduler(llam_task_t *task, llam_ctx_t *scheduler_ctx);
+void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task);
 
 /*
  * Slab allocators and per-shard cache quiescence.
@@ -52,103 +66,103 @@ void nm_runtime_prewarm_task_allocators(nm_runtime_t *rt);
  * Allocator helpers are shard-local unless a function explicitly accepts the
  * runtime. Remote frees are drained only at quiescent/safepoint-friendly points.
  */
-void nm_allocator_destroy(nm_allocator_t *allocator);
-void nm_allocator_init(nm_allocator_t *allocator);
-void nm_allocator_quiescent(nm_shard_t *shard);
-int nm_allocator_grow_io_buffer_slab(nm_shard_t *shard);
-int nm_allocator_grow_io_req_slab(nm_shard_t *shard);
-int nm_allocator_grow_task_slab(nm_shard_t *shard);
-int nm_allocator_grow_timer_slab(nm_shard_t *shard);
-int nm_allocator_grow_wait_slab(nm_shard_t *shard);
-void nm_allocator_lock(nm_allocator_t *allocator);
-void nm_allocator_unlock(nm_allocator_t *allocator);
-nm_io_buffer_t *nm_io_buffer_alloc(nm_shard_t *shard, size_t min_capacity);
-void nm_io_buffer_allocator_free(nm_io_buffer_t *buffer);
-nm_timer_node_t *nm_timer_node_alloc(nm_shard_t *shard);
-void nm_shard_drain_stack_cache(nm_shard_t *shard);
-void nm_runtime_drain_stack_cache(nm_runtime_t *rt);
-void nm_runtime_prewarm_stack_cache(nm_runtime_t *rt);
+void llam_allocator_destroy(llam_allocator_t *allocator);
+void llam_allocator_init(llam_allocator_t *allocator);
+void llam_allocator_quiescent(llam_shard_t *shard);
+int llam_allocator_grow_io_buffer_slab(llam_shard_t *shard);
+int llam_allocator_grow_io_req_slab(llam_shard_t *shard);
+int llam_allocator_grow_task_slab(llam_shard_t *shard);
+int llam_allocator_grow_timer_slab(llam_shard_t *shard);
+int llam_allocator_grow_wait_slab(llam_shard_t *shard);
+void llam_allocator_lock(llam_allocator_t *allocator);
+void llam_allocator_unlock(llam_allocator_t *allocator);
+llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity);
+void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer);
+llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard);
+void llam_shard_drain_stack_cache(llam_shard_t *shard);
+void llam_runtime_drain_stack_cache(llam_runtime_t *rt);
+void llam_runtime_prewarm_stack_cache(llam_runtime_t *rt);
 
 /*
  * Small utility and environment helpers.
  */
-size_t nm_align_up(size_t value, size_t alignment);
-void nm_atomic_update_peak(atomic_uint *peak, unsigned value);
-const char *nm_env_get(const char *name);
-unsigned nm_max_unsigned(unsigned a, unsigned b);
-long nm_page_size(void);
-void nm_pause_cpu(void);
-uint64_t nm_slice_ns(nm_task_class_t task_class);
-const char *nm_stack_profile_hint(const nm_task_t *task);
+size_t llam_align_up(size_t value, size_t alignment);
+void llam_atomic_update_peak(atomic_uint *peak, unsigned value);
+const char *llam_env_get(const char *name);
+unsigned llam_max_unsigned(unsigned a, unsigned b);
+long llam_page_size(void);
+void llam_pause_cpu(void);
+uint64_t llam_slice_ns(llam_task_class_t task_class);
+const char *llam_stack_profile_hint(const llam_task_t *task);
 
 /*
  * CPU/NUMA discovery and thread/platform tuning.
  */
-void nm_bind_current_thread_to_cpu(unsigned cpu_id);
-unsigned nm_count_allowed_cpus(unsigned **out_cpus);
-unsigned nm_detect_cpu_node(unsigned cpu_id);
-unsigned nm_find_or_add_node_id(unsigned *node_ids,
+void llam_bind_current_thread_to_cpu(unsigned cpu_id);
+unsigned llam_count_allowed_cpus(unsigned **out_cpus);
+unsigned llam_detect_cpu_node(unsigned cpu_id);
+unsigned llam_find_or_add_node_id(unsigned *node_ids,
                                 unsigned *node_count,
                                 unsigned limit,
                                 unsigned kernel_node_id);
-void nm_restore_init_thread_affinity(nm_runtime_t *rt);
-void nm_tune_block_worker_thread(void);
-void nm_tune_ctrl_thread(void);
-void nm_tune_io_worker_thread(nm_node_t *node);
-void nm_tune_scheduler_thread(nm_shard_t *shard, bool opaque_helper);
+void llam_restore_init_thread_affinity(llam_runtime_t *rt);
+void llam_tune_block_worker_thread(void);
+void llam_tune_ctrl_thread(void);
+void llam_tune_io_worker_thread(llam_node_t *node);
+void llam_tune_scheduler_thread(llam_shard_t *shard, bool opaque_helper);
 
 /*
  * Context/FPU and process signal integration.
  */
-void nm_clear_xsave_globals(void);
-void nm_ctx_destroy_fp_state(nm_ctx_t *ctx);
-int nm_ctx_init_fp_state(nm_ctx_t *ctx);
-int nm_detect_xsave_support(nm_runtime_t *rt);
-void nm_fault_signal_handler(int signo, siginfo_t *info, void *ucontext);
-int nm_install_process_signal_handlers(nm_runtime_t *rt);
-int nm_install_thread_signal_stack(nm_shard_t *shard);
-void nm_preempt_signal_handler(int signo);
-void nm_restore_process_signal_handlers(nm_runtime_t *rt);
+void llam_clear_xsave_globals(void);
+void llam_ctx_destroy_fp_state(llam_ctx_t *ctx);
+int llam_ctx_init_fp_state(llam_ctx_t *ctx);
+int llam_detect_xsave_support(llam_runtime_t *rt);
+void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext);
+int llam_install_process_signal_handlers(llam_runtime_t *rt);
+int llam_install_thread_signal_stack(llam_shard_t *shard);
+void llam_preempt_signal_handler(int signo);
+void llam_restore_process_signal_handlers(llam_runtime_t *rt);
 
 /*
  * Wake handles and low-level Linux futex/eventfd wrappers.
  */
-void nm_drain_node_wake(nm_node_t *node);
-void nm_drain_shard_wake(nm_shard_t *shard);
-unsigned nm_eventfd_try_claim(atomic_uint *pending);
-void nm_kick_node(nm_node_t *node);
-void nm_kick_shard(nm_shard_t *shard);
-long nm_linux_futex_wait_private(atomic_uint *addr, unsigned expected);
-long nm_linux_futex_wait_private_timeout(atomic_uint *addr, unsigned expected, const struct timespec *timeout);
-long nm_linux_futex_wake_private(atomic_uint *addr, unsigned count);
-void nm_opaque_wake_destroy(nm_shard_t *shard);
-int nm_opaque_wake_init(nm_shard_t *shard);
-void nm_opaque_wake_signal(nm_shard_t *shard);
-void nm_opaque_wake_wait(nm_shard_t *shard);
-void nm_wake_all_shards(nm_runtime_t *rt);
-int nm_wake_handle_create(void);
-void nm_wake_handle_close(int fd);
-int nm_wake_handle_wait(int fd, int timeout_ms);
-int nm_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns);
+void llam_drain_node_wake(llam_node_t *node);
+void llam_drain_shard_wake(llam_shard_t *shard);
+unsigned llam_eventfd_try_claim(atomic_uint *pending);
+void llam_kick_node(llam_node_t *node);
+void llam_kick_shard(llam_shard_t *shard);
+long llam_linux_futex_wait_private(atomic_uint *addr, unsigned expected);
+long llam_linux_futex_wait_private_timeout(atomic_uint *addr, unsigned expected, const struct timespec *timeout);
+long llam_linux_futex_wake_private(atomic_uint *addr, unsigned count);
+void llam_opaque_wake_destroy(llam_shard_t *shard);
+int llam_opaque_wake_init(llam_shard_t *shard);
+void llam_opaque_wake_signal(llam_shard_t *shard);
+void llam_opaque_wake_wait(llam_shard_t *shard);
+void llam_wake_all_shards(llam_runtime_t *rt);
+int llam_wake_handle_create(void);
+void llam_wake_handle_close(int fd);
+int llam_wake_handle_wait(int fd, int timeout_ms);
+int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns);
 
 /*
  * Blocking-worker jobs, safepoints, tracing, and fatal-stop state.
  */
-nm_block_job_t *nm_block_job_alloc(nm_runtime_t *rt);
-void nm_block_job_release(nm_runtime_t *rt, nm_block_job_t *job);
-int nm_consume_task_wake_error(nm_task_t *task);
-void nm_record_fatal(nm_runtime_t *rt, int err);
-void nm_request_stop(nm_runtime_t *rt);
-void nm_task_safepoint(void);
-void nm_task_sample_live_stack(nm_task_t *task);
-void nm_task_sample_stack_rsp(nm_task_t *task, uintptr_t rsp);
-const char *nm_trace_kind_name(nm_trace_kind_t kind);
-void nm_trace_shard(nm_shard_t *shard,
-                    nm_task_t *task,
-                    nm_trace_kind_t kind,
-                    nm_task_state_id_t from,
-                    nm_task_state_id_t to,
-                    nm_wait_reason_t reason);
-void nm_uninstall_thread_signal_stack(nm_shard_t *shard);
+llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt);
+void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job);
+int llam_consume_task_wake_error(llam_task_t *task);
+void llam_record_fatal(llam_runtime_t *rt, int err);
+void llam_request_stop(llam_runtime_t *rt);
+void llam_task_safepoint(void);
+void llam_task_sample_live_stack(llam_task_t *task);
+void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp);
+const char *llam_trace_kind_name(llam_trace_kind_t kind);
+void llam_trace_shard(llam_shard_t *shard,
+                    llam_task_t *task,
+                    llam_trace_kind_t kind,
+                    llam_task_state_id_t from,
+                    llam_task_state_id_t to,
+                    llam_wait_reason_t reason);
+void llam_uninstall_thread_signal_stack(llam_shard_t *shard);
 
 #endif

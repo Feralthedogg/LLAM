@@ -34,7 +34,7 @@
  *
  * @return File descriptor for the wake handle, or -1 with @c errno set.
  */
-int nm_wake_handle_create(void) {
+int llam_wake_handle_create(void) {
 #if defined(__APPLE__)
     struct kevent kev;
     int fd = kqueue();
@@ -61,7 +61,7 @@ int nm_wake_handle_create(void) {
  *
  * @param fd Wake handle descriptor.
  */
-void nm_wake_handle_close(int fd) {
+void llam_wake_handle_close(int fd) {
     if (fd >= 0) {
         close(fd);
     }
@@ -76,7 +76,7 @@ void nm_wake_handle_close(int fd) {
  *
  * @return Backend wait result.
  */
-int nm_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns) {
+int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns) {
     if (fd < 0) {
         errno = EINVAL;
         return -1;
@@ -112,10 +112,10 @@ int nm_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns) {
  *
  * @return Backend wait result.
  */
-int nm_wake_handle_wait(int fd, int timeout_ms) {
+int llam_wake_handle_wait(int fd, int timeout_ms) {
     uint64_t timeout_ns = timeout_ms >= 0 ? (uint64_t)timeout_ms * 1000000ULL : 0U;
 
-    return nm_wake_handle_wait_ns(fd, timeout_ms, timeout_ns);
+    return llam_wake_handle_wait_ns(fd, timeout_ms, timeout_ns);
 }
 
 /**
@@ -125,7 +125,7 @@ int nm_wake_handle_wait(int fd, int timeout_ms) {
  *
  * @return @c true when the wake was delivered.
  */
-static bool nm_kick_fd_raw(int fd) {
+static bool llam_kick_fd_raw(int fd) {
     if (fd < 0) {
         return false;
     }
@@ -163,7 +163,7 @@ static bool nm_kick_fd_raw(int fd) {
  *
  * @param fd Wake descriptor.
  */
-static void nm_drain_fd_raw(int fd) {
+static void llam_drain_fd_raw(int fd) {
     if (fd < 0) {
         return;
     }
@@ -190,10 +190,10 @@ static void nm_drain_fd_raw(int fd) {
 
 #if defined(__APPLE__)
 /** @brief Mach message used to wake a Darwin I/O node through a Mach port. */
-typedef struct nm_mach_wake_msg {
+typedef struct llam_mach_wake_msg {
     mach_msg_header_t header;
     uint8_t trailer[64];
-} nm_mach_wake_msg_t;
+} llam_mach_wake_msg_t;
 
 /**
  * @brief Wake a Darwin I/O node through its Mach port.
@@ -202,8 +202,8 @@ typedef struct nm_mach_wake_msg {
  *
  * @return @c true when the Mach send succeeded.
  */
-static bool nm_kick_node_mach(nm_node_t *node) {
-    nm_mach_wake_msg_t msg;
+static bool llam_kick_node_mach(llam_node_t *node) {
+    llam_mach_wake_msg_t msg;
     kern_return_t kr;
 
     if (node == NULL || !node->mach_wake_enabled) {
@@ -230,8 +230,8 @@ static bool nm_kick_node_mach(nm_node_t *node) {
  *
  * @param node Node whose Mach wake port should be drained.
  */
-static void nm_drain_node_mach(nm_node_t *node) {
-    nm_mach_wake_msg_t msg;
+static void llam_drain_node_mach(llam_node_t *node) {
+    llam_mach_wake_msg_t msg;
 
     if (node == NULL || !node->mach_wake_enabled) {
         return;
@@ -267,7 +267,7 @@ static void nm_drain_node_mach(nm_node_t *node) {
  *
  * @return 1 if this caller should signal the kernel object, otherwise 0.
  */
-unsigned nm_eventfd_try_claim(atomic_uint *pending) {
+unsigned llam_eventfd_try_claim(atomic_uint *pending) {
     unsigned expected = 0U;
 
     if (pending == NULL) {
@@ -285,7 +285,7 @@ unsigned nm_eventfd_try_claim(atomic_uint *pending) {
 /**
  * @brief Futex wait wrapper used when the assembly fast path is unavailable.
  */
-long nm_linux_futex_wait_private(atomic_uint *addr, unsigned expected) {
+long llam_linux_futex_wait_private(atomic_uint *addr, unsigned expected) {
 #if defined(__linux__)
     return syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, NULL, NULL, 0);
 #else
@@ -299,7 +299,7 @@ long nm_linux_futex_wait_private(atomic_uint *addr, unsigned expected) {
 /**
  * @brief Futex timed wait wrapper used when the assembly fast path is unavailable.
  */
-long nm_linux_futex_wait_private_timeout(atomic_uint *addr, unsigned expected, const struct timespec *timeout) {
+long llam_linux_futex_wait_private_timeout(atomic_uint *addr, unsigned expected, const struct timespec *timeout) {
 #if defined(__linux__)
     return syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, timeout, NULL, 0);
 #else
@@ -314,7 +314,7 @@ long nm_linux_futex_wait_private_timeout(atomic_uint *addr, unsigned expected, c
 /**
  * @brief Futex wake wrapper used when the assembly fast path is unavailable.
  */
-long nm_linux_futex_wake_private(atomic_uint *addr, unsigned count) {
+long llam_linux_futex_wake_private(atomic_uint *addr, unsigned count) {
 #if defined(__linux__)
     return syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, count, NULL, NULL, 0);
 #else
@@ -331,22 +331,22 @@ long nm_linux_futex_wake_private(atomic_uint *addr, unsigned count) {
  *
  * @param shard Shard to kick.
  */
-void nm_kick_shard(nm_shard_t *shard) {
+void llam_kick_shard(llam_shard_t *shard) {
     if (shard == NULL || shard->event_fd < 0) {
         return;
     }
-    if (nm_eventfd_try_claim(&shard->event_pending) == 0U) {
+    if (llam_eventfd_try_claim(&shard->event_pending) == 0U) {
         return;
     }
 #if defined(__linux__)
     // Linux scheduler workers sleep directly on the pending word via futex.
-    (void)nm_linux_futex_wake_private(&shard->event_pending, 1U);
+    (void)llam_linux_futex_wake_private(&shard->event_pending, 1U);
     if (atomic_load_explicit(&shard->opaque_helper_opaque_wait, memory_order_acquire) != 0U) {
-        nm_opaque_wake_signal(shard);
+        llam_opaque_wake_signal(shard);
     }
     return;
 #else
-    if (!nm_kick_fd_raw(shard->event_fd)) {
+    if (!llam_kick_fd_raw(shard->event_fd)) {
         atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
     }
 #endif
@@ -357,21 +357,21 @@ void nm_kick_shard(nm_shard_t *shard) {
  *
  * @param node Node to kick.
  */
-void nm_kick_node(nm_node_t *node) {
+void llam_kick_node(llam_node_t *node) {
     bool kicked = false;
 
     if (node == NULL || node->event_fd < 0) {
         return;
     }
-    if (nm_eventfd_try_claim(&node->event_pending) == 0U) {
+    if (llam_eventfd_try_claim(&node->event_pending) == 0U) {
         return;
     }
 #if defined(__APPLE__)
     if (node->mach_wake_enabled) {
-        kicked = nm_kick_node_mach(node);
+        kicked = llam_kick_node_mach(node);
     }
 #endif
-    if (nm_kick_fd_raw(node->event_fd)) {
+    if (llam_kick_fd_raw(node->event_fd)) {
         kicked = true;
     }
     if (!kicked) {
@@ -384,14 +384,14 @@ void nm_kick_node(nm_node_t *node) {
  *
  * @param shard Shard whose wake state should be drained.
  */
-void nm_drain_shard_wake(nm_shard_t *shard) {
+void llam_drain_shard_wake(llam_shard_t *shard) {
     if (shard == NULL) {
         return;
     }
 #if defined(__linux__)
     atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
 #else
-    nm_drain_fd_raw(shard->event_fd);
+    llam_drain_fd_raw(shard->event_fd);
     atomic_store_explicit(&shard->event_pending, 0U, memory_order_release);
 #endif
 }
@@ -401,16 +401,16 @@ void nm_drain_shard_wake(nm_shard_t *shard) {
  *
  * @param node Node whose wake state should be drained.
  */
-void nm_drain_node_wake(nm_node_t *node) {
+void llam_drain_node_wake(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
 #if defined(__APPLE__)
     if (node->mach_wake_enabled) {
-        nm_drain_node_mach(node);
+        llam_drain_node_mach(node);
     }
 #endif
-    nm_drain_fd_raw(node->event_fd);
+    llam_drain_fd_raw(node->event_fd);
     atomic_store_explicit(&node->event_pending, 0U, memory_order_release);
 }
 
@@ -421,14 +421,14 @@ void nm_drain_node_wake(nm_node_t *node) {
  *
  * @return 0 on success, or -1 with @c errno set for invalid input.
  */
-int nm_opaque_wake_init(nm_shard_t *shard) {
+int llam_opaque_wake_init(llam_shard_t *shard) {
     if (shard == NULL) {
         errno = EINVAL;
         return -1;
     }
 #if defined(__APPLE__)
     {
-        const char *env = nm_env_get("LLAM_OPAQUE_MACH_SEM");
+        const char *env = llam_env_get("LLAM_OPAQUE_MACH_SEM");
 
         if (env == NULL || env[0] == '\0' || strcmp(env, "0") == 0) {
             return 0;
@@ -446,7 +446,7 @@ int nm_opaque_wake_init(nm_shard_t *shard) {
  *
  * @param shard Shard to clean up.
  */
-void nm_opaque_wake_destroy(nm_shard_t *shard) {
+void llam_opaque_wake_destroy(llam_shard_t *shard) {
     if (shard == NULL) {
         return;
     }
@@ -464,13 +464,13 @@ void nm_opaque_wake_destroy(nm_shard_t *shard) {
  *
  * @param shard Shard whose opaque waiters should be woken.
  */
-void nm_opaque_wake_signal(nm_shard_t *shard) {
+void llam_opaque_wake_signal(llam_shard_t *shard) {
     if (shard == NULL) {
         return;
     }
 #if defined(__linux__)
     atomic_fetch_add_explicit(&shard->opaque_wake_seq, 1U, memory_order_release);
-    (void)nm_linux_futex_wake_private(&shard->opaque_wake_seq, INT_MAX);
+    (void)llam_linux_futex_wake_private(&shard->opaque_wake_seq, INT_MAX);
     return;
 #endif
 #if defined(__APPLE__)
@@ -490,7 +490,7 @@ void nm_opaque_wake_signal(nm_shard_t *shard) {
  *
  * @param shard Shard whose opaque wake path should be waited on.
  */
-void nm_opaque_wake_wait(nm_shard_t *shard) {
+void llam_opaque_wake_wait(llam_shard_t *shard) {
     if (shard == NULL) {
         return;
     }
@@ -499,7 +499,7 @@ void nm_opaque_wake_wait(nm_shard_t *shard) {
         unsigned seq = atomic_load_explicit(&shard->opaque_wake_seq, memory_order_acquire);
 
         pthread_mutex_unlock(&shard->opaque_lock);
-        (void)nm_linux_futex_wait_private(&shard->opaque_wake_seq, seq);
+        (void)llam_linux_futex_wait_private(&shard->opaque_wake_seq, seq);
         pthread_mutex_lock(&shard->opaque_lock);
         return;
     }
@@ -528,11 +528,11 @@ void nm_opaque_wake_wait(nm_shard_t *shard) {
  *
  * @param rt Runtime whose shards should be kicked.
  */
-void nm_wake_all_shards(nm_runtime_t *rt) {
+void llam_wake_all_shards(llam_runtime_t *rt) {
     unsigned i;
 
     for (i = 0; i < rt->active_shards; ++i) {
-        nm_kick_shard(&rt->shards[i]);
+        llam_kick_shard(&rt->shards[i]);
     }
 }
 
@@ -541,11 +541,11 @@ void nm_wake_all_shards(nm_runtime_t *rt) {
  *
  * @param rt Runtime whose nodes should be kicked.
  */
-void nm_wake_all_nodes(nm_runtime_t *rt) {
+void llam_wake_all_nodes(llam_runtime_t *rt) {
     unsigned i;
 
     for (i = 0; i < rt->active_nodes; ++i) {
-        nm_kick_node(&rt->nodes[i]);
+        llam_kick_node(&rt->nodes[i]);
     }
 }
 
@@ -554,12 +554,12 @@ void nm_wake_all_nodes(nm_runtime_t *rt) {
  *
  * @param rt Runtime to stop.
  */
-void nm_request_stop(nm_runtime_t *rt) {
+void llam_request_stop(llam_runtime_t *rt) {
     atomic_store(&rt->stop_requested, true);
     if (rt->block_lock_initialized) {
         atomic_fetch_add_explicit(&rt->block_wake_seq, 1U, memory_order_release);
 #if defined(__linux__)
-        (void)nm_linux_futex_wake_private(&rt->block_wake_seq, INT_MAX);
+        (void)llam_linux_futex_wake_private(&rt->block_wake_seq, INT_MAX);
 #else
         if (rt->block_cv_initialized) {
             pthread_mutex_lock(&rt->block_lock);
@@ -568,8 +568,8 @@ void nm_request_stop(nm_runtime_t *rt) {
         }
 #endif
     }
-    nm_wake_all_shards(rt);
-    nm_wake_all_nodes(rt);
+    llam_wake_all_shards(rt);
+    llam_wake_all_nodes(rt);
 }
 
 /**
@@ -578,7 +578,7 @@ void nm_request_stop(nm_runtime_t *rt) {
  * @param rt  Runtime to update.
  * @param err Positive errno value; 0 is ignored.
  */
-void nm_record_fatal(nm_runtime_t *rt, int err) {
+void llam_record_fatal(llam_runtime_t *rt, int err) {
     int expected = 0;
 
     if (err == 0) {
@@ -586,6 +586,6 @@ void nm_record_fatal(nm_runtime_t *rt, int err) {
     }
 
     if (atomic_compare_exchange_strong(&rt->fatal_errno, &expected, err)) {
-        nm_request_stop(rt);
+        llam_request_stop(rt);
     }
 }

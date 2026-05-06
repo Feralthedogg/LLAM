@@ -23,17 +23,17 @@
 void run_spawn_join_storm(void) {
     enum { kStormTasks = 64 };
     storm_state_t state;
-    nm_task_t *tasks[kStormTasks];
+    llam_task_t *tasks[kStormTasks];
     unsigned i;
 
     atomic_init(&state.completed, 0U);
     state.yields_per_task = 4U;
     for (i = 0; i < kStormTasks; ++i) {
-        tasks[i] = nm_spawn(storm_child_task,
+        tasks[i] = llam_spawn(storm_child_task,
                             &state,
-                            &(nm_spawn_opts_t){
-                                .task_class = NM_TASK_CLASS_DEFAULT,
-                                .stack_class = NM_STACK_CLASS_DEFAULT,
+                            &(llam_spawn_opts_t){
+                                .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                .stack_class = LLAM_STACK_CLASS_DEFAULT,
                             });
         if (tasks[i] == NULL) {
             stress_fail_msg("storm child spawn failed");
@@ -41,7 +41,7 @@ void run_spawn_join_storm(void) {
         }
     }
     for (i = 0; i < kStormTasks; ++i) {
-        if (nm_join(tasks[i]) != 0) {
+        if (llam_join(tasks[i]) != 0) {
             stress_fail_msg("storm child join failed");
             return;
         }
@@ -53,34 +53,34 @@ void run_spawn_join_storm(void) {
 
 void run_channel_ping_pong(void) {
     ping_state_t state;
-    nm_task_t *peer;
+    llam_task_t *peer;
     unsigned i;
 
-    state.request = nm_channel_create(1U);
-    state.response = nm_channel_create(1U);
+    state.request = llam_channel_create(1U);
+    state.response = llam_channel_create(1U);
     state.rounds = 64U;
     atomic_init(&state.echoed, 0U);
     if (state.request == NULL || state.response == NULL) {
         stress_fail_msg("ping channels create failed");
         if (state.request != NULL) {
-            nm_channel_destroy(state.request);
+            llam_channel_destroy(state.request);
         }
         if (state.response != NULL) {
-            nm_channel_destroy(state.response);
+            llam_channel_destroy(state.response);
         }
         return;
     }
 
-    peer = nm_spawn(ping_peer_task,
+    peer = llam_spawn(ping_peer_task,
                     &state,
-                    &(nm_spawn_opts_t){
-                        .task_class = NM_TASK_CLASS_DEFAULT,
-                        .stack_class = NM_STACK_CLASS_DEFAULT,
+                    &(llam_spawn_opts_t){
+                        .task_class = LLAM_TASK_CLASS_DEFAULT,
+                        .stack_class = LLAM_STACK_CLASS_DEFAULT,
                     });
     if (peer == NULL) {
         stress_fail_msg("ping peer spawn failed");
-        nm_channel_destroy(state.request);
-        nm_channel_destroy(state.response);
+        llam_channel_destroy(state.request);
+        llam_channel_destroy(state.response);
         return;
     }
 
@@ -88,33 +88,33 @@ void run_channel_ping_pong(void) {
         void *token = (void *)(intptr_t)(i + 1U);
         void *echo;
 
-        if (nm_channel_send(state.request, token) != 0) {
+        if (llam_channel_send(state.request, token) != 0) {
             stress_fail_msg("ping request send failed");
             break;
         }
-        echo = nm_channel_recv(state.response);
+        echo = llam_channel_recv(state.response);
         if (echo != token) {
             stress_fail_msg("ping response mismatch");
             break;
         }
     }
 
-    if (nm_join(peer) != 0) {
+    if (llam_join(peer) != 0) {
         stress_fail_msg("ping peer join failed");
     }
     if (atomic_load(&state.echoed) != state.rounds) {
         stress_fail_u32("ping echoed", atomic_load(&state.echoed), state.rounds);
     }
-    nm_channel_destroy(state.request);
-    nm_channel_destroy(state.response);
+    llam_channel_destroy(state.request);
+    llam_channel_destroy(state.response);
 }
 
 void run_mutex_convoy(void) {
     convoy_state_t state;
-    nm_task_t *tasks[8];
+    llam_task_t *tasks[8];
     unsigned i;
 
-    state.mutex = nm_mutex_create();
+    state.mutex = llam_mutex_create();
     state.iterations = 200U;
     state.workers = 8U;
     state.counter = 0U;
@@ -124,22 +124,22 @@ void run_mutex_convoy(void) {
     }
 
     for (i = 0; i < state.workers; ++i) {
-        tasks[i] = nm_spawn(convoy_worker_task,
+        tasks[i] = llam_spawn(convoy_worker_task,
                             &state,
-                            &(nm_spawn_opts_t){
-                                .task_class = NM_TASK_CLASS_DEFAULT,
-                                .stack_class = NM_STACK_CLASS_DEFAULT,
+                            &(llam_spawn_opts_t){
+                                .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                .stack_class = LLAM_STACK_CLASS_DEFAULT,
                             });
         if (tasks[i] == NULL) {
             stress_fail_msg("convoy worker spawn failed");
-            nm_mutex_destroy(state.mutex);
+            llam_mutex_destroy(state.mutex);
             return;
         }
     }
     for (i = 0; i < state.workers; ++i) {
-        if (nm_join(tasks[i]) != 0) {
+        if (llam_join(tasks[i]) != 0) {
             stress_fail_msg("convoy worker join failed");
-            nm_mutex_destroy(state.mutex);
+            llam_mutex_destroy(state.mutex);
             return;
         }
     }
@@ -147,15 +147,15 @@ void run_mutex_convoy(void) {
     if (state.counter != state.workers * state.iterations) {
         stress_fail_u32("convoy counter", state.counter, state.workers * state.iterations);
     }
-    nm_mutex_destroy(state.mutex);
+    llam_mutex_destroy(state.mutex);
 }
 
 void run_cancel_path(void) {
     cancel_state_t state;
-    nm_task_t *waiter;
-    nm_task_t *trigger;
+    llam_task_t *waiter;
+    llam_task_t *trigger;
 
-    state.token = nm_cancel_token_create();
+    state.token = llam_cancel_token_create();
     atomic_init(&state.cancelled, 0U);
     atomic_init(&state.triggered, 0U);
     if (state.token == NULL) {
@@ -163,35 +163,35 @@ void run_cancel_path(void) {
         return;
     }
 
-    waiter = nm_spawn(cancel_waiter_task,
+    waiter = llam_spawn(cancel_waiter_task,
                       &state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                           .cancel_token = state.token,
                       });
-    trigger = nm_spawn(cancel_trigger_task,
+    trigger = llam_spawn(cancel_trigger_task,
                        &state,
-                       &(nm_spawn_opts_t){
-                           .task_class = NM_TASK_CLASS_DEFAULT,
-                           .stack_class = NM_STACK_CLASS_DEFAULT,
+                       &(llam_spawn_opts_t){
+                           .task_class = LLAM_TASK_CLASS_DEFAULT,
+                           .stack_class = LLAM_STACK_CLASS_DEFAULT,
                        });
     if (waiter == NULL || trigger == NULL) {
         stress_fail_msg("cancel task spawn failed");
         if (waiter != NULL) {
-            (void)nm_join(waiter);
+            (void)llam_join(waiter);
         }
         if (trigger != NULL) {
-            (void)nm_join(trigger);
+            (void)llam_join(trigger);
         }
-        (void)nm_cancel_token_destroy(state.token);
+        (void)llam_cancel_token_destroy(state.token);
         return;
     }
 
-    if (nm_join(waiter) != 0) {
+    if (llam_join(waiter) != 0) {
         stress_fail_msg("cancel waiter join failed");
     }
-    if (nm_join(trigger) != 0) {
+    if (llam_join(trigger) != 0) {
         stress_fail_msg("cancel trigger join failed");
     }
     if (atomic_load(&state.triggered) != 1U) {
@@ -200,13 +200,13 @@ void run_cancel_path(void) {
     if (atomic_load(&state.cancelled) != 1U) {
         stress_fail_u32("cancel waiter count", atomic_load(&state.cancelled), 1U);
     }
-    (void)nm_cancel_token_destroy(state.token);
+    (void)llam_cancel_token_destroy(state.token);
 }
 
 void run_io_cancel_path(void) {
     io_cancel_state_t state;
-    nm_task_t *waiter;
-    nm_task_t *trigger;
+    llam_task_t *waiter;
+    llam_task_t *trigger;
     int sv[2];
 
     state.reader_fd = -1;
@@ -220,7 +220,7 @@ void run_io_cancel_path(void) {
     }
     state.reader_fd = sv[0];
     state.writer_fd = sv[1];
-    state.token = nm_cancel_token_create();
+    state.token = llam_cancel_token_create();
     if (state.token == NULL) {
         stress_fail_msg("io cancel token create failed");
         close(state.reader_fd);
@@ -228,37 +228,37 @@ void run_io_cancel_path(void) {
         return;
     }
 
-    waiter = nm_spawn(io_cancel_waiter_task,
+    waiter = llam_spawn(io_cancel_waiter_task,
                       &state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                           .cancel_token = state.token,
                       });
-    trigger = nm_spawn(io_cancel_trigger_task,
+    trigger = llam_spawn(io_cancel_trigger_task,
                        &state,
-                       &(nm_spawn_opts_t){
-                           .task_class = NM_TASK_CLASS_DEFAULT,
-                           .stack_class = NM_STACK_CLASS_DEFAULT,
+                       &(llam_spawn_opts_t){
+                           .task_class = LLAM_TASK_CLASS_DEFAULT,
+                           .stack_class = LLAM_STACK_CLASS_DEFAULT,
                        });
     if (waiter == NULL || trigger == NULL) {
         stress_fail_msg("io cancel task spawn failed");
         if (waiter != NULL) {
-            (void)nm_join(waiter);
+            (void)llam_join(waiter);
         }
         if (trigger != NULL) {
-            (void)nm_join(trigger);
+            (void)llam_join(trigger);
         }
-        (void)nm_cancel_token_destroy(state.token);
+        (void)llam_cancel_token_destroy(state.token);
         close(state.reader_fd);
         close(state.writer_fd);
         return;
     }
 
-    if (nm_join(waiter) != 0) {
+    if (llam_join(waiter) != 0) {
         stress_fail_msg("io cancel waiter join failed");
     }
-    if (nm_join(trigger) != 0) {
+    if (llam_join(trigger) != 0) {
         stress_fail_msg("io cancel trigger join failed");
     }
     if (atomic_load(&state.triggered) != 1U) {
@@ -268,7 +268,7 @@ void run_io_cancel_path(void) {
         stress_fail_u32("io cancel waiter count", atomic_load(&state.cancelled), 1U);
     }
 
-    (void)nm_cancel_token_destroy(state.token);
+    (void)llam_cancel_token_destroy(state.token);
     close(state.reader_fd);
     close(state.writer_fd);
 }
@@ -277,8 +277,8 @@ void run_owned_read_paths(void) {
     enum { kLargeOwnedBytes = 5000 };
     owned_read_state_t small_state;
     owned_read_state_t large_state;
-    nm_task_t *writer;
-    nm_io_buffer_t *buffer = NULL;
+    llam_task_t *writer;
+    llam_io_buffer_t *buffer = NULL;
     char *large_payload;
     int sv[2];
     int small_sock_type = SOCK_STREAM;
@@ -297,11 +297,11 @@ void run_owned_read_paths(void) {
         return;
     }
     small_state.fd = sv[1];
-    writer = nm_spawn(owned_read_writer_task,
+    writer = llam_spawn(owned_read_writer_task,
                       &small_state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (writer == NULL) {
         stress_fail_msg("owned read small writer spawn failed");
@@ -309,17 +309,17 @@ void run_owned_read_paths(void) {
         close(sv[1]);
         return;
     }
-    rc = nm_read_owned(sv[0], 16U, &buffer);
+    rc = llam_read_owned(sv[0], 16U, &buffer);
     if (rc != (ssize_t)small_state.len) {
         stress_fail_msg("owned read small rc failed");
-    } else if (buffer == NULL || nm_io_buffer_capacity(buffer) < small_state.len) {
+    } else if (buffer == NULL || llam_io_buffer_capacity(buffer) < small_state.len) {
         stress_fail_msg("owned read small capacity failed");
-    } else if (memcmp(nm_io_buffer_data(buffer), small_state.payload, small_state.len) != 0) {
+    } else if (memcmp(llam_io_buffer_data(buffer), small_state.payload, small_state.len) != 0) {
         stress_fail_msg("owned read small payload failed");
     }
-    nm_io_buffer_release(buffer);
+    llam_io_buffer_release(buffer);
     buffer = NULL;
-    if (nm_join(writer) != 0) {
+    if (llam_join(writer) != 0) {
         stress_fail_msg("owned read small writer join failed");
     }
     close(sv[0]);
@@ -343,11 +343,11 @@ void run_owned_read_paths(void) {
         return;
     }
     large_state.fd = sv[1];
-    writer = nm_spawn(owned_read_writer_task,
+    writer = llam_spawn(owned_read_writer_task,
                       &large_state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (writer == NULL) {
         stress_fail_msg("owned read large writer spawn failed");
@@ -356,18 +356,18 @@ void run_owned_read_paths(void) {
         free(large_payload);
         return;
     }
-    rc = nm_read_owned(sv[0], kLargeOwnedBytes, &buffer);
+    rc = llam_read_owned(sv[0], kLargeOwnedBytes, &buffer);
     if (rc != kLargeOwnedBytes) {
         stress_fail_msg("owned read large rc failed");
-    } else if (buffer == NULL || nm_io_buffer_capacity(buffer) < kLargeOwnedBytes) {
+    } else if (buffer == NULL || llam_io_buffer_capacity(buffer) < kLargeOwnedBytes) {
         stress_fail_msg("owned read large capacity failed");
-    } else if (((const char *)nm_io_buffer_data(buffer))[0] != 'B' ||
-               ((const char *)nm_io_buffer_data(buffer))[kLargeOwnedBytes - 1] != 'E') {
+    } else if (((const char *)llam_io_buffer_data(buffer))[0] != 'B' ||
+               ((const char *)llam_io_buffer_data(buffer))[kLargeOwnedBytes - 1] != 'E') {
         stress_fail_msg("owned read large payload failed");
     }
-    nm_io_buffer_release(buffer);
+    llam_io_buffer_release(buffer);
     buffer = NULL;
-    if (nm_join(writer) != 0) {
+    if (llam_join(writer) != 0) {
         stress_fail_msg("owned read large writer join failed");
     }
     close(sv[0]);
@@ -378,7 +378,7 @@ void run_owned_read_paths(void) {
 void run_dynamic_sleep_fanout(unsigned task_count, unsigned base_yields, uint64_t sleep_ns) {
     dynamic_sleep_wave_state_t wave;
     dynamic_sleep_child_state_t *child_states = NULL;
-    nm_task_t **tasks = NULL;
+    llam_task_t **tasks = NULL;
     unsigned spawned = 0U;
     unsigned i;
 
@@ -397,11 +397,11 @@ void run_dynamic_sleep_fanout(unsigned task_count, unsigned base_yields, uint64_
     for (i = 0; i < task_count; ++i) {
         child_states[i].wave = &wave;
         child_states[i].extra_yields = i & 3U;
-        tasks[i] = nm_spawn(dynamic_sleep_child_task,
+        tasks[i] = llam_spawn(dynamic_sleep_child_task,
                             &child_states[i],
-                            &(nm_spawn_opts_t){
-                                .task_class = NM_TASK_CLASS_DEFAULT,
-                                .stack_class = NM_STACK_CLASS_DEFAULT,
+                            &(llam_spawn_opts_t){
+                                .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                .stack_class = LLAM_STACK_CLASS_DEFAULT,
                             });
         if (tasks[i] == NULL) {
             stress_fail_msg("dynamic sleep child spawn failed");
@@ -410,7 +410,7 @@ void run_dynamic_sleep_fanout(unsigned task_count, unsigned base_yields, uint64_
         spawned += 1U;
     }
     for (i = 0; i < spawned; ++i) {
-        if (nm_join(tasks[i]) != 0) {
+        if (llam_join(tasks[i]) != 0) {
             stress_fail_msg("dynamic sleep child join failed");
         }
     }
@@ -428,8 +428,8 @@ void run_dynamic_sleep_fanout(unsigned task_count, unsigned base_yields, uint64_
 
 void run_recv_owned_peek_path(void) {
     owned_read_state_t state;
-    nm_task_t *writer;
-    nm_io_buffer_t *buffer = NULL;
+    llam_task_t *writer;
+    llam_io_buffer_t *buffer = NULL;
     int sv[2];
     ssize_t rc;
 
@@ -442,11 +442,11 @@ void run_recv_owned_peek_path(void) {
         return;
     }
     state.fd = sv[1];
-    writer = nm_spawn(owned_read_writer_task,
+    writer = llam_spawn(owned_read_writer_task,
                       &state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                       });
     if (writer == NULL) {
         stress_fail_msg("recv owned peek writer spawn failed");
@@ -455,25 +455,25 @@ void run_recv_owned_peek_path(void) {
         return;
     }
 
-    rc = nm_recv_owned(sv[0], 16U, MSG_PEEK, &buffer);
+    rc = llam_recv_owned(sv[0], 16U, MSG_PEEK, &buffer);
     if (rc != (ssize_t)state.len) {
         stress_fail_msg("recv owned peek rc failed");
-    } else if (buffer == NULL || memcmp(nm_io_buffer_data(buffer), state.payload, state.len) != 0) {
+    } else if (buffer == NULL || memcmp(llam_io_buffer_data(buffer), state.payload, state.len) != 0) {
         stress_fail_msg("recv owned peek payload failed");
     }
-    nm_io_buffer_release(buffer);
+    llam_io_buffer_release(buffer);
     buffer = NULL;
 
-    rc = nm_read_owned(sv[0], 16U, &buffer);
+    rc = llam_read_owned(sv[0], 16U, &buffer);
     if (rc != (ssize_t)state.len) {
         stress_fail_msg("recv owned after peek rc failed");
-    } else if (buffer == NULL || memcmp(nm_io_buffer_data(buffer), state.payload, state.len) != 0) {
+    } else if (buffer == NULL || memcmp(llam_io_buffer_data(buffer), state.payload, state.len) != 0) {
         stress_fail_msg("recv owned after peek payload failed");
     }
-    nm_io_buffer_release(buffer);
+    llam_io_buffer_release(buffer);
     buffer = NULL;
 
-    if (nm_join(writer) != 0) {
+    if (llam_join(writer) != 0) {
         stress_fail_msg("recv owned peek writer join failed");
     }
     close(sv[0]);
@@ -482,7 +482,7 @@ void run_recv_owned_peek_path(void) {
 
 void run_recv_owned_multishot_path(void) {
     static const char *payloads[] = {"one", "two", "three"};
-    nm_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *buffer = NULL;
     int sv[2];
     int sock_type = SOCK_SEQPACKET;
     size_t i;
@@ -511,14 +511,14 @@ void run_recv_owned_multishot_path(void) {
 
     for (i = 0; i < (sizeof(payloads) / sizeof(payloads[0])); ++i) {
         size_t len = strlen(payloads[i]);
-        ssize_t rc = nm_read_owned(sv[0], 16U, &buffer);
+        ssize_t rc = llam_read_owned(sv[0], 16U, &buffer);
 
         if (rc != (ssize_t)len) {
             stress_fail_msg("recv owned multishot rc failed");
-        } else if (buffer == NULL || memcmp(nm_io_buffer_data(buffer), payloads[i], len) != 0) {
+        } else if (buffer == NULL || memcmp(llam_io_buffer_data(buffer), payloads[i], len) != 0) {
             stress_fail_msg("recv owned multishot payload failed");
         }
-        nm_io_buffer_release(buffer);
+        llam_io_buffer_release(buffer);
         buffer = NULL;
     }
 
@@ -528,10 +528,10 @@ void run_recv_owned_multishot_path(void) {
 
 void run_block_cancel_path(void) {
     block_cancel_state_t state;
-    nm_task_t *waiter;
-    nm_task_t *trigger;
+    llam_task_t *waiter;
+    llam_task_t *trigger;
 
-    state.token = nm_cancel_token_create();
+    state.token = llam_cancel_token_create();
     atomic_init(&state.cancelled, 0U);
     atomic_init(&state.triggered, 0U);
     if (state.token == NULL) {
@@ -539,35 +539,35 @@ void run_block_cancel_path(void) {
         return;
     }
 
-    waiter = nm_spawn(block_cancel_waiter_task,
+    waiter = llam_spawn(block_cancel_waiter_task,
                       &state,
-                      &(nm_spawn_opts_t){
-                          .task_class = NM_TASK_CLASS_DEFAULT,
-                          .stack_class = NM_STACK_CLASS_DEFAULT,
+                      &(llam_spawn_opts_t){
+                          .task_class = LLAM_TASK_CLASS_DEFAULT,
+                          .stack_class = LLAM_STACK_CLASS_DEFAULT,
                           .cancel_token = state.token,
                       });
-    trigger = nm_spawn(block_cancel_trigger_task,
+    trigger = llam_spawn(block_cancel_trigger_task,
                        &state,
-                       &(nm_spawn_opts_t){
-                           .task_class = NM_TASK_CLASS_DEFAULT,
-                           .stack_class = NM_STACK_CLASS_DEFAULT,
+                       &(llam_spawn_opts_t){
+                           .task_class = LLAM_TASK_CLASS_DEFAULT,
+                           .stack_class = LLAM_STACK_CLASS_DEFAULT,
                        });
     if (waiter == NULL || trigger == NULL) {
         stress_fail_msg("block cancel task spawn failed");
         if (waiter != NULL) {
-            (void)nm_join(waiter);
+            (void)llam_join(waiter);
         }
         if (trigger != NULL) {
-            (void)nm_join(trigger);
+            (void)llam_join(trigger);
         }
-        (void)nm_cancel_token_destroy(state.token);
+        (void)llam_cancel_token_destroy(state.token);
         return;
     }
 
-    if (nm_join(waiter) != 0) {
+    if (llam_join(waiter) != 0) {
         stress_fail_msg("block cancel waiter join failed");
     }
-    if (nm_join(trigger) != 0) {
+    if (llam_join(trigger) != 0) {
         stress_fail_msg("block cancel trigger join failed");
     }
     if (atomic_load(&state.triggered) != 1U) {
@@ -576,5 +576,5 @@ void run_block_cancel_path(void) {
     if (atomic_load(&state.cancelled) != 1U) {
         stress_fail_u32("block cancel waiter count", atomic_load(&state.cancelled), 1U);
     }
-    (void)nm_cancel_token_destroy(state.token);
+    (void)llam_cancel_token_destroy(state.token);
 }

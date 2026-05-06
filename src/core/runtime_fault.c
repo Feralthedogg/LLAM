@@ -26,7 +26,7 @@
 #include "runtime_internal.h"
 
 /** @brief Append one character to a bounded signal-safe buffer. */
-static size_t nm_buf_append_char(char *buf, size_t cap, size_t offset, char ch) {
+static size_t llam_buf_append_char(char *buf, size_t cap, size_t offset, char ch) {
     if (offset < cap) {
         buf[offset] = ch;
     }
@@ -34,7 +34,7 @@ static size_t nm_buf_append_char(char *buf, size_t cap, size_t offset, char ch) 
 }
 
 /** @brief Append a string to a bounded signal-safe buffer. */
-static size_t nm_buf_append_str(char *buf, size_t cap, size_t offset, const char *str) {
+static size_t llam_buf_append_str(char *buf, size_t cap, size_t offset, const char *str) {
     size_t i = 0U;
 
     if (str == NULL) {
@@ -42,7 +42,7 @@ static size_t nm_buf_append_str(char *buf, size_t cap, size_t offset, const char
     }
 
     while (str[i] != '\0') {
-        offset = nm_buf_append_char(buf, cap, offset, str[i]);
+        offset = llam_buf_append_char(buf, cap, offset, str[i]);
         i += 1U;
     }
 
@@ -50,12 +50,12 @@ static size_t nm_buf_append_str(char *buf, size_t cap, size_t offset, const char
 }
 
 /** @brief Append an unsigned 64-bit integer to a bounded signal-safe buffer. */
-static size_t nm_buf_append_u64(char *buf, size_t cap, size_t offset, uint64_t value) {
+static size_t llam_buf_append_u64(char *buf, size_t cap, size_t offset, uint64_t value) {
     char digits[32];
     size_t count = 0U;
 
     if (value == 0U) {
-        return nm_buf_append_char(buf, cap, offset, '0');
+        return llam_buf_append_char(buf, cap, offset, '0');
     }
 
     while (value > 0U && count < sizeof(digits)) {
@@ -64,7 +64,7 @@ static size_t nm_buf_append_u64(char *buf, size_t cap, size_t offset, uint64_t v
     }
 
     while (count > 0U) {
-        offset = nm_buf_append_char(buf, cap, offset, digits[count - 1U]);
+        offset = llam_buf_append_char(buf, cap, offset, digits[count - 1U]);
         count -= 1U;
     }
 
@@ -72,13 +72,13 @@ static size_t nm_buf_append_u64(char *buf, size_t cap, size_t offset, uint64_t v
 }
 
 /** @brief Append a uintptr_t as lowercase hexadecimal to a bounded signal-safe buffer. */
-static size_t nm_buf_append_hex_uintptr(char *buf, size_t cap, size_t offset, uintptr_t value) {
+static size_t llam_buf_append_hex_uintptr(char *buf, size_t cap, size_t offset, uintptr_t value) {
     char digits[2U + sizeof(uintptr_t) * 2U];
     size_t count = 0U;
 
-    offset = nm_buf_append_str(buf, cap, offset, "0x");
+    offset = llam_buf_append_str(buf, cap, offset, "0x");
     if (value == 0U) {
-        return nm_buf_append_char(buf, cap, offset, '0');
+        return llam_buf_append_char(buf, cap, offset, '0');
     }
 
     while (value > 0U && count < sizeof(digits)) {
@@ -88,7 +88,7 @@ static size_t nm_buf_append_hex_uintptr(char *buf, size_t cap, size_t offset, ui
     }
 
     while (count > 0U) {
-        offset = nm_buf_append_char(buf, cap, offset, digits[count - 1U]);
+        offset = llam_buf_append_char(buf, cap, offset, digits[count - 1U]);
         count -= 1U;
     }
 
@@ -102,7 +102,7 @@ static size_t nm_buf_append_hex_uintptr(char *buf, size_t cap, size_t offset, ui
  * @param buf Buffer to write.
  * @param len Byte length.
  */
-static void nm_async_write_best_effort(int fd, const char *buf, size_t len) {
+static void llam_async_write_best_effort(int fd, const char *buf, size_t len) {
     while (len > 0U) {
         ssize_t rc = write(fd, buf, len);
 
@@ -128,7 +128,7 @@ static void nm_async_write_best_effort(int fd, const char *buf, size_t len) {
  *
  * @return @c true when the address lies inside the guard page.
  */
-static bool nm_fault_in_task_guard_page(const nm_task_t *task, uintptr_t fault_addr) {
+static bool llam_fault_in_task_guard_page(const llam_task_t *task, uintptr_t fault_addr) {
     uintptr_t guard_lo;
     uintptr_t guard_hi;
 
@@ -146,11 +146,11 @@ static bool nm_fault_in_task_guard_page(const nm_task_t *task, uintptr_t fault_a
  *
  * @param signo Signal number, ignored.
  */
-void nm_preempt_signal_handler(int signo) {
+void llam_preempt_signal_handler(int signo) {
     (void)signo;
 
-    if (g_nm_tls_task != NULL) {
-        atomic_store_explicit(&g_nm_tls_task->preempt_requested, 1U, memory_order_relaxed);
+    if (g_llam_tls_task != NULL) {
+        atomic_store_explicit(&g_llam_tls_task->preempt_requested, 1U, memory_order_relaxed);
     }
 }
 
@@ -164,59 +164,59 @@ void nm_preempt_signal_handler(int signo) {
  * @param info     Signal info containing the fault address.
  * @param ucontext Signal context, currently unused.
  */
-void nm_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
-    nm_task_t *task = g_nm_tls_task;
-    nm_shard_t *shard = g_nm_tls_shard;
+void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
+    llam_task_t *task = g_llam_tls_task;
+    llam_shard_t *shard = g_llam_tls_shard;
     uintptr_t fault_addr = info != NULL ? (uintptr_t)info->si_addr : 0U;
 
     (void)ucontext;
 
-    if (signo == SIGSEGV && task != NULL && nm_fault_in_task_guard_page(task, fault_addr)) {
+    if (signo == SIGSEGV && task != NULL && llam_fault_in_task_guard_page(task, fault_addr)) {
         char buf[1024];
         size_t off = 0U;
 
         // Everything below is written using the local buffer helpers to avoid stdio in a signal handler.
-        off = nm_buf_append_str(buf, sizeof(buf), off, "nm: guard page fault detected\n");
-        off = nm_buf_append_str(buf, sizeof(buf), off, "  task=");
-        off = nm_buf_append_u64(buf, sizeof(buf), off, task->id);
-        off = nm_buf_append_str(buf, sizeof(buf), off, " shard=");
-        off = nm_buf_append_u64(buf, sizeof(buf), off, shard != NULL ? shard->id : 0U);
-        off = nm_buf_append_str(buf, sizeof(buf), off, " state=");
-        off = nm_buf_append_str(buf, sizeof(buf), off, nm_state_name_from_id(task->state));
-        off = nm_buf_append_str(buf, sizeof(buf), off, " wait=");
-        off = nm_buf_append_str(buf, sizeof(buf), off, nm_wait_reason_name(task->wait_reason));
-        off = nm_buf_append_char(buf, sizeof(buf), off, '\n');
-        off = nm_buf_append_str(buf, sizeof(buf), off, "  fault_addr=");
-        off = nm_buf_append_hex_uintptr(buf, sizeof(buf), off, fault_addr);
-        off = nm_buf_append_str(buf, sizeof(buf), off, " guard=[");
-        off = nm_buf_append_hex_uintptr(buf, sizeof(buf), off, (uintptr_t)task->stack_mapping);
-        off = nm_buf_append_str(buf, sizeof(buf), off, ", ");
-        off = nm_buf_append_hex_uintptr(buf, sizeof(buf), off, (uintptr_t)task->stack_base);
-        off = nm_buf_append_str(buf, sizeof(buf), off, ") stack=[");
-        off = nm_buf_append_hex_uintptr(buf, sizeof(buf), off, (uintptr_t)task->stack_base);
-        off = nm_buf_append_str(buf, sizeof(buf), off, ", ");
-        off = nm_buf_append_hex_uintptr(buf,
+        off = llam_buf_append_str(buf, sizeof(buf), off, "nm: guard page fault detected\n");
+        off = llam_buf_append_str(buf, sizeof(buf), off, "  task=");
+        off = llam_buf_append_u64(buf, sizeof(buf), off, task->id);
+        off = llam_buf_append_str(buf, sizeof(buf), off, " shard=");
+        off = llam_buf_append_u64(buf, sizeof(buf), off, shard != NULL ? shard->id : 0U);
+        off = llam_buf_append_str(buf, sizeof(buf), off, " state=");
+        off = llam_buf_append_str(buf, sizeof(buf), off, llam_state_name_from_id(task->state));
+        off = llam_buf_append_str(buf, sizeof(buf), off, " wait=");
+        off = llam_buf_append_str(buf, sizeof(buf), off, llam_wait_reason_name(task->wait_reason));
+        off = llam_buf_append_char(buf, sizeof(buf), off, '\n');
+        off = llam_buf_append_str(buf, sizeof(buf), off, "  fault_addr=");
+        off = llam_buf_append_hex_uintptr(buf, sizeof(buf), off, fault_addr);
+        off = llam_buf_append_str(buf, sizeof(buf), off, " guard=[");
+        off = llam_buf_append_hex_uintptr(buf, sizeof(buf), off, (uintptr_t)task->stack_mapping);
+        off = llam_buf_append_str(buf, sizeof(buf), off, ", ");
+        off = llam_buf_append_hex_uintptr(buf, sizeof(buf), off, (uintptr_t)task->stack_base);
+        off = llam_buf_append_str(buf, sizeof(buf), off, ") stack=[");
+        off = llam_buf_append_hex_uintptr(buf, sizeof(buf), off, (uintptr_t)task->stack_base);
+        off = llam_buf_append_str(buf, sizeof(buf), off, ", ");
+        off = llam_buf_append_hex_uintptr(buf,
                                         sizeof(buf),
                                         off,
                                         (uintptr_t)task->stack_base + (uintptr_t)task->stack_size);
-        off = nm_buf_append_str(buf, sizeof(buf), off, ")\n");
+        off = llam_buf_append_str(buf, sizeof(buf), off, ")\n");
         if (shard != NULL && shard->trace_head > 0U) {
-            const nm_trace_event_t *event = &shard->trace_ring[(shard->trace_head - 1U) % NM_TRACE_RING_CAP];
+            const llam_trace_event_t *event = &shard->trace_ring[(shard->trace_head - 1U) % LLAM_TRACE_RING_CAP];
 
-            off = nm_buf_append_str(buf, sizeof(buf), off, "  last_trace=");
-            off = nm_buf_append_str(buf, sizeof(buf), off, nm_trace_kind_name((nm_trace_kind_t)event->kind));
-            off = nm_buf_append_str(buf, sizeof(buf), off, " reason=");
-            off = nm_buf_append_str(buf, sizeof(buf), off, nm_wait_reason_name((nm_wait_reason_t)event->reason));
-            off = nm_buf_append_char(buf, sizeof(buf), off, '\n');
+            off = llam_buf_append_str(buf, sizeof(buf), off, "  last_trace=");
+            off = llam_buf_append_str(buf, sizeof(buf), off, llam_trace_kind_name((llam_trace_kind_t)event->kind));
+            off = llam_buf_append_str(buf, sizeof(buf), off, " reason=");
+            off = llam_buf_append_str(buf, sizeof(buf), off, llam_wait_reason_name((llam_wait_reason_t)event->reason));
+            off = llam_buf_append_char(buf, sizeof(buf), off, '\n');
         }
-        off = nm_buf_append_str(buf,
+        off = llam_buf_append_str(buf,
                                 sizeof(buf),
                                 off,
                                 "  hint=fixed-size stack overflowed into guard page; increase stack_class\n");
         if (off > sizeof(buf)) {
             off = sizeof(buf);
         }
-        nm_async_write_best_effort(STDERR_FILENO, buf, off);
+        llam_async_write_best_effort(STDERR_FILENO, buf, off);
         _exit(128 + signo);
     }
 
