@@ -99,6 +99,22 @@ static bool llam_shard_has_local_work(llam_shard_t *shard) {
 }
 
 /**
+ * @brief Treat an empty live-task set as a drained runtime.
+ *
+ * Task exit normally requests stop when the last task completes.  This guard
+ * makes the scheduler robust against missed or reordered wake/stop observation:
+ * once no managed tasks remain, the run loop is complete and all idle workers
+ * should be woken so they can leave their scheduler loops.
+ */
+static bool llam_runtime_drained(llam_runtime_t *rt) {
+    if (atomic_load(&rt->live_tasks) != 0U) {
+        return false;
+    }
+    llam_request_stop(rt);
+    return true;
+}
+
+/**
  * @brief Clear the current task after returning from a task fiber.
  *
  * This records run timing, stack samples, and slice-overrun metrics before the
@@ -171,7 +187,8 @@ static bool llam_shard_pause_for_merge(llam_shard_t *shard) {
 
     atomic_store_explicit(&shard->merge_pause_ack, 1U, memory_order_release);
     while (llam_shard_merge_pause_requested(shard)) {
-        if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
+        if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+            llam_runtime_drained(rt)) {
             break;
         }
         llam_idle_wait(shard);
@@ -253,13 +270,17 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         uint64_t started_ns;
         bool pressure;
 
+        if (llam_runtime_drained(rt)) {
+            break;
+        }
         if (llam_shard_pause_for_merge(shard)) {
             continue;
         }
         if (rt->experimental_dynamic_shards != 0U &&
             atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
             if (!llam_shard_has_local_work(shard)) {
-                if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
+                if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+                    llam_runtime_drained(rt)) {
                     break;
                 }
                 llam_idle_wait(shard);
@@ -288,7 +309,8 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         }
 
         if (task == NULL) {
-            if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
+            if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+                llam_runtime_drained(rt)) {
                 break;
             }
             llam_idle_wait(shard);
@@ -382,6 +404,9 @@ void *llam_opaque_helper_main(void *arg) {
             bool keep_running;
             bool stop_requested;
 
+            if (llam_runtime_drained(rt)) {
+                break;
+            }
             if (llam_shard_pause_for_merge(shard)) {
                 continue;
             }
@@ -428,7 +453,8 @@ void *llam_opaque_helper_main(void *arg) {
 #endif
                 pthread_mutex_unlock(&shard->opaque_lock);
 
-                if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
+                if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+                    llam_runtime_drained(rt)) {
                     break;
                 }
                 llam_idle_wait(shard);

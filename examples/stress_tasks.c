@@ -156,6 +156,14 @@ void *stress_blocking_pause(void *arg) {
     return arg;
 }
 
+static void *stress_blocking_cancel_pause(void *arg) {
+    block_cancel_state_t *state = arg;
+
+    atomic_store_explicit(&state->blocking_started, 1U, memory_order_release);
+    usleep(100U * 1000U);
+    return NULL;
+}
+
 int stress_connect_loopback(dynamic_accept_connector_state_t *state) {
     struct sockaddr_in addr;
     int fd;
@@ -189,7 +197,7 @@ void block_cancel_waiter_task(void *arg) {
     block_cancel_state_t *state = arg;
     void *result = NULL;
 
-    if (llam_call_blocking_result(stress_blocking_pause, NULL, &result) != 0) {
+    if (llam_call_blocking_result(stress_blocking_cancel_pause, state, &result) != 0) {
         if (errno == ECANCELED) {
             atomic_fetch_add(&state->cancelled, 1U);
             return;
@@ -203,8 +211,21 @@ void block_cancel_waiter_task(void *arg) {
 
 void block_cancel_trigger_task(void *arg) {
     block_cancel_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + 500ULL * 1000ULL * 1000ULL;
 
-    llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
+    while (!llam_deadline_passed(deadline_ns)) {
+        if (atomic_load_explicit(&state->blocking_started, memory_order_acquire) != 0U) {
+            break;
+        }
+        if (llam_sleep_ns(100ULL * 1000ULL) != 0) {
+            stress_fail_msg("block cancel trigger wait failed");
+            return;
+        }
+    }
+    if (atomic_load_explicit(&state->blocking_started, memory_order_acquire) == 0U) {
+        stress_fail_msg("block cancel callback did not start");
+        return;
+    }
     if (llam_cancel_token_cancel(state->token) != 0) {
         stress_fail_msg("block cancel trigger failed");
         return;
@@ -227,6 +248,7 @@ void mutex_holder_task(void *arg) {
         stress_fail_msg("mutex holder lock failed");
         return;
     }
+    atomic_store_explicit(&state->locked, 1U, memory_order_release);
     if (llam_sleep_ns(state->hold_ns) != 0) {
         stress_fail_msg("mutex holder sleep failed");
     }

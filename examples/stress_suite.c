@@ -20,8 +20,63 @@
 
 #include "stress_internal.h"
 
+#include <pthread.h>
+
+typedef struct stress_phase_watchdog {
+    atomic_uint done;
+    unsigned timeout_sec;
+    const char *phase_name;
+} stress_phase_watchdog_t;
+
 static unsigned stress_suite_runtime_flag_enabled(const llam_runtime_opts_t *opts, uint64_t flag) {
     return opts != NULL && (opts->experimental_flags & flag) != 0U ? 1U : 0U;
+}
+
+static void *stress_phase_watchdog_main(void *arg) {
+    stress_phase_watchdog_t *watchdog = arg;
+    unsigned ticks;
+    unsigned limit = watchdog->timeout_sec * 10U;
+
+    for (ticks = 0U; ticks < limit; ++ticks) {
+        if (atomic_load_explicit(&watchdog->done, memory_order_acquire) != 0U) {
+            return NULL;
+        }
+        usleep(100U * 1000U);
+    }
+    if (atomic_load_explicit(&watchdog->done, memory_order_acquire) == 0U) {
+        fprintf(stderr, "[stress] phase watchdog timeout phase=%s seconds=%u\n",
+                watchdog->phase_name,
+                watchdog->timeout_sec);
+        llam_dump_runtime_state(STDERR_FILENO);
+        fflush(stderr);
+    }
+    return NULL;
+}
+
+static int stress_start_phase_watchdog(stress_phase_watchdog_t *watchdog,
+                                       pthread_t *thread,
+                                       const char *phase_name) {
+    unsigned timeout_sec = stress_env_u32("LLAM_STRESS_PHASE_WATCHDOG_SEC", 0U, 3600U);
+
+    if (timeout_sec == 0U) {
+        return 0;
+    }
+    atomic_init(&watchdog->done, 0U);
+    watchdog->timeout_sec = timeout_sec;
+    watchdog->phase_name = phase_name;
+    if (pthread_create(thread, NULL, stress_phase_watchdog_main, watchdog) != 0) {
+        stress_fail_msg("phase watchdog start failed");
+        return -1;
+    }
+    return 1;
+}
+
+static void stress_stop_phase_watchdog(stress_phase_watchdog_t *watchdog, pthread_t thread, int started) {
+    if (started <= 0) {
+        return;
+    }
+    atomic_store_explicit(&watchdog->done, 1U, memory_order_release);
+    (void)pthread_join(thread, NULL);
 }
 
 void run_poll_paths(void) {
@@ -376,6 +431,9 @@ int stress_run_phase(const char *phase_name,
                             unsigned require_dynamic_motion,
                             unsigned require_floor_reach) {
     llam_runtime_stats_t stats;
+    stress_phase_watchdog_t watchdog;
+    pthread_t watchdog_thread;
+    int watchdog_started = 0;
     unsigned failures_before = atomic_load(&g_failures);
 
     printf("[stress] phase=%s deterministic=%u forced_yield_every=%u shard_rings=%u shard_rings_multishot=%u dynamic_shards=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u sqpoll_cpu=%d\n",
@@ -404,12 +462,19 @@ int stress_run_phase(const char *phase_name,
         llam_runtime_shutdown();
         return 1;
     }
+    watchdog_started = stress_start_phase_watchdog(&watchdog, &watchdog_thread, phase_name);
+    if (watchdog_started < 0) {
+        llam_runtime_shutdown();
+        return 1;
+    }
     if (llam_run() != 0) {
+        stress_stop_phase_watchdog(&watchdog, watchdog_thread, watchdog_started);
         perror("llam_run");
         llam_dump_runtime_state(STDOUT_FILENO);
         llam_runtime_shutdown();
         return 1;
     }
+    stress_stop_phase_watchdog(&watchdog, watchdog_thread, watchdog_started);
     if (llam_runtime_collect_stats(&stats) != 0) {
         perror("llam_runtime_collect_stats");
         llam_runtime_shutdown();

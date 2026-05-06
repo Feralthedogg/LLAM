@@ -20,6 +20,19 @@
 
 #include "stress_internal.h"
 
+static bool wait_mutex_holder_locked(mutex_timeout_state_t *state, const char *failure_message) {
+    uint64_t deadline_ns = llam_now_ns() + 50ULL * 1000ULL * 1000ULL;
+
+    while (atomic_load_explicit(&state->locked, memory_order_acquire) == 0U) {
+        if (llam_deadline_passed(deadline_ns)) {
+            stress_fail_msg(failure_message);
+            return false;
+        }
+        llam_yield();
+    }
+    return true;
+}
+
 void run_opaque_reuse(void) {
     opaque_state_t state;
     llam_task_t *task;
@@ -75,6 +88,7 @@ void run_mutex_timeout_path(void) {
 
     state.mutex = llam_mutex_create();
     state.hold_ns = 5ULL * 1000ULL * 1000ULL;
+    atomic_init(&state.locked, 0U);
     if (state.mutex == NULL) {
         stress_fail_msg("mutex timeout create failed");
         return;
@@ -92,14 +106,13 @@ void run_mutex_timeout_path(void) {
         return;
     }
 
-    if (llam_sleep_ns(1ULL * 1000ULL * 1000ULL) != 0) {
-        stress_fail_msg("mutex timeout sync sleep failed");
-    }
-    if (llam_mutex_lock_until(state.mutex, llam_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
-        stress_fail_msg("mutex timeout unexpectedly succeeded");
-        (void)llam_mutex_unlock(state.mutex);
-    } else if (errno != ETIMEDOUT) {
-        stress_fail_errno("mutex timeout errno", errno, ETIMEDOUT);
+    if (wait_mutex_holder_locked(&state, "mutex timeout holder did not lock")) {
+        if (llam_mutex_lock_until(state.mutex, llam_now_ns() + 1ULL * 1000ULL * 1000ULL) == 0) {
+            stress_fail_msg("mutex timeout unexpectedly succeeded");
+            (void)llam_mutex_unlock(state.mutex);
+        } else if (errno != ETIMEDOUT) {
+            stress_fail_errno("mutex timeout errno", errno, ETIMEDOUT);
+        }
     }
     if (llam_join(holder) != 0) {
         stress_fail_msg("mutex timeout holder join failed");
@@ -243,6 +256,7 @@ void run_dynamic_mutex_timeout_path(void) {
 
     state.mutex = llam_mutex_create();
     state.hold_ns = 20ULL * 1000ULL * 1000ULL;
+    atomic_init(&state.locked, 0U);
     if (state.mutex == NULL) {
         stress_fail_msg("dynamic mutex timeout create failed");
         return;
@@ -260,14 +274,13 @@ void run_dynamic_mutex_timeout_path(void) {
         return;
     }
 
-    if (llam_sleep_ns(2ULL * 1000ULL * 1000ULL) != 0) {
-        stress_fail_msg("dynamic mutex timeout sync sleep failed");
-    }
-    if (llam_mutex_lock_until(state.mutex, llam_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
-        stress_fail_msg("dynamic mutex timeout unexpectedly succeeded");
-        (void)llam_mutex_unlock(state.mutex);
-    } else if (errno != ETIMEDOUT) {
-        stress_fail_errno("dynamic mutex timeout errno", errno, ETIMEDOUT);
+    if (wait_mutex_holder_locked(&state, "dynamic mutex timeout holder did not lock")) {
+        if (llam_mutex_lock_until(state.mutex, llam_now_ns() + 4ULL * 1000ULL * 1000ULL) == 0) {
+            stress_fail_msg("dynamic mutex timeout unexpectedly succeeded");
+            (void)llam_mutex_unlock(state.mutex);
+        } else if (errno != ETIMEDOUT) {
+            stress_fail_errno("dynamic mutex timeout errno", errno, ETIMEDOUT);
+        }
     }
     if (llam_join(holder) != 0) {
         stress_fail_msg("dynamic mutex timeout holder join failed");
@@ -581,7 +594,14 @@ void dynamic_idle_accept_watch_task(void *arg) {
     for (i = 1U; i < (sizeof(connectors) / sizeof(connectors[0])); ++i) {
         accepted_fd = llam_accept(state->listener_fd, NULL, NULL);
         if (accepted_fd < 0) {
-            stress_fail_msg("dynamic idle accept follow accept failed");
+            char message[128];
+
+            (void)snprintf(message,
+                           sizeof(message),
+                           "dynamic idle accept follow accept failed errno=%d index=%zu",
+                           errno,
+                           i);
+            stress_fail_msg(message);
             goto cleanup;
         }
         close(accepted_fd);

@@ -437,7 +437,13 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;
-    node->supports_multishot_recv = true;
+    /*
+     * Darwin recv-watch currently uses level-triggered kqueue readiness.
+     * Under repeated owned-read stress it can strand a waiter after an early
+     * completion/rearm race, so keep recv on the one-shot/fallback path until
+     * the watcher has an explicit drain-and-rearm handshake.
+     */
+    node->supports_multishot_recv = false;
     node->supports_multishot_accept = true;
     node->supports_multishot_poll = true;
     node->supports_provided_buffers = false;
@@ -560,7 +566,11 @@ void llam_probe_ring_support(llam_node_t *node) {
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;
-    node->supports_multishot_recv = true;
+    /*
+     * Keep recv-watch disabled on Darwin for the same reason as init: poll and
+     * accept watches are stable, but recv needs a stricter rearm contract.
+     */
+    node->supports_multishot_recv = false;
     node->supports_multishot_accept = true;
     node->supports_multishot_poll = true;
 }

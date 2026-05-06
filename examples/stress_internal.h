@@ -93,11 +93,13 @@ typedef struct block_cancel_state {
     llam_cancel_token_t *token;
     atomic_uint cancelled;
     atomic_uint triggered;
+    atomic_uint blocking_started;
 } block_cancel_state_t;
 
 typedef struct mutex_timeout_state {
     llam_mutex_t *mutex;
     uint64_t hold_ns;
+    atomic_uint locked;
 } mutex_timeout_state_t;
 
 typedef struct fp_round_state {

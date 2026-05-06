@@ -456,11 +456,17 @@ static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
  * @param shard Shard that has become idle.
  */
 void llam_idle_wait(llam_shard_t *shard) {
+    llam_runtime_t *rt = shard->runtime;
     int timeout_ms;
 #if defined(__APPLE__)
     bool has_precise_timeout = false;
     uint64_t precise_timeout_ns = 0U;
 #endif
+
+    if (rt != NULL && atomic_load_explicit(&rt->live_tasks, memory_order_acquire) == 0U) {
+        llam_request_stop(rt);
+        return;
+    }
 
 #if defined(__APPLE__)
     timeout_ms = llam_shard_next_timeout(shard, &has_precise_timeout, &precise_timeout_ns);

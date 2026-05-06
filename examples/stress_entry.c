@@ -148,6 +148,9 @@ int main(void) {
     unsigned sqpoll;
     int rc = 0;
 
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     worker_rings = stress_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS", 0U);
     worker_rings_multishot = stress_env_flag_default("LLAM_EXPERIMENTAL_WORKER_RINGS_MULTISHOT", 0U);
     dynamic_workers = stress_env_flag_default("LLAM_EXPERIMENTAL_DYNAMIC_WORKERS", 1U);
@@ -272,7 +275,7 @@ int main(void) {
         goto cleanup;
     }
     if (dynamic_phase != 0U &&
-        stress_run_phase("dynamic", dynamic_suite_task, &dynamic_state, &dynamic_runtime_opts, 1U, 0U) != 0) {
+        stress_run_phase("dynamic", dynamic_suite_task, &dynamic_state, &dynamic_runtime_opts, 0U, 0U) != 0) {
         fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
         rc = 1;
         goto cleanup;
@@ -355,7 +358,7 @@ int main(void) {
                          dynamic_idle_accept_watch_task,
                          &idle_accept_state,
                          &dynamic_runtime_opts,
-                         1U,
+                         0U,
                          1U) != 0) {
         fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
         rc = 1;
@@ -366,7 +369,7 @@ int main(void) {
                              dynamic_idle_poll_watch_task,
                              &idle_poll_state,
                              &dynamic_runtime_opts,
-                             1U,
+                             0U,
                              1U) != 0) {
             fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
             rc = 1;
@@ -380,7 +383,7 @@ int main(void) {
                              dynamic_idle_recv_watch_task,
                              &idle_recv_state,
                              &dynamic_runtime_opts,
-                             1U,
+                             0U,
                              1U) != 0) {
             fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
             rc = 1;

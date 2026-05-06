@@ -67,6 +67,72 @@ void llam_yield(void) {
 }
 
 /**
+ * @brief Yield directly to another local runnable task when safe.
+ *
+ * This is a narrower handoff path for latency-sensitive internal producers that
+ * already know local work exists.  It avoids a scheduler round trip but keeps
+ * the same queue discipline as a normal yield by placing the current task on the
+ * normal FIFO side before switching to the selected peer.
+ *
+ * @return true when a direct task-to-task handoff happened.
+ */
+bool llam_yield_to_local_runnable(void) {
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_task_t *current = g_llam_tls_task;
+    llam_task_t *next = NULL;
+    int caller_errno = errno;
+
+    if (shard == NULL || current == NULL || shard->runtime == NULL) {
+        return false;
+    }
+    if (shard->runtime->run_timing_enabled != 0U || shard->runtime->wake_latency_metrics_enabled != 0U ||
+        !llam_shard_accepts_new_work(shard)) {
+        return false;
+    }
+
+    pthread_mutex_lock(&shard->lock);
+    if (shard->opaque_redirect_active || shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+        pthread_mutex_unlock(&shard->lock);
+        return false;
+    }
+    if (shard->hot_q.depth > 0U) {
+        next = llam_queue_pop_head(&shard->hot_q);
+    }
+    if (next == NULL) {
+        next = llam_norm_queue_pop_owner_locked(shard);
+    }
+    if (next == NULL || next == current) {
+        pthread_mutex_unlock(&shard->lock);
+        return false;
+    }
+
+    current->forced_yield_budget = g_llam_runtime.forced_yield_every;
+    current->state = LLAM_TASK_STATE_RUNNABLE;
+    current->wait_reason = LLAM_WAIT_NONE;
+    current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+    (void)llam_norm_queue_push_yield_locked(shard, current);
+
+    next->state = LLAM_TASK_STATE_RUNNING;
+    next->wait_reason = LLAM_WAIT_NONE;
+    next->last_shard = shard->id;
+    next->last_started_ns = 0U;
+    atomic_store_explicit(&shard->current, next, memory_order_release);
+    g_llam_tls_task = next;
+
+    shard->metrics.yields += 1U;
+    shard->metrics.ctx_switches += 1U;
+    if (shard->runtime->trace_events_enabled != 0U) {
+        llam_trace_shard(shard, next, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNABLE, LLAM_TASK_STATE_RUNNING, LLAM_WAIT_NONE);
+        llam_trace_shard(shard, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    errno = caller_errno;
+    llam_switch_task_to_task(current, next);
+    return true;
+}
+
+/**
  * @brief Join a task, optionally bounded by an absolute deadline.
  *
  * Managed callers park on the target task's join waiter list and resume when

@@ -146,7 +146,7 @@ static bool llam_write_handoff_enabled(void) {
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #elif defined(__linux__)
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
 #endif
@@ -319,6 +319,28 @@ static bool llam_write_handoff_requires_work(void) {
 }
 
 /**
+ * @brief Check whether write handoff may switch directly to local work.
+ *
+ * @return true when direct task-to-task handoff is enabled.
+ */
+static bool llam_write_direct_local_handoff_enabled(void) {
+    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF");
+
+#if defined(__APPLE__) || defined(__linux__)
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+#else
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+#endif
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+/**
  * @brief Return the recent-yield suppression window for write handoff.
  *
  * @return Nanosecond window; 0 disables suppression.
@@ -381,6 +403,7 @@ static bool llam_write_handoff_check_fd_enabled(void) {
  */
 void llam_maybe_handoff_after_socket_write(int fd, size_t count, bool known_socket) {
     uint64_t recent_yield_ns;
+    bool direct_local_handoff;
 
     if (!llam_write_handoff_enabled() || count > 256U || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
         return;
@@ -400,10 +423,17 @@ void llam_maybe_handoff_after_socket_write(int fd, size_t count, bool known_sock
             }
         }
     }
-    if (llam_write_handoff_requires_work()) {
-        if (!llam_io_shard_has_local_work()) {
+    direct_local_handoff = llam_write_direct_local_handoff_enabled();
+    if (direct_local_handoff) {
+        g_llam_tls_io_handoff_yield += 1U;
+        if (llam_yield_to_local_runnable()) {
+            g_llam_tls_io_handoff_yield -= 1U;
             return;
         }
+        g_llam_tls_io_handoff_yield -= 1U;
+    }
+    if (llam_write_handoff_requires_work() && !llam_io_shard_has_local_work()) {
+        return;
     }
     if (known_socket && !llam_write_handoff_check_fd_enabled()) {
         g_llam_tls_io_handoff_yield += 1U;

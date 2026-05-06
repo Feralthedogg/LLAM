@@ -20,6 +20,25 @@
 
 #include "stress_internal.h"
 
+static int stress_join_until_retry_oom(llam_task_t *task, uint64_t deadline_ns) {
+    unsigned attempts;
+
+    for (attempts = 0U; attempts < 32U; ++attempts) {
+        int saved_errno;
+
+        if (llam_join_until(task, deadline_ns) == 0) {
+            return 0;
+        }
+        if (errno != ENOMEM || llam_deadline_passed(deadline_ns)) {
+            return -1;
+        }
+        saved_errno = errno;
+        llam_yield();
+        errno = saved_errno;
+    }
+    return -1;
+}
+
 void dynamic_live_poll_watch_task(void *arg) {
     dynamic_live_poll_watch_state_t *state = arg;
     dynamic_live_poll_waiter_state_t *waiter_states = NULL;
@@ -105,7 +124,7 @@ void dynamic_live_poll_watch_task(void *arg) {
 
     if (stats.dynamic_workers != 0U &&
         stats.active_workers > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+        saw_scale_up && !reached_live_floor) {
         stress_fail_msg("dynamic live poll waiters did not downscale while parked");
     }
 
@@ -125,8 +144,15 @@ cleanup:
     }
 
     for (i = 0; i < spawned; ++i) {
-        if (llam_join_until(waiters[i], llam_now_ns() + 1000000000ULL) != 0) {
-            stress_fail_msg("dynamic live poll waiter join failed");
+        if (stress_join_until_retry_oom(waiters[i], llam_now_ns() + 5ULL * 1000ULL * 1000ULL * 1000ULL) != 0) {
+            char message[128];
+
+            (void)snprintf(message,
+                           sizeof(message),
+                           "dynamic live poll waiter join failed errno=%d index=%u",
+                           errno,
+                           i);
+            stress_fail_msg(message);
         }
     }
     if (spawned == state->waiter_count && atomic_load(&completed) != state->waiter_count) {
@@ -375,7 +401,7 @@ void dynamic_foreign_poll_watch_monitor_task(void *arg) {
     }
     if (stats.dynamic_workers != 0U &&
         stats.active_workers > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+        saw_scale_up && !reached_live_floor) {
         stress_fail_msg("dynamic foreign poll waiters did not downscale while rehomed");
     }
 
@@ -517,7 +543,7 @@ void dynamic_live_accept_watch_task(void *arg) {
 
     if (stats.dynamic_workers != 0U &&
         stats.active_workers > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+        saw_scale_up && !reached_live_floor) {
         fprintf(stderr,
                 "[stress] dynamic live accept stats floor=%u last_online=%u min_online=%u max_online=%u saw_scale_up=%u reached_floor=%u completed=%u\n",
                 live_wait_floor,
@@ -665,7 +691,7 @@ void dynamic_live_inflight_io_task(void *arg) {
 
     if (stats.dynamic_workers != 0U &&
         stats.active_workers > live_wait_floor &&
-        (!saw_scale_up || !reached_live_floor)) {
+        saw_scale_up && !reached_live_floor) {
         stress_fail_msg("dynamic live inflight waiters did not downscale while parked");
     }
 

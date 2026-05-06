@@ -511,10 +511,27 @@ void run_recv_owned_multishot_path(void) {
 
     for (i = 0; i < (sizeof(payloads) / sizeof(payloads[0])); ++i) {
         size_t len = strlen(payloads[i]);
-        ssize_t rc = llam_read_owned(sv[0], 16U, &buffer);
+        ssize_t rc;
+        unsigned retry;
+
+        for (retry = 0U; retry < 8U; ++retry) {
+            rc = llam_read_owned(sv[0], 16U, &buffer);
+            if (rc >= 0 || (errno != EAGAIN && errno != EINTR)) {
+                break;
+            }
+            llam_yield();
+        }
 
         if (rc != (ssize_t)len) {
-            stress_fail_msg("recv owned multishot rc failed");
+            char message[128];
+
+            (void)snprintf(message,
+                           sizeof(message),
+                           "recv owned multishot rc failed rc=%zd errno=%d expected=%zu",
+                           rc,
+                           errno,
+                           len);
+            stress_fail_msg(message);
         } else if (buffer == NULL || memcmp(llam_io_buffer_data(buffer), payloads[i], len) != 0) {
             stress_fail_msg("recv owned multishot payload failed");
         }
@@ -534,6 +551,7 @@ void run_block_cancel_path(void) {
     state.token = llam_cancel_token_create();
     atomic_init(&state.cancelled, 0U);
     atomic_init(&state.triggered, 0U);
+    atomic_init(&state.blocking_started, 0U);
     if (state.token == NULL) {
         stress_fail_msg("block cancel token create failed");
         return;

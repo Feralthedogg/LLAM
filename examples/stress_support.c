@@ -375,7 +375,11 @@ bool stress_platform_supports_foreign_poll_watch(void) {
 }
 
 bool stress_platform_supports_recv_watch(void) {
+#if defined(__APPLE__)
+    return false;
+#else
     return true;
+#endif
 }
 
 bool stress_platform_supports_nested_opaque(void) {

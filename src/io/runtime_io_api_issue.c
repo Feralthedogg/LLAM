@@ -171,6 +171,47 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
 }
 
 /**
+ * @brief Prepare the current task before publishing it to a shared I/O watch.
+ *
+ * Watch completions can race with waiter insertion because an already-active
+ * multishot watch may deliver data without a fresh backend kick.  Publish the
+ * parked task state and initial request result before linking the waiter so an
+ * early completion cannot be overwritten by the generic park path.
+ *
+ * @param req       Request that will be linked to a watch.
+ * @param wait_mode Watch wait mode to publish.
+ *
+ * @return 0 on success, -1 with errno set for invalid context.
+ */
+static int llam_prepare_watch_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wait_mode) {
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_task_t *task = g_llam_tls_task;
+
+    if (shard == NULL || task == NULL || req == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    llam_task_set_io_tracking(task, req, shard->id);
+    req->task = task;
+    req->result = -1;
+    req->error_code = 0;
+    req->owner_shard = shard->id;
+    req->submit_ts_ns = llam_now_ns();
+    req->deadline_ns = 0U;
+    atomic_store(&req->wait_mode, wait_mode);
+    atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_store(&req->cancel_queued, 0U);
+
+    task->state = LLAM_TASK_STATE_PARKED;
+    task->wait_reason = LLAM_WAIT_IO;
+    shard->metrics.io_submits += 1U;
+    shard->metrics.parks += 1U;
+    llam_trace_shard(shard, task, LLAM_TRACE_IO_SUBMIT, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_IO);
+    return 0;
+}
+
+/**
  * @brief Park the current task on an I/O request until it completes.
  *
  * The caller must publish @p req to a submit queue or watch before entering
@@ -188,32 +229,53 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
 int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns, llam_node_t *wake_node) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
+    unsigned wait_mode;
+    bool already_prepared;
 
     if (shard == NULL || task == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    llam_task_set_io_tracking(task, req, shard->id);
-    req->task = task;
-    req->result = -1;
-    req->error_code = 0;
-    req->owner_shard = shard->id;
-    req->submit_ts_ns = llam_now_ns();
-    req->deadline_ns = has_deadline ? deadline_ns : 0U;
+    wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
+    already_prepared = (task->active_io_req == req &&
+                        task->state == LLAM_TASK_STATE_PARKED &&
+                        task->wait_reason == LLAM_WAIT_IO &&
+                        (wait_mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
+                         wait_mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
+                         wait_mode == LLAM_IO_WAIT_MODE_RECV_WATCH));
+    if (!already_prepared) {
+        llam_task_set_io_tracking(task, req, shard->id);
+        req->task = task;
+        req->result = -1;
+        req->error_code = 0;
+        req->owner_shard = shard->id;
+        req->submit_ts_ns = llam_now_ns();
+        req->deadline_ns = has_deadline ? deadline_ns : 0U;
 
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_IO;
-    shard->metrics.io_submits += 1U;
-    shard->metrics.parks += 1U;
-    llam_trace_shard(shard, task, LLAM_TRACE_IO_SUBMIT, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_IO);
-    if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
-        llam_cleanup_io_wait_setup(task, req);
-        return -1;
+        task->state = LLAM_TASK_STATE_PARKED;
+        task->wait_reason = LLAM_WAIT_IO;
+        shard->metrics.io_submits += 1U;
+        shard->metrics.parks += 1U;
+        llam_trace_shard(shard, task, LLAM_TRACE_IO_SUBMIT, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_IO);
     }
-    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
-        llam_cleanup_io_wait_setup(task, req);
-        return -1;
+    if (has_deadline && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
+        if (llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
+            llam_cleanup_io_wait_setup(task, req);
+            return -1;
+        }
+        if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE) {
+            llam_disarm_task_wait_deadline(task);
+        }
+    }
+    if (task->cancel_token != NULL && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
+        if (llam_cancel_token_register_task(task) != 0) {
+            llam_cleanup_io_wait_setup(task, req);
+            return -1;
+        }
+        if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE && task->cancel_registered) {
+            llam_cancel_token_unregister_task(task);
+        }
     }
     if (wake_node != NULL) {
         llam_kick_node(wake_node);
@@ -336,17 +398,22 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
         watch->activating = true;
         kick = true;
     }
+    req->poll_watch = watch;
+    req->accept_watch = NULL;
+    req->recv_watch = NULL;
+    if (llam_prepare_watch_io_wait(req, LLAM_IO_WAIT_MODE_POLL_WATCH) != 0) {
+        int saved_errno = errno;
+
+        pthread_mutex_unlock(&node->watch_lock);
+        errno = saved_errno;
+        return -1;
+    }
     llam_poll_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
     if (kick) {
         llam_kick_node(node);
     }
 
-    atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_POLL_WATCH);
-    atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
-    atomic_store(&req->cancel_queued, 0U);
-    req->poll_watch = watch;
-    req->accept_watch = NULL;
     return llam_park_io_req(req, false, 0U, NULL);
 }
 
@@ -408,18 +475,22 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
         watch->activating = true;
         kick = true;
     }
+    req->poll_watch = NULL;
+    req->accept_watch = watch;
+    req->recv_watch = NULL;
+    if (llam_prepare_watch_io_wait(req, LLAM_IO_WAIT_MODE_ACCEPT_WATCH) != 0) {
+        int saved_errno = errno;
+
+        pthread_mutex_unlock(&node->watch_lock);
+        errno = saved_errno;
+        return -1;
+    }
     llam_accept_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
     if (kick) {
         llam_kick_node(node);
     }
 
-    atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_ACCEPT_WATCH);
-    atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
-    atomic_store(&req->cancel_queued, 0U);
-    req->poll_watch = NULL;
-    req->accept_watch = watch;
-    req->recv_watch = NULL;
     return llam_park_io_req(req, false, 0U, NULL);
 }
 
@@ -538,18 +609,22 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
         watch->activating = true;
         kick = true;
     }
+    req->poll_watch = NULL;
+    req->accept_watch = NULL;
+    req->recv_watch = watch;
+    if (llam_prepare_watch_io_wait(req, LLAM_IO_WAIT_MODE_RECV_WATCH) != 0) {
+        int saved_errno = errno;
+
+        pthread_mutex_unlock(&node->watch_lock);
+        errno = saved_errno;
+        return -1;
+    }
     llam_recv_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
     if (kick) {
         llam_kick_node(node);
     }
 
-    atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_RECV_WATCH);
-    atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
-    atomic_store(&req->cancel_queued, 0U);
-    req->poll_watch = NULL;
-    req->accept_watch = NULL;
-    req->recv_watch = watch;
     return llam_park_io_req(req, false, 0U, NULL);
 }
 

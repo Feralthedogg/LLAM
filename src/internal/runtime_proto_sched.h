@@ -109,6 +109,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
                                                  bool hot,
                                                  llam_trace_kind_t kind,
                                                  llam_wait_reason_t reason);
+bool llam_yield_to_local_runnable(void);
 
 /*
  * Runtime online-shard counters and pressure predicates.

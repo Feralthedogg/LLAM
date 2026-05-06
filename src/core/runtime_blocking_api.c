@@ -358,12 +358,11 @@ int llam_enter_blocking(void) {
     uint64_t enter_wait_ns = 0U;
     uint64_t enter_wait_start_ns = 0U;
 
-    llam_task_safepoint();
-
     /* Keep the shard productive while this task blocks in foreign code. */
     if (task == NULL || shard == NULL) {
         return 0;
     }
+    atomic_store_explicit(&shard->last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
 
     if (task->opaque_blocking_depth == 0U) {
         timing = llam_opaque_timing_enabled();

@@ -261,7 +261,13 @@ ssize_t llam_read_owned_impl(int fd,
     req->buf = (req->use_provided_buffer || prefer_multishot) ? NULL : buffer->data;
     if (prefer_multishot && llam_issue_multishot_recv(req) == 0) {
         result = req->result;
-        if (result < 0 && llam_io_capability_error(req->error_code)) {
+        if (result < 0 && (req->error_code == 0 || llam_io_capability_error(req->error_code))) {
+            /*
+             * A shared multishot watch can be invalidated by a transient
+             * readiness race before it reports a concrete errno. Treat that
+             * incomplete completion as a backend miss and retry on the regular
+             * one-shot path instead of surfacing -1/errno=0 to callers.
+             */
             req->result = -1;
             req->error_code = 0;
             req->owned_buffer->provided_storage = false;
