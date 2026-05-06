@@ -175,6 +175,10 @@ void llam_runtime_shutdown(void) {
             rt->shards[i].timers = NULL;
             llam_shard_drain_stack_cache(&rt->shards[i]);
             pthread_mutex_destroy(&rt->shards[i].lock);
+            if (rt->shards[i].stack_cache_lock_initialized) {
+                pthread_mutex_destroy(&rt->shards[i].stack_cache_lock);
+                rt->shards[i].stack_cache_lock_initialized = false;
+            }
             llam_opaque_wake_destroy(&rt->shards[i]);
             pthread_cond_destroy(&rt->shards[i].opaque_cv);
             pthread_mutex_destroy(&rt->shards[i].opaque_lock);

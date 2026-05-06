@@ -723,6 +723,7 @@ struct llam_shard {
     bool opaque_helper_thread_started;
     bool opaque_helper_ready;
     bool opaque_helper_active;
+    bool stack_cache_lock_initialized;
     atomic_uint opaque_helper_active_hint;
 #if defined(__linux__)
     atomic_uint opaque_helper_opaque_wait;
@@ -752,6 +753,7 @@ struct llam_shard {
     unsigned stack_cache_default_count;
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;
+    pthread_mutex_t stack_cache_lock;
     llam_ctx_t scheduler_ctx;
     llam_ctx_t opaque_scheduler_ctx;
     _Atomic(llam_task_t *) current;

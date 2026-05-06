@@ -485,6 +485,15 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
             llam_runtime_shutdown();
             return -1;
         }
+        rc = pthread_mutex_init(&rt->shards[i].stack_cache_lock, NULL);
+        if (rc != 0) {
+            free(io_node_ids);
+            free(locality_node_ids);
+            errno = rc;
+            llam_runtime_shutdown();
+            return -1;
+        }
+        rt->shards[i].stack_cache_lock_initialized = true;
         rc = pthread_mutex_init(&rt->shards[i].opaque_lock, NULL);
         if (rc != 0) {
             free(io_node_ids);

@@ -111,31 +111,33 @@ static bool llam_shard_has_local_work(llam_shard_t *shard) {
 static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     llam_task_t *task = g_llam_tls_task;
 
+    if (run_ns == 0U) {
+        atomic_store_explicit(&shard->current, NULL, memory_order_release);
+        g_llam_tls_task = NULL;
+        return;
+    }
+
     pthread_mutex_lock(&shard->lock);
     atomic_store_explicit(&shard->current, NULL, memory_order_release);
     if (task != NULL) {
-        if (run_ns != 0U) {
-            uint64_t slice_ns = llam_slice_ns(task->task_class);
+        uint64_t slice_ns = llam_slice_ns(task->task_class);
 
-            task->last_run_ns = run_ns;
-            task->total_run_ns += run_ns;
+        task->last_run_ns = run_ns;
+        task->total_run_ns += run_ns;
 #if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
-            llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
+        llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
 #elif defined(__aarch64__)
-            llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.sp);
+        llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.sp);
 #endif
-            shard->metrics.slice_budget_ns += slice_ns;
-            if (run_ns > shard->metrics.max_run_ns) {
-                shard->metrics.max_run_ns = run_ns;
-            }
-            if (run_ns > slice_ns) {
-                shard->metrics.slice_overruns += 1U;
-            }
+        shard->metrics.slice_budget_ns += slice_ns;
+        if (run_ns > shard->metrics.max_run_ns) {
+            shard->metrics.max_run_ns = run_ns;
+        }
+        if (run_ns > slice_ns) {
+            shard->metrics.slice_overruns += 1U;
         }
     }
-    if (run_ns != 0U) {
-        shard->metrics.total_run_ns += run_ns;
-    }
+    shard->metrics.total_run_ns += run_ns;
     pthread_mutex_unlock(&shard->lock);
     g_llam_tls_task = NULL;
 }

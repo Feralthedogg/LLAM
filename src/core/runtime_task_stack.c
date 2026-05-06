@@ -241,7 +241,7 @@ static void llam_runtime_stack_cache_entry_free_locked(llam_runtime_t *rt, llam_
 /**
  * @brief Allocate or reuse a shard-local stack-cache entry.
  *
- * @param shard Shard cache owner; its lock must already be held.
+ * @param shard Shard cache owner; its stack cache lock must already be held.
  * @return Cleared entry object on success, or NULL on allocation failure.
  */
 static llam_stack_cache_entry_t *llam_shard_stack_cache_entry_alloc(llam_shard_t *shard) {
@@ -267,7 +267,7 @@ static llam_stack_cache_entry_t *llam_shard_stack_cache_entry_alloc(llam_shard_t
 /**
  * @brief Return a metadata entry to the shard-local entry cache.
  *
- * @param shard Shard cache owner; its lock must already be held.
+ * @param shard Shard cache owner; its stack cache lock must already be held.
  * @param entry Entry metadata object to recycle.
  */
 static void llam_shard_stack_cache_entry_free(llam_shard_t *shard, llam_stack_cache_entry_t *entry) {
@@ -389,10 +389,10 @@ static bool llam_shard_stack_cache_pop(llam_shard_t *shard,
         return false;
     }
 
-    pthread_mutex_lock(&shard->lock);
+    pthread_mutex_lock(&shard->stack_cache_lock);
     entry = *head;
     if (entry == NULL) {
-        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->stack_cache_lock);
         return false;
     }
 
@@ -404,7 +404,7 @@ static bool llam_shard_stack_cache_pop(llam_shard_t *shard,
     mapping_size = entry->mapping_size;
     stack_base = entry->stack_base;
     llam_shard_stack_cache_entry_free(shard, entry);
-    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->stack_cache_lock);
 
     if (mapping_out != NULL) {
         *mapping_out = mapping;
@@ -519,14 +519,14 @@ static bool llam_shard_stack_cache_push(llam_shard_t *shard,
     if (head == NULL || count == NULL || limit == 0U) {
         return false;
     }
-    pthread_mutex_lock(&shard->lock);
+    pthread_mutex_lock(&shard->stack_cache_lock);
     if (*count >= limit) {
-        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->stack_cache_lock);
         return false;
     }
     entry = llam_shard_stack_cache_entry_alloc(shard);
     if (entry == NULL) {
-        pthread_mutex_unlock(&shard->lock);
+        pthread_mutex_unlock(&shard->stack_cache_lock);
         return false;
     }
     entry->mapping = mapping;
@@ -536,7 +536,7 @@ static bool llam_shard_stack_cache_push(llam_shard_t *shard,
     entry->next = *head;
     *head = entry;
     *count += 1U;
-    pthread_mutex_unlock(&shard->lock);
+    pthread_mutex_unlock(&shard->stack_cache_lock);
     return true;
 }
 
