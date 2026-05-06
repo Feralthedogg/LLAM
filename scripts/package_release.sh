@@ -2,7 +2,7 @@
 set -eu
 
 target="${1:-}"
-version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v0.1.0}}"
+version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v1.0.0}}"
 version="${version#v}"
 version="$(printf '%s' "$version" | tr '/' '-')"
 abi_major="${LLAM_ABI_MAJOR:-1}"
@@ -28,9 +28,9 @@ fi
 
 package_name="llam-$version-$target"
 stage="$out_dir/$package_name"
-archive="$out_dir/$package_name.tar.gz"
+archive="$out_dir/$package_name.tar.xz"
 
-rm -rf "$stage" "$archive" "$archive.sha256"
+rm -rf "$stage" "$archive" "$archive.sha256" "$out_dir/$package_name.tar.gz" "$out_dir/$package_name.tar.gz.sha256"
 mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib"
 
 printf '%s\n' "$version" > "$stage/VERSION"
@@ -58,7 +58,7 @@ case "$(uname -s)" in
         ;;
 esac
 
-tar -C "$out_dir" -czf "$archive" "$package_name"
+tar -C "$out_dir" -cJf "$archive" "$package_name"
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$out_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 else

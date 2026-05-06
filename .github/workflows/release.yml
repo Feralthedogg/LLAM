@@ -41,7 +41,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git python3
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git python3 xz-utils
 
       - name: Build liburing
         if: runner.os == 'Linux'
@@ -76,8 +76,8 @@ jobs:
         with:
           name: release-${{ matrix.target }}
           path: |
-            target/dist/*.tar.gz
-            target/dist/*.tar.gz.sha256
+            target/dist/*.tar.xz
+            target/dist/*.tar.xz.sha256
           if-no-files-found: error
 
   publish-release:
@@ -98,12 +98,62 @@ jobs:
           cd release-artifacts
           cat *.sha256 | sort -k2 > SHA256SUMS
 
+      - name: Build release notes
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          cd release-artifacts
+          version="${TAG#v}"
+          base_url="https://github.com/${REPOSITORY}/releases/download/${TAG}"
+          run_url="https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}"
+          {
+            echo "# LLAM ${version}"
+            echo
+            echo "LLAM ${version} publishes native runtime builds for Linux and macOS."
+            echo
+            echo "## Downloads"
+            echo
+            echo "| File | Platform | Checksum |"
+            echo "| --- | --- | --- |"
+            for row in \
+              "linux-x86_64|Linux x86_64" \
+              "linux-aarch64|Linux aarch64" \
+              "macos-x86_64|macOS x86_64" \
+              "macos-aarch64|macOS arm64"; do
+              target="${row%%|*}"
+              label="${row#*|}"
+              file="llam-${version}-${target}.tar.xz"
+              checksum="${file}.sha256"
+              if [ -f "$file" ]; then
+                echo "| [${file}](${base_url}/${file}) | ${label} | [checksum](${base_url}/${checksum}) |"
+              fi
+            done
+            echo
+            echo "## Package Contents"
+            echo
+            echo "- Public headers under \`include/\`."
+            echo "- Static runtime library: \`libllam_runtime.a\`."
+            echo "- Platform shared runtime library: \`libllam_runtime.so\` or \`libllam_runtime.dylib\`."
+            echo "- Docs, examples, and the bundled \`demo\`, \`stress\`, and \`bench\` executables."
+            echo
+            echo "## Verification"
+            echo
+            echo "- Release workflow succeeded: ${run_url}"
+            echo "- Release target commit: \`${RELEASE_SHA}\`."
+            echo "- Full checksum manifest: [SHA256SUMS](${base_url}/SHA256SUMS)."
+          } > RELEASE_NOTES.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          generate_release_notes: true
+          name: LLAM ${{ github.ref_name }}
+          body_path: release-artifacts/RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
           files: |
-            release-artifacts/*.tar.gz
-            release-artifacts/*.tar.gz.sha256
+            release-artifacts/*.tar.xz
+            release-artifacts/*.tar.xz.sha256
             release-artifacts/SHA256SUMS

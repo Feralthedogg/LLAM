@@ -113,7 +113,7 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, `demo`, `stress`, `bench`,
 `libllam_runtime.a`, and the platform shared library. Tag pushes such as
-`v0.1.0` build and publish archives for Linux x86_64, Linux aarch64, macOS
+`v1.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64, macOS
 x86_64, and macOS arm64 through `.github/workflows/release.yml`.
 
 Include the canonical public API:
