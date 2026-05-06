@@ -4,22 +4,33 @@ on:
   push:
     branches:
       - main
+      - dev
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: gcc
+          - name: linux-x86_64-gcc
+            runner: ubuntu-24.04
             cc: gcc
             cflags: "-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer"
-          - name: sanitizer
+            package_target: linux-x86_64
+          - name: linux-aarch64-gcc
+            runner: ubuntu-24.04-arm
+            cc: gcc
+            cflags: "-std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer"
+            package_target: linux-aarch64
+          - name: linux-x86_64-sanitizer
+            runner: ubuntu-24.04
             cc: gcc
             cflags: "-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer"
+            package_target: linux-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -36,23 +47,34 @@ jobs:
           sudo make -C /tmp/liburing install
           sudo ldconfig
 
-      - name: Make build
+      - name: Make sanitizer build
+        if: ${{ contains(matrix.name, 'sanitizer') }}
         run: make clean all CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
 
       - name: Verify Linux
-        if: matrix.name != 'sanitizer'
+        if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: make verify-linux CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
 
       - name: Sanitizer stress
-        if: matrix.name == 'sanitizer'
+        if: ${{ contains(matrix.name, 'sanitizer') }}
         run: LLAM_STRESS_ROUNDS=4 ./stress
 
       - name: CMake build
-        if: matrix.name == 'gcc'
+        if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: |
           cmake -S . -B build/linux -DCMAKE_C_COMPILER=gcc -DCMAKE_ASM_COMPILER=gcc
           cmake --build build/linux
+          ctest --test-dir build/linux --output-on-failure
 
       - name: Benchmark smoke
-        if: matrix.name == 'gcc'
+        if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: LLAM_BENCH_ONLY=spawn_join LLAM_BENCH_ROUNDS=1 ./bench
+
+      - name: Package smoke
+        if: ${{ !contains(matrix.name, 'sanitizer') }}
+        run: |
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.0 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
+          grep '/include/llam/runtime.h$' package-files.txt
+          grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
+          grep '/lib/pkgconfig/llam.pc$' package-files.txt

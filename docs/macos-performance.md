@@ -28,7 +28,8 @@ python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1 --o
 ```
 
 The `Runtime Benchmarks` GitHub workflow runs LLAM, Goroutine, and Tokio on
-macOS arm64 and Linux x86_64, then uploads CSV and graph artifacts.
+macOS arm64, macOS x86_64, and Linux x86_64, then uploads CSV and graph
+artifacts.
 
 Windows performance numbers are intentionally absent in 1.0.0 because native
 Windows support is planned but not implemented. See `docs/windows-roadmap.md`.

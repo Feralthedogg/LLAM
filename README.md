@@ -652,7 +652,8 @@ python3 scripts/bench_runtime_compare.py --runtime all
 
 Graph generation requires Python `matplotlib`. Without it, the script still writes CSV and prints tables.
 The scheduled `Runtime Benchmarks` workflow runs the same comparison on Linux
-and macOS and uploads CSV/PNG artifacts for regression tracking.
+x86_64, macOS arm64, and macOS x86_64, then uploads CSV/PNG artifacts for
+regression tracking.
 
 Run the benchmark matrix:
 
