@@ -26,6 +26,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if LLAM_PLATFORM_POSIX
+#include <unistd.h>
+#endif
 
 typedef struct core_state {
     atomic_uint failures;
@@ -117,6 +120,7 @@ static void inspect_task(void *arg) {
         return;
     }
 
+    llam_task_safepoint();
     llam_yield();
     if (llam_sleep_ns(0U) != 0) {
         task_fail(state, "llam_sleep_ns(0)", errno);
@@ -228,6 +232,7 @@ static int test_preinit_contracts(void) {
     if (llam_task_flags(NULL) != 0U) {
         return test_fail("llam_task_flags(NULL) did not return 0");
     }
+    llam_task_safepoint();
     errno = 0;
     if (llam_task_set_class(999U) != -1 || errno != EINVAL) {
         return test_fail("llam_task_set_class invalid class did not fail with EINVAL");
@@ -244,6 +249,10 @@ static int test_preinit_contracts(void) {
     errno = 0;
     if (llam_runtime_collect_stats_ex(&stats, 0U) != -1 || errno != EINVAL) {
         return test_fail("llam_runtime_collect_stats_ex zero size did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_write_stats_json(-1) != -1 || errno != EINVAL) {
+        return test_fail("llam_runtime_write_stats_json invalid fd did not fail with EINVAL");
     }
     memset(&stats, 0xA5, sizeof(stats));
     errno = 0;
@@ -402,6 +411,42 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
         llam_runtime_shutdown();
         return test_fail_errno("llam_runtime_collect_stats wrapper failed");
     }
+#if LLAM_PLATFORM_POSIX
+    {
+        int pipe_fds[2];
+        char json[1024];
+        ssize_t nread;
+
+        if (pipe(pipe_fds) != 0) {
+            llam_runtime_shutdown();
+            return test_fail_errno("pipe for stats json failed");
+        }
+        if (llam_runtime_write_stats_json(pipe_fds[1]) != 0) {
+            int saved_errno = errno;
+
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+            llam_runtime_shutdown();
+            errno = saved_errno;
+            return test_fail_errno("llam_runtime_write_stats_json failed");
+        }
+        close(pipe_fds[1]);
+        nread = read(pipe_fds[0], json, sizeof(json) - 1U);
+        close(pipe_fds[0]);
+        if (nread <= 0) {
+            llam_runtime_shutdown();
+            return test_fail("stats json read produced no data");
+        }
+        json[nread] = '\0';
+        if (json[0] != '{' ||
+            strstr(json, "\"ctx_switches\":") == NULL ||
+            strstr(json, "\"active_workers\":") == NULL ||
+            strstr(json, "\"io_submit_syscalls\":") == NULL) {
+            llam_runtime_shutdown();
+            return test_fail("stats json did not contain expected fields");
+        }
+    }
+#endif
 
     llam_runtime_shutdown();
     return 0;

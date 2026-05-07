@@ -279,6 +279,7 @@ unsigned stress_round_count(void);
 unsigned stress_env_u32(const char *name, unsigned default_value, unsigned max_value);
 unsigned stress_env_flag_default(const char *name, unsigned default_value);
 int stress_env_i32(const char *name, int default_value, int min_value, int max_value);
+unsigned stress_fd_budget_waiters(unsigned requested, unsigned fds_per_waiter, unsigned reserve_fds);
 bool stress_platform_prefers_indefinite_ready_poll(void);
 bool stress_platform_supports_foreign_poll_watch(void);
 bool stress_platform_supports_recv_watch(void);

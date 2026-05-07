@@ -209,11 +209,13 @@ int nm_runtime_request_stop(void);
 void nm_runtime_shutdown(void);
 int nm_runtime_collect_stats_ex(nm_runtime_stats_t *stats, size_t stats_size);
 int nm_runtime_collect_stats(nm_runtime_stats_t *stats);
+int nm_runtime_write_stats_json(int fd);
 
 nm_task_t *nm_spawn_ex(nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts, size_t opts_size);
 nm_task_t *nm_spawn(nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts);
 int nm_run(void);
 void nm_yield(void);
+void nm_task_safepoint(void);
 int nm_join(nm_task_t *task);
 int nm_join_until(nm_task_t *task, uint64_t deadline_ns);
 int nm_detach(nm_task_t *task);

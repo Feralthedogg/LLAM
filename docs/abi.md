@@ -55,7 +55,7 @@ with `errno` set on failure.
 | --- | --- | --- |
 | ABI/version | `llam_abi_version`, `llam_version_string`, `llam_abi_get_info` | Safe to call before runtime initialization. Returned strings are library-owned static storage. |
 | Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_shutdown` | Process-wide singleton runtime. Initialize before spawning tasks; shutdown invalidates runtime-owned handles. FFI bindings should prefer `_ex` and option initializers. |
-| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. FFI bindings should prefer `_ex` and option initializers. |
+| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. |
 | Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. |
 | Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners or waiters remain. |
@@ -63,7 +63,7 @@ with `errno` set on failure.
 | Blocking | `llam_call_blocking_result`, `llam_call_blocking`, `llam_enter_blocking`, `llam_leave_blocking` | Prevents long blocking work from pinning scheduler workers. `llam_call_blocking_result` is the unambiguous FFI-safe form. Blocking callback return value is user-owned. |
 | I/O | `llam_read`, `llam_write`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd` | Scheduler-safe descriptor/socket operations. File descriptor ownership follows POSIX convention unless owned-buffer APIs say otherwise. |
 | Owned buffers | `llam_io_buffer_data`, `llam_io_buffer_size`, `llam_io_buffer_capacity`, `llam_io_buffer_release` | Buffers returned by owned-read APIs are runtime-allocated and caller-released through `llam_io_buffer_release()`. |
-| Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` for stats snapshots. |
+| Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats`, `llam_runtime_write_stats_json`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` for stats snapshots and JSON export for machine logs. |
 
 Compatibility `nm_*` symbols follow the same contracts and remain available for
 existing code, but new bindings should prefer the canonical `llam_*` names.
@@ -135,6 +135,10 @@ library's `llam_runtime_stats_t`. This lets older FFI bindings pass smaller
 stats structs to newer libraries without buffer overflow when fields are
 appended at the tail. `llam_runtime_collect_stats()` is a C convenience wrapper
 that passes `sizeof(llam_runtime_stats_t)`.
+
+`llam_runtime_write_stats_json(fd)` writes the same canonical LLAM counter names
+as a newline-terminated JSON object. The schema is additive: consumers must
+ignore unknown fields and should not require a fixed field order.
 
 All scalar control fields in public option structs and all 32-bit counter/state
 fields in public stats structs use fixed-width integer storage. Language
@@ -279,7 +283,9 @@ function returns.
 
 `llam_yield()` is cooperative. It never transfers ownership of user memory and
 does not imply a memory fence beyond the synchronization performed by the
-runtime scheduler.
+runtime scheduler. `llam_task_safepoint()` is the lower-overhead progress hook
+for CPU-bound loops; it is a no-op outside a managed task and may yield only
+when runtime policy or preemption requests require it.
 
 ## Synchronization Semantics
 
@@ -290,6 +296,7 @@ instead of blocking the scheduler worker.
 Outside-runtime behavior is fixed as follows:
 
 - `llam_yield()` outside a managed task is a no-op.
+- `llam_task_safepoint()` outside a managed task is a no-op.
 - `llam_sleep_ns()` and `llam_sleep_until()` block the calling OS thread after
   runtime initialization; before initialization they fail with `EINVAL`.
 - `llam_call_blocking_result()` runs the callback synchronously outside a

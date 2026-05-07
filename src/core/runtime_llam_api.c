@@ -184,6 +184,10 @@ int nm_runtime_collect_stats(nm_runtime_stats_t *stats) {
     return nm_runtime_collect_stats_ex(stats, stats != NULL ? sizeof(*stats) : 0U);
 }
 
+int nm_runtime_write_stats_json(int fd) {
+    return llam_runtime_write_stats_json(fd);
+}
+
 nm_task_t *nm_spawn_ex(nm_task_fn fn, void *arg, const nm_spawn_opts_t *opts, size_t opts_size) {
     nm_spawn_opts_t opts_storage;
     llam_spawn_opts_t llam_opts;
@@ -213,6 +217,10 @@ int nm_run(void) {
 
 void nm_yield(void) {
     llam_yield();
+}
+
+void nm_task_safepoint(void) {
+    llam_task_safepoint();
 }
 
 int nm_join(nm_task_t *task) {

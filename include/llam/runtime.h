@@ -379,6 +379,20 @@ int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size
 int llam_runtime_collect_stats(llam_runtime_stats_t *stats);
 
 /**
+ * @brief Write runtime counters as one JSON object to an fd.
+ *
+ * @details
+ * The JSON field set is additive and intended for dashboards, stress logs, and
+ * automation that should not parse ::llam_dump_runtime_state. The call writes a
+ * single newline-terminated object. Managed and unmanaged callers are both
+ * allowed.
+ *
+ * @param fd Destination file descriptor.
+ * @return 0 on success, -1 on invalid fd/write failure with errno set.
+ */
+int llam_runtime_write_stats_json(int fd);
+
+/**
  * @brief Create a task and make it runnable with an explicit option size.
  *
  * @details
@@ -425,6 +439,17 @@ int llam_run(void);
  * @details Calls outside a managed LLAM task are a no-op.
  */
 void llam_yield(void);
+
+/**
+ * @brief Execute a cooperative safepoint without requiring an immediate yield.
+ *
+ * @details
+ * CPU-bound managed tasks should call this periodically from long loops so the
+ * watchdog, cancellation, allocator quiescence, and cooperative preemption
+ * machinery can observe progress. Calls outside a managed LLAM task are a
+ * no-op.
+ */
+void llam_task_safepoint(void);
 
 /**
  * @brief Wait indefinitely for task completion.

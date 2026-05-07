@@ -43,6 +43,8 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/
 
 Native Windows runtime support is not complete in 1.0.0. Use WSL/Linux if you need a working Windows-hosted path today. The native Windows plan is documented in `docs/windows-roadmap.md`.
 
+Production and stress-operation guidance is documented in `docs/operations.md`.
+
 ## Getting Started
 
 Install Linux/WSL dependencies:
@@ -433,6 +435,7 @@ Runtime lifecycle:
 | `llam_runtime_shutdown` | Shut the runtime down and release resources. |
 | `llam_runtime_collect_stats_ex` | Collect stats with an explicit output struct size for FFI. |
 | `llam_runtime_collect_stats` | Collect scheduler, I/O, blocking, and queue statistics. |
+| `llam_runtime_write_stats_json` | Write a newline-terminated JSON stats snapshot to an fd. |
 
 Task scheduling:
 
@@ -443,6 +446,7 @@ Task scheduling:
 | `llam_spawn` | Create a task. |
 | `llam_run` | Run the scheduler. |
 | `llam_yield` | Yield the current task. |
+| `llam_task_safepoint` | Mark progress in CPU-bound loops without forcing an immediate yield. |
 | `llam_join` | Wait for task completion. |
 | `llam_join_until` | Wait for task completion until a deadline. |
 | `llam_detach` | Consume a task handle without waiting for completion. |
@@ -594,6 +598,9 @@ Experimental flags:
 
 Selected environment variables:
 
+The table lists canonical `LLAM_*` names. Legacy `NM_*` aliases and the older
+`*_SHARD_*` experimental names remain compatibility-only inputs for old scripts.
+
 | Variable | Example values | Meaning |
 | --- | --- | --- |
 | `LLAM_RUNTIME_PROFILE` | `balanced`, `release-fast`, `debug-safe`, `io-latency` | Override the runtime profile. |
@@ -606,6 +613,24 @@ Selected environment variables:
 | `LLAM_SQPOLL_CPU` | CPU number | Select the SQPOLL CPU. |
 | `LLAM_IDLE_SPIN_NS` | nanoseconds | Idle spin time. |
 | `LLAM_IDLE_SPIN_ITERS` | iteration count | Idle spin iteration limit. |
+| `LLAM_BIND_WORKERS` | `0`, `1` | Bind worker threads to platform CPUs when supported. |
+| `LLAM_DARWIN_MACH_SCHED` | `0`, `1` | Toggle Darwin Mach/QoS scheduler hints; default is enabled on macOS. |
+| `LLAM_DIRECT_BLOCKING_IO` | `0`, `1` | Allow eligible blocking socket read/write operations to run through compensated direct blocking regions. |
+| `LLAM_DIRECT_BLOCKING_POLL` | `0`, `1`, unset | Control direct blocking poll fallback; Linux auto mode handles finite waits directly when profitable. |
+| `LLAM_IO_POLL_REDIRECT_TIMEOUT_MS` | milliseconds | Redirect long direct-poll waits through opaque blocking compensation on Linux. |
+| `LLAM_IO_COOP_YIELD` | `0`, `1` | Enable cooperative yields around direct I/O fast paths; default is enabled on macOS and Linux. |
+| `LLAM_IO_POLL_COOP_YIELD` | `0`, `1` | Enable cooperative yields in poll readiness paths; default is enabled on macOS and Linux. |
+| `LLAM_IO_POLL_EXTRA_YIELD` | `0`, `1` | Add an extra poll-readiness yield; default is enabled on macOS and opt-in elsewhere. |
+| `LLAM_POLL_SOCKET_PEEK` | `0`, `1` | Use `MSG_PEEK` for socket `POLLIN` fast checks; default is enabled on macOS and opt-in elsewhere. |
+| `LLAM_IO_WRITE_HANDOFF` | `0`, `1` | Yield after small socket writes so local readers can run; default is enabled on macOS and Linux. |
+| `LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF` | `0`, `1` | Prefer direct same-shard task handoff after eligible socket writes; default is enabled on macOS and Linux. |
+| `LLAM_OPAQUE_REDIRECT_FASTPATH` | `0`, `1` | Prefer redirect over helper handoff for opaque blocking; default is enabled on Linux. |
+| `LLAM_STACK_CACHE_PREWARM` | stack count | Prewarm the default stack cache before high fanout workloads. |
+| `LLAM_TASK_CACHE_PREWARM` | task count | Prewarm task metadata slabs before high fanout workloads. |
+| `LLAM_STACK_SAMPLING` | `0`, `1` | Enable stack high-water sampling diagnostics. |
+| `LLAM_TRACE_EVENTS` | `0`, `1` | Enable per-worker trace ring diagnostics. |
+| `LLAM_WAKE_LATENCY_METRICS` | `0`, `1` | Enable wake-latency diagnostics. |
+| `LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS` | waiter count | Stress live poll/accept/inflight waiters; automatically clamped by fd budget. |
 
 ## Benchmarks
 

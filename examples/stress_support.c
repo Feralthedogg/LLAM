@@ -20,6 +20,10 @@
 
 #include "stress_internal.h"
 
+#if LLAM_PLATFORM_POSIX
+#include <sys/resource.h>
+#endif
+
 atomic_uint g_failures;
 
 void stress_fail_msg(const char *label) {
@@ -360,6 +364,48 @@ int stress_env_i32(const char *name, int default_value, int min_value, int max_v
         parsed = (long)max_value;
     }
     return (int)parsed;
+}
+
+unsigned stress_fd_budget_waiters(unsigned requested, unsigned fds_per_waiter, unsigned reserve_fds) {
+#if LLAM_PLATFORM_POSIX
+    struct rlimit limit;
+    unsigned long long soft_limit;
+    unsigned long long available;
+    unsigned long long capped;
+
+    if (requested == 0U || fds_per_waiter == 0U || getrlimit(RLIMIT_NOFILE, &limit) != 0 ||
+        limit.rlim_cur == RLIM_INFINITY) {
+        return requested;
+    }
+
+    soft_limit = (unsigned long long)limit.rlim_cur;
+    if (soft_limit <= (unsigned long long)reserve_fds) {
+        capped = 1ULL;
+    } else {
+        available = soft_limit - (unsigned long long)reserve_fds;
+        capped = available / (unsigned long long)fds_per_waiter;
+        if (capped == 0ULL) {
+            capped = 1ULL;
+        }
+    }
+    if (capped > (unsigned long long)requested) {
+        return requested;
+    }
+    if (capped < (unsigned long long)requested) {
+        fprintf(stderr,
+                "[stress] fd budget clamped dynamic waiters requested=%u effective=%llu nofile=%llu reserve=%u fds_per_waiter=%u\n",
+                requested,
+                capped,
+                soft_limit,
+                reserve_fds,
+                fds_per_waiter);
+    }
+    return (unsigned)capped;
+#else
+    (void)fds_per_waiter;
+    (void)reserve_fds;
+    return requested;
+#endif
 }
 
 bool stress_platform_prefers_indefinite_ready_poll(void) {

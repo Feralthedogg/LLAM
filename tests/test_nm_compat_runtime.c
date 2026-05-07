@@ -25,7 +25,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#if NM_PLATFORM_POSIX
+#include <unistd.h>
+#endif
+
+extern const char *llam_env_get(const char *name);
 
 typedef struct nm_state {
     nm_channel_t *channel;
@@ -46,6 +52,51 @@ static int test_fail(const char *message) {
 static int test_fail_errno(const char *message) {
     fprintf(stderr, "[test_nm_compat_runtime] %s: errno=%d (%s)\n", message, errno, strerror(errno));
     return 1;
+}
+
+static int test_nm_env_aliases(void) {
+#if NM_PLATFORM_WINDOWS
+    return 0;
+#else
+    const char *value;
+
+    (void)unsetenv("LLAM_TEST_ALIAS");
+    (void)unsetenv("NM_TEST_ALIAS");
+    if (setenv("NM_TEST_ALIAS", "ok", 1) != 0) {
+        return test_fail_errno("setenv NM_TEST_ALIAS failed");
+    }
+    value = llam_env_get("LLAM_TEST_ALIAS");
+    if (value == NULL || strcmp(value, "ok") != 0) {
+        (void)unsetenv("NM_TEST_ALIAS");
+        return test_fail("LLAM_TEST_ALIAS did not fall back to NM_TEST_ALIAS");
+    }
+    if (setenv("LLAM_TEST_ALIAS", "canonical", 1) != 0) {
+        (void)unsetenv("NM_TEST_ALIAS");
+        return test_fail_errno("setenv LLAM_TEST_ALIAS failed");
+    }
+    value = llam_env_get("LLAM_TEST_ALIAS");
+    if (value == NULL || strcmp(value, "canonical") != 0) {
+        (void)unsetenv("LLAM_TEST_ALIAS");
+        (void)unsetenv("NM_TEST_ALIAS");
+        return test_fail("canonical LLAM env did not win over NM alias");
+    }
+    (void)unsetenv("LLAM_TEST_ALIAS");
+    (void)unsetenv("NM_TEST_ALIAS");
+
+    (void)unsetenv("LLAM_EXPERIMENTAL_WORKER_RINGS");
+    (void)unsetenv("LLAM_EXPERIMENTAL_SHARD_RINGS");
+    (void)unsetenv("NM_EXPERIMENTAL_SHARD_RINGS");
+    if (setenv("NM_EXPERIMENTAL_SHARD_RINGS", "1", 1) != 0) {
+        return test_fail_errno("setenv NM_EXPERIMENTAL_SHARD_RINGS failed");
+    }
+    value = llam_env_get("LLAM_EXPERIMENTAL_WORKER_RINGS");
+    if (value == NULL || strcmp(value, "1") != 0) {
+        (void)unsetenv("NM_EXPERIMENTAL_SHARD_RINGS");
+        return test_fail("worker-ring env did not accept NM shard alias");
+    }
+    (void)unsetenv("NM_EXPERIMENTAL_SHARD_RINGS");
+    return 0;
+#endif
 }
 
 static void task_fail(nm_state_t *state, const char *where, int err) {
@@ -79,6 +130,7 @@ static void nm_sender_task(void *arg) {
         task_fail(state, "nm_channel_send", errno);
         return;
     }
+    nm_task_safepoint();
     nm_yield();
     atomic_fetch_add_explicit(&state->sender_done, 1U, memory_order_relaxed);
 }
@@ -153,6 +205,11 @@ static int test_nm_runtime_wrappers(void) {
     runtime_opts.profile = NM_RUNTIME_PROFILE_RELEASE_FAST;
     if (nm_runtime_init_ex(&runtime_opts, sizeof(runtime_opts)) != 0) {
         return test_fail_errno("nm_runtime_init_ex failed");
+    }
+    errno = 0;
+    if (nm_runtime_write_stats_json(-1) != -1 || errno != EINVAL) {
+        nm_runtime_shutdown();
+        return test_fail("nm_runtime_write_stats_json invalid fd did not fail with EINVAL");
     }
 
     state.channel = nm_channel_create(1U);
@@ -237,6 +294,45 @@ static int test_nm_runtime_wrappers(void) {
         nm_runtime_shutdown();
         return test_fail_errno("nm_runtime_collect_stats wrapper failed");
     }
+#if NM_PLATFORM_POSIX
+    {
+        int pipe_fds[2];
+        char json[1024];
+        ssize_t nread;
+
+        if (pipe(pipe_fds) != 0) {
+            nm_channel_destroy(state.channel);
+            nm_runtime_shutdown();
+            return test_fail_errno("pipe for nm stats json failed");
+        }
+        if (nm_runtime_write_stats_json(pipe_fds[1]) != 0) {
+            int saved_errno = errno;
+
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+            nm_channel_destroy(state.channel);
+            nm_runtime_shutdown();
+            errno = saved_errno;
+            return test_fail_errno("nm_runtime_write_stats_json failed");
+        }
+        close(pipe_fds[1]);
+        nread = read(pipe_fds[0], json, sizeof(json) - 1U);
+        close(pipe_fds[0]);
+        if (nread <= 0) {
+            nm_channel_destroy(state.channel);
+            nm_runtime_shutdown();
+            return test_fail("nm stats json read produced no data");
+        }
+        json[nread] = '\0';
+        if (json[0] != '{' ||
+            strstr(json, "\"ctx_switches\":") == NULL ||
+            strstr(json, "\"active_workers\":") == NULL) {
+            nm_channel_destroy(state.channel);
+            nm_runtime_shutdown();
+            return test_fail("nm stats json did not contain expected fields");
+        }
+    }
+#endif
 
     nm_channel_destroy(state.channel);
     nm_runtime_shutdown();
@@ -244,7 +340,8 @@ static int test_nm_runtime_wrappers(void) {
 }
 
 int main(void) {
-    if (test_nm_cancel_token_contract() != 0 ||
+    if (test_nm_env_aliases() != 0 ||
+        test_nm_cancel_token_contract() != 0 ||
         test_nm_runtime_wrappers() != 0) {
         return 1;
     }
