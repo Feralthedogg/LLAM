@@ -75,8 +75,6 @@ Require-Input (Join-Path $Root "LICENSE")
 Require-Input (Join-Path $Root "README.md")
 Require-Input (Join-Path $Root "docs")
 Require-Input (Join-Path $Root "include\llam")
-Require-Input (Join-Path $Root "include\nm_runtime.h")
-Require-Input (Join-Path $Root "include\nm_platform.h")
 Require-Input (Join-Path $Root "examples\bench.c")
 Require-Input $StaticLib
 Require-Input $SharedDll
@@ -87,7 +85,6 @@ Set-Content -Path (Join-Path $Stage "VERSION") -Value $Version -NoNewline
 Copy-Item -Path @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md")) -Destination $Stage
 Copy-Item -Recurse -Path (Join-Path $Root "docs\*") -Destination (Join-Path $Stage "docs")
 Copy-Item -Recurse -Path (Join-Path $Root "include\llam") -Destination (Join-Path $Stage "include")
-Copy-Item -Path @((Join-Path $Root "include\nm_runtime.h"), (Join-Path $Root "include\nm_platform.h")) -Destination (Join-Path $Stage "include")
 Copy-Item -Path @(
     (Join-Path $Root "examples\demo.c"),
     (Join-Path $Root "examples\bench.c"),

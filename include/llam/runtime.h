@@ -5,9 +5,7 @@
  * @details
  * LLAM exposes stackful cooperative tasks backed by a scheduler/runtime that can
  * integrate blocking callbacks, runtime-aware synchronization primitives, and
- * platform I/O backends. This header is the canonical public API. Legacy
- * @c nm_* names are provided by compatibility headers and forward to the same
- * implementation.
+ * platform I/O backends. This header is the canonical public API.
  *
  * Typical lifecycle:
  *  - call ::llam_runtime_init once,

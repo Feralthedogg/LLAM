@@ -27,7 +27,6 @@ CLEAN_FILES = \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
-	test_nm_compat_runtime \
 	test_shared_load \
 	libllam_runtime.a \
 	demo.exe \
@@ -41,7 +40,6 @@ CLEAN_FILES = \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
-	test_nm_compat_runtime.exe \
 	test_shared_load.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
@@ -83,8 +81,6 @@ DL_LIBS = -ldl
 endif
 
 RUNTIME_PRIV_HDRS = \
-	include/llam/nm_platform.h \
-	include/llam/nm_runtime.h \
 	include/llam/platform.h \
 	include/llam/runtime.h \
 	src/internal/runtime_platform.h \
@@ -132,6 +128,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_windows.o \
 	$(OBJDIR)/src/core/runtime_safepoint.o \
 	$(OBJDIR)/src/core/runtime_wait.o \
+	$(OBJDIR)/src/core/runtime_task_reclaim.o \
 	$(OBJDIR)/src/core/runtime_task_stack.o \
 	$(OBJDIR)/src/core/runtime_reinject.o \
 	$(OBJDIR)/src/core/runtime_wait_tracking.o \
@@ -146,7 +143,6 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/engine/runtime_watchdog_scale.o \
 	$(OBJDIR)/src/engine/runtime_watchdog_worker.o \
 	$(OBJDIR)/src/core/runtime_api.o \
-	$(OBJDIR)/src/core/runtime_llam_api.o \
 	$(OBJDIR)/src/core/runtime_spawn.o \
 	$(OBJDIR)/src/core/runtime_yield_join_sleep.o \
 	$(OBJDIR)/src/core/runtime_blocking_api.o \
@@ -275,8 +271,6 @@ TEST_IO_BUFFERS_OBJS = \
 	$(OBJDIR)/tests/test_io_buffers.o
 TEST_WINDOWS_POLICY_OBJS = \
 	$(OBJDIR)/tests/test_windows_policy.o
-TEST_NM_COMPAT_OBJS = \
-	$(OBJDIR)/tests/test_nm_compat_runtime.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
@@ -314,14 +308,13 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_connect_io test_runtime_core test_sync_primitives test_io_buffers test_windows_policy test_nm_compat_runtime test_shared_load shared
+test: test_abi_contract test_connect_io test_runtime_core test_sync_primitives test_io_buffers test_windows_policy test_shared_load shared
 	./test_abi_contract
 	./test_connect_io
 	./test_runtime_core
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
-	./test_nm_compat_runtime
 	./test_shared_load ./$(SHLIB_REAL)
 
 check: test
@@ -375,9 +368,6 @@ test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
 
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)
-
-test_nm_compat_runtime: $(RUNTIME_OBJS) $(TEST_NM_COMPAT_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_NM_COMPAT_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
@@ -522,7 +512,7 @@ $(OBJDIR)/examples/server_flood.o: examples/server_flood.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/%.o: tests/%.c include/llam/runtime.h include/llam/nm_runtime.h
+$(OBJDIR)/tests/%.o: tests/%.c include/llam/runtime.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

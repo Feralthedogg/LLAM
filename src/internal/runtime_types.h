@@ -901,6 +901,10 @@ struct llam_node {
     uint64_t submit_entries;
     uint64_t submit_calls;
     uint64_t submit_syscalls;
+    uint64_t windows_cancel_controls;
+    uint64_t windows_cancel_success;
+    uint64_t windows_cancel_failures;
+    uint64_t windows_cancel_not_found;
     unsigned max_submit_batch;
     unsigned last_cq_depth;
     unsigned max_cq_depth;

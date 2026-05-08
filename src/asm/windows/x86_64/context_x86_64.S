@@ -79,7 +79,13 @@ llam_ctx_switch:
     testl $LLAM_WIN_CTX_SIMD_F_SKIP_RESTORE, LLAM_WIN_CTX_SIMD_FLAGS_OFFSET(%r10)
     jnz .Lllam_win_ctx_restored_simd
     cmpl $0, 256(%r10)
+    jne .Lllam_win_ctx_restore_valid_simd
+    cmpl $0, g_llam_fp_control_context(%rip)
     je .Lllam_win_ctx_restored_simd
+    ldmxcsr 240(%r10)
+    fldcw 244(%r10)
+    jmp .Lllam_win_ctx_restored_simd
+.Lllam_win_ctx_restore_valid_simd:
     movq 248(%r10), %r11
     testq %r11, %r11
     jnz .Lllam_win_ctx_restore_xsave

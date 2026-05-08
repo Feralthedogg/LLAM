@@ -317,7 +317,7 @@ void llam_dump_runtime_state(int fd) {
     dprintf(fd, "nodes:\n");
     for (i = 0; i < rt->active_nodes; ++i) {
         dprintf(fd,
-                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
+                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu cancel(ctrl=%llu ok=%llu fail=%llu not_found=%llu) max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
                 rt->nodes[i].index,
                 rt->nodes[i].kernel_node_id,
                 rt->nodes[i].ring_ready ? 1U : 0U,
@@ -338,6 +338,10 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)rt->nodes[i].submit_entries,
                 (unsigned long long)rt->nodes[i].submit_calls,
                 (unsigned long long)rt->nodes[i].submit_syscalls,
+                (unsigned long long)rt->nodes[i].windows_cancel_controls,
+                (unsigned long long)rt->nodes[i].windows_cancel_success,
+                (unsigned long long)rt->nodes[i].windows_cancel_failures,
+                (unsigned long long)rt->nodes[i].windows_cancel_not_found,
                 rt->nodes[i].max_submit_batch,
                 rt->nodes[i].last_cq_depth,
                 rt->nodes[i].max_cq_depth,

@@ -171,6 +171,36 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
 }
 
 /**
+ * @brief Queue backend cancellation for a request that became in-flight during setup.
+ *
+ * A cancellation token may already be cancelled by the time the task registers
+ * after publishing an I/O request. If the backend worker has already taken the
+ * request out of the submit queue, the request must stay owned by the backend
+ * until its cancellation completion arrives.
+ */
+static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reason_t reason) {
+    int node_index;
+    llam_node_t *node;
+
+    if (req == NULL ||
+        atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_INFLIGHT) {
+        return false;
+    }
+    node_index = llam_io_req_node_index(req);
+    if (node_index < 0) {
+        return false;
+    }
+    node = &g_llam_runtime.nodes[node_index];
+    atomic_store_explicit(&req->abort_reason, (unsigned)reason, memory_order_release);
+    if (atomic_exchange_explicit(&req->cancel_queued, 1U, memory_order_acq_rel) == 0U &&
+        llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req) != 0) {
+        atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+/**
  * @brief Prepare the current task before publishing it to a shared I/O watch.
  *
  * Watch completions can race with waiter insertion because an already-active
@@ -272,8 +302,15 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     }
     if (task->cancel_token != NULL && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
         if (llam_cancel_token_register_task(task) != 0) {
-            llam_cleanup_io_wait_setup(task, req);
-            return -1;
+            int saved_errno = errno;
+
+            if (saved_errno == ECANCELED && llam_abort_inflight_io_setup(req, LLAM_IO_ABORT_CANCEL)) {
+                /* Backend completion will wake this task with ECANCELED. */
+            } else {
+                llam_cleanup_io_wait_setup(task, req);
+                errno = saved_errno;
+                return -1;
+            }
         }
         if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE && task->cancel_registered) {
             llam_cancel_token_unregister_task(task);

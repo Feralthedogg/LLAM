@@ -580,11 +580,6 @@ static bool llam_reinject_single_local_join_waiter(llam_runtime_t *rt, llam_task
 void llam_reinject_join_waiters(llam_runtime_t *rt, llam_task_t *task) {
     llam_task_t *waiters;
 
-    if (atomic_load_explicit(&task->join_waiter_hint, memory_order_acquire) == 0U) {
-        task->join_waiter_count_at_exit = 0U;
-        return;
-    }
-
     pthread_mutex_lock(&task->lock);
     waiters = task->join_waiters;
     // Preserve the exit-time waiter count for reclamation ownership.
@@ -593,6 +588,10 @@ void llam_reinject_join_waiters(llam_runtime_t *rt, llam_task_t *task) {
     task->join_waiter_count = 0U;
     atomic_store_explicit(&task->join_waiter_hint, 0U, memory_order_release);
     pthread_mutex_unlock(&task->lock);
+
+    if (waiters == NULL) {
+        return;
+    }
 
     while (waiters != NULL) {
         llam_task_t *next = waiters->wait_next;

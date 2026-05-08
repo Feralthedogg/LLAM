@@ -22,6 +22,7 @@
 
 int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
     llam_windows_fd_assoc_t *assoc;
+    bool known_fd = false;
     HANDLE handle;
     DWORD error_code;
 
@@ -31,17 +32,22 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
     }
     for (assoc = node->windows_fd_assoc_head; assoc != NULL; assoc = assoc->next) {
         if (assoc->fd == fd) {
-            return 0;
+            known_fd = true;
+            break;
         }
     }
 
     handle = CreateIoCompletionPort((HANDLE)(uintptr_t)fd, (HANDLE)node->windows_iocp_handle, 0, 0);
     if (handle == NULL) {
         error_code = GetLastError();
-        if (error_code != ERROR_INVALID_PARAMETER) {
-            errno = error_code == ERROR_NOT_ENOUGH_MEMORY ? ENOMEM : EINVAL;
-            return -1;
+        if (error_code == ERROR_INVALID_PARAMETER && known_fd) {
+            return 0;
         }
+        errno = error_code == ERROR_NOT_ENOUGH_MEMORY ? ENOMEM : EINVAL;
+        return -1;
+    }
+    if (known_fd) {
+        return 0;
     }
 
     assoc = calloc(1, sizeof(*assoc));

@@ -141,28 +141,51 @@ def print_summary(rows: list[BenchRow], cases: list[str]) -> None:
     runtimes = [runtime for runtime in ["LLAM", "Goroutine", "Tokio"] if any(row.runtime == runtime for row in rows)]
 
     if runtimes != ["LLAM", "Goroutine", "Tokio"]:
-        print("| runtime | case | ops/s | p50 us | p99 us |")
-        print("| --- | --- | ---: | ---: | ---: |")
+        out_rows = []
+        out_rows.append(["runtime", "case", "ops/s", "p50 us", "p99 us"])
         for case in cases:
             for runtime in runtimes:
                 row = by_key.get((runtime, case))
                 if row is None:
                     continue
-                print(f"| {runtime} | {case} | {row.ops_per_sec:.2f} | {row.p50_us:.2f} | {row.p99_us:.2f} |")
+                out_rows.append([runtime, case, f"{row.ops_per_sec:.2f}", f"{row.p50_us:.2f}", f"{row.p99_us:.2f}"])
+        if len(out_rows) <= 1:
+            return
+        widths = [max(len(str(item)) for item in col) for col in zip(*out_rows)]
+        w = [max(3, width) for width in widths]
+        print(f"| {out_rows[0][0]:<{w[0]}} | {out_rows[0][1]:<{w[1]}} | {out_rows[0][2]:>{w[2]}} | {out_rows[0][3]:>{w[3]}} | {out_rows[0][4]:>{w[4]}} |")
+        print(f"| {'-' * w[0]} | {'-' * w[1]} | {'-' * (w[2]-1)}: | {'-' * (w[3]-1)}: | {'-' * (w[4]-1)}: |")
+        for row in out_rows[1:]:
+            print(f"| {row[0]:<{w[0]}} | {row[1]:<{w[1]}} | {row[2]:>{w[2]}} | {row[3]:>{w[3]}} | {row[4]:>{w[4]}} |")
         return
 
-    print("| case | LLAM ops/s | Goroutine ops/s | Tokio ops/s | LLAM/Go | LLAM/Tokio |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: |")
+    out_rows = []
+    out_rows.append(["case", "LLAM ops/s", "Goroutine ops/s", "Tokio ops/s", "LLAM/Go", "LLAM/Tokio"])
     for case in cases:
         values = [by_key.get((runtime, case)) for runtime in runtimes]
         if any(value is None for value in values):
             continue
         llam, go, tokio = values
         assert llam is not None and go is not None and tokio is not None
-        print(
-            f"| {case} | {llam.ops_per_sec:.2f} | {go.ops_per_sec:.2f} | {tokio.ops_per_sec:.2f} | "
-            f"{llam.ops_per_sec / go.ops_per_sec:.2f}x | {llam.ops_per_sec / tokio.ops_per_sec:.2f}x |"
-        )
+        out_rows.append([
+            case,
+            f"{llam.ops_per_sec:.2f}",
+            f"{go.ops_per_sec:.2f}",
+            f"{tokio.ops_per_sec:.2f}",
+            f"{llam.ops_per_sec / go.ops_per_sec:.2f}x",
+            f"{llam.ops_per_sec / tokio.ops_per_sec:.2f}x"
+        ])
+
+    if len(out_rows) <= 1:
+        return
+
+    widths = [max(len(str(item)) for item in col) for col in zip(*out_rows)]
+    w = [max(3, width) for width in widths]
+
+    print(f"| {out_rows[0][0]:<{w[0]}} | {out_rows[0][1]:>{w[1]}} | {out_rows[0][2]:>{w[2]}} | {out_rows[0][3]:>{w[3]}} | {out_rows[0][4]:>{w[4]}} | {out_rows[0][5]:>{w[5]}} |")
+    print(f"| {'-' * w[0]} | {'-' * (w[1]-1)}: | {'-' * (w[2]-1)}: | {'-' * (w[3]-1)}: | {'-' * (w[4]-1)}: | {'-' * (w[5]-1)}: |")
+    for row in out_rows[1:]:
+        print(f"| {row[0]:<{w[0]}} | {row[1]:>{w[1]}} | {row[2]:>{w[2]}} | {row[3]:>{w[3]}} | {row[4]:>{w[4]}} | {row[5]:>{w[5]}} |")
 
 
 def grouped_bars(ax, cases: list[str], runtimes: list[str], values: dict[tuple[str, str], float], ylabel: str, title: str, log: bool = False) -> None:

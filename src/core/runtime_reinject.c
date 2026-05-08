@@ -26,7 +26,7 @@
 
 #include "runtime_internal.h"
 
-#if LLAM_RUNTIME_BACKEND_WINDOWS || defined(__linux__)
+#if defined(__linux__)
 #define LLAM_REINJECT_DIRECT_OWNER_HANDOFF 1
 #else
 #define LLAM_REINJECT_DIRECT_OWNER_HANDOFF 0

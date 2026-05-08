@@ -198,12 +198,12 @@ int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
 
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
     /*
-     * Fresh Windows fibers skip SIMD/FP restore on first entry.  The first
-     * switch-out saves the real ABI-preserved state and marks it valid, so
-     * per-spawn FP control reads are unnecessary on this path.
+     * Fresh Windows fibers skip XMM6-XMM15 restore on first entry, but still
+     * need to inherit the caller's FP control environment when the scheduler
+     * dispatches them without a direct task-to-task handoff.
      */
-    ctx->mxcsr = 0U;
-    ctx->x87_cw = 0U;
+    ctx->mxcsr = llam_current_mxcsr();
+    ctx->x87_cw = llam_current_x87_cw();
     ctx->pad = 0U;
     ctx->xsave_area = NULL;
     ctx->simd_valid = 0U;

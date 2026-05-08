@@ -62,7 +62,18 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
     if (req != NULL && atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_INFLIGHT) {
         io_op = req->platform_data;
         if (io_op != NULL && io_op->magic == LLAM_WINDOWS_IO_OP_MAGIC) {
-            (void)CancelIoEx((HANDLE)(uintptr_t)req->fd, &io_op->overlapped);
+            DWORD error_code;
+
+            io_op->node->windows_cancel_controls += 1U;
+            if (CancelIoEx((HANDLE)(uintptr_t)req->fd, &io_op->overlapped)) {
+                io_op->node->windows_cancel_success += 1U;
+            } else {
+                error_code = GetLastError();
+                io_op->node->windows_cancel_failures += 1U;
+                if (error_code == ERROR_NOT_FOUND) {
+                    io_op->node->windows_cancel_not_found += 1U;
+                }
+            }
         }
     }
     free(op);

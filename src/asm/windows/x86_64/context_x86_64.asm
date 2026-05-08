@@ -85,7 +85,13 @@ saved_simd:
     test DWORD PTR [r10 + LLAM_WIN_CTX_SIMD_FLAGS_OFFSET], LLAM_WIN_CTX_SIMD_F_SKIP_RESTORE
     jnz restored_simd
     cmp DWORD PTR [r10 + 256], 0
+    jne restore_valid_simd
+    cmp DWORD PTR [g_llam_fp_control_context], 0
     je restored_simd
+    ldmxcsr DWORD PTR [r10 + 240]
+    fldcw WORD PTR [r10 + 244]
+    jmp restored_simd
+restore_valid_simd:
     mov r11, QWORD PTR [r10 + 248]
     test r11, r11
     jnz restore_xsave

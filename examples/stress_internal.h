@@ -48,6 +48,10 @@
 #ifndef POLLHUP
 #define POLLHUP 0x0002
 #endif
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
+int stress_socketpair_windows(int domain, int type, int protocol, int sv[2]);
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -59,6 +63,13 @@
 #include "runtime_internal.h"
 
 #include "env_compat.h"
+
+#if LLAM_PLATFORM_WINDOWS
+#undef write
+#define socketpair(domain, type, protocol, sv) stress_socketpair_windows((domain), (type), (protocol), (sv))
+#define close(fd) closesocket((SOCKET)(uintptr_t)(fd))
+#define write(fd, buf, count) send((SOCKET)(uintptr_t)(fd), (const char *)(buf), (int)(count), 0)
+#endif
 
 typedef struct storm_state {
     atomic_uint completed;

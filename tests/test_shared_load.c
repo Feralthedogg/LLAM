@@ -157,85 +157,11 @@ int main(int argc, char **argv) {
         "llam_task_class",
         "llam_current_task",
     };
-    static const char *const nm_symbols[] = {
-        "nm_abi_version",
-        "nm_version_string",
-        "nm_abi_get_info",
-        "nm_runtime_opts_init",
-        "nm_spawn_opts_init",
-        "nm_runtime_init_ex",
-        "nm_runtime_init",
-        "nm_runtime_request_stop",
-        "nm_runtime_shutdown",
-        "nm_runtime_collect_stats_ex",
-        "nm_runtime_collect_stats",
-        "nm_runtime_write_stats_json",
-        "nm_spawn_ex",
-        "nm_spawn",
-        "nm_run",
-        "nm_yield",
-        "nm_task_safepoint",
-        "nm_join",
-        "nm_join_until",
-        "nm_detach",
-        "nm_sleep_until",
-        "nm_sleep_ns",
-        "nm_call_blocking_result",
-        "nm_call_blocking",
-        "nm_enter_blocking",
-        "nm_leave_blocking",
-        "nm_task_set_class",
-        "nm_dump_runtime_state",
-        "nm_task_flags",
-        "nm_cancel_token_create",
-        "nm_cancel_token_destroy",
-        "nm_cancel_token_cancel",
-        "nm_cancel_token_is_cancelled",
-        "nm_mutex_create",
-        "nm_mutex_destroy",
-        "nm_mutex_lock",
-        "nm_mutex_lock_until",
-        "nm_mutex_trylock",
-        "nm_mutex_unlock",
-        "nm_cond_create",
-        "nm_cond_destroy",
-        "nm_cond_wait",
-        "nm_cond_wait_until",
-        "nm_cond_signal",
-        "nm_cond_broadcast",
-        "nm_channel_create",
-        "nm_channel_destroy",
-        "nm_channel_send",
-        "nm_channel_send_until",
-        "nm_channel_recv_result",
-        "nm_channel_recv_until_result",
-        "nm_channel_recv",
-        "nm_channel_recv_until",
-        "nm_channel_close",
-        "nm_read",
-        "nm_read_when_ready",
-        "nm_write",
-        "nm_read_owned",
-        "nm_recv_owned",
-        "nm_io_buffer_release",
-        "nm_io_buffer_data",
-        "nm_io_buffer_size",
-        "nm_io_buffer_capacity",
-        "nm_accept",
-        "nm_connect",
-        "nm_poll_fd",
-        "nm_now_ns",
-        "nm_task_id",
-        "nm_task_state_name",
-        "nm_task_class",
-        "nm_current_task",
-    };
     const char *path = argc > 1 ? argv[1] : LLAM_TEST_DEFAULT_SHARED_PATH;
     char expected_version[32];
     abi_version_fn llam_abi_version_ptr = NULL;
     version_string_fn llam_version_string_ptr = NULL;
     abi_info_fn llam_abi_get_info_ptr = NULL;
-    abi_version_fn nm_abi_version_ptr = NULL;
     connect_fn llam_connect_ptr = NULL;
     llam_abi_info_t info;
     void *handle;
@@ -250,14 +176,12 @@ int main(int argc, char **argv) {
     LOAD_FN(handle, "llam_version_string", llam_version_string_ptr);
     LOAD_FN(handle, "llam_abi_get_info", llam_abi_get_info_ptr);
     LOAD_FN(handle, "llam_connect", llam_connect_ptr);
-    LOAD_FN(handle, "nm_abi_version", nm_abi_version_ptr);
-    if (require_symbols(handle, llam_symbols, sizeof(llam_symbols) / sizeof(llam_symbols[0])) != 0 ||
-        require_symbols(handle, nm_symbols, sizeof(nm_symbols) / sizeof(nm_symbols[0])) != 0) {
+    if (require_symbols(handle, llam_symbols, sizeof(llam_symbols) / sizeof(llam_symbols[0])) != 0) {
         (void)dlclose(handle);
         return 1;
     }
 
-    if (llam_abi_version_ptr() != LLAM_ABI_VERSION || nm_abi_version_ptr() != LLAM_ABI_VERSION) {
+    if (llam_abi_version_ptr() != LLAM_ABI_VERSION) {
         (void)dlclose(handle);
         return test_fail("loaded ABI version does not match headers");
     }

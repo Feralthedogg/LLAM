@@ -55,6 +55,99 @@ void stress_close_fd_pair(int sv[2]) {
     }
 }
 
+#if LLAM_PLATFORM_WINDOWS
+int stress_socketpair_windows(int domain, int type, int protocol, int sv[2]) {
+    SOCKET listener = INVALID_SOCKET;
+    SOCKET client = INVALID_SOCKET;
+    SOCKET server = INVALID_SOCKET;
+    struct sockaddr_in addr;
+    int addr_len = (int)sizeof(addr);
+    BOOL no_delay = TRUE;
+    u_long nonblocking = 1UL;
+
+    (void)domain;
+    (void)protocol;
+    if (sv == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    sv[0] = -1;
+    sv[1] = -1;
+    if (type != SOCK_STREAM) {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    listener = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (listener == INVALID_SOCKET) {
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(listener, (const struct sockaddr *)&addr, (int)sizeof(addr)) == SOCKET_ERROR ||
+        listen(listener, 1) == SOCKET_ERROR ||
+        getsockname(listener, (struct sockaddr *)&addr, &addr_len) == SOCKET_ERROR) {
+        int saved_errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+
+        closesocket(listener);
+        errno = saved_errno;
+        return -1;
+    }
+
+    client = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (client == INVALID_SOCKET) {
+        int saved_errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+
+        closesocket(listener);
+        errno = saved_errno;
+        return -1;
+    }
+    if (connect(client, (const struct sockaddr *)&addr, addr_len) == SOCKET_ERROR) {
+        int saved_errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+
+        closesocket(client);
+        closesocket(listener);
+        errno = saved_errno;
+        return -1;
+    }
+
+    server = accept(listener, NULL, NULL);
+    closesocket(listener);
+    if (server == INVALID_SOCKET) {
+        int saved_errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+
+        closesocket(client);
+        errno = saved_errno;
+        return -1;
+    }
+    if ((uintptr_t)client > (uintptr_t)INT_MAX || (uintptr_t)server > (uintptr_t)INT_MAX) {
+        closesocket(client);
+        closesocket(server);
+        errno = EMFILE;
+        return -1;
+    }
+    if (ioctlsocket(client, FIONBIO, &nonblocking) != 0 ||
+        ioctlsocket(server, FIONBIO, &nonblocking) != 0) {
+        int saved_errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+
+        closesocket(client);
+        closesocket(server);
+        errno = saved_errno;
+        return -1;
+    }
+
+    (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char *)&no_delay, (int)sizeof(no_delay));
+    (void)setsockopt(server, IPPROTO_TCP, TCP_NODELAY, (const char *)&no_delay, (int)sizeof(no_delay));
+    sv[0] = (int)(uintptr_t)client;
+    sv[1] = (int)(uintptr_t)server;
+    return 0;
+}
+#endif
+
 void stress_reset_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_t *state) {
     if (state == NULL) {
         return;
@@ -269,7 +362,7 @@ int stress_create_loopback_listener(uint16_t *out_port) {
     if (fd < 0) {
         return -1;
     }
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0) {
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one)) != 0) {
         close(fd);
         return -1;
     }
@@ -434,7 +527,11 @@ bool stress_platform_supports_nested_opaque(void) {
 }
 
 bool stress_platform_supports_owned_buffer_stress(void) {
+#if LLAM_PLATFORM_WINDOWS
+    return false;
+#else
     return true;
+#endif
 }
 
 bool stress_platform_supports_basic_poll_stress(void) {

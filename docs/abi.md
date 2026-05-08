@@ -5,10 +5,8 @@ implementations may rely on when loading LLAM dynamically.
 
 ## ABI Stability
 
-LLAM exposes one stable public ABI family:
-
-- Canonical API: symbols declared in `include/llam/runtime.h`.
-- Legacy compatibility API: symbols declared in `include/llam/nm_runtime.h`.
+LLAM exposes one stable public ABI family: symbols declared in
+`include/llam/runtime.h`.
 
 All other non-static implementation symbols are private even if a platform
 linker happens to export them. Language runtimes must bind only documented
@@ -64,9 +62,6 @@ with `errno` set on failure.
 | I/O | `llam_read`, `llam_write`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd` | Scheduler-safe descriptor/socket operations. File descriptor ownership follows POSIX convention unless owned-buffer APIs say otherwise. |
 | Owned buffers | `llam_io_buffer_data`, `llam_io_buffer_size`, `llam_io_buffer_capacity`, `llam_io_buffer_release` | Buffers returned by owned-read APIs are runtime-allocated and caller-released through `llam_io_buffer_release()`. |
 | Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats`, `llam_runtime_write_stats_json`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` for stats snapshots and JSON export for machine logs. |
-
-Compatibility `nm_*` symbols follow the same contracts and remain available for
-existing code, but new bindings should prefer the canonical `llam_*` names.
 
 ## Inbound Option Structs
 
@@ -160,9 +155,7 @@ Callers should pass one of the `llam_task_class_t` constants to
 `llam_task_set_class()` and interpret `llam_task_class()` as a
 `llam_task_class_t` value. The fixed-width signature avoids depending on the C
 compiler's enum representation. `llam_task_set_class()` returns `-1/EINVAL`
-for unknown class values and `-1/ENOTSUP` outside a managed task. Legacy
-`nm_task_set_class()`, `nm_task_class()`, and `nm_task_flags()` follow the same
-rule.
+for unknown class values and `-1/ENOTSUP` outside a managed task.
 
 ## Threading And Ownership Rules
 
@@ -392,8 +385,6 @@ success, it transfers ownership of the accepted descriptor to the caller. The
 caller is responsible for closing it. Use `LLAM_FD_IS_INVALID(fd)` when testing
 returned descriptors, especially from Windows bindings where `llam_fd_t` maps to
 `SOCKET`.
-Legacy `nm_accept()` follows the same rule with `NM_INVALID_FD` and
-`NM_FD_IS_INVALID(fd)`.
 
 Owned-buffer read APIs transfer buffer ownership to the caller on success. The
 caller must release the buffer with `llam_io_buffer_release()`.

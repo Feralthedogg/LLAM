@@ -46,7 +46,6 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_io_udata.c
     src/core/runtime_init.c
     src/core/runtime_lifecycle.c
-    src/core/runtime_llam_api.c
     src/core/runtime_channel_cache.c
     src/core/runtime_channel.c
     src/core/runtime_channel_select.c
@@ -69,6 +68,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_task_alloc.c
     src/core/runtime_task_group.c
     src/core/runtime_task_local.c
+    src/core/runtime_task_reclaim.c
     src/core/runtime_task_stack.c
     src/core/runtime_timer.c
     src/core/runtime_time.c
@@ -230,7 +230,7 @@ foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
     endif()
 endforeach()
 
-target_compile_definitions(llam_runtime_shared PRIVATE LLAM_BUILD_SHARED=1 NM_BUILD_SHARED=1)
+target_compile_definitions(llam_runtime_shared PRIVATE LLAM_BUILD_SHARED=1)
 
 find_package(Threads REQUIRED)
 target_link_libraries(llam_runtime PUBLIC Threads::Threads)
@@ -371,11 +371,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime)
 endif()
 
-add_executable(test_nm_compat_runtime ${LLAM_POSIX_TEST_EXCLUDE}
-    tests/test_nm_compat_runtime.c
-)
-target_link_libraries(test_nm_compat_runtime PRIVATE llam_runtime)
-
 add_executable(test_shared_load ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_shared_load.c
 )
@@ -390,7 +385,6 @@ foreach(LLAM_TEST_TARGET
         test_io_buffers
         test_windows_policy
         test_windows_runtime_smoke
-        test_nm_compat_runtime
         test_shared_load)
     target_include_directories(${LLAM_TEST_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -415,7 +409,6 @@ endif()
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_connect_io COMMAND test_connect_io)
     add_test(NAME test_io_buffers COMMAND test_io_buffers)
-    add_test(NAME test_nm_compat_runtime COMMAND test_nm_compat_runtime)
     add_test(NAME test_shared_load COMMAND test_shared_load $<TARGET_FILE:llam_runtime_shared>)
 endif()
 

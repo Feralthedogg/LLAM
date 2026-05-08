@@ -158,12 +158,11 @@ Build outputs:
 - `server_flood`: native nonblocking throughput flood driver for the chat server.
 - `scripts/stress_server.py`: TCP fanout stress test for the chat server.
 - `scripts/stress_server_composite.py`: long-running composite server stability suite.
-- `test_abi_contract`: ABI metadata, size handshakes, and legacy compatibility checks.
+- `test_abi_contract`: ABI metadata and size handshakes.
 - `test_connect_io`: direct and runtime-managed `llam_connect()` success and invalid-input checks.
 - `test_runtime_core`: lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats checks.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
 - `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
-- `test_nm_compat_runtime`: legacy `nm_*` runtime wrapper behavior.
 - `test_shared_load`: `dlopen()` coverage for the shared library ABI surface.
 
 ## Using LLAM In An Application
@@ -219,8 +218,6 @@ Include the canonical public API:
 ```c
 #include "llam/runtime.h"
 ```
-
-`include/llam/nm_runtime.h` and `include/nm_runtime.h` provide compatibility for the older `nm_*` API names. New code should prefer the `llam_*` API.
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer `llam_runtime_init_ex()` and `llam_spawn_ex()` so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
 Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.0 as one active runtime per process.
@@ -597,7 +594,6 @@ Time, debug, and platform:
 | `llam_dump_runtime_state` | Dump runtime state to an fd. |
 | `llam_fd_t` | Platform-specific fd/socket handle type. |
 | `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Platform-correct invalid descriptor sentinel and predicate. |
-| `NM_INVALID_FD` / `NM_FD_IS_INVALID` | Legacy compatibility invalid descriptor sentinel and predicate. |
 | `LLAM_PLATFORM_LINUX` | Linux build flag. |
 | `LLAM_PLATFORM_DARWIN` | macOS/Darwin build flag. |
 | `LLAM_PLATFORM_WINDOWS` | Windows build flag. |
@@ -651,9 +647,6 @@ Experimental flags:
 | `LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL` | Experimental Linux io_uring SQPOLL mode. |
 
 Selected environment variables:
-
-The table lists canonical `LLAM_*` names. Legacy `NM_*` aliases and the older
-`*_SHARD_*` experimental names remain compatibility-only inputs for old scripts.
 
 | Variable | Example values | Meaning |
 | --- | --- | --- |

@@ -34,7 +34,7 @@
 /** @brief Sentinel used to mark an explicit user yield without sampling a real timestamp. */
 #define LLAM_RECENT_EXPLICIT_YIELD UINT64_MAX
 
-#if LLAM_RUNTIME_BACKEND_WINDOWS || defined(__linux__)
+#if defined(__linux__)
 #define LLAM_DIRECT_OWNER_HANDOFF 1
 #else
 #define LLAM_DIRECT_OWNER_HANDOFF 0
@@ -124,12 +124,12 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
         } else {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
             /*
-             * Keep the Windows default on explicit handoff yields only.  Broad
-             * ordinary-yield handoff can starve timer fanout bursts before
-             * sleepers have published their deadlines, and targeted benches show
-             * mode 1 is also better for spawn/join latency on current x64 hosts.
+             * Windows task-to-task handoff remains opt-in while the scheduler
+             * wake path is the stable default. Tight channel handoff chains can
+             * otherwise keep work away from the scheduler in cancellation-heavy
+             * stress loops; LLAM_YIELD_DIRECT_HANDOFF=1 keeps the old experiment.
              */
-            value = rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 1 : 0;
+            value = 0;
 #elif defined(__linux__)
             /*
              * Linux owner-lane exchange is cheap enough to use for ordinary
@@ -622,17 +622,10 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         return -1;
     }
     llam_task_ensure_listed(self);
-    self->wait_next = task->join_waiters;
-    task->join_waiters = self;
-    task->join_waiter_count += 1U;
-    atomic_store_explicit(&task->join_waiter_hint, task->join_waiter_count, memory_order_release);
-    pthread_mutex_unlock(&task->lock);
     llam_task_set_join_tracking(self, task, g_llam_tls_shard->id);
     self->state = LLAM_TASK_STATE_PARKED;
     self->wait_reason = LLAM_WAIT_JOIN;
     if (has_deadline && llam_arm_task_wait_deadline(self, g_llam_tls_shard, deadline_ns) != 0) {
-        pthread_mutex_lock(&task->lock);
-        (void)llam_join_waiter_remove_locked(task, self);
         pthread_mutex_unlock(&task->lock);
         self->state = LLAM_TASK_STATE_RUNNING;
         self->wait_reason = LLAM_WAIT_NONE;
@@ -641,14 +634,17 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
     }
     if (self->cancel_token != NULL && llam_cancel_token_register_task(self) != 0) {
         llam_disarm_task_wait_deadline(self);
-        pthread_mutex_lock(&task->lock);
-        (void)llam_join_waiter_remove_locked(task, self);
         pthread_mutex_unlock(&task->lock);
         self->state = LLAM_TASK_STATE_RUNNING;
         self->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(self);
         return -1;
     }
+    self->wait_next = task->join_waiters;
+    task->join_waiters = self;
+    task->join_waiter_count += 1U;
+    atomic_store_explicit(&task->join_waiter_hint, task->join_waiter_count, memory_order_release);
+    pthread_mutex_unlock(&task->lock);
 
     g_llam_tls_shard->metrics.joins += 1U;
     g_llam_tls_shard->metrics.parks += 1U;
