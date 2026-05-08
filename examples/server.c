@@ -525,7 +525,7 @@ static void chat_accept_task(void *arg) {
             continue;
         }
         client_opts.cancel_token = server->stop_token;
-        client_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_LARGE;
+        client_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_HUGE;
 
         chat_client_retain(client);
         writer = llam_spawn_ex(chat_writer_task, client, &client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
@@ -764,7 +764,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     accept_opts.cancel_token = server.stop_token;
-    accept_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_LARGE;
+    accept_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_HUGE;
     accept_task = llam_spawn_ex(chat_accept_task, &server, &accept_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
     if (accept_task == NULL || llam_detach(accept_task) != 0) {
         perror("llam_spawn accept");
