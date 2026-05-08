@@ -109,7 +109,22 @@ Do not assume benchmark parity means identical behavior. Track I/O submit
 syscalls, direct path usage, wake latency, and skipped stress phases separately
 per platform.
 
-## 6.1 Runtime Handle Boundary
+## 6.1 I/O Direct-Path Expectations
+
+Managed `read`, `write`, `recv`, `poll`, `connect`, and `accept` first try an
+immediate direct path when that can complete without parking the current task.
+For `accept`, this means a connection already present in the kernel listen
+backlog can be consumed directly before LLAM submits a backend request. This
+keeps serial connect/accept tests from depending on backend re-arm timing and
+reduces one worker round trip on hot server paths.
+
+The backend path is still the correctness path for not-ready descriptors,
+timeouts, cancellation, and unsupported direct operations. If a direct path
+regresses, compare both throughput and `io_submit_syscalls`; a lower syscall
+count is useful only when the observed completion rate and tail latency do not
+regress.
+
+## 6.2 Runtime Handle Boundary
 
 `llam_runtime_create()`, `llam_runtime_run_handle()`, and
 `llam_runtime_destroy()` are the canonical embedding-facing lifecycle APIs, but
@@ -200,7 +215,10 @@ Before tagging a 1.0.x build, require:
 - Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
   the Windows 2022/2025 stress jobs.
 - `python3 scripts/stress_server_composite.py --quick` on at least one POSIX
-  platform, plus the hour-long variant before claiming server stability.
+  platform. Quick mode is a hosted-runner smoke gate and uses a lower absolute
+  flood delivery threshold than standard/hour mode; delivery ratio must still
+  remain exact.
+- The hour-long server composite profile before claiming server stability.
 - `python3 scripts/bench_runtime_compare.py --runtime all` for the public
   LLAM/Go/Tokio comparison graph.
 - No unexplained `skipped=` phases. A skipped phase is acceptable only when the

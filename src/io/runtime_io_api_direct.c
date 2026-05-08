@@ -434,6 +434,95 @@ int llam_try_direct_rw(llam_fd_t fd,
 }
 
 /**
+ * @brief Try accepting a pending connection without parking the current task.
+ *
+ * Serial accept/connect workloads often have a connection already queued in
+ * the kernel backlog by the time the managed task calls ::llam_accept.  Taking
+ * that descriptor directly avoids an I/O worker round trip and removes a
+ * backend re-arm dependency from the hot accept path.
+ *
+ * @return 1 for an accepted descriptor, 0 for would-block, or -1 for hard
+ *         accept/setup errors with @c errno preserved.
+ */
+int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen, llam_fd_t *result_out) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    int nonblock_rc;
+#else
+    int saved_flags;
+    bool restore_flags = false;
+#endif
+    llam_fd_t accepted;
+
+    if (result_out != NULL) {
+        *result_out = LLAM_INVALID_FD;
+    }
+
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    nonblock_rc = llam_windows_ensure_socket_nonblocking(fd);
+    if (nonblock_rc < 0) {
+        return -1;
+    }
+    if (nonblock_rc == 0) {
+        return 0;
+    }
+#else
+    saved_flags = fcntl(fd, F_GETFL, 0);
+    if (saved_flags < 0) {
+        return -1;
+    }
+    if ((saved_flags & O_NONBLOCK) == 0) {
+        if (fcntl(fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
+            return -1;
+        }
+        restore_flags = true;
+    }
+#endif
+
+    for (;;) {
+        accepted = llam_platform_accept_fd(fd, addr, addrlen);
+        if (!LLAM_FD_IS_INVALID(accepted)) {
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+            if (restore_flags) {
+                int saved_errno = errno;
+
+                (void)fcntl(fd, F_SETFL, saved_flags);
+                errno = saved_errno;
+            }
+#endif
+            if (result_out != NULL) {
+                *result_out = accepted;
+            }
+            return 1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+            if (restore_flags) {
+                int saved_errno = errno;
+
+                (void)fcntl(fd, F_SETFL, saved_flags);
+                errno = saved_errno;
+            }
+#endif
+            return 0;
+        }
+        {
+            int saved_errno = errno;
+
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+            if (restore_flags) {
+                (void)fcntl(fd, F_SETFL, saved_flags);
+            }
+#endif
+            errno = saved_errno;
+        }
+        return -1;
+    }
+}
+
+/**
  * @brief Resolve the completion status for a nonblocking socket connect.
  *
  * Writable readiness after @c EINPROGRESS only means the connection attempt has

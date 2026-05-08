@@ -312,8 +312,9 @@ def phase_correctness(args: argparse.Namespace, script_path: Path) -> None:
 
 
 def phase_flood(args: argparse.Namespace) -> None:
+    main_min_delivery_mps = 1.5 if args.quick else 2.5
     cases = [
-        ("main", 16, args.flood_duration, 8, 64, 0.30, 2.5),
+        ("main", 16, args.flood_duration, 8, 64, 0.30, main_min_delivery_mps),
         ("payload-64b", 16, args.payload_flood_duration, 64, 64, 0.15, 1.0),
         ("payload-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05),
     ]

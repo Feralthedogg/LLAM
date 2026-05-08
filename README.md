@@ -136,6 +136,9 @@ The composite suite combines exact fanout checks, 60-second native flood,
 payload-size variation, connection churn, slow receivers, half-close/reset
 patterns, and RSS/fd sampling.
 
+`--quick` is intended for hosted CI runners. It keeps exact-delivery checks but
+uses a lower absolute flood delivery threshold than standard and hour-long runs.
+
 The one-hour profile runs the same classes of checks with a long soak layout:
 30 minutes of main flood, two 5-minute payload flood phases, and 20 minutes of
 mixed edge stress.

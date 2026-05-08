@@ -509,6 +509,17 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return llam_platform_accept_fd(fd, addr, addrlen);
     }
+    {
+        llam_fd_t direct_fd = LLAM_INVALID_FD;
+        int direct_rc = llam_try_direct_accept(fd, addr, addrlen, &direct_fd);
+
+        if (direct_rc > 0) {
+            return direct_fd;
+        }
+        if (direct_rc < 0) {
+            return LLAM_INVALID_FD;
+        }
+    }
 
     req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
