@@ -663,7 +663,7 @@ int llam_opaque_wake_init(llam_shard_t *shard) {
     {
         const char *env = llam_env_get("LLAM_OPAQUE_MACH_SEM");
 
-        if (env == NULL || env[0] == '\0' || strcmp(env, "0") == 0) {
+        if (env != NULL && strcmp(env, "0") == 0) {
             return 0;
         }
         if (semaphore_create(mach_task_self(), &shard->opaque_sem, SYNC_POLICY_FIFO, 0) == KERN_SUCCESS) {

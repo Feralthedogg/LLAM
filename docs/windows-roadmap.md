@@ -21,7 +21,7 @@ path.
 | IOCP tuning policy | Present. Both generations use IOCP, but `win10-conservative` and `win11-batched` are separate code paths with different batch, prepost, timeout, timer, and skip-completion defaults. |
 | Native scheduler backend | Present for Windows x86_64 through GNU as and MASM context-switch assembly, Windows event wake handles, `VirtualAlloc` stack mappings, and runtime lifecycle smoke coverage. |
 | Native I/O backend | Present for one-shot socket requests: WSARecv/WSASend, AcceptEx, ConnectEx, TCP `POLLOUT`, and UDP `POLLIN` readiness are bound to IOCP completions. TCP `POLLIN`, AF_UNIX, and unsupported poll masks remain fallback. |
-| IOCP source layout | In progress. State/control queue helpers, socket association/extension loading, accept/op pools, submit path, and completion path are split out of the original monolithic backend. Worker/control fallback stubs remain in `runtime_io_watch_windows.c`. |
+| IOCP source layout | In progress. State/control queue helpers, socket association/extension loading, accept/op pools, control packet processing, submit path, completion path, and unsupported fallback stubs are split out of the original monolithic backend. The remaining root file now owns worker lifetime and cleanup only. |
 | Native package artifacts | Not published until Windows 10 and Windows 11 CI pass the full acceptance gate. |
 | Verification today | Windows 10 has been verified with native MSVC CMake build/test/bench smoke. GitHub Actions covers Windows Server 2022 and Windows Server 2025 native stress smoke. WSL verification remains Linux-backend verification. |
 
@@ -65,13 +65,14 @@ The native backend is intentionally being decomposed by runtime responsibility:
 | `src/io/windows/runtime_io_watch_windows_state.c` | IOCP queue/control/inflight owner state helpers. |
 | `src/io/windows/runtime_io_watch_windows_socket.c` | FD association, `AcceptEx`/`ConnectEx` loading, socket type/family inspection, and poll-support gating. |
 | `src/io/windows/runtime_io_watch_windows_pool.c` | Accept socket prepost cache and overlapped operation object cache. |
+| `src/io/windows/runtime_io_watch_windows_control.c` | IOCP control packet drain and `CancelIoEx` request cancellation. |
 | `src/io/windows/runtime_io_watch_windows_submit.c` | WSARecv/WSASend/AcceptEx/ConnectEx/poll request submission. |
 | `src/io/windows/runtime_io_watch_windows_completion.c` | IOCP completion drain, accept/connect finalization, request result publication, and task wakeup. |
-| `src/io/windows/runtime_io_watch_windows.c` | Worker loop, cancel control packets, cleanup, and unsupported watch fallback stubs. |
+| `src/io/windows/runtime_io_watch_windows_fallback.c` | Unsupported multishot watch stubs for paths routed through direct/blocking fallback. |
+| `src/io/windows/runtime_io_watch_windows.c` | Worker loop and IOCP node cleanup. |
 
-The remaining decomposition target is to move cancel/control packet handling and
-fallback watch stubs into their own files once Windows 10/11 native CI has
-covered the current split.
+The remaining decomposition target is native multishot readiness support for
+currently unsupported Windows watch cases, not further file splitting.
 
 ## Planned Architecture
 

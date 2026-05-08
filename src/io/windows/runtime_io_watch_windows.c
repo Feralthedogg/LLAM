@@ -1,6 +1,6 @@
 /**
  * @file src/io/windows/runtime_io_watch_windows.c
- * @brief Windows IOCP request backend for one-shot socket operations.
+ * @brief Windows IOCP worker loop and backend cleanup.
  *
  * @details
  * Windows does not have a kqueue/io_uring-style poll primitive, so this backend
@@ -19,6 +19,8 @@
  * overlapped stream-readiness probes are not stable enough across Windows 10/11
  * loopback workloads.
  * Unsupported masks and multi-direction polls continue through fallback paths.
+ * Control packets and unsupported watch stubs live in dedicated sibling files
+ * so this file stays focused on worker lifetime and node cleanup.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -37,52 +39,6 @@
  */
 
 #include "runtime_io_watch_windows_internal.h"
-
-static llam_io_control_op_t *llam_take_node_controls(llam_node_t *node) {
-    llam_io_control_op_t *head;
-
-    pthread_mutex_lock(&node->watch_lock);
-    head = node->control_head;
-    node->control_head = NULL;
-    node->control_tail = NULL;
-    pthread_mutex_unlock(&node->watch_lock);
-    return head;
-}
-
-static void llam_windows_process_control(llam_node_t *node, llam_io_control_op_t *op) {
-    llam_io_req_t *req;
-    llam_windows_io_op_t *io_op;
-
-    if (op == NULL) {
-        return;
-    }
-    if (op->kind != LLAM_IO_CONTROL_REQ_CANCEL) {
-        free(op);
-        return;
-    }
-
-    req = op->target;
-    if (req != NULL && atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_INFLIGHT) {
-        io_op = req->platform_data;
-        if (io_op != NULL && io_op->magic == LLAM_WINDOWS_IO_OP_MAGIC) {
-            (void)CancelIoEx((HANDLE)(uintptr_t)req->fd, &io_op->overlapped);
-        }
-    }
-    free(op);
-    (void)node;
-}
-
-static void llam_windows_process_controls(llam_node_t *node) {
-    llam_io_control_op_t *controls = llam_take_node_controls(node);
-
-    while (controls != NULL) {
-        llam_io_control_op_t *next = controls->next;
-
-        controls->next = NULL;
-        llam_windows_process_control(node, controls);
-        controls = next;
-    }
-}
 
 void *llam_io_worker_main(void *arg) {
     llam_node_t *node = arg;
@@ -127,118 +83,4 @@ void llam_windows_iocp_cleanup_node(llam_node_t *node) {
         llam_windows_iocp_close(node->windows_iocp_handle);
         node->windows_iocp_handle = NULL;
     }
-}
-
-void llam_accept_watch_enqueue_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-}
-
-int llam_accept_watch_pop_ready(llam_accept_watch_t *watch) {
-    (void)watch;
-    errno = EAGAIN;
-    return -1;
-}
-
-bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-    return false;
-}
-
-void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-}
-
-bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-    return false;
-}
-
-void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-}
-
-bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-    return false;
-}
-
-bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
-                             size_t *size_out,
-                             unsigned short *bid_out,
-                             bool *has_buffer_out,
-                             unsigned *node_index_out,
-                             unsigned char **copy_data_out,
-                             size_t *copy_capacity_out) {
-    (void)watch;
-    if (size_out != NULL) {
-        *size_out = 0U;
-    }
-    if (bid_out != NULL) {
-        *bid_out = 0U;
-    }
-    if (has_buffer_out != NULL) {
-        *has_buffer_out = false;
-    }
-    if (node_index_out != NULL) {
-        *node_index_out = 0U;
-    }
-    if (copy_data_out != NULL) {
-        *copy_data_out = NULL;
-    }
-    if (copy_capacity_out != NULL) {
-        *copy_capacity_out = 0U;
-    }
-    errno = EAGAIN;
-    return false;
-}
-
-llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, llam_fd_t fd) {
-    (void)node;
-    (void)fd;
-    errno = ENOSYS;
-    return NULL;
-}
-
-llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, llam_fd_t fd, short events) {
-    (void)node;
-    (void)fd;
-    (void)events;
-    errno = ENOSYS;
-    return NULL;
-}
-
-llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, llam_fd_t fd) {
-    (void)node;
-    (void)fd;
-    errno = ENOSYS;
-    return NULL;
-}
-
-void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch) {
-    (void)node;
-    (void)watch;
-}
-
-bool llam_io_rehome_idle_watch_state(llam_node_t *source, llam_node_t *target) {
-    (void)source;
-    (void)target;
-    return false;
-}
-
-bool llam_io_rehome_marked_watch_state(llam_node_t *source, llam_node_t *target) {
-    (void)source;
-    (void)target;
-    return false;
-}
-
-unsigned llam_multishot_owner_node_index(llam_runtime_t *rt, unsigned fallback_node_index, llam_fd_t fd) {
-    (void)rt;
-    (void)fd;
-    return fallback_node_index;
 }

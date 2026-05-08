@@ -69,6 +69,7 @@ int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTE
 int llam_windows_load_connectex(llam_node_t *node, SOCKET socket_fd, LPFN_CONNECTEX *fn_out);
 int llam_windows_bind_connect_socket(SOCKET socket_fd, const struct sockaddr *addr);
 bool llam_windows_socket_info(llam_fd_t fd, int *family_out, int *socket_type_out);
+bool llam_windows_iocp_poll_supported(llam_fd_t fd, short events);
 
 SOCKET llam_windows_accept_socket_acquire(llam_node_t *node, SOCKET listener);
 void llam_windows_accept_socket_pool_warm(llam_node_t *node, SOCKET listener, unsigned target_free);
@@ -78,6 +79,7 @@ void llam_windows_io_op_free(llam_windows_io_op_t *op);
 void llam_windows_io_op_pool_destroy(llam_node_t *node);
 void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool decrement_pending);
 void llam_windows_complete_submit_error(llam_node_t *node, llam_io_req_t *req, int err);
+void llam_windows_process_controls(llam_node_t *node);
 void llam_windows_process_submissions(llam_node_t *node);
 void llam_windows_drain_completions(llam_node_t *node, DWORD timeout_ms);
 

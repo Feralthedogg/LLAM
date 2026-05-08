@@ -227,8 +227,10 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_state.o \
 	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_socket.o \
 	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_pool.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_control.o \
 	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_submit.o \
 	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_completion.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_fallback.o \
 	$(OBJDIR)/src/io/windows/runtime_io_watch_windows.o
 ifeq ($(UNAME_M),AMD64)
 RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o

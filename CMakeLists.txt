@@ -130,8 +130,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         src/io/windows/runtime_io_watch_windows_state.c
         src/io/windows/runtime_io_watch_windows_socket.c
         src/io/windows/runtime_io_watch_windows_pool.c
+        src/io/windows/runtime_io_watch_windows_control.c
         src/io/windows/runtime_io_watch_windows_submit.c
         src/io/windows/runtime_io_watch_windows_completion.c
+        src/io/windows/runtime_io_watch_windows_fallback.c
         src/io/windows/runtime_io_watch_windows.c
     )
 endif()

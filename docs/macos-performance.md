@@ -11,6 +11,8 @@ This document records the macOS-specific performance boundary for LLAM 1.0.0.
 | Direct I/O fast path | nonblocking read/write/connect/poll attempts before backend submission | Enabled |
 | Task allocation | task metadata and stack cache reuse | Enabled |
 | Safepoints | cheap hot-path checks with heavier sampling outside the common path | Enabled |
+| Opaque blocking wake | Mach semaphore helper wake path with `LLAM_OPAQUE_MACH_SEM=0` opt-out | Enabled |
+| Timer heap | shard-local 4-ary min-heap with batched sleep wake reinjection | Enabled |
 | Release packaging | macOS arm64 and x86_64 release archives | Enabled |
 
 ## Benchmarks
@@ -39,8 +41,8 @@ See `docs/windows-roadmap.md`.
 
 | Case | Likely remaining cost | Next structural change |
 | --- | --- | --- |
-| `opaque_block` | helper thread handoff and pthread condition wake cost | Replace helper waits with a Mach semaphore or Darwin `__ulock_wait`/`__ulock_wake` path behind a portability boundary. |
-| `sleep_fanout` | timer insertion and wake batching under high fanout | Replace per-wakeup timer handling with a shard-local timer wheel or batched min-heap drain. |
+| `opaque_block` | helper thread handoff and bounded Mach semaphore lost-wake recovery | Profile whether Darwin `__ulock_wait`/`__ulock_wake` beats the Mach semaphore path on real opaque workloads. |
+| `sleep_fanout` | timer insertion under very high fanout after 4-ary heap and batched sleep reinjection | Consider a shard-local timing wheel only if the heap remains top-stack in p99 stress. |
 | `poll_wake` | kqueue wake/reinject overhead after direct fast path misses | Keep direct path, then profile workload-specific wake storms before changing structure. |
 | `spawn_join` | remaining task metadata initialization and join bookkeeping | Add a more aggressive single-join fast path only if ABI-visible semantics stay unchanged. |
 
