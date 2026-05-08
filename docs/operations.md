@@ -101,6 +101,8 @@ Verification must be platform-local:
 ```bash
 make verify-linux CC=gcc
 CC=clang make verify-darwin
+./scripts/docker_verify_linux.sh
+.\scripts\verify_windows.ps1 -Native
 ```
 
 Do not assume benchmark parity means identical behavior. Track I/O submit
@@ -119,6 +121,22 @@ This is intentional for the 1.0 line because global task context, TLS shard/task
 state, signal/fault hooks, and platform I/O ownership are still process-scoped.
 Embedders should treat a second `llam_runtime_create()` returning `EBUSY` as the
 defined behavior, not as a transient initialization failure.
+
+The path to true multi-runtime support is intentionally staged:
+
+- Move task/shard TLS lookup behind an active-runtime cursor instead of direct
+  `g_llam_runtime` access.
+- Make process signal/fault hooks reference-counted and shared between runtime
+  instances.
+- Allocate I/O nodes, block helpers, stack caches, and debug task lists from the
+  `llam_runtime_t` handle only.
+- Add tests that create two isolated runtimes in one process and verify that
+  task IDs, channels, timers, cancellation tokens, and I/O completions never
+  cross runtime boundaries.
+
+Until those are complete, do not emulate multiple runtimes by repeatedly
+initializing and shutting LLAM down from concurrent embedding threads. Serialize
+runtime lifecycle calls at the host application boundary.
 
 ## 7. Experimental Options
 
@@ -172,3 +190,18 @@ The cross-runtime script includes these cases for LLAM, Go, and Tokio:
 ```bash
 python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1
 ```
+
+## 10. Release Gate
+
+Before tagging a 1.0.x build, require:
+
+- `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
+- `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.
+- Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
+  the Windows 2022/2025 stress jobs.
+- `python3 scripts/stress_server_composite.py --quick` on at least one POSIX
+  platform, plus the hour-long variant before claiming server stability.
+- `python3 scripts/bench_runtime_compare.py --runtime all` for the public
+  LLAM/Go/Tokio comparison graph.
+- No unexplained `skipped=` phases. A skipped phase is acceptable only when the
+  platform contract explicitly lacks that backend feature.

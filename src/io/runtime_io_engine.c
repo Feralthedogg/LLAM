@@ -93,6 +93,7 @@ static void llam_node_disable_recv_buf_ring(llam_node_t *node) {
         return;
     }
     node->supports_provided_buffers = false;
+    node->supports_multishot_recv = false;
     node->recv_buf_entries = 0U;
     node->recv_buf_mask = 0U;
     node->recv_buf_group = -1;

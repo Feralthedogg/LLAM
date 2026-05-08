@@ -122,6 +122,20 @@ def wait_for_broadcasts(clients: list[ClientState], payloads: list[bytes], expec
     raise AssertionError(f"missing broadcasts: {preview}")
 
 
+def wait_for_welcome(clients: list[ClientState], timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    marker = b"Welcome to LLAM chat. Type and press enter."
+    missing: list[int] = []
+
+    while time.monotonic() < deadline:
+        missing = [client.index for client in clients if marker not in bytes(client.buffer)]
+        if not missing:
+            return
+        time.sleep(0.01)
+
+    raise AssertionError(f"clients did not receive welcome before payload phase: {missing[:8]}")
+
+
 def close_clients(clients: list[ClientState]) -> None:
     for client in clients:
         try:
@@ -176,9 +190,11 @@ def main() -> int:
             if args.connect_spread_ms > 0:
                 time.sleep(args.connect_spread_ms / 1000.0)
 
-        # Let welcome/join traffic settle so the measured payload phase focuses
-        # on broadcast fanout instead of connect churn.
-        time.sleep(0.2)
+        # Wait until every connection has passed the server accept/registration
+        # path.  Otherwise a heavily loaded CI runner can send payloads before
+        # the last sockets are visible to broadcast fanout, creating false
+        # correctness failures.
+        wait_for_welcome(clients, args.timeout)
 
         for round_index in range(args.messages):
             for client in clients:

@@ -23,7 +23,7 @@ path.
 | Native I/O backend | Present for one-shot socket requests: WSARecv/WSASend, AcceptEx, ConnectEx, TCP `POLLOUT`, and UDP `POLLIN` readiness are bound to IOCP completions. TCP `POLLIN`, AF_UNIX, and unsupported poll masks remain fallback. |
 | IOCP source layout | In progress. State/control queue helpers, socket association/extension loading, accept/op pools, submit path, and completion path are split out of the original monolithic backend. Worker/control fallback stubs remain in `runtime_io_watch_windows.c`. |
 | Native package artifacts | Not published until Windows 10 and Windows 11 CI pass the full acceptance gate. |
-| Verification today | CMake can build static/shared runtime libraries and Windows-native policy/scheduler smoke tests. WSL verification remains available for the Linux backend. |
+| Verification today | Windows 10 has been verified with native MSVC CMake build/test/bench smoke. GitHub Actions covers Windows Server 2022 and Windows Server 2025 native stress smoke. WSL verification remains Linux-backend verification. |
 
 `scripts/verify_windows.ps1 -Native` reports the detected Windows generation,
 selected IOCP policy family, builds the native CMake targets, and runs the
@@ -123,6 +123,8 @@ Windows 10 and Windows 11:
 ## 1.0.0 Boundaries
 
 - Native Windows scheduler/core smoke support is present.
+- Windows Server 2022/2025 CI covers native build, CTest, policy-forced 10/11
+  smoke, and scheduler/IOCP benchmark smoke.
 - Native Windows archives are not published until full Windows 10/11 CI lands.
 - The IOCP request backend covers one-shot socket `read`/`write`/`accept`/`connect`
   plus gated TCP `POLLOUT` and UDP `POLLIN` readiness; TCP `POLLIN` remains on

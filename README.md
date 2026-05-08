@@ -185,6 +185,11 @@ macOS arm64 through `.github/workflows/release.yml`. Native Windows archives are
 held until Windows 10/11 CI covers the native IOCP socket backend and longer
 stress/benchmark gates.
 
+The 1.0 release gate is intentionally platform-local: Linux must pass
+`make verify-linux` or Docker verification, macOS must pass the Darwin verify
+path, and Windows must pass native CMake/CTest plus Windows 2022/2025 stress
+smoke. The full operational checklist is in `docs/operations.md`.
+
 Use an installed SDK with CMake:
 
 ```cmake
@@ -218,6 +223,8 @@ Include the canonical public API:
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer `llam_runtime_init_ex()` and `llam_spawn_ex()` so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
 Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.0 as one active runtime per process.
+True multi-runtime isolation is a post-1.0 migration item; do not create/destroy
+LLAM concurrently from multiple host runtime instances.
 macOS-specific performance gates and remaining structural work are tracked in `docs/macos-performance.md`.
 Windows backend scope and acceptance gates are tracked in `docs/windows-roadmap.md`.
 

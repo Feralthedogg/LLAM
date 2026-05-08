@@ -409,6 +409,33 @@ int llam_channel_select(llam_select_op_t *ops,
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
 
+    if (deadline_ns == 0U) {
+        bool ready;
+
+        heap_arrays = op_count > LLAM_CHANNEL_SELECT_INLINE_OPS;
+        if (heap_arrays) {
+            channels = calloc(op_count, sizeof(*channels));
+            if (channels == NULL) {
+                errno = ENOMEM;
+                return -1;
+            }
+        } else {
+            channels = inline_channels;
+        }
+
+        channel_count = llam_channel_select_collect_channels(ops, op_count, channels);
+        llam_channel_select_lock_channels(channels, channel_count);
+        ready = llam_channel_select_any_ready_locked(ops, op_count);
+        llam_channel_select_unlock_channels(channels, channel_count);
+        if (heap_arrays) {
+            free(channels);
+        }
+        if (!ready) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+    }
+
     for (;;) {
         for (i = 0U; i < op_count; ++i) {
             size_t index = (start + i) % op_count;
