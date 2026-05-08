@@ -46,8 +46,8 @@
  * @brief Finish the current task and switch back to the scheduler context.
  *
  * This is the terminal path for task fibers.  It marks the task dead, wakes
- * join waiters, decrements the runtime live-task count, and requests runtime
- * stop when the last task exits.
+ * join waiters, decrements shard-local live-task accounting, and requests
+ * runtime stop when the last task exits.
  *
  * @note This function does not return.  It assumes g_llam_tls_task and
  *       g_llam_tls_shard identify the running task and owner shard.
@@ -65,7 +65,7 @@ void llam_task_exit_internal(void) {
     llam_trace_shard(g_llam_tls_shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_DEAD, LLAM_WAIT_NONE);
     llam_reinject_join_waiters(rt, task);
 
-    if (atomic_fetch_sub(&rt->live_tasks, 1U) == 1U) {
+    if (llam_runtime_note_task_dead(rt, task)) {
         llam_request_stop(rt);
     }
 
@@ -192,6 +192,7 @@ static int llam_prepare_watch_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wa
         return -1;
     }
 
+    llam_task_ensure_listed(task);
     llam_task_set_io_tracking(task, req, shard->id);
     req->task = task;
     req->result = -1;
@@ -245,6 +246,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
                          wait_mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
                          wait_mode == LLAM_IO_WAIT_MODE_RECV_WATCH));
     if (!already_prepared) {
+        llam_task_ensure_listed(task);
         llam_task_set_io_tracking(task, req, shard->id);
         req->task = task;
         req->result = -1;
@@ -654,6 +656,14 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     }
 
     node = &rt->nodes[shard->io_node_index];
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    if (req->kind == LLAM_IO_KIND_POLL && !llam_windows_iocp_poll_supported(req->fd, req->poll_events)) {
+        node->unsupported_ops += 1U;
+        shard->metrics.io_fallbacks += 1U;
+        errno = EAGAIN;
+        return -1;
+    }
+#endif
     if (!node->ring_ready ||
         (req->kind == LLAM_IO_KIND_READ && req->use_recv_op ? !node->supports_recv : !llam_node_supports_kind(node, req->kind))) {
         node->unsupported_ops += 1U;

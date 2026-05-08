@@ -32,11 +32,15 @@
 /*
  * Task list, task allocation, and stack lifetime.
  *
- * The runtime owns all task handles through a global task list for diagnostics
- * and rehome operations. Stack allocation is intentionally separate from task
- * object allocation so stacks can be cached and reclaimed independently.
+ * The runtime owns all task handles through shard-local task lists for
+ * diagnostics, shutdown cleanup, and rehome operations. Stack allocation is
+ * intentionally separate from task object allocation so stacks can be cached
+ * and reclaimed independently.
  */
 void llam_add_task_to_list(llam_runtime_t *rt, llam_task_t *task);
+void llam_add_task_to_list_locked(llam_shard_t *shard, llam_task_t *task);
+bool llam_task_list_eager_enabled(const llam_runtime_t *rt);
+void llam_task_ensure_listed(llam_task_t *task);
 int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class);
 void llam_free_task(llam_task_t *task);
 void llam_task_release_stack(llam_task_t *task);
@@ -60,6 +64,22 @@ void llam_task_restore_errno(const llam_task_t *task);
 void llam_switch_task_to_scheduler(llam_task_t *task, llam_ctx_t *scheduler_ctx);
 void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task);
 void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
+
+/**
+ * @brief Inline task-to-task switch for validated hot handoff paths.
+ *
+ * @details
+ * Direct channel, wake, and join handoffs have already validated both task
+ * pointers. Keeping the errno save/restore sequence inline removes one C
+ * wrapper call from every fiber-to-fiber handoff while preserving task-local
+ * errno semantics.
+ */
+static inline void llam_switch_task_to_task_hot(llam_task_t *from, llam_task_t *to) {
+    from->saved_errno = errno;
+    errno = to->saved_errno;
+    llam_ctx_switch(&from->ctx, &to->ctx);
+    errno = from->saved_errno;
+}
 
 /*
  * Slab allocators and per-shard cache quiescence.
@@ -154,6 +174,10 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job);
 int llam_consume_task_wake_error(llam_task_t *task);
 void llam_record_fatal(llam_runtime_t *rt, int err);
 void llam_request_stop(llam_runtime_t *rt);
+bool llam_runtime_has_live_tasks(llam_runtime_t *rt);
+unsigned llam_runtime_live_tasks(llam_runtime_t *rt);
+void llam_runtime_note_task_live(llam_runtime_t *rt, llam_shard_t *shard);
+bool llam_runtime_note_task_dead(llam_runtime_t *rt, llam_task_t *task);
 void llam_task_safepoint(void);
 void llam_task_sample_live_stack(llam_task_t *task);
 void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp);

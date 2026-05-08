@@ -260,8 +260,17 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     unsigned *io_node_ids = NULL;
     size_t altstack_size;
     const char *light_safepoint_env;
+    const char *spawn_fanout_env;
     size_t opts_copy_size;
     uint64_t experimental_flags;
+    unsigned timer_heap_prewarm;
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+    unsigned windows_unsafe_skip_scheduler_simd;
+    unsigned windows_unsafe_skip_task_simd;
+#endif
+#if LLAM_ARCH_AARCH64
+    unsigned aarch64_unsafe_skip_scheduler_simd;
+#endif
     int rc;
 
     if (opts != NULL) {
@@ -297,6 +306,18 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
         rt->init_thread_affinity_valid = true;
     }
 #endif
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    {
+        WSADATA wsa_data;
+        int wsa_rc = WSAStartup(MAKEWORD(2, 2), &wsa_data);
+
+        if (wsa_rc != 0) {
+            errno = llam_windows_wsa_error_to_errno(wsa_rc);
+            return -1;
+        }
+        rt->winsock_started = true;
+    }
+#endif
 
     observed = llam_count_allowed_cpus(&cpus);
     if (observed == 0U) {
@@ -328,13 +349,33 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     light_safepoint_env = llam_env_get("LLAM_DIAG_LIGHT_SAFEPOINT");
     rt->trace_events_enabled = llam_runtime_env_flag("LLAM_TRACE_EVENTS", 0U);
     rt->wake_latency_metrics_enabled = llam_runtime_env_flag("LLAM_WAKE_LATENCY_METRICS", 0U);
-    rt->run_timing_enabled =
-        llam_runtime_env_flag("LLAM_RUN_TIMING", 0U) ||
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+    windows_unsafe_skip_scheduler_simd = llam_runtime_env_flag("LLAM_WINDOWS_UNSAFE_SKIP_SCHEDULER_SIMD", 0U);
+    windows_unsafe_skip_task_simd = llam_runtime_env_flag("LLAM_WINDOWS_UNSAFE_SKIP_TASK_SIMD", 0U);
+    rt->windows_unsafe_skip_task_simd = windows_unsafe_skip_task_simd;
+#endif
+#if LLAM_ARCH_AARCH64
+    aarch64_unsafe_skip_scheduler_simd =
+        llam_runtime_env_flag("LLAM_AARCH64_UNSAFE_SKIP_SCHEDULER_SIMD", 0U) ||
+        llam_runtime_env_flag("LLAM_ARM64_UNSAFE_SKIP_SCHEDULER_SIMD", 0U);
+#endif
+    rt->stack_sampling_enabled =
         llam_runtime_env_flag("LLAM_STACK_SAMPLING", 0U) ||
         (light_safepoint_env != NULL &&
          light_safepoint_env[0] != '\0' &&
          strcmp(light_safepoint_env, "0") == 0) ||
         llam_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U);
+    rt->run_timing_enabled =
+        llam_runtime_env_flag("LLAM_RUN_TIMING", 0U) ||
+        rt->stack_sampling_enabled != 0U;
+    rt->direct_handoff_stats_enabled = llam_runtime_env_flag("LLAM_DIRECT_HANDOFF_STATS", 0U);
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
+#elif defined(__linux__)
+    rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
+#else
+    rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 0U, 65535U);
+#endif
     if (light_safepoint_env != NULL && light_safepoint_env[0] != '\0') {
         rt->cheap_safepoint = strcmp(light_safepoint_env, "0") != 0 ? 1U : 0U;
     } else {
@@ -349,7 +390,9 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     }
     rt->safepoint_clock_period =
         llam_runtime_env_u32("LLAM_SAFEPOINT_CLOCK_PERIOD", rt->safepoint_clock_period, 4096U);
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    rt->preempt_poll_period = rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ? 16U : 32U;
+#elif defined(__APPLE__)
     rt->preempt_poll_period = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 16U : 8U;
     if (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY) {
         rt->preempt_poll_period = 16U;
@@ -364,15 +407,17 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
         rt->preempt_poll_period = 1U;
     }
     rt->preempt_poll_period = llam_runtime_env_u32("LLAM_PREEMPT_POLL_PERIOD", rt->preempt_poll_period, 4096U);
-    rt->spawn_fanout_wake_interval =
-        llam_runtime_env_u32("LLAM_SPAWN_FANOUT_WAKE_INTERVAL", 0U, 65535U);
     rt->channel_local_handoff_enabled =
         llam_runtime_env_flag("LLAM_CHANNEL_LOCAL_HANDOFF",
                             rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 1U);
+    timer_heap_prewarm = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
+                             ? 1024U
+                             : (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ? 512U : 0U);
+    timer_heap_prewarm = llam_runtime_env_u32("LLAM_TIMER_HEAP_PREWARM", timer_heap_prewarm, 1048576U);
     if (rt->experimental_shard_rings != 0U) {
         rt->experimental_sqpoll_requested = 0U;
     }
-    if (rt->deterministic != 0U || observed <= 1U) {
+    if (rt->deterministic != 0U || observed <= 2U) {
         rt->experimental_dynamic_shards = 0U;
     }
     if (llam_runtime_reserve_sqpoll_cpu(rt, &cpus, &observed) != 0) {
@@ -382,6 +427,29 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     }
     rt->observed_shards = observed_total;
     rt->active_shards = rt->deterministic != 0U ? 1U : observed;
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    rt->direct_handoff_live_limit =
+        llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT",
+                            rt->active_shards <= 2U ? 0U : 16U,
+                            1048576U);
+#else
+    rt->direct_handoff_live_limit =
+        llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT", 0U, 1048576U);
+#endif
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    /* Windows needs earlier kicks to avoid lock-free fanout starvation. */
+    rt->spawn_fanout_wake_interval =
+        rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 128U;
+    rt->spawn_fanout_adaptive = llam_runtime_env_flag("LLAM_SPAWN_FANOUT_ADAPTIVE", 0U);
+#else
+    rt->spawn_fanout_wake_interval = 0U;
+    rt->spawn_fanout_adaptive = llam_runtime_env_flag("LLAM_SPAWN_FANOUT_ADAPTIVE", 0U);
+#endif
+    spawn_fanout_env = llam_env_get("LLAM_SPAWN_FANOUT_WAKE_INTERVAL");
+    rt->spawn_fanout_wake_interval_forced =
+        spawn_fanout_env != NULL && spawn_fanout_env[0] != '\0' ? 1U : 0U;
+    rt->spawn_fanout_wake_interval =
+        llam_runtime_env_u32("LLAM_SPAWN_FANOUT_WAKE_INTERVAL", rt->spawn_fanout_wake_interval, 65535U);
     initial_online_shards = rt->active_shards;
     rt->dynamic_online_floor = rt->active_shards;
     if (rt->experimental_dynamic_shards != 0U) {
@@ -405,6 +473,8 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     atomic_store(&rt->online_shards_min, initial_online_shards);
     atomic_store(&rt->online_shards_max, initial_online_shards);
     atomic_store(&rt->steal_pause_active, 0U);
+    atomic_store(&rt->live_tasks, 0U);
+    atomic_store(&rt->live_task_shards, 0U);
     atomic_store(&rt->active_io_waiters, 0U);
     rt->allowed_cpus = cpus;
     (void)llam_detect_xsave_support(rt);
@@ -454,10 +524,22 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
         atomic_init(&rt->shards[i].merge_pause_requested, 0U);
         atomic_init(&rt->shards[i].merge_pause_ack, 0U);
         atomic_init(&rt->shards[i].steal_pause_ack, 0U);
+        atomic_init(&rt->shards[i].live_tasks, 0U);
         llam_cldeque_init(&rt->shards[i].norm_cldeque);
         atomic_init(&rt->shards[i].inject_depth, 0U);
         atomic_init(&rt->shards[i].norm_depth, 0U);
         atomic_init(&rt->shards[i].timer_count, 0U);
+        if (timer_heap_prewarm > 0U) {
+            rt->shards[i].timer_heap = calloc(timer_heap_prewarm, sizeof(*rt->shards[i].timer_heap));
+            if (rt->shards[i].timer_heap == NULL) {
+                free(io_node_ids);
+                free(locality_node_ids);
+                errno = ENOMEM;
+                llam_runtime_shutdown();
+                return -1;
+            }
+            rt->shards[i].timer_heap_cap = timer_heap_prewarm;
+        }
         atomic_init(&rt->shards[i].current, NULL);
         atomic_init(&rt->shards[i].opaque_helper_active_hint, 0U);
 #if defined(__linux__)
@@ -539,6 +621,31 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
             llam_runtime_shutdown();
             return -1;
         }
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+        if (windows_unsafe_skip_scheduler_simd != 0U) {
+            /*
+             * Opt-in ceiling mode: task contexts still preserve XMM6-XMM15, but
+             * scheduler contexts skip their own SIMD save/restore. This is not
+             * the default because Windows x64 treats XMM6-XMM15 as callee-saved.
+             */
+            rt->shards[i].scheduler_ctx.simd_flags =
+                LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
+            rt->shards[i].opaque_scheduler_ctx.simd_flags =
+                LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
+        }
+#endif
+#if LLAM_ARCH_AARCH64
+        if (aarch64_unsafe_skip_scheduler_simd != 0U) {
+            /*
+             * Opt-in ceiling mode: task contexts still preserve d8-d15 and
+             * FPCR/FPSR, but scheduler contexts skip their own SIMD path.
+             */
+            rt->shards[i].scheduler_ctx.simd_flags =
+                LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
+            rt->shards[i].opaque_scheduler_ctx.simd_flags =
+                LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
+        }
+#endif
         atomic_store_explicit(&rt->shards[i].last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
         atomic_store(&rt->shards[i].last_run_started_ns, 0U);
     }
@@ -660,6 +767,11 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     if (rt->block_worker_count == 0U) {
         rt->block_worker_count = 1U;
     }
+#if !defined(__linux__)
+    if (rt->block_worker_count < 2U) {
+        rt->block_worker_count = 2U;
+    }
+#endif
     rt->block_threads = calloc(rt->block_worker_count, sizeof(*rt->block_threads));
     if (rt->block_threads == NULL) {
         llam_runtime_shutdown();

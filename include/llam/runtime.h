@@ -271,6 +271,14 @@ typedef struct llam_runtime_stats {
     uint64_t opaque_leave_wait_ns;      /**< Total wait time leaving opaque blocking regions. */
     uint64_t opaque_leave_wait_samples; /**< Leave-wait sample count. */
     uint64_t opaque_leave_wait_max_ns;  /**< Maximum leave-wait duration. */
+    uint64_t yield_direct_attempts;     /**< Direct yield handoff attempts. */
+    uint64_t yield_direct_fast_hits;    /**< Lock-free direct yield handoff hits. */
+    uint64_t yield_direct_locked_hits;  /**< Locked direct yield handoff hits. */
+    uint64_t yield_direct_fail_context; /**< Direct handoff failures from invalid context. */
+    uint64_t yield_direct_fail_policy;  /**< Direct handoff failures from policy/state guards. */
+    uint64_t yield_direct_fail_no_work; /**< Direct handoff failures with no local runnable work. */
+    uint64_t yield_direct_fail_self;    /**< Direct handoff failures that only found the caller. */
+    uint64_t yield_direct_fail_push;    /**< Direct handoff failures requeueing the caller. */
 } llam_runtime_stats_t;
 
 /** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */
@@ -825,6 +833,27 @@ int llam_channel_close(llam_channel_t *channel);
  * primitive directly and may block the calling OS thread.
  */
 ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
+
+/**
+ * @brief Wait for read readiness and read in one runtime operation.
+ *
+ * @details
+ * Managed tasks first try an immediate nonblocking read. If the descriptor is
+ * not ready, LLAM waits for @c POLLIN and then retries the read directly,
+ * avoiding the duplicate safepoint/readiness checks of a separate
+ * ::llam_poll_fd + ::llam_read pair. Calls outside a managed LLAM task delegate
+ * to platform poll/read primitives and may block the calling OS thread.
+ *
+ * @param fd         File descriptor to read from.
+ * @param buf        Destination buffer.
+ * @param count      Maximum bytes to read.
+ * @param timeout_ms Timeout in milliseconds; negative means infinite.
+ *
+ * @return Number of bytes read.
+ * @return -1 with @c errno set to @c ETIMEDOUT if the readiness wait expires,
+ *         or another error from the poll/read path.
+ */
+ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_ms);
 
 /**
  * @brief Write to fd using the runtime I/O backend where possible.

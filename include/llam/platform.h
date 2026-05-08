@@ -64,6 +64,20 @@
 #define LLAM_PLATFORM_POSIX 0
 #endif
 
+/** @brief Non-zero when compiling for x86-64. */
+#if defined(__x86_64__) || defined(_M_X64)
+#define LLAM_ARCH_X86_64 1
+#else
+#define LLAM_ARCH_X86_64 0
+#endif
+
+/** @brief Non-zero when compiling for AArch64/arm64. */
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define LLAM_ARCH_AARCH64 1
+#else
+#define LLAM_ARCH_AARCH64 0
+#endif
+
 /**
  * @brief LLAM uses POSIX file descriptors on Unix-like platforms and SOCKET on
  * Windows.

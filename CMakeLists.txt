@@ -8,10 +8,16 @@ set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.0"
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+include(CheckSymbolExists)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+option(LLAM_ENABLE_WINDOWS_BACKEND "Enable the native Windows 10/11 backend when building on Windows" ON)
+add_compile_options($<$<COMPILE_LANG_AND_ID:C,MSVC>:/experimental:c11atomics>)
 
 set(LLAM_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_OSX_ARCHITECTURES)
@@ -68,6 +74,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_wait_timer_alloc.c
     src/core/runtime_wait_tracking.c
     src/core/runtime_wake.c
+    src/core/runtime_windows.c
     src/core/runtime_yield_join_sleep.c
     src/engine/runtime_block.c
     src/engine/runtime_engine.c
@@ -85,6 +92,7 @@ set(LLAM_RUNTIME_SOURCES
     src/io/runtime_io_api_public.c
     src/io/runtime_io_engine.c
     src/io/runtime_io_watch.c
+    src/io/windows/runtime_windows_iocp.c
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -113,6 +121,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    list(APPEND LLAM_RUNTIME_SOURCES
+        src/io/windows/runtime_io_watch_windows.c
+    )
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND LLAM_TARGET_PROCESSOR MATCHES "arm64|aarch64")
     list(APPEND LLAM_RUNTIME_SOURCES
         src/core/runtime_context_arm64.c
@@ -132,6 +146,21 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "aar
         src/core/runtime_context_arm64.c
         src/asm/linux/arm64/context_arm64.S
     )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND MSVC)
+    enable_language(ASM_MASM)
+    list(APPEND LLAM_RUNTIME_SOURCES
+        src/asm/windows/x86_64/context_x86_64.asm
+    )
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    list(APPEND LLAM_RUNTIME_SOURCES
+        src/asm/windows/x86_64/context_x86_64.S
+    )
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CMAKE_REQUIRED_LIBRARIES uring)
+    check_symbol_exists(io_uring_setup_buf_ring "liburing.h" LLAM_HAVE_IO_URING_SETUP_BUF_RING)
+    unset(CMAKE_REQUIRED_LIBRARIES)
 endif()
 
 add_library(llam_runtime STATIC ${LLAM_RUNTIME_SOURCES})
@@ -169,8 +198,15 @@ foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(LLAM_HAVE_IO_URING_SETUP_BUF_RING)
+            target_compile_definitions(${LLAM_TARGET} PRIVATE LLAM_HAVE_IO_URING_BUF_RING_HELPERS=1)
+        endif()
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        target_compile_definitions(${LLAM_TARGET} PRIVATE _WIN32_WINNT=0x0A00)
+        if(NOT LLAM_ENABLE_WINDOWS_BACKEND)
+            message(FATAL_ERROR "Native Windows builds require LLAM_ENABLE_WINDOWS_BACKEND=ON")
+        endif()
+        target_compile_definitions(${LLAM_TARGET} PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     endif()
 endforeach()
 
@@ -181,9 +217,19 @@ target_link_libraries(llam_runtime_shared PUBLIC Threads::Threads)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(llam_runtime PUBLIC uring m)
     target_link_libraries(llam_runtime_shared PUBLIC uring m)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_link_libraries(llam_runtime PUBLIC ws2_32 mswsock synchronization)
+    target_link_libraries(llam_runtime_shared PUBLIC ws2_32 mswsock synchronization)
 endif()
 
-add_executable(demo
+set(LLAM_POSIX_EXAMPLE_EXCLUDE)
+set(LLAM_POSIX_TEST_EXCLUDE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set(LLAM_POSIX_EXAMPLE_EXCLUDE EXCLUDE_FROM_ALL)
+    set(LLAM_POSIX_TEST_EXCLUDE EXCLUDE_FROM_ALL)
+endif()
+
+add_executable(demo ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/demo.c
     examples/demo_tasks.c
     examples/demo_entry.c
@@ -193,9 +239,12 @@ target_include_directories(demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
 )
 target_compile_definitions(demo PRIVATE _GNU_SOURCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(demo PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+endif()
 target_link_libraries(demo PRIVATE llam_runtime)
 
-add_executable(stress
+add_executable(stress ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/stress.c
     examples/stress_support.c
     examples/stress_tasks.c
@@ -210,9 +259,12 @@ target_include_directories(stress PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
 )
 target_compile_definitions(stress PRIVATE _GNU_SOURCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(stress PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+endif()
 target_link_libraries(stress PRIVATE llam_runtime)
 
-add_executable(bench
+add_executable(bench ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/bench.c
     examples/bench_support.c
     examples/bench_entry.c
@@ -222,7 +274,31 @@ target_include_directories(bench PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
 )
 target_compile_definitions(bench PRIVATE _GNU_SOURCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(bench PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+endif()
 target_link_libraries(bench PRIVATE llam_runtime)
+
+add_executable(server ${LLAM_POSIX_EXAMPLE_EXCLUDE}
+    examples/server.c
+)
+target_compile_definitions(server PRIVATE _GNU_SOURCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_compile_definitions(server PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(server PRIVATE _WIN32_WINNT=0x0A00)
+endif()
+target_link_libraries(server PRIVATE llam_runtime)
+
+add_executable(server_flood ${LLAM_POSIX_EXAMPLE_EXCLUDE}
+    examples/server_flood.c
+)
+target_compile_definitions(server_flood PRIVATE _GNU_SOURCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_compile_definitions(server_flood PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(server_flood PRIVATE _WIN32_WINNT=0x0A00)
+endif()
 
 enable_testing()
 
@@ -231,7 +307,7 @@ add_executable(test_abi_contract
 )
 target_link_libraries(test_abi_contract PRIVATE llam_runtime)
 
-add_executable(test_connect_io
+add_executable(test_connect_io ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_connect_io.c
 )
 target_link_libraries(test_connect_io PRIVATE llam_runtime)
@@ -246,17 +322,39 @@ add_executable(test_sync_primitives
 )
 target_link_libraries(test_sync_primitives PRIVATE llam_runtime)
 
-add_executable(test_io_buffers
+add_executable(test_io_buffers ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_io_buffers.c
 )
 target_link_libraries(test_io_buffers PRIVATE llam_runtime)
 
-add_executable(test_nm_compat_runtime
+add_executable(test_windows_policy
+    tests/test_windows_policy.c
+)
+target_link_libraries(test_windows_policy PRIVATE llam_runtime)
+
+add_executable(test_windows_runtime_smoke
+    tests/test_windows_runtime_smoke.c
+)
+target_link_libraries(test_windows_runtime_smoke PRIVATE llam_runtime)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    add_executable(test_windows_iocp_io
+        tests/test_windows_iocp_io.c
+    )
+    target_include_directories(test_windows_iocp_io PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    )
+    target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+    target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime)
+endif()
+
+add_executable(test_nm_compat_runtime ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_nm_compat_runtime.c
 )
 target_link_libraries(test_nm_compat_runtime PRIVATE llam_runtime)
 
-add_executable(test_shared_load
+add_executable(test_shared_load ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_shared_load.c
 )
 target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS})
@@ -268,26 +366,36 @@ foreach(LLAM_TEST_TARGET
         test_runtime_core
         test_sync_primitives
         test_io_buffers
+        test_windows_policy
+        test_windows_runtime_smoke
         test_nm_compat_runtime
         test_shared_load)
     target_include_directories(${LLAM_TEST_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
     )
     target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _GNU_SOURCE)
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _WIN32_WINNT=0x0A00)
+        target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     endif()
 endforeach()
 
 add_test(NAME test_abi_contract COMMAND test_abi_contract)
-add_test(NAME test_connect_io COMMAND test_connect_io)
 add_test(NAME test_runtime_core COMMAND test_runtime_core)
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
-add_test(NAME test_io_buffers COMMAND test_io_buffers)
-add_test(NAME test_nm_compat_runtime COMMAND test_nm_compat_runtime)
-add_test(NAME test_shared_load COMMAND test_shared_load $<TARGET_FILE:llam_runtime_shared>)
+add_test(NAME test_windows_policy COMMAND test_windows_policy)
+add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    add_test(NAME test_windows_iocp_io COMMAND test_windows_iocp_io)
+endif()
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    add_test(NAME test_connect_io COMMAND test_connect_io)
+    add_test(NAME test_io_buffers COMMAND test_io_buffers)
+    add_test(NAME test_nm_compat_runtime COMMAND test_nm_compat_runtime)
+    add_test(NAME test_shared_load COMMAND test_shared_load $<TARGET_FILE:llam_runtime_shared>)
+endif()
 
 set(LLAM_PC_PRIVATE_LIBS "-pthread")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -320,10 +428,12 @@ install(
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-install(
-    TARGETS demo stress bench
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    install(
+        TARGETS demo stress bench server server_flood
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
 
 install(
     DIRECTORY include/

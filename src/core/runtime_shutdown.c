@@ -189,12 +189,19 @@ void llam_runtime_shutdown(void) {
         llam_runtime_drain_stack_cache(rt);
     }
 
-    task = rt->all_tasks;
-    while (task != NULL) {
-        llam_task_t *next = task->all_next;
+    if (rt->shards != NULL) {
+        for (i = 0; i < rt->active_shards; ++i) {
+            task = rt->shards[i].all_tasks;
+            rt->shards[i].all_tasks = NULL;
+            while (task != NULL) {
+                llam_task_t *next = task->all_next;
 
-        llam_free_task(task);
-        task = next;
+                task->all_next = NULL;
+                task->all_prev = NULL;
+                llam_free_task(task);
+                task = next;
+            }
+        }
     }
 
     if (rt->shards != NULL) {
@@ -249,6 +256,12 @@ void llam_runtime_shutdown(void) {
     free(rt->nodes);
     free(rt->shards);
     free(rt->allowed_cpus);
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    if (rt->winsock_started) {
+        WSACleanup();
+        rt->winsock_started = false;
+    }
+#endif
     llam_clear_xsave_globals();
     // Clear the singleton last so accidental post-shutdown reads fail closed.
     memset(rt, 0, sizeof(*rt));

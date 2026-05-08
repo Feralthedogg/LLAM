@@ -218,7 +218,8 @@ def main() -> int:
     if "LLAM" in selected_runtimes:
         rows.extend(run_command(root, "LLAM", ["./bench"], env, args.timeout))
     if "Goroutine" in selected_runtimes:
-        rows.extend(run_command(root, "Goroutine", ["go", "run", "scripts/bench_go_compare.go"], env, args.timeout))
+        go_script = "scripts/bench_go_windows_compare.go" if os.name == "nt" else "scripts/bench_go_compare.go"
+        rows.extend(run_command(root, "Goroutine", ["go", "run", go_script], env, args.timeout))
     if "Tokio" in selected_runtimes:
         rows.extend(
             run_command(

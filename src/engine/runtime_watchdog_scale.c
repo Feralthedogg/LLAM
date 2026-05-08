@@ -250,7 +250,7 @@ release_pause:
                     target != NULL ? target->id : UINT_MAX,
                     blocked_reason,
                     llam_runtime_online_shards(rt),
-                    atomic_load(&rt->live_tasks),
+                    llam_runtime_live_tasks(rt),
                     llam_runtime_active_io_waiters(rt),
                     norm_depth,
                     hot_depth,
@@ -311,7 +311,7 @@ void llam_runtime_adjust_online_shards(llam_runtime_t *rt) {
         return;
     }
 
-    live = atomic_load(&rt->live_tasks);
+    live = llam_runtime_live_tasks(rt);
     active_io_waiters = llam_runtime_active_io_waiters(rt);
     // I/O waiters are live tasks, but they are not consuming CPU while parked.
     effective_live = live > active_io_waiters ? live - active_io_waiters : 0U;
@@ -322,12 +322,23 @@ void llam_runtime_adjust_online_shards(llam_runtime_t *rt) {
         // resume tasks without waiting for the scaler to ramp back up.
         online_floor = llam_max_unsigned(online_floor, rt->active_shards - (rt->active_shards / 4U));
     }
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    if (timers_pending && rt->active_shards <= 8U) {
+        /*
+         * Windows VM timer fanout is sensitive to parked worker count: if only
+         * the dynamic floor is online, timer shards can wake late and create
+         * large p99 spikes.  Keep small Windows runtimes fully online while
+         * timers are armed, but preserve dynamic scaling for spawn/I/O phases.
+         */
+        online_floor = rt->active_shards;
+    }
+#endif
     pressure = llam_runtime_pressure_signal(rt);
     runnable_backlog = llam_runtime_has_runnable_backlog(rt);
     want_up = (pressure ||
                effective_live > online * 2U ||
                (active_io_waiters > 0U && runnable_backlog) ||
-               (active_io_waiters > 0U && online < online_floor)) &&
+               online < online_floor) &&
               online < rt->active_shards;
     want_down = !pressure &&
                 online > online_floor &&

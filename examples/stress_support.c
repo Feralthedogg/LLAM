@@ -144,11 +144,12 @@ llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg
     }
 
     task->home_shard = shard_id;
+    task->live_shard = shard_id;
     task->last_shard = shard_id;
     task->last_runnable_ns = llam_now_ns();
 
     llam_add_task_to_list(rt, task);
-    atomic_fetch_add(&rt->live_tasks, 1U);
+    llam_runtime_note_task_live(rt, target);
 
     pthread_mutex_lock(&target->lock);
     if (rt->experimental_dynamic_shards != 0U &&

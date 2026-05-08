@@ -264,6 +264,7 @@ int nm_channel_close(nm_channel_t *channel);
 
 /* Runtime-integrated I/O helpers. */
 ssize_t nm_read(nm_fd_t fd, void *buf, size_t count);
+ssize_t nm_read_when_ready(nm_fd_t fd, void *buf, size_t count, int timeout_ms);
 ssize_t nm_write(nm_fd_t fd, const void *buf, size_t count);
 ssize_t nm_read_owned(nm_fd_t fd, size_t max_count, nm_io_buffer_t **out);
 ssize_t nm_recv_owned(nm_fd_t fd, size_t max_count, int flags, nm_io_buffer_t **out);

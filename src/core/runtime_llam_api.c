@@ -375,6 +375,10 @@ ssize_t nm_read(nm_fd_t fd, void *buf, size_t count) {
     return llam_read((llam_fd_t)fd, buf, count);
 }
 
+ssize_t nm_read_when_ready(nm_fd_t fd, void *buf, size_t count, int timeout_ms) {
+    return llam_read_when_ready((llam_fd_t)fd, buf, count, timeout_ms);
+}
+
 ssize_t nm_write(nm_fd_t fd, const void *buf, size_t count) {
     return llam_write((llam_fd_t)fd, buf, count);
 }

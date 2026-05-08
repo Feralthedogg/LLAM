@@ -31,23 +31,29 @@
 #include "llam_internal.h"
 #include "runtime_platform.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+#include "runtime_windows_compat.h"
+#else
+#include <dirent.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#endif
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
 #include <pthread.h>
 #include <signal.h>
+#include <unistd.h>
+#endif
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
@@ -266,6 +272,14 @@ typedef struct llam_metrics {
     uint64_t idle_spin_ns;
     uint64_t watchdog_hits;
     uint64_t long_no_safepoint;
+    uint64_t yield_direct_attempts;
+    uint64_t yield_direct_fast_hits;
+    uint64_t yield_direct_locked_hits;
+    uint64_t yield_direct_fail_context;
+    uint64_t yield_direct_fail_policy;
+    uint64_t yield_direct_fail_no_work;
+    uint64_t yield_direct_fail_self;
+    uint64_t yield_direct_fail_push;
     uint64_t opaque_compensations;
     uint64_t deadlock_suspicions;
     uint64_t queue_overflows;
@@ -349,6 +363,7 @@ typedef struct llam_io_req {
     struct sockaddr *addr;
     socklen_t *addrlen;
     socklen_t addr_len;
+    llam_fd_t fd_result;
     ssize_t result;
     int error_code;
     short poll_events;
@@ -369,6 +384,7 @@ typedef struct llam_io_req {
     uint64_t submit_ts_ns;
     uint64_t deadline_ns;
     unsigned short provided_bid;
+    void *platform_data;
     atomic_uint wait_mode;
     atomic_uint abort_reason;
     atomic_uint cancel_queued;
@@ -618,6 +634,7 @@ struct llam_task {
     llam_wait_reason_t wait_reason;
     unsigned flags;
     unsigned home_shard;
+    unsigned live_shard;
     unsigned last_shard;
     unsigned parked_shard;
     llam_task_class_t task_class;
@@ -625,7 +642,7 @@ struct llam_task {
     llam_cancel_token_t *cancel_token;
     llam_task_fn entry;
     void *arg;
-    llam_ctx_t ctx;
+    _Alignas(16) llam_ctx_t ctx;
     void *stack_mapping;
     size_t mapping_size;
     void *stack_base;
@@ -633,6 +650,7 @@ struct llam_task {
     llam_stack_cache_entry_t stack_cache_entry;
     pthread_mutex_t lock;
     bool lock_initialized;
+    atomic_uint task_listed;
     llam_task_t *all_next;
     llam_task_t *all_prev;
     llam_task_t *alloc_next;
@@ -640,6 +658,7 @@ struct llam_task {
     llam_task_t *queue_prev;
     llam_task_t *join_waiters;
     unsigned join_waiter_count;
+    atomic_uint join_waiter_hint;
     llam_task_t *join_target;
     llam_task_t *wait_next;
     llam_task_t *cancel_next;
@@ -707,7 +726,7 @@ struct llam_shard {
     pthread_mutex_t lock;
     pthread_mutex_t opaque_lock;
     pthread_cond_t opaque_cv;
-#if defined(__linux__)
+#if defined(__linux__) || LLAM_PLATFORM_WINDOWS
     atomic_uint opaque_wake_seq;
 #endif
 #if defined(__APPLE__)
@@ -741,6 +760,7 @@ struct llam_shard {
     llam_queue_t hot_q;
     llam_queue_t norm_q;
     llam_cldeque_t norm_cldeque;
+    llam_task_t *all_tasks;
     llam_timer_node_t *timers;
     llam_timer_node_t **timer_heap;
     size_t timer_heap_len;
@@ -754,14 +774,17 @@ struct llam_shard {
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;
     pthread_mutex_t stack_cache_lock;
-    llam_ctx_t scheduler_ctx;
-    llam_ctx_t opaque_scheduler_ctx;
+    _Alignas(16) llam_ctx_t scheduler_ctx;
+    _Alignas(16) llam_ctx_t opaque_scheduler_ctx;
     _Atomic(llam_task_t *) current;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
     atomic_uint_fast64_t last_safepoint_ns;
     atomic_uint_fast64_t last_run_started_ns;
     uint64_t last_idle_wake_ns;
+    uint64_t next_task_seq;
     atomic_uint norm_depth;
     unsigned hot_streak;
+    unsigned direct_handoff_streak;
     llam_allocator_t allocator;
     llam_metrics_t metrics;
     llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
@@ -795,6 +818,20 @@ struct llam_node {
     int event_fd;
     uint32_t mach_wake_port;
     uint32_t mach_wake_pset;
+    void *windows_iocp_handle;
+    void *windows_fd_assoc_head;
+    void *windows_io_op_free;
+    void *windows_accept_socket_free;
+    void *windows_acceptex;
+    void *windows_connectex;
+    unsigned windows_completion_batch;
+    unsigned windows_use_skip_completion_on_success;
+    unsigned windows_io_op_free_count;
+    unsigned windows_io_op_free_max;
+    unsigned windows_accept_socket_free_count;
+    unsigned windows_accept_socket_free_max;
+    unsigned windows_accept_prepost;
+    unsigned windows_poll_timeout_ms;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t submit_lock;
     pthread_mutex_t watch_lock;
@@ -856,6 +893,8 @@ struct llam_runtime {
     unsigned sqpoll_cpu_reserved;
     int sqpoll_cpu;
     bool xsave_enabled;
+    bool winsock_started;
+    unsigned windows_unsafe_skip_task_simd;
     uint64_t xsave_mask;
     size_t xsave_area_size;
     size_t xsave_area_alloc_size;
@@ -905,6 +944,7 @@ struct llam_runtime {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active_peak;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_task_shards;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint active_io_waiters;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint next_task_id;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint overflow_depth;
@@ -919,10 +959,16 @@ struct llam_runtime {
     unsigned trace_events_enabled;
     unsigned wake_latency_metrics_enabled;
     unsigned run_timing_enabled;
+    unsigned stack_sampling_enabled;
+    unsigned direct_handoff_stats_enabled;
+    unsigned direct_handoff_burst;
+    unsigned direct_handoff_live_limit;
     unsigned cheap_safepoint;
     unsigned safepoint_clock_period;
     unsigned preempt_poll_period;
     unsigned spawn_fanout_wake_interval;
+    unsigned spawn_fanout_wake_interval_forced;
+    unsigned spawn_fanout_adaptive;
     unsigned channel_local_handoff_enabled;
     atomic_uint steal_pause_active;
 };

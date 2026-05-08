@@ -32,7 +32,7 @@
  * @return @c true when @c LLAM_DYNAMIC_TRACE is set to a non-zero value.
  */
 bool llam_dynamic_trace_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {

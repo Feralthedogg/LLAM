@@ -27,6 +27,42 @@
 #include "runtime_internal.h"
 
 /**
+ * @brief Reset a recycled task object while preserving embedded permanent state.
+ *
+ * @details
+ * The pthread mutex is initialized once per slab object and embedded wait/I/O
+ * objects are cleared at acquisition time.  Avoiding a whole-struct memset keeps
+ * spawn-heavy workloads from repeatedly touching cold embedded request storage.
+ *
+ * @param task     Task object taken from a shard free list.
+ * @param shard_id Allocation-owner shard id to publish after reset.
+ */
+static void llam_task_reset_reused(llam_task_t *task, unsigned shard_id) {
+    bool lock_initialized;
+
+    if (task == NULL) {
+        return;
+    }
+
+    lock_initialized = task->lock_initialized;
+    memset(task, 0, offsetof(llam_task_t, ctx));
+    memset((char *)task + offsetof(llam_task_t, stack_mapping),
+           0,
+           offsetof(llam_task_t, lock) - offsetof(llam_task_t, stack_mapping));
+    memset((char *)task + offsetof(llam_task_t, task_listed),
+           0,
+           offsetof(llam_task_t, embedded_wait_node) - offsetof(llam_task_t, task_listed));
+    memset((char *)task + offsetof(llam_task_t, active_wait_node),
+           0,
+           offsetof(llam_task_t, embedded_io_req) - offsetof(llam_task_t, active_wait_node));
+    memset((char *)task + offsetof(llam_task_t, active_io_req),
+           0,
+           sizeof(*task) - offsetof(llam_task_t, active_io_req));
+    task->lock_initialized = lock_initialized;
+    task->alloc_owner_shard = shard_id;
+}
+
+/**
  * @brief Allocate a task object from a shard-local cache.
  *
  * @param shard Shard that should own the returned task object.
@@ -49,18 +85,9 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
             // owner-local free list without taking the slow path lock.
             task = shard->allocator.task_free;
             if (task != NULL) {
-                bool lock_initialized = task->lock_initialized;
-
                 shard->allocator.task_free = task->alloc_next;
                 shard->allocator.task_reuses += 1U;
-                // Clear around the embedded lock so the pthread_mutex_t remains
-                // valid while all task-visible state is reset.
-                memset(task, 0, offsetof(llam_task_t, lock));
-                memset((char *)task + offsetof(llam_task_t, all_next),
-                       0,
-                       sizeof(*task) - offsetof(llam_task_t, all_next));
-                task->lock_initialized = lock_initialized;
-                task->alloc_owner_shard = shard->id;
+                llam_task_reset_reused(task, shard->id);
                 return task;
             }
         } else {
@@ -69,17 +96,10 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
             llam_allocator_lock(&shard->allocator);
             task = shard->allocator.task_free;
             if (task != NULL) {
-                bool lock_initialized = task->lock_initialized;
-
                 shard->allocator.task_free = task->alloc_next;
                 shard->allocator.task_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
-                memset(task, 0, offsetof(llam_task_t, lock));
-                memset((char *)task + offsetof(llam_task_t, all_next),
-                       0,
-                       sizeof(*task) - offsetof(llam_task_t, all_next));
-                task->lock_initialized = lock_initialized;
-                task->alloc_owner_shard = shard->id;
+                llam_task_reset_reused(task, shard->id);
                 return task;
             }
             llam_allocator_unlock(&shard->allocator);

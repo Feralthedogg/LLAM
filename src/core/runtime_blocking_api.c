@@ -43,11 +43,7 @@
 #include "runtime_internal.h"
 
 #define LLAM_OPAQUE_HANDOFF_SPIN_ITERS_DEFAULT 16U
-#if defined(__linux__)
-#define LLAM_OPAQUE_REDIRECT_FASTPATH_DEFAULT 1U
-#else
 #define LLAM_OPAQUE_REDIRECT_FASTPATH_DEFAULT 0U
-#endif
 
 /**
  * @brief Return the cached helper-handoff spin count.
@@ -60,7 +56,7 @@
  *         condition variable/futex path.
  */
 static unsigned llam_opaque_handoff_spin_iters(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -86,14 +82,15 @@ static unsigned llam_opaque_handoff_spin_iters(void) {
 /**
  * @brief Check whether opaque blocking should prefer queue redirect.
  *
- * Linux defaults to redirect because the benchmarked fast path avoids the
- * helper handoff latency for short opaque blocks. Other platforms default to
- * helper handoff unless the environment overrides the policy.
+ * Helper handoff is the default because it preserves local scheduling affinity
+ * and avoids redirect-tail variance in short opaque blocking regions. Redirect
+ * remains available through the environment for workloads that prefer keeping
+ * every primary worker out of foreign blocking calls.
  *
  * @return @c true when redirect should be attempted before helper handoff.
  */
 static bool llam_opaque_redirect_fastpath_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -117,7 +114,7 @@ static bool llam_opaque_redirect_fastpath_enabled(void) {
  * @return @c true when @c LLAM_OPAQUE_TIMING is set to a non-zero value.
  */
 static bool llam_opaque_timing_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -247,6 +244,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
 
     task->blocking_result = NULL;
     task->blocking_errno = 0;
+    llam_task_ensure_listed(task);
     llam_task_set_block_tracking(task, job, g_llam_tls_shard->id);
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_BLOCKING;
@@ -286,7 +284,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     atomic_fetch_add(&rt->block_pending, 1U);
     /* Queue state still lives under the mutex; futex only handles worker sleep/wake. */
     atomic_fetch_add_explicit(&rt->block_wake_seq, 1U, memory_order_release);
-#if !defined(__linux__)
+#if !defined(__linux__) && !LLAM_PLATFORM_WINDOWS
     if (rt->block_cv_initialized) {
         pthread_cond_signal(&rt->block_cv);
     }
@@ -294,6 +292,8 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     pthread_mutex_unlock(&rt->block_lock);
 #if defined(__linux__)
     (void)llam_linux_futex_wake_private(&rt->block_wake_seq, 1U);
+#elif LLAM_PLATFORM_WINDOWS
+    WakeByAddressSingle((PVOID)&rt->block_wake_seq);
 #endif
     if (token != NULL) {
         pthread_mutex_unlock(&token->lock);

@@ -218,16 +218,17 @@ Expected dynamic artifacts:
 ```text
 Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.0
 macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
-Windows: planned; no native dynamic artifact is published in LLAM 1.0.0
+Windows: libllam_runtime.dll is built by the native CMake backend; release
+         archives are withheld until Windows 10/11 CI covers the full gate.
 ```
 
 Language runtimes should prefer the ABI-major soname/install-name when a
 platform supports it.
 
-Native Windows 10/11 support is planned around IOCP and Fiber/context switching.
-Until that backend is complete, Windows-hosted verification should use WSL and
-the Linux backend. Native Windows archives are not part of the 1.0.0 release
-matrix.
+Native Windows 10/11 support covers Windows x86_64 context switching, Windows
+event wake handles, IOCP policy primitives, and IOCP one-shot socket requests
+for `read`, `write`, `accept`, and `connect`. Windows artifacts still wait for
+Windows 10/11 CI, stress, and benchmark acceptance.
 
 ## Runtime Lifecycle
 
@@ -400,9 +401,9 @@ Owned-buffer result rules are fixed for FFI bindings:
 - EOF or zero-byte read/receive: returns `0` and stores `NULL` in `*out`.
 - Failure: returns `-1`, stores `NULL` in `*out`, and sets `errno`.
 
-On Windows, these I/O contracts are the planned native contract. They are not
-claimed as supported until the IOCP backend passes the Windows acceptance gate
-documented in `docs/windows-roadmap.md`.
+On Windows, one-shot socket `read`, `write`, `accept`, and `connect` use IOCP
+request completions. Poll and owned-buffer paths remain covered by the documented
+direct/blocking fallback behavior until dedicated Windows designs are added.
 
 ## Error Contract
 

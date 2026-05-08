@@ -23,20 +23,38 @@
 
 #include "llam/runtime.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fenv.h>
 #include <limits.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if LLAM_PLATFORM_WINDOWS
+#include <windows.h>
+#if defined(__has_include)
+#if __has_include(<afunix.h>)
+#include <afunix.h>
+#endif
+#endif
+#ifndef POLLIN
+#define POLLIN 0x0100
+#endif
+#ifndef POLLERR
+#define POLLERR 0x0001
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0002
+#endif
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include "runtime_internal.h"
 

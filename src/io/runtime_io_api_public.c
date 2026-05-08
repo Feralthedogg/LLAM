@@ -46,6 +46,74 @@ static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
 }
 
 /**
+ * @brief Convert a relative timeout to the remaining poll timeout.
+ *
+ * @param timeout_ms Original relative timeout; negative means infinite.
+ * @param deadline_ns Absolute deadline computed from @p timeout_ms.
+ * @return Remaining timeout in milliseconds, or -1 for infinite.
+ */
+static int llam_remaining_timeout_ms(int timeout_ms, uint64_t deadline_ns) {
+    uint64_t now_ns;
+    uint64_t remaining_ns;
+    uint64_t remaining_ms;
+
+    if (timeout_ms < 0) {
+        return -1;
+    }
+    now_ns = llam_now_ns();
+    if (now_ns >= deadline_ns) {
+        return 0;
+    }
+    remaining_ns = deadline_ns - now_ns;
+    remaining_ms = (remaining_ns + 999999ULL) / 1000000ULL;
+    if (remaining_ms > (uint64_t)INT_MAX) {
+        return INT_MAX;
+    }
+    return (int)remaining_ms;
+}
+
+/**
+ * @brief Check whether fused read should yield once before its first probe.
+ *
+ * Producer/consumer loops often call read-when-ready while the producer is
+ * already runnable locally but has not written yet.  A short same-shard handoff
+ * avoids an immediate EAGAIN read and lets the subsequent direct read complete.
+ */
+static bool llam_read_ready_initial_handoff_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_READ_READY_INITIAL_HANDOFF");
+
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+/**
+ * @brief Check whether read-when-ready may use compensated blocking read.
+ *
+ * The fused API has stronger semantics than a readiness probe: it is allowed to
+ * wait until bytes can be read.  For infinite waits, compensated blocking read
+ * can avoid a poll backend round trip while another worker/helper keeps the
+ * shard making progress.
+ */
+static bool llam_read_ready_direct_blocking_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_READ_READY_DIRECT_BLOCKING");
+
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+/**
  * @brief Read bytes from a descriptor without blocking the scheduler worker.
  *
  * Managed tasks attempt direct non-blocking completion before submitting an
@@ -58,14 +126,12 @@ static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
  *
  * @return Number of bytes read, or -1 with @c errno set.
  */
-ssize_t llam_read(int fd, void *buf, size_t count) {
+ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
     llam_io_req_t *req;
     ssize_t result;
 
-    llam_task_safepoint();
-
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
-        return read(fd, buf, count);
+        return llam_platform_read_fd(fd, buf, count);
     }
     {
         ssize_t direct_result;
@@ -77,6 +143,7 @@ ssize_t llam_read(int fd, void *buf, size_t count) {
         if (direct_rc < 0) {
             return -1;
         }
+        llam_task_safepoint();
         if (llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
             llam_yield();
             direct_rc = llam_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
@@ -135,6 +202,110 @@ ssize_t llam_read(int fd, void *buf, size_t count) {
 }
 
 /**
+ * @brief Wait for read readiness and read without a separate public poll/read pair.
+ *
+ * This fused path is intended for event loops that always read immediately
+ * after @c POLLIN.  It preserves ordinary read semantics while avoiding one
+ * extra public-API safepoint and one redundant readiness probe after poll wake.
+ */
+ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_ms) {
+    uint64_t deadline_ns = 0U;
+    int caller_errno = errno;
+
+    llam_task_safepoint();
+
+    if (count == 0U) {
+        return 0;
+    }
+    if (timeout_ms >= 0) {
+        deadline_ns = llam_now_ns() + (uint64_t)timeout_ms * 1000000ULL;
+    }
+
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
+        for (;;) {
+            short revents = 0;
+            int poll_timeout = llam_remaining_timeout_ms(timeout_ms, deadline_ns);
+            int poll_rc;
+            ssize_t rc;
+
+            poll_rc = llam_platform_poll_fd(fd, POLLIN, poll_timeout, &revents);
+            if (poll_rc < 0) {
+                return -1;
+            }
+            if (poll_rc == 0) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            do {
+                rc = llam_platform_read_fd(fd, buf, count);
+            } while (rc < 0 && errno == EINTR);
+            if (rc >= 0) {
+                errno = caller_errno;
+                return rc;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                return -1;
+            }
+            if (timeout_ms >= 0 && llam_remaining_timeout_ms(timeout_ms, deadline_ns) == 0) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+        }
+    }
+
+    if (timeout_ms != 0 &&
+        llam_read_ready_initial_handoff_enabled() &&
+        llam_io_coop_yield_enabled() &&
+        llam_io_poll_coop_yield_enabled()) {
+        if (!llam_yield_to_local_runnable() && llam_io_shard_has_local_work()) {
+            llam_yield();
+        }
+    }
+
+    for (;;) {
+        ssize_t direct_result;
+        int direct_rc = llam_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
+
+        if (direct_rc > 0) {
+            return direct_result;
+        }
+        if (direct_rc < 0) {
+            return -1;
+        }
+        if (timeout_ms < 0 && llam_read_ready_direct_blocking_enabled()) {
+            direct_rc = llam_try_direct_blocking_rw_forced(fd, buf, count, false, false, 0, &direct_result);
+            if (direct_rc > 0) {
+                return direct_result;
+            }
+            if (direct_rc < 0) {
+                return -1;
+            }
+        }
+        {
+            short revents = 0;
+            int poll_timeout = llam_remaining_timeout_ms(timeout_ms, deadline_ns);
+            int poll_rc = llam_poll_fd(fd, POLLIN, poll_timeout, &revents);
+
+            if (poll_rc < 0) {
+                return -1;
+            }
+            if (poll_rc == 0) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            if ((revents & (POLLIN | POLLHUP | POLLERR)) == 0) {
+                errno = EIO;
+                return -1;
+            }
+        }
+        if (timeout_ms >= 0 && llam_remaining_timeout_ms(timeout_ms, deadline_ns) == 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+    }
+}
+
+/**
  * @brief Read into a runtime-owned buffer.
  *
  * @param fd        File descriptor to read from.
@@ -145,7 +316,7 @@ ssize_t llam_read(int fd, void *buf, size_t count) {
  *
  * @see llam_io_buffer_release
  */
-ssize_t llam_read_owned(int fd, size_t max_count, llam_io_buffer_t **out) {
+ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_t **out) {
     return llam_read_owned_impl(fd, max_count, 0, false, out);
 }
 
@@ -161,7 +332,7 @@ ssize_t llam_read_owned(int fd, size_t max_count, llam_io_buffer_t **out) {
  *
  * @see llam_io_buffer_release
  */
-ssize_t llam_recv_owned(int fd, size_t max_count, int flags, llam_io_buffer_t **out) {
+ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out) {
     return llam_read_owned_impl(fd, max_count, flags, true, out);
 }
 
@@ -245,14 +416,12 @@ size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer) {
  *
  * @return Number of bytes written, or -1 with @c errno set.
  */
-ssize_t llam_write(int fd, const void *buf, size_t count) {
+ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
     llam_io_req_t *req;
     ssize_t result;
 
-    llam_task_safepoint();
-
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
-        return write(fd, buf, count);
+        return llam_platform_write_fd(fd, buf, count);
     }
     {
         ssize_t direct_result;
@@ -266,6 +435,7 @@ ssize_t llam_write(int fd, const void *buf, size_t count) {
         if (direct_rc < 0) {
             return -1;
         }
+        llam_task_safepoint();
         direct_rc = llam_try_direct_blocking_rw(fd, (void *)buf, count, true, false, 0, &direct_result);
         if (direct_rc > 0) {
             llam_maybe_handoff_after_socket_write(fd, count, false);
@@ -325,9 +495,9 @@ ssize_t llam_write(int fd, const void *buf, size_t count) {
  *
  * @return Accepted descriptor, or -1 with @c errno set.
  */
-int llam_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
+llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
     llam_io_req_t *req;
-    int result;
+    llam_fd_t result;
     bool allow_multishot = addr == NULL && addrlen == NULL;
 
 #if defined(__linux__)
@@ -337,13 +507,13 @@ int llam_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
     llam_task_safepoint();
 
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
-        return accept(fd, addr, addrlen);
+        return llam_platform_accept_fd(fd, addr, addrlen);
     }
 
     req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         errno = ENOMEM;
-        return -1;
+        return LLAM_INVALID_FD;
     }
 
     req->kind = LLAM_IO_KIND_ACCEPT;
@@ -353,12 +523,12 @@ int llam_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
     req->recv_watch = NULL;
     if (allow_multishot) {
         if (llam_issue_multishot_accept(req) == 0) {
-            result = (int)req->result;
+            result = (llam_fd_t)req->result;
             llam_api_io_req_release(g_llam_tls_shard, req);
             return result;
         }
         if (!llam_io_capability_error(errno)) {
-            result = (int)req->result;
+            result = (llam_fd_t)req->result;
             llam_api_io_req_release(g_llam_tls_shard, req);
             return result;
         }
@@ -367,7 +537,7 @@ int llam_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
     if (llam_issue_io(req, false, 0U) != 0) {
         if (!llam_io_capability_error(errno)) {
             llam_api_io_req_release(g_llam_tls_shard, req);
-            return -1;
+            return LLAM_INVALID_FD;
         }
         req->kind = LLAM_IO_KIND_ACCEPT;
         req->fd = fd;
@@ -379,14 +549,14 @@ int llam_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
 
             llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
-            return -1;
+            return LLAM_INVALID_FD;
         }
-        result = (int)req->result;
+        result = LLAM_RUNTIME_BACKEND_WINDOWS ? req->fd_result : (llam_fd_t)req->result;
         llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
 
-    result = (int)req->result;
+    result = LLAM_RUNTIME_BACKEND_WINDOWS ? req->fd_result : (llam_fd_t)req->result;
     llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
 }
@@ -405,7 +575,7 @@ int llam_accept(int fd, struct sockaddr *addr, socklen_t *addrlen) {
  *
  * @return 0 on connection, or -1 with @c errno set.
  */
-int llam_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
+int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen) {
     llam_io_req_t *req;
     int result;
 
@@ -416,7 +586,7 @@ int llam_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
         return -1;
     }
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
-        return connect(fd, addr, addrlen);
+        return llam_platform_connect_fd(fd, addr, addrlen);
     }
 
     req = llam_api_io_req_acquire(g_llam_tls_shard);
@@ -471,19 +641,21 @@ int llam_connect(int fd, const struct sockaddr *addr, socklen_t addrlen) {
  *
  * @return Positive ready count, 0 on timeout, or -1 with @c errno set.
  */
-int llam_poll_fd(int fd, short events, int timeout_ms, short *revents) {
+int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
     llam_io_req_t *req;
     int result;
-    bool yielded_for_local_work = false;
-
-    llam_task_safepoint();
+    unsigned ready_yields = 0U;
+    unsigned ready_yield_limit;
 
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return llam_platform_poll_fd(fd, events, timeout_ms, revents);
     }
-    if (timeout_ms > 0 && llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
-        if (llam_io_poll_coop_yield_enabled()) {
-            yielded_for_local_work = true;
+    if (timeout_ms != 0 &&
+        llam_io_poll_pre_yield_enabled() &&
+        llam_io_coop_yield_enabled() &&
+        llam_io_poll_coop_yield_enabled() &&
+        llam_io_shard_has_local_work()) {
+        if (!llam_yield_to_local_runnable()) {
             llam_yield();
         }
     }
@@ -494,9 +666,20 @@ int llam_poll_fd(int fd, short events, int timeout_ms, short *revents) {
     if (result != 0 || timeout_ms == 0) {
         return result;
     }
-    if ((!yielded_for_local_work || llam_io_poll_extra_yield_enabled()) && llam_io_coop_yield_enabled() &&
-        llam_io_poll_coop_yield_enabled() && llam_io_shard_has_local_work()) {
-        llam_yield();
+    llam_task_safepoint();
+    ready_yield_limit = llam_io_poll_ready_yields();
+    if (!llam_io_poll_extra_yield_enabled() && ready_yield_limit > 1U) {
+        ready_yield_limit = 1U;
+    }
+    while (ready_yields < ready_yield_limit && timeout_ms != 0 && llam_io_coop_yield_enabled() &&
+           llam_io_poll_coop_yield_enabled()) {
+        ready_yields += 1U;
+        if (!llam_yield_to_local_runnable()) {
+            if (!llam_io_shard_has_local_work()) {
+                break;
+            }
+            llam_yield();
+        }
         result = llam_try_socket_pollin_now(fd, events, revents);
         if (result == INT_MIN) {
             result = llam_platform_poll_now(fd, events, revents);

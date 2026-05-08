@@ -54,6 +54,13 @@ typedef struct double_join_state {
     atomic_uint busy;
 } double_join_state_t;
 
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+typedef struct aarch64_simd_state {
+    core_state_t *state;
+    uint64_t expected_d8_bits;
+} aarch64_simd_state_t;
+#endif
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_runtime_core] %s\n", message);
     return 1;
@@ -70,6 +77,19 @@ static void task_fail(core_state_t *state, const char *where, int err) {
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
     }
 }
+
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+__attribute__((always_inline)) static inline void aarch64_set_d8_bits(uint64_t value) {
+    __asm__ volatile("fmov d8, %0" : : "r"(value) : "v8");
+}
+
+__attribute__((always_inline)) static inline uint64_t aarch64_get_d8_bits(void) {
+    uint64_t value;
+
+    __asm__ volatile("fmov %0, d8" : "=r"(value));
+    return value;
+}
+#endif
 
 static void *blocking_callback(void *arg) {
     core_state_t *state = arg;
@@ -213,6 +233,24 @@ static void detached_task(void *arg) {
     llam_yield();
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
+
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+static void aarch64_simd_preservation_task(void *arg) {
+    aarch64_simd_state_t *simd = arg;
+    unsigned i;
+
+    aarch64_set_d8_bits(simd->expected_d8_bits);
+    for (i = 0U; i < 64U; ++i) {
+        llam_yield();
+        if (aarch64_get_d8_bits() != simd->expected_d8_bits) {
+            task_fail(simd->state, "AArch64 d8 was not preserved across yield", EINVAL);
+            return;
+        }
+    }
+
+    atomic_fetch_add_explicit(&simd->state->ran, 1U, memory_order_relaxed);
+}
+#endif
 
 static int test_preinit_contracts(void) {
     llam_runtime_stats_t stats;
@@ -641,6 +679,58 @@ static int test_errno_is_task_local_across_switches(void) {
     return 0;
 }
 
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+static int test_aarch64_simd_is_preserved_across_switches(void) {
+    core_state_t state;
+    aarch64_simd_state_t task_a;
+    aarch64_simd_state_t task_b;
+    llam_runtime_opts_t runtime_opts;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+
+    task_a.state = &state;
+    task_a.expected_d8_bits = UINT64_C(0x3ff123456789abcd);
+    task_b.state = &state;
+    task_b.expected_d8_bits = UINT64_C(0x400fedcba9876543);
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init for AArch64 SIMD preservation failed");
+    }
+    if (llam_spawn(aarch64_simd_preservation_task, &task_a, NULL) == NULL ||
+        llam_spawn(aarch64_simd_preservation_task, &task_b, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_spawn AArch64 SIMD preservation task failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_run AArch64 SIMD preservation failed");
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] task failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        llam_runtime_shutdown();
+        return 1;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 2U) {
+        llam_runtime_shutdown();
+        return test_fail("AArch64 SIMD preservation tasks did not both complete");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+#endif
+
 static int test_concurrent_join_contract(void) {
     core_state_t core;
     double_join_state_t state;
@@ -702,6 +792,9 @@ int main(void) {
         test_detach_contract() != 0 ||
         test_ex_option_prefixes() != 0 ||
         test_errno_is_task_local_across_switches() != 0 ||
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+        test_aarch64_simd_is_preserved_across_switches() != 0 ||
+#endif
         test_concurrent_join_contract() != 0) {
         return 1;
     }

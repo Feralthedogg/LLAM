@@ -26,6 +26,10 @@
 
 #include "runtime_internal.h"
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 #if defined(__APPLE__)
 #include <mach/thread_policy.h>
 #include <pthread/qos.h>
@@ -42,7 +46,7 @@
  */
 void llam_bind_current_thread_to_cpu(unsigned cpu_id) {
 #if defined(__linux__)
-    static atomic_int bind_enabled = ATOMIC_VAR_INIT(-1);
+    static atomic_int bind_enabled = -1;
     int enabled = atomic_load_explicit(&bind_enabled, memory_order_acquire);
     cpu_set_t set;
 
@@ -250,19 +254,27 @@ bool llam_io_sqpoll_setup_error(int error_code) {
     return llam_io_capability_error(error_code) || error_code == EPERM || error_code == EACCES;
 }
 
-#if defined(__x86_64__) || defined(__i386__)
+#if LLAM_ARCH_X86_64 || defined(__i386__) || defined(_M_IX86)
 /**
  * @brief Issue a CPU pause hint for spin loops.
  */
 void llam_pause_cpu(void) {
+#if defined(_MSC_VER)
+    YieldProcessor();
+#else
     __asm__ volatile("pause" ::: "memory");
+#endif
 }
 #else
 /**
  * @brief Compiler barrier fallback for platforms without an explicit pause instruction.
  */
 void llam_pause_cpu(void) {
+#if defined(_MSC_VER)
+    _ReadWriteBarrier();
+#else
     __asm__ volatile("" ::: "memory");
+#endif
 }
 #endif
 
@@ -403,6 +415,27 @@ unsigned llam_count_allowed_cpus(unsigned **out_cpus) {
         }
     }
 
+    *out_cpus = cpus;
+    return count;
+#elif LLAM_PLATFORM_WINDOWS
+    SYSTEM_INFO system_info;
+    unsigned count;
+    unsigned *cpus;
+    unsigned i;
+
+    if (out_cpus == NULL) {
+        return 0;
+    }
+    memset(&system_info, 0, sizeof(system_info));
+    GetNativeSystemInfo(&system_info);
+    count = system_info.dwNumberOfProcessors != 0U ? (unsigned)system_info.dwNumberOfProcessors : 1U;
+    cpus = calloc(count, sizeof(*cpus));
+    if (cpus == NULL) {
+        return 0;
+    }
+    for (i = 0; i < count; ++i) {
+        cpus[i] = i;
+    }
     *out_cpus = cpus;
     return count;
 #else

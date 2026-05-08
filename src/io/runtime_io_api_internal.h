@@ -38,9 +38,57 @@ llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard);
 void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req);
 
 /* Direct syscall and poll probes used before parking a task. */
-int llam_platform_poll_fd(int fd, short events, int timeout_ms, short *revents);
-int llam_platform_poll_now(int fd, short events, short *revents);
-int llam_try_direct_rw(int fd,
+static inline ssize_t llam_platform_read_fd(llam_fd_t fd, void *buf, size_t count) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    return llam_windows_socket_recv(fd, buf, count, 0);
+#else
+    return read(fd, buf, count);
+#endif
+}
+
+static inline ssize_t llam_platform_write_fd(llam_fd_t fd, const void *buf, size_t count) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    return llam_windows_socket_send(fd, buf, count, 0);
+#else
+    return write(fd, buf, count);
+#endif
+}
+
+static inline ssize_t llam_platform_recv_fd(llam_fd_t fd, void *buf, size_t count, int flags) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    return llam_windows_socket_recv(fd, buf, count, flags);
+#else
+    return recv(fd, buf, count, flags);
+#endif
+}
+
+static inline ssize_t llam_platform_send_fd(llam_fd_t fd, const void *buf, size_t count, int flags) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    return llam_windows_socket_send(fd, buf, count, flags);
+#else
+    return send(fd, buf, count, flags);
+#endif
+}
+
+static inline llam_fd_t llam_platform_accept_fd(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    return llam_windows_socket_accept(fd, addr, addrlen);
+#else
+    return accept(fd, addr, addrlen);
+#endif
+}
+
+static inline int llam_platform_connect_fd(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    return llam_windows_socket_connect(fd, addr, addrlen);
+#else
+    return connect(fd, addr, addrlen);
+#endif
+}
+
+int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
+int llam_platform_poll_now(llam_fd_t fd, short events, short *revents);
+int llam_try_direct_rw(llam_fd_t fd,
                      void *buf,
                      size_t count,
                      bool is_write,
@@ -51,18 +99,31 @@ int llam_try_direct_rw(int fd,
 bool llam_io_coop_yield_enabled(void);
 bool llam_io_poll_coop_yield_enabled(void);
 bool llam_io_poll_extra_yield_enabled(void);
+bool llam_io_poll_pre_yield_enabled(void);
+unsigned llam_io_poll_ready_yields(void);
 bool llam_io_shard_has_local_work(void);
-void llam_maybe_handoff_after_socket_write(int fd, size_t count, bool known_socket);
-int llam_try_direct_blocking_rw(int fd,
+void llam_maybe_handoff_after_socket_write(llam_fd_t fd, size_t count, bool known_socket);
+int llam_try_direct_blocking_rw(llam_fd_t fd,
                               void *buf,
                               size_t count,
                               bool is_write,
                               bool socket_recv,
                               int recv_flags,
                               ssize_t *result_out);
-int llam_socket_connect_error(int fd);
-int llam_try_socket_pollin_now(int fd, short events, short *revents);
-int llam_try_direct_blocking_poll(int fd, short events, int timeout_ms, short *revents);
+int llam_try_direct_blocking_rw_forced(llam_fd_t fd,
+                                     void *buf,
+                                     size_t count,
+                                     bool is_write,
+                                     bool socket_recv,
+                                     int recv_flags,
+                                     ssize_t *result_out);
+int llam_socket_connect_error(llam_fd_t fd);
+int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents);
+int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, short *revents);
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+bool llam_windows_socket_nonblocking_cached(llam_fd_t fd);
+bool llam_windows_iocp_poll_supported(llam_fd_t fd, short events);
+#endif
 
 /* Blocking fallback callbacks executed on the runtime blocking pool. */
 void *llam_blocking_read_impl(void *arg);
@@ -70,7 +131,7 @@ void *llam_blocking_write_impl(void *arg);
 void *llam_blocking_accept_impl(void *arg);
 void *llam_blocking_connect_impl(void *arg);
 void *llam_blocking_poll_impl(void *arg);
-ssize_t llam_read_owned_impl(int fd,
+ssize_t llam_read_owned_impl(llam_fd_t fd,
                            size_t max_count,
                            int recv_flags,
                            bool socket_recv,

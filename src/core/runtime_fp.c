@@ -25,6 +25,13 @@
 
 #include "runtime_internal.h"
 
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <float.h>
+#include <immintrin.h>
+#include <intrin.h>
+#include <malloc.h>
+#endif
+
 /**
  * @brief Clear cached global extended-context capability flags.
  */
@@ -34,21 +41,33 @@ void llam_clear_xsave_globals(void) {
     g_llam_fp_control_context = 0U;
 }
 
-#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
+#if ((defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64) || \
+    (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)
 /** @brief Read the current SSE MXCSR control/status register. */
 static uint32_t llam_current_mxcsr(void) {
+#if defined(_MSC_VER)
+    return (uint32_t)_mm_getcsr();
+#else
     uint32_t value;
 
     __asm__ volatile("stmxcsr %0" : "=m"(value));
     return value;
+#endif
 }
 
 /** @brief Read the current x87 control word. */
 static uint16_t llam_current_x87_cw(void) {
+#if defined(_MSC_VER)
+    unsigned int current = 0U;
+
+    (void)_controlfp_s(&current, 0U, 0U);
+    return (uint16_t)current;
+#else
     uint16_t value;
 
     __asm__ volatile("fnstcw %0" : "=m"(value));
     return value;
+#endif
 }
 
 #if defined(__linux__)
@@ -65,10 +84,14 @@ static uint64_t llam_xgetbv(uint32_t index) {
 
 /** @brief Save extended CPU state into an aligned XSAVE area. */
 static void llam_save_xsave_area(void *area, uint64_t mask) {
+#if defined(_MSC_VER)
+    _xsave64(area, mask);
+#else
     uint32_t eax = (uint32_t)mask;
     uint32_t edx = (uint32_t)(mask >> 32U);
 
     __asm__ volatile("xsave64 (%0)" : : "r"(area), "a"(eax), "d"(edx) : "memory");
+#endif
 }
 
 /**
@@ -102,9 +125,9 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
 
 #if !defined(__linux__)
     /*
-     * Darwin x86-64 uses the same fast register switch but currently preserves
-     * only FP control state. Keep XSAVE disabled until the Darwin capability
-     * probe and signal/ABI interactions are explicitly validated.
+     * Darwin and Windows x86-64 use fast register switches but currently
+     * preserve only FP control state. Keep XSAVE disabled until each platform's
+     * capability probe and signal/SEH interactions are explicitly validated.
      */
     rt->xsave_enabled = false;
     rt->xsave_mask = 0U;
@@ -173,6 +196,21 @@ int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
         return -1;
     }
 
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+    /*
+     * Fresh Windows fibers skip SIMD/FP restore on first entry.  The first
+     * switch-out saves the real ABI-preserved state and marks it valid, so
+     * per-spawn FP control reads are unnecessary on this path.
+     */
+    ctx->mxcsr = 0U;
+    ctx->x87_cw = 0U;
+    ctx->pad = 0U;
+    ctx->xsave_area = NULL;
+    ctx->simd_valid = 0U;
+    ctx->simd_flags = 0U;
+    return 0;
+#endif
+
     /* Fresh task/scheduler contexts inherit the current worker FP environment. */
     ctx->mxcsr = llam_current_mxcsr();
     ctx->x87_cw = llam_current_x87_cw();
@@ -182,10 +220,18 @@ int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
         return 0;
     }
 
+#if defined(_MSC_VER)
+    area = _aligned_malloc(g_llam_runtime.xsave_area_alloc_size, 64U);
+    if (area == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+#else
     if (posix_memalign(&area, 64U, g_llam_runtime.xsave_area_alloc_size) != 0) {
         errno = ENOMEM;
         return -1;
     }
+#endif
     memset(area, 0, g_llam_runtime.xsave_area_alloc_size);
     llam_save_xsave_area(area, g_llam_runtime.xsave_mask);
     ctx->xsave_area = area;
@@ -202,10 +248,14 @@ void llam_ctx_destroy_fp_state(llam_ctx_t *ctx) {
         return;
     }
 
+#if defined(_MSC_VER)
+    _aligned_free(ctx->xsave_area);
+#else
     free(ctx->xsave_area);
+#endif
     ctx->xsave_area = NULL;
 }
-#elif defined(__aarch64__)
+#elif LLAM_ARCH_AARCH64
 /** @brief Read AArch64 FPCR. */
 static uint64_t llam_current_fpcr(void) {
     uint64_t value;

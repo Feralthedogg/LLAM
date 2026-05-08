@@ -68,7 +68,93 @@ static bool llam_spawn_should_wake_fanout(llam_runtime_t *rt, llam_shard_t *targ
         return false;
     }
     depth = llam_norm_queue_depth(target);
+    if (depth < interval) {
+        return false;
+    }
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    if (rt->spawn_fanout_adaptive != 0U &&
+        rt->spawn_fanout_wake_interval_forced == 0U) {
+        bool pressure = atomic_load_explicit(&rt->active_io_waiters, memory_order_acquire) != 0U;
+
+        if (!pressure) {
+            for (unsigned i = 0U; i < rt->active_shards; ++i) {
+                if (atomic_load_explicit(&rt->shards[i].timer_count, memory_order_acquire) != 0U) {
+                    pressure = true;
+                    break;
+                }
+            }
+        }
+        if (!pressure) {
+            interval = llam_max_unsigned(256U, interval * 2U);
+            if (interval > 512U) {
+                interval = 512U;
+            }
+        }
+    }
+#endif
     return depth >= interval && (depth % interval) == 0U;
+}
+
+/**
+ * @brief Try the same-shard spawn path without taking the shard mutex.
+ *
+ * @details
+ * A task running on the primary scheduler thread is the single owner of the
+ * shard's Chase-Lev bottom.  When tracing is disabled and the shard is not being
+ * merge-paused, local spawns can publish directly to the lock-free normal lane.
+ * This removes one pthread mutex pair from every child spawn in fanout-heavy
+ * workloads while keeping remote spawn, debug tracing, and redirect paths on the
+ * conservative locked implementation.
+ *
+ * @param rt          Runtime instance.
+ * @param target      Current shard receiving the task.
+ * @param task        Fully initialized task.
+ * @param wake_fanout Set when this enqueue should kick all shards.
+ * @return true if the task was published, false if the caller must use the locked path.
+ */
+static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
+                                          llam_shard_t *target,
+                                          llam_task_t *task,
+                                          bool *wake_fanout) {
+    if (rt == NULL || target == NULL || task == NULL || wake_fanout == NULL) {
+        return false;
+    }
+    if (g_llam_tls_shard != target ||
+        g_llam_tls_task == NULL ||
+        g_llam_tls_scheduler_ctx != &target->scheduler_ctx ||
+        rt->trace_events_enabled != 0U ||
+        !llam_shard_accepts_new_work(target) ||
+        !llam_lockfree_normq_enabled(rt)) {
+        return false;
+    }
+
+    task->state = LLAM_TASK_STATE_RUNNABLE;
+    task->enqueue_hot = 0U;
+    if (!llam_norm_queue_push_owner_unlocked(target, task)) {
+        return false;
+    }
+    llam_runtime_note_task_live(rt, target);
+    *wake_fanout = llam_spawn_should_wake_fanout(rt, target);
+    return true;
+}
+
+/**
+ * @brief Allocate a runtime task id with a local fast path for same-shard spawn.
+ *
+ * Local task fanout is single-writer on the primary scheduler thread.  Encoding
+ * the shard id in the high bits preserves uniqueness without touching the
+ * runtime-wide atomic counter on every child spawn.
+ */
+static uint64_t llam_spawn_next_task_id(llam_runtime_t *rt, llam_shard_t *target, bool local_spawn) {
+    if (target != NULL &&
+        local_spawn &&
+        g_llam_tls_scheduler_ctx == &target->scheduler_ctx) {
+        uint64_t seq = ++target->next_task_seq;
+
+        return (((uint64_t)(target->id + 1U) & 0xffffULL) << 48U) |
+               (seq & 0x0000ffffffffffffULL);
+    }
+    return (uint64_t)atomic_fetch_add_explicit(&rt->next_task_id, 1U, memory_order_relaxed) + 1U;
 }
 
 /** @brief Return true when @p task_class is a supported public task class. */
@@ -94,7 +180,7 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
  *     deadline, and cancellation-token ownership.
  *  3) Pick a home shard, allocate the task object, allocate its fiber stack,
  *     and initialize scheduler-visible state.
- *  4) Publish the task in the global task list and increment live task count.
+ *  4) Publish the task in the shard-local task list and increment live task count.
  *  5) Enqueue the task on the best queue for the current context:
  *       - opaque redirect queue when the target shard is blocked in opaque I/O,
  *       - inject queue for remote lock-free normal queue handoff,
@@ -124,8 +210,6 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     size_t opts_copy_size;
     bool local_spawn;
     bool wake_fanout = false;
-
-    llam_task_safepoint();
 
     if (opts != NULL) {
         if (opts_size == 0U) {
@@ -161,7 +245,7 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
         return NULL;
     }
 
-    task->id = atomic_fetch_add(&rt->next_task_id, 1U) + 1U;
+    task->id = llam_spawn_next_task_id(rt, target, local_spawn);
     task->state = LLAM_TASK_STATE_NEW;
     task->wait_reason = LLAM_WAIT_NONE;
     task->flags = opts != NULL ? opts->flags : 0U;
@@ -180,11 +264,14 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     task->arg = arg;
     task->forced_yield_budget = rt->forced_yield_every;
     task->home_shard = shard_id;
+    task->live_shard = shard_id;
     task->last_shard = shard_id;
     atomic_init(&task->preempt_requested, 0U);
     atomic_init(&task->reclaim_ready, 0U);
     atomic_init(&task->reclaim_claimed, 0U);
     atomic_init(&task->detached, 0U);
+    atomic_init(&task->task_listed, 0U);
+    atomic_init(&task->join_waiter_hint, 0U);
     task->join_waiter_count_at_exit = 0U;
 
     if (llam_alloc_task_stack(task, stack_class) != 0) {
@@ -196,39 +283,48 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
 
     task->last_runnable_ns = rt->wake_latency_metrics_enabled != 0U ? llam_now_ns() : 0U;
 
-    llam_add_task_to_list(rt, task);
-    atomic_fetch_add(&rt->live_tasks, 1U);
-
-    pthread_mutex_lock(&target->lock);
-    if (rt->experimental_dynamic_shards != 0U &&
-        atomic_load_explicit(&target->online, memory_order_relaxed) == 0U) {
-        atomic_store_explicit(&target->online, 1U, memory_order_release);
-        llam_runtime_note_online_shards(rt, atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
-    }
-    task->state = LLAM_TASK_STATE_RUNNABLE;
-    if (target->opaque_redirect_active) {
-        target->metrics.migrations += 1U;
-        task->enqueue_hot = 0U;
-        if (!llam_enqueue_opaque_redirect_task_locked(target, task, false)) {
-            llam_enqueue_overflow_task(rt, task);
-        }
-    } else if (llam_lockfree_normq_enabled(rt) && (g_llam_tls_shard != target || g_llam_tls_task == NULL)) {
-        task->enqueue_hot = 0U;
-        if (llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
-            target->metrics.inject_enqueues += 1U;
+    if (!llam_task_list_eager_enabled(rt) &&
+        llam_spawn_try_local_unlocked(rt, target, task, &wake_fanout)) {
+        if (wake_fanout) {
+            llam_wake_all_shards(rt);
         }
     } else {
-        (void)llam_norm_queue_push_owner_locked(target, task);
-    }
-    if (local_spawn) {
-        wake_fanout = llam_spawn_should_wake_fanout(rt, target);
-    }
-    llam_trace_shard(target, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_NEW, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_NONE);
-    pthread_mutex_unlock(&target->lock);
-    if (!local_spawn) {
-        llam_kick_shard(target);
-    } else if (wake_fanout) {
-        llam_wake_all_shards(rt);
+        pthread_mutex_lock(&target->lock);
+        if (llam_task_list_eager_enabled(rt)) {
+            llam_add_task_to_list_locked(target, task);
+        }
+        llam_runtime_note_task_live(rt, target);
+        if (rt->experimental_dynamic_shards != 0U &&
+            atomic_load_explicit(&target->online, memory_order_relaxed) == 0U) {
+            atomic_store_explicit(&target->online, 1U, memory_order_release);
+            llam_runtime_note_online_shards(rt,
+                                          atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
+        }
+        task->state = LLAM_TASK_STATE_RUNNABLE;
+        if (target->opaque_redirect_active) {
+            target->metrics.migrations += 1U;
+            task->enqueue_hot = 0U;
+            if (!llam_enqueue_opaque_redirect_task_locked(target, task, false)) {
+                llam_enqueue_overflow_task(rt, task);
+            }
+        } else if (llam_lockfree_normq_enabled(rt) && (g_llam_tls_shard != target || g_llam_tls_task == NULL)) {
+            task->enqueue_hot = 0U;
+            if (llam_queue_push_bounded_locked(target, &target->inject_q, LLAM_INJECT_QUEUE_CAP, task)) {
+                target->metrics.inject_enqueues += 1U;
+            }
+        } else {
+            (void)llam_norm_queue_push_owner_locked(target, task);
+        }
+        if (local_spawn) {
+            wake_fanout = llam_spawn_should_wake_fanout(rt, target);
+        }
+        llam_trace_shard(target, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_NEW, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_NONE);
+        pthread_mutex_unlock(&target->lock);
+        if (!local_spawn) {
+            llam_kick_shard(target);
+        } else if (wake_fanout) {
+            llam_wake_all_shards(rt);
+        }
     }
     return task;
 }

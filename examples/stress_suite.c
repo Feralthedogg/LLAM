@@ -20,7 +20,9 @@
 
 #include "stress_internal.h"
 
+#if !LLAM_PLATFORM_WINDOWS
 #include <pthread.h>
+#endif
 
 typedef struct stress_phase_watchdog {
     atomic_uint done;

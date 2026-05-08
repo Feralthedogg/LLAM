@@ -48,7 +48,7 @@ static _Thread_local unsigned g_llam_tls_channel_cache_count;
  * @return Capacity parsed from @c LLAM_CHANNEL_TLS_CACHE_CAP, capped to 1024.
  */
 static unsigned llam_channel_tls_cache_cap(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -79,7 +79,7 @@ static unsigned llam_channel_tls_cache_cap(void) {
  * @return Capacity parsed from @c LLAM_CHANNEL_CACHE_CAP, capped to 4096.
  */
 static unsigned llam_channel_cache_cap(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {

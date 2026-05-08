@@ -108,6 +108,14 @@ static void llam_runtime_collect_stats_full(llam_runtime_stats_t *stats) {
         stats->idle_spin_hits += shard->metrics.idle_spin_hits;
         stats->idle_spin_fallbacks += shard->metrics.idle_spin_fallbacks;
         stats->idle_spin_ns += shard->metrics.idle_spin_ns;
+        stats->yield_direct_attempts += shard->metrics.yield_direct_attempts;
+        stats->yield_direct_fast_hits += shard->metrics.yield_direct_fast_hits;
+        stats->yield_direct_locked_hits += shard->metrics.yield_direct_locked_hits;
+        stats->yield_direct_fail_context += shard->metrics.yield_direct_fail_context;
+        stats->yield_direct_fail_policy += shard->metrics.yield_direct_fail_policy;
+        stats->yield_direct_fail_no_work += shard->metrics.yield_direct_fail_no_work;
+        stats->yield_direct_fail_self += shard->metrics.yield_direct_fail_self;
+        stats->yield_direct_fail_push += shard->metrics.yield_direct_fail_push;
         stats->queue_overflows += shard->metrics.queue_overflows;
         stats->opaque_block_ns += shard->metrics.opaque_block_ns;
         stats->opaque_block_samples += shard->metrics.opaque_block_samples;
@@ -287,7 +295,7 @@ void llam_dump_runtime_state(int fd) {
             pressure,
             overflow_depth,
             overflow_threshold,
-            atomic_load(&rt->live_tasks),
+            llam_runtime_live_tasks(rt),
             atomic_load(&rt->fatal_errno),
             rt->xsave_enabled ? 1U : 0U,
             (unsigned long long)rt->xsave_mask,
@@ -386,7 +394,7 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.wake_latency_ns,
                 (unsigned long long)shard->metrics.wake_samples);
         dprintf(fd,
-                "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
+                "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) direct_yield(attempts=%llu fast=%llu locked=%llu context=%llu policy=%llu no_work=%llu self=%llu push=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
                 (unsigned long long)shard->metrics.blocking_calls,
                 (unsigned long long)shard->metrics.blocking_completions,
                 (unsigned long long)shard->metrics.io_submits,
@@ -399,6 +407,14 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.idle_spin_hits,
                 (unsigned long long)shard->metrics.idle_spin_fallbacks,
                 (unsigned long long)shard->metrics.idle_spin_ns,
+                (unsigned long long)shard->metrics.yield_direct_attempts,
+                (unsigned long long)shard->metrics.yield_direct_fast_hits,
+                (unsigned long long)shard->metrics.yield_direct_locked_hits,
+                (unsigned long long)shard->metrics.yield_direct_fail_context,
+                (unsigned long long)shard->metrics.yield_direct_fail_policy,
+                (unsigned long long)shard->metrics.yield_direct_fail_no_work,
+                (unsigned long long)shard->metrics.yield_direct_fail_self,
+                (unsigned long long)shard->metrics.yield_direct_fail_push,
                 (unsigned long long)shard->metrics.watchdog_hits,
                 (unsigned long long)shard->metrics.long_no_safepoint,
                 (unsigned long long)shard->metrics.opaque_compensations,
@@ -481,26 +497,30 @@ void llam_dump_runtime_state(int fd) {
     }
 
     dprintf(fd, "tasks:\n");
-    pthread_mutex_lock(&rt->task_list_lock);
-    for (llam_task_t *task = rt->all_tasks; task != NULL; task = task->all_next) {
-        dprintf(fd,
-                "  id=%llu state=%s class=%d flags=0x%x home=%u last=%u wait=%s stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
-                (unsigned long long)task->id,
-                llam_state_name_from_id(task->state),
-                (int)task->task_class,
-                task->flags,
-                task->home_shard,
-                task->last_shard,
-                llam_wait_reason_name(task->wait_reason),
-                task->stack_size,
-                task->last_stack_used,
-                task->stack_high_water,
-                llam_stack_profile_hint(task),
-                (unsigned long long)task->last_run_ns,
-                (unsigned long long)task->total_run_ns,
-                (unsigned long long)task->last_opaque_block_ns,
-                (unsigned long long)task->max_opaque_block_ns,
-                (unsigned long long)task->opaque_block_count);
+    for (i = 0; i < rt->active_shards; ++i) {
+        llam_shard_t *shard = &rt->shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+        for (llam_task_t *task = shard->all_tasks; task != NULL; task = task->all_next) {
+            dprintf(fd,
+                    "  id=%llu state=%s class=%d flags=0x%x home=%u last=%u wait=%s stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
+                    (unsigned long long)task->id,
+                    llam_state_name_from_id(task->state),
+                    (int)task->task_class,
+                    task->flags,
+                    task->home_shard,
+                    task->last_shard,
+                    llam_wait_reason_name(task->wait_reason),
+                    task->stack_size,
+                    task->last_stack_used,
+                    task->stack_high_water,
+                    llam_stack_profile_hint(task),
+                    (unsigned long long)task->last_run_ns,
+                    (unsigned long long)task->total_run_ns,
+                    (unsigned long long)task->last_opaque_block_ns,
+                    (unsigned long long)task->max_opaque_block_ns,
+                    (unsigned long long)task->opaque_block_count);
+        }
+        pthread_mutex_unlock(&shard->lock);
     }
-    pthread_mutex_unlock(&rt->task_list_lock);
 }

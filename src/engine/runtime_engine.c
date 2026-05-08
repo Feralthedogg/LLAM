@@ -289,7 +289,7 @@ static bool llam_idle_spin_ready(llam_shard_t *shard, uint64_t now_ns) {
     llam_runtime_t *rt = shard->runtime;
     bool ready = false;
 
-    if (atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) {
+    if (atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) {
         return true;
     }
     if (llam_runtime_overflow_depth(rt) > 0U) {
@@ -458,17 +458,17 @@ static void llam_idle_futex_wait(llam_shard_t *shard, int timeout_ms) {
 void llam_idle_wait(llam_shard_t *shard) {
     llam_runtime_t *rt = shard->runtime;
     int timeout_ms;
-#if defined(__APPLE__)
+#if defined(__APPLE__) || LLAM_PLATFORM_WINDOWS
     bool has_precise_timeout = false;
     uint64_t precise_timeout_ns = 0U;
 #endif
 
-    if (rt != NULL && atomic_load_explicit(&rt->live_tasks, memory_order_acquire) == 0U) {
+    if (rt != NULL && !llam_runtime_has_live_tasks(rt)) {
         llam_request_stop(rt);
         return;
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || LLAM_PLATFORM_WINDOWS
     timeout_ms = llam_shard_next_timeout(shard, &has_precise_timeout, &precise_timeout_ns);
 #else
     timeout_ms = llam_shard_next_timeout(shard, NULL, NULL);
@@ -485,10 +485,10 @@ void llam_idle_wait(llam_shard_t *shard) {
 #else
     for (;;) {
         int wait_timeout_ms = timeout_ms < 0 ? LLAM_IDLE_POLL_TIMEOUT_MS : timeout_ms;
-#if defined(__APPLE__)
+#if defined(__APPLE__) || LLAM_PLATFORM_WINDOWS
         uint64_t wait_timeout_ns =
             has_precise_timeout ? precise_timeout_ns : (uint64_t)wait_timeout_ms * 1000000ULL;
-        // Darwin keeps the precise timer delta to avoid millisecond rounding drift.
+        // Darwin and Windows keep the precise timer delta to avoid millisecond rounding drift.
         int rc = llam_wake_handle_wait_ns(shard->event_fd, wait_timeout_ms, wait_timeout_ns);
 #else
         int rc = llam_wake_handle_wait(shard->event_fd, wait_timeout_ms);

@@ -1,0 +1,181 @@
+name: Stress
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      stress_rounds:
+        description: Runtime stress rounds per phase
+        required: false
+        default: "2"
+      dynamic_rounds:
+        description: Dynamic stress rounds per phase
+        required: false
+        default: "2"
+      server_mode:
+        description: Run server composite stress
+        required: false
+        default: "quick"
+        type: choice
+        options:
+          - "quick"
+          - "standard"
+
+permissions:
+  contents: read
+
+jobs:
+  posix-runtime-stress:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-stress
+            runner: ubuntu-24.04
+            cc: gcc
+          - name: linux-aarch64-stress
+            runner: ubuntu-24.04-arm
+            cc: gcc
+          - name: macos-aarch64-stress
+            runner: macos-14
+            cc: clang
+          - name: macos-x86_64-stress
+            runner: macos-15-intel
+            cc: clang
+
+    env:
+      STRESS_ROUNDS: ${{ github.event.inputs.stress_rounds || '2' }}
+      DYNAMIC_ROUNDS: ${{ github.event.inputs.dynamic_rounds || '2' }}
+      SERVER_MODE: ${{ github.event.inputs.server_mode || 'quick' }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git python3 xz-utils
+
+      - name: Build liburing
+        if: runner.os == 'Linux'
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/stress \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
+            -DCMAKE_ASM_COMPILER="${{ matrix.cc }}"
+
+      - name: Build stress targets
+        run: cmake --build build/stress -j 4
+
+      - name: Unit tests
+        run: ctest --test-dir build/stress --output-on-failure
+
+      - name: Runtime stress
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          env = os.environ.copy()
+          env.update({
+              "LLAM_STRESS_ROUNDS": os.environ["STRESS_ROUNDS"],
+              "LLAM_STRESS_DYNAMIC_ROUNDS": os.environ["DYNAMIC_ROUNDS"],
+              "LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS": "64",
+              "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS": "512",
+              "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US": "1000",
+          })
+          subprocess.run(["./build/stress/stress"], env=env, timeout=900, check=True)
+          PY
+
+      - name: I/O benchmark stress smoke
+        run: |
+          LLAM_BENCH_ROUNDS=3 \
+          LLAM_BENCH_WARMUP_ROUNDS=1 \
+          LLAM_BENCH_IO_MESSAGES=128 \
+          LLAM_BENCH_POLL_EVENTS=128 \
+          ./build/stress/bench
+
+      - name: Server composite stress
+        run: |
+          args=""
+          if [ "$SERVER_MODE" = "quick" ]; then
+            args="--quick"
+          fi
+          python3 scripts/stress_server_composite.py \
+            --server ./build/stress/server \
+            --server-flood ./build/stress/server_flood \
+            $args
+
+  windows-runtime-stress:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-2022-x86_64-stress
+            runner: windows-2022
+          - name: windows-2025-x86_64-stress
+            runner: windows-2025
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build/windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build native Windows backend
+        shell: pwsh
+        run: cmake --build build/windows --config Release --target bench test_windows_runtime_smoke test_windows_policy test_windows_iocp_io
+
+      - name: CTest Windows backend
+        shell: pwsh
+        run: ctest --test-dir build/windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io"
+
+      - name: Forced Windows 10/11 policy stress
+        shell: pwsh
+        run: |
+          foreach ($generation in @("10", "11")) {
+            $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
+            ctest --test-dir build/windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+          Remove-Item Env:\LLAM_WINDOWS_FORCE_GENERATION -ErrorAction SilentlyContinue
+
+      - name: Scheduler and IOCP benchmark stress smoke
+        shell: pwsh
+        run: |
+          $bench = ".\build\windows\Release\bench.exe"
+          foreach ($case in @("spawn_join", "channel_pingpong", "io_echo", "poll_wake", "sleep_fanout", "opaque_block")) {
+            $env:LLAM_BENCH_ONLY = $case
+            $env:LLAM_BENCH_ROUNDS = "3"
+            $env:LLAM_BENCH_WARMUP_ROUNDS = "1"
+            & $bench
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }

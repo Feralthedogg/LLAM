@@ -30,6 +30,74 @@
 
 #include "runtime_io_api_internal.h"
 
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+/** Number of Windows socket handles remembered as already set nonblocking. */
+#define LLAM_WINDOWS_NONBLOCK_CACHE_CAP 4096U
+
+/** Small direct-mapped cache that avoids repeating FIONBIO on every operation. */
+static _Atomic(uintptr_t) g_llam_windows_nonblock_cache[LLAM_WINDOWS_NONBLOCK_CACHE_CAP];
+
+/**
+ * @brief Return whether the Windows nonblocking socket cache is enabled.
+ *
+ * LLAM's Windows backend treats sockets used through managed I/O as
+ * runtime-owned readiness objects, matching the usual event-loop model.  Once a
+ * socket is promoted to nonblocking mode, this cache avoids per-read/write
+ * FIONBIO churn on hot paths.
+ */
+static bool llam_windows_nonblock_cache_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_WINDOWS_NONBLOCK_CACHE");
+
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+/** @brief Return true when @p fd is remembered as already nonblocking. */
+bool llam_windows_socket_nonblocking_cached(llam_fd_t fd) {
+    uintptr_t key = (uintptr_t)fd + 1U;
+    uintptr_t slot = ((uintptr_t)fd ^ ((uintptr_t)fd >> 7U)) & (LLAM_WINDOWS_NONBLOCK_CACHE_CAP - 1U);
+
+    return llam_windows_nonblock_cache_enabled() &&
+           atomic_load_explicit(&g_llam_windows_nonblock_cache[slot], memory_order_acquire) == key;
+}
+
+/**
+ * @brief Ensure a Windows socket is nonblocking for direct managed I/O.
+ *
+ * @return 1 when nonblocking mode is active, 0 when @p fd is not a socket, or
+ *         -1 for a hard socket error with errno set.
+ */
+static int llam_windows_ensure_socket_nonblocking(llam_fd_t fd) {
+    uintptr_t key = (uintptr_t)fd + 1U;
+    uintptr_t slot = ((uintptr_t)fd ^ ((uintptr_t)fd >> 7U)) & (LLAM_WINDOWS_NONBLOCK_CACHE_CAP - 1U);
+    bool cache_enabled = llam_windows_nonblock_cache_enabled();
+    u_long nonblocking = 1UL;
+
+    if (cache_enabled && llam_windows_socket_nonblocking_cached(fd)) {
+        return 1;
+    }
+    if (ioctlsocket(fd, FIONBIO, &nonblocking) != 0) {
+        int mapped = llam_windows_wsa_error_to_errno(WSAGetLastError());
+
+        if (mapped == ENOTSOCK) {
+            return 0;
+        }
+        errno = mapped;
+        return -1;
+    }
+    if (cache_enabled) {
+        atomic_store_explicit(&g_llam_windows_nonblock_cache[slot], key, memory_order_release);
+    }
+    return 1;
+}
+#endif
+
 /**
  * @brief Acquire an I/O request object for the current operation.
  *
@@ -92,7 +160,7 @@ void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req) {
  *
  * @return Platform poll result.
  */
-int llam_platform_poll_fd(int fd, short events, int timeout_ms, short *revents) {
+int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
 #if defined(__APPLE__)
     struct kevent changes[2];
     struct kevent fired[2];
@@ -182,7 +250,7 @@ int llam_platform_poll_fd(int fd, short events, int timeout_ms, short *revents) 
  *
  * @return Platform poll result.
  */
-int llam_platform_poll_now(int fd, short events, short *revents) {
+int llam_platform_poll_now(llam_fd_t fd, short events, short *revents) {
     struct pollfd pfd;
     int rc;
 
@@ -222,7 +290,7 @@ int llam_platform_poll_now(int fd, short events, short *revents) {
  *
  * @return 1 for completed, 0 for would-block, or -1 for hard error.
  */
-int llam_try_direct_rw(int fd,
+int llam_try_direct_rw(llam_fd_t fd,
                             void *buf,
                             size_t count,
                             bool write_op,
@@ -240,12 +308,52 @@ int llam_try_direct_rw(int fd,
     if (socket_op_out != NULL) {
         *socket_op_out = false;
     }
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    if (count == 0U) {
+        if (result_out != NULL) {
+            *result_out = 0;
+        }
+        if (socket_op_out != NULL) {
+            *socket_op_out = true;
+        }
+        return 1;
+    }
+    {
+        int nonblock_rc = llam_windows_ensure_socket_nonblocking(fd);
+
+        if (nonblock_rc < 0) {
+            return -1;
+        }
+        if (nonblock_rc > 0) {
+            for (;;) {
+                rc = write_op ? llam_platform_send_fd(fd, buf, count, 0)
+                              : llam_platform_recv_fd(fd, buf, count, recv_flags);
+                if (rc >= 0) {
+                    if (result_out != NULL) {
+                        *result_out = rc;
+                    }
+                    if (socket_op_out != NULL) {
+                        *socket_op_out = true;
+                    }
+                    return 1;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    return 0;
+                }
+                return errno == ENOTSOCK ? 0 : -1;
+            }
+        }
+    }
+#endif
 #if defined(MSG_DONTWAIT)
     for (;;) {
         if (write_op) {
-            rc = send(fd, buf, count, MSG_DONTWAIT);
+            rc = llam_platform_send_fd(fd, buf, count, MSG_DONTWAIT);
         } else {
-            rc = recv(fd, buf, count, recv_flags | MSG_DONTWAIT);
+            rc = llam_platform_recv_fd(fd, buf, count, recv_flags | MSG_DONTWAIT);
         }
         if (rc >= 0) {
             if (result_out != NULL) {
@@ -285,11 +393,11 @@ int llam_try_direct_rw(int fd,
 
     for (;;) {
         if (write_op) {
-            rc = write(fd, buf, count);
+            rc = llam_platform_write_fd(fd, buf, count);
         } else if (recv_op) {
-            rc = recv(fd, buf, count, recv_flags);
+            rc = llam_platform_recv_fd(fd, buf, count, recv_flags);
         } else {
-            rc = read(fd, buf, count);
+            rc = llam_platform_read_fd(fd, buf, count);
         }
         if (rc >= 0) {
             if (restore_flags) {
@@ -334,7 +442,7 @@ int llam_try_direct_rw(int fd,
  * @param fd Socket descriptor whose connection status should be checked.
  * @return 0 when connected, -1 with @c errno set to the connection error.
  */
-int llam_socket_connect_error(int fd) {
+int llam_socket_connect_error(llam_fd_t fd) {
     int error_code = 0;
     socklen_t error_len = sizeof(error_code);
 
@@ -342,7 +450,11 @@ int llam_socket_connect_error(int fd) {
         return -1;
     }
     if (error_code != 0) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        errno = llam_windows_wsa_error_to_errno(error_code);
+#else
         errno = error_code;
+#endif
         return -1;
     }
     return 0;

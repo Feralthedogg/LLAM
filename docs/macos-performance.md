@@ -31,8 +31,9 @@ The `Runtime Benchmarks` GitHub workflow runs LLAM, Goroutine, and Tokio on
 macOS arm64, macOS x86_64, and Linux x86_64, then uploads CSV and graph
 artifacts.
 
-Windows performance numbers are intentionally absent in 1.0.0 because native
-Windows support is planned but not implemented. See `docs/windows-roadmap.md`.
+Windows performance numbers are intentionally absent in 1.0.0 because the IOCP
+socket backend still needs longer Windows 10/11 stress and benchmark acceptance.
+See `docs/windows-roadmap.md`.
 
 ## Remaining High-Cost Areas
 

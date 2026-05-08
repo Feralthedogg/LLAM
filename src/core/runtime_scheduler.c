@@ -107,7 +107,7 @@ static bool llam_shard_has_local_work(llam_shard_t *shard) {
  * should be woken so they can leave their scheduler loops.
  */
 static bool llam_runtime_drained(llam_runtime_t *rt) {
-    if (atomic_load(&rt->live_tasks) != 0U) {
+    if (llam_runtime_has_live_tasks(rt)) {
         return false;
     }
     llam_request_stop(rt);
@@ -140,9 +140,9 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
 
         task->last_run_ns = run_ns;
         task->total_run_ns += run_ns;
-#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
+#if ((defined(__linux__) || defined(__APPLE__)) || LLAM_PLATFORM_WINDOWS) && LLAM_ARCH_X86_64
         llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
-#elif defined(__aarch64__)
+#elif LLAM_ARCH_AARCH64
         llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.sp);
 #endif
         shard->metrics.slice_budget_ns += slice_ns;
@@ -187,7 +187,7 @@ static bool llam_shard_pause_for_merge(llam_shard_t *shard) {
 
     atomic_store_explicit(&shard->merge_pause_ack, 1U, memory_order_release);
     while (llam_shard_merge_pause_requested(shard)) {
-        if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+        if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
             llam_runtime_drained(rt)) {
             break;
         }
@@ -256,7 +256,9 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     g_llam_tls_shard = shard;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = &shard->scheduler_ctx;
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
     shard->thread = pthread_self();
+#endif
     shard->primary_thread = pthread_self();
     llam_bind_current_thread_to_cpu(shard->cpu_id);
     llam_tune_scheduler_thread(shard, false);
@@ -265,7 +267,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         return;
     }
 
-    while (!atomic_load(&rt->stop_requested) || atomic_load(&rt->live_tasks) > 0U) {
+    while (!atomic_load(&rt->stop_requested) || llam_runtime_has_live_tasks(rt)) {
         llam_task_t *task;
         uint64_t started_ns;
         bool pressure;
@@ -279,7 +281,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         if (rt->experimental_dynamic_shards != 0U &&
             atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
             if (!llam_shard_has_local_work(shard)) {
-                if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+                if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
                     llam_runtime_drained(rt)) {
                     break;
                 }
@@ -309,7 +311,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         }
 
         if (task == NULL) {
-            if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+            if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
                 llam_runtime_drained(rt)) {
                 break;
             }
@@ -378,7 +380,9 @@ void *llam_opaque_helper_main(void *arg) {
             if (shard->opaque_helper_active) {
                 shard->opaque_helper_active = false;
                 atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
                 shard->thread = shard->primary_thread;
+#endif
                 llam_opaque_wake_signal(shard);
             }
             llam_opaque_wake_wait(shard);
@@ -386,18 +390,22 @@ void *llam_opaque_helper_main(void *arg) {
         if (shard->opaque_helper_stop) {
             shard->opaque_helper_active = false;
             atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
             shard->thread = shard->primary_thread;
+#endif
             llam_opaque_wake_signal(shard);
             pthread_mutex_unlock(&shard->opaque_lock);
             break;
         }
         shard->opaque_helper_active = true;
         atomic_store_explicit(&shard->opaque_helper_active_hint, 1U, memory_order_release);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
         shard->thread = pthread_self();
+#endif
         llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
 
-        while (!atomic_load(&rt->stop_requested) || atomic_load(&rt->live_tasks) > 0U) {
+        while (!atomic_load(&rt->stop_requested) || llam_runtime_has_live_tasks(rt)) {
             llam_task_t *task;
             uint64_t started_ns;
             bool pressure;
@@ -439,7 +447,9 @@ void *llam_opaque_helper_main(void *arg) {
                 if (!keep_running || stop_requested) {
                     shard->opaque_helper_active = false;
                     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
                     shard->thread = shard->primary_thread;
+#endif
                     llam_opaque_wake_signal(shard);
                     pthread_mutex_unlock(&shard->opaque_lock);
                     break;
@@ -453,7 +463,7 @@ void *llam_opaque_helper_main(void *arg) {
 #endif
                 pthread_mutex_unlock(&shard->opaque_lock);
 
-                if ((atomic_load(&rt->stop_requested) && atomic_load(&rt->live_tasks) == 0U) ||
+                if ((atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) ||
                     llam_runtime_drained(rt)) {
                     break;
                 }
@@ -478,7 +488,9 @@ void *llam_opaque_helper_main(void *arg) {
             if (!keep_running || stop_requested) {
                 shard->opaque_helper_active = false;
                 atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
                 shard->thread = shard->primary_thread;
+#endif
                 llam_opaque_wake_signal(shard);
                 pthread_mutex_unlock(&shard->opaque_lock);
                 if (stop_requested) {
@@ -497,7 +509,9 @@ out:
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
     shard->thread = shard->primary_thread;
+#endif
     llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
     return NULL;

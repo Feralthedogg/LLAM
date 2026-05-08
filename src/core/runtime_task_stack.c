@@ -41,22 +41,103 @@
 #define LLAM_STACK_CACHE_LOCAL_LARGE_LIMIT 64U
 /** Per-shard cached huge stack limit. */
 #define LLAM_STACK_CACHE_LOCAL_HUGE_LIMIT 16U
+/**
+ * @brief Link a task into a shard-local diagnostic task list.
+ *
+ * @param shard Shard that owns the list; its lock must already be held.
+ * @param task  Task to insert.
+ */
+void llam_add_task_to_list_locked(llam_shard_t *shard, llam_task_t *task) {
+    if (shard == NULL || task == NULL) {
+        return;
+    }
+    if (atomic_load_explicit(&task->task_listed, memory_order_acquire) != 0U) {
+        return;
+    }
+    task->all_prev = NULL;
+    task->all_next = shard->all_tasks;
+    if (shard->all_tasks != NULL) {
+        shard->all_tasks->all_prev = task;
+    }
+    shard->all_tasks = task;
+    atomic_store_explicit(&task->task_listed, 1U, memory_order_release);
+}
 
 /**
- * @brief Link a task into the runtime-wide diagnostic task list.
+ * @brief Link a task into its allocation-owner shard task list.
  *
- * @param rt   Runtime that owns the list.
+ * @param rt   Runtime that owns the shards.
  * @param task Task to insert.
  */
 void llam_add_task_to_list(llam_runtime_t *rt, llam_task_t *task) {
-    pthread_mutex_lock(&rt->task_list_lock);
-    task->all_prev = NULL;
-    task->all_next = rt->all_tasks;
-    if (rt->all_tasks != NULL) {
-        rt->all_tasks->all_prev = task;
+    llam_shard_t *owner;
+
+    if (rt == NULL || task == NULL || task->alloc_owner_shard >= rt->active_shards) {
+        return;
     }
-    rt->all_tasks = task;
-    pthread_mutex_unlock(&rt->task_list_lock);
+    owner = &rt->shards[task->alloc_owner_shard];
+    pthread_mutex_lock(&owner->lock);
+    llam_add_task_to_list_locked(owner, task);
+    pthread_mutex_unlock(&owner->lock);
+}
+
+/**
+ * @brief Decide whether every spawned task should enter diagnostic lists.
+ *
+ * @details
+ * Default mode is lazy: tasks are linked only once they park on a wait that
+ * dynamic rehome or diagnostics must be able to find.  This removes diagnostic
+ * list mutation from spawn-heavy workloads.  Debug-safe runs and explicit
+ * @c LLAM_TASK_LIST_EAGER=1 keep the older eager behavior.
+ *
+ * @param rt Runtime whose profile controls the default policy.
+ * @return true when spawn should eagerly link the task.
+ */
+bool llam_task_list_eager_enabled(const llam_runtime_t *rt) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_TASK_LIST_EAGER");
+
+        if (env != NULL && env[0] != '\0') {
+            value = strcmp(env, "0") != 0 ? 1 : 0;
+        } else {
+            value = 2;
+        }
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    if (value == 2) {
+        return rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+    }
+    return value != 0;
+}
+
+/**
+ * @brief Lazily link a task into the owner shard task list.
+ *
+ * @details
+ * Parked waiters and in-flight I/O are the only tasks that dynamic rehome must
+ * scan.  Linking at first park keeps the common spawn/run/join fast path free of
+ * diagnostic list pointer mutation while preserving rehome visibility before the
+ * task publishes a parked state.
+ *
+ * @param task Task to make visible to rehome/diagnostic scans.
+ */
+void llam_task_ensure_listed(llam_task_t *task) {
+    llam_runtime_t *rt = &g_llam_runtime;
+    llam_shard_t *owner;
+
+    if (task == NULL ||
+        atomic_load_explicit(&task->task_listed, memory_order_acquire) != 0U ||
+        task->alloc_owner_shard >= rt->active_shards) {
+        return;
+    }
+
+    owner = &rt->shards[task->alloc_owner_shard];
+    pthread_mutex_lock(&owner->lock);
+    llam_add_task_to_list_locked(owner, task);
+    pthread_mutex_unlock(&owner->lock);
 }
 
 /**
@@ -744,7 +825,18 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         errno = saved_errno;
         return -1;
     }
-#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+    if (g_llam_runtime.windows_unsafe_skip_task_simd != 0U) {
+        /*
+         * Opt-in ceiling mode for benchmark/runtime profiles that guarantee
+         * managed tasks do not depend on ABI-preserved XMM6-XMM15 state across
+         * cooperative switches.
+         */
+        task->ctx.simd_flags = LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
+    }
+#endif
+#if ((defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64) || \
+    (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)
     {
         uintptr_t stack_top = (uintptr_t)task->stack_base + task->stack_size;
         uint64_t *sp;
@@ -759,6 +851,10 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         task->ctx.rsp = (uint64_t)(uintptr_t)sp;
         task->ctx.rbx = 0;
         task->ctx.rbp = 0;
+#if LLAM_PLATFORM_WINDOWS
+        task->ctx.rsi = 0;
+        task->ctx.rdi = 0;
+#endif
         task->ctx.r12 = (uint64_t)(uintptr_t)task;
         task->ctx.r13 = 0;
         task->ctx.r14 = 0;
@@ -839,27 +935,33 @@ void llam_task_mark_reclaim_ready(llam_task_t *task) {
  * @return true if the task was present and removed.
  */
 static bool llam_remove_task_from_list(llam_runtime_t *rt, llam_task_t *task) {
+    llam_shard_t *owner;
     bool removed = false;
 
-    if (rt == NULL || task == NULL || !rt->task_list_lock_initialized) {
+    if (rt == NULL || task == NULL ||
+        atomic_load_explicit(&task->task_listed, memory_order_acquire) == 0U ||
+        task->alloc_owner_shard >= rt->active_shards) {
         return false;
     }
 
-    pthread_mutex_lock(&rt->task_list_lock);
-    if (task->all_prev != NULL || rt->all_tasks == task) {
+    owner = &rt->shards[task->alloc_owner_shard];
+    pthread_mutex_lock(&owner->lock);
+    if (atomic_load_explicit(&task->task_listed, memory_order_acquire) != 0U &&
+        (task->all_prev != NULL || owner->all_tasks == task)) {
         if (task->all_prev != NULL) {
             task->all_prev->all_next = task->all_next;
         } else {
-            rt->all_tasks = task->all_next;
+            owner->all_tasks = task->all_next;
         }
         if (task->all_next != NULL) {
             task->all_next->all_prev = task->all_prev;
         }
         task->all_next = NULL;
         task->all_prev = NULL;
+        atomic_store_explicit(&task->task_listed, 0U, memory_order_release);
         removed = true;
     }
-    pthread_mutex_unlock(&rt->task_list_lock);
+    pthread_mutex_unlock(&owner->lock);
     return removed;
 }
 
@@ -873,9 +975,7 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL) {
         return;
     }
-    if (!llam_remove_task_from_list(rt, task)) {
-        return;
-    }
+    (void)llam_remove_task_from_list(rt, task);
     llam_free_task(task);
 }
 

@@ -92,7 +92,9 @@ disable it for release benchmarking unless diagnostics are required.
 
 Linux and macOS have different kernel contracts. Linux uses io_uring/liburing
 where available, while macOS uses kqueue and Darwin-specific scheduler hints.
-Windows native support is planned but not shipped in 1.0.0.
+Windows native support covers scheduler/core and IOCP one-shot socket requests,
+but production operation remains gated on longer Windows 10/11 stress,
+benchmark, and CI coverage.
 
 Verification must be platform-local:
 
@@ -132,4 +134,3 @@ Minimum production counters to export are `ctx_switches`, `parks`, `wakes`,
 `io_submits`, `io_submit_syscalls`, `io_completions`, `active_workers`,
 `online_workers`, `queue_overflows`, `overflow_depth`, and opaque blocking
 duration counters.
-

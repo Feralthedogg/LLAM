@@ -24,19 +24,41 @@
 #include "llam/runtime.h"
 
 #include <errno.h>
-#include <poll.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if LLAM_PLATFORM_WINDOWS
+#include <windows.h>
+#if defined(__has_include)
+#if __has_include(<afunix.h>)
+#include <afunix.h>
+#define LLAM_BENCH_HAVE_AFUNIX 1
+#endif
+#endif
+#ifndef LLAM_BENCH_HAVE_AFUNIX
+#define LLAM_BENCH_HAVE_AFUNIX 0
+#endif
+#ifndef POLLIN
+#define POLLIN 0x0100
+#endif
+#ifndef POLLERR
+#define POLLERR 0x0001
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0002
+#endif
+#else
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
+#endif
 
 #include "env_compat.h"
 
@@ -58,7 +80,7 @@ typedef struct bench_ping_state {
 } bench_ping_state_t;
 
 typedef struct bench_echo_state {
-    int fd;
+    llam_fd_t fd;
     unsigned messages_per_round;
 } bench_echo_state_t;
 
@@ -70,7 +92,7 @@ typedef struct bench_io_state {
 } bench_io_state_t;
 
 typedef struct bench_poll_writer_state {
-    int fd;
+    llam_fd_t fd;
     unsigned events_per_round;
 } bench_poll_writer_state_t;
 

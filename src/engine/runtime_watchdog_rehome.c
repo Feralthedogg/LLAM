@@ -95,17 +95,21 @@ void llam_rehome_parked_waiters(llam_runtime_t *rt, llam_shard_t *source, llam_s
         return;
     }
 
-    pthread_mutex_lock(&rt->task_list_lock);
-    for (task = rt->all_tasks; task != NULL; task = task->all_next) {
-        // The wait structure keeps the same node; only the resume shard changes.
-        if (!llam_task_can_rehome_parked_wait(source, target, task)) {
-            continue;
+    for (unsigned i = 0U; i < rt->active_shards; ++i) {
+        llam_shard_t *owner = &rt->shards[i];
+
+        pthread_mutex_lock(&owner->lock);
+        for (task = owner->all_tasks; task != NULL; task = task->all_next) {
+            // The wait structure keeps the same node; only the resume shard changes.
+            if (!llam_task_can_rehome_parked_wait(source, target, task)) {
+                continue;
+            }
+            task->parked_shard = target->id;
+            llam_merge_rehome_task(source, target, task);
+            migrated += 1U;
         }
-        task->parked_shard = target->id;
-        llam_merge_rehome_task(source, target, task);
-        migrated += 1U;
+        pthread_mutex_unlock(&owner->lock);
     }
-    pthread_mutex_unlock(&rt->task_list_lock);
 
     if (migrated_out != NULL) {
         *migrated_out = migrated;
@@ -202,23 +206,27 @@ void llam_rehome_inflight_io_waiters(llam_runtime_t *rt, llam_shard_t *source, l
         return;
     }
 
-    pthread_mutex_lock(&rt->task_list_lock);
-    for (task = rt->all_tasks; task != NULL; task = task->all_next) {
-        llam_io_req_t *req = task->active_io_req;
+    for (unsigned i = 0U; i < rt->active_shards; ++i) {
+        llam_shard_t *owner = &rt->shards[i];
 
-        if (!llam_task_can_rehome_io_wait(source, target, task, req, LLAM_IO_WAIT_MODE_INFLIGHT)) {
-            continue;
+        pthread_mutex_lock(&owner->lock);
+        for (task = owner->all_tasks; task != NULL; task = task->all_next) {
+            llam_io_req_t *req = task->active_io_req;
+
+            if (!llam_task_can_rehome_io_wait(source, target, task, req, LLAM_IO_WAIT_MODE_INFLIGHT)) {
+                continue;
+            }
+            // In-flight completions race with rehome; transfer only if owner still matches.
+            if (!llam_io_req_transfer_inflight_owner(req, source->id, target->id)) {
+                continue;
+            }
+            task->parked_shard = target->id;
+            req->owner_shard = target->id;
+            llam_merge_rehome_task(source, target, task);
+            migrated += 1U;
         }
-        // In-flight completions race with rehome; transfer only if owner still matches.
-        if (!llam_io_req_transfer_inflight_owner(req, source->id, target->id)) {
-            continue;
-        }
-        task->parked_shard = target->id;
-        req->owner_shard = target->id;
-        llam_merge_rehome_task(source, target, task);
-        migrated += 1U;
+        pthread_mutex_unlock(&owner->lock);
     }
-    pthread_mutex_unlock(&rt->task_list_lock);
 
     if (migrated_out != NULL) {
         *migrated_out = migrated;
