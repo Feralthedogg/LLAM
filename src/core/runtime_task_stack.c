@@ -379,9 +379,9 @@ static bool llam_runtime_stack_cache_pop(llam_runtime_t *rt,
     llam_stack_cache_entry_t **head;
     unsigned *count;
     llam_stack_cache_entry_t *entry;
-    void *mapping;
-    size_t mapping_size;
-    void *stack_base;
+    void *mapping = NULL;
+    size_t mapping_size = 0U;
+    void *stack_base = NULL;
 
     if (mapping_out != NULL) {
         *mapping_out = NULL;
@@ -418,9 +418,6 @@ static bool llam_runtime_stack_cache_pop(llam_runtime_t *rt,
         return false;
     }
 
-    if (mapping_size_out != NULL) {
-        *mapping_size_out = 0U;
-    }
     if (mapping_out != NULL) {
         *mapping_out = mapping;
     }
