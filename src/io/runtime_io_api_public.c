@@ -114,6 +114,36 @@ static bool llam_read_ready_direct_blocking_enabled(void) {
 }
 
 /**
+ * @brief Return whether not-ready accept should use the blocking-helper path.
+ *
+ * Darwin one-shot accept readiness is correct for many workloads, but hosted
+ * CI can expose a narrow registration/re-arm race in serial connect/accept
+ * tests with peer-address output. The helper path keeps the listener
+ * nonblocking and polls in short slices, so it does not pin a scheduler worker
+ * and still observes task cancellation.
+ */
+static bool llam_accept_direct_blocking_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_ACCEPT_DIRECT_BLOCKING");
+
+        if (env != NULL && env[0] != '\0') {
+            value = strcmp(env, "0") != 0 ? 1 : 0;
+        } else {
+#if defined(__APPLE__)
+            value = 1;
+#else
+            value = 0;
+#endif
+        }
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+/**
  * @brief Read bytes from a descriptor without blocking the scheduler worker.
  *
  * Managed tasks attempt direct non-blocking completion before submitting an
@@ -532,6 +562,19 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
     req->addr = addr;
     req->addrlen = addrlen;
     req->recv_watch = NULL;
+    if (llam_accept_direct_blocking_enabled()) {
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_accept_impl, req) != 0) {
+            int saved_errno = errno;
+
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            errno = saved_errno;
+            return LLAM_INVALID_FD;
+        }
+        result = LLAM_RUNTIME_BACKEND_WINDOWS ? req->fd_result : (llam_fd_t)req->result;
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        return result;
+    }
     if (allow_multishot) {
         if (llam_issue_multishot_accept(req) == 0) {
             result = (llam_fd_t)req->result;

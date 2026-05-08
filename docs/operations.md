@@ -118,6 +118,11 @@ backlog can be consumed directly before LLAM submits a backend request. This
 keeps serial connect/accept tests from depending on backend re-arm timing and
 reduces one worker round trip on hot server paths.
 
+On macOS, not-ready managed `accept` defaults to the compensated helper path
+controlled by `LLAM_ACCEPT_DIRECT_BLOCKING`. The helper keeps the listener
+nonblocking and polls in short slices, avoiding scheduler-worker pinning while
+sidestepping one-shot kqueue accept races observed on hosted runners.
+
 The backend path is still the correctness path for not-ready descriptors,
 timeouts, cancellation, and unsupported direct operations. If a direct path
 regresses, compare both throughput and `io_submit_syscalls`; a lower syscall
