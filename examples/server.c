@@ -700,8 +700,7 @@ int main(int argc, char **argv) {
 
     memset(&opts, 0, sizeof(opts));
     opts.profile = LLAM_RUNTIME_PROFILE_IO_LATENCY;
-    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS |
-                              LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     if (llam_runtime_init(&opts) != 0) {
         perror("llam_runtime_init");
         return 1;
