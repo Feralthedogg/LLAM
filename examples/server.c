@@ -97,6 +97,8 @@ struct chat_client {
 
 static atomic_bool g_stop_requested;
 
+static void chat_client_close_fd(chat_client_t *client);
+
 static void chat_client_retain(chat_client_t *client) {
     (void)atomic_fetch_add_explicit(&client->refs, 1U, memory_order_relaxed);
 }
@@ -105,6 +107,7 @@ static void chat_client_release(chat_client_t *client) {
     if (atomic_fetch_sub_explicit(&client->refs, 1U, memory_order_acq_rel) != 1U) {
         return;
     }
+    chat_client_close_fd(client);
     if (client->outbox != NULL) {
         (void)llam_channel_destroy(client->outbox);
     }
@@ -245,7 +248,7 @@ static void chat_server_close_all(chat_server_t *server) {
         }
         if (atomic_exchange_explicit(&client->closing, 1U, memory_order_acq_rel) == 0U) {
             (void)llam_channel_close(client->outbox);
-            chat_client_close_fd(client);
+            chat_client_shutdown_fd(client);
         }
         // Drop the list reference removed above.
         chat_client_release(client);
@@ -371,7 +374,6 @@ static void chat_writer_task(void *arg) {
         }
     }
 
-    chat_client_close_fd(client);
     chat_client_release(client);
 }
 
