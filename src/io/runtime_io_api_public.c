@@ -145,6 +145,27 @@ static bool llam_accept_direct_blocking_enabled(void) {
 }
 
 /**
+ * @brief Extract an accepted descriptor while preserving the public errno contract.
+ *
+ * Accept watch completions should always carry either a valid descriptor or a
+ * positive errno.  Defensive normalization here prevents a backend wakeup bug
+ * from surfacing as LLAM_INVALID_FD with errno left at zero.
+ */
+static llam_fd_t llam_accept_req_result(const llam_io_req_t *req) {
+    llam_fd_t result;
+
+    if (req == NULL) {
+        errno = EINVAL;
+        return LLAM_INVALID_FD;
+    }
+    result = LLAM_RUNTIME_BACKEND_WINDOWS ? req->fd_result : (llam_fd_t)req->result;
+    if (LLAM_FD_IS_INVALID(result) && errno == 0) {
+        errno = req->error_code != 0 ? req->error_code : EIO;
+    }
+    return result;
+}
+
+/**
  * @brief Read bytes from a descriptor without blocking the scheduler worker.
  *
  * Managed tasks attempt direct non-blocking completion before submitting an
@@ -572,18 +593,18 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
             errno = saved_errno;
             return LLAM_INVALID_FD;
         }
-        result = LLAM_RUNTIME_BACKEND_WINDOWS ? req->fd_result : (llam_fd_t)req->result;
+        result = llam_accept_req_result(req);
         llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
     if (allow_multishot) {
         if (llam_issue_multishot_accept(req) == 0) {
-            result = (llam_fd_t)req->result;
+            result = llam_accept_req_result(req);
             llam_api_io_req_release(g_llam_tls_shard, req);
             return result;
         }
         if (!llam_io_capability_error(errno)) {
-            result = (llam_fd_t)req->result;
+            result = llam_accept_req_result(req);
             llam_api_io_req_release(g_llam_tls_shard, req);
             return result;
         }
@@ -606,12 +627,12 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
             errno = saved_errno;
             return LLAM_INVALID_FD;
         }
-        result = LLAM_RUNTIME_BACKEND_WINDOWS ? req->fd_result : (llam_fd_t)req->result;
+        result = llam_accept_req_result(req);
         llam_api_io_req_release(g_llam_tls_shard, req);
         return result;
     }
 
-    result = LLAM_RUNTIME_BACKEND_WINDOWS ? req->fd_result : (llam_fd_t)req->result;
+    result = llam_accept_req_result(req);
     llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
 }

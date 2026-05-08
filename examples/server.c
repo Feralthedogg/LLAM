@@ -516,7 +516,6 @@ static void chat_accept_task(void *arg) {
         }
         if (chat_server_add_client(server, client) != 0) {
             perror("chat_server_add_client");
-            (void)close(fd);
             chat_client_release(client);
             continue;
         }
