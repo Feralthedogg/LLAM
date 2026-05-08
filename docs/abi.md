@@ -227,8 +227,11 @@ platform supports it.
 
 Native Windows 10/11 support covers Windows x86_64 context switching, Windows
 event wake handles, IOCP policy primitives, and IOCP one-shot socket requests
-for `read`, `write`, `accept`, and `connect`. The release workflow publishes a
-native Windows x86_64 archive after the Windows stress and IOCP smoke gates pass.
+for `read`, `write`, `accept`, and `connect`. TCP `POLLOUT` and UDP `POLLIN`
+readiness are also IOCP-backed; TCP `POLLIN` remains fallback by default unless
+`LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark
+runs. The release workflow publishes a native Windows x86_64 archive after the
+Windows stress, shared-library export, and IOCP smoke gates pass.
 
 ## Runtime Lifecycle
 
@@ -402,8 +405,12 @@ Owned-buffer result rules are fixed for FFI bindings:
 - Failure: returns `-1`, stores `NULL` in `*out`, and sets `errno`.
 
 On Windows, one-shot socket `read`, `write`, `accept`, and `connect` use IOCP
-request completions. Poll and owned-buffer paths remain covered by the documented
-direct/blocking fallback behavior until dedicated Windows designs are added.
+request completions. TCP `POLLOUT` readiness uses a zero-byte overlapped send,
+and UDP `POLLIN` readiness uses an overlapped peek receive so datagrams are not
+consumed. TCP `POLLIN` remains on the cooperative/direct fallback path by
+default; `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` enables the experimental IOCP stream
+readiness probe for controlled validation. Owned-buffer and unsupported poll
+paths keep the documented direct/blocking fallback behavior.
 
 ## Error Contract
 

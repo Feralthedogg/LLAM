@@ -52,7 +52,7 @@ if ($Native) {
         Write-Host "selected strategy: win10-conservative"
         Write-Host "selected tuning: processor_count=$processorCount iocp_concurrency=$iocpConcurrency completion_batch=64 control_batch=16 accept_prepost=$acceptPrepost recv_prepost=$recvPrepost poll_timeout_ms=10 timer_granularity_ms=10 skip_completion_on_success=0"
     }
-    Write-Host "native I/O backend: IOCP request path for WSARecv/WSASend/AcceptEx/ConnectEx, TCP read/write readiness, and UDP read readiness; AF_UNIX poll remains fallback."
+    Write-Host "native I/O backend: IOCP request path for WSARecv/WSASend/AcceptEx/ConnectEx, TCP POLLOUT readiness, UDP POLLIN readiness, and opt-in TCP POLLIN readiness; AF_UNIX poll remains fallback."
 
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
     $buildDir = Join-Path $repoRoot.Path "build-windows-native"

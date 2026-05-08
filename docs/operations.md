@@ -92,9 +92,23 @@ disable it for release benchmarking unless diagnostics are required.
 
 Linux and macOS have different kernel contracts. Linux uses io_uring/liburing
 where available, while macOS uses kqueue and Darwin-specific scheduler hints.
-Windows native support covers scheduler/core and IOCP one-shot socket requests.
+Windows native support covers scheduler/core, Windows event wake handles, x86_64
+context switching, and IOCP-backed Winsock requests. Windows 10 and Windows 11
+share the public API; LLAM selects a `win10-conservative` or `win11-batched`
+tuning policy at runtime and CI forces both branches through
+`LLAM_WINDOWS_FORCE_GENERATION`.
+
+The native Windows IOCP request backend covers overlapped `WSARecv`, `WSASend`,
+`AcceptEx`, and `ConnectEx`. One-shot readiness support covers TCP `POLLOUT`
+with a zero-byte overlapped send and UDP `POLLIN` with `WSARecvFrom(MSG_PEEK)`.
+TCP `POLLIN` stays on the cooperative/direct fallback path by default; set
+`LLAM_WINDOWS_IOCP_TCP_POLLIN=1` only for controlled native-probe smoke or
+benchmark runs. AF_UNIX sockets and unsupported poll masks remain documented
+fallback cases.
+
 Production rollout is gated by native Windows CMake/CTest, Windows 2022/2025
-stress, forced Windows 10/11 policy checks, and benchmark smoke coverage.
+stress, forced Windows 10/11 policy checks, IOCP smoke coverage, shared-library
+export checks, and benchmark smoke coverage.
 
 Verification must be platform-local:
 
@@ -220,7 +234,8 @@ Before tagging a 1.0.x build, require:
 - `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
 - `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.
 - Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
-  the Windows 2022/2025 stress jobs.
+  the Windows 2022/2025 stress jobs, including forced Windows 10/11 policies and
+  opt-in TCP `POLLIN` IOCP smoke.
 - `python3 scripts/stress_server_composite.py --quick` on at least one POSIX
   platform. Quick mode is a hosted-runner smoke gate and uses a lower absolute
   flood delivery threshold than standard/hour mode; delivery ratio must still

@@ -40,9 +40,9 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 | Linux aarch64 | Supported | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
 | macOS x86_64 | Supported | kqueue + x86_64 asm context switch | Apple Clang | `CC=clang make verify-darwin` |
-| Windows 10/11 | Native backend candidate | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` and unsupported poll masks use fallback | MinGW and MSVC/MASM via CMake | CMake Windows build plus `test_windows_policy`, `test_windows_runtime_smoke`, and `test_windows_iocp_io`; `scripts/verify_windows.ps1 -Native` |
+| Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MinGW and MSVC/MASM via CMake | CMake Windows build plus `test_windows_policy`, `test_windows_runtime_smoke`, and `test_windows_iocp_io`; `scripts/verify_windows.ps1 -Native` |
 
-Native Windows runtime support now covers scheduler/core and one-shot socket I/O. Performance parity with Linux/macOS is still gated on longer Windows 10/11 stress and benchmark runs. The Windows plan and the Windows 10/11 IOCP tuning split are documented in `docs/windows-roadmap.md`.
+Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, and IOCP-backed socket requests. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
 
 Production and stress-operation guidance is documented in `docs/operations.md`.
 
@@ -226,8 +226,8 @@ Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` befor
 Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.0 as one active runtime per process.
 True multi-runtime isolation is a post-1.0 migration item; do not create/destroy
 LLAM concurrently from multiple host runtime instances.
-macOS-specific performance gates and remaining structural work are tracked in `docs/macos-performance.md`.
-Windows backend scope and acceptance gates are tracked in `docs/windows-roadmap.md`.
+macOS-specific performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
+Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
 
 ## Execution Model
 
@@ -367,7 +367,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` and unsupported poll masks remain on the cooperative/direct fallback path. The current I/O primitive set covers `read`, `read_when_ready`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers `read`, `read_when_ready`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`.
 
 ```c
 #include "llam/runtime.h"
@@ -741,8 +741,8 @@ python3 scripts/bench_runtime_compare.py --runtime all
 
 Graph generation requires Python `matplotlib`. Without it, the script still writes CSV and prints tables.
 The scheduled `Runtime Benchmarks` workflow runs the same comparison on Linux
-x86_64, macOS arm64, and macOS x86_64, then uploads CSV/PNG artifacts for
-regression tracking.
+x86_64, macOS arm64, macOS x86_64, Windows Server 2022, and Windows Server
+2025, then uploads CSV/PNG artifacts for regression tracking.
 
 Run the benchmark matrix:
 
