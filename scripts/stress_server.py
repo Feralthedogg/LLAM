@@ -187,6 +187,11 @@ def main() -> int:
             thread = threading.Thread(target=reader_loop, args=(client, stop_readers), daemon=True)
             thread.start()
             reader_threads.append(thread)
+            # TCP connect can complete while the socket is still queued in the
+            # kernel listen backlog.  The correctness phase wants registered
+            # chat clients, not a backlog throughput race, so pace on the
+            # server welcome for each new socket before opening more clients.
+            wait_for_welcome([client], max(0.1, connect_deadline - time.monotonic()))
             if args.connect_spread_ms > 0:
                 time.sleep(args.connect_spread_ms / 1000.0)
 

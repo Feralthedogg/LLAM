@@ -197,6 +197,10 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         return false;
     }
 
+#if !LLAM_REINJECT_DIRECT_OWNER_HANDOFF
+    return false;
+#endif
+
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
 
     llam_task_clear_wait_tracking(task);

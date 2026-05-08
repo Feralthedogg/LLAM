@@ -343,6 +343,10 @@ bool llam_yield_to_local_runnable(void) {
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_CONTEXT);
         return false;
     }
+    if (llam_direct_yield_handoff_mode(shard->runtime) == 0U) {
+        llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
+        return false;
+    }
     if (shard->runtime->run_timing_enabled != 0U || shard->runtime->wake_latency_metrics_enabled != 0U ||
         !llam_shard_accepts_new_work(shard)) {
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
@@ -465,6 +469,9 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     int caller_errno = errno;
 
     if (shard == NULL || current == NULL || shard->runtime == NULL) {
+        return false;
+    }
+    if (llam_direct_yield_handoff_mode(shard->runtime) == 0U) {
         return false;
     }
     if (shard->runtime->run_timing_enabled != 0U ||
