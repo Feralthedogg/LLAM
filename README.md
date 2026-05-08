@@ -180,13 +180,11 @@ target_link_libraries(my_app PRIVATE llam_runtime)
 Use `llam_runtime_shared` when a language runtime needs to load LLAM dynamically.
 The Makefile equivalent is `make shared`.
 
-Release archives include the public headers, docs, `demo`, `stress`, `bench`, `server`,
-`server_flood`, the server stress script, `libllam_runtime.a`, the platform shared library,
-`pkg-config` metadata, CMake package files, and an `install.sh` helper. Tag pushes such as `v1.0.0` build and
-publish `.tar.xz` archives for Linux x86_64, Linux aarch64, macOS x86_64, and
-macOS arm64 through `.github/workflows/release.yml`. Native Windows archives are
-held until Windows 10/11 CI covers the native IOCP socket backend and longer
-stress/benchmark gates.
+Release archives include the public headers, docs, bundled examples, runtime
+libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
+`v1.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
+through `.github/workflows/release.yml`.
 
 The 1.0 release gate is intentionally platform-local: Linux must pass
 `make verify-linux` or Docker verification, macOS must pass the Darwin verify

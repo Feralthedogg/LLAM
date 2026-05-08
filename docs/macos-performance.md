@@ -11,7 +11,7 @@ This document records the macOS-specific performance boundary for LLAM 1.0.0.
 | Direct I/O fast path | nonblocking read/write/connect/poll attempts before backend submission | Enabled |
 | Task allocation | task metadata and stack cache reuse | Enabled |
 | Safepoints | cheap hot-path checks with heavier sampling outside the common path | Enabled |
-| Opaque blocking wake | Mach semaphore helper wake path with `LLAM_OPAQUE_MACH_SEM=0` opt-out; default keeps 1ms timed recovery, `LLAM_OPAQUE_MACH_SEM_INDEFINITE=1` probes indefinite waits | Enabled |
+| Opaque blocking wake | Mach semaphore helper wake path with `LLAM_OPAQUE_MACH_SEM=0` opt-out; default keeps 1ms timed recovery, `LLAM_OPAQUE_MACH_SEM_INDEFINITE=1` probes indefinite waits, and `LLAM_OPAQUE_DARWIN_ULOCK=1` probes Darwin `__ulock_wait`/`__ulock_wake` | Enabled |
 | Timer heap | shard-local 4-ary min-heap with batched sleep wake reinjection | Enabled |
 | Release packaging | macOS arm64 and x86_64 release archives | Enabled |
 

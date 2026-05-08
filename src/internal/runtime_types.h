@@ -771,7 +771,7 @@ struct llam_shard {
     pthread_mutex_t lock;
     pthread_mutex_t opaque_lock;
     pthread_cond_t opaque_cv;
-#if defined(__linux__) || LLAM_PLATFORM_WINDOWS
+#if defined(__linux__) || LLAM_PLATFORM_WINDOWS || defined(__APPLE__)
     atomic_uint opaque_wake_seq;
 #endif
 #if defined(__APPLE__)

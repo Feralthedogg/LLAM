@@ -518,6 +518,26 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
 }
 
 /**
+ * @brief Reclaim an already-completed task before taking the join mutex.
+ *
+ * @details
+ * The scheduler publishes @c reclaim_ready after a task has released its stack.
+ * A join caller that observes that flag can consume the handle immediately,
+ * including timed joins whose deadline has already expired. Completion wins over
+ * timeout because no parking or waiting is required.
+ */
+static bool llam_join_try_completed_fast(llam_runtime_t *rt, llam_task_t *task) {
+    if (rt == NULL || task == NULL) {
+        return false;
+    }
+    if (atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) == 0U) {
+        return false;
+    }
+    llam_try_reclaim_joined_task(rt, task);
+    return true;
+}
+
+/**
  * @brief Join a task, optionally bounded by an absolute deadline.
  *
  * Managed callers park on the target task's join waiter list and resume when
@@ -574,8 +594,7 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         return -1;
     }
 
-    if (!has_deadline && atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) != 0U) {
-        llam_try_reclaim_joined_task(rt, task);
+    if (llam_join_try_completed_fast(rt, task)) {
         errno = caller_errno;
         return 0;
     }

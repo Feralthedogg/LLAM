@@ -92,9 +92,9 @@ disable it for release benchmarking unless diagnostics are required.
 
 Linux and macOS have different kernel contracts. Linux uses io_uring/liburing
 where available, while macOS uses kqueue and Darwin-specific scheduler hints.
-Windows native support covers scheduler/core and IOCP one-shot socket requests,
-but production operation remains gated on longer Windows 10/11 stress,
-benchmark, and CI coverage.
+Windows native support covers scheduler/core and IOCP one-shot socket requests.
+Production rollout is gated by native Windows CMake/CTest, Windows 2022/2025
+stress, forced Windows 10/11 policy checks, and benchmark smoke coverage.
 
 Verification must be platform-local:
 

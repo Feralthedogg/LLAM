@@ -195,6 +195,15 @@ set_target_properties(llam_runtime_shared
         POSITION_INDEPENDENT_CODE ON
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    set_target_properties(llam_runtime_shared
+        PROPERTIES
+            RUNTIME_OUTPUT_NAME llam_runtime
+            ARCHIVE_OUTPUT_NAME llam_runtime_shared
+            LIBRARY_OUTPUT_NAME llam_runtime_shared
+    )
+endif()
+
 foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
     target_include_directories(${LLAM_TARGET}
         PUBLIC

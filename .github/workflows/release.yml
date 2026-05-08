@@ -30,6 +30,9 @@ jobs:
           - target: macos-aarch64
             runner: macos-14
             cc: clang
+          - target: windows-x86_64
+            runner: windows-2025
+            cc: msvc
 
     steps:
       - uses: actions/checkout@v6
@@ -50,7 +53,8 @@ jobs:
           sudo make -C /tmp/liburing install
           sudo ldconfig
 
-      - name: Build and test
+      - name: Build and test POSIX
+        if: runner.os != 'Windows'
         run: |
           version="1.0.0"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
@@ -58,7 +62,8 @@ jobs:
           fi
           make clean all test CC="${{ matrix.cc }}" LLAM_VERSION="$version"
 
-      - name: Smoke test runtime executables
+      - name: Smoke test POSIX runtime executables
+        if: runner.os != 'Windows'
         run: |
           ./demo
           LLAM_BENCH_ROUNDS=1 LLAM_BENCH_IO_MESSAGES=32 LLAM_BENCH_POLL_EVENTS=32 ./bench
@@ -69,7 +74,8 @@ jobs:
           LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US=1000 \
           ./stress
 
-      - name: Package release archive
+      - name: Package POSIX release archive
+        if: runner.os != 'Windows'
         run: |
           version="1.0.0"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
@@ -79,6 +85,46 @@ jobs:
           LLAM_VERSION="$version" \
             ./scripts/package_release.sh "${{ matrix.target }}"
 
+      - name: Configure Windows release build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake -S . -B build/release-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build and test Windows release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake --build build/release-windows --config Release --target bench test_windows_runtime_smoke test_windows_policy test_windows_iocp_io llam_runtime llam_runtime_shared
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $env:LLAM_WINDOWS_IOCP_TCP_POLLIN = "1"
+          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_windows_iocp_io"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          Remove-Item Env:\LLAM_WINDOWS_IOCP_TCP_POLLIN -ErrorAction SilentlyContinue
+          $env:LLAM_BENCH_ROUNDS = "1"
+          $env:LLAM_BENCH_ONLY = "spawn_join"
+          .\build\release-windows\Release\bench.exe
+
+      - name: Package Windows release archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = "1.0.0"
+          $releaseVersion = "dev"
+          if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
+            $tagName = $env:GITHUB_REF_NAME
+            $version = $tagName.TrimStart("v")
+            $releaseVersion = $tagName
+          }
+          .\scripts\package_release_windows.ps1 -Target "${{ matrix.target }}" -BuildDir "build\release-windows" -Configuration Release -Version $releaseVersion -LibraryVersion $version
+
       - name: Upload platform artifact
         uses: actions/upload-artifact@v6
         with:
@@ -86,6 +132,8 @@ jobs:
           path: |
             target/dist/*.tar.xz
             target/dist/*.tar.xz.sha256
+            target/dist/*.zip
+            target/dist/*.zip.sha256
           if-no-files-found: error
 
   publish-release:
@@ -120,15 +168,14 @@ jobs:
           {
             echo "# LLAM ${version}"
             echo
-            echo "LLAM ${version} publishes native runtime builds for Linux and macOS."
-            echo "Native Windows 10/11 support is planned but not shipped in this release."
+            echo "LLAM ${version} publishes native runtime builds for Linux, macOS, and Windows x86_64."
             echo
             echo "## Highlights"
             echo
             echo "- Native Darwin x86_64 assembly context switching for Intel Mac builds."
             echo "- kqueue-based macOS I/O backend for both Apple Silicon and Intel Mac."
             echo "- io_uring/liburing Linux I/O backend for x86_64 and aarch64."
-            echo "- Windows roadmap documented for the planned IOCP/Fiber backend."
+            echo "- Windows x86_64 IOCP backend archive with WSARecv/WSASend/AcceptEx/ConnectEx coverage."
             echo "- SDK metadata for CMake and pkg-config consumers."
             echo
             echo "## Downloads"
@@ -139,10 +186,15 @@ jobs:
               "linux-x86_64|Linux x86_64" \
               "linux-aarch64|Linux aarch64" \
               "macos-x86_64|macOS x86_64" \
-              "macos-aarch64|macOS arm64"; do
+              "macos-aarch64|macOS arm64" \
+              "windows-x86_64|Windows x86_64"; do
               target="${row%%|*}"
               label="${row#*|}"
-              file="llam-${version}-${target}.tar.xz"
+              case "$target" in
+                windows-*) ext="zip" ;;
+                *) ext="tar.xz" ;;
+              esac
+              file="llam-${version}-${target}.${ext}"
               checksum="${file}.sha256"
               if [ -f "$file" ]; then
                 echo "| [${file}](${base_url}/${file}) | ${label} | [checksum](${base_url}/${checksum}) |"
@@ -152,15 +204,11 @@ jobs:
             echo "## Package Contents"
             echo
             echo "- Public headers under \`include/\`."
-            echo "- Static runtime library: \`libllam_runtime.a\`."
-            echo "- Platform shared runtime library: \`libllam_runtime.so\` or \`libllam_runtime.dylib\`."
+            echo "- Static runtime library: \`libllam_runtime.a\` on POSIX or \`llam_runtime.lib\` on Windows."
+            echo "- Platform shared runtime library: \`libllam_runtime.so\`, \`libllam_runtime.dylib\`, or \`llam_runtime.dll\`."
             echo "- CMake package files under \`share/llam/cmake/\` and pkg-config metadata under \`lib/pkgconfig/\`."
             echo "- Optional archive installer: \`install.sh --prefix <dir>\`."
-            echo "- Docs, examples, and the bundled \`demo\`, \`stress\`, and \`bench\` executables."
-            echo
-            echo "## Windows Status"
-            echo
-            echo "Native Windows archives are not published for ${version}. Use WSL to verify the Linux backend on Windows hosts until the native IOCP/Fiber backend lands."
+            echo "- Docs, examples, and bundled smoke executables where supported."
             echo
             echo "## Verification"
             echo
@@ -179,4 +227,6 @@ jobs:
           files: |
             release-artifacts/*.tar.xz
             release-artifacts/*.tar.xz.sha256
+            release-artifacts/*.zip
+            release-artifacts/*.zip.sha256
             release-artifacts/SHA256SUMS

@@ -24,7 +24,7 @@ path.
 | Native scheduler backend | Present for Windows x86_64 through GNU as and MASM context-switch assembly, Windows event wake handles, `VirtualAlloc` stack mappings, and runtime lifecycle smoke coverage. |
 | Native I/O backend | Present for one-shot socket requests: WSARecv/WSASend, AcceptEx, ConnectEx, TCP `POLLOUT`, and UDP `POLLIN` readiness are bound to IOCP completions. TCP `POLLIN` has an opt-in IOCP probe through `LLAM_WINDOWS_IOCP_TCP_POLLIN=1`; AF_UNIX and unsupported poll masks remain fallback. |
 | IOCP source layout | In progress. State/control queue helpers, socket association/extension loading, accept/op pools, control packet processing, submit path, completion path, and unsupported fallback stubs are split out of the original monolithic backend. The remaining root file now owns worker lifetime and cleanup only. |
-| Native package artifacts | Not published until Windows 10 and Windows 11 CI pass the full acceptance gate. |
+| Native package artifacts | Release workflow now builds a Windows x86_64 archive from the native IOCP backend after Windows stress and IOCP smoke pass. |
 | Verification today | Windows 10 has been verified with native MSVC CMake build/test/bench smoke. GitHub Actions covers Windows Server 2022 and Windows Server 2025 native stress smoke. WSL verification remains Linux-backend verification. |
 
 `scripts/verify_windows.ps1 -Native` reports the detected Windows generation,
@@ -75,14 +75,17 @@ The native backend is intentionally being decomposed by runtime responsibility:
 | `src/io/windows/runtime_io_watch_windows.c` | Worker loop and IOCP node cleanup. |
 
 The remaining decomposition target is native multishot readiness support for
-currently unsupported Windows watch cases, not further file splitting.
+currently unsupported Windows watch cases, not further file splitting. The
+current CI gate covers default fallback behavior plus opt-in
+`LLAM_WINDOWS_IOCP_TCP_POLLIN=1` stream-readiness probes so the native path can
+be promoted only after repeated Windows 10/11 stress remains clean.
 
 ## Planned Architecture
 
 | Subsystem | Windows path |
 | --- | --- |
 | Context switching | Windows x86_64 assembly preserving the Windows x64 callee-saved GPR, XMM6-XMM15, and FP-control state. LLAM keeps its own task stacks; it does not use the OS Fiber allocator. |
-| I/O readiness/completion | IOCP owns one-shot socket request completions through overlapped WSARecv/WSASend, AcceptEx, ConnectEx, TCP write-readiness probes, and UDP read-readiness probes. TCP read readiness, AF_UNIX, and unsupported poll masks stay on fallback paths. |
+| I/O readiness/completion | IOCP owns one-shot socket request completions through overlapped WSARecv/WSASend, AcceptEx, ConnectEx, TCP write-readiness probes, UDP read-readiness probes, and opt-in TCP read-readiness probes. AF_UNIX and unsupported poll masks stay on fallback paths. |
 | Scheduler wake | Windows event handles integrated through the existing shard/node wake abstraction. |
 | Blocking compensation | Dedicated helper workers using `WaitOnAddress` wake words instead of pthread condvar waits on native Windows. |
 | Timers | Scheduler idle waits can use high-resolution waitable timers for sub-16ms precise deadlines. |
@@ -129,7 +132,8 @@ Windows 10 and Windows 11:
 - Native Windows scheduler/core smoke support is present.
 - Windows Server 2022/2025 CI covers native build, CTest, policy-forced 10/11
   smoke, and scheduler/IOCP benchmark smoke.
-- Native Windows archives are not published until full Windows 10/11 CI lands.
+- Native Windows x86_64 archives are produced by the release workflow after the
+  native Windows stress gate passes.
 - The IOCP request backend covers one-shot socket `read`/`write`/`accept`/`connect`
   plus gated TCP `POLLOUT` and UDP `POLLIN` readiness; TCP `POLLIN` remains on
   the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1`

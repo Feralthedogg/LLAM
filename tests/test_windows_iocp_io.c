@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if !LLAM_PLATFORM_WINDOWS
@@ -252,13 +253,23 @@ static void server_task(void *arg) {
     ssize_t nread;
     ssize_t nwritten;
     short revents = 0;
+    const char *native_tcp_pollin = getenv("LLAM_WINDOWS_IOCP_TCP_POLLIN");
+    bool use_native_tcp_pollin = native_tcp_pollin != NULL &&
+                                 native_tcp_pollin[0] != '\0' &&
+                                 strcmp(native_tcp_pollin, "0") != 0;
 
     accepted = llam_accept(state->listener, NULL, NULL);
     if (LLAM_FD_IS_INVALID(accepted)) {
         task_fail(state, "llam_accept/AcceptEx failed", errno);
         return;
     }
-    if (llam_poll_fd(accepted, POLLIN, 5000, &revents) != 1 || (revents & POLLIN) == 0) {
+    if (use_native_tcp_pollin) {
+        if (issue_backend_poll(accepted, POLLIN, 5000, &revents) != 1 || (revents & POLLIN) == 0) {
+            task_fail(state, "tcp IOCP WSARecv(MSG_PEEK) POLLIN readiness failed", errno);
+            closesocket(accepted);
+            return;
+        }
+    } else if (llam_poll_fd(accepted, POLLIN, 5000, &revents) != 1 || (revents & POLLIN) == 0) {
         task_fail(state, "llam_poll_fd TCP POLLIN fallback readiness failed", errno);
         closesocket(accepted);
         return;

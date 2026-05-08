@@ -172,6 +172,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
+            $env:LLAM_WINDOWS_IOCP_TCP_POLLIN = "1"
+            ctest --test-dir build/windows --output-on-failure -C Release -R "test_windows_iocp_io"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            Remove-Item Env:\LLAM_WINDOWS_IOCP_TCP_POLLIN -ErrorAction SilentlyContinue
           }
           Remove-Item Env:\LLAM_WINDOWS_FORCE_GENERATION -ErrorAction SilentlyContinue
 

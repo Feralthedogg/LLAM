@@ -30,6 +30,7 @@
 #endif
 
 #if defined(__APPLE__)
+#include <dlfcn.h>
 #include <sys/event.h>
 #endif
 
@@ -675,6 +676,61 @@ int llam_opaque_wake_init(llam_shard_t *shard) {
 }
 
 #if defined(__APPLE__)
+#define LLAM_DARWIN_UL_COMPARE_AND_WAIT 1U
+#define LLAM_DARWIN_ULF_WAKE_ALL 0x00000100U
+
+typedef int (*llam_darwin_ulock_wait_fn)(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
+typedef int (*llam_darwin_ulock_wake_fn)(uint32_t operation, void *addr, uint64_t wake_value);
+
+/**
+ * @brief Resolve private Darwin ulock entry points for opt-in opaque wake probes.
+ *
+ * @details
+ * The symbols are resolved lazily with @c dlsym so the normal public Mach
+ * semaphore path remains the default ABI-safe implementation.  The ulock path is
+ * only used when @c LLAM_OPAQUE_DARWIN_ULOCK is explicitly enabled.
+ */
+static bool llam_darwin_ulock_functions(llam_darwin_ulock_wait_fn *wait_out,
+                                        llam_darwin_ulock_wake_fn *wake_out) {
+    static atomic_int cached = -1;
+    static llam_darwin_ulock_wait_fn wait_fn = NULL;
+    static llam_darwin_ulock_wake_fn wake_fn = NULL;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_OPAQUE_DARWIN_ULOCK");
+
+        value = 0;
+        if (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) {
+            union {
+                void *object;
+                llam_darwin_ulock_wait_fn function;
+            } wait_symbol;
+            union {
+                void *object;
+                llam_darwin_ulock_wake_fn function;
+            } wake_symbol;
+
+            wait_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wait");
+            wake_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wake");
+            wait_fn = wait_symbol.function;
+            wake_fn = wake_symbol.function;
+            value = wait_fn != NULL && wake_fn != NULL ? 1 : 0;
+        }
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    if (value == 0) {
+        return false;
+    }
+    if (wait_out != NULL) {
+        *wait_out = wait_fn;
+    }
+    if (wake_out != NULL) {
+        *wake_out = wake_fn;
+    }
+    return true;
+}
+
 /**
  * @brief Return whether Darwin opaque semaphores should skip timed recovery.
  *
@@ -734,6 +790,20 @@ void llam_opaque_wake_signal(llam_shard_t *shard) {
     return;
 #endif
 #if defined(__APPLE__)
+    {
+        llam_darwin_ulock_wake_fn ulock_wake = NULL;
+
+        if (llam_darwin_ulock_functions(NULL, &ulock_wake)) {
+            int saved_errno = errno;
+
+            atomic_fetch_add_explicit(&shard->opaque_wake_seq, 1U, memory_order_release);
+            (void)ulock_wake(LLAM_DARWIN_UL_COMPARE_AND_WAIT | LLAM_DARWIN_ULF_WAKE_ALL,
+                             (void *)&shard->opaque_wake_seq,
+                             0U);
+            errno = saved_errno;
+            return;
+        }
+    }
     if (shard->opaque_sem_initialized) {
         (void)semaphore_signal_all(shard->opaque_sem);
         return;
@@ -775,6 +845,23 @@ void llam_opaque_wake_wait(llam_shard_t *shard) {
     }
 #endif
 #if defined(__APPLE__)
+    {
+        llam_darwin_ulock_wait_fn ulock_wait = NULL;
+
+        if (llam_darwin_ulock_functions(&ulock_wait, NULL)) {
+            unsigned seq = atomic_load_explicit(&shard->opaque_wake_seq, memory_order_acquire);
+            int saved_errno = errno;
+
+            pthread_mutex_unlock(&shard->opaque_lock);
+            (void)ulock_wait(LLAM_DARWIN_UL_COMPARE_AND_WAIT,
+                             (void *)&shard->opaque_wake_seq,
+                             (uint64_t)seq,
+                             1000U);
+            pthread_mutex_lock(&shard->opaque_lock);
+            errno = saved_errno;
+            return;
+        }
+    }
     if (shard->opaque_sem_initialized) {
         kern_return_t kr;
 

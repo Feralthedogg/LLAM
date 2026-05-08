@@ -218,8 +218,8 @@ Expected dynamic artifacts:
 ```text
 Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.0
 macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
-Windows: libllam_runtime.dll is built by the native CMake backend; release
-         archives are withheld until Windows 10/11 CI covers the full gate.
+Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
+         the native Windows x86_64 release archive.
 ```
 
 Language runtimes should prefer the ABI-major soname/install-name when a
@@ -227,8 +227,8 @@ platform supports it.
 
 Native Windows 10/11 support covers Windows x86_64 context switching, Windows
 event wake handles, IOCP policy primitives, and IOCP one-shot socket requests
-for `read`, `write`, `accept`, and `connect`. Windows artifacts still wait for
-Windows 10/11 CI, stress, and benchmark acceptance.
+for `read`, `write`, `accept`, and `connect`. The release workflow publishes a
+native Windows x86_64 archive after the Windows stress and IOCP smoke gates pass.
 
 ## Runtime Lifecycle
 
