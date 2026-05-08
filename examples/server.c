@@ -489,7 +489,8 @@ static void chat_accept_task(void *arg) {
         if (listener_fd < 0) {
             break;
         }
-        fd = llam_accept(listener_fd, (struct sockaddr *)(void *)&peer_addr, &peer_len);
+        memset(&peer_addr, 0, sizeof(peer_addr));
+        fd = llam_accept(listener_fd, NULL, NULL);
         if (LLAM_FD_IS_INVALID(fd)) {
             if (atomic_load_explicit(&g_stop_requested, memory_order_acquire) ||
                 errno == EBADF ||
@@ -499,6 +500,10 @@ static void chat_accept_task(void *arg) {
             perror("llam_accept");
             (void)llam_sleep_ns(10ULL * 1000ULL * 1000ULL);
             continue;
+        }
+        if (getpeername(fd, (struct sockaddr *)(void *)&peer_addr, &peer_len) != 0) {
+            memset(&peer_addr, 0, sizeof(peer_addr));
+            peer_len = 0;
         }
 
         client = chat_client_create(server, fd, &peer_addr, peer_len);
