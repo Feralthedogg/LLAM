@@ -103,7 +103,8 @@ RUNTIME_PRIV_HDRS = \
 	src/engine/runtime_watchdog_internal.h \
 	src/io/runtime_io_api_internal.h \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
-	src/io/linux/runtime_io_watch_linux_internal.h
+	src/io/linux/runtime_io_watch_linux_internal.h \
+	src/io/windows/runtime_io_watch_windows_internal.h
 
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime.o \
@@ -160,6 +161,10 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_cond.o \
 	$(OBJDIR)/src/core/runtime_channel_cache.o \
 	$(OBJDIR)/src/core/runtime_channel.o \
+	$(OBJDIR)/src/core/runtime_channel_select.o \
+	$(OBJDIR)/src/core/runtime_handle.o \
+	$(OBJDIR)/src/core/runtime_task_group.o \
+	$(OBJDIR)/src/core/runtime_task_local.o \
 	$(OBJDIR)/src/io/runtime_io_api.o \
 	$(OBJDIR)/src/io/runtime_io_api_direct.o \
 	$(OBJDIR)/src/io/runtime_io_api_direct_tuning.o \
@@ -218,7 +223,13 @@ else ifeq ($(HOST_PLATFORM),windows)
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock
 CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
-RUNTIME_OBJS += $(OBJDIR)/src/io/windows/runtime_io_watch_windows.o
+RUNTIME_OBJS += \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_state.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_socket.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_pool.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_submit.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_completion.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows.o
 ifeq ($(UNAME_M),AMD64)
 RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
 else ifeq ($(UNAME_M),x86_64)

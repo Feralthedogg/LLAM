@@ -365,6 +365,7 @@ void run_join_timeout_path(void);
 void run_mutex_timeout_path(void);
 void run_cond_cancel_path(void);
 void run_channel_timeout_paths(void);
+void run_channel_select_race_paths(void);
 void run_dynamic_join_timeout_path(void);
 void run_dynamic_mutex_timeout_path(void);
 void run_dynamic_cond_timeout_path(void);

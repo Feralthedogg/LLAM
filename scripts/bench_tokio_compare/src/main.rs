@@ -4,7 +4,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(windows)]
+use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 use tokio::task;
@@ -93,6 +96,23 @@ fn print_report(report: Report, warmup_rounds: u32) {
     );
 }
 
+#[cfg(unix)]
+fn stream_pair() -> (UnixStream, UnixStream) {
+    UnixStream::pair().expect("UnixStream::pair failed")
+}
+
+#[cfg(windows)]
+async fn stream_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("TcpListener::bind failed");
+    let addr = listener.local_addr().expect("local_addr failed");
+    let (client, accepted) = tokio::try_join!(TcpStream::connect(addr), listener.accept())
+        .expect("TCP loopback pair failed");
+    let (server, _) = accepted;
+    (client, server)
+}
+
 async fn run_spawn_join(rounds: u32, tasks_per_round: u32, yields_per_task: u32) -> Report {
     let mut samples = Vec::with_capacity(rounds as usize);
     for _ in 0..rounds {
@@ -149,10 +169,110 @@ async fn run_channel_pingpong(rounds: u32, messages_per_round: u32) -> Report {
     }
 }
 
+async fn run_select_recv_ready(rounds: u32, ops_per_round: u32) -> Report {
+    let mut samples = Vec::with_capacity(rounds as usize);
+    for _ in 0..rounds {
+        let (primary_tx, mut primary_rx) = mpsc::channel::<usize>(1);
+        let (_secondary_tx, mut secondary_rx) = mpsc::channel::<usize>(1);
+        let start = Instant::now();
+        for i in 0..ops_per_round {
+            let token = i as usize + 1;
+            primary_tx
+                .send(token)
+                .await
+                .expect("select ready seed failed");
+            tokio::select! {
+                biased;
+                value = primary_rx.recv() => {
+                    assert_eq!(value, Some(token), "select ready mismatch");
+                }
+                value = secondary_rx.recv() => {
+                    panic!("select ready wrong channel: {value:?}");
+                }
+            }
+        }
+        samples.push(start.elapsed());
+    }
+    Report {
+        name: "select_recv_ready",
+        ops_per_round,
+        samples,
+    }
+}
+
+async fn run_select_park_wake(rounds: u32, ops_per_round: u32) -> Report {
+    let mut samples = Vec::with_capacity(rounds as usize);
+    for _ in 0..rounds {
+        let (primary_tx, mut primary_rx) = mpsc::channel::<usize>(1);
+        let (_secondary_tx, mut secondary_rx) = mpsc::channel::<usize>(1);
+        let handle = task::spawn(async move {
+            for i in 0..ops_per_round {
+                task::yield_now().await;
+                primary_tx
+                    .send(i as usize + 1)
+                    .await
+                    .expect("select park-wake send failed");
+            }
+        });
+        let start = Instant::now();
+        for i in 0..ops_per_round {
+            let token = i as usize + 1;
+            tokio::select! {
+                biased;
+                value = primary_rx.recv() => {
+                    assert_eq!(value, Some(token), "select park-wake mismatch");
+                }
+                value = secondary_rx.recv() => {
+                    panic!("select park-wake wrong channel: {value:?}");
+                }
+            }
+        }
+        handle.await.expect("select park-wake task panicked");
+        samples.push(start.elapsed());
+    }
+    Report {
+        name: "select_park_wake",
+        ops_per_round,
+        samples,
+    }
+}
+
+async fn run_select_timeout(rounds: u32, ops_per_round: u32) -> Report {
+    let mut samples = Vec::with_capacity(rounds as usize);
+    for _ in 0..rounds {
+        let (_primary_tx, mut primary_rx) = mpsc::channel::<usize>(1);
+        let (_secondary_tx, mut secondary_rx) = mpsc::channel::<usize>(1);
+        let start = Instant::now();
+        for _ in 0..ops_per_round {
+            let result = time::timeout(Duration::ZERO, async {
+                tokio::select! {
+                    value = primary_rx.recv() => {
+                        panic!("select timeout primary ready: {value:?}");
+                    }
+                    value = secondary_rx.recv() => {
+                        panic!("select timeout secondary ready: {value:?}");
+                    }
+                }
+            })
+            .await;
+            assert!(result.is_err(), "select timeout unexpectedly completed");
+        }
+        samples.push(start.elapsed());
+    }
+    Report {
+        name: "select_timeout",
+        ops_per_round,
+        samples,
+    }
+}
+
 async fn run_io_echo(rounds: u32, messages_per_round: u32) -> Report {
     let mut samples = Vec::with_capacity(rounds as usize);
     for _ in 0..rounds {
-        let (mut client, mut server) = UnixStream::pair().expect("UnixStream::pair failed");
+        #[cfg(unix)]
+        let (mut client, mut server) = stream_pair();
+        #[cfg(windows)]
+        let (mut client, mut server) = stream_pair().await;
         let handle = task::spawn(async move {
             let mut one = [0_u8; 1];
             for _ in 0..messages_per_round {
@@ -188,7 +308,10 @@ async fn run_io_echo(rounds: u32, messages_per_round: u32) -> Report {
 async fn run_poll_wake_approx(rounds: u32, events_per_round: u32) -> Report {
     let mut samples = Vec::with_capacity(rounds as usize);
     for _ in 0..rounds {
-        let (reader, mut writer) = UnixStream::pair().expect("UnixStream::pair failed");
+        #[cfg(unix)]
+        let (reader, mut writer) = stream_pair();
+        #[cfg(windows)]
+        let (reader, mut writer) = stream_pair().await;
         let handle = task::spawn(async move {
             for _ in 0..events_per_round {
                 task::yield_now().await;
@@ -283,6 +406,7 @@ async fn async_main(worker_threads: usize) {
     let total_rounds = rounds + warmup_rounds;
     let spawn_tasks = env_u32("LLAM_BENCH_SPAWN_TASKS", 128, 4096);
     let channel_messages = env_u32("LLAM_BENCH_CHANNEL_MESSAGES", 1024, 16384);
+    let select_ops = env_u32("LLAM_BENCH_SELECT_OPS", 512, 16384);
     let io_messages = env_u32("LLAM_BENCH_IO_MESSAGES", 256, 8192);
     let poll_events = env_u32("LLAM_BENCH_POLL_EVENTS", 256, 8192);
     let sleep_tasks = env_u32("LLAM_BENCH_SLEEP_TASKS", spawn_tasks.max(512), 8192);
@@ -291,12 +415,13 @@ async fn async_main(worker_threads: usize) {
     let opaque_scopes = env_u32("LLAM_BENCH_OPAQUE_SCOPES", 16, 1024);
 
     println!(
-        "[tokio-bench] config rounds={} warmup={} worker_threads={} spawn_tasks={} channel_messages={} io_messages={} poll_events={} sleep_tasks={} sleep_yields={} sleep_us={} opaque_scopes={}",
+        "[tokio-bench] config rounds={} warmup={} worker_threads={} spawn_tasks={} channel_messages={} select_ops={} io_messages={} poll_events={} sleep_tasks={} sleep_yields={} sleep_us={} opaque_scopes={}",
         rounds,
         warmup_rounds,
         worker_threads,
         spawn_tasks,
         channel_messages,
+        select_ops,
         io_messages,
         poll_events,
         sleep_tasks,
@@ -314,6 +439,24 @@ async fn async_main(worker_threads: usize) {
     if bench_case_selected("channel_pingpong") {
         print_report(
             run_channel_pingpong(total_rounds, channel_messages).await,
+            warmup_rounds,
+        );
+    }
+    if bench_case_selected("select_recv_ready") {
+        print_report(
+            run_select_recv_ready(total_rounds, select_ops).await,
+            warmup_rounds,
+        );
+    }
+    if bench_case_selected("select_park_wake") {
+        print_report(
+            run_select_park_wake(total_rounds, select_ops).await,
+            warmup_rounds,
+        );
+    }
+    if bench_case_selected("select_timeout") {
+        print_report(
+            run_select_timeout(total_rounds, select_ops).await,
             warmup_rounds,
         );
     }

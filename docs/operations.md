@@ -107,6 +107,19 @@ Do not assume benchmark parity means identical behavior. Track I/O submit
 syscalls, direct path usage, wake latency, and skipped stress phases separately
 per platform.
 
+## 6.1 Runtime Handle Boundary
+
+`llam_runtime_create()`, `llam_runtime_run_handle()`, and
+`llam_runtime_destroy()` are the canonical embedding-facing lifecycle APIs, but
+LLAM 1.0 still has one active runtime per process. The handle currently names
+that active runtime and makes future ABI expansion explicit; it does not yet
+allow two independent schedulers in one address space.
+
+This is intentional for the 1.0 line because global task context, TLS shard/task
+state, signal/fault hooks, and platform I/O ownership are still process-scoped.
+Embedders should treat a second `llam_runtime_create()` returning `EBUSY` as the
+defined behavior, not as a transient initialization failure.
+
 ## 7. Experimental Options
 
 The stable API exposes experiments through `experimental_flags`, but those flags
@@ -134,3 +147,28 @@ Minimum production counters to export are `ctx_switches`, `parks`, `wakes`,
 `io_submits`, `io_submit_syscalls`, `io_completions`, `active_workers`,
 `online_workers`, `queue_overflows`, `overflow_depth`, and opaque blocking
 duration counters.
+
+## 9. Channel Select Benchmarking
+
+Channel select has three focused benchmark cases:
+
+- `select_recv_ready`: both LLAM and comparison runtimes exercise the already
+  ready path where selection should not park.
+- `select_park_wake`: the waiter parks on multiple channels and a peer wakes
+  one selected operation.
+- `select_timeout`: the immediate-timeout/no-ready path used to measure
+  validation and deadline overhead.
+
+Run them directly with:
+
+```bash
+LLAM_BENCH_ONLY=select_recv_ready ./bench
+LLAM_BENCH_ONLY=select_park_wake ./bench
+LLAM_BENCH_ONLY=select_timeout ./bench
+```
+
+The cross-runtime script includes these cases for LLAM, Go, and Tokio:
+
+```bash
+python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1
+```

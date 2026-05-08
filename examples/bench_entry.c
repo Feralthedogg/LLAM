@@ -28,10 +28,11 @@ static int bench_run_case(const char *name,
                           unsigned warmup_rounds,
                           unsigned ops_per_round,
                           const llam_runtime_opts_t *opts) {
+    llam_runtime_t *runtime = NULL;
     llam_runtime_stats_t stats;
 
-    if (llam_runtime_init(opts) != 0) {
-        perror("llam_runtime_init");
+    if (llam_runtime_create(opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        perror("llam_runtime_create");
         return -1;
     }
     if (llam_spawn(entry,
@@ -42,22 +43,26 @@ static int bench_run_case(const char *name,
                      .flags = LLAM_SPAWN_F_PINNED,
                  }) == NULL) {
         perror("llam_spawn");
-        llam_runtime_shutdown();
+        llam_runtime_destroy(runtime);
         return -1;
     }
-    if (llam_run() != 0) {
-        perror("llam_run");
+    if (llam_runtime_run_handle(runtime) != 0) {
+        perror("llam_runtime_run_handle");
+#if LLAM_PLATFORM_WINDOWS
+        llam_dump_runtime_state(_fileno(stdout));
+#else
         llam_dump_runtime_state(STDOUT_FILENO);
-        llam_runtime_shutdown();
+#endif
+        llam_runtime_destroy(runtime);
         return -1;
     }
     if (llam_runtime_collect_stats(&stats) != 0) {
         perror("llam_runtime_collect_stats");
-        llam_runtime_shutdown();
+        llam_runtime_destroy(runtime);
         return -1;
     }
     bench_print_report(name, total_rounds, warmup_rounds, ops_per_round, samples_ns, &stats);
-    llam_runtime_shutdown();
+    llam_runtime_destroy(runtime);
     return 0;
 }
 
@@ -72,6 +77,7 @@ int main(void) {
     unsigned total_rounds = rounds + warmup_rounds;
     unsigned spawn_tasks = bench_env_u32("LLAM_BENCH_SPAWN_TASKS", 128U, 4096U);
     unsigned channel_messages = bench_env_u32("LLAM_BENCH_CHANNEL_MESSAGES", 1024U, 16384U);
+    unsigned select_ops = bench_env_u32("LLAM_BENCH_SELECT_OPS", 512U, 16384U);
     unsigned io_messages = bench_env_u32("LLAM_BENCH_IO_MESSAGES", 256U, 8192U);
     unsigned poll_events = bench_env_u32("LLAM_BENCH_POLL_EVENTS", 256U, 8192U);
     unsigned sleep_tasks = bench_env_u32("LLAM_BENCH_SLEEP_TASKS", spawn_tasks < 512U ? 512U : spawn_tasks, 8192U);
@@ -124,7 +130,7 @@ int main(void) {
         return 1;
     }
 
-    printf("[bench] config rounds=%u warmup=%u profile=%s worker_rings=%u worker_rings_multishot=%u dynamic_workers=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u sqpoll_cpu=%d idle_spin_ns=%u idle_spin_iters=%u spawn_tasks=%u channel_messages=%u io_messages=%u poll_events=%u sleep_tasks=%u sleep_yields=%u sleep_us=%u opaque_scopes=%u\n",
+    printf("[bench] config rounds=%u warmup=%u profile=%s worker_rings=%u worker_rings_multishot=%u dynamic_workers=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u sqpoll_cpu=%d idle_spin_ns=%u idle_spin_iters=%u spawn_tasks=%u channel_messages=%u select_ops=%u io_messages=%u poll_events=%u sleep_tasks=%u sleep_yields=%u sleep_us=%u opaque_scopes=%u\n",
            rounds,
            warmup_rounds,
            runtime_profile != NULL && runtime_profile[0] != '\0' ? runtime_profile : "balanced",
@@ -139,6 +145,7 @@ int main(void) {
            idle_spin_iters,
            spawn_tasks,
            channel_messages,
+           select_ops,
            io_messages,
            poll_events,
            sleep_tasks,
@@ -175,6 +182,57 @@ int main(void) {
         atomic_init(&state.failures, 0U);
         memset(samples, 0, total_rounds * sizeof(*samples));
         rc = bench_run_case("channel_pingpong", bench_channel_task, &state, samples, total_rounds, warmup_rounds, channel_messages, &runtime_opts);
+        if (rc != 0 || atomic_load(&state.failures) != 0U) {
+            rc = 1;
+            goto done;
+        }
+    }
+
+    if (bench_case_selected("select_recv_ready")) {
+        bench_select_state_t state = {
+            .rounds = total_rounds,
+            .ops_per_round = select_ops,
+            .mode = BENCH_SELECT_READY,
+            .samples_ns = samples,
+        };
+
+        atomic_init(&state.failures, 0U);
+        memset(samples, 0, total_rounds * sizeof(*samples));
+        rc = bench_run_case("select_recv_ready", bench_select_task, &state, samples, total_rounds, warmup_rounds, select_ops, &runtime_opts);
+        if (rc != 0 || atomic_load(&state.failures) != 0U) {
+            rc = 1;
+            goto done;
+        }
+    }
+
+    if (bench_case_selected("select_park_wake")) {
+        bench_select_state_t state = {
+            .rounds = total_rounds,
+            .ops_per_round = select_ops,
+            .mode = BENCH_SELECT_PARK_WAKE,
+            .samples_ns = samples,
+        };
+
+        atomic_init(&state.failures, 0U);
+        memset(samples, 0, total_rounds * sizeof(*samples));
+        rc = bench_run_case("select_park_wake", bench_select_task, &state, samples, total_rounds, warmup_rounds, select_ops, &runtime_opts);
+        if (rc != 0 || atomic_load(&state.failures) != 0U) {
+            rc = 1;
+            goto done;
+        }
+    }
+
+    if (bench_case_selected("select_timeout")) {
+        bench_select_state_t state = {
+            .rounds = total_rounds,
+            .ops_per_round = select_ops,
+            .mode = BENCH_SELECT_TIMEOUT,
+            .samples_ns = samples,
+        };
+
+        atomic_init(&state.failures, 0U);
+        memset(samples, 0, total_rounds * sizeof(*samples));
+        rc = bench_run_case("select_timeout", bench_select_task, &state, samples, total_rounds, warmup_rounds, select_ops, &runtime_opts);
         if (rc != 0 || atomic_load(&state.failures) != 0U) {
             rc = 1;
             goto done;

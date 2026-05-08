@@ -141,7 +141,7 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
 
     target = &rt->shards[target_id];
     pressure = llam_runtime_pressure_signal(rt);
-    effective_hot = hot || task->task_class == LLAM_TASK_CLASS_LATENCY;
+    effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
     direct_local = (g_llam_tls_shard == target && g_llam_tls_task != NULL);
 
     if (task->active_timer != NULL) {
@@ -197,7 +197,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         return false;
     }
 
-    effective_hot = hot || task->task_class == LLAM_TASK_CLASS_LATENCY;
+    effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
 
     llam_task_clear_wait_tracking(task);
 

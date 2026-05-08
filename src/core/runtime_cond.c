@@ -144,6 +144,9 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         atomic_store(&mutex->owner, (uintptr_t)0);
     }
     pthread_mutex_unlock(&mutex->lock);
+    atomic_store_explicit(&task->task_class,
+                          atomic_load_explicit(&task->base_task_class, memory_order_acquire),
+                          memory_order_release);
     if (mutex_waiter != NULL) {
         mutex_waiter->error_code = 0;
         llam_wake_wait_node(mutex_waiter, true, LLAM_WAIT_MUTEX);

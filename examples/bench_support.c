@@ -123,7 +123,7 @@ static void bench_close_fd(llam_fd_t fd) {
 
 #if LLAM_PLATFORM_WINDOWS && LLAM_BENCH_HAVE_AFUNIX
 static int bench_socketpair_windows_afunix(llam_fd_t sv[2]) {
-    static atomic_uint sequence = ATOMIC_VAR_INIT(0U);
+    static atomic_uint sequence;
     SOCKET listener = INVALID_SOCKET;
     SOCKET client = INVALID_SOCKET;
     SOCKET server = INVALID_SOCKET;
@@ -547,6 +547,122 @@ void bench_channel_task(void *arg) {
         state->response = NULL;
         llam_channel_destroy(request);
         llam_channel_destroy(response);
+    }
+}
+
+static void bench_select_sender_task(void *arg) {
+    bench_select_state_t *state = arg;
+    unsigned i;
+
+    for (i = 0; i < state->ops_per_round; ++i) {
+        void *token = (void *)(uintptr_t)(i + 1U);
+
+        llam_yield();
+        if (llam_channel_send(state->primary, token) != 0) {
+            bench_fail(&state->failures, "select sender send failed");
+            return;
+        }
+    }
+}
+
+static int bench_select_recv_once(bench_select_state_t *state, uint64_t deadline_ns, unsigned i) {
+    void *received = NULL;
+    size_t selected = SIZE_MAX;
+    llam_select_op_t ops[2] = {
+        {
+            .kind = LLAM_SELECT_OP_RECV,
+            .channel = state->primary,
+            .recv_out = &received,
+        },
+        {
+            .kind = LLAM_SELECT_OP_RECV,
+            .channel = state->secondary,
+            .recv_out = &received,
+        },
+    };
+
+    if (llam_channel_select(ops, 2U, deadline_ns, &selected) != 0) {
+        if (state->mode == BENCH_SELECT_TIMEOUT && errno == ETIMEDOUT) {
+            return 0;
+        }
+        bench_fail(&state->failures, "select recv failed");
+        return -1;
+    }
+    if (state->mode == BENCH_SELECT_TIMEOUT) {
+        bench_fail(&state->failures, "select timeout unexpectedly selected");
+        return -1;
+    }
+    if (selected != 0U || received != (void *)(uintptr_t)(i + 1U)) {
+        bench_fail(&state->failures, "select recv mismatch");
+        return -1;
+    }
+    return 0;
+}
+
+void bench_select_task(void *arg) {
+    bench_select_state_t *state = arg;
+    unsigned round;
+
+    for (round = 0; round < state->rounds; ++round) {
+        llam_channel_t *primary = llam_channel_create(1U);
+        llam_channel_t *secondary = llam_channel_create(1U);
+        llam_task_t *sender = NULL;
+        uint64_t start_ns;
+        unsigned i;
+
+        if (primary == NULL || secondary == NULL) {
+            bench_fail(&state->failures, "select channel create failed");
+            if (primary != NULL) {
+                (void)llam_channel_destroy(primary);
+            }
+            if (secondary != NULL) {
+                (void)llam_channel_destroy(secondary);
+            }
+            return;
+        }
+        state->primary = primary;
+        state->secondary = secondary;
+
+        if (state->mode == BENCH_SELECT_PARK_WAKE) {
+            sender = llam_spawn(bench_select_sender_task, state, NULL);
+            if (sender == NULL) {
+                bench_fail(&state->failures, "select sender spawn failed");
+                (void)llam_channel_destroy(primary);
+                (void)llam_channel_destroy(secondary);
+                return;
+            }
+        }
+
+        start_ns = llam_now_ns();
+        for (i = 0; i < state->ops_per_round; ++i) {
+            if (state->mode == BENCH_SELECT_READY &&
+                llam_channel_send(primary, (void *)(uintptr_t)(i + 1U)) != 0) {
+                bench_fail(&state->failures, "select ready seed send failed");
+                goto done_round;
+            }
+            if (bench_select_recv_once(state,
+                                       state->mode == BENCH_SELECT_TIMEOUT ? llam_now_ns() : UINT64_MAX,
+                                       i) != 0) {
+                goto done_round;
+            }
+        }
+        state->samples_ns[round] = llam_now_ns() - start_ns;
+
+done_round:
+        if (atomic_load(&state->failures) != 0U) {
+            (void)llam_channel_close(primary);
+            (void)llam_channel_close(secondary);
+        }
+        if (sender != NULL && llam_join(sender) != 0) {
+            bench_fail(&state->failures, "select sender join failed");
+        }
+        state->primary = NULL;
+        state->secondary = NULL;
+        (void)llam_channel_destroy(primary);
+        (void)llam_channel_destroy(secondary);
+        if (atomic_load(&state->failures) != 0U) {
+            return;
+        }
     }
 }
 

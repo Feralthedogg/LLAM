@@ -29,6 +29,14 @@
 
 #include "runtime_internal.h"
 
+/** Timer heap fanout. A 4-ary heap reduces sift depth and improves cache locality. */
+#define LLAM_TIMER_HEAP_ARITY 4U
+
+/** @brief Return the parent index for a non-root heap entry. */
+static size_t llam_timer_heap_parent(size_t index) {
+    return (index - 1U) / LLAM_TIMER_HEAP_ARITY;
+}
+
 /**
  * @brief Compare two timer heap nodes.
  *
@@ -117,7 +125,7 @@ static bool llam_timer_heap_reserve(llam_shard_t *shard, size_t needed) {
  */
 static void llam_timer_heap_sift_up(llam_shard_t *shard, size_t index) {
     while (index > 0U) {
-        size_t parent = (index - 1U) / 2U;
+        size_t parent = llam_timer_heap_parent(index);
 
         if (!llam_timer_heap_less(shard->timer_heap[index], shard->timer_heap[parent])) {
             break;
@@ -135,15 +143,16 @@ static void llam_timer_heap_sift_up(llam_shard_t *shard, size_t index) {
  */
 static void llam_timer_heap_sift_down(llam_shard_t *shard, size_t index) {
     for (;;) {
-        size_t left = index * 2U + 1U;
-        size_t right = left + 1U;
+        size_t first_child = index * LLAM_TIMER_HEAP_ARITY + 1U;
         size_t best = index;
+        size_t child;
 
-        if (left < shard->timer_heap_len && llam_timer_heap_less(shard->timer_heap[left], shard->timer_heap[best])) {
-            best = left;
-        }
-        if (right < shard->timer_heap_len && llam_timer_heap_less(shard->timer_heap[right], shard->timer_heap[best])) {
-            best = right;
+        for (child = first_child;
+             child < shard->timer_heap_len && child < first_child + LLAM_TIMER_HEAP_ARITY;
+             ++child) {
+            if (llam_timer_heap_less(shard->timer_heap[child], shard->timer_heap[best])) {
+                best = child;
+            }
         }
         if (best == index) {
             break;
@@ -202,7 +211,7 @@ static llam_timer_node_t *llam_timer_heap_remove_at_locked(llam_shard_t *shard, 
         shard->timer_heap[index] = last;
         last->heap_index = index;
         if (index > 0U &&
-            llam_timer_heap_less(last, shard->timer_heap[(index - 1U) / 2U])) {
+            llam_timer_heap_less(last, shard->timer_heap[llam_timer_heap_parent(index)])) {
             llam_timer_heap_sift_up(shard, index);
         } else {
             llam_timer_heap_sift_down(shard, index);
@@ -359,6 +368,16 @@ void llam_cancel_task_wait(llam_task_t *task) {
     case LLAM_WAIT_COND:
     case LLAM_WAIT_CHANNEL_SEND:
     case LLAM_WAIT_CHANNEL_RECV:
+        if (task->active_select_state != NULL) {
+            if (llam_channel_select_abort_task_wait(task, ECANCELED, LLAM_WAIT_CANCEL)) {
+                llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+
+                pthread_mutex_lock(&shard->lock);
+                shard->metrics.cancel_wakes += 1U;
+                pthread_mutex_unlock(&shard->lock);
+            }
+            break;
+        }
         if (task->active_wait_queue != NULL && task->active_wait_queue_lock != NULL && task->active_wait_node != NULL) {
             llam_wait_node_t *node = task->active_wait_node;
 
@@ -454,6 +473,14 @@ void llam_timeout_task_wait(llam_task_t *task) {
     case LLAM_WAIT_COND:
     case LLAM_WAIT_CHANNEL_SEND:
     case LLAM_WAIT_CHANNEL_RECV:
+        if (task->active_select_state != NULL) {
+            if (llam_channel_select_abort_task_wait(task, ETIMEDOUT, LLAM_WAIT_TIMEOUT)) {
+                llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+
+                shard->metrics.timeout_wakes += 1U;
+            }
+            break;
+        }
         if (task->active_wait_queue != NULL && task->active_wait_queue_lock != NULL && task->active_wait_node != NULL) {
             llam_wait_node_t *node = task->active_wait_node;
             llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];

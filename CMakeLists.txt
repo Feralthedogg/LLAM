@@ -49,7 +49,9 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_llam_api.c
     src/core/runtime_channel_cache.c
     src/core/runtime_channel.c
+    src/core/runtime_channel_select.c
     src/core/runtime_cond.c
+    src/core/runtime_handle.c
     src/core/runtime_mutex.c
     src/core/runtime_names.c
     src/core/runtime_norm_queue.c
@@ -65,6 +67,8 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_sync.c
     src/core/runtime_spawn.c
     src/core/runtime_task_alloc.c
+    src/core/runtime_task_group.c
+    src/core/runtime_task_local.c
     src/core/runtime_task_stack.c
     src/core/runtime_timer.c
     src/core/runtime_time.c
@@ -123,6 +127,11 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     list(APPEND LLAM_RUNTIME_SOURCES
+        src/io/windows/runtime_io_watch_windows_state.c
+        src/io/windows/runtime_io_watch_windows_socket.c
+        src/io/windows/runtime_io_watch_windows_pool.c
+        src/io/windows/runtime_io_watch_windows_submit.c
+        src/io/windows/runtime_io_watch_windows_completion.c
         src/io/windows/runtime_io_watch_windows.c
     )
 endif()

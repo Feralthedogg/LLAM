@@ -126,6 +126,7 @@ void llam_task_allocator_free(llam_task_t *task) {
         return;
     }
 
+    llam_task_local_clear(task);
     owner = &rt->shards[task->alloc_owner_shard];
     task->alloc_next = NULL;
     if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {

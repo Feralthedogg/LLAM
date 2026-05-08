@@ -111,11 +111,12 @@ static void llam_channel_reset_for_reuse(llam_channel_t *channel) {
     if (channel == NULL) {
         return;
     }
-    if (channel->buffer != NULL && channel->capacity > 0U) {
+    if (channel->buffer != NULL && channel->ring_capacity > 0U) {
         // Keep the allocated buffer for reuse, but clear stale pointer payloads.
-        memset(channel->buffer, 0, channel->capacity * sizeof(*channel->buffer));
+        memset(channel->buffer, 0, channel->ring_capacity * sizeof(*channel->buffer));
     }
     channel->cache_next = NULL;
+    channel->mask = channel->ring_capacity > 0U ? channel->ring_capacity - 1U : 0U;
     channel->head = 0U;
     channel->tail = 0U;
     channel->count = 0U;

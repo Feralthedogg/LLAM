@@ -136,7 +136,7 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     pthread_mutex_lock(&shard->lock);
     atomic_store_explicit(&shard->current, NULL, memory_order_release);
     if (task != NULL) {
-        uint64_t slice_ns = llam_slice_ns(task->task_class);
+        uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&task->task_class, memory_order_acquire));
 
         task->last_run_ns = run_ns;
         task->total_run_ns += run_ns;

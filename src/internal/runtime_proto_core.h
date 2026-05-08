@@ -45,6 +45,7 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class);
 void llam_free_task(llam_task_t *task);
 void llam_task_release_stack(llam_task_t *task);
 void llam_task_mark_reclaim_ready(llam_task_t *task);
+void llam_task_local_clear(llam_task_t *task);
 void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task);
 void llam_try_reclaim_detached_task(llam_runtime_t *rt, llam_task_t *task);
 void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task);

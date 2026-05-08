@@ -24,6 +24,7 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 - Windows 10/11 backend with IOCP request completions, Windows wake handles, and x86_64 context-switch assembly.
 - Task primitives: `spawn`, `yield`, `join`, `sleep`, deadlines, and task metadata.
 - Synchronization primitives: mutex, condition variable, channel, and cancellation token.
+- Channel multiplexing with `llam_channel_select()` and focused select benchmarks.
 - Blocking integration through `llam_call_blocking`, `llam_enter_blocking`, and `llam_leave_blocking`.
 - Runtime tuning through profiles, dynamic workers, worker rings, SQPOLL, and idle-spin controls.
 - Observability through runtime stats and debug dumps.
@@ -149,7 +150,7 @@ Build outputs:
 
 - `demo`: runnable examples of the public runtime API.
 - `stress`: regression coverage for scheduling, sync, timeouts, I/O, and dynamic workers.
-- `bench`: microbenchmarks for spawn/join, channels, I/O, poll, sleep fanout, and opaque blocking.
+- `bench`: microbenchmarks for spawn/join, channels, channel select, I/O, poll, sleep fanout, and opaque blocking.
 - `server`: minimal LLAM-backed TCP chat backend for local testing.
 - `server_flood`: native nonblocking throughput flood driver for the chat server.
 - `scripts/stress_server.py`: TCP fanout stress test for the chat server.
@@ -216,6 +217,7 @@ Include the canonical public API:
 `include/llam/nm_runtime.h` and `include/nm_runtime.h` provide compatibility for the older `nm_*` API names. New code should prefer the `llam_*` API.
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer `llam_runtime_init_ex()` and `llam_spawn_ex()` so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
+Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.0 as one active runtime per process.
 macOS-specific performance gates and remaining structural work are tracked in `docs/macos-performance.md`.
 Windows backend scope and acceptance gates are tracked in `docs/windows-roadmap.md`.
 

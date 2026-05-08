@@ -109,6 +109,7 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
+    (void)rt;
     if (value < 0) {
         const char *env = llam_env_get("LLAM_YIELD_DIRECT_HANDOFF");
 
@@ -556,6 +557,7 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
             errno = atomic_load(&rt->fatal_errno);
             return -1;
         }
+        llam_try_reclaim_joined_task(rt, task);
         errno = caller_errno;
         return 0;
     }

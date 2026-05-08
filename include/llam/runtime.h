@@ -116,6 +116,18 @@ typedef struct llam_cancel_token llam_cancel_token_t;
 /** @brief Opaque handle for a runtime-owned I/O buffer. */
 typedef struct llam_io_buffer llam_io_buffer_t;
 
+/** @brief Opaque handle for an explicit runtime instance. */
+typedef struct llam_runtime llam_runtime_t;
+
+/** @brief Opaque handle for structured task groups. */
+typedef struct llam_task_group llam_task_group_t;
+
+/** @brief Task-local storage key. */
+typedef uint32_t llam_task_local_key_t;
+
+/** @brief Invalid task-local storage key value. */
+#define LLAM_TASK_LOCAL_INVALID_KEY UINT32_MAX
+
 /**
  * @brief Task entry point executed on a LLAM-managed stackful user thread.
  * @param arg User pointer passed to llam_spawn().
@@ -387,6 +399,48 @@ int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size
 int llam_runtime_collect_stats(llam_runtime_stats_t *stats);
 
 /**
+ * @brief Return the process-global runtime handle.
+ *
+ * @details
+ * LLAM 1.x still uses one runtime singleton internally. The handle API exists
+ * so embedders can move to explicit handles without changing call sites later.
+ *
+ * @return The default runtime handle.
+ */
+llam_runtime_t *llam_runtime_default(void);
+
+/**
+ * @brief Create an explicit runtime handle.
+ *
+ * @details
+ * Current LLAM builds support only one live runtime per process. This function
+ * initializes the singleton and returns its handle. A second live runtime fails
+ * with @c EBUSY. Future ABI-compatible versions may allocate independent
+ * runtime objects behind this handle.
+ *
+ * @param opts Optional runtime options; pass NULL for defaults.
+ * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
+ * @param out Destination runtime handle. Must not be NULL.
+ * @return 0 on success, -1 with @c errno set.
+ */
+int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_runtime_t **out);
+
+/**
+ * @brief Run a runtime handle.
+ *
+ * @details Current builds accept only ::llam_runtime_default().
+ */
+int llam_runtime_run_handle(llam_runtime_t *runtime);
+
+/**
+ * @brief Destroy a runtime handle.
+ *
+ * @details Current builds accept only ::llam_runtime_default() and delegate to
+ * ::llam_runtime_shutdown.
+ */
+void llam_runtime_destroy(llam_runtime_t *runtime);
+
+/**
  * @brief Write runtime counters as one JSON object to an fd.
  *
  * @details
@@ -495,6 +549,59 @@ int llam_join_until(llam_task_t *task, uint64_t deadline_ns);
 int llam_detach(llam_task_t *task);
 
 /**
+ * @brief Create a structured task group.
+ *
+ * @details
+ * A group owns the task handles spawned through it. Use
+ * ::llam_task_group_join to consume all child handles, or
+ * ::llam_task_group_cancel to request cooperative cancellation first.
+ */
+llam_task_group_t *llam_task_group_create(void);
+
+/**
+ * @brief Destroy an empty task group.
+ *
+ * @return 0 on success, or -1 with @c errno set to @c EBUSY if unjoined tasks
+ * remain.
+ */
+int llam_task_group_destroy(llam_task_group_t *group);
+
+/**
+ * @brief Spawn a task owned by a group with explicit option size.
+ *
+ * @details
+ * If @p opts does not provide a cancellation token, the group cancellation token
+ * is attached automatically. The returned task pointer is borrowed for
+ * diagnostics; callers must not join or detach it outside the group.
+ */
+llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
+                                      llam_task_fn fn,
+                                      void *arg,
+                                      const llam_spawn_opts_t *opts,
+                                      size_t opts_size);
+
+/**
+ * @brief Spawn a task owned by a group.
+ */
+llam_task_t *llam_task_group_spawn(llam_task_group_t *group,
+                                   llam_task_fn fn,
+                                   void *arg,
+                                   const llam_spawn_opts_t *opts);
+
+/**
+ * @brief Request cooperative cancellation for all group children.
+ */
+int llam_task_group_cancel(llam_task_group_t *group);
+
+/**
+ * @brief Join all tasks owned by a group.
+ *
+ * @details Successful joins consume the child task handles. If an error occurs,
+ * the failed and remaining handles stay owned by the group.
+ */
+int llam_task_group_join(llam_task_group_t *group);
+
+/**
  * @brief Sleep the current task until an absolute deadline.
  *
  * @details
@@ -587,6 +694,35 @@ void llam_dump_runtime_state(int fd);
  */
 uint32_t llam_task_flags(const llam_task_t *task);
 
+/**
+ * @brief Allocate a task-local storage key.
+ */
+int llam_task_local_key_create(llam_task_local_key_t *out_key);
+
+/**
+ * @brief Delete a task-local storage key.
+ *
+ * @details Existing per-task values for the key are discarded when each task
+ * exits or sets the key to NULL.
+ */
+int llam_task_local_key_delete(llam_task_local_key_t key);
+
+/**
+ * @brief Return the current task's value for a task-local key.
+ *
+ * @details Must be called from a managed LLAM task; outside task context sets
+ * @c errno to @c ENOTSUP and returns NULL.
+ */
+void *llam_task_local_get(llam_task_local_key_t key);
+
+/**
+ * @brief Set the current task's value for a task-local key.
+ *
+ * @details Passing NULL clears the key for the current task. Must be called
+ * from a managed LLAM task.
+ */
+int llam_task_local_set(llam_task_local_key_t key, void *value);
+
 /* ============================================================================
  * Cancellation tokens
  * ============================================================================
@@ -632,7 +768,9 @@ int llam_mutex_destroy(llam_mutex_t *mutex);
  *
  * @details Must be called from a managed LLAM task; outside task context fails
  * with @c ENOTSUP. LLAM mutexes are non-recursive; locking a mutex already
- * owned by the current task fails with @c EDEADLK.
+ * owned by the current task fails with @c EDEADLK. Contended locks apply a
+ * bounded priority-donation hint from latency-class waiters to the owner until
+ * unlock.
  */
 int llam_mutex_lock(llam_mutex_t *mutex);
 
@@ -643,6 +781,8 @@ int llam_mutex_lock(llam_mutex_t *mutex);
  * with @c ENOTSUP. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
  * is treated as an already-expired deadline. LLAM mutexes are non-recursive;
  * locking a mutex already owned by the current task fails with @c EDEADLK.
+ * Contended locks apply the same bounded priority-donation hint as
+ * ::llam_mutex_lock.
  */
 int llam_mutex_lock_until(llam_mutex_t *mutex, uint64_t deadline_ns);
 
@@ -818,6 +958,45 @@ void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns);
  * valid payload; use result-style receive APIs to distinguish it from failure.
  */
 int llam_channel_close(llam_channel_t *channel);
+
+/** @brief Channel select operation kind. */
+typedef enum llam_select_op_kind {
+    LLAM_SELECT_OP_RECV = 1, /**< Try to receive from channel. */
+    LLAM_SELECT_OP_SEND = 2, /**< Try to send to channel. */
+} llam_select_op_kind_t;
+
+/**
+ * @brief One channel operation passed to ::llam_channel_select.
+ */
+typedef struct llam_select_op {
+    uint32_t kind;                /**< One of ::llam_select_op_kind_t. */
+    uint32_t reserved0;           /**< Reserved; initialize to 0. */
+    llam_channel_t *channel;      /**< Channel to operate on. */
+    void *send_value;             /**< Payload for send operations. */
+    void **recv_out;              /**< Output pointer for receive operations. */
+    int result_errno;             /**< Per-operation terminal errno, or 0. */
+} llam_select_op_t;
+
+/**
+ * @brief Select one ready channel send/receive operation.
+ *
+ * @details
+ * The current managed task is parked on all requested channel queues when no
+ * operation is immediately ready. The first channel operation to complete wins;
+ * the selected operation index is returned and remaining queued wait nodes are
+ * removed before this call returns. @p deadline_ns is an absolute ::llam_now_ns
+ * deadline; @c 0 performs a single non-blocking scan.
+ *
+ * @param ops Operation array.
+ * @param op_count Number of operations.
+ * @param deadline_ns Absolute deadline, or UINT64_MAX for no deadline.
+ * @param selected_index Receives selected operation index. Must not be NULL.
+ * @return 0 when an operation is selected, -1 on timeout/failure with errno set.
+ */
+int llam_channel_select(llam_select_op_t *ops,
+                        size_t op_count,
+                        uint64_t deadline_ns,
+                        size_t *selected_index);
 
 /* ============================================================================
  * Runtime I/O and owned buffers

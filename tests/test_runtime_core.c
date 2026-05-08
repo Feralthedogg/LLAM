@@ -254,7 +254,11 @@ static void aarch64_simd_preservation_task(void *arg) {
 
 static int test_preinit_contracts(void) {
     llam_runtime_stats_t stats;
+    llam_task_local_key_t key = LLAM_TASK_LOCAL_INVALID_KEY;
 
+    if (llam_runtime_default() == NULL) {
+        return test_fail("llam_runtime_default returned NULL");
+    }
     if (llam_current_task() != NULL) {
         return test_fail("llam_current_task outside runtime was not NULL");
     }
@@ -278,6 +282,26 @@ static int test_preinit_contracts(void) {
     errno = 0;
     if (llam_task_set_class(LLAM_TASK_CLASS_DEFAULT) != -1 || errno != ENOTSUP) {
         return test_fail("llam_task_set_class outside task did not fail with ENOTSUP");
+    }
+    if (llam_task_local_key_create(&key) != 0) {
+        return test_fail_errno("llam_task_local_key_create outside runtime failed");
+    }
+    errno = 0;
+    if (llam_task_local_get(key) != NULL || errno != ENOTSUP) {
+        (void)llam_task_local_key_delete(key);
+        return test_fail("llam_task_local_get outside task did not fail with ENOTSUP");
+    }
+    errno = 0;
+    if (llam_task_local_set(key, &stats) != -1 || errno != ENOTSUP) {
+        (void)llam_task_local_key_delete(key);
+        return test_fail("llam_task_local_set outside task did not fail with ENOTSUP");
+    }
+    if (llam_task_local_key_delete(key) != 0) {
+        return test_fail_errno("llam_task_local_key_delete failed");
+    }
+    errno = 0;
+    if (llam_task_local_key_delete(key) != -1 || errno != EINVAL) {
+        return test_fail("llam_task_local_key_delete inactive key did not fail with EINVAL");
     }
 
     errno = 0;
@@ -333,6 +357,57 @@ static int test_preinit_contracts(void) {
     if (llam_sleep_ns(0U) != -1 || errno != EINVAL) {
         return test_fail("llam_sleep_ns before init did not fail with EINVAL");
     }
+    return 0;
+}
+
+static int test_runtime_handle_api(void) {
+    core_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *second_runtime = NULL;
+    llam_task_t *task;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &runtime) != 0) {
+        return test_fail_errno("llam_runtime_create failed");
+    }
+    if (runtime == NULL || runtime != llam_runtime_default()) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_create returned unexpected handle");
+    }
+    errno = 0;
+    if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &second_runtime) != -1 ||
+        errno != EBUSY ||
+        second_runtime != NULL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("second llam_runtime_create did not fail with EBUSY");
+    }
+    task = llam_spawn(detached_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("llam_spawn for runtime handle failed");
+    }
+    if (llam_runtime_run_handle(runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("llam_runtime_run_handle failed");
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        llam_runtime_destroy(runtime);
+        return test_fail("runtime handle task did not run");
+    }
+    if (llam_join(task) != 0) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("llam_join for runtime handle task failed");
+    }
+    llam_runtime_destroy(runtime);
     return 0;
 }
 
@@ -787,6 +862,7 @@ static int test_concurrent_join_contract(void) {
 
 int main(void) {
     if (test_preinit_contracts() != 0 ||
+        test_runtime_handle_api() != 0 ||
         test_runtime_lifecycle_and_task_contracts() != 0 ||
         test_request_stop_returns_success() != 0 ||
         test_detach_contract() != 0 ||

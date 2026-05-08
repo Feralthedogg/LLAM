@@ -53,7 +53,9 @@ const char *llam_task_state_name(const llam_task_t *task) {
  * @return Task class, or default class for NULL.
  */
 uint32_t llam_task_class(const llam_task_t *task) {
-    return task != NULL ? (uint32_t)task->task_class : (uint32_t)LLAM_TASK_CLASS_DEFAULT;
+    return task != NULL
+               ? atomic_load_explicit(&((llam_task_t *)task)->task_class, memory_order_acquire)
+               : (uint32_t)LLAM_TASK_CLASS_DEFAULT;
 }
 
 /**
@@ -506,7 +508,7 @@ void llam_dump_runtime_state(int fd) {
                     "  id=%llu state=%s class=%d flags=0x%x home=%u last=%u wait=%s stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
                     (unsigned long long)task->id,
                     llam_state_name_from_id(task->state),
-                    (int)task->task_class,
+                    (int)atomic_load_explicit(&task->task_class, memory_order_acquire),
                     task->flags,
                     task->home_shard,
                     task->last_shard,

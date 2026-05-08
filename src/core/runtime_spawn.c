@@ -252,7 +252,8 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     if ((task->flags & LLAM_TASK_FLAG_LATENCY_CRITICAL) != 0U) {
         task_class = LLAM_TASK_CLASS_LATENCY;
     }
-    task->task_class = task_class;
+    atomic_init(&task->task_class, (unsigned)task_class);
+    atomic_init(&task->base_task_class, (unsigned)task_class);
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
     if (task->cancel_token != NULL) {

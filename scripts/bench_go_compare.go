@@ -183,6 +183,80 @@ func runChannelPingPong(rounds, messagesPerRound uint) report {
 	return report{name: "channel_pingpong", rounds: rounds, opsPerRound: messagesPerRound, samples: samples}
 }
 
+func runSelectRecvReady(rounds, opsPerRound uint) report {
+	samples := make([]time.Duration, rounds)
+	for round := uint(0); round < rounds; round++ {
+		primary := make(chan uintptr, 1)
+		secondary := make(chan uintptr, 1)
+		start := time.Now()
+		for i := uint(0); i < opsPerRound; i++ {
+			token := uintptr(i + 1)
+			primary <- token
+			select {
+			case value := <-primary:
+				if value != token {
+					panic("select ready mismatch")
+				}
+			case <-secondary:
+				panic("select ready wrong channel")
+			}
+		}
+		samples[round] = time.Since(start)
+	}
+	return report{name: "select_recv_ready", rounds: rounds, opsPerRound: opsPerRound, samples: samples}
+}
+
+func runSelectParkWake(rounds, opsPerRound uint) report {
+	samples := make([]time.Duration, rounds)
+	for round := uint(0); round < rounds; round++ {
+		primary := make(chan uintptr, 1)
+		secondary := make(chan uintptr, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := uint(0); i < opsPerRound; i++ {
+				runtime.Gosched()
+				primary <- uintptr(i + 1)
+			}
+		}()
+		start := time.Now()
+		for i := uint(0); i < opsPerRound; i++ {
+			token := uintptr(i + 1)
+			select {
+			case value := <-primary:
+				if value != token {
+					panic("select park-wake mismatch")
+				}
+			case <-secondary:
+				panic("select park-wake wrong channel")
+			}
+		}
+		<-done
+		samples[round] = time.Since(start)
+	}
+	return report{name: "select_park_wake", rounds: rounds, opsPerRound: opsPerRound, samples: samples}
+}
+
+func runSelectTimeout(rounds, opsPerRound uint) report {
+	samples := make([]time.Duration, rounds)
+	for round := uint(0); round < rounds; round++ {
+		primary := make(chan uintptr, 1)
+		secondary := make(chan uintptr, 1)
+		start := time.Now()
+		for i := uint(0); i < opsPerRound; i++ {
+			select {
+			case <-primary:
+				panic("select timeout primary ready")
+			case <-secondary:
+				panic("select timeout secondary ready")
+			default:
+			}
+		}
+		samples[round] = time.Since(start)
+	}
+	return report{name: "select_timeout", rounds: rounds, opsPerRound: opsPerRound, samples: samples}
+}
+
 func runIoEcho(rounds, messagesPerRound uint) report {
 	samples := make([]time.Duration, rounds)
 	for round := uint(0); round < rounds; round++ {
@@ -237,48 +311,48 @@ func fdSet(fd int, set *rawFdSet) {
 }
 
 func rawSelect(n int, rfds *rawFdSet, timeout *syscall.Timeval) error {
-    var rfdsPtr uintptr
-    var timeoutPtr uintptr
-    syscallNumber := uintptr(0)
+	var rfdsPtr uintptr
+	var timeoutPtr uintptr
+	syscallNumber := uintptr(0)
 
-    if rfds != nil {
-        rfdsPtr = uintptr(unsafe.Pointer(rfds))
-    }
-    if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
-        var ts syscall.Timespec
+	if rfds != nil {
+		rfdsPtr = uintptr(unsafe.Pointer(rfds))
+	}
+	if runtime.GOOS == "linux" && runtime.GOARCH == "arm64" {
+		var ts syscall.Timespec
 
-        if timeout != nil {
-            ts.Sec = timeout.Sec
-            ts.Nsec = int64(timeout.Usec) * 1000
-            timeoutPtr = uintptr(unsafe.Pointer(&ts))
-        }
-        _, _, errno := syscall.Syscall6(72, uintptr(n), rfdsPtr, 0, 0, timeoutPtr, 0)
-        if errno != 0 {
-            return errno
-        }
-        return nil
-    }
+		if timeout != nil {
+			ts.Sec = timeout.Sec
+			ts.Nsec = int64(timeout.Usec) * 1000
+			timeoutPtr = uintptr(unsafe.Pointer(&ts))
+		}
+		_, _, errno := syscall.Syscall6(72, uintptr(n), rfdsPtr, 0, 0, timeoutPtr, 0)
+		if errno != 0 {
+			return errno
+		}
+		return nil
+	}
 
-    switch runtime.GOOS {
-    case "darwin":
-        syscallNumber = 93
-    case "linux":
-        if runtime.GOARCH == "amd64" {
-            syscallNumber = 23
-        } else if runtime.GOARCH == "386" || runtime.GOARCH == "arm" {
-            syscallNumber = 82
-        }
-    }
-    if syscallNumber == 0 {
-        return syscall.ENOSYS
-    }
-    if timeout != nil {
-        timeoutPtr = uintptr(unsafe.Pointer(timeout))
-    }
-    _, _, errno := syscall.Syscall6(syscallNumber, uintptr(n), rfdsPtr, 0, 0, timeoutPtr, 0)
-    if errno != 0 {
-        return errno
-    }
+	switch runtime.GOOS {
+	case "darwin":
+		syscallNumber = 93
+	case "linux":
+		if runtime.GOARCH == "amd64" {
+			syscallNumber = 23
+		} else if runtime.GOARCH == "386" || runtime.GOARCH == "arm" {
+			syscallNumber = 82
+		}
+	}
+	if syscallNumber == 0 {
+		return syscall.ENOSYS
+	}
+	if timeout != nil {
+		timeoutPtr = uintptr(unsafe.Pointer(timeout))
+	}
+	_, _, errno := syscall.Syscall6(syscallNumber, uintptr(n), rfdsPtr, 0, 0, timeoutPtr, 0)
+	if errno != 0 {
+		return errno
+	}
 	return nil
 }
 
@@ -391,6 +465,7 @@ func main() {
 	totalRounds := rounds + warmupRounds
 	spawnTasks := envU32("LLAM_BENCH_SPAWN_TASKS", 128, 4096)
 	channelMessages := envU32("LLAM_BENCH_CHANNEL_MESSAGES", 1024, 16384)
+	selectOps := envU32("LLAM_BENCH_SELECT_OPS", 512, 16384)
 	ioMessages := envU32("LLAM_BENCH_IO_MESSAGES", 256, 8192)
 	pollEvents := envU32("LLAM_BENCH_POLL_EVENTS", 256, 8192)
 	sleepTasks := envU32("LLAM_BENCH_SLEEP_TASKS", maxU32(spawnTasks, 512), 8192)
@@ -400,12 +475,13 @@ func main() {
 	goMaxProcs := envI32("GO_BENCH_GOMAXPROCS", runtime.NumCPU(), 1, 4096)
 
 	runtime.GOMAXPROCS(goMaxProcs)
-	fmt.Printf("[go-bench] config rounds=%d warmup=%d gomaxprocs=%d spawn_tasks=%d channel_messages=%d io_messages=%d poll_events=%d sleep_tasks=%d sleep_yields=%d sleep_us=%d opaque_scopes=%d\n",
+	fmt.Printf("[go-bench] config rounds=%d warmup=%d gomaxprocs=%d spawn_tasks=%d channel_messages=%d select_ops=%d io_messages=%d poll_events=%d sleep_tasks=%d sleep_yields=%d sleep_us=%d opaque_scopes=%d\n",
 		rounds,
 		warmupRounds,
 		goMaxProcs,
 		spawnTasks,
 		channelMessages,
+		selectOps,
 		ioMessages,
 		pollEvents,
 		sleepTasks,
@@ -420,6 +496,18 @@ func main() {
 	}
 	if benchCaseSelected("channel_pingpong") {
 		printReport(runChannelPingPong(totalRounds, channelMessages), warmupRounds)
+		runtime.GC()
+	}
+	if benchCaseSelected("select_recv_ready") {
+		printReport(runSelectRecvReady(totalRounds, selectOps), warmupRounds)
+		runtime.GC()
+	}
+	if benchCaseSelected("select_park_wake") {
+		printReport(runSelectParkWake(totalRounds, selectOps), warmupRounds)
+		runtime.GC()
+	}
+	if benchCaseSelected("select_timeout") {
+		printReport(runSelectTimeout(totalRounds, selectOps), warmupRounds)
 		runtime.GC()
 	}
 	if benchCaseSelected("io_echo") {

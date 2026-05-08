@@ -27,6 +27,32 @@
 #include "runtime_internal.h"
 
 /**
+ * @brief Donate waiter priority to a current mutex owner.
+ *
+ * This is a bounded, non-transitive priority-inheritance hint: latency-class
+ * waiters can temporarily raise the owner class until unlock restores the
+ * owner's base class.
+ */
+static void llam_mutex_donate_priority(uintptr_t owner_value, const llam_task_t *waiter) {
+    llam_task_t *owner = (llam_task_t *)owner_value;
+    unsigned waiter_class;
+    unsigned owner_class;
+
+    if (owner == NULL || waiter == NULL || owner == waiter) {
+        return;
+    }
+    waiter_class = atomic_load_explicit(&((llam_task_t *)waiter)->task_class, memory_order_acquire);
+    owner_class = atomic_load_explicit(&owner->task_class, memory_order_acquire);
+    while (waiter_class < owner_class &&
+           !atomic_compare_exchange_weak_explicit(&owner->task_class,
+                                                  &owner_class,
+                                                  waiter_class,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+    }
+}
+
+/**
  * @brief Allocate a runtime-aware mutex.
  *
  * @return New mutex on success, or @c NULL with @c errno set on failure.
@@ -168,6 +194,7 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
         llam_sync_wait_node_release(shard, node);
         return 0;
     }
+    llam_mutex_donate_priority(expected, task);
     llam_wait_queue_push_tail(&mutex->waiters, node);
     pthread_mutex_unlock(&mutex->lock);
     llam_task_ensure_listed(task);
@@ -272,6 +299,9 @@ int llam_mutex_unlock(llam_mutex_t *mutex) {
         atomic_store(&mutex->owner, (uintptr_t)0);
     }
     pthread_mutex_unlock(&mutex->lock);
+    atomic_store_explicit(&g_llam_tls_task->task_class,
+                          atomic_load_explicit(&g_llam_tls_task->base_task_class, memory_order_acquire),
+                          memory_order_release);
 
     if (node != NULL) {
         node->error_code = 0;

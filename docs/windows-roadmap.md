@@ -21,6 +21,7 @@ path.
 | IOCP tuning policy | Present. Both generations use IOCP, but `win10-conservative` and `win11-batched` are separate code paths with different batch, prepost, timeout, timer, and skip-completion defaults. |
 | Native scheduler backend | Present for Windows x86_64 through GNU as and MASM context-switch assembly, Windows event wake handles, `VirtualAlloc` stack mappings, and runtime lifecycle smoke coverage. |
 | Native I/O backend | Present for one-shot socket requests: WSARecv/WSASend, AcceptEx, ConnectEx, TCP `POLLOUT`, and UDP `POLLIN` readiness are bound to IOCP completions. TCP `POLLIN`, AF_UNIX, and unsupported poll masks remain fallback. |
+| IOCP source layout | In progress. State/control queue helpers, socket association/extension loading, accept/op pools, submit path, and completion path are split out of the original monolithic backend. Worker/control fallback stubs remain in `runtime_io_watch_windows.c`. |
 | Native package artifacts | Not published until Windows 10 and Windows 11 CI pass the full acceptance gate. |
 | Verification today | CMake can build static/shared runtime libraries and Windows-native policy/scheduler smoke tests. WSL verification remains available for the Linux backend. |
 
@@ -54,6 +55,23 @@ stable policy object without re-checking the OS version:
 
 The policy code lives in `src/internal/runtime_windows.h` and
 `src/core/runtime_windows.c`. It is covered by `test_windows_policy`.
+
+## IOCP Source Layout
+
+The native backend is intentionally being decomposed by runtime responsibility:
+
+| File | Responsibility |
+| --- | --- |
+| `src/io/windows/runtime_io_watch_windows_state.c` | IOCP queue/control/inflight owner state helpers. |
+| `src/io/windows/runtime_io_watch_windows_socket.c` | FD association, `AcceptEx`/`ConnectEx` loading, socket type/family inspection, and poll-support gating. |
+| `src/io/windows/runtime_io_watch_windows_pool.c` | Accept socket prepost cache and overlapped operation object cache. |
+| `src/io/windows/runtime_io_watch_windows_submit.c` | WSARecv/WSASend/AcceptEx/ConnectEx/poll request submission. |
+| `src/io/windows/runtime_io_watch_windows_completion.c` | IOCP completion drain, accept/connect finalization, request result publication, and task wakeup. |
+| `src/io/windows/runtime_io_watch_windows.c` | Worker loop, cancel control packets, cleanup, and unsupported watch fallback stubs. |
+
+The remaining decomposition target is to move cancel/control packet handling and
+fallback watch stubs into their own files once Windows 10/11 native CI has
+covered the current split.
 
 ## Planned Architecture
 
@@ -91,6 +109,8 @@ Windows 10 and Windows 11:
 - Run native Windows CMake tests: ABI, runtime core, sync primitives, Windows
   policy, Windows runtime smoke, and Windows IOCP socket round-trip.
 - Run `demo`, `stress`, and `bench` smoke tests.
+- Run the select benchmark smoke cases `select_recv_ready`, `select_park_wake`,
+  and `select_timeout` alongside the scheduler and I/O cases.
 - Verify `llam_connect`, `llam_accept`, `llam_read`, `llam_write`, TCP
   `llam_poll_fd(POLLOUT)`, and UDP `llam_poll_fd(POLLIN)` on native IOCP
   sockets; verify TCP `llam_poll_fd(POLLIN)`, AF_UNIX poll fallback,

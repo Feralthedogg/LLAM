@@ -16,7 +16,17 @@ except ModuleNotFoundError:
 
 
 FIELD_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
-DEFAULT_CASES = ["spawn_join", "channel_pingpong", "io_echo", "poll_wake", "sleep_fanout", "opaque_block"]
+DEFAULT_CASES = [
+    "spawn_join",
+    "channel_pingpong",
+    "select_recv_ready",
+    "select_park_wake",
+    "select_timeout",
+    "io_echo",
+    "poll_wake",
+    "sleep_fanout",
+    "opaque_block",
+]
 NAME_ALIASES = {
     "poll_wake_approx": "poll_wake",
     "opaque_syscall_sleep_approx": "opaque_block",
@@ -84,6 +94,38 @@ def run_command(root: pathlib.Path, runtime: str, command: list[str], env: dict[
         sys.stderr.write(proc.stderr)
         raise SystemExit(proc.returncode)
     return parse_output(runtime, proc.stdout)
+
+
+def llam_bench_command(root: pathlib.Path, no_build: bool) -> list[str]:
+    if os.name == "nt":
+        build_dir = root / "build" / "bench-runtime-compare"
+        if not no_build:
+            subprocess.run(
+                [
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    str(build_dir),
+                    "-G",
+                    "Visual Studio 17 2022",
+                    "-A",
+                    "x64",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                ],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["cmake", "--build", str(build_dir), "--config", "Release", "--target", "bench"],
+                cwd=root,
+                check=True,
+            )
+        return [str(build_dir / "Release" / "bench.exe")]
+
+    if not no_build:
+        subprocess.run(["make", "-j4"], cwd=root, check=True)
+    return ["./bench"]
 
 
 def write_csv(path: pathlib.Path, rows: list[BenchRow]) -> None:
@@ -197,6 +239,7 @@ def main() -> int:
             "LLAM_BENCH_WARMUP_ROUNDS": str(args.warmup),
             "LLAM_BENCH_SPAWN_TASKS": "512",
             "LLAM_BENCH_CHANNEL_MESSAGES": "4096",
+            "LLAM_BENCH_SELECT_OPS": "4096",
             "LLAM_BENCH_IO_MESSAGES": "512",
             "LLAM_BENCH_POLL_EVENTS": "512",
             "LLAM_BENCH_SLEEP_TASKS": "1024",
@@ -204,19 +247,20 @@ def main() -> int:
         }
     )
 
-    if not args.no_build:
-        if "LLAM" in selected_runtimes:
-            subprocess.run(["make", "-j4"], cwd=root, check=True)
-        if "Tokio" in selected_runtimes:
-            subprocess.run(
-                ["cargo", "build", "--release", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
-                cwd=root,
-                check=True,
-            )
+    llam_command: list[str] | None = None
+    if "LLAM" in selected_runtimes:
+        llam_command = llam_bench_command(root, args.no_build)
+    if not args.no_build and "Tokio" in selected_runtimes:
+        subprocess.run(
+            ["cargo", "build", "--release", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
+            cwd=root,
+            check=True,
+        )
 
     rows: list[BenchRow] = []
     if "LLAM" in selected_runtimes:
-        rows.extend(run_command(root, "LLAM", ["./bench"], env, args.timeout))
+        assert llam_command is not None
+        rows.extend(run_command(root, "LLAM", llam_command, env, args.timeout))
     if "Goroutine" in selected_runtimes:
         go_script = "scripts/bench_go_windows_compare.go" if os.name == "nt" else "scripts/bench_go_compare.go"
         rows.extend(run_command(root, "Goroutine", ["go", "run", go_script], env, args.timeout))

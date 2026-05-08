@@ -62,7 +62,7 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
     current = atomic_load_explicit(&shard->current, memory_order_acquire);
     if (current != NULL) {
         uint64_t last_safepoint = atomic_load_explicit(&shard->last_safepoint_ns, memory_order_relaxed);
-        uint64_t slice_ns = llam_slice_ns(current->task_class);
+        uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&current->task_class, memory_order_acquire));
 
         if (current->opaque_blocking_depth > 0U || current->state == LLAM_TASK_STATE_BLOCKED_OPAQUE) {
             pthread_mutex_unlock(&shard->lock);

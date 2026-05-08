@@ -133,6 +133,8 @@ typedef struct llam_cpu_set {
 #define LLAM_TASK_SLAB_COUNT 16U
 /** Number of wait nodes allocated per wait-node slab. */
 #define LLAM_WAIT_NODE_SLAB_COUNT 64U
+/** Number of multi-channel select wait nodes embedded in each task. */
+#define LLAM_TASK_EMBEDDED_SELECT_NODES 4U
 /** Number of timer nodes allocated per timer-node slab. */
 #define LLAM_TIMER_NODE_SLAB_COUNT 64U
 /** Number of I/O requests allocated per request slab. */
@@ -176,6 +178,10 @@ typedef struct llam_shard llam_shard_t;
 typedef struct llam_node llam_node_t;
 /** @brief Metadata entry describing a cached stack mapping. */
 typedef struct llam_stack_cache_entry llam_stack_cache_entry_t;
+/** @brief Per-task task-local storage entry. */
+typedef struct llam_task_local_entry llam_task_local_entry_t;
+/** @brief Active multi-channel select wait owned by a parked task. */
+typedef struct llam_channel_select_state llam_channel_select_state_t;
 
 /** @brief Simple FIFO task queue used for hot, inject, overflow, and blocking queues. */
 typedef struct llam_queue {
@@ -402,7 +408,9 @@ typedef struct llam_wait_node {
     struct llam_wait_node *next;
     struct llam_wait_node *alloc_next;
     void *value;
+    llam_channel_select_state_t *select_state;
     int error_code;
+    uint32_t select_kind;
     intptr_t scalar_value;
     unsigned owner_shard;
 } llam_wait_node_t;
@@ -413,6 +421,20 @@ typedef struct llam_wait_queue {
     llam_wait_node_t *tail;
     unsigned depth;
 } llam_wait_queue_t;
+
+/** @brief Parked state for a task waiting on multiple channel operations. */
+struct llam_channel_select_state {
+    llam_select_op_t *ops;
+    llam_wait_node_t **nodes;
+    llam_channel_t **channels;
+    size_t op_count;
+    size_t channel_count;
+    size_t selected_index;
+    void *selected_value;
+    int error_code;
+    atomic_uint completed;
+    atomic_uint wake_armed;
+};
 
 /** @brief Control messages processed by an I/O node thread. */
 typedef enum llam_io_control_kind {
@@ -615,6 +637,8 @@ struct llam_channel {
     void **buffer;
     struct llam_channel *cache_next;
     size_t capacity;
+    size_t ring_capacity;
+    size_t mask;
     size_t head;
     size_t tail;
     size_t count;
@@ -637,7 +661,8 @@ struct llam_task {
     unsigned live_shard;
     unsigned last_shard;
     unsigned parked_shard;
-    llam_task_class_t task_class;
+    atomic_uint task_class;
+    atomic_uint base_task_class;
     uint64_t deadline_ns;
     llam_cancel_token_t *cancel_token;
     llam_task_fn entry;
@@ -664,12 +689,15 @@ struct llam_task {
     llam_task_t *cancel_next;
     llam_task_t *cancel_prev;
     llam_wait_node_t embedded_wait_node;
+    llam_wait_node_t embedded_select_nodes[LLAM_TASK_EMBEDDED_SELECT_NODES];
     llam_wait_node_t *active_wait_node;
     llam_wait_queue_t *active_wait_queue;
     pthread_mutex_t *active_wait_queue_lock;
+    llam_channel_select_state_t *active_select_state;
     llam_io_req_t embedded_io_req;
     llam_io_req_t *active_io_req;
     llam_block_job_t *active_block_job;
+    llam_task_local_entry_t *task_locals;
     bool cancel_registered;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
@@ -701,6 +729,23 @@ struct llam_task {
     atomic_uint detached;
     unsigned join_waiter_count_at_exit;
     unsigned forced_yield_budget;
+};
+
+/** @brief Intrusive task-local storage value linked from its owning task. */
+struct llam_task_local_entry {
+    llam_task_local_entry_t *next;
+    llam_task_local_key_t key;
+    void *value;
+};
+
+/** @brief Structured-concurrency group that owns a set of child task handles. */
+struct llam_task_group {
+    pthread_mutex_t lock;
+    llam_cancel_token_t *cancel_token;
+    llam_task_t **tasks;
+    size_t count;
+    size_t capacity;
+    bool lock_initialized;
 };
 
 /**

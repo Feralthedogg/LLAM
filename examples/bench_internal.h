@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if LLAM_PLATFORM_WINDOWS
+#include <io.h>
 #include <windows.h>
 #if defined(__has_include)
 #if __has_include(<afunix.h>)
@@ -78,6 +79,22 @@ typedef struct bench_ping_state {
     uint64_t *samples_ns;
     atomic_uint failures;
 } bench_ping_state_t;
+
+typedef enum bench_select_mode {
+    BENCH_SELECT_READY = 1,
+    BENCH_SELECT_PARK_WAKE = 2,
+    BENCH_SELECT_TIMEOUT = 3,
+} bench_select_mode_t;
+
+typedef struct bench_select_state {
+    unsigned rounds;
+    unsigned ops_per_round;
+    bench_select_mode_t mode;
+    llam_channel_t *primary;
+    llam_channel_t *secondary;
+    uint64_t *samples_ns;
+    atomic_uint failures;
+} bench_select_state_t;
 
 typedef struct bench_echo_state {
     llam_fd_t fd;
@@ -136,6 +153,7 @@ void bench_print_report(const char *name,
 
 void bench_spawn_task(void *arg);
 void bench_channel_task(void *arg);
+void bench_select_task(void *arg);
 void bench_io_task(void *arg);
 void bench_poll_task(void *arg);
 void bench_opaque_task(void *arg);

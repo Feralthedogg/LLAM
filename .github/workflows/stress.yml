@@ -109,6 +109,7 @@ jobs:
         run: |
           LLAM_BENCH_ROUNDS=3 \
           LLAM_BENCH_WARMUP_ROUNDS=1 \
+          LLAM_BENCH_SELECT_OPS=128 \
           LLAM_BENCH_IO_MESSAGES=128 \
           LLAM_BENCH_POLL_EVENTS=128 \
           ./build/stress/bench
@@ -170,10 +171,11 @@ jobs:
         shell: pwsh
         run: |
           $bench = ".\build\windows\Release\bench.exe"
-          foreach ($case in @("spawn_join", "channel_pingpong", "io_echo", "poll_wake", "sleep_fanout", "opaque_block")) {
+          foreach ($case in @("spawn_join", "channel_pingpong", "select_recv_ready", "select_park_wake", "select_timeout", "io_echo", "poll_wake", "sleep_fanout", "opaque_block")) {
             $env:LLAM_BENCH_ONLY = $case
             $env:LLAM_BENCH_ROUNDS = "3"
             $env:LLAM_BENCH_WARMUP_ROUNDS = "1"
+            $env:LLAM_BENCH_SELECT_OPS = "128"
             & $bench
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE

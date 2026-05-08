@@ -45,6 +45,7 @@ void llam_task_clear_wait_tracking(llam_task_t *task) {
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -68,6 +69,7 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
     task->active_wait_node = node;
     task->active_wait_queue = queue;
     task->active_wait_queue_lock = queue_lock;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -86,6 +88,7 @@ void llam_task_set_join_tracking(llam_task_t *task, llam_task_t *target, unsigne
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = target;
@@ -103,6 +106,7 @@ void llam_task_set_sleep_tracking(llam_task_t *task, unsigned parked_shard) {
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -128,6 +132,7 @@ void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned p
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = req;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -146,6 +151,7 @@ void llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsi
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = job;
     task->join_target = NULL;
