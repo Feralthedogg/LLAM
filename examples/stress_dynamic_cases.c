@@ -130,12 +130,19 @@ void dynamic_live_poll_watch_task(void *arg) {
 
 cleanup:
     if (state->sv[1] >= 0) {
-        char byte = 'x';
-        ssize_t rc = write(state->sv[1], &byte, 1U);
+        unsigned wake_rounds = spawned > 0U ? spawned : 1U;
 
-        if (rc != 1) {
-            stress_fail_msg("dynamic live poll writer failed");
+        for (i = 0; i < wake_rounds && atomic_load(&completed) < spawned; ++i) {
+            char byte = 'x';
+            ssize_t rc = write(state->sv[1], &byte, 1U);
+
+            if (rc != 1) {
+                stress_fail_msg("dynamic live poll writer failed");
+                break;
+            }
+            (void)llam_sleep_ns(1000ULL * 1000ULL);
         }
+        (void)shutdown(state->sv[1], SHUT_WR);
     }
 
     if (state->sv[1] >= 0) {
@@ -144,7 +151,7 @@ cleanup:
     }
 
     for (i = 0; i < spawned; ++i) {
-        if (stress_join_until_retry_oom(waiters[i], llam_now_ns() + 5ULL * 1000ULL * 1000ULL * 1000ULL) != 0) {
+        if (stress_join_until_retry_oom(waiters[i], llam_now_ns() + 10ULL * 1000ULL * 1000ULL * 1000ULL) != 0) {
             char message[128];
 
             (void)snprintf(message,

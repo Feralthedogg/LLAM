@@ -30,6 +30,10 @@
 
 #include "runtime_internal.h"
 
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+#include "runtime_windows_iocp.h"
+#endif
+
 #if defined(__linux__)
 
 /**
@@ -89,6 +93,7 @@ static void llam_node_disable_recv_buf_ring(llam_node_t *node) {
         return;
     }
     node->supports_provided_buffers = false;
+    node->supports_multishot_recv = false;
     node->recv_buf_entries = 0U;
     node->recv_buf_mask = 0U;
     node->recv_buf_group = -1;
@@ -177,6 +182,7 @@ bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
     }
 }
 
+#if defined(LLAM_HAVE_IO_URING_BUF_RING_HELPERS)
 /**
  * @brief Set up an io_uring provided-buffer ring for small receives.
  *
@@ -279,6 +285,37 @@ void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
     node->recv_buf_storage = NULL;
     llam_node_disable_recv_buf_ring(node);
 }
+#else
+/**
+ * @brief Disable provided receive buffers when liburing lacks ring helpers.
+ *
+ * Older distro liburing packages may expose core io_uring operations without
+ * @c io_uring_setup_buf_ring and @c io_uring_free_buf_ring.  Provided buffers
+ * are an optimization only, so compatibility builds keep regular read/recv
+ * requests enabled and report the buffer-ring feature as unsupported.
+ */
+int llam_node_setup_recv_buf_ring(llam_node_t *node) {
+    llam_node_disable_recv_buf_ring(node);
+    return 0;
+}
+
+int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
+    (void)node;
+    (void)bid;
+    errno = ENOSYS;
+    return -1;
+}
+
+void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
+    if (node == NULL) {
+        return;
+    }
+    free(node->recv_buf_storage);
+    node->recv_buf_storage = NULL;
+    node->recv_buf_ring = NULL;
+    llam_node_disable_recv_buf_ring(node);
+}
+#endif
 
 /**
  * @brief Unregister a completion eventfd from a Linux io_uring node.
@@ -330,7 +367,7 @@ void llam_probe_ring_support(llam_node_t *node) {
     io_uring_free_probe(probe);
 }
 
-#else
+#elif defined(__APPLE__)
 
 #include <mach/mach.h>
 #include <sys/event.h>
@@ -431,12 +468,12 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
         return -1;
     }
     node->ring_ready = true;
-    node->supports_read = true;
-    node->supports_recv = true;
-    node->supports_write = true;
-    node->supports_accept = true;
-    node->supports_connect = true;
-    node->supports_poll = true;
+    node->supports_read = false;
+    node->supports_recv = false;
+    node->supports_write = false;
+    node->supports_accept = false;
+    node->supports_connect = false;
+    node->supports_poll = false;
     /*
      * Darwin recv-watch currently uses level-triggered kqueue readiness.
      * Under repeated owned-read stress it can strand a waiter after an early
@@ -560,12 +597,12 @@ void llam_probe_ring_support(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
-    node->supports_read = true;
-    node->supports_recv = true;
-    node->supports_write = true;
-    node->supports_accept = true;
-    node->supports_connect = true;
-    node->supports_poll = true;
+    node->supports_read = false;
+    node->supports_recv = false;
+    node->supports_write = false;
+    node->supports_accept = false;
+    node->supports_connect = false;
+    node->supports_poll = false;
     /*
      * Keep recv-watch disabled on Darwin for the same reason as init: poll and
      * accept watches are stable, but recv needs a stricter rearm contract.
@@ -573,6 +610,230 @@ void llam_probe_ring_support(llam_node_t *node) {
     node->supports_multishot_recv = false;
     node->supports_multishot_accept = true;
     node->supports_multishot_poll = true;
+}
+
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
+
+void llam_windows_iocp_cleanup_node(llam_node_t *node);
+
+int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
+    llam_windows_iocp_policy_t policy;
+
+    if (rt == NULL || node == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_windows_detect_iocp_policy(&policy) != 0) {
+        llam_windows_default_iocp_policy(LLAM_WINDOWS_GENERATION_10, 10U, 0U, 19045U, rt->active_shards, &policy);
+    }
+    if (llam_windows_iocp_create(&policy, &node->windows_iocp_handle) != 0) {
+        return -1;
+    }
+
+    node->ring_ready = true;
+    node->supports_read = true;
+    node->supports_recv = true;
+    node->supports_write = true;
+    node->supports_accept = true;
+    node->supports_connect = true;
+    node->supports_poll = true;
+    node->supports_multishot_recv = false;
+    node->supports_multishot_accept = false;
+    node->supports_multishot_poll = false;
+    node->supports_provided_buffers = false;
+    node->cq_eventfd_registered = false;
+    node->mach_wake_enabled = false;
+    node->mach_wake_port = 0U;
+    node->mach_wake_pset = 0U;
+    node->windows_completion_batch = policy.completion_batch != 0U ? policy.completion_batch : 64U;
+    node->windows_use_skip_completion_on_success = policy.use_skip_completion_on_success;
+    node->windows_io_op_free = NULL;
+    node->windows_accept_socket_free = NULL;
+    node->windows_io_op_free_count = 0U;
+    node->windows_accept_socket_free_count = 0U;
+    node->windows_io_op_free_max = policy.recv_prepost != 0U ? policy.recv_prepost * 4U : 64U;
+    if (node->windows_io_op_free_max < 64U) {
+        node->windows_io_op_free_max = 64U;
+    } else if (node->windows_io_op_free_max > 512U) {
+        node->windows_io_op_free_max = 512U;
+    }
+    node->windows_accept_prepost = policy.accept_prepost;
+    node->windows_accept_socket_free_max = policy.accept_prepost != 0U ? policy.accept_prepost : 1U;
+    if (node->windows_accept_socket_free_max > 64U) {
+        node->windows_accept_socket_free_max = 64U;
+    }
+    node->windows_poll_timeout_ms = policy.poll_timeout_ms;
+    return 0;
+}
+
+bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
+    if (node == NULL) {
+        return false;
+    }
+    switch (kind) {
+    case LLAM_IO_KIND_READ:
+        return node->supports_read;
+    case LLAM_IO_KIND_WRITE:
+        return node->supports_write;
+    case LLAM_IO_KIND_ACCEPT:
+        return node->supports_accept;
+    case LLAM_IO_KIND_CONNECT:
+        return node->supports_connect;
+    case LLAM_IO_KIND_POLL:
+        return node->supports_poll;
+    default:
+        return false;
+    }
+}
+
+int llam_node_setup_recv_buf_ring(llam_node_t *node) {
+    if (node != NULL) {
+        node->supports_provided_buffers = false;
+        node->recv_buf_entries = 0U;
+        node->recv_buf_mask = 0U;
+        node->recv_buf_group = -1;
+    }
+    return 0;
+}
+
+int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
+    (void)node;
+    (void)bid;
+    errno = ENOSYS;
+    return -1;
+}
+
+void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
+    if (node == NULL) {
+        return;
+    }
+    free(node->recv_buf_storage);
+    node->recv_buf_storage = NULL;
+    node->recv_buf_ring = NULL;
+    node->supports_provided_buffers = false;
+}
+
+void llam_node_unregister_cq_eventfd(llam_node_t *node) {
+    if (node == NULL) {
+        return;
+    }
+    node->cq_eventfd_registered = false;
+    llam_windows_iocp_cleanup_node(node);
+}
+
+void llam_probe_ring_support(llam_node_t *node) {
+    if (node == NULL) {
+        return;
+    }
+    node->supports_read = true;
+    node->supports_recv = true;
+    node->supports_write = true;
+    node->supports_accept = true;
+    node->supports_connect = true;
+    node->supports_poll = true;
+    node->supports_multishot_recv = false;
+    node->supports_multishot_accept = false;
+    node->supports_multishot_poll = false;
+}
+
+#else
+
+/**
+ * @brief Initialize the generic I/O node capability surface.
+ *
+ * Unknown non-Linux/non-Darwin backends expose operation support through direct
+ * and blocking fallback paths.
+ */
+int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
+    (void)rt;
+    if (node == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    node->ring_ready = true;
+    node->supports_read = true;
+    node->supports_recv = true;
+    node->supports_write = true;
+    node->supports_accept = true;
+    node->supports_connect = true;
+    node->supports_poll = true;
+    node->supports_multishot_recv = false;
+    node->supports_multishot_accept = false;
+    node->supports_multishot_poll = false;
+    node->supports_provided_buffers = false;
+    node->cq_eventfd_registered = false;
+    node->mach_wake_enabled = false;
+    node->mach_wake_port = 0U;
+    node->mach_wake_pset = 0U;
+    return 0;
+}
+
+bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
+    if (node == NULL) {
+        return false;
+    }
+    switch (kind) {
+    case LLAM_IO_KIND_READ:
+        return node->supports_read;
+    case LLAM_IO_KIND_WRITE:
+        return node->supports_write;
+    case LLAM_IO_KIND_ACCEPT:
+        return node->supports_accept;
+    case LLAM_IO_KIND_CONNECT:
+        return node->supports_connect;
+    case LLAM_IO_KIND_POLL:
+        return node->supports_poll;
+    default:
+        return false;
+    }
+}
+
+int llam_node_setup_recv_buf_ring(llam_node_t *node) {
+    if (node != NULL) {
+        node->supports_provided_buffers = false;
+        node->recv_buf_entries = 0U;
+        node->recv_buf_mask = 0U;
+        node->recv_buf_group = -1;
+    }
+    return 0;
+}
+
+int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
+    (void)node;
+    (void)bid;
+    errno = ENOSYS;
+    return -1;
+}
+
+void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
+    if (node == NULL) {
+        return;
+    }
+    free(node->recv_buf_storage);
+    node->recv_buf_storage = NULL;
+    node->recv_buf_ring = NULL;
+    node->supports_provided_buffers = false;
+}
+
+void llam_node_unregister_cq_eventfd(llam_node_t *node) {
+    if (node != NULL) {
+        node->cq_eventfd_registered = false;
+    }
+}
+
+void llam_probe_ring_support(llam_node_t *node) {
+    if (node == NULL) {
+        return;
+    }
+    node->supports_read = true;
+    node->supports_recv = true;
+    node->supports_write = true;
+    node->supports_accept = true;
+    node->supports_connect = true;
+    node->supports_poll = true;
+    node->supports_multishot_recv = false;
+    node->supports_multishot_accept = false;
+    node->supports_multishot_poll = false;
 }
 
 #endif

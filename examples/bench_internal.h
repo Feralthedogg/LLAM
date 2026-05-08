@@ -24,19 +24,42 @@
 #include "llam/runtime.h"
 
 #include <errno.h>
-#include <poll.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if LLAM_PLATFORM_WINDOWS
+#include <io.h>
+#include <windows.h>
+#if defined(__has_include)
+#if __has_include(<afunix.h>)
+#include <afunix.h>
+#define LLAM_BENCH_HAVE_AFUNIX 1
+#endif
+#endif
+#ifndef LLAM_BENCH_HAVE_AFUNIX
+#define LLAM_BENCH_HAVE_AFUNIX 0
+#endif
+#ifndef POLLIN
+#define POLLIN 0x0100
+#endif
+#ifndef POLLERR
+#define POLLERR 0x0001
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0002
+#endif
+#else
+#include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
+#endif
 
 #include "env_compat.h"
 
@@ -57,8 +80,24 @@ typedef struct bench_ping_state {
     atomic_uint failures;
 } bench_ping_state_t;
 
+typedef enum bench_select_mode {
+    BENCH_SELECT_READY = 1,
+    BENCH_SELECT_PARK_WAKE = 2,
+    BENCH_SELECT_TIMEOUT = 3,
+} bench_select_mode_t;
+
+typedef struct bench_select_state {
+    unsigned rounds;
+    unsigned ops_per_round;
+    bench_select_mode_t mode;
+    llam_channel_t *primary;
+    llam_channel_t *secondary;
+    uint64_t *samples_ns;
+    atomic_uint failures;
+} bench_select_state_t;
+
 typedef struct bench_echo_state {
-    int fd;
+    llam_fd_t fd;
     unsigned messages_per_round;
 } bench_echo_state_t;
 
@@ -70,7 +109,7 @@ typedef struct bench_io_state {
 } bench_io_state_t;
 
 typedef struct bench_poll_writer_state {
-    int fd;
+    llam_fd_t fd;
     unsigned events_per_round;
 } bench_poll_writer_state_t;
 
@@ -114,6 +153,7 @@ void bench_print_report(const char *name,
 
 void bench_spawn_task(void *arg);
 void bench_channel_task(void *arg);
+void bench_select_task(void *arg);
 void bench_io_task(void *arg);
 void bench_poll_task(void *arg);
 void bench_opaque_task(void *arg);

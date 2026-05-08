@@ -26,7 +26,7 @@
 
 #include "runtime_internal.h"
 
-#if defined(__aarch64__)
+#if LLAM_ARCH_AARCH64
 
 /**
  * @brief Build an initial AArch64 task context.

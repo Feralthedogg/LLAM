@@ -134,7 +134,7 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
 void llam_darwin_complete_accept_completions(llam_node_t *node, llam_darwin_accept_completion_t *head);
 int llam_darwin_fd_set_nonblocking(int fd, int *saved_flags_out, bool *restore_out);
 void llam_darwin_fd_restore(int fd, int saved_flags, bool restore);
-int llam_socket_connect_error(int fd);
+int llam_socket_connect_error(llam_fd_t fd);
 bool llam_darwin_assign_owned_buffer(llam_io_req_t *req,
                                    const unsigned char *data,
                                    size_t size,

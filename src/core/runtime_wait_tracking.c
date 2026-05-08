@@ -45,6 +45,7 @@ void llam_task_clear_wait_tracking(llam_task_t *task) {
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -68,6 +69,7 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
     task->active_wait_node = node;
     task->active_wait_queue = queue;
     task->active_wait_queue_lock = queue_lock;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -86,6 +88,7 @@ void llam_task_set_join_tracking(llam_task_t *task, llam_task_t *target, unsigne
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = target;
@@ -103,6 +106,7 @@ void llam_task_set_sleep_tracking(llam_task_t *task, unsigned parked_shard) {
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -128,6 +132,7 @@ void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned p
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = req;
     task->active_block_job = NULL;
     task->join_target = NULL;
@@ -146,6 +151,7 @@ void llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsi
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
+    task->active_select_state = NULL;
     task->active_io_req = NULL;
     task->active_block_job = job;
     task->join_target = NULL;
@@ -504,6 +510,7 @@ void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind) {
     }
 
     scheduler_ctx = g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx;
+    llam_task_ensure_listed(task);
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = reason;
     shard->metrics.parks += 1U;
@@ -512,6 +519,56 @@ void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind) {
     // The scheduler resumes after this context switch and will later reinject
     // the task when its wait completes.
     llam_switch_task_to_scheduler(task, scheduler_ctx);
+}
+
+/**
+ * @brief Requeue the common same-shard single join waiter without generic wake routing.
+ *
+ * @details
+ * Spawn/join fanout overwhelmingly wakes exactly one waiter on the same shard
+ * that parked it.  The generic reinject path must handle migration, pressure,
+ * timers, and cross-worker kicks; this path keeps those semantics out of the
+ * hot join wake when they are provably unnecessary.
+ *
+ * @param rt     Runtime that owns the waiter.
+ * @param waiter Single waiter removed from a completed task's join list.
+ * @return true when the waiter was published locally.
+ */
+static bool llam_reinject_single_local_join_waiter(llam_runtime_t *rt, llam_task_t *waiter) {
+    llam_shard_t *target;
+    llam_task_state_id_t from;
+
+    if (rt == NULL || waiter == NULL || waiter->wait_next != NULL || waiter->parked_shard >= rt->active_shards) {
+        return false;
+    }
+    target = &rt->shards[waiter->parked_shard];
+    if (g_llam_tls_shard != target ||
+        g_llam_tls_task == NULL ||
+        !llam_shard_accepts_new_work(target) ||
+        waiter->active_timer != NULL) {
+        return false;
+    }
+
+    from = waiter->state;
+    llam_task_clear_wait_tracking(waiter);
+
+    pthread_mutex_lock(&target->lock);
+    if (target->opaque_redirect_active) {
+        pthread_mutex_unlock(&target->lock);
+        return false;
+    }
+    waiter->state = LLAM_TASK_STATE_RUNNABLE;
+    waiter->wait_reason = LLAM_WAIT_NONE;
+    waiter->enqueue_hot = 0U;
+    waiter->last_runnable_ns = rt->wake_latency_metrics_enabled != 0U ? llam_now_ns() : 0U;
+    if (llam_queue_push_bounded_locked(target, &target->hot_q, LLAM_HOT_QUEUE_CAP, waiter)) {
+        target->metrics.hot_enqueues += 1U;
+    }
+    target->metrics.wakes += 1U;
+    target->metrics.wake_reason_hist[LLAM_WAIT_JOIN] += 1U;
+    llam_trace_shard(target, waiter, LLAM_TRACE_WAKE, from, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_JOIN);
+    pthread_mutex_unlock(&target->lock);
+    return true;
 }
 
 /**
@@ -529,12 +586,19 @@ void llam_reinject_join_waiters(llam_runtime_t *rt, llam_task_t *task) {
     task->join_waiter_count_at_exit = task->join_waiter_count;
     task->join_waiters = NULL;
     task->join_waiter_count = 0U;
+    atomic_store_explicit(&task->join_waiter_hint, 0U, memory_order_release);
     pthread_mutex_unlock(&task->lock);
+
+    if (waiters == NULL) {
+        return;
+    }
 
     while (waiters != NULL) {
         llam_task_t *next = waiters->wait_next;
         waiters->wait_next = NULL;
-        llam_reinject_task_on_shard(rt, waiters, waiters->parked_shard, true, LLAM_TRACE_WAKE, LLAM_WAIT_JOIN);
+        if (!llam_reinject_single_local_join_waiter(rt, waiters)) {
+            llam_reinject_task_on_shard(rt, waiters, waiters->parked_shard, true, LLAM_TRACE_WAKE, LLAM_WAIT_JOIN);
+        }
         waiters = next;
     }
 }
@@ -561,6 +625,7 @@ bool llam_join_waiter_remove_locked(llam_task_t *target, llam_task_t *waiter) {
             if (target->join_waiter_count > 0U) {
                 target->join_waiter_count -= 1U;
             }
+            atomic_store_explicit(&target->join_waiter_hint, target->join_waiter_count, memory_order_release);
             return true;
         }
         prev = cur;

@@ -14,8 +14,6 @@ FORBIDDEN_STEMS = {"common", "misc", "helper", "helpers", "utils", "manager", "h
 SOURCE_EXTS = {".c", ".h", ".inc", ".S"}
 WARN_LINES = 500
 SPLIT_LINES = 800
-PUBLIC_ROOT_WRAPPERS = {ROOT / "include" / "nm_runtime.h", ROOT / "include" / "nm_platform.h"}
-
 
 def rel(path: pathlib.Path) -> str:
     return str(path.relative_to(ROOT))
@@ -39,8 +37,6 @@ def public_header_boundary_errors() -> list[str]:
     if (ROOT / "include" / "internal").exists():
         errors.append("include/internal must not exist; internal headers live under src/internal")
     for path in (ROOT / "include").rglob("*.h"):
-        if path in PUBLIC_ROOT_WRAPPERS:
-            continue
         if PUBLIC_INCLUDE_DIR not in path.parents and path != PUBLIC_INCLUDE_DIR:
             errors.append(f"public header outside include/llam: {rel(path)}")
     if not PUBLIC_INCLUDE_DIR.exists():

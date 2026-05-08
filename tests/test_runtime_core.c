@@ -26,6 +26,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if LLAM_PLATFORM_POSIX
+#include <unistd.h>
+#endif
 
 typedef struct core_state {
     atomic_uint failures;
@@ -51,6 +54,13 @@ typedef struct double_join_state {
     atomic_uint busy;
 } double_join_state_t;
 
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+typedef struct aarch64_simd_state {
+    core_state_t *state;
+    uint64_t expected_d8_bits;
+} aarch64_simd_state_t;
+#endif
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_runtime_core] %s\n", message);
     return 1;
@@ -67,6 +77,19 @@ static void task_fail(core_state_t *state, const char *where, int err) {
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
     }
 }
+
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+__attribute__((always_inline)) static inline void aarch64_set_d8_bits(uint64_t value) {
+    __asm__ volatile("fmov d8, %0" : : "r"(value) : "v8");
+}
+
+__attribute__((always_inline)) static inline uint64_t aarch64_get_d8_bits(void) {
+    uint64_t value;
+
+    __asm__ volatile("fmov %0, d8" : "=r"(value));
+    return value;
+}
+#endif
 
 static void *blocking_callback(void *arg) {
     core_state_t *state = arg;
@@ -117,6 +140,7 @@ static void inspect_task(void *arg) {
         return;
     }
 
+    llam_task_safepoint();
     llam_yield();
     if (llam_sleep_ns(0U) != 0) {
         task_fail(state, "llam_sleep_ns(0)", errno);
@@ -210,9 +234,31 @@ static void detached_task(void *arg) {
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+static void aarch64_simd_preservation_task(void *arg) {
+    aarch64_simd_state_t *simd = arg;
+    unsigned i;
+
+    aarch64_set_d8_bits(simd->expected_d8_bits);
+    for (i = 0U; i < 64U; ++i) {
+        llam_yield();
+        if (aarch64_get_d8_bits() != simd->expected_d8_bits) {
+            task_fail(simd->state, "AArch64 d8 was not preserved across yield", EINVAL);
+            return;
+        }
+    }
+
+    atomic_fetch_add_explicit(&simd->state->ran, 1U, memory_order_relaxed);
+}
+#endif
+
 static int test_preinit_contracts(void) {
     llam_runtime_stats_t stats;
+    llam_task_local_key_t key = LLAM_TASK_LOCAL_INVALID_KEY;
 
+    if (llam_runtime_default() == NULL) {
+        return test_fail("llam_runtime_default returned NULL");
+    }
     if (llam_current_task() != NULL) {
         return test_fail("llam_current_task outside runtime was not NULL");
     }
@@ -228,6 +274,7 @@ static int test_preinit_contracts(void) {
     if (llam_task_flags(NULL) != 0U) {
         return test_fail("llam_task_flags(NULL) did not return 0");
     }
+    llam_task_safepoint();
     errno = 0;
     if (llam_task_set_class(999U) != -1 || errno != EINVAL) {
         return test_fail("llam_task_set_class invalid class did not fail with EINVAL");
@@ -235,6 +282,26 @@ static int test_preinit_contracts(void) {
     errno = 0;
     if (llam_task_set_class(LLAM_TASK_CLASS_DEFAULT) != -1 || errno != ENOTSUP) {
         return test_fail("llam_task_set_class outside task did not fail with ENOTSUP");
+    }
+    if (llam_task_local_key_create(&key) != 0) {
+        return test_fail_errno("llam_task_local_key_create outside runtime failed");
+    }
+    errno = 0;
+    if (llam_task_local_get(key) != NULL || errno != ENOTSUP) {
+        (void)llam_task_local_key_delete(key);
+        return test_fail("llam_task_local_get outside task did not fail with ENOTSUP");
+    }
+    errno = 0;
+    if (llam_task_local_set(key, &stats) != -1 || errno != ENOTSUP) {
+        (void)llam_task_local_key_delete(key);
+        return test_fail("llam_task_local_set outside task did not fail with ENOTSUP");
+    }
+    if (llam_task_local_key_delete(key) != 0) {
+        return test_fail_errno("llam_task_local_key_delete failed");
+    }
+    errno = 0;
+    if (llam_task_local_key_delete(key) != -1 || errno != EINVAL) {
+        return test_fail("llam_task_local_key_delete inactive key did not fail with EINVAL");
     }
 
     errno = 0;
@@ -244,6 +311,10 @@ static int test_preinit_contracts(void) {
     errno = 0;
     if (llam_runtime_collect_stats_ex(&stats, 0U) != -1 || errno != EINVAL) {
         return test_fail("llam_runtime_collect_stats_ex zero size did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_write_stats_json(-1) != -1 || errno != EINVAL) {
+        return test_fail("llam_runtime_write_stats_json invalid fd did not fail with EINVAL");
     }
     memset(&stats, 0xA5, sizeof(stats));
     errno = 0;
@@ -286,6 +357,57 @@ static int test_preinit_contracts(void) {
     if (llam_sleep_ns(0U) != -1 || errno != EINVAL) {
         return test_fail("llam_sleep_ns before init did not fail with EINVAL");
     }
+    return 0;
+}
+
+static int test_runtime_handle_api(void) {
+    core_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *second_runtime = NULL;
+    llam_task_t *task;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &runtime) != 0) {
+        return test_fail_errno("llam_runtime_create failed");
+    }
+    if (runtime == NULL || runtime != llam_runtime_default()) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_create returned unexpected handle");
+    }
+    errno = 0;
+    if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &second_runtime) != -1 ||
+        errno != EBUSY ||
+        second_runtime != NULL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("second llam_runtime_create did not fail with EBUSY");
+    }
+    task = llam_spawn(detached_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("llam_spawn for runtime handle failed");
+    }
+    if (llam_runtime_run_handle(runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("llam_runtime_run_handle failed");
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        llam_runtime_destroy(runtime);
+        return test_fail("runtime handle task did not run");
+    }
+    if (llam_join(task) != 0) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("llam_join for runtime handle task failed");
+    }
+    llam_runtime_destroy(runtime);
     return 0;
 }
 
@@ -402,6 +524,42 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
         llam_runtime_shutdown();
         return test_fail_errno("llam_runtime_collect_stats wrapper failed");
     }
+#if LLAM_PLATFORM_POSIX
+    {
+        int pipe_fds[2];
+        char json[1024];
+        ssize_t nread;
+
+        if (pipe(pipe_fds) != 0) {
+            llam_runtime_shutdown();
+            return test_fail_errno("pipe for stats json failed");
+        }
+        if (llam_runtime_write_stats_json(pipe_fds[1]) != 0) {
+            int saved_errno = errno;
+
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+            llam_runtime_shutdown();
+            errno = saved_errno;
+            return test_fail_errno("llam_runtime_write_stats_json failed");
+        }
+        close(pipe_fds[1]);
+        nread = read(pipe_fds[0], json, sizeof(json) - 1U);
+        close(pipe_fds[0]);
+        if (nread <= 0) {
+            llam_runtime_shutdown();
+            return test_fail("stats json read produced no data");
+        }
+        json[nread] = '\0';
+        if (json[0] != '{' ||
+            strstr(json, "\"ctx_switches\":") == NULL ||
+            strstr(json, "\"active_workers\":") == NULL ||
+            strstr(json, "\"io_submit_syscalls\":") == NULL) {
+            llam_runtime_shutdown();
+            return test_fail("stats json did not contain expected fields");
+        }
+    }
+#endif
 
     llam_runtime_shutdown();
     return 0;
@@ -596,6 +754,58 @@ static int test_errno_is_task_local_across_switches(void) {
     return 0;
 }
 
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+static int test_aarch64_simd_is_preserved_across_switches(void) {
+    core_state_t state;
+    aarch64_simd_state_t task_a;
+    aarch64_simd_state_t task_b;
+    llam_runtime_opts_t runtime_opts;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+
+    task_a.state = &state;
+    task_a.expected_d8_bits = UINT64_C(0x3ff123456789abcd);
+    task_b.state = &state;
+    task_b.expected_d8_bits = UINT64_C(0x400fedcba9876543);
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init for AArch64 SIMD preservation failed");
+    }
+    if (llam_spawn(aarch64_simd_preservation_task, &task_a, NULL) == NULL ||
+        llam_spawn(aarch64_simd_preservation_task, &task_b, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_spawn AArch64 SIMD preservation task failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_run AArch64 SIMD preservation failed");
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] task failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        llam_runtime_shutdown();
+        return 1;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 2U) {
+        llam_runtime_shutdown();
+        return test_fail("AArch64 SIMD preservation tasks did not both complete");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+#endif
+
 static int test_concurrent_join_contract(void) {
     core_state_t core;
     double_join_state_t state;
@@ -652,11 +862,15 @@ static int test_concurrent_join_contract(void) {
 
 int main(void) {
     if (test_preinit_contracts() != 0 ||
+        test_runtime_handle_api() != 0 ||
         test_runtime_lifecycle_and_task_contracts() != 0 ||
         test_request_stop_returns_success() != 0 ||
         test_detach_contract() != 0 ||
         test_ex_option_prefixes() != 0 ||
         test_errno_is_task_local_across_switches() != 0 ||
+#if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
+        test_aarch64_simd_is_preserved_across_switches() != 0 ||
+#endif
         test_concurrent_join_contract() != 0) {
         return 1;
     }

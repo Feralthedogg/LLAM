@@ -104,10 +104,171 @@ static bool bench_platform_prefers_indefinite_ready_poll(void) {
         return strcmp(env, "0") != 0;
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || LLAM_PLATFORM_WINDOWS
     return true;
 #else
     return false;
+#endif
+}
+
+static void bench_close_fd(llam_fd_t fd) {
+#if LLAM_PLATFORM_WINDOWS
+    if (!LLAM_FD_IS_INVALID(fd)) {
+        (void)closesocket(fd);
+    }
+#else
+    (void)close(fd);
+#endif
+}
+
+#if LLAM_PLATFORM_WINDOWS && LLAM_BENCH_HAVE_AFUNIX
+static int bench_socketpair_windows_afunix(llam_fd_t sv[2]) {
+    static atomic_uint sequence;
+    SOCKET listener = INVALID_SOCKET;
+    SOCKET client = INVALID_SOCKET;
+    SOCKET server = INVALID_SOCKET;
+    struct sockaddr_un addr;
+    unsigned seq = atomic_fetch_add_explicit(&sequence, 1U, memory_order_relaxed);
+    char path[UNIX_PATH_MAX];
+
+    snprintf(path, sizeof(path), ".\\llam-bench-%lu-%u.sock", (unsigned long)GetCurrentProcessId(), seq);
+    listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (listener == INVALID_SOCKET) {
+        errno = EIO;
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1U);
+    (void)DeleteFileA(path);
+    if (bind(listener, (const struct sockaddr *)&addr, (int)sizeof(addr)) == SOCKET_ERROR ||
+        listen(listener, 1) == SOCKET_ERROR) {
+        closesocket(listener);
+        (void)DeleteFileA(path);
+        errno = EIO;
+        return -1;
+    }
+
+    client = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client == INVALID_SOCKET) {
+        closesocket(listener);
+        (void)DeleteFileA(path);
+        errno = EIO;
+        return -1;
+    }
+    if (connect(client, (const struct sockaddr *)&addr, (int)sizeof(addr)) == SOCKET_ERROR) {
+        closesocket(client);
+        closesocket(listener);
+        (void)DeleteFileA(path);
+        errno = EIO;
+        return -1;
+    }
+    server = accept(listener, NULL, NULL);
+    closesocket(listener);
+    (void)DeleteFileA(path);
+    if (server == INVALID_SOCKET) {
+        closesocket(client);
+        errno = EIO;
+        return -1;
+    }
+
+    sv[0] = (llam_fd_t)client;
+    sv[1] = (llam_fd_t)server;
+    return 0;
+}
+#endif
+
+static int bench_socketpair(llam_fd_t sv[2]) {
+#if LLAM_PLATFORM_WINDOWS
+    SOCKET listener = INVALID_SOCKET;
+    SOCKET client = INVALID_SOCKET;
+    SOCKET server = INVALID_SOCKET;
+    struct sockaddr_in addr;
+    int addr_len = (int)sizeof(addr);
+    BOOL no_delay = TRUE;
+
+    if (sv == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    sv[0] = LLAM_INVALID_FD;
+    sv[1] = LLAM_INVALID_FD;
+
+#if LLAM_BENCH_HAVE_AFUNIX
+    if (bench_env_flag_default("LLAM_BENCH_WINDOWS_AFUNIX", 1U) != 0U &&
+        bench_socketpair_windows_afunix(sv) == 0) {
+        return 0;
+    }
+    sv[0] = LLAM_INVALID_FD;
+    sv[1] = LLAM_INVALID_FD;
+#endif
+
+    listener = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (listener == INVALID_SOCKET) {
+        errno = EIO;
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(listener, (const struct sockaddr *)&addr, (int)sizeof(addr)) == SOCKET_ERROR ||
+        listen(listener, 1) == SOCKET_ERROR ||
+        getsockname(listener, (struct sockaddr *)&addr, &addr_len) == SOCKET_ERROR) {
+        closesocket(listener);
+        errno = EIO;
+        return -1;
+    }
+
+    client = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (client == INVALID_SOCKET) {
+        closesocket(listener);
+        errno = EIO;
+        return -1;
+    }
+    if (connect(client, (const struct sockaddr *)&addr, addr_len) == SOCKET_ERROR) {
+        closesocket(client);
+        closesocket(listener);
+        errno = EIO;
+        return -1;
+    }
+    server = accept(listener, NULL, NULL);
+    closesocket(listener);
+    if (server == INVALID_SOCKET) {
+        closesocket(client);
+        errno = EIO;
+        return -1;
+    }
+
+    (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char *)&no_delay, (int)sizeof(no_delay));
+    (void)setsockopt(server, IPPROTO_TCP, TCP_NODELAY, (const char *)&no_delay, (int)sizeof(no_delay));
+    sv[0] = (llam_fd_t)client;
+    sv[1] = (llam_fd_t)server;
+    return 0;
+#else
+    int pair[2];
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
+        return -1;
+    }
+    sv[0] = (llam_fd_t)pair[0];
+    sv[1] = (llam_fd_t)pair[1];
+    return 0;
+#endif
+}
+
+static bool bench_reuse_socketpair_enabled(void) {
+    const char *env = llam_example_env_get("LLAM_BENCH_REUSE_SOCKETPAIR");
+
+    if (env != NULL && env[0] != '\0') {
+        return strcmp(env, "0") != 0;
+    }
+#if LLAM_PLATFORM_WINDOWS
+    return false;
+#else
+    return true;
 #endif
 }
 
@@ -202,7 +363,7 @@ void bench_print_report(const char *name,
             (double)stats->opaque_leave_wait_ns / (double)stats->opaque_leave_wait_samples / 1000.0;
     }
 
-    printf("[bench] name=%s rounds=%u warmup=%u ops=%u ops_per_sec=%.2f p50_us=%.2f p99_us=%.2f ctx_switches=%llu idle_polls=%llu idle_spin_hits=%llu idle_spin_fallbacks=%llu idle_spin_us=%.2f io_submits=%llu io_submit_calls=%llu io_submit_syscalls=%llu overflows=%llu overflow_depth=%llu dynamic_workers=%u online_workers=%u online_workers_floor=%u online_workers_min=%u online_workers_max=%u worker_rings=%u worker_rings_multishot=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u active_workers=%u active_nodes=%u opaque_block_avg_us=%.2f opaque_block_max_us=%.2f opaque_block_samples=%llu opaque_enter_wait_avg_us=%.2f opaque_enter_wait_max_us=%.2f opaque_enter_wait_samples=%llu opaque_leave_wait_avg_us=%.2f opaque_leave_wait_max_us=%.2f opaque_leave_wait_samples=%llu\n",
+    printf("[bench] name=%s rounds=%u warmup=%u ops=%u ops_per_sec=%.2f p50_us=%.2f p99_us=%.2f ctx_switches=%llu idle_polls=%llu idle_spin_hits=%llu idle_spin_fallbacks=%llu idle_spin_us=%.2f io_submits=%llu io_submit_calls=%llu io_submit_syscalls=%llu overflows=%llu overflow_depth=%llu dynamic_workers=%u online_workers=%u online_workers_floor=%u online_workers_min=%u online_workers_max=%u worker_rings=%u worker_rings_multishot=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u active_workers=%u active_nodes=%u yield_direct_attempts=%llu yield_direct_fast_hits=%llu yield_direct_locked_hits=%llu yield_direct_fail_context=%llu yield_direct_fail_policy=%llu yield_direct_fail_no_work=%llu yield_direct_fail_self=%llu yield_direct_fail_push=%llu opaque_block_avg_us=%.2f opaque_block_max_us=%.2f opaque_block_samples=%llu opaque_enter_wait_avg_us=%.2f opaque_enter_wait_max_us=%.2f opaque_enter_wait_samples=%llu opaque_leave_wait_avg_us=%.2f opaque_leave_wait_max_us=%.2f opaque_leave_wait_samples=%llu\n",
            name,
            measured_rounds,
            warmup_rounds,
@@ -232,6 +393,14 @@ void bench_print_report(const char *name,
            stats->sqpoll,
            stats->active_workers,
            stats->active_nodes,
+           (unsigned long long)stats->yield_direct_attempts,
+           (unsigned long long)stats->yield_direct_fast_hits,
+           (unsigned long long)stats->yield_direct_locked_hits,
+           (unsigned long long)stats->yield_direct_fail_context,
+           (unsigned long long)stats->yield_direct_fail_policy,
+           (unsigned long long)stats->yield_direct_fail_no_work,
+           (unsigned long long)stats->yield_direct_fail_self,
+           (unsigned long long)stats->yield_direct_fail_push,
            opaque_block_avg_us,
            (double)stats->opaque_block_max_ns / 1000.0,
            (unsigned long long)stats->opaque_block_samples,
@@ -279,12 +448,7 @@ void bench_spawn_task(void *arg) {
         memset(tasks, 0, state->tasks_per_round * sizeof(*tasks));
         start_ns = llam_now_ns();
         for (i = 0; i < state->tasks_per_round; ++i) {
-            tasks[i] = llam_spawn(bench_spawn_child_task,
-                                &state->yields_per_task,
-                                &(llam_spawn_opts_t){
-                                    .task_class = LLAM_TASK_CLASS_DEFAULT,
-                                    .stack_class = LLAM_STACK_CLASS_DEFAULT,
-            });
+            tasks[i] = llam_spawn(bench_spawn_child_task, &state->yields_per_task, NULL);
             if (tasks[i] == NULL) {
                 bench_fail(&state->failures, "spawn/join child spawn failed");
                 goto done;
@@ -345,12 +509,7 @@ void bench_channel_task(void *arg) {
 
         state->request = request;
         state->response = response;
-        peer = llam_spawn(bench_ping_peer_task,
-                        state,
-                        &(llam_spawn_opts_t){
-                            .task_class = LLAM_TASK_CLASS_DEFAULT,
-                            .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                        });
+        peer = llam_spawn(bench_ping_peer_task, state, NULL);
         if (peer == NULL) {
             bench_fail(&state->failures, "channel peer spawn failed");
             llam_channel_destroy(request);
@@ -391,6 +550,122 @@ void bench_channel_task(void *arg) {
     }
 }
 
+static void bench_select_sender_task(void *arg) {
+    bench_select_state_t *state = arg;
+    unsigned i;
+
+    for (i = 0; i < state->ops_per_round; ++i) {
+        void *token = (void *)(uintptr_t)(i + 1U);
+
+        llam_yield();
+        if (llam_channel_send(state->primary, token) != 0) {
+            bench_fail(&state->failures, "select sender send failed");
+            return;
+        }
+    }
+}
+
+static int bench_select_recv_once(bench_select_state_t *state, uint64_t deadline_ns, unsigned i) {
+    void *received = NULL;
+    size_t selected = SIZE_MAX;
+    llam_select_op_t ops[2] = {
+        {
+            .kind = LLAM_SELECT_OP_RECV,
+            .channel = state->primary,
+            .recv_out = &received,
+        },
+        {
+            .kind = LLAM_SELECT_OP_RECV,
+            .channel = state->secondary,
+            .recv_out = &received,
+        },
+    };
+
+    if (llam_channel_select(ops, 2U, deadline_ns, &selected) != 0) {
+        if (state->mode == BENCH_SELECT_TIMEOUT && errno == ETIMEDOUT) {
+            return 0;
+        }
+        bench_fail(&state->failures, "select recv failed");
+        return -1;
+    }
+    if (state->mode == BENCH_SELECT_TIMEOUT) {
+        bench_fail(&state->failures, "select timeout unexpectedly selected");
+        return -1;
+    }
+    if (selected != 0U || received != (void *)(uintptr_t)(i + 1U)) {
+        bench_fail(&state->failures, "select recv mismatch");
+        return -1;
+    }
+    return 0;
+}
+
+void bench_select_task(void *arg) {
+    bench_select_state_t *state = arg;
+    unsigned round;
+
+    for (round = 0; round < state->rounds; ++round) {
+        llam_channel_t *primary = llam_channel_create(1U);
+        llam_channel_t *secondary = llam_channel_create(1U);
+        llam_task_t *sender = NULL;
+        uint64_t start_ns;
+        unsigned i;
+
+        if (primary == NULL || secondary == NULL) {
+            bench_fail(&state->failures, "select channel create failed");
+            if (primary != NULL) {
+                (void)llam_channel_destroy(primary);
+            }
+            if (secondary != NULL) {
+                (void)llam_channel_destroy(secondary);
+            }
+            return;
+        }
+        state->primary = primary;
+        state->secondary = secondary;
+
+        if (state->mode == BENCH_SELECT_PARK_WAKE) {
+            sender = llam_spawn(bench_select_sender_task, state, NULL);
+            if (sender == NULL) {
+                bench_fail(&state->failures, "select sender spawn failed");
+                (void)llam_channel_destroy(primary);
+                (void)llam_channel_destroy(secondary);
+                return;
+            }
+        }
+
+        start_ns = llam_now_ns();
+        for (i = 0; i < state->ops_per_round; ++i) {
+            if (state->mode == BENCH_SELECT_READY &&
+                llam_channel_send(primary, (void *)(uintptr_t)(i + 1U)) != 0) {
+                bench_fail(&state->failures, "select ready seed send failed");
+                goto done_round;
+            }
+            if (bench_select_recv_once(state,
+                                       state->mode == BENCH_SELECT_TIMEOUT ? llam_now_ns() : UINT64_MAX,
+                                       i) != 0) {
+                goto done_round;
+            }
+        }
+        state->samples_ns[round] = llam_now_ns() - start_ns;
+
+done_round:
+        if (atomic_load(&state->failures) != 0U) {
+            (void)llam_channel_close(primary);
+            (void)llam_channel_close(secondary);
+        }
+        if (sender != NULL && llam_join(sender) != 0) {
+            bench_fail(&state->failures, "select sender join failed");
+        }
+        state->primary = NULL;
+        state->secondary = NULL;
+        (void)llam_channel_destroy(primary);
+        (void)llam_channel_destroy(secondary);
+        if (atomic_load(&state->failures) != 0U) {
+            return;
+        }
+    }
+}
+
 static void bench_echo_peer_task(void *arg) {
     bench_echo_state_t *state = arg;
     unsigned i;
@@ -409,33 +684,32 @@ static void bench_echo_peer_task(void *arg) {
 
 void bench_io_task(void *arg) {
     bench_io_state_t *state = arg;
+    llam_fd_t sv[2] = {LLAM_INVALID_FD, LLAM_INVALID_FD};
+    bool reuse_pair = bench_reuse_socketpair_enabled();
     unsigned round;
 
+    if (reuse_pair && bench_socketpair(sv) != 0) {
+        bench_fail(&state->failures, "io socketpair failed");
+        return;
+    }
+
     for (round = 0; round < state->rounds; ++round) {
-        int sv[2];
         bench_echo_state_t peer_state;
         llam_task_t *peer;
         uint64_t start_ns;
         unsigned i;
 
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        if (!reuse_pair && bench_socketpair(sv) != 0) {
             bench_fail(&state->failures, "io socketpair failed");
             return;
         }
 
         peer_state.fd = sv[1];
         peer_state.messages_per_round = state->messages_per_round;
-        peer = llam_spawn(bench_echo_peer_task,
-                        &peer_state,
-                        &(llam_spawn_opts_t){
-                            .task_class = LLAM_TASK_CLASS_DEFAULT,
-                            .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                        });
+        peer = llam_spawn(bench_echo_peer_task, &peer_state, NULL);
         if (peer == NULL) {
             bench_fail(&state->failures, "io peer spawn failed");
-            close(sv[0]);
-            close(sv[1]);
-            return;
+            goto done;
         }
 
         start_ns = llam_now_ns();
@@ -445,27 +719,29 @@ void bench_io_task(void *arg) {
 
             if (llam_write(sv[0], &out, 1U) != 1) {
                 bench_fail(&state->failures, "io write failed");
-                close(sv[0]);
-                close(sv[1]);
-                return;
+                goto done;
             }
             if (llam_read(sv[0], &in, 1U) != 1 || in != out) {
                 bench_fail(&state->failures, "io read mismatch");
-                close(sv[0]);
-                close(sv[1]);
-                return;
+                goto done;
             }
         }
         if (llam_join(peer) != 0) {
             bench_fail(&state->failures, "io peer join failed");
-            close(sv[0]);
-            close(sv[1]);
-            return;
+            goto done;
         }
         state->samples_ns[round] = llam_now_ns() - start_ns;
-        close(sv[0]);
-        close(sv[1]);
+        if (!reuse_pair) {
+            bench_close_fd(sv[0]);
+            bench_close_fd(sv[1]);
+            sv[0] = LLAM_INVALID_FD;
+            sv[1] = LLAM_INVALID_FD;
+        }
     }
+
+done:
+    bench_close_fd(sv[0]);
+    bench_close_fd(sv[1]);
 }
 
 static void bench_poll_writer_task(void *arg) {
@@ -484,33 +760,33 @@ static void bench_poll_writer_task(void *arg) {
 
 void bench_poll_task(void *arg) {
     bench_poll_state_t *state = arg;
+    bool fused_read = bench_env_flag_default("LLAM_BENCH_POLL_FUSED", 0U) != 0U;
+    llam_fd_t sv[2] = {LLAM_INVALID_FD, LLAM_INVALID_FD};
+    bool reuse_pair = bench_reuse_socketpair_enabled();
     unsigned round;
 
+    if (reuse_pair && bench_socketpair(sv) != 0) {
+        bench_fail(&state->failures, "poll socketpair failed");
+        return;
+    }
+
     for (round = 0; round < state->rounds; ++round) {
-        int sv[2];
         bench_poll_writer_state_t writer_state;
         llam_task_t *writer;
         uint64_t start_ns;
         unsigned i;
 
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        if (!reuse_pair && bench_socketpair(sv) != 0) {
             bench_fail(&state->failures, "poll socketpair failed");
             return;
         }
 
         writer_state.fd = sv[1];
         writer_state.events_per_round = state->events_per_round;
-        writer = llam_spawn(bench_poll_writer_task,
-                          &writer_state,
-                          &(llam_spawn_opts_t){
-                              .task_class = LLAM_TASK_CLASS_DEFAULT,
-                              .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                          });
+        writer = llam_spawn(bench_poll_writer_task, &writer_state, NULL);
         if (writer == NULL) {
             bench_fail(&state->failures, "poll writer spawn failed");
-            close(sv[0]);
-            close(sv[1]);
-            return;
+            goto done;
         }
 
         start_ns = llam_now_ns();
@@ -519,6 +795,16 @@ void bench_poll_task(void *arg) {
             char byte = 0;
             int poll_rc;
 
+            if (fused_read) {
+                if (llam_read_when_ready(sv[0],
+                                       &byte,
+                                       1U,
+                                       bench_platform_prefers_indefinite_ready_poll() ? -1 : 1000) != 1) {
+                    bench_fail(&state->failures, "poll fused read failed");
+                    goto done;
+                }
+                continue;
+            }
             poll_rc = llam_poll_fd(sv[0], POLLIN, bench_platform_prefers_indefinite_ready_poll() ? -1 : 1000, &revents);
             if (poll_rc != 1 || (revents & POLLIN) == 0) {
                 fprintf(stderr,
@@ -529,27 +815,29 @@ void bench_poll_task(void *arg) {
                         round,
                         i);
                 bench_fail(&state->failures, "poll wait failed");
-                close(sv[0]);
-                close(sv[1]);
-                return;
+                goto done;
             }
             if (llam_read(sv[0], &byte, 1U) != 1) {
                 bench_fail(&state->failures, "poll read failed");
-                close(sv[0]);
-                close(sv[1]);
-                return;
+                goto done;
             }
         }
         if (llam_join(writer) != 0) {
             bench_fail(&state->failures, "poll writer join failed");
-            close(sv[0]);
-            close(sv[1]);
-            return;
+            goto done;
         }
         state->samples_ns[round] = llam_now_ns() - start_ns;
-        close(sv[0]);
-        close(sv[1]);
+        if (!reuse_pair) {
+            bench_close_fd(sv[0]);
+            bench_close_fd(sv[1]);
+            sv[0] = LLAM_INVALID_FD;
+            sv[1] = LLAM_INVALID_FD;
+        }
     }
+
+done:
+    bench_close_fd(sv[0]);
+    bench_close_fd(sv[1]);
 }
 
 static void bench_opaque_companion_task(void *arg) {
@@ -562,6 +850,34 @@ static void bench_opaque_companion_task(void *arg) {
 }
 
 static void bench_blocking_sleep_us(unsigned sleep_us) {
+#if LLAM_PLATFORM_WINDOWS
+    LARGE_INTEGER due_time;
+    HANDLE timer;
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+    if (sleep_us == 0U) {
+        return;
+    }
+    timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (timer == NULL) {
+        timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    }
+    if (timer == NULL) {
+        Sleep((DWORD)((sleep_us + 999U) / 1000U));
+        return;
+    }
+    due_time.QuadPart = -((LONGLONG)sleep_us * 10LL);
+    if (!SetWaitableTimer(timer, &due_time, 0, NULL, NULL, FALSE)) {
+        CloseHandle(timer);
+        Sleep((DWORD)((sleep_us + 999U) / 1000U));
+        return;
+    }
+    (void)WaitForSingleObject(timer, INFINITE);
+    CloseHandle(timer);
+#else
     for (;;) {
         struct timeval tv;
         int rc;
@@ -581,6 +897,7 @@ static void bench_blocking_sleep_us(unsigned sleep_us) {
         }
         return;
     }
+#endif
 }
 
 void bench_opaque_task(void *arg) {
@@ -592,12 +909,7 @@ void bench_opaque_task(void *arg) {
         unsigned i;
 
         for (i = 0; i < state->scopes_per_round; ++i) {
-            llam_task_t *companion = llam_spawn(bench_opaque_companion_task,
-                                            &state->companion_yields,
-                                            &(llam_spawn_opts_t){
-                                                .task_class = LLAM_TASK_CLASS_DEFAULT,
-                                                .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                                            });
+            llam_task_t *companion = llam_spawn(bench_opaque_companion_task, &state->companion_yields, NULL);
 
             if (companion == NULL) {
                 bench_fail(&state->failures, "opaque companion spawn failed");
@@ -649,12 +961,7 @@ void bench_sleep_task(void *arg) {
         memset(tasks, 0, state->tasks_per_round * sizeof(*tasks));
         start_ns = llam_now_ns();
         for (i = 0; i < state->tasks_per_round; ++i) {
-            tasks[i] = llam_spawn(bench_sleep_child_task,
-                                state,
-                                &(llam_spawn_opts_t){
-                                    .task_class = LLAM_TASK_CLASS_DEFAULT,
-                                    .stack_class = LLAM_STACK_CLASS_DEFAULT,
-            });
+            tasks[i] = llam_spawn(bench_sleep_child_task, state, NULL);
             if (tasks[i] == NULL) {
                 bench_fail(&state->failures, "sleep_fanout child spawn failed");
                 goto done;

@@ -41,6 +41,14 @@ typedef struct sync_state {
     llam_channel_t *busy_channel;
     llam_channel_t *errno_request_channel;
     llam_channel_t *errno_response_channel;
+    llam_channel_t *select_recv_channel;
+    llam_channel_t *select_send_channel;
+    llam_channel_t *select_full_channel;
+    llam_channel_t *select_park_channel;
+    llam_channel_t *select_empty_a;
+    llam_channel_t *select_empty_b;
+    llam_channel_t *bounded3_channel;
+    llam_task_local_key_t tls_key;
     atomic_uint failures;
     atomic_uint counter;
     atomic_uint cond_waiting;
@@ -55,6 +63,12 @@ typedef struct sync_state {
     atomic_uint null_checks;
     atomic_uint errno_checks;
     atomic_uint destroy_checks;
+    atomic_uint select_checks;
+    atomic_uint select_park_waiting;
+    atomic_uint select_park_checks;
+    atomic_uint tls_checks;
+    atomic_uint group_checks;
+    atomic_uint bounded_capacity_checks;
     int first_errno;
     char first_case[128];
 } sync_state_t;
@@ -399,7 +413,209 @@ static void busy_cond_destroyer_task(void *arg) {
     }
 }
 
+static void select_task(void *arg) {
+    sync_state_t *state = arg;
+    void *received = NULL;
+    size_t selected = SIZE_MAX;
+    llam_select_op_t recv_ops[2];
+    llam_select_op_t send_ops[2];
+
+    if (llam_channel_send(state->select_recv_channel, (void *)(uintptr_t)23U) != 0) {
+        task_fail(state, "select fixture send", errno);
+        return;
+    }
+
+    memset(recv_ops, 0, sizeof(recv_ops));
+    recv_ops[0].kind = LLAM_SELECT_OP_RECV;
+    recv_ops[0].channel = state->select_recv_channel;
+    recv_ops[0].recv_out = &received;
+    recv_ops[1].kind = LLAM_SELECT_OP_RECV;
+    recv_ops[1].channel = state->empty_channel;
+    recv_ops[1].recv_out = &received;
+    if (llam_channel_select(recv_ops, 2U, llam_now_ns() + 10000000ULL, &selected) != 0 ||
+        selected != 0U ||
+        received != (void *)(uintptr_t)23U ||
+        recv_ops[0].result_errno != 0) {
+        task_fail(state, "channel select recv", errno);
+        return;
+    }
+
+    memset(send_ops, 0, sizeof(send_ops));
+    send_ops[0].kind = LLAM_SELECT_OP_SEND;
+    if (llam_channel_send(state->select_full_channel, (void *)(uintptr_t)55U) != 0) {
+        task_fail(state, "select full fixture send", errno);
+        return;
+    }
+
+    send_ops[0].channel = state->select_full_channel;
+    send_ops[0].send_value = (void *)(uintptr_t)77U;
+    send_ops[1].kind = LLAM_SELECT_OP_SEND;
+    send_ops[1].channel = state->select_send_channel;
+    send_ops[1].send_value = (void *)(uintptr_t)31U;
+    selected = SIZE_MAX;
+    if (llam_channel_select(send_ops, 2U, llam_now_ns() + 10000000ULL, &selected) != 0 ||
+        selected != 1U ||
+        send_ops[1].result_errno != 0) {
+        task_fail(state, "channel select send", errno);
+        return;
+    }
+    received = llam_channel_recv(state->select_send_channel);
+    if (received != (void *)(uintptr_t)31U) {
+        task_fail(state, "channel select sent payload", errno);
+        return;
+    }
+    received = llam_channel_recv(state->select_full_channel);
+    if (received != (void *)(uintptr_t)55U) {
+        task_fail(state, "channel select full drain", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->select_checks, 1U, memory_order_relaxed);
+}
+
+static void select_park_waiter_task(void *arg) {
+    sync_state_t *state = arg;
+    void *received = NULL;
+    size_t selected = SIZE_MAX;
+    llam_select_op_t recv_ops[2];
+
+    memset(recv_ops, 0, sizeof(recv_ops));
+    recv_ops[0].kind = LLAM_SELECT_OP_RECV;
+    recv_ops[0].channel = state->select_park_channel;
+    recv_ops[0].recv_out = &received;
+    recv_ops[1].kind = LLAM_SELECT_OP_RECV;
+    recv_ops[1].channel = state->select_empty_a;
+    recv_ops[1].recv_out = &received;
+
+    atomic_store_explicit(&state->select_park_waiting, 1U, memory_order_release);
+    if (llam_channel_select(recv_ops, 2U, llam_now_ns() + 50000000ULL, &selected) != 0 ||
+        selected != 0U ||
+        received != (void *)(uintptr_t)99U ||
+        recv_ops[0].result_errno != 0) {
+        task_fail(state, "channel select parked recv", errno);
+        return;
+    }
+
+    memset(recv_ops, 0, sizeof(recv_ops));
+    recv_ops[0].kind = LLAM_SELECT_OP_RECV;
+    recv_ops[0].channel = state->select_empty_a;
+    recv_ops[0].recv_out = &received;
+    recv_ops[1].kind = LLAM_SELECT_OP_RECV;
+    recv_ops[1].channel = state->select_empty_b;
+    recv_ops[1].recv_out = &received;
+    errno = 0;
+    if (llam_channel_select(recv_ops, 2U, llam_now_ns() + 1000000ULL, &selected) != -1 ||
+        errno != ETIMEDOUT) {
+        task_fail(state, "channel select parked timeout", errno);
+        return;
+    }
+
+    atomic_fetch_add_explicit(&state->select_park_checks, 1U, memory_order_relaxed);
+}
+
+static void select_park_sender_task(void *arg) {
+    sync_state_t *state = arg;
+    unsigned i;
+
+    while (atomic_load_explicit(&state->select_park_waiting, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    for (i = 0U; i < 4U; ++i) {
+        llam_yield();
+    }
+    if (llam_channel_send(state->select_park_channel, (void *)(uintptr_t)99U) != 0) {
+        task_fail(state, "channel select parked sender", errno);
+    }
+}
+
+static void task_local_task(void *arg) {
+    sync_state_t *state = arg;
+    uintptr_t value = 91U;
+
+    if (llam_task_local_set(state->tls_key, (void *)value) != 0) {
+        task_fail(state, "task local set", errno);
+        return;
+    }
+    if (llam_task_local_get(state->tls_key) != (void *)value) {
+        task_fail(state, "task local get", errno);
+        return;
+    }
+    if (llam_task_local_set(state->tls_key, NULL) != 0) {
+        task_fail(state, "task local clear", errno);
+        return;
+    }
+    if (llam_task_local_get(state->tls_key) != NULL) {
+        task_fail(state, "task local cleared get", EPROTO);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->tls_checks, 1U, memory_order_relaxed);
+}
+
+static void bounded_capacity_task(void *arg) {
+    sync_state_t *state = arg;
+    void *value;
+
+    if (llam_channel_send(state->bounded3_channel, (void *)(uintptr_t)1U) != 0 ||
+        llam_channel_send(state->bounded3_channel, (void *)(uintptr_t)2U) != 0 ||
+        llam_channel_send(state->bounded3_channel, (void *)(uintptr_t)3U) != 0) {
+        task_fail(state, "bounded capacity fill", errno);
+        return;
+    }
+    errno = 0;
+    if (llam_channel_send_until(state->bounded3_channel, (void *)(uintptr_t)4U, 0U) != -1 ||
+        errno != ETIMEDOUT) {
+        task_fail(state, "bounded capacity exact full", errno);
+        return;
+    }
+    value = llam_channel_recv(state->bounded3_channel);
+    if (value != (void *)(uintptr_t)1U) {
+        task_fail(state, "bounded capacity recv 1", errno);
+        return;
+    }
+    value = llam_channel_recv(state->bounded3_channel);
+    if (value != (void *)(uintptr_t)2U) {
+        task_fail(state, "bounded capacity recv 2", errno);
+        return;
+    }
+    value = llam_channel_recv(state->bounded3_channel);
+    if (value != (void *)(uintptr_t)3U) {
+        task_fail(state, "bounded capacity recv 3", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->bounded_capacity_checks, 1U, memory_order_relaxed);
+}
+
+static void group_task(void *arg) {
+    sync_state_t *state = arg;
+
+    atomic_fetch_add_explicit(&state->group_checks, 1U, memory_order_relaxed);
+}
+
 static void destroy_sync_state(sync_state_t *state) {
+    if (state->tls_key != 0U && state->tls_key != LLAM_TASK_LOCAL_INVALID_KEY) {
+        (void)llam_task_local_key_delete(state->tls_key);
+        state->tls_key = LLAM_TASK_LOCAL_INVALID_KEY;
+    }
+    if (state->select_send_channel != NULL) {
+        (void)llam_channel_destroy(state->select_send_channel);
+    }
+    if (state->select_full_channel != NULL) {
+        (void)llam_channel_destroy(state->select_full_channel);
+    }
+    if (state->bounded3_channel != NULL) {
+        (void)llam_channel_destroy(state->bounded3_channel);
+    }
+    if (state->select_recv_channel != NULL) {
+        (void)llam_channel_destroy(state->select_recv_channel);
+    }
+    if (state->select_empty_b != NULL) {
+        (void)llam_channel_destroy(state->select_empty_b);
+    }
+    if (state->select_empty_a != NULL) {
+        (void)llam_channel_destroy(state->select_empty_a);
+    }
+    if (state->select_park_channel != NULL) {
+        (void)llam_channel_destroy(state->select_park_channel);
+    }
     if (state->busy_channel != NULL) {
         (void)llam_channel_destroy(state->busy_channel);
     }
@@ -460,6 +676,13 @@ static int init_sync_state(sync_state_t *state) {
     atomic_init(&state->null_checks, 0U);
     atomic_init(&state->errno_checks, 0U);
     atomic_init(&state->destroy_checks, 0U);
+    atomic_init(&state->select_checks, 0U);
+    atomic_init(&state->select_park_waiting, 0U);
+    atomic_init(&state->select_park_checks, 0U);
+    atomic_init(&state->tls_checks, 0U);
+    atomic_init(&state->group_checks, 0U);
+    atomic_init(&state->bounded_capacity_checks, 0U);
+    state->tls_key = LLAM_TASK_LOCAL_INVALID_KEY;
 
     state->counter_mutex = llam_mutex_create();
     state->cond_mutex = llam_mutex_create();
@@ -475,6 +698,17 @@ static int init_sync_state(sync_state_t *state) {
     state->busy_channel = llam_channel_create(1U);
     state->errno_request_channel = llam_channel_create(1U);
     state->errno_response_channel = llam_channel_create(1U);
+    state->select_recv_channel = llam_channel_create(3U);
+    state->select_send_channel = llam_channel_create(3U);
+    state->select_full_channel = llam_channel_create(1U);
+    state->select_park_channel = llam_channel_create(1U);
+    state->select_empty_a = llam_channel_create(1U);
+    state->select_empty_b = llam_channel_create(1U);
+    state->bounded3_channel = llam_channel_create(3U);
+    if (llam_task_local_key_create(&state->tls_key) != 0) {
+        destroy_sync_state(state);
+        return -1;
+    }
     if (state->counter_mutex == NULL ||
         state->cond_mutex == NULL ||
         state->destroy_mutex == NULL ||
@@ -488,7 +722,14 @@ static int init_sync_state(sync_state_t *state) {
         state->null_channel == NULL ||
         state->busy_channel == NULL ||
         state->errno_request_channel == NULL ||
-        state->errno_response_channel == NULL) {
+        state->errno_response_channel == NULL ||
+        state->select_recv_channel == NULL ||
+        state->select_send_channel == NULL ||
+        state->select_full_channel == NULL ||
+        state->select_park_channel == NULL ||
+        state->select_empty_a == NULL ||
+        state->select_empty_b == NULL ||
+        state->bounded3_channel == NULL) {
         destroy_sync_state(state);
         return -1;
     }
@@ -501,6 +742,7 @@ int main(void) {
     llam_mutex_t *idle_mutex;
     llam_cond_t *idle_cond;
     llam_channel_t *idle_channel;
+    llam_task_group_t *group = NULL;
 
     errno = 0;
     if (llam_channel_create(0U) != NULL || errno != EINVAL) {
@@ -544,6 +786,32 @@ int main(void) {
         llam_runtime_shutdown();
         return test_fail_errno("sync state initialization failed");
     }
+    group = llam_task_group_create();
+    if (group == NULL) {
+        destroy_sync_state(&state);
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_task_group_create failed");
+    }
+    if (llam_task_group_spawn(group, group_task, &state, NULL) == NULL ||
+        llam_task_group_spawn(group, group_task, &state, NULL) == NULL) {
+        (void)llam_task_group_destroy(group);
+        destroy_sync_state(&state);
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_task_group_spawn failed");
+    }
+    errno = 0;
+    if (llam_task_group_join_until(group, llam_now_ns()) != -1 || errno != ETIMEDOUT) {
+        (void)llam_task_group_destroy(group);
+        destroy_sync_state(&state);
+        llam_runtime_shutdown();
+        return test_fail("llam_task_group_join_until did not preserve pending children on timeout");
+    }
+    errno = 0;
+    if (llam_task_group_destroy(group) != -1 || errno != EBUSY) {
+        destroy_sync_state(&state);
+        llam_runtime_shutdown();
+        return test_fail("busy task group destroy did not fail with EBUSY");
+    }
 
     if (llam_spawn(counter_task, &state, NULL) == NULL ||
         llam_spawn(counter_task, &state, NULL) == NULL ||
@@ -557,15 +825,33 @@ int main(void) {
         llam_spawn(channel_errno_sender_task, &state, NULL) == NULL ||
         llam_spawn(destroy_contract_task, &state, NULL) == NULL ||
         llam_spawn(busy_cond_waiter_task, &state, NULL) == NULL ||
-        llam_spawn(busy_cond_destroyer_task, &state, NULL) == NULL) {
+        llam_spawn(busy_cond_destroyer_task, &state, NULL) == NULL ||
+        llam_spawn(select_task, &state, NULL) == NULL ||
+        llam_spawn(select_park_waiter_task, &state, NULL) == NULL ||
+        llam_spawn(select_park_sender_task, &state, NULL) == NULL ||
+        llam_spawn(task_local_task, &state, NULL) == NULL ||
+        llam_spawn(bounded_capacity_task, &state, NULL) == NULL) {
+        (void)llam_task_group_destroy(group);
         destroy_sync_state(&state);
         llam_runtime_shutdown();
         return test_fail_errno("llam_spawn failed");
     }
     if (llam_run() != 0) {
+        (void)llam_task_group_destroy(group);
         destroy_sync_state(&state);
         llam_runtime_shutdown();
         return test_fail_errno("llam_run failed");
+    }
+    if (llam_task_group_join(group) != 0) {
+        (void)llam_task_group_destroy(group);
+        destroy_sync_state(&state);
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_task_group_join failed");
+    }
+    if (llam_task_group_destroy(group) != 0) {
+        destroy_sync_state(&state);
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_task_group_destroy failed");
     }
 
     if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
@@ -585,7 +871,12 @@ int main(void) {
         atomic_load_explicit(&state.timeout_checks, memory_order_relaxed) != 3U ||
         atomic_load_explicit(&state.null_checks, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.errno_checks, memory_order_relaxed) != 2U ||
-        atomic_load_explicit(&state.destroy_checks, memory_order_relaxed) != 1U) {
+        atomic_load_explicit(&state.destroy_checks, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.select_checks, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.select_park_checks, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.tls_checks, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.group_checks, memory_order_relaxed) != 2U ||
+        atomic_load_explicit(&state.bounded_capacity_checks, memory_order_relaxed) != 1U) {
         destroy_sync_state(&state);
         llam_runtime_shutdown();
         return test_fail("sync primitive result counters were unexpected");

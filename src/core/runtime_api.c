@@ -1,9 +1,9 @@
 /**
  * @file src/core/runtime_api.c
- * @brief Legacy llam_* public runtime API entry points and argument validation.
+ * @brief Canonical llam_* public runtime API entry points and argument validation.
  *
  * @details
- * The legacy public API is split across subsystem-specific translation units
+ * The canonical public API is split across subsystem-specific translation units
  * (spawn, run, synchronization, I/O, cancellation, diagnostics, etc.). This file
  * intentionally stays minimal so build systems that expect @c runtime_api.c to
  * exist continue to compile cleanly.

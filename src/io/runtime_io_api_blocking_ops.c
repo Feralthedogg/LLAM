@@ -66,8 +66,8 @@ void *llam_blocking_read_impl(void *arg) {
     }
 
     for (;;) {
-        req->result = req->use_recv_op ? recv(req->fd, req->buf, req->count, req->recv_flags) :
-                                         read(req->fd, req->buf, req->count);
+        req->result = req->use_recv_op ? llam_platform_recv_fd(req->fd, req->buf, req->count, req->recv_flags) :
+                                         llam_platform_read_fd(req->fd, req->buf, req->count);
         if (req->result >= 0) {
             break;
         }
@@ -147,7 +147,7 @@ static llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity) {
  *
  * @return @c true when @p fd is a socket.
  */
-static bool llam_fd_get_socket_type(int fd, int *so_type_out) {
+static bool llam_fd_get_socket_type(llam_fd_t fd, int *so_type_out) {
     int so_type = 0;
     socklen_t so_type_len = sizeof(so_type);
 
@@ -175,7 +175,7 @@ static bool llam_fd_get_socket_type(int fd, int *so_type_out) {
  *
  * @return Number of bytes read, or -1 with @c errno set.
  */
-ssize_t llam_read_owned_impl(int fd,
+ssize_t llam_read_owned_impl(llam_fd_t fd,
                                   size_t max_count,
                                   int recv_flags,
                                   bool force_recv,
@@ -212,7 +212,8 @@ ssize_t llam_read_owned_impl(int fd,
             errno = ENOMEM;
             return -1;
         }
-        result = socket_recv ? recv(fd, buffer->data, max_count, recv_flags) : read(fd, buffer->data, max_count);
+        result = socket_recv ? llam_platform_recv_fd(fd, buffer->data, max_count, recv_flags) :
+                               llam_platform_read_fd(fd, buffer->data, max_count);
         if (result < 0) {
             saved_errno = errno;
             llam_io_buffer_release(buffer);
@@ -366,7 +367,7 @@ void *llam_blocking_write_impl(void *arg) {
     }
 
     for (;;) {
-        req->result = write(req->fd, req->buf, req->count);
+        req->result = llam_platform_write_fd(req->fd, req->buf, req->count);
         if (req->result >= 0) {
             break;
         }
@@ -417,7 +418,12 @@ void *llam_blocking_accept_impl(void *arg) {
     }
 
     for (;;) {
-        req->result = accept(req->fd, req->addr, req->addrlen);
+        {
+            llam_fd_t accepted = llam_platform_accept_fd(req->fd, req->addr, req->addrlen);
+
+            req->fd_result = accepted;
+            req->result = LLAM_FD_IS_INVALID(accepted) ? -1 : (ssize_t)accepted;
+        }
         if (req->result >= 0) {
             break;
         }
@@ -477,7 +483,7 @@ void *llam_blocking_connect_impl(void *arg) {
 
     for (;;) {
         if (!wait_ready) {
-            if (connect(req->fd, req->addr, req->addr_len) == 0) {
+            if (llam_platform_connect_fd(req->fd, req->addr, req->addr_len) == 0) {
                 req->result = 0;
                 break;
             }

@@ -53,7 +53,9 @@ const char *llam_task_state_name(const llam_task_t *task) {
  * @return Task class, or default class for NULL.
  */
 uint32_t llam_task_class(const llam_task_t *task) {
-    return task != NULL ? (uint32_t)task->task_class : (uint32_t)LLAM_TASK_CLASS_DEFAULT;
+    return task != NULL
+               ? atomic_load_explicit(&((llam_task_t *)task)->task_class, memory_order_acquire)
+               : (uint32_t)LLAM_TASK_CLASS_DEFAULT;
 }
 
 /**
@@ -108,6 +110,14 @@ static void llam_runtime_collect_stats_full(llam_runtime_stats_t *stats) {
         stats->idle_spin_hits += shard->metrics.idle_spin_hits;
         stats->idle_spin_fallbacks += shard->metrics.idle_spin_fallbacks;
         stats->idle_spin_ns += shard->metrics.idle_spin_ns;
+        stats->yield_direct_attempts += shard->metrics.yield_direct_attempts;
+        stats->yield_direct_fast_hits += shard->metrics.yield_direct_fast_hits;
+        stats->yield_direct_locked_hits += shard->metrics.yield_direct_locked_hits;
+        stats->yield_direct_fail_context += shard->metrics.yield_direct_fail_context;
+        stats->yield_direct_fail_policy += shard->metrics.yield_direct_fail_policy;
+        stats->yield_direct_fail_no_work += shard->metrics.yield_direct_fail_no_work;
+        stats->yield_direct_fail_self += shard->metrics.yield_direct_fail_self;
+        stats->yield_direct_fail_push += shard->metrics.yield_direct_fail_push;
         stats->queue_overflows += shard->metrics.queue_overflows;
         stats->opaque_block_ns += shard->metrics.opaque_block_ns;
         stats->opaque_block_samples += shard->metrics.opaque_block_samples;
@@ -165,6 +175,78 @@ int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
     return llam_runtime_collect_stats_ex(stats, stats != NULL ? sizeof(*stats) : 0U);
 }
 
+static int llam_stats_json_u64(int fd, const char *name, uint64_t value, unsigned *field_count) {
+    int rc = dprintf(fd,
+                     "%s\"%s\":%llu",
+                     *field_count == 0U ? "" : ",",
+                     name,
+                     (unsigned long long)value);
+
+    if (rc < 0) {
+        return -1;
+    }
+    *field_count += 1U;
+    return 0;
+}
+
+int llam_runtime_write_stats_json(int fd) {
+    llam_runtime_stats_t stats;
+    unsigned fields = 0U;
+
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_runtime_collect_stats(&stats) != 0) {
+        return -1;
+    }
+    if (dprintf(fd, "{") < 0 ||
+        llam_stats_json_u64(fd, "ctx_switches", stats.ctx_switches, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yields", stats.yields, &fields) != 0 ||
+        llam_stats_json_u64(fd, "parks", stats.parks, &fields) != 0 ||
+        llam_stats_json_u64(fd, "wakes", stats.wakes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "steals", stats.steals, &fields) != 0 ||
+        llam_stats_json_u64(fd, "migrations", stats.migrations, &fields) != 0 ||
+        llam_stats_json_u64(fd, "blocking_calls", stats.blocking_calls, &fields) != 0 ||
+        llam_stats_json_u64(fd, "blocking_completions", stats.blocking_completions, &fields) != 0 ||
+        llam_stats_json_u64(fd, "io_submits", stats.io_submits, &fields) != 0 ||
+        llam_stats_json_u64(fd, "io_submit_calls", stats.io_submit_calls, &fields) != 0 ||
+        llam_stats_json_u64(fd, "io_submit_syscalls", stats.io_submit_syscalls, &fields) != 0 ||
+        llam_stats_json_u64(fd, "io_completions", stats.io_completions, &fields) != 0 ||
+        llam_stats_json_u64(fd, "idle_polls", stats.idle_polls, &fields) != 0 ||
+        llam_stats_json_u64(fd, "idle_spin_loops", stats.idle_spin_loops, &fields) != 0 ||
+        llam_stats_json_u64(fd, "idle_spin_hits", stats.idle_spin_hits, &fields) != 0 ||
+        llam_stats_json_u64(fd, "idle_spin_fallbacks", stats.idle_spin_fallbacks, &fields) != 0 ||
+        llam_stats_json_u64(fd, "idle_spin_ns", stats.idle_spin_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "queue_overflows", stats.queue_overflows, &fields) != 0 ||
+        llam_stats_json_u64(fd, "overflow_depth", stats.overflow_depth, &fields) != 0 ||
+        llam_stats_json_u64(fd, "active_workers", stats.active_workers, &fields) != 0 ||
+        llam_stats_json_u64(fd, "online_workers", stats.online_workers, &fields) != 0 ||
+        llam_stats_json_u64(fd, "online_workers_floor", stats.online_workers_floor, &fields) != 0 ||
+        llam_stats_json_u64(fd, "online_workers_min", stats.online_workers_min, &fields) != 0 ||
+        llam_stats_json_u64(fd, "online_workers_max", stats.online_workers_max, &fields) != 0 ||
+        llam_stats_json_u64(fd, "active_nodes", stats.active_nodes, &fields) != 0 ||
+        llam_stats_json_u64(fd, "dynamic_workers", stats.dynamic_workers, &fields) != 0 ||
+        llam_stats_json_u64(fd, "worker_rings", stats.worker_rings, &fields) != 0 ||
+        llam_stats_json_u64(fd, "worker_rings_multishot", stats.worker_rings_multishot, &fields) != 0 ||
+        llam_stats_json_u64(fd, "lockfree_normq", stats.lockfree_normq, &fields) != 0 ||
+        llam_stats_json_u64(fd, "huge_alloc", stats.huge_alloc, &fields) != 0 ||
+        llam_stats_json_u64(fd, "sqpoll", stats.sqpoll, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_block_ns", stats.opaque_block_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_block_samples", stats.opaque_block_samples, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_block_max_ns", stats.opaque_block_max_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_enter_wait_ns", stats.opaque_enter_wait_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_enter_wait_samples", stats.opaque_enter_wait_samples, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_enter_wait_max_ns", stats.opaque_enter_wait_max_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_leave_wait_ns", stats.opaque_leave_wait_ns, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_leave_wait_samples", stats.opaque_leave_wait_samples, &fields) != 0 ||
+        llam_stats_json_u64(fd, "opaque_leave_wait_max_ns", stats.opaque_leave_wait_max_ns, &fields) != 0 ||
+        dprintf(fd, "}\n") < 0) {
+        return -1;
+    }
+    return 0;
+}
+
 /**
  * @brief Write a human-readable runtime dump to an fd.
  *
@@ -215,7 +297,7 @@ void llam_dump_runtime_state(int fd) {
             pressure,
             overflow_depth,
             overflow_threshold,
-            atomic_load(&rt->live_tasks),
+            llam_runtime_live_tasks(rt),
             atomic_load(&rt->fatal_errno),
             rt->xsave_enabled ? 1U : 0U,
             (unsigned long long)rt->xsave_mask,
@@ -235,7 +317,7 @@ void llam_dump_runtime_state(int fd) {
     dprintf(fd, "nodes:\n");
     for (i = 0; i < rt->active_nodes; ++i) {
         dprintf(fd,
-                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
+                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu cancel(ctrl=%llu ok=%llu fail=%llu not_found=%llu) max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
                 rt->nodes[i].index,
                 rt->nodes[i].kernel_node_id,
                 rt->nodes[i].ring_ready ? 1U : 0U,
@@ -256,6 +338,10 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)rt->nodes[i].submit_entries,
                 (unsigned long long)rt->nodes[i].submit_calls,
                 (unsigned long long)rt->nodes[i].submit_syscalls,
+                (unsigned long long)rt->nodes[i].windows_cancel_controls,
+                (unsigned long long)rt->nodes[i].windows_cancel_success,
+                (unsigned long long)rt->nodes[i].windows_cancel_failures,
+                (unsigned long long)rt->nodes[i].windows_cancel_not_found,
                 rt->nodes[i].max_submit_batch,
                 rt->nodes[i].last_cq_depth,
                 rt->nodes[i].max_cq_depth,
@@ -314,7 +400,7 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.wake_latency_ns,
                 (unsigned long long)shard->metrics.wake_samples);
         dprintf(fd,
-                "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
+                "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) direct_yield(attempts=%llu fast=%llu locked=%llu context=%llu policy=%llu no_work=%llu self=%llu push=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
                 (unsigned long long)shard->metrics.blocking_calls,
                 (unsigned long long)shard->metrics.blocking_completions,
                 (unsigned long long)shard->metrics.io_submits,
@@ -327,6 +413,14 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.idle_spin_hits,
                 (unsigned long long)shard->metrics.idle_spin_fallbacks,
                 (unsigned long long)shard->metrics.idle_spin_ns,
+                (unsigned long long)shard->metrics.yield_direct_attempts,
+                (unsigned long long)shard->metrics.yield_direct_fast_hits,
+                (unsigned long long)shard->metrics.yield_direct_locked_hits,
+                (unsigned long long)shard->metrics.yield_direct_fail_context,
+                (unsigned long long)shard->metrics.yield_direct_fail_policy,
+                (unsigned long long)shard->metrics.yield_direct_fail_no_work,
+                (unsigned long long)shard->metrics.yield_direct_fail_self,
+                (unsigned long long)shard->metrics.yield_direct_fail_push,
                 (unsigned long long)shard->metrics.watchdog_hits,
                 (unsigned long long)shard->metrics.long_no_safepoint,
                 (unsigned long long)shard->metrics.opaque_compensations,
@@ -409,26 +503,30 @@ void llam_dump_runtime_state(int fd) {
     }
 
     dprintf(fd, "tasks:\n");
-    pthread_mutex_lock(&rt->task_list_lock);
-    for (llam_task_t *task = rt->all_tasks; task != NULL; task = task->all_next) {
-        dprintf(fd,
-                "  id=%llu state=%s class=%d flags=0x%x home=%u last=%u wait=%s stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
-                (unsigned long long)task->id,
-                llam_state_name_from_id(task->state),
-                (int)task->task_class,
-                task->flags,
-                task->home_shard,
-                task->last_shard,
-                llam_wait_reason_name(task->wait_reason),
-                task->stack_size,
-                task->last_stack_used,
-                task->stack_high_water,
-                llam_stack_profile_hint(task),
-                (unsigned long long)task->last_run_ns,
-                (unsigned long long)task->total_run_ns,
-                (unsigned long long)task->last_opaque_block_ns,
-                (unsigned long long)task->max_opaque_block_ns,
-                (unsigned long long)task->opaque_block_count);
+    for (i = 0; i < rt->active_shards; ++i) {
+        llam_shard_t *shard = &rt->shards[i];
+
+        pthread_mutex_lock(&shard->lock);
+        for (llam_task_t *task = shard->all_tasks; task != NULL; task = task->all_next) {
+            dprintf(fd,
+                    "  id=%llu state=%s class=%d flags=0x%x home=%u last=%u wait=%s stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
+                    (unsigned long long)task->id,
+                    llam_state_name_from_id(task->state),
+                    (int)atomic_load_explicit(&task->task_class, memory_order_acquire),
+                    task->flags,
+                    task->home_shard,
+                    task->last_shard,
+                    llam_wait_reason_name(task->wait_reason),
+                    task->stack_size,
+                    task->last_stack_used,
+                    task->stack_high_water,
+                    llam_stack_profile_hint(task),
+                    (unsigned long long)task->last_run_ns,
+                    (unsigned long long)task->total_run_ns,
+                    (unsigned long long)task->last_opaque_block_ns,
+                    (unsigned long long)task->max_opaque_block_ns,
+                    (unsigned long long)task->opaque_block_count);
+        }
+        pthread_mutex_unlock(&shard->lock);
     }
-    pthread_mutex_unlock(&rt->task_list_lock);
 }

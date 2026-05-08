@@ -293,6 +293,14 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     node->provided_buf_acquires += 1U;
                 }
             }
+            if (res == -ENOBUFS) {
+                /*
+                 * recv_multishot depends on provided buffers. Some kernels can
+                 * accept the SQE and later report that no buffer is available;
+                 * treat that as a backend miss so callers retry on one-shot I/O.
+                 */
+                res = -EAGAIN;
+            }
             if (res > 0 && !has_buffer) {
                 // A positive multishot recv without a provided buffer is not
                 // usable for the owned-buffer API, so treat it as backend error.
@@ -310,7 +318,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     release_pending = true;
                 }
                 watch->deactivate_queued = false;
-                if (res == -EINVAL || res == -EOPNOTSUPP || res == -ENOSYS) {
+                if (res == -EAGAIN || res == -EINVAL || res == -EOPNOTSUPP || res == -ENOSYS) {
                     node->supports_multishot_recv = false;
                 }
             } else {

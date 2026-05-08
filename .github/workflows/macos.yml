@@ -26,7 +26,7 @@ jobs:
             package_target: macos-x86_64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Verify Darwin
         run: make verify-darwin CC="${{ matrix.cc }}"
@@ -38,7 +38,13 @@ jobs:
           ctest --test-dir build/macos --output-on-failure
 
       - name: Benchmark smoke
-        run: LLAM_BENCH_ONLY=spawn_join LLAM_BENCH_ROUNDS=1 ./bench
+        run: |
+          for case in spawn_join select_recv_ready select_park_wake select_timeout; do
+            LLAM_BENCH_ONLY="$case" \
+            LLAM_BENCH_ROUNDS=1 \
+            LLAM_BENCH_SELECT_OPS=128 \
+            ./bench
+          done
 
       - name: Package smoke
         run: |

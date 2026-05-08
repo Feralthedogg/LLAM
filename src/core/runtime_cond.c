@@ -89,6 +89,8 @@ int llam_cond_destroy(llam_cond_t *cond) {
  * @return 0 on signal/broadcast success, or -1 with @c errno set.
  */
 int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns) {
+    llam_shard_t *shard;
+    llam_task_t *task;
     llam_wait_node_t *node;
     llam_wait_node_t *mutex_waiter;
     uintptr_t owner;
@@ -103,8 +105,10 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
     if (llam_require_task_context() != 0) {
         return -1;
     }
+    task = g_llam_tls_task;
+    shard = g_llam_tls_shard;
 
-    if (atomic_load(&mutex->owner) != (uintptr_t)g_llam_tls_task) {
+    if (atomic_load(&mutex->owner) != (uintptr_t)task) {
         errno = EPERM;
         return -1;
     }
@@ -113,21 +117,21 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         return -1;
     }
 
-    node = llam_sync_wait_node_acquire(g_llam_tls_shard);
+    node = llam_sync_wait_node_acquire(shard);
     if (node == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
-    node->task = g_llam_tls_task;
-    node->owner_shard = g_llam_tls_shard->id;
+    node->task = task;
+    node->owner_shard = shard->id;
 
     pthread_mutex_lock(&cond->lock);
     llam_wait_queue_push_tail(&cond->waiters, node);
     owner = atomic_load(&mutex->owner);
-    if (owner != (uintptr_t)g_llam_tls_task) {
+    if (owner != (uintptr_t)task) {
         pthread_mutex_unlock(&cond->lock);
-        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        llam_sync_wait_node_release(shard, node);
         errno = EPERM;
         return -1;
     }
@@ -140,45 +144,49 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         atomic_store(&mutex->owner, (uintptr_t)0);
     }
     pthread_mutex_unlock(&mutex->lock);
+    atomic_store_explicit(&task->task_class,
+                          atomic_load_explicit(&task->base_task_class, memory_order_acquire),
+                          memory_order_release);
     if (mutex_waiter != NULL) {
         mutex_waiter->error_code = 0;
         llam_wake_wait_node(mutex_waiter, true, LLAM_WAIT_MUTEX);
     }
     pthread_mutex_unlock(&cond->lock);
-    llam_task_set_wait_node_tracking(g_llam_tls_task, node, &cond->waiters, &cond->lock, g_llam_tls_shard->id);
-    g_llam_tls_task->state = LLAM_TASK_STATE_PARKED;
-    g_llam_tls_task->wait_reason = LLAM_WAIT_COND;
-    if (has_deadline && llam_arm_task_wait_deadline(g_llam_tls_task, g_llam_tls_shard, deadline_ns) != 0) {
+    llam_task_ensure_listed(task);
+    llam_task_set_wait_node_tracking(task, node, &cond->waiters, &cond->lock, shard->id);
+    task->state = LLAM_TASK_STATE_PARKED;
+    task->wait_reason = LLAM_WAIT_COND;
+    if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
         pthread_mutex_lock(&cond->lock);
         (void)llam_wait_queue_remove(&cond->waiters, node);
         pthread_mutex_unlock(&cond->lock);
-        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
-        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(g_llam_tls_task);
-        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        task->state = LLAM_TASK_STATE_RUNNING;
+        task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(task);
+        llam_sync_wait_node_release(shard, node);
         (void)llam_mutex_lock_impl(mutex, false, 0U, false);
         return -1;
     }
-    if (g_llam_tls_task->cancel_token != NULL && llam_cancel_token_register_task(g_llam_tls_task) != 0) {
-        llam_disarm_task_wait_deadline(g_llam_tls_task);
+    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        llam_disarm_task_wait_deadline(task);
         pthread_mutex_lock(&cond->lock);
         (void)llam_wait_queue_remove(&cond->waiters, node);
         pthread_mutex_unlock(&cond->lock);
-        g_llam_tls_task->state = LLAM_TASK_STATE_RUNNING;
-        g_llam_tls_task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(g_llam_tls_task);
-        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        task->state = LLAM_TASK_STATE_RUNNING;
+        task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(task);
+        llam_sync_wait_node_release(shard, node);
         (void)llam_mutex_lock_impl(mutex, false, 0U, false);
         return -1;
     }
 
     llam_park_current_task(LLAM_WAIT_COND, LLAM_TRACE_STATE);
-    if (g_llam_tls_task->cancel_registered) {
-        llam_cancel_token_unregister_task(g_llam_tls_task);
+    if (task->cancel_registered) {
+        llam_cancel_token_unregister_task(task);
     }
-    llam_task_clear_wait_tracking(g_llam_tls_task);
+    llam_task_clear_wait_tracking(task);
     rc = node->error_code;
-    llam_sync_wait_node_release(g_llam_tls_shard, node);
+    llam_sync_wait_node_release(shard, node);
     if (llam_mutex_lock_impl(mutex, false, 0U, false) != 0) {
         return -1;
     }

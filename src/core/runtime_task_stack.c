@@ -3,11 +3,11 @@
  * @brief Fiber stack allocation, guard handling, and stack class sizing.
  *
  * @details
- * This translation unit owns stack mapping lifetime and task-object reclamation
- * helpers. Fiber stacks are allocated with a guard page, cached first in the
- * task's home shard, and then in a runtime-wide fallback cache. Keeping stacks
- * warm avoids repeated @c mmap / @c mprotect cost in spawn-heavy workloads while
- * preserving guard-page protection for overflow diagnostics.
+ * This translation unit owns stack mapping lifetime. Fiber stacks are allocated
+ * with a guard page, cached first in the task's home shard, and then in a
+ * runtime-wide fallback cache. Keeping stacks warm avoids repeated @c mmap /
+ * @c mprotect cost in spawn-heavy workloads while preserving guard-page
+ * protection for overflow diagnostics.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -41,24 +41,6 @@
 #define LLAM_STACK_CACHE_LOCAL_LARGE_LIMIT 64U
 /** Per-shard cached huge stack limit. */
 #define LLAM_STACK_CACHE_LOCAL_HUGE_LIMIT 16U
-
-/**
- * @brief Link a task into the runtime-wide diagnostic task list.
- *
- * @param rt   Runtime that owns the list.
- * @param task Task to insert.
- */
-void llam_add_task_to_list(llam_runtime_t *rt, llam_task_t *task) {
-    pthread_mutex_lock(&rt->task_list_lock);
-    task->all_prev = NULL;
-    task->all_next = rt->all_tasks;
-    if (rt->all_tasks != NULL) {
-        rt->all_tasks->all_prev = task;
-    }
-    rt->all_tasks = task;
-    pthread_mutex_unlock(&rt->task_list_lock);
-}
-
 /**
  * @brief Select the runtime-wide cache head for a stack size.
  *
@@ -298,9 +280,9 @@ static bool llam_runtime_stack_cache_pop(llam_runtime_t *rt,
     llam_stack_cache_entry_t **head;
     unsigned *count;
     llam_stack_cache_entry_t *entry;
-    void *mapping;
-    size_t mapping_size;
-    void *stack_base;
+    void *mapping = NULL;
+    size_t mapping_size = 0U;
+    void *stack_base = NULL;
 
     if (mapping_out != NULL) {
         *mapping_out = NULL;
@@ -337,9 +319,6 @@ static bool llam_runtime_stack_cache_pop(llam_runtime_t *rt,
         return false;
     }
 
-    if (mapping_size_out != NULL) {
-        *mapping_size_out = 0U;
-    }
     if (mapping_out != NULL) {
         *mapping_out = mapping;
     }
@@ -744,7 +723,18 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         errno = saved_errno;
         return -1;
     }
-#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+    if (g_llam_runtime.windows_unsafe_skip_task_simd != 0U) {
+        /*
+         * Opt-in ceiling mode for benchmark/runtime profiles that guarantee
+         * managed tasks do not depend on ABI-preserved XMM6-XMM15 state across
+         * cooperative switches.
+         */
+        task->ctx.simd_flags = LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
+    }
+#endif
+#if ((defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64) || \
+    (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)
     {
         uintptr_t stack_top = (uintptr_t)task->stack_base + task->stack_size;
         uint64_t *sp;
@@ -759,6 +749,10 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         task->ctx.rsp = (uint64_t)(uintptr_t)sp;
         task->ctx.rbx = 0;
         task->ctx.rbp = 0;
+#if LLAM_PLATFORM_WINDOWS
+        task->ctx.rsi = 0;
+        task->ctx.rdi = 0;
+#endif
         task->ctx.r12 = (uint64_t)(uintptr_t)task;
         task->ctx.r13 = 0;
         task->ctx.r14 = 0;
@@ -817,170 +811,6 @@ void llam_task_release_stack(llam_task_t *task) {
     if (!llam_shard_stack_cache_push(cache_shard, mapping, mapping_size, stack_base, stack_size)) {
         llam_runtime_stack_cache_push(&g_llam_runtime, mapping, mapping_size, stack_base, stack_size, NULL);
     }
-}
-
-/**
- * @brief Mark a joined task as safe for final reclamation.
- *
- * @param task Task whose join lifecycle reached reclaim-ready state.
- */
-void llam_task_mark_reclaim_ready(llam_task_t *task) {
-    if (task == NULL) {
-        return;
-    }
-    atomic_store_explicit(&task->reclaim_ready, 1U, memory_order_release);
-}
-
-/**
- * @brief Remove a task from the runtime-wide diagnostic task list.
- *
- * @param rt   Runtime that owns the list.
- * @param task Task to unlink.
- * @return true if the task was present and removed.
- */
-static bool llam_remove_task_from_list(llam_runtime_t *rt, llam_task_t *task) {
-    bool removed = false;
-
-    if (rt == NULL || task == NULL || !rt->task_list_lock_initialized) {
-        return false;
-    }
-
-    pthread_mutex_lock(&rt->task_list_lock);
-    if (task->all_prev != NULL || rt->all_tasks == task) {
-        if (task->all_prev != NULL) {
-            task->all_prev->all_next = task->all_next;
-        } else {
-            rt->all_tasks = task->all_next;
-        }
-        if (task->all_next != NULL) {
-            task->all_next->all_prev = task->all_prev;
-        }
-        task->all_next = NULL;
-        task->all_prev = NULL;
-        removed = true;
-    }
-    pthread_mutex_unlock(&rt->task_list_lock);
-    return removed;
-}
-
-/**
- * @brief Finish reclamation after a caller has claimed task ownership.
- *
- * @param rt   Runtime that owns @p task.
- * @param task Task whose reclaim_claimed flag is already set by the caller.
- */
-void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
-    if (rt == NULL || task == NULL) {
-        return;
-    }
-    if (!llam_remove_task_from_list(rt, task)) {
-        return;
-    }
-    llam_free_task(task);
-}
-
-/**
- * @brief Reclaim a joined task once join waiters have released it.
- *
- * @param rt   Runtime that owns @p task.
- * @param task Joined task candidate.
- */
-void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task) {
-    unsigned expected = 0U;
-
-    if (rt == NULL || task == NULL) {
-        return;
-    }
-    if (task->join_waiter_count_at_exit > 1U) {
-        return;
-    }
-    // The final join waiter marks reclaim_ready. A non-runtime thread sleeps
-    // briefly; a fiber yields so another runnable can complete the handoff.
-    while (atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) == 0U) {
-        if (g_llam_tls_task != NULL) {
-            llam_yield();
-        } else {
-            struct timespec ts = {
-                .tv_sec = 0,
-                .tv_nsec = 100000L,
-            };
-
-            nanosleep(&ts, NULL);
-        }
-    }
-    if (!atomic_compare_exchange_strong_explicit(&task->reclaim_claimed,
-                                                 &expected,
-                                                 1U,
-                                                 memory_order_acq_rel,
-                                                 memory_order_acquire)) {
-        return;
-    }
-    llam_reclaim_claimed_task(rt, task);
-}
-
-/**
- * @brief Reclaim a detached task after it has fully returned to the scheduler.
- *
- * @param rt   Runtime that owns @p task.
- * @param task Detached task candidate.
- */
-void llam_try_reclaim_detached_task(llam_runtime_t *rt, llam_task_t *task) {
-    unsigned expected = 0U;
-
-    if (rt == NULL || task == NULL) {
-        return;
-    }
-    if (atomic_load_explicit(&task->detached, memory_order_acquire) == 0U ||
-        atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) == 0U) {
-        return;
-    }
-    if (!atomic_compare_exchange_strong_explicit(&task->reclaim_claimed,
-                                                 &expected,
-                                                 1U,
-                                                 memory_order_acq_rel,
-                                                 memory_order_acquire)) {
-        return;
-    }
-    llam_reclaim_claimed_task(rt, task);
-}
-
-/**
- * @brief Fully destroy a task object and return it to the task allocator.
- *
- * @param task Task to free.
- */
-void llam_free_task(llam_task_t *task) {
-    if (task == NULL) {
-        return;
-    }
-
-    if (task->cancel_token != NULL) {
-        // A task may still be registered as a cancellation waiter when freed
-        // through error paths. Detach it before dropping the token reference.
-        pthread_mutex_lock(&task->cancel_token->lock);
-        if (task->cancel_registered) {
-            if (task->cancel_prev != NULL) {
-                task->cancel_prev->cancel_next = task->cancel_next;
-            } else {
-                task->cancel_token->waiters = task->cancel_next;
-            }
-            if (task->cancel_next != NULL) {
-                task->cancel_next->cancel_prev = task->cancel_prev;
-            }
-            task->cancel_prev = NULL;
-            task->cancel_next = NULL;
-            task->cancel_registered = false;
-        }
-        if (task->cancel_token->refcount > 0U) {
-            task->cancel_token->refcount -= 1U;
-        }
-        pthread_mutex_unlock(&task->cancel_token->lock);
-    }
-    llam_ctx_destroy_fp_state(&task->ctx);
-    if (task->stack_mapping != NULL && task->mapping_size != 0U) {
-        (void)munmap(task->stack_mapping, task->mapping_size);
-    }
-    llam_task_allocator_free(task);
 }
 
 /**

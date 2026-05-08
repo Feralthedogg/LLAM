@@ -53,7 +53,8 @@ int llam_task_set_class(uint32_t task_class) {
         errno = ENOTSUP;
         return -1;
     }
-    g_llam_tls_task->task_class = (llam_task_class_t)task_class;
+    atomic_store_explicit(&g_llam_tls_task->task_class, task_class, memory_order_release);
+    atomic_store_explicit(&g_llam_tls_task->base_task_class, task_class, memory_order_release);
     return 0;
 }
 

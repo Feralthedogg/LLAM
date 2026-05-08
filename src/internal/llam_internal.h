@@ -32,7 +32,102 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if (defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
+/** @brief Internal task states used by tracing, diagnostics, and assembly-visible code. */
+typedef enum llam_task_state_id {
+    LLAM_TASK_STATE_NEW = 0,
+    LLAM_TASK_STATE_RUNNABLE = 1,
+    LLAM_TASK_STATE_RUNNING = 2,
+    LLAM_TASK_STATE_PARKED = 3,
+    LLAM_TASK_STATE_BLOCKED_OPAQUE = 4,
+    LLAM_TASK_STATE_DEAD = 5,
+} llam_task_state_id_t;
+
+/** @brief Reason a task left running state or was woken. */
+typedef enum llam_wait_reason {
+    LLAM_WAIT_NONE = 0,
+    LLAM_WAIT_YIELD = 1,
+    LLAM_WAIT_JOIN = 2,
+    LLAM_WAIT_SLEEP = 3,
+    LLAM_WAIT_BLOCKING = 4,
+    LLAM_WAIT_IO = 5,
+    LLAM_WAIT_CANCEL = 6,
+    LLAM_WAIT_MUTEX = 7,
+    LLAM_WAIT_COND = 8,
+    LLAM_WAIT_CHANNEL_SEND = 9,
+    LLAM_WAIT_CHANNEL_RECV = 10,
+    LLAM_WAIT_TIMEOUT = 11,
+} llam_wait_reason_t;
+
+/** @brief Trace event categories recorded by shard-local trace buffers. */
+typedef enum llam_trace_kind {
+    LLAM_TRACE_STATE = 1,
+    LLAM_TRACE_WAKE = 2,
+    LLAM_TRACE_BLOCK_SUBMIT = 3,
+    LLAM_TRACE_BLOCK_COMPLETE = 4,
+    LLAM_TRACE_IO_SUBMIT = 5,
+    LLAM_TRACE_IO_COMPLETE = 6,
+    LLAM_TRACE_IDLE = 7,
+    LLAM_TRACE_STEAL = 8,
+    LLAM_TRACE_WATCHDOG = 9,
+} llam_trace_kind_t;
+
+/**
+ * @brief Windows x86-64 callee-saved context layout.
+ *
+ * Windows x64 preserves RSI, RDI, and XMM6-XMM15 in addition to the integer
+ * registers saved by the SysV x86-64 path. Offsets are consumed directly by
+ * @c asm/windows/x86_64/context_x86_64.S.
+ */
+#define LLAM_CTX_SIMD_F_SKIP_SAVE 0x1U
+#define LLAM_CTX_SIMD_F_SKIP_RESTORE 0x2U
+
+typedef struct llam_ctx {
+    uint64_t rsp;
+    uint64_t rbx;
+    uint64_t rbp;
+    uint64_t rsi;
+    uint64_t rdi;
+    uint64_t r12;
+    uint64_t r13;
+    uint64_t r14;
+    uint64_t r15;
+    uint64_t simd_align_pad;
+    uint64_t xmm6[2];
+    uint64_t xmm7[2];
+    uint64_t xmm8[2];
+    uint64_t xmm9[2];
+    uint64_t xmm10[2];
+    uint64_t xmm11[2];
+    uint64_t xmm12[2];
+    uint64_t xmm13[2];
+    uint64_t xmm14[2];
+    uint64_t xmm15[2];
+    uint32_t mxcsr;
+    uint16_t x87_cw;
+    uint16_t pad;
+    void *xsave_area;
+    uint32_t simd_valid;
+    uint32_t simd_flags;
+} llam_ctx_t;
+
+_Static_assert(offsetof(llam_ctx_t, rsp) == 0, "llam_ctx_t.rsp offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, rbx) == 8, "llam_ctx_t.rbx offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, rbp) == 16, "llam_ctx_t.rbp offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, rsi) == 24, "llam_ctx_t.rsi offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, rdi) == 32, "llam_ctx_t.rdi offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, r12) == 40, "llam_ctx_t.r12 offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, r15) == 64, "llam_ctx_t.r15 offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, simd_align_pad) == 72, "llam_ctx_t.simd_align_pad offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, xmm6) == 80, "llam_ctx_t.xmm6 offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, xmm15) == 224, "llam_ctx_t.xmm15 offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, mxcsr) == 240, "llam_ctx_t.mxcsr offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, x87_cw) == 244, "llam_ctx_t.x87_cw offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, xsave_area) == 248, "llam_ctx_t.xsave_area offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, simd_valid) == 256, "llam_ctx_t.simd_valid offset must match asm/windows/x86_64 context switch");
+_Static_assert(offsetof(llam_ctx_t, simd_flags) == 260, "llam_ctx_t.simd_flags offset must match asm/windows/x86_64 context switch");
+_Static_assert(sizeof(llam_ctx_t) == 264, "llam_ctx_t size must match asm/windows/x86_64 context switch");
+#elif (defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64
 /** @brief Internal task states used by tracing, diagnostics, and assembly-visible code. */
 typedef enum llam_task_state_id {
     LLAM_TASK_STATE_NEW = 0,
@@ -104,7 +199,7 @@ _Static_assert(offsetof(llam_ctx_t, mxcsr) == 56, "llam_ctx_t.mxcsr offset must 
 _Static_assert(offsetof(llam_ctx_t, x87_cw) == 60, "llam_ctx_t.x87_cw offset must match asm/x86_64 context switch");
 _Static_assert(offsetof(llam_ctx_t, xsave_area) == 64, "llam_ctx_t.xsave_area offset must match asm/x86_64 context switch");
 _Static_assert(sizeof(llam_ctx_t) == 72, "llam_ctx_t size must match asm/x86_64 context switch");
-#elif defined(__aarch64__)
+#elif LLAM_ARCH_AARCH64
 /** @brief Internal task states used by tracing and diagnostics on AArch64. */
 typedef enum llam_task_state_id {
     LLAM_TASK_STATE_NEW = 0,
@@ -150,6 +245,9 @@ typedef enum llam_trace_kind {
  * Integer callee-saved registers, FP/LR, SIMD d8-d15, and FP control/status are
  * stored in the exact order expected by the AArch64 context switch assembly.
  */
+#define LLAM_CTX_SIMD_F_SKIP_SAVE 0x1U
+#define LLAM_CTX_SIMD_F_SKIP_RESTORE 0x2U
+
 typedef struct llam_ctx {
     uint64_t sp;
     uint64_t x19;
@@ -174,6 +272,7 @@ typedef struct llam_ctx {
     uint64_t d15_bits;
     uint64_t fpcr;
     uint64_t fpsr;
+    uint64_t simd_flags;
 } llam_ctx_t;
 
 _Static_assert(offsetof(llam_ctx_t, sp) == 0, "llam_ctx_t.sp offset must match asm/arm64 context switch");
@@ -185,7 +284,8 @@ _Static_assert(offsetof(llam_ctx_t, d8_bits) == 104, "llam_ctx_t.d8_bits offset 
 _Static_assert(offsetof(llam_ctx_t, d15_bits) == 160, "llam_ctx_t.d15_bits offset must match asm/arm64 context switch");
 _Static_assert(offsetof(llam_ctx_t, fpcr) == 168, "llam_ctx_t.fpcr offset must match asm/arm64 context switch");
 _Static_assert(offsetof(llam_ctx_t, fpsr) == 176, "llam_ctx_t.fpsr offset must match asm/arm64 context switch");
-_Static_assert(sizeof(llam_ctx_t) == 184, "llam_ctx_t size must match asm/arm64 context switch");
+_Static_assert(offsetof(llam_ctx_t, simd_flags) == 184, "llam_ctx_t.simd_flags offset must match asm/arm64 context switch");
+_Static_assert(sizeof(llam_ctx_t) == 192, "llam_ctx_t size must match asm/arm64 context switch");
 #else
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -255,11 +355,17 @@ typedef struct llam_ctx {
  * backend. The noreturn functions terminate a task stack back into scheduler
  * code and must never return to their caller.
  */
+#if defined(_MSC_VER)
+#define LLAM_NORETURN __declspec(noreturn)
+#else
+#define LLAM_NORETURN __attribute__((noreturn))
+#endif
+
 void llam_ctx_switch(llam_ctx_t *from, const llam_ctx_t *to);
 void llam_fiber_bootstrap(void);
-void llam_fiber_alignment_violation(uint64_t rsp) __attribute__((noreturn));
-void llam_task_bootstrap(struct llam_task *task) __attribute__((noreturn));
-void llam_task_exit_internal(void) __attribute__((noreturn));
+LLAM_NORETURN void llam_fiber_alignment_violation(uint64_t rsp);
+LLAM_NORETURN void llam_task_bootstrap(struct llam_task *task);
+LLAM_NORETURN void llam_task_exit_internal(void);
 int llam_ctx_make_task(llam_ctx_t *ctx, void *stack_base, size_t stack_size, struct llam_task *task);
 
 /*

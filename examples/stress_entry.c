@@ -184,6 +184,7 @@ int main(void) {
     dynamic_sleep_yields = stress_env_u32("LLAM_STRESS_DYNAMIC_SLEEP_YIELDS", 4U, 64U);
     dynamic_sleep_us = stress_env_u32("LLAM_STRESS_DYNAMIC_SLEEP_US", 30000U, 1000000U);
     dynamic_live_poll_waiters = stress_env_u32("LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS", 128U, 2048U);
+    dynamic_live_poll_waiters = stress_fd_budget_waiters(dynamic_live_poll_waiters, 2U, 256U);
     dynamic_live_poll_monitor_rounds = stress_env_u32("LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS", 256U, 4096U);
     dynamic_live_poll_monitor_us = stress_env_u32("LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US", 2000U, 1000000U);
     dynamic_state.round_count = dynamic_rounds;

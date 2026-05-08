@@ -32,7 +32,7 @@
  * @return true when @c LLAM_DIRECT_BLOCKING_IO is set to a non-zero value.
  */
 static bool llam_direct_blocking_io_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -52,7 +52,7 @@ static bool llam_direct_blocking_io_enabled(void) {
  * @return true when direct blocking poll should be attempted.
  */
 static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -61,22 +61,27 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
         if (env != NULL && env[0] != '\0') {
             value = strcmp(env, "0") != 0 ? 1 : 0;
         } else {
-#if defined(__linux__)
             value = 2;
-#else
-            value = 0;
-#endif
         }
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     if (value == 2) {
-#if defined(__linux__)
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        (void)timeout_ms;
+        /*
+         * WSAPoll on Windows AF_UNIX can stall a scheduler worker when used as
+         * a direct blocking fallback.  Keep the automatic policy on the
+         * backend/offload path; explicit LLAM_DIRECT_BLOCKING_POLL=1 remains
+         * available for local experiments.
+         */
+        return false;
+#elif defined(__linux__)
         llam_runtime_t *rt = &g_llam_runtime;
         llam_shard_t *shard = g_llam_tls_shard;
         llam_node_t *node;
 
-        // Auto mode on Linux uses direct blocking poll for long finite waits,
-        // and for infinite waits only when the backend poll path is unavailable.
+        // Auto mode uses direct blocking poll for finite waits, and for
+        // infinite waits only when the backend poll path is unavailable.
         if (timeout_ms > 0) {
             return true;
         }
@@ -85,6 +90,15 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
         }
         node = &rt->nodes[shard->io_node_index];
         return timeout_ms < 0 && (!node->ring_ready || !node->supports_poll);
+#elif defined(__APPLE__)
+        const llam_runtime_t *rt = &g_llam_runtime;
+
+        // Darwin keeps infinite waits on the kqueue backend so one parked task
+        // cannot pin a scheduler worker.  Finite waits are safe to redirect
+        // through compensated direct poll in the latency-oriented profiles.
+        return timeout_ms > 0 &&
+               (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ||
+                rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST);
 #else
         (void)timeout_ms;
         return false;
@@ -100,7 +114,7 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
  * @return Millisecond threshold; 0 disables redirect hinting.
  */
 static unsigned llam_direct_poll_redirect_timeout_ms(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -137,7 +151,7 @@ static unsigned llam_direct_poll_redirect_timeout_ms(void) {
  * @return true if small blocking socket writes may yield after completion.
  */
 static bool llam_write_handoff_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -146,6 +160,8 @@ static bool llam_write_handoff_enabled(void) {
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #elif defined(__linux__)
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -161,7 +177,7 @@ static bool llam_write_handoff_enabled(void) {
  * @return true if enabled by platform default or environment override.
  */
 bool llam_io_coop_yield_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -170,6 +186,8 @@ bool llam_io_coop_yield_enabled(void) {
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #elif defined(__linux__)
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -185,7 +203,7 @@ bool llam_io_coop_yield_enabled(void) {
  * @return true if enabled by platform default or environment override.
  */
 bool llam_io_poll_coop_yield_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -194,6 +212,8 @@ bool llam_io_poll_coop_yield_enabled(void) {
 #if defined(__APPLE__)
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #elif defined(__linux__)
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -209,13 +229,13 @@ bool llam_io_poll_coop_yield_enabled(void) {
  * @return true if enabled.
  */
 bool llam_io_poll_extra_yield_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_POLL_EXTRA_YIELD");
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -226,18 +246,78 @@ bool llam_io_poll_extra_yield_enabled(void) {
 }
 
 /**
+ * @brief Check whether poll may hand off before its first readiness probe.
+ *
+ * This avoids a guaranteed not-ready syscall in producer/consumer patterns
+ * where the producer is already runnable on the same shard.
+ */
+bool llam_io_poll_pre_yield_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_IO_POLL_PRE_YIELD");
+
+#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+#else
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+#endif
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+/**
+ * @brief Return short cooperative yield attempts before poll parks in the kernel.
+ *
+ * @return Number of ready-yield probes to attempt.
+ */
+unsigned llam_io_poll_ready_yields(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_IO_POLL_READY_YIELDS");
+
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        value = 2;
+#else
+        value = 1;
+#endif
+        if (env != NULL && env[0] != '\0') {
+            char *end = NULL;
+            long parsed;
+
+            errno = 0;
+            parsed = strtol(env, &end, 10);
+            if (errno == 0 && end != env && *end == '\0') {
+                if (parsed < 0) {
+                    parsed = 0;
+                } else if (parsed > 8L) {
+                    parsed = 8L;
+                }
+                value = (int)parsed;
+            }
+        }
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return (unsigned)value;
+}
+
+/**
  * @brief Check whether socket poll-readiness should use MSG_PEEK.
  *
  * @return true if enabled.
  */
 static bool llam_poll_socket_peek_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
         const char *env = llam_env_get("LLAM_POLL_SOCKET_PEEK");
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -253,7 +333,7 @@ static bool llam_poll_socket_peek_enabled(void) {
  * @param fd File descriptor.
  * @return true if it is a socket without O_NONBLOCK.
  */
-static bool llam_fd_is_blocking_socket(int fd) {
+static bool llam_fd_is_blocking_socket(llam_fd_t fd) {
     int flags;
     int so_type = 0;
     socklen_t so_type_len = sizeof(so_type);
@@ -271,7 +351,7 @@ static bool llam_fd_is_blocking_socket(int fd) {
  * @param fd File descriptor.
  * @return true if O_NONBLOCK is not set.
  */
-static bool llam_fd_is_blocking(int fd) {
+static bool llam_fd_is_blocking(llam_fd_t fd) {
     int flags = fcntl(fd, F_GETFL, 0);
 
     return flags >= 0 && (flags & O_NONBLOCK) == 0;
@@ -306,7 +386,7 @@ bool llam_io_shard_has_local_work(void) {
  * @return true if handoff should be skipped when the shard is otherwise idle.
  */
 static bool llam_write_handoff_requires_work(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -324,13 +404,13 @@ static bool llam_write_handoff_requires_work(void) {
  * @return true when direct task-to-task handoff is enabled.
  */
 static bool llam_write_direct_local_handoff_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF");
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -346,13 +426,13 @@ static bool llam_write_direct_local_handoff_enabled(void) {
  * @return Nanosecond window; 0 disables suppression.
  */
 static uint64_t llam_write_handoff_recent_yield_ns(void) {
-    static atomic_ullong cached = ATOMIC_VAR_INIT(UINT64_MAX);
+    static atomic_ullong cached = UINT64_MAX;
     uint64_t value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value == UINT64_MAX) {
         const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_RECENT_YIELD_NS");
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
         value = 1000000ULL;
 #else
         value = 0ULL;
@@ -378,7 +458,7 @@ static uint64_t llam_write_handoff_recent_yield_ns(void) {
  * @return true if fd validation should run before yielding.
  */
 static bool llam_write_handoff_check_fd_enabled(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -401,7 +481,7 @@ static bool llam_write_handoff_check_fd_enabled(void) {
  * @param count        Bytes attempted/written by the caller.
  * @param known_socket Whether caller already knows @p fd is a socket.
  */
-void llam_maybe_handoff_after_socket_write(int fd, size_t count, bool known_socket) {
+void llam_maybe_handoff_after_socket_write(llam_fd_t fd, size_t count, bool known_socket) {
     uint64_t recent_yield_ns;
     bool direct_local_handoff;
 
@@ -458,20 +538,22 @@ void llam_maybe_handoff_after_socket_write(int fd, size_t count, bool known_sock
  *
  * @return 1 if handled, 0 if caller should use normal path, -1 on error.
  */
-int llam_try_direct_blocking_rw(int fd,
-                                     void *buf,
-                                     size_t count,
-                                     bool write_op,
-                                     bool recv_op,
-                                     int recv_flags,
-                                     ssize_t *result_out) {
+static int llam_try_direct_blocking_rw_impl(llam_fd_t fd,
+                                            void *buf,
+                                            size_t count,
+                                            bool write_op,
+                                            bool recv_op,
+                                            int recv_flags,
+                                            ssize_t *result_out,
+                                            bool force_enabled) {
     ssize_t rc;
     int saved_errno = 0;
 
     if (result_out != NULL) {
         *result_out = -1;
     }
-    if (!llam_direct_blocking_io_enabled() || g_llam_tls_task == NULL || g_llam_tls_shard == NULL ||
+    if ((!force_enabled && !llam_direct_blocking_io_enabled()) ||
+        g_llam_tls_task == NULL || g_llam_tls_shard == NULL ||
         g_llam_tls_task->cancel_token != NULL || !llam_fd_is_blocking_socket(fd)) {
         return 0;
     }
@@ -487,11 +569,11 @@ int llam_try_direct_blocking_rw(int fd,
 
     for (;;) {
         if (write_op) {
-            rc = write(fd, buf, count);
+            rc = llam_platform_write_fd(fd, buf, count);
         } else if (recv_op) {
-            rc = recv(fd, buf, count, recv_flags);
+            rc = llam_platform_recv_fd(fd, buf, count, recv_flags);
         } else {
-            rc = read(fd, buf, count);
+            rc = llam_platform_read_fd(fd, buf, count);
         }
         if (rc >= 0) {
             break;
@@ -516,13 +598,52 @@ int llam_try_direct_blocking_rw(int fd,
     return -1;
 }
 
+int llam_try_direct_blocking_rw(llam_fd_t fd,
+                                     void *buf,
+                                     size_t count,
+                                     bool write_op,
+                                     bool recv_op,
+                                     int recv_flags,
+                                     ssize_t *result_out) {
+    return llam_try_direct_blocking_rw_impl(fd, buf, count, write_op, recv_op, recv_flags, result_out, false);
+}
+
+int llam_try_direct_blocking_rw_forced(llam_fd_t fd,
+                                            void *buf,
+                                            size_t count,
+                                            bool write_op,
+                                            bool recv_op,
+                                            int recv_flags,
+                                            ssize_t *result_out) {
+    return llam_try_direct_blocking_rw_impl(fd, buf, count, write_op, recv_op, recv_flags, result_out, true);
+}
+
 /**
- * @brief Try to answer a POLLIN readiness check with nonblocking MSG_PEEK.
+ * @brief Try to answer a POLLIN readiness check without a blocking poll.
  *
  * @return 1 ready, 0 not ready, or INT_MIN when unsupported/unhandled.
  */
-int llam_try_socket_pollin_now(int fd, short events, short *revents) {
-#if defined(MSG_PEEK) && defined(MSG_DONTWAIT)
+int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    u_long available = 0UL;
+
+    if (!llam_poll_socket_peek_enabled() || (events & POLLIN) == 0 || (events & POLLOUT) != 0) {
+        return INT_MIN;
+    }
+    if (ioctlsocket(fd, FIONREAD, &available) != 0) {
+        return INT_MIN;
+    }
+    if (available > 0UL) {
+        if (revents != NULL) {
+            *revents = POLLIN;
+        }
+        return 1;
+    }
+    if (revents != NULL) {
+        *revents = 0;
+    }
+    return 0;
+#elif defined(MSG_PEEK) && defined(MSG_DONTWAIT)
     char byte;
     ssize_t rc;
 
@@ -530,7 +651,7 @@ int llam_try_socket_pollin_now(int fd, short events, short *revents) {
         return INT_MIN;
     }
     for (;;) {
-        rc = recv(fd, &byte, 1U, MSG_PEEK | MSG_DONTWAIT);
+        rc = llam_platform_recv_fd(fd, &byte, 1U, MSG_PEEK | MSG_DONTWAIT);
         if (rc > 0) {
             if (revents != NULL) {
                 *revents = POLLIN;
@@ -565,7 +686,7 @@ int llam_try_socket_pollin_now(int fd, short events, short *revents) {
  * @return poll result if handled, INT_MIN if caller should use normal path, or
  *         -1 on error.
  */
-int llam_try_direct_blocking_poll(int fd, short events, int timeout_ms, short *revents) {
+int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, short *revents) {
     struct pollfd pfd;
     int rc;
     int saved_errno = 0;

@@ -46,8 +46,8 @@
  * @brief Finish the current task and switch back to the scheduler context.
  *
  * This is the terminal path for task fibers.  It marks the task dead, wakes
- * join waiters, decrements the runtime live-task count, and requests runtime
- * stop when the last task exits.
+ * join waiters, decrements shard-local live-task accounting, and requests
+ * runtime stop when the last task exits.
  *
  * @note This function does not return.  It assumes g_llam_tls_task and
  *       g_llam_tls_shard identify the running task and owner shard.
@@ -65,7 +65,7 @@ void llam_task_exit_internal(void) {
     llam_trace_shard(g_llam_tls_shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_DEAD, LLAM_WAIT_NONE);
     llam_reinject_join_waiters(rt, task);
 
-    if (atomic_fetch_sub(&rt->live_tasks, 1U) == 1U) {
+    if (llam_runtime_note_task_dead(rt, task)) {
         llam_request_stop(rt);
     }
 
@@ -171,6 +171,36 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
 }
 
 /**
+ * @brief Queue backend cancellation for a request that became in-flight during setup.
+ *
+ * A cancellation token may already be cancelled by the time the task registers
+ * after publishing an I/O request. If the backend worker has already taken the
+ * request out of the submit queue, the request must stay owned by the backend
+ * until its cancellation completion arrives.
+ */
+static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reason_t reason) {
+    int node_index;
+    llam_node_t *node;
+
+    if (req == NULL ||
+        atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_INFLIGHT) {
+        return false;
+    }
+    node_index = llam_io_req_node_index(req);
+    if (node_index < 0) {
+        return false;
+    }
+    node = &g_llam_runtime.nodes[node_index];
+    atomic_store_explicit(&req->abort_reason, (unsigned)reason, memory_order_release);
+    if (atomic_exchange_explicit(&req->cancel_queued, 1U, memory_order_acq_rel) == 0U &&
+        llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req) != 0) {
+        atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+/**
  * @brief Prepare the current task before publishing it to a shared I/O watch.
  *
  * Watch completions can race with waiter insertion because an already-active
@@ -192,6 +222,7 @@ static int llam_prepare_watch_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wa
         return -1;
     }
 
+    llam_task_ensure_listed(task);
     llam_task_set_io_tracking(task, req, shard->id);
     req->task = task;
     req->result = -1;
@@ -245,6 +276,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
                          wait_mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
                          wait_mode == LLAM_IO_WAIT_MODE_RECV_WATCH));
     if (!already_prepared) {
+        llam_task_ensure_listed(task);
         llam_task_set_io_tracking(task, req, shard->id);
         req->task = task;
         req->result = -1;
@@ -270,8 +302,15 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     }
     if (task->cancel_token != NULL && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
         if (llam_cancel_token_register_task(task) != 0) {
-            llam_cleanup_io_wait_setup(task, req);
-            return -1;
+            int saved_errno = errno;
+
+            if (saved_errno == ECANCELED && llam_abort_inflight_io_setup(req, LLAM_IO_ABORT_CANCEL)) {
+                /* Backend completion will wake this task with ECANCELED. */
+            } else {
+                llam_cleanup_io_wait_setup(task, req);
+                errno = saved_errno;
+                return -1;
+            }
         }
         if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE && task->cancel_registered) {
             llam_cancel_token_unregister_task(task);
@@ -654,6 +693,14 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     }
 
     node = &rt->nodes[shard->io_node_index];
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    if (req->kind == LLAM_IO_KIND_POLL && !llam_windows_iocp_poll_supported(req->fd, req->poll_events)) {
+        node->unsupported_ops += 1U;
+        shard->metrics.io_fallbacks += 1U;
+        errno = EAGAIN;
+        return -1;
+    }
+#endif
     if (!node->ring_ready ||
         (req->kind == LLAM_IO_KIND_READ && req->use_recv_op ? !node->supports_recv : !llam_node_supports_kind(node, req->kind))) {
         node->unsupported_ops += 1U;

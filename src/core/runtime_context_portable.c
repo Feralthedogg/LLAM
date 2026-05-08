@@ -25,7 +25,9 @@
 
 #include "runtime_internal.h"
 
-#if !((defined(__linux__) || defined(__APPLE__)) && defined(__x86_64__)) && !defined(__aarch64__)
+#if !(((defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64) || \
+      (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)) && \
+    !LLAM_ARCH_AARCH64
 
 #if defined(__clang__)
 #pragma clang diagnostic push

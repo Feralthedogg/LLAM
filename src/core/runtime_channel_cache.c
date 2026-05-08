@@ -48,7 +48,7 @@ static _Thread_local unsigned g_llam_tls_channel_cache_count;
  * @return Capacity parsed from @c LLAM_CHANNEL_TLS_CACHE_CAP, capped to 1024.
  */
 static unsigned llam_channel_tls_cache_cap(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -79,7 +79,7 @@ static unsigned llam_channel_tls_cache_cap(void) {
  * @return Capacity parsed from @c LLAM_CHANNEL_CACHE_CAP, capped to 4096.
  */
 static unsigned llam_channel_cache_cap(void) {
-    static atomic_int cached = ATOMIC_VAR_INIT(-1);
+    static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
     if (value < 0) {
@@ -111,11 +111,12 @@ static void llam_channel_reset_for_reuse(llam_channel_t *channel) {
     if (channel == NULL) {
         return;
     }
-    if (channel->buffer != NULL && channel->capacity > 0U) {
+    if (channel->buffer != NULL && channel->ring_capacity > 0U) {
         // Keep the allocated buffer for reuse, but clear stale pointer payloads.
-        memset(channel->buffer, 0, channel->capacity * sizeof(*channel->buffer));
+        memset(channel->buffer, 0, channel->ring_capacity * sizeof(*channel->buffer));
     }
     channel->cache_next = NULL;
+    channel->mask = channel->ring_capacity > 0U ? channel->ring_capacity - 1U : 0U;
     channel->head = 0U;
     channel->tail = 0U;
     channel->count = 0U;

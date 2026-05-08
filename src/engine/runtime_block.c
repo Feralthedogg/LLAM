@@ -55,6 +55,12 @@ void *llam_block_worker_main(void *arg) {
             pthread_mutex_unlock(&rt->block_lock);
             (void)llam_linux_futex_wait_private(&rt->block_wake_seq, wait_seq);
             pthread_mutex_lock(&rt->block_lock);
+#elif LLAM_PLATFORM_WINDOWS
+            unsigned wait_seq = atomic_load_explicit(&rt->block_wake_seq, memory_order_acquire);
+
+            pthread_mutex_unlock(&rt->block_lock);
+            (void)WaitOnAddress((volatile VOID *)&rt->block_wake_seq, &wait_seq, sizeof(wait_seq), INFINITE);
+            pthread_mutex_lock(&rt->block_lock);
 #else
             pthread_cond_wait(&rt->block_cv, &rt->block_lock);
 #endif

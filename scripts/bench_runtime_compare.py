@@ -16,7 +16,17 @@ except ModuleNotFoundError:
 
 
 FIELD_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
-DEFAULT_CASES = ["spawn_join", "channel_pingpong", "io_echo", "poll_wake", "sleep_fanout", "opaque_block"]
+DEFAULT_CASES = [
+    "spawn_join",
+    "channel_pingpong",
+    "select_recv_ready",
+    "select_park_wake",
+    "select_timeout",
+    "io_echo",
+    "poll_wake",
+    "sleep_fanout",
+    "opaque_block",
+]
 NAME_ALIASES = {
     "poll_wake_approx": "poll_wake",
     "opaque_syscall_sleep_approx": "opaque_block",
@@ -86,6 +96,38 @@ def run_command(root: pathlib.Path, runtime: str, command: list[str], env: dict[
     return parse_output(runtime, proc.stdout)
 
 
+def llam_bench_command(root: pathlib.Path, no_build: bool) -> list[str]:
+    if os.name == "nt":
+        build_dir = root / "build" / "bench-runtime-compare"
+        if not no_build:
+            subprocess.run(
+                [
+                    "cmake",
+                    "-S",
+                    ".",
+                    "-B",
+                    str(build_dir),
+                    "-G",
+                    "Visual Studio 17 2022",
+                    "-A",
+                    "x64",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                ],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["cmake", "--build", str(build_dir), "--config", "Release", "--target", "bench"],
+                cwd=root,
+                check=True,
+            )
+        return [str(build_dir / "Release" / "bench.exe")]
+
+    if not no_build:
+        subprocess.run(["make", "-j4"], cwd=root, check=True)
+    return ["./bench"]
+
+
 def write_csv(path: pathlib.Path, rows: list[BenchRow]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
@@ -99,28 +141,51 @@ def print_summary(rows: list[BenchRow], cases: list[str]) -> None:
     runtimes = [runtime for runtime in ["LLAM", "Goroutine", "Tokio"] if any(row.runtime == runtime for row in rows)]
 
     if runtimes != ["LLAM", "Goroutine", "Tokio"]:
-        print("| runtime | case | ops/s | p50 us | p99 us |")
-        print("| --- | --- | ---: | ---: | ---: |")
+        out_rows = []
+        out_rows.append(["runtime", "case", "ops/s", "p50 us", "p99 us"])
         for case in cases:
             for runtime in runtimes:
                 row = by_key.get((runtime, case))
                 if row is None:
                     continue
-                print(f"| {runtime} | {case} | {row.ops_per_sec:.2f} | {row.p50_us:.2f} | {row.p99_us:.2f} |")
+                out_rows.append([runtime, case, f"{row.ops_per_sec:.2f}", f"{row.p50_us:.2f}", f"{row.p99_us:.2f}"])
+        if len(out_rows) <= 1:
+            return
+        widths = [max(len(str(item)) for item in col) for col in zip(*out_rows)]
+        w = [max(3, width) for width in widths]
+        print(f"| {out_rows[0][0]:<{w[0]}} | {out_rows[0][1]:<{w[1]}} | {out_rows[0][2]:>{w[2]}} | {out_rows[0][3]:>{w[3]}} | {out_rows[0][4]:>{w[4]}} |")
+        print(f"| {'-' * w[0]} | {'-' * w[1]} | {'-' * (w[2]-1)}: | {'-' * (w[3]-1)}: | {'-' * (w[4]-1)}: |")
+        for row in out_rows[1:]:
+            print(f"| {row[0]:<{w[0]}} | {row[1]:<{w[1]}} | {row[2]:>{w[2]}} | {row[3]:>{w[3]}} | {row[4]:>{w[4]}} |")
         return
 
-    print("| case | LLAM ops/s | Goroutine ops/s | Tokio ops/s | LLAM/Go | LLAM/Tokio |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: |")
+    out_rows = []
+    out_rows.append(["case", "LLAM ops/s", "Goroutine ops/s", "Tokio ops/s", "LLAM/Go", "LLAM/Tokio"])
     for case in cases:
         values = [by_key.get((runtime, case)) for runtime in runtimes]
         if any(value is None for value in values):
             continue
         llam, go, tokio = values
         assert llam is not None and go is not None and tokio is not None
-        print(
-            f"| {case} | {llam.ops_per_sec:.2f} | {go.ops_per_sec:.2f} | {tokio.ops_per_sec:.2f} | "
-            f"{llam.ops_per_sec / go.ops_per_sec:.2f}x | {llam.ops_per_sec / tokio.ops_per_sec:.2f}x |"
-        )
+        out_rows.append([
+            case,
+            f"{llam.ops_per_sec:.2f}",
+            f"{go.ops_per_sec:.2f}",
+            f"{tokio.ops_per_sec:.2f}",
+            f"{llam.ops_per_sec / go.ops_per_sec:.2f}x",
+            f"{llam.ops_per_sec / tokio.ops_per_sec:.2f}x"
+        ])
+
+    if len(out_rows) <= 1:
+        return
+
+    widths = [max(len(str(item)) for item in col) for col in zip(*out_rows)]
+    w = [max(3, width) for width in widths]
+
+    print(f"| {out_rows[0][0]:<{w[0]}} | {out_rows[0][1]:>{w[1]}} | {out_rows[0][2]:>{w[2]}} | {out_rows[0][3]:>{w[3]}} | {out_rows[0][4]:>{w[4]}} | {out_rows[0][5]:>{w[5]}} |")
+    print(f"| {'-' * w[0]} | {'-' * (w[1]-1)}: | {'-' * (w[2]-1)}: | {'-' * (w[3]-1)}: | {'-' * (w[4]-1)}: | {'-' * (w[5]-1)}: |")
+    for row in out_rows[1:]:
+        print(f"| {row[0]:<{w[0]}} | {row[1]:>{w[1]}} | {row[2]:>{w[2]}} | {row[3]:>{w[3]}} | {row[4]:>{w[4]}} | {row[5]:>{w[5]}} |")
 
 
 def grouped_bars(ax, cases: list[str], runtimes: list[str], values: dict[tuple[str, str], float], ylabel: str, title: str, log: bool = False) -> None:
@@ -197,6 +262,7 @@ def main() -> int:
             "LLAM_BENCH_WARMUP_ROUNDS": str(args.warmup),
             "LLAM_BENCH_SPAWN_TASKS": "512",
             "LLAM_BENCH_CHANNEL_MESSAGES": "4096",
+            "LLAM_BENCH_SELECT_OPS": "4096",
             "LLAM_BENCH_IO_MESSAGES": "512",
             "LLAM_BENCH_POLL_EVENTS": "512",
             "LLAM_BENCH_SLEEP_TASKS": "1024",
@@ -204,21 +270,23 @@ def main() -> int:
         }
     )
 
-    if not args.no_build:
-        if "LLAM" in selected_runtimes:
-            subprocess.run(["make", "-j4"], cwd=root, check=True)
-        if "Tokio" in selected_runtimes:
-            subprocess.run(
-                ["cargo", "build", "--release", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
-                cwd=root,
-                check=True,
-            )
+    llam_command: list[str] | None = None
+    if "LLAM" in selected_runtimes:
+        llam_command = llam_bench_command(root, args.no_build)
+    if not args.no_build and "Tokio" in selected_runtimes:
+        subprocess.run(
+            ["cargo", "build", "--release", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
+            cwd=root,
+            check=True,
+        )
 
     rows: list[BenchRow] = []
     if "LLAM" in selected_runtimes:
-        rows.extend(run_command(root, "LLAM", ["./bench"], env, args.timeout))
+        assert llam_command is not None
+        rows.extend(run_command(root, "LLAM", llam_command, env, args.timeout))
     if "Goroutine" in selected_runtimes:
-        rows.extend(run_command(root, "Goroutine", ["go", "run", "scripts/bench_go_compare.go"], env, args.timeout))
+        go_script = "scripts/bench_go_windows_compare.go" if os.name == "nt" else "scripts/bench_go_compare.go"
+        rows.extend(run_command(root, "Goroutine", ["go", "run", go_script], env, args.timeout))
     if "Tokio" in selected_runtimes:
         rows.extend(
             run_command(

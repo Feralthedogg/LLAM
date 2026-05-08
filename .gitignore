@@ -1,6 +1,7 @@
 object/
 object-pic/
 build/
+build-*/
 target/
 CMakeFiles/
 CMakeCache.txt
@@ -9,6 +10,8 @@ compile_commands.json
 bench
 demo
 stress
+server
+server_flood
 test_abi_contract
 test_connect_io
 test_io_buffers
@@ -16,6 +19,10 @@ test_nm_compat_runtime
 test_runtime_core
 test_shared_load
 test_sync_primitives
+test_windows_iocp_io
+test_windows_policy
+test_windows_runtime_smoke
+*.exe
 libllam_runtime.a
 libllam_runtime.dylib
 libllam_runtime.*.dylib

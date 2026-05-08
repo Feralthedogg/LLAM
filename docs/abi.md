@@ -5,10 +5,8 @@ implementations may rely on when loading LLAM dynamically.
 
 ## ABI Stability
 
-LLAM exposes one stable public ABI family:
-
-- Canonical API: symbols declared in `include/llam/runtime.h`.
-- Legacy compatibility API: symbols declared in `include/llam/nm_runtime.h`.
+LLAM exposes one stable public ABI family: symbols declared in
+`include/llam/runtime.h`.
 
 All other non-static implementation symbols are private even if a platform
 linker happens to export them. Language runtimes must bind only documented
@@ -55,7 +53,7 @@ with `errno` set on failure.
 | --- | --- | --- |
 | ABI/version | `llam_abi_version`, `llam_version_string`, `llam_abi_get_info` | Safe to call before runtime initialization. Returned strings are library-owned static storage. |
 | Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_shutdown` | Process-wide singleton runtime. Initialize before spawning tasks; shutdown invalidates runtime-owned handles. FFI bindings should prefer `_ex` and option initializers. |
-| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. FFI bindings should prefer `_ex` and option initializers. |
+| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. |
 | Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. |
 | Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners or waiters remain. |
@@ -63,10 +61,7 @@ with `errno` set on failure.
 | Blocking | `llam_call_blocking_result`, `llam_call_blocking`, `llam_enter_blocking`, `llam_leave_blocking` | Prevents long blocking work from pinning scheduler workers. `llam_call_blocking_result` is the unambiguous FFI-safe form. Blocking callback return value is user-owned. |
 | I/O | `llam_read`, `llam_write`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd` | Scheduler-safe descriptor/socket operations. File descriptor ownership follows POSIX convention unless owned-buffer APIs say otherwise. |
 | Owned buffers | `llam_io_buffer_data`, `llam_io_buffer_size`, `llam_io_buffer_capacity`, `llam_io_buffer_release` | Buffers returned by owned-read APIs are runtime-allocated and caller-released through `llam_io_buffer_release()`. |
-| Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` for stats snapshots. |
-
-Compatibility `nm_*` symbols follow the same contracts and remain available for
-existing code, but new bindings should prefer the canonical `llam_*` names.
+| Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats`, `llam_runtime_write_stats_json`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` for stats snapshots and JSON export for machine logs. |
 
 ## Inbound Option Structs
 
@@ -136,6 +131,10 @@ stats structs to newer libraries without buffer overflow when fields are
 appended at the tail. `llam_runtime_collect_stats()` is a C convenience wrapper
 that passes `sizeof(llam_runtime_stats_t)`.
 
+`llam_runtime_write_stats_json(fd)` writes the same canonical LLAM counter names
+as a newline-terminated JSON object. The schema is additive: consumers must
+ignore unknown fields and should not require a fixed field order.
+
 All scalar control fields in public option structs and all 32-bit counter/state
 fields in public stats structs use fixed-width integer storage. Language
 bindings should model these fields as unsigned 32-bit integers, except
@@ -156,9 +155,7 @@ Callers should pass one of the `llam_task_class_t` constants to
 `llam_task_set_class()` and interpret `llam_task_class()` as a
 `llam_task_class_t` value. The fixed-width signature avoids depending on the C
 compiler's enum representation. `llam_task_set_class()` returns `-1/EINVAL`
-for unknown class values and `-1/ENOTSUP` outside a managed task. Legacy
-`nm_task_set_class()`, `nm_task_class()`, and `nm_task_flags()` follow the same
-rule.
+for unknown class values and `-1/ENOTSUP` outside a managed task.
 
 ## Threading And Ownership Rules
 
@@ -214,16 +211,20 @@ Expected dynamic artifacts:
 ```text
 Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.0
 macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
-Windows: planned; no native dynamic artifact is published in LLAM 1.0.0
+Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
+         the native Windows x86_64 release archive.
 ```
 
 Language runtimes should prefer the ABI-major soname/install-name when a
 platform supports it.
 
-Native Windows 10/11 support is planned around IOCP and Fiber/context switching.
-Until that backend is complete, Windows-hosted verification should use WSL and
-the Linux backend. Native Windows archives are not part of the 1.0.0 release
-matrix.
+Native Windows 10/11 support covers Windows x86_64 context switching, Windows
+event wake handles, IOCP policy primitives, and IOCP one-shot socket requests
+for `read`, `write`, `accept`, and `connect`. TCP `POLLOUT` and UDP `POLLIN`
+readiness are also IOCP-backed; TCP `POLLIN` remains fallback by default unless
+`LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark
+runs. The release workflow publishes a native Windows x86_64 archive after the
+Windows stress, shared-library export, and IOCP smoke gates pass.
 
 ## Runtime Lifecycle
 
@@ -279,7 +280,9 @@ function returns.
 
 `llam_yield()` is cooperative. It never transfers ownership of user memory and
 does not imply a memory fence beyond the synchronization performed by the
-runtime scheduler.
+runtime scheduler. `llam_task_safepoint()` is the lower-overhead progress hook
+for CPU-bound loops; it is a no-op outside a managed task and may yield only
+when runtime policy or preemption requests require it.
 
 ## Synchronization Semantics
 
@@ -290,6 +293,7 @@ instead of blocking the scheduler worker.
 Outside-runtime behavior is fixed as follows:
 
 - `llam_yield()` outside a managed task is a no-op.
+- `llam_task_safepoint()` outside a managed task is a no-op.
 - `llam_sleep_ns()` and `llam_sleep_until()` block the calling OS thread after
   runtime initialization; before initialization they fail with `EINVAL`.
 - `llam_call_blocking_result()` runs the callback synchronously outside a
@@ -381,8 +385,6 @@ success, it transfers ownership of the accepted descriptor to the caller. The
 caller is responsible for closing it. Use `LLAM_FD_IS_INVALID(fd)` when testing
 returned descriptors, especially from Windows bindings where `llam_fd_t` maps to
 `SOCKET`.
-Legacy `nm_accept()` follows the same rule with `NM_INVALID_FD` and
-`NM_FD_IS_INVALID(fd)`.
 
 Owned-buffer read APIs transfer buffer ownership to the caller on success. The
 caller must release the buffer with `llam_io_buffer_release()`.
@@ -393,9 +395,13 @@ Owned-buffer result rules are fixed for FFI bindings:
 - EOF or zero-byte read/receive: returns `0` and stores `NULL` in `*out`.
 - Failure: returns `-1`, stores `NULL` in `*out`, and sets `errno`.
 
-On Windows, these I/O contracts are the planned native contract. They are not
-claimed as supported until the IOCP backend passes the Windows acceptance gate
-documented in `docs/windows-roadmap.md`.
+On Windows, one-shot socket `read`, `write`, `accept`, and `connect` use IOCP
+request completions. TCP `POLLOUT` readiness uses a zero-byte overlapped send,
+and UDP `POLLIN` readiness uses an overlapped peek receive so datagrams are not
+consumed. TCP `POLLIN` remains on the cooperative/direct fallback path by
+default; `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` enables the experimental IOCP stream
+readiness probe for controlled validation. Owned-buffer and unsupported poll
+paths keep the documented direct/blocking fallback behavior.
 
 ## Error Contract
 

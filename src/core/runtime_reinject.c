@@ -26,6 +26,12 @@
 
 #include "runtime_internal.h"
 
+#if defined(__linux__)
+#define LLAM_REINJECT_DIRECT_OWNER_HANDOFF 1
+#else
+#define LLAM_REINJECT_DIRECT_OWNER_HANDOFF 0
+#endif
+
 /**
  * @brief Mark a task runnable and enqueue it on a shard while the shard lock is held.
  *
@@ -135,7 +141,7 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
 
     target = &rt->shards[target_id];
     pressure = llam_runtime_pressure_signal(rt);
-    effective_hot = hot || task->task_class == LLAM_TASK_CLASS_LATENCY;
+    effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
     direct_local = (g_llam_tls_shard == target && g_llam_tls_task != NULL);
 
     if (task->active_timer != NULL) {
@@ -174,6 +180,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_task_t *current = g_llam_tls_task;
     llam_task_state_id_t task_from;
     bool effective_hot;
+    int caller_errno = errno;
 
     if (rt == NULL || task == NULL || current == NULL || rt->active_shards == 0U ||
         target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
@@ -190,9 +197,49 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         return false;
     }
 
-    effective_hot = hot || task->task_class == LLAM_TASK_CLASS_LATENCY;
+#if !LLAM_REINJECT_DIRECT_OWNER_HANDOFF
+    return false;
+#endif
+
+    effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
 
     llam_task_clear_wait_tracking(task);
+
+#if LLAM_REINJECT_DIRECT_OWNER_HANDOFF
+    if (g_llam_tls_scheduler_ctx == &target->scheduler_ctx &&
+        rt->trace_events_enabled == 0U &&
+        rt->run_timing_enabled == 0U &&
+        rt->wake_latency_metrics_enabled == 0U &&
+        llam_lockfree_normq_enabled(rt) &&
+        !target->opaque_redirect_active &&
+        atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U) {
+        current->forced_yield_budget = rt->forced_yield_every;
+        current->state = LLAM_TASK_STATE_RUNNABLE;
+        current->wait_reason = LLAM_WAIT_NONE;
+        current->last_yield_ns = 0U;
+        if (llam_norm_queue_push_yield_unlocked(target, current)) {
+            task_from = task->state;
+            task->state = LLAM_TASK_STATE_RUNNING;
+            task->wait_reason = LLAM_WAIT_NONE;
+            task->enqueue_hot = effective_hot ? 1U : 0U;
+            task->last_shard = target->id;
+            task->last_started_ns = 0U;
+            atomic_store_explicit(&target->current, task, memory_order_release);
+            g_llam_tls_task = task;
+            target->metrics.wakes += 1U;
+            if (reason > LLAM_WAIT_NONE && reason <= LLAM_WAIT_TIMEOUT) {
+                target->metrics.wake_reason_hist[reason] += 1U;
+            }
+            target->metrics.yields += 1U;
+            target->metrics.ctx_switches += 1U;
+            (void)kind;
+            (void)task_from;
+            errno = caller_errno;
+            llam_switch_task_to_task_hot(current, task);
+            return true;
+        }
+    }
+#endif
 
     pthread_mutex_lock(&target->lock);
     if (target->opaque_redirect_active || target->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
@@ -227,7 +274,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_trace_shard(target, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&target->lock);
 
-    llam_task_sample_live_stack(current);
-    llam_switch_task_to_task(current, task);
+    errno = caller_errno;
+    llam_switch_task_to_task_hot(current, task);
     return true;
 }

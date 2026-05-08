@@ -7,13 +7,13 @@
 ![C11](https://img.shields.io/badge/C-C11-blue)
 ![Linux](https://img.shields.io/badge/Linux-io_uring-yellow)
 ![macOS](https://img.shields.io/badge/macOS-kqueue-lightgrey)
-![Windows](https://img.shields.io/badge/Windows-planned-inactive)
+![Windows](https://img.shields.io/badge/Windows-IOCP-orange)
 ![Build](https://img.shields.io/badge/build-Make%20%2F%20CMake-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, `connect`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
 
-LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/Darwin backend uses kqueue-based watch and completion paths. Native Windows 10/11 support is planned, but not shipped in 1.0.0.
+LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darwin backend uses kqueue-based watch and completion paths, and the native Windows 10/11 backend uses IOCP for overlapped Winsock `read`/`write`/`accept`/`connect` requests.
 
 ## Key Features
 
@@ -21,15 +21,16 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/
 - N:M scheduling over runtime worker threads.
 - Linux I/O backend based on io_uring/liburing.
 - macOS/Darwin I/O backend based on kqueue.
-- Windows 10/11 backend roadmap for IOCP, scheduler wake integration, and Fiber/context switching.
+- Windows 10/11 backend with IOCP request completions, Windows wake handles, and x86_64 context-switch assembly.
 - Task primitives: `spawn`, `yield`, `join`, `sleep`, deadlines, and task metadata.
 - Synchronization primitives: mutex, condition variable, channel, and cancellation token.
+- Channel multiplexing with `llam_channel_select()` and focused select benchmarks.
 - Blocking integration through `llam_call_blocking`, `llam_enter_blocking`, and `llam_leave_blocking`.
 - Runtime tuning through profiles, dynamic workers, worker rings, SQPOLL, and idle-spin controls.
 - Observability through runtime stats and debug dumps.
 - Stable ABI metadata for dynamic language-runtime loaders.
 - Static and shared library build targets.
-- Built-in demo, stress, benchmark, Docker verification, and Go/Tokio comparison scripts.
+- Built-in demo, chat server, stress, benchmark, Docker verification, and Go/Tokio comparison scripts.
 
 ## Platform Support
 
@@ -39,9 +40,11 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, and the macOS/
 | Linux aarch64 | Supported | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
 | macOS x86_64 | Supported | kqueue + x86_64 asm context switch | Apple Clang | `CC=clang make verify-darwin` |
-| Windows 10/11 | Planned, not native in 1.0.0 | IOCP/Fiber planned | MSVC/MinGW planned | `scripts/verify_windows.ps1` for WSL fallback; `-Native` reports planned status |
+| Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MinGW and MSVC/MASM via CMake | CMake Windows build plus `test_windows_policy`, `test_windows_runtime_smoke`, and `test_windows_iocp_io`; `scripts/verify_windows.ps1 -Native` |
 
-Native Windows runtime support is not complete in 1.0.0. Use WSL/Linux if you need a working Windows-hosted path today. The native Windows plan is documented in `docs/windows-roadmap.md`.
+Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, and IOCP-backed socket requests. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
+
+Production and stress-operation guidance is documented in `docs/operations.md`.
 
 ## Getting Started
 
@@ -69,13 +72,15 @@ Build on macOS:
 CC=clang make -j4
 ```
 
-Build on Windows today:
+Build native Windows with CMake:
 
 ```powershell
-.\scripts\verify_windows.ps1
+cmake -S . -B build-windows -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+cmake --build build-windows
+ctest --test-dir build-windows --output-on-failure
 ```
 
-This verifies the Linux backend through WSL. `.\scripts\verify_windows.ps1 -Native` intentionally exits with the planned-backend status until the IOCP/Fiber implementation lands.
+`.\scripts\verify_windows.ps1` still verifies the Linux backend through WSL. `.\scripts\verify_windows.ps1 -Native` builds the native Windows CMake targets and runs the Windows CTest suite.
 
 Build with CMake:
 
@@ -96,7 +101,47 @@ Run the included programs:
 ./demo
 ./stress
 ./bench
+./server 7777
 ```
+
+Stress the chat server with real TCP clients:
+
+```bash
+make server-stress
+python3 scripts/stress_server.py --clients 64 --messages 16 --payload-bytes 64
+```
+
+Run the native maximum-throughput flood driver:
+
+```bash
+make server-flood
+./server_flood --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30
+```
+
+`server_flood` reports both inbound messages/sec and observed broadcast
+deliveries/sec. For chat fanout, one inbound message can produce `clients - 1`
+peer deliveries, so million-level delivery rates can appear before inbound
+message rates reach the same scale.
+
+Run the full composite server stress suite:
+
+```bash
+make server-stress-composite
+make server-stress-composite-quick
+make server-stress-composite-hour
+python3 scripts/stress_server_composite.py --quick
+```
+
+The composite suite combines exact fanout checks, 60-second native flood,
+payload-size variation, connection churn, slow receivers, half-close/reset
+patterns, and RSS/fd sampling.
+
+`--quick` is intended for hosted CI runners. It keeps exact-delivery checks but
+uses a lower absolute flood delivery threshold than standard and hour-long runs.
+
+The one-hour profile runs the same classes of checks with a long soak layout:
+30 minutes of main flood, two 5-minute payload flood phases, and 20 minutes of
+mixed edge stress.
 
 Run focused API/ABI tests:
 
@@ -108,13 +153,16 @@ Build outputs:
 
 - `demo`: runnable examples of the public runtime API.
 - `stress`: regression coverage for scheduling, sync, timeouts, I/O, and dynamic workers.
-- `bench`: microbenchmarks for spawn/join, channels, I/O, poll, sleep fanout, and opaque blocking.
-- `test_abi_contract`: ABI metadata, size handshakes, and legacy compatibility checks.
+- `bench`: microbenchmarks for spawn/join, channels, channel select, I/O, poll, sleep fanout, and opaque blocking.
+- `server`: minimal LLAM-backed TCP chat backend for local testing.
+- `server_flood`: native nonblocking throughput flood driver for the chat server.
+- `scripts/stress_server.py`: TCP fanout stress test for the chat server.
+- `scripts/stress_server_composite.py`: long-running composite server stability suite.
+- `test_abi_contract`: ABI metadata and size handshakes.
 - `test_connect_io`: direct and runtime-managed `llam_connect()` success and invalid-input checks.
 - `test_runtime_core`: lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats checks.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
 - `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
-- `test_nm_compat_runtime`: legacy `nm_*` runtime wrapper behavior.
 - `test_shared_load`: `dlopen()` coverage for the shared library ABI surface.
 
 ## Using LLAM In An Application
@@ -131,12 +179,16 @@ target_link_libraries(my_app PRIVATE llam_runtime)
 Use `llam_runtime_shared` when a language runtime needs to load LLAM dynamically.
 The Makefile equivalent is `make shared`.
 
-Release archives include the public headers, docs, `demo`, `stress`, `bench`,
-`libllam_runtime.a`, the platform shared library, `pkg-config` metadata, CMake
-package files, and an `install.sh` helper. Tag pushes such as `v1.0.0` build and
-publish `.tar.xz` archives for Linux x86_64, Linux aarch64, macOS x86_64, and
-macOS arm64 through `.github/workflows/release.yml`. Native Windows archives are
-not published until the planned IOCP/Fiber backend is implemented and verified.
+Release archives include the public headers, docs, bundled examples, runtime
+libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
+`v1.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
+through `.github/workflows/release.yml`.
+
+The 1.0 release gate is intentionally platform-local: Linux must pass
+`make verify-linux` or Docker verification, macOS must pass the Darwin verify
+path, and Windows must pass native CMake/CTest plus Windows 2022/2025 stress
+smoke. The full operational checklist is in `docs/operations.md`.
 
 Use an installed SDK with CMake:
 
@@ -167,11 +219,12 @@ Include the canonical public API:
 #include "llam/runtime.h"
 ```
 
-`include/llam/nm_runtime.h` and `include/nm_runtime.h` provide compatibility for the older `nm_*` API names. New code should prefer the `llam_*` API.
-
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer `llam_runtime_init_ex()` and `llam_spawn_ex()` so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
-macOS-specific performance gates and remaining structural work are tracked in `docs/macos-performance.md`.
-Windows backend scope and acceptance gates are tracked in `docs/windows-roadmap.md`.
+Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.0 as one active runtime per process.
+True multi-runtime isolation is a post-1.0 migration item; do not create/destroy
+LLAM concurrently from multiple host runtime instances.
+macOS-specific performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
+Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
 
 ## Execution Model
 
@@ -311,7 +364,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, and macOS uses kqueue. Windows native I/O is planned around IOCP. The current I/O primitive set covers `read`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers `read`, `read_when_ready`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`.
 
 ```c
 #include "llam/runtime.h"
@@ -433,6 +486,7 @@ Runtime lifecycle:
 | `llam_runtime_shutdown` | Shut the runtime down and release resources. |
 | `llam_runtime_collect_stats_ex` | Collect stats with an explicit output struct size for FFI. |
 | `llam_runtime_collect_stats` | Collect scheduler, I/O, blocking, and queue statistics. |
+| `llam_runtime_write_stats_json` | Write a newline-terminated JSON stats snapshot to an fd. |
 
 Task scheduling:
 
@@ -443,6 +497,7 @@ Task scheduling:
 | `llam_spawn` | Create a task. |
 | `llam_run` | Run the scheduler. |
 | `llam_yield` | Yield the current task. |
+| `llam_task_safepoint` | Mark progress in CPU-bound loops without forcing an immediate yield. |
 | `llam_join` | Wait for task completion. |
 | `llam_join_until` | Wait for task completion until a deadline. |
 | `llam_detach` | Consume a task handle without waiting for completion. |
@@ -539,7 +594,6 @@ Time, debug, and platform:
 | `llam_dump_runtime_state` | Dump runtime state to an fd. |
 | `llam_fd_t` | Platform-specific fd/socket handle type. |
 | `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Platform-correct invalid descriptor sentinel and predicate. |
-| `NM_INVALID_FD` / `NM_FD_IS_INVALID` | Legacy compatibility invalid descriptor sentinel and predicate. |
 | `LLAM_PLATFORM_LINUX` | Linux build flag. |
 | `LLAM_PLATFORM_DARWIN` | macOS/Darwin build flag. |
 | `LLAM_PLATFORM_WINDOWS` | Windows build flag. |
@@ -606,6 +660,34 @@ Selected environment variables:
 | `LLAM_SQPOLL_CPU` | CPU number | Select the SQPOLL CPU. |
 | `LLAM_IDLE_SPIN_NS` | nanoseconds | Idle spin time. |
 | `LLAM_IDLE_SPIN_ITERS` | iteration count | Idle spin iteration limit. |
+| `LLAM_BIND_WORKERS` | `0`, `1` | Bind worker threads to platform CPUs when supported. |
+| `LLAM_DARWIN_MACH_SCHED` | `0`, `1` | Toggle Darwin Mach/QoS scheduler hints; default is enabled on macOS. |
+| `LLAM_WINDOWS_UNSAFE_SKIP_TASK_SIMD` | `0`, `1` | Experimental Windows x64 ceiling mode: skip task-context XMM6-XMM15 save/restore. Only valid when managed tasks do not rely on callee-saved SIMD state across LLAM yields/waits. |
+| `LLAM_AARCH64_UNSAFE_SKIP_SCHEDULER_SIMD` | `0`, `1` | Experimental macOS/Linux ARM64 ceiling mode: skip scheduler-context SIMD save/restore while task contexts still preserve ABI-required `d8-d15`. |
+| `LLAM_ARM64_UNSAFE_SKIP_SCHEDULER_SIMD` | `0`, `1` | Alias for `LLAM_AARCH64_UNSAFE_SKIP_SCHEDULER_SIMD`. |
+| `LLAM_DIRECT_BLOCKING_IO` | `0`, `1` | Allow eligible blocking socket read/write operations to run through compensated direct blocking regions. |
+| `LLAM_DIRECT_BLOCKING_POLL` | `0`, `1`, unset | Control direct blocking poll fallback; Linux/Windows auto mode handles finite waits directly when profitable. |
+| `LLAM_ACCEPT_DIRECT_BLOCKING` | `0`, `1` | Route managed `accept` calls that cannot use multishot accept-watch through a compensated helper poll loop; default is enabled on macOS and disabled elsewhere. |
+| `LLAM_IO_POLL_REDIRECT_TIMEOUT_MS` | milliseconds | Redirect long direct-poll waits through opaque blocking compensation on Linux. |
+| `LLAM_IO_COOP_YIELD` | `0`, `1` | Enable cooperative yields around direct I/O fast paths; default is enabled on macOS, Linux, and Windows. |
+| `LLAM_IO_POLL_COOP_YIELD` | `0`, `1` | Enable cooperative yields in poll readiness paths; default is enabled on macOS, Linux, and Windows. |
+| `LLAM_IO_POLL_PRE_YIELD` | `0`, `1` | Let poll hand off to same-shard runnable producers before the first readiness probe; default is enabled on macOS and Windows. |
+| `LLAM_IO_POLL_EXTRA_YIELD` | `0`, `1` | Add an extra poll-readiness yield; default is enabled on macOS and Windows. |
+| `LLAM_IO_POLL_READY_YIELDS` | `0`-`8` | Bound short same-shard ready-yield probes before poll parks in the backend. |
+| `LLAM_READ_READY_INITIAL_HANDOFF` | `0`, `1` | Let `llam_read_when_ready()` hand off once to local producers before its first read probe; default is disabled. |
+| `LLAM_READ_READY_DIRECT_BLOCKING` | `0`, `1` | Let infinite `llam_read_when_ready()` use compensated direct blocking reads; default is disabled. |
+| `LLAM_POLL_SOCKET_PEEK` | `0`, `1` | Use `MSG_PEEK` for socket `POLLIN` fast checks; default is enabled on macOS and opt-in elsewhere. |
+| `LLAM_IO_WRITE_HANDOFF` | `0`, `1` | Yield after small socket writes so local readers can run; default is enabled on macOS and Linux. |
+| `LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF` | `0`, `1` | Prefer direct same-shard task handoff after eligible socket writes; default is enabled on macOS, Linux, and Windows. |
+| `LLAM_YIELD_DIRECT_HANDOFF` | `0`, `1`, unset | Allow ordinary yields to switch directly to same-shard runnable work when no timers or inject work are pending. |
+| `LLAM_OPAQUE_REDIRECT_FASTPATH` | `0`, `1` | Prefer redirect over helper handoff for opaque blocking; default is enabled on Linux. |
+| `LLAM_TIMER_HEAP_PREWARM` | timer slots | Preallocate shard timer heap slots to avoid growth during sleep/deadline fanout. |
+| `LLAM_STACK_CACHE_PREWARM` | stack count | Prewarm the default stack cache before high fanout workloads. |
+| `LLAM_TASK_CACHE_PREWARM` | task count | Prewarm task metadata slabs before high fanout workloads. |
+| `LLAM_STACK_SAMPLING` | `0`, `1` | Enable stack high-water sampling diagnostics. |
+| `LLAM_TRACE_EVENTS` | `0`, `1` | Enable per-worker trace ring diagnostics. |
+| `LLAM_WAKE_LATENCY_METRICS` | `0`, `1` | Enable wake-latency diagnostics. |
+| `LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS` | waiter count | Stress live poll/accept/inflight waiters; automatically clamped by fd budget. |
 
 ## Benchmarks
 
@@ -652,8 +734,8 @@ python3 scripts/bench_runtime_compare.py --runtime all
 
 Graph generation requires Python `matplotlib`. Without it, the script still writes CSV and prints tables.
 The scheduled `Runtime Benchmarks` workflow runs the same comparison on Linux
-x86_64, macOS arm64, and macOS x86_64, then uploads CSV/PNG artifacts for
-regression tracking.
+x86_64, macOS arm64, macOS x86_64, Windows Server 2022, and Windows Server
+2025, then uploads CSV/PNG artifacts for regression tracking.
 
 Run the benchmark matrix:
 
@@ -719,7 +801,7 @@ Check Windows status:
 .\scripts\verify_windows.ps1 -Native
 ```
 
-The default command verifies through WSL when available. The `-Native` command is expected to exit with status `2` until native Windows support is complete.
+The default command verifies through WSL when available. The `-Native` command builds native Windows targets and runs the Windows CTest suite.
 
 Remove generated files:
 
@@ -768,7 +850,7 @@ flowchart LR
     Engine --> Blocking["blocking\ncompensation"]
     IO --> Linux["src/io/linux\nio_uring"]
     IO --> Darwin["src/io/darwin\nkqueue"]
-    IO -.->|planned| Windows["Windows\nIOCP / Fiber"]
+    IO --> Windows["Windows\nIOCP socket requests"]
     Core --> ASM["src/asm\ncontext switch"]
 ```
 

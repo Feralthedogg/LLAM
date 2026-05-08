@@ -215,6 +215,62 @@ bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
 }
 
 /**
+ * @brief Enqueue on the owner side of the lock-free normal lane without taking shard->lock.
+ *
+ * @details
+ * This is only valid from the shard's primary scheduler thread while a managed
+ * task is running.  The Chase-Lev owner side is single-writer, so local spawn
+ * bursts can avoid a pthread mutex round trip and still publish work safely to
+ * thieves through the deque's release fence.
+ *
+ * @param shard Owner shard.
+ * @param task  Task to enqueue.
+ * @return true when the task was accepted by the normal lane or overflow queue.
+ */
+bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task) {
+    if (shard == NULL || task == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
+        return false;
+    }
+
+    if (llam_cldeque_push_bottom(&shard->norm_cldeque, task)) {
+        atomic_fetch_add_explicit(&shard->norm_depth, 1U, memory_order_release);
+        shard->metrics.norm_enqueues += 1U;
+        return true;
+    }
+
+    shard->metrics.queue_overflows += 1U;
+    llam_enqueue_overflow_task(shard->runtime, task);
+    return true;
+}
+
+/**
+ * @brief Pop owner-side normal work without taking shard->lock.
+ *
+ * @details
+ * Valid only on the primary scheduler thread while a managed task is running.
+ * The owner is the only writer for the Chase-Lev bottom and FIFO yield lane.
+ *
+ * @param shard Owner shard.
+ * @return Runnable task, or NULL when the owner lanes are empty.
+ */
+llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
+    llam_task_t *task;
+
+    if (shard == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
+        return NULL;
+    }
+
+    task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+    if (task == NULL) {
+        task = llam_queue_pop_head(&shard->norm_q);
+    }
+    if (task != NULL) {
+        atomic_fetch_sub_explicit(&shard->norm_depth, 1U, memory_order_release);
+    }
+    return task;
+}
+
+/**
  * @brief Enqueue a yielding current task with FIFO behavior.
  *
  * @param shard Owner shard.
@@ -241,6 +297,90 @@ bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task) {
         shard->metrics.norm_enqueues += 1U;
     }
     return pushed;
+}
+
+/**
+ * @brief Enqueue a yielding task on the owner FIFO lane without shard->lock.
+ *
+ * @details
+ * This mirrors ::llam_norm_queue_push_yield_locked for the single-owner direct
+ * handoff path. It deliberately uses FIFO order so yielded tasks do not starve
+ * behind fresh owner-side spawn bursts.
+ *
+ * @param shard Owner shard.
+ * @param task  Yielding task.
+ * @return true on success.
+ */
+bool llam_norm_queue_push_yield_unlocked(llam_shard_t *shard, llam_task_t *task) {
+    if (shard == NULL || task == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
+        return false;
+    }
+    if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+        return false;
+    }
+
+    llam_queue_push_tail(&shard->norm_q, task);
+    atomic_fetch_add_explicit(&shard->norm_depth, 1U, memory_order_release);
+    shard->metrics.norm_enqueues += 1U;
+    return true;
+}
+
+/**
+ * @brief Exchange the running task with local normal work without changing net depth.
+ *
+ * @details
+ * Direct yield handoff pops one runnable task and queues the current task in
+ * its place.  The normal-lane total depth is unchanged, so the hot path can
+ * avoid the atomic decrement/increment pair used by separate pop and push
+ * helpers.  The caller must be the shard owner thread.
+ *
+ * @param shard           Owner shard.
+ * @param current         Running task to requeue on the FIFO yield lane.
+ * @param out_next        Receives the runnable task to switch into.
+ * @param out_push_failed Receives whether failure was caused by no FIFO space.
+ * @return true when @p current was queued and @p out_next owns a runnable task.
+ */
+bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
+                                             llam_task_t *current,
+                                             llam_task_t **out_next,
+                                             bool *out_push_failed) {
+    llam_task_t *next = NULL;
+
+    if (out_next != NULL) {
+        *out_next = NULL;
+    }
+    if (out_push_failed != NULL) {
+        *out_push_failed = false;
+    }
+    if (shard == NULL || current == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
+        return false;
+    }
+
+    /*
+     * Direct yields should prefer older yielded peers before fresh owner-side
+     * spawn work. This also keeps tight ping-pong handoffs on the FIFO lane and
+     * avoids an unnecessary Chase-Lev owner pop on the common exchange path.
+     */
+    next = llam_queue_pop_head(&shard->norm_q);
+    if (next == NULL) {
+        if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+            if (out_push_failed != NULL) {
+                *out_push_failed = true;
+            }
+            return false;
+        }
+        next = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+        if (next == NULL) {
+            return false;
+        }
+    }
+
+    llam_queue_push_tail(&shard->norm_q, current);
+    shard->metrics.norm_enqueues += 1U;
+    if (out_next != NULL) {
+        *out_next = next;
+    }
+    return true;
 }
 
 /**

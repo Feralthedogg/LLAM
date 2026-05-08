@@ -25,8 +25,121 @@
 
 #include "runtime_internal.h"
 
+#if LLAM_PLATFORM_WINDOWS
+#include "runtime_windows_iocp.h"
+#endif
+
 #if defined(__APPLE__)
+#include <dlfcn.h>
 #include <sys/event.h>
+#endif
+
+#if LLAM_PLATFORM_WINDOWS
+#define LLAM_WINDOWS_WAKE_TABLE_CAP 4096
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+static SRWLOCK g_llam_windows_wake_lock = SRWLOCK_INIT;
+static HANDLE g_llam_windows_wake_handles[LLAM_WINDOWS_WAKE_TABLE_CAP];
+static HANDLE g_llam_windows_wake_timers[LLAM_WINDOWS_WAKE_TABLE_CAP];
+
+static bool llam_windows_high_res_wake_timer_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_WINDOWS_HIGH_RES_WAKE_TIMER");
+
+        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
+static HANDLE llam_windows_wake_timer_create(void) {
+    HANDLE timer = NULL;
+
+    if (!llam_windows_high_res_wake_timer_enabled()) {
+        return NULL;
+    }
+    timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (timer == NULL) {
+        timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    }
+    return timer;
+}
+
+static int llam_windows_wake_handle_alloc(HANDLE handle, HANDLE timer) {
+    int fd = -1;
+    unsigned i;
+
+    AcquireSRWLockExclusive(&g_llam_windows_wake_lock);
+    for (i = 1U; i < LLAM_WINDOWS_WAKE_TABLE_CAP; ++i) {
+        if (g_llam_windows_wake_handles[i] == NULL) {
+            g_llam_windows_wake_handles[i] = handle;
+            g_llam_windows_wake_timers[i] = timer;
+            fd = (int)i;
+            break;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_llam_windows_wake_lock);
+    if (fd < 0) {
+        errno = EMFILE;
+    }
+    return fd;
+}
+
+static HANDLE llam_windows_wake_handle_get(int fd) {
+    HANDLE handle = NULL;
+
+    if (fd <= 0 || fd >= LLAM_WINDOWS_WAKE_TABLE_CAP) {
+        return NULL;
+    }
+    AcquireSRWLockShared(&g_llam_windows_wake_lock);
+    handle = g_llam_windows_wake_handles[fd];
+    ReleaseSRWLockShared(&g_llam_windows_wake_lock);
+    return handle;
+}
+
+static HANDLE llam_windows_wake_timer_get(int fd) {
+    HANDLE timer = NULL;
+
+    if (fd <= 0 || fd >= LLAM_WINDOWS_WAKE_TABLE_CAP) {
+        return NULL;
+    }
+    AcquireSRWLockShared(&g_llam_windows_wake_lock);
+    timer = g_llam_windows_wake_timers[fd];
+    ReleaseSRWLockShared(&g_llam_windows_wake_lock);
+    return timer;
+}
+
+static void llam_windows_wake_handle_take(int fd, HANDLE *handle_out, HANDLE *timer_out) {
+    HANDLE handle = NULL;
+    HANDLE timer = NULL;
+
+    if (handle_out != NULL) {
+        *handle_out = NULL;
+    }
+    if (timer_out != NULL) {
+        *timer_out = NULL;
+    }
+    if (fd <= 0 || fd >= LLAM_WINDOWS_WAKE_TABLE_CAP) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_llam_windows_wake_lock);
+    handle = g_llam_windows_wake_handles[fd];
+    timer = g_llam_windows_wake_timers[fd];
+    g_llam_windows_wake_handles[fd] = NULL;
+    g_llam_windows_wake_timers[fd] = NULL;
+    ReleaseSRWLockExclusive(&g_llam_windows_wake_lock);
+    if (handle_out != NULL) {
+        *handle_out = handle;
+    }
+    if (timer_out != NULL) {
+        *timer_out = timer;
+    }
+}
 #endif
 
 /**
@@ -51,6 +164,25 @@ int llam_wake_handle_create(void) {
         return -1;
     }
     return fd;
+#elif LLAM_PLATFORM_WINDOWS
+    HANDLE handle = CreateEventW(NULL, TRUE, FALSE, NULL);
+    HANDLE timer = NULL;
+    int fd;
+
+    if (handle == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    timer = llam_windows_wake_timer_create();
+    fd = llam_windows_wake_handle_alloc(handle, timer);
+    if (fd < 0) {
+        if (timer != NULL) {
+            CloseHandle(timer);
+        }
+        CloseHandle(handle);
+        return -1;
+    }
+    return fd;
 #else
     return eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 #endif
@@ -63,7 +195,21 @@ int llam_wake_handle_create(void) {
  */
 void llam_wake_handle_close(int fd) {
     if (fd >= 0) {
+#if LLAM_PLATFORM_WINDOWS
+        HANDLE handle = NULL;
+        HANDLE timer = NULL;
+
+        llam_windows_wake_handle_take(fd, &handle, &timer);
+        if (timer != NULL) {
+            (void)CancelWaitableTimer(timer);
+            (void)CloseHandle(timer);
+        }
+        if (handle != NULL) {
+            (void)CloseHandle(handle);
+        }
+#else
         close(fd);
+#endif
     }
 }
 
@@ -93,6 +239,56 @@ int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns) {
         ts_ptr = &ts;
     }
     return kevent(fd, NULL, 0, &event, 1, ts_ptr);
+#elif LLAM_PLATFORM_WINDOWS
+    {
+        HANDLE os_handle = llam_windows_wake_handle_get(fd);
+        HANDLE timer = llam_windows_wake_timer_get(fd);
+        DWORD wait_ms;
+        DWORD rc;
+
+        if (os_handle == NULL) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (timeout_ms < 0) {
+            wait_ms = INFINITE;
+        } else if (timeout_ns > 0U && timer != NULL) {
+            LARGE_INTEGER due_time;
+            HANDLE handles[2];
+
+            due_time.QuadPart = -((LONGLONG)((timeout_ns + 99ULL) / 100ULL));
+            handles[0] = os_handle;
+            handles[1] = timer;
+            if (SetWaitableTimer(timer, &due_time, 0, NULL, NULL, FALSE)) {
+                rc = WaitForMultipleObjects(2U, handles, FALSE, INFINITE);
+                (void)CancelWaitableTimer(timer);
+                if (rc == WAIT_OBJECT_0) {
+                    return 1;
+                }
+                if (rc == WAIT_OBJECT_0 + 1U) {
+                    return 0;
+                }
+                errno = EINVAL;
+                return -1;
+            }
+            wait_ms = (DWORD)((timeout_ns + 999999ULL) / 1000000ULL);
+        } else if (timeout_ns > 0U) {
+            uint64_t rounded_ms = (timeout_ns + 999999ULL) / 1000000ULL;
+
+            wait_ms = rounded_ms > (uint64_t)UINT32_MAX ? UINT32_MAX : (DWORD)rounded_ms;
+        } else {
+            wait_ms = (DWORD)timeout_ms;
+        }
+        rc = WaitForSingleObject(os_handle, wait_ms);
+        if (rc == WAIT_OBJECT_0) {
+            return 1;
+        }
+        if (rc == WAIT_TIMEOUT) {
+            return 0;
+        }
+        errno = EINVAL;
+        return -1;
+    }
 #else
     struct pollfd pfd;
 
@@ -137,6 +333,12 @@ static bool llam_kick_fd_raw(int fd) {
         EV_SET(&kev, 1, EVFILT_USER, 0U, NOTE_TRIGGER, 0, NULL);
         return kevent(fd, &kev, 1, NULL, 0, NULL) == 0;
     }
+#elif LLAM_PLATFORM_WINDOWS
+    {
+        HANDLE os_handle = llam_windows_wake_handle_get(fd);
+
+        return os_handle != NULL && SetEvent(os_handle) != 0;
+    }
 #else
     {
         uint64_t one = 1;
@@ -169,6 +371,15 @@ static void llam_drain_fd_raw(int fd) {
     }
 
 #if !defined(__APPLE__)
+#if LLAM_PLATFORM_WINDOWS
+    {
+        HANDLE os_handle = llam_windows_wake_handle_get(fd);
+
+        if (os_handle != NULL) {
+            (void)ResetEvent(os_handle);
+        }
+    }
+#else
     {
         uint64_t value;
 
@@ -183,6 +394,7 @@ static void llam_drain_fd_raw(int fd) {
             return;
         }
     }
+#endif
 #else
     (void)fd;
 #endif
@@ -336,6 +548,16 @@ void llam_kick_shard(llam_shard_t *shard) {
         return;
     }
     if (llam_eventfd_try_claim(&shard->event_pending) == 0U) {
+#if LLAM_PLATFORM_WINDOWS
+        /*
+         * Manual-reset events can lose a coalesced wake if a second producer
+         * observes event_pending just before the worker drains and resets the
+         * event.  Re-set the OS event on Windows even when the logical pending
+         * bit is already claimed; SetEvent is idempotent for the common case and
+         * closes the reset-after-producer race.
+         */
+        (void)llam_kick_fd_raw(shard->event_fd);
+#endif
         return;
     }
 #if defined(__linux__)
@@ -364,11 +586,23 @@ void llam_kick_node(llam_node_t *node) {
         return;
     }
     if (llam_eventfd_try_claim(&node->event_pending) == 0U) {
+#if LLAM_PLATFORM_WINDOWS
+        (void)llam_kick_fd_raw(node->event_fd);
+        if (node->windows_iocp_handle != NULL) {
+            (void)llam_windows_iocp_post(node->windows_iocp_handle, LLAM_WINDOWS_IOCP_WAKE_KEY, 0U, 0U);
+        }
+#endif
         return;
     }
 #if defined(__APPLE__)
     if (node->mach_wake_enabled) {
         kicked = llam_kick_node_mach(node);
+    }
+#endif
+#if LLAM_PLATFORM_WINDOWS
+    if (node->windows_iocp_handle != NULL &&
+        llam_windows_iocp_post(node->windows_iocp_handle, LLAM_WINDOWS_IOCP_WAKE_KEY, 0U, 0U) == 0) {
+        kicked = true;
     }
 #endif
     if (llam_kick_fd_raw(node->event_fd)) {
@@ -430,7 +664,7 @@ int llam_opaque_wake_init(llam_shard_t *shard) {
     {
         const char *env = llam_env_get("LLAM_OPAQUE_MACH_SEM");
 
-        if (env == NULL || env[0] == '\0' || strcmp(env, "0") == 0) {
+        if (env != NULL && strcmp(env, "0") == 0) {
             return 0;
         }
         if (semaphore_create(mach_task_self(), &shard->opaque_sem, SYNC_POLICY_FIFO, 0) == KERN_SUCCESS) {
@@ -440,6 +674,83 @@ int llam_opaque_wake_init(llam_shard_t *shard) {
 #endif
     return 0;
 }
+
+#if defined(__APPLE__)
+#define LLAM_DARWIN_UL_COMPARE_AND_WAIT 1U
+#define LLAM_DARWIN_ULF_WAKE_ALL 0x00000100U
+
+typedef int (*llam_darwin_ulock_wait_fn)(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
+typedef int (*llam_darwin_ulock_wake_fn)(uint32_t operation, void *addr, uint64_t wake_value);
+
+/**
+ * @brief Resolve private Darwin ulock entry points for opt-in opaque wake probes.
+ *
+ * @details
+ * The symbols are resolved lazily with @c dlsym so the normal public Mach
+ * semaphore path remains the default ABI-safe implementation.  The ulock path is
+ * only used when @c LLAM_OPAQUE_DARWIN_ULOCK is explicitly enabled.
+ */
+static bool llam_darwin_ulock_functions(llam_darwin_ulock_wait_fn *wait_out,
+                                        llam_darwin_ulock_wake_fn *wake_out) {
+    static atomic_int cached = -1;
+    static llam_darwin_ulock_wait_fn wait_fn = NULL;
+    static llam_darwin_ulock_wake_fn wake_fn = NULL;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_OPAQUE_DARWIN_ULOCK");
+
+        value = 0;
+        if (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) {
+            union {
+                void *object;
+                llam_darwin_ulock_wait_fn function;
+            } wait_symbol;
+            union {
+                void *object;
+                llam_darwin_ulock_wake_fn function;
+            } wake_symbol;
+
+            wait_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wait");
+            wake_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wake");
+            wait_fn = wait_symbol.function;
+            wake_fn = wake_symbol.function;
+            value = wait_fn != NULL && wake_fn != NULL ? 1 : 0;
+        }
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    if (value == 0) {
+        return false;
+    }
+    if (wait_out != NULL) {
+        *wait_out = wait_fn;
+    }
+    if (wake_out != NULL) {
+        *wake_out = wake_fn;
+    }
+    return true;
+}
+
+/**
+ * @brief Return whether Darwin opaque semaphores should skip timed recovery.
+ *
+ * The default path keeps a bounded 1ms timed wait because opaque helper wake
+ * races can otherwise strand a helper on some Darwin schedules. Indefinite
+ * waits remain available as an opt-in probe for profiling controlled workloads.
+ */
+static bool llam_opaque_mach_sem_indefinite_wait_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_OPAQUE_MACH_SEM_INDEFINITE");
+
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+#endif
 
 /**
  * @brief Destroy optional opaque-helper wake resources for a shard.
@@ -473,7 +784,26 @@ void llam_opaque_wake_signal(llam_shard_t *shard) {
     (void)llam_linux_futex_wake_private(&shard->opaque_wake_seq, INT_MAX);
     return;
 #endif
+#if LLAM_PLATFORM_WINDOWS
+    atomic_fetch_add_explicit(&shard->opaque_wake_seq, 1U, memory_order_release);
+    WakeByAddressAll((PVOID)&shard->opaque_wake_seq);
+    return;
+#endif
 #if defined(__APPLE__)
+    {
+        llam_darwin_ulock_wake_fn ulock_wake = NULL;
+
+        if (llam_darwin_ulock_functions(NULL, &ulock_wake)) {
+            int saved_errno = errno;
+
+            atomic_fetch_add_explicit(&shard->opaque_wake_seq, 1U, memory_order_release);
+            (void)ulock_wake(LLAM_DARWIN_UL_COMPARE_AND_WAIT | LLAM_DARWIN_ULF_WAKE_ALL,
+                             (void *)&shard->opaque_wake_seq,
+                             0U);
+            errno = saved_errno;
+            return;
+        }
+    }
     if (shard->opaque_sem_initialized) {
         (void)semaphore_signal_all(shard->opaque_sem);
         return;
@@ -504,18 +834,52 @@ void llam_opaque_wake_wait(llam_shard_t *shard) {
         return;
     }
 #endif
-#if defined(__APPLE__)
-    if (shard->opaque_sem_initialized) {
-        kern_return_t kr;
-        mach_timespec_t timeout = {
-            .tv_sec = 0,
-            .tv_nsec = 1000000U,
-        };
+#if LLAM_PLATFORM_WINDOWS
+    {
+        unsigned seq = atomic_load_explicit(&shard->opaque_wake_seq, memory_order_acquire);
 
         pthread_mutex_unlock(&shard->opaque_lock);
-        do {
-            kr = semaphore_timedwait(shard->opaque_sem, timeout);
-        } while (kr == KERN_ABORTED);
+        (void)WaitOnAddress((volatile VOID *)&shard->opaque_wake_seq, &seq, sizeof(seq), INFINITE);
+        pthread_mutex_lock(&shard->opaque_lock);
+        return;
+    }
+#endif
+#if defined(__APPLE__)
+    {
+        llam_darwin_ulock_wait_fn ulock_wait = NULL;
+
+        if (llam_darwin_ulock_functions(&ulock_wait, NULL)) {
+            unsigned seq = atomic_load_explicit(&shard->opaque_wake_seq, memory_order_acquire);
+            int saved_errno = errno;
+
+            pthread_mutex_unlock(&shard->opaque_lock);
+            (void)ulock_wait(LLAM_DARWIN_UL_COMPARE_AND_WAIT,
+                             (void *)&shard->opaque_wake_seq,
+                             (uint64_t)seq,
+                             1000U);
+            pthread_mutex_lock(&shard->opaque_lock);
+            errno = saved_errno;
+            return;
+        }
+    }
+    if (shard->opaque_sem_initialized) {
+        kern_return_t kr;
+
+        pthread_mutex_unlock(&shard->opaque_lock);
+        if (llam_opaque_mach_sem_indefinite_wait_enabled()) {
+            do {
+                kr = semaphore_wait(shard->opaque_sem);
+            } while (kr == KERN_ABORTED);
+        } else {
+            mach_timespec_t timeout = {
+                .tv_sec = 0,
+                .tv_nsec = 1000000U,
+            };
+
+            do {
+                kr = semaphore_timedwait(shard->opaque_sem, timeout);
+            } while (kr == KERN_ABORTED);
+        }
         pthread_mutex_lock(&shard->opaque_lock);
         return;
     }
@@ -560,6 +924,8 @@ void llam_request_stop(llam_runtime_t *rt) {
         atomic_fetch_add_explicit(&rt->block_wake_seq, 1U, memory_order_release);
 #if defined(__linux__)
         (void)llam_linux_futex_wake_private(&rt->block_wake_seq, INT_MAX);
+#elif LLAM_PLATFORM_WINDOWS
+        WakeByAddressAll((PVOID)&rt->block_wake_seq);
 #else
         if (rt->block_cv_initialized) {
             pthread_mutex_lock(&rt->block_lock);

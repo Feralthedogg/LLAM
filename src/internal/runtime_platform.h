@@ -51,9 +51,10 @@
 #define LLAM_RUNTIME_BACKEND_DARWIN 0
 #endif
 
-// The Windows backend is declared at the platform layer but not implemented yet.
+// Native Windows builds must opt into the staged backend explicitly so accidental
+// partial toolchain builds fail with a clear diagnostic.
 #if LLAM_RUNTIME_BACKEND_WINDOWS && !defined(LLAM_ENABLE_WINDOWS_BACKEND)
-#error "Native Windows 10/11 backend is not implemented yet; use WSL/Linux or build after the IOCP/Fiber backend lands."
+#error "Native Windows 10/11 backend requires LLAM_ENABLE_WINDOWS_BACKEND; use the CMake Windows configuration."
 #endif
 
 #endif

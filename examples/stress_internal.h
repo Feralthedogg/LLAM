@@ -23,24 +23,53 @@
 
 #include "llam/runtime.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fenv.h>
 #include <limits.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if LLAM_PLATFORM_WINDOWS
+#include <windows.h>
+#if defined(__has_include)
+#if __has_include(<afunix.h>)
+#include <afunix.h>
+#endif
+#endif
+#ifndef POLLIN
+#define POLLIN 0x0100
+#endif
+#ifndef POLLERR
+#define POLLERR 0x0001
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0002
+#endif
+#ifndef SHUT_WR
+#define SHUT_WR SD_SEND
+#endif
+int stress_socketpair_windows(int domain, int type, int protocol, int sv[2]);
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include "runtime_internal.h"
 
 #include "env_compat.h"
+
+#if LLAM_PLATFORM_WINDOWS
+#undef write
+#define socketpair(domain, type, protocol, sv) stress_socketpair_windows((domain), (type), (protocol), (sv))
+#define close(fd) closesocket((SOCKET)(uintptr_t)(fd))
+#define write(fd, buf, count) send((SOCKET)(uintptr_t)(fd), (const char *)(buf), (int)(count), 0)
+#endif
 
 typedef struct storm_state {
     atomic_uint completed;
@@ -279,6 +308,7 @@ unsigned stress_round_count(void);
 unsigned stress_env_u32(const char *name, unsigned default_value, unsigned max_value);
 unsigned stress_env_flag_default(const char *name, unsigned default_value);
 int stress_env_i32(const char *name, int default_value, int min_value, int max_value);
+unsigned stress_fd_budget_waiters(unsigned requested, unsigned fds_per_waiter, unsigned reserve_fds);
 bool stress_platform_prefers_indefinite_ready_poll(void);
 bool stress_platform_supports_foreign_poll_watch(void);
 bool stress_platform_supports_recv_watch(void);
@@ -346,6 +376,7 @@ void run_join_timeout_path(void);
 void run_mutex_timeout_path(void);
 void run_cond_cancel_path(void);
 void run_channel_timeout_paths(void);
+void run_channel_select_race_paths(void);
 void run_dynamic_join_timeout_path(void);
 void run_dynamic_mutex_timeout_path(void);
 void run_dynamic_cond_timeout_path(void);

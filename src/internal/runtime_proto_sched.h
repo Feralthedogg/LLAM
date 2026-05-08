@@ -54,8 +54,15 @@ void llam_cldeque_init(llam_cldeque_t *deque);
 bool llam_lockfree_normq_enabled(const llam_runtime_t *rt);
 unsigned llam_norm_queue_depth(const llam_shard_t *shard);
 llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard);
+llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard);
+bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
+                                           llam_task_t *current,
+                                           llam_task_t **out_next,
+                                           bool *out_push_failed);
 bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task);
+bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task);
 bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task);
+bool llam_norm_queue_push_yield_unlocked(llam_shard_t *shard, llam_task_t *task);
 llam_task_t *llam_norm_queue_steal(llam_shard_t *victim);
 llam_task_t *llam_queue_pop_head(llam_queue_t *queue);
 llam_task_t *llam_queue_pop_tail(llam_queue_t *queue);

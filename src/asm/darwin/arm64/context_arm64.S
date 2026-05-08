@@ -32,6 +32,8 @@ _llam_ctx_switch:
      * x1 = context to restore
      *
      * Save stack pointer, x19-x30, d8-d15, and FP control/status registers.
+     * Scheduler contexts may opt out of SIMD save/restore through simd_flags;
+     * task contexts keep the ABI-preserved SIMD path enabled by default.
      */
     mov x9, sp
     str x9, [x0, #0]
@@ -41,18 +43,17 @@ _llam_ctx_switch:
     stp x25, x26, [x0, #56]
     stp x27, x28, [x0, #72]
     stp x29, x30, [x0, #88]
-    str d8, [x0, #104]
-    str d9, [x0, #112]
-    str d10, [x0, #120]
-    str d11, [x0, #128]
-    str d12, [x0, #136]
-    str d13, [x0, #144]
-    str d14, [x0, #152]
-    str d15, [x0, #160]
+    ldr x10, [x0, #184]
+    tbnz x10, #0, 1f
+    stp d8, d9, [x0, #104]
+    stp d10, d11, [x0, #120]
+    stp d12, d13, [x0, #136]
+    stp d14, d15, [x0, #152]
     mrs x9, fpcr
     str x9, [x0, #168]
     mrs x9, fpsr
     str x9, [x0, #176]
+1:
 
     ldr x9, [x1, #0]
     ldp x19, x20, [x1, #8]
@@ -61,18 +62,17 @@ _llam_ctx_switch:
     ldp x25, x26, [x1, #56]
     ldp x27, x28, [x1, #72]
     ldp x29, x30, [x1, #88]
-    ldr d8, [x1, #104]
-    ldr d9, [x1, #112]
-    ldr d10, [x1, #120]
-    ldr d11, [x1, #128]
-    ldr d12, [x1, #136]
-    ldr d13, [x1, #144]
-    ldr d14, [x1, #152]
-    ldr d15, [x1, #160]
+    ldr x10, [x1, #184]
+    tbnz x10, #1, 2f
+    ldp d8, d9, [x1, #104]
+    ldp d10, d11, [x1, #120]
+    ldp d12, d13, [x1, #136]
+    ldp d14, d15, [x1, #152]
     ldr x10, [x1, #168]
     msr fpcr, x10
     ldr x10, [x1, #176]
     msr fpsr, x10
+2:
     mov sp, x9
     ret
 

@@ -27,6 +27,10 @@
 
 #include "runtime_internal.h"
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 /**
  * @brief Return the usable stack size for a stack class.
  *
@@ -71,9 +75,11 @@ uint64_t llam_slice_ns(llam_task_class_t task_class) {
 static uintptr_t llam_current_rsp(void) {
     uintptr_t rsp;
 
-#if defined(__aarch64__)
+#if defined(_MSC_VER)
+    rsp = (uintptr_t)_AddressOfReturnAddress();
+#elif LLAM_ARCH_AARCH64
     __asm__ volatile("mov %0, sp" : "=r"(rsp));
-#elif defined(__x86_64__)
+#elif LLAM_ARCH_X86_64
     __asm__ volatile("movq %%rsp, %0" : "=r"(rsp));
 #else
     // Portable fallback is approximate but still useful for diagnostics on
@@ -115,24 +121,7 @@ static size_t llam_task_stack_used_from_rsp(const llam_task_t *task, uintptr_t r
  * @return true if sampling should record high-water data.
  */
 static bool llam_stack_sampling_enabled(void) {
-    static atomic_int cached_enabled = ATOMIC_VAR_INIT(-1);
-    int enabled = atomic_load_explicit(&cached_enabled, memory_order_acquire);
-
-    if (enabled < 0) {
-        const char *sample_value = llam_env_get("LLAM_STACK_SAMPLING");
-        const char *light_value = llam_env_get("LLAM_DIAG_LIGHT_SAFEPOINT");
-        const char *strict_value = llam_env_get("LLAM_STRICT_SAFEPOINT");
-
-        // Cache the environment decision after the first check so the sampling
-        // path does not repeatedly parse strings.
-        enabled = ((sample_value != NULL && sample_value[0] != '\0' && strcmp(sample_value, "0") != 0) ||
-                   (light_value != NULL && light_value[0] != '\0' && strcmp(light_value, "0") == 0) ||
-                   (strict_value != NULL && strict_value[0] != '\0' && strcmp(strict_value, "0") != 0))
-                      ? 1
-                      : 0;
-        atomic_store_explicit(&cached_enabled, enabled, memory_order_release);
-    }
-    return enabled != 0;
+    return g_llam_runtime.stack_sampling_enabled != 0U;
 }
 
 /**
@@ -205,7 +194,15 @@ long llam_page_size(void) {
     static long cached_page_size = 0;
 
     if (cached_page_size == 0) {
+#if LLAM_PLATFORM_WINDOWS
+        SYSTEM_INFO system_info;
+
+        memset(&system_info, 0, sizeof(system_info));
+        GetSystemInfo(&system_info);
+        cached_page_size = system_info.dwPageSize != 0U ? (long)system_info.dwPageSize : 4096L;
+#else
         cached_page_size = sysconf(_SC_PAGESIZE);
+#endif
     }
 
     return cached_page_size;

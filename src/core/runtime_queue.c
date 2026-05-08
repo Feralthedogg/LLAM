@@ -280,7 +280,7 @@ unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task) {
         if (i != last_id) {
             penalty += 1U;
         }
-        if (task->task_class == LLAM_TASK_CLASS_LATENCY && i != home_id) {
+        if (atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY && i != home_id) {
             penalty += 2U;
         }
 
@@ -316,7 +316,7 @@ bool llam_should_enqueue_hot_locked(llam_shard_t *shard,
     unsigned norm_depth;
 
     /* Pressure can still demote hot work so the normal lane does not starve. */
-    if (task != NULL && task->task_class == LLAM_TASK_CLASS_LATENCY) {
+    if (task != NULL && atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY) {
         return true;
     }
 

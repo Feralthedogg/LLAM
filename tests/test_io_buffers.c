@@ -89,6 +89,7 @@ static int test_direct_owned_read_and_poll(void) {
     int poll_fds[2] = {-1, -1};
     short revents = 0;
     ssize_t bytes;
+    char one = 0;
 
     errno = 0;
     if (llam_read_owned(-1, 8U, NULL) != -1 || errno != EINVAL) {
@@ -146,6 +147,12 @@ static int test_direct_owned_read_and_poll(void) {
         close_if_valid(&poll_fds[1]);
         return test_fail("empty pipe poll did not time out immediately");
     }
+    errno = 0;
+    if (llam_read_when_ready(poll_fds[0], &one, 1U, 0) != -1 || errno != ETIMEDOUT) {
+        close_if_valid(&poll_fds[0]);
+        close_if_valid(&poll_fds[1]);
+        return test_fail("empty pipe fused read did not time out immediately");
+    }
     if (write_all_native(poll_fds[1], "x", 1U) != 0) {
         close_if_valid(&poll_fds[0]);
         close_if_valid(&poll_fds[1]);
@@ -156,6 +163,11 @@ static int test_direct_owned_read_and_poll(void) {
         close_if_valid(&poll_fds[0]);
         close_if_valid(&poll_fds[1]);
         return test_fail("ready pipe poll did not report POLLIN");
+    }
+    if (llam_read_when_ready(poll_fds[0], &one, 1U, 0) != 1 || one != 'x') {
+        close_if_valid(&poll_fds[0]);
+        close_if_valid(&poll_fds[1]);
+        return test_fail("ready pipe fused read failed");
     }
     close_if_valid(&poll_fds[0]);
     close_if_valid(&poll_fds[1]);
@@ -176,24 +188,14 @@ static void io_writer_task(void *arg) {
 static void io_reader_task(void *arg) {
     io_state_t *state = arg;
     llam_io_buffer_t *buffer = NULL;
-    short revents = 0;
+    char hello[5];
     ssize_t bytes;
 
-    if (llam_poll_fd(state->stream_sv[0], POLLIN, 1000, &revents) <= 0 || (revents & POLLIN) == 0) {
-        task_fail(state, "llam_poll_fd stream", errno);
+    bytes = llam_read_when_ready(state->stream_sv[0], hello, sizeof(hello), 1000);
+    if (bytes != 5 || memcmp(hello, "hello", 5U) != 0) {
+        task_fail(state, "managed llam_read_when_ready stream", EPROTO);
         return;
     }
-    bytes = llam_read_owned(state->stream_sv[0], 16U, &buffer);
-    if (bytes != 5 ||
-        buffer == NULL ||
-        llam_io_buffer_size(buffer) != 5U ||
-        memcmp(llam_io_buffer_data(buffer), "hello", 5U) != 0) {
-        llam_io_buffer_release(buffer);
-        task_fail(state, "managed llam_read_owned stream", EPROTO);
-        return;
-    }
-    llam_io_buffer_release(buffer);
-    buffer = NULL;
 
     bytes = llam_recv_owned(state->peek_sv[0], 4U, MSG_PEEK, &buffer);
     if (bytes != 4 ||

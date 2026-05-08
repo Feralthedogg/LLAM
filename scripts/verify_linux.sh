@@ -28,8 +28,11 @@ def run(cmd, timeout, env=None):
 run(["./demo"], timeout=30)
 run(["./bench"], timeout=120, env={
     "LLAM_BENCH_ROUNDS": "1",
+    "LLAM_BENCH_SELECT_OPS": "128",
     "LLAM_BENCH_IO_MESSAGES": "32",
     "LLAM_BENCH_POLL_EVENTS": "32",
+    "LLAM_BENCH_SLEEP_TASKS": "128",
+    "LLAM_BENCH_OPAQUE_SCOPES": "4",
 })
 run(["./stress"], timeout=90, env={
     "LLAM_STRESS_ROUNDS": "1",

@@ -19,23 +19,27 @@ CLEAN_FILES = \
 	demo \
 	stress \
 	bench \
+	server \
+	server_flood \
 	test_abi_contract \
 	test_connect_io \
 	test_runtime_core \
 	test_sync_primitives \
 	test_io_buffers \
-	test_nm_compat_runtime \
+	test_windows_policy \
 	test_shared_load \
 	libllam_runtime.a \
 	demo.exe \
 	stress.exe \
 	bench.exe \
+	server.exe \
+	server_flood.exe \
 	test_abi_contract.exe \
 	test_connect_io.exe \
 	test_runtime_core.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
-	test_nm_compat_runtime.exe \
+	test_windows_policy.exe \
 	test_shared_load.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
@@ -77,11 +81,12 @@ DL_LIBS = -ldl
 endif
 
 RUNTIME_PRIV_HDRS = \
-	include/llam/nm_platform.h \
-	include/llam/nm_runtime.h \
 	include/llam/platform.h \
 	include/llam/runtime.h \
 	src/internal/runtime_platform.h \
+	src/internal/runtime_windows_compat.h \
+	src/internal/runtime_windows.h \
+	src/internal/runtime_windows_iocp.h \
 	src/internal/llam_internal.h \
 	src/internal/runtime_internal.h \
 	src/internal/runtime_types.h \
@@ -94,7 +99,8 @@ RUNTIME_PRIV_HDRS = \
 	src/engine/runtime_watchdog_internal.h \
 	src/io/runtime_io_api_internal.h \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
-	src/io/linux/runtime_io_watch_linux_internal.h
+	src/io/linux/runtime_io_watch_linux_internal.h \
+	src/io/windows/runtime_io_watch_windows_internal.h
 
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime.o \
@@ -119,8 +125,10 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_trace.o \
 	$(OBJDIR)/src/core/runtime_wake.o \
 	$(OBJDIR)/src/core/runtime_platform.o \
+	$(OBJDIR)/src/core/runtime_windows.o \
 	$(OBJDIR)/src/core/runtime_safepoint.o \
 	$(OBJDIR)/src/core/runtime_wait.o \
+	$(OBJDIR)/src/core/runtime_task_reclaim.o \
 	$(OBJDIR)/src/core/runtime_task_stack.o \
 	$(OBJDIR)/src/core/runtime_reinject.o \
 	$(OBJDIR)/src/core/runtime_wait_tracking.o \
@@ -135,7 +143,6 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/engine/runtime_watchdog_scale.o \
 	$(OBJDIR)/src/engine/runtime_watchdog_worker.o \
 	$(OBJDIR)/src/core/runtime_api.o \
-	$(OBJDIR)/src/core/runtime_llam_api.o \
 	$(OBJDIR)/src/core/runtime_spawn.o \
 	$(OBJDIR)/src/core/runtime_yield_join_sleep.o \
 	$(OBJDIR)/src/core/runtime_blocking_api.o \
@@ -150,17 +157,26 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_cond.o \
 	$(OBJDIR)/src/core/runtime_channel_cache.o \
 	$(OBJDIR)/src/core/runtime_channel.o \
+	$(OBJDIR)/src/core/runtime_channel_select.o \
+	$(OBJDIR)/src/core/runtime_handle.o \
+	$(OBJDIR)/src/core/runtime_task_group.o \
+	$(OBJDIR)/src/core/runtime_task_local.o \
 	$(OBJDIR)/src/io/runtime_io_api.o \
 	$(OBJDIR)/src/io/runtime_io_api_direct.o \
 	$(OBJDIR)/src/io/runtime_io_api_direct_tuning.o \
 	$(OBJDIR)/src/io/runtime_io_api_issue.o \
 	$(OBJDIR)/src/io/runtime_io_api_blocking_ops.o \
 	$(OBJDIR)/src/io/runtime_io_api_public.o \
+	$(OBJDIR)/src/io/windows/runtime_windows_iocp.o \
 	$(OBJDIR)/src/core/runtime_debug.o \
 	$(OBJDIR)/src/io/runtime_io_watch.o
 
 ifeq ($(HOST_PLATFORM),linux)
 LDLIBS += -lm
+LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '#include <liburing.h>\nint main(void) { void *p = (void *)io_uring_setup_buf_ring; return p == 0; }\n' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /tmp/llam-uring-check-$$$$ >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(LLAM_HAVE_IO_URING_BUF_RING_HELPERS),1)
+CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
+endif
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_prelude.o \
@@ -200,9 +216,23 @@ else ifeq ($(UNAME_M),x86_64)
 RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/context_x86_64.o
 endif
 else ifeq ($(HOST_PLATFORM),windows)
-RUNTIME_OBJS =
-LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32
-CPPFLAGS += -D_WIN32_WINNT=0x0A00
+RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
+LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock
+CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
+RUNTIME_OBJS += \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_state.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_socket.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_pool.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_control.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_submit.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_completion.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_fallback.o \
+	$(OBJDIR)/src/io/windows/runtime_io_watch_windows.o
+ifeq ($(UNAME_M),AMD64)
+RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+else ifeq ($(UNAME_M),x86_64)
+RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+endif
 else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -luring,$(LDLIBS))
@@ -225,6 +255,10 @@ BENCH_OBJS = \
 	$(OBJDIR)/examples/bench.o \
 	$(OBJDIR)/examples/bench_support.o \
 	$(OBJDIR)/examples/bench_entry.o
+SERVER_OBJS = \
+	$(OBJDIR)/examples/server.o
+SERVER_FLOOD_OBJS = \
+	$(OBJDIR)/examples/server_flood.o
 TEST_ABI_OBJS = \
 	$(OBJDIR)/tests/test_abi_contract.o
 TEST_CONNECT_OBJS = \
@@ -235,23 +269,23 @@ TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
 	$(OBJDIR)/tests/test_io_buffers.o
-TEST_NM_COMPAT_OBJS = \
-	$(OBJDIR)/tests/test_nm_compat_runtime.o
+TEST_WINDOWS_POLICY_OBJS = \
+	$(OBJDIR)/tests/test_windows_policy.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 
-.PHONY: all clean static shared test check package bench-matrix verify-darwin verify-linux verify-windows platform-status windows-unsupported
+.PHONY: all clean static shared test check package bench-matrix server-stress server-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported
 
 ifeq ($(HOST_PLATFORM),windows)
 
-all demo stress bench static shared test check package bench-matrix verify-darwin verify-linux: windows-unsupported
+all demo stress bench server server_flood static shared test check package bench-matrix server-stress server-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
-	@echo "Native Windows 10/11 backend is scaffolded at the API/build boundary but not complete."
-	@echo "Use WSL/Linux for the Linux backend today, or implement the planned IOCP/Fiber backend under a Windows platform layer."
+	@echo "Native Windows 10/11 backend is staged: scheduler/core builds through CMake with x86_64 asm context switching."
+	@echo "Use CMake for native Windows builds; Makefile Windows host targets remain guarded until full IOCP request support lands."
 
 windows-unsupported: platform-status
 	@exit 2
@@ -265,7 +299,7 @@ verify-windows:
 
 else
 
-all: demo stress bench static shared
+all: demo stress bench server server_flood static shared
 
 static: libllam_runtime.a
 
@@ -274,13 +308,13 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_connect_io test_runtime_core test_sync_primitives test_io_buffers test_nm_compat_runtime test_shared_load shared
+test: test_abi_contract test_connect_io test_runtime_core test_sync_primitives test_io_buffers test_windows_policy test_shared_load shared
 	./test_abi_contract
 	./test_connect_io
 	./test_runtime_core
 	./test_sync_primitives
 	./test_io_buffers
-	./test_nm_compat_runtime
+	./test_windows_policy
 	./test_shared_load ./$(SHLIB_REAL)
 
 check: test
@@ -311,6 +345,12 @@ stress: $(RUNTIME_OBJS) $(STRESS_OBJS)
 bench: $(RUNTIME_OBJS) $(BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BENCH_OBJS) $(LDLIBS)
 
+server: $(RUNTIME_OBJS) $(SERVER_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_OBJS) $(LDLIBS)
+
+server_flood: $(SERVER_FLOOD_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(SERVER_FLOOD_OBJS) -pthread
+
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
 
@@ -326,8 +366,8 @@ test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS) $(LDLIBS)
 
-test_nm_compat_runtime: $(RUNTIME_OBJS) $(TEST_NM_COMPAT_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_NM_COMPAT_OBJS) $(LDLIBS)
+test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
@@ -353,6 +393,14 @@ $(OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+
+$(OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(SHARED_OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
@@ -389,6 +437,14 @@ $(OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+
+$(OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(SHARED_OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
@@ -448,20 +504,47 @@ $(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c include/llam/runtime.h 
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/%.o: tests/%.c include/llam/runtime.h include/llam/nm_runtime.h
+$(OBJDIR)/examples/server.o: examples/server.c include/llam/runtime.h $(EXAMPLE_SHARED_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/examples/server_flood.o: examples/server_flood.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/%.o: tests/%.c include/llam/runtime.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 clean:
 	rm -rf $(CLEAN_DIRS)
 	rm -f $(CLEAN_FILES)
-	find src examples tests -name '*.o' -delete
+	for dir in src examples tests; do \
+		if [ -d "$$dir" ]; then \
+			find "$$dir" -name '*.o' -delete; \
+		fi; \
+	done
 
 package: all test
 	./scripts/package_release.sh
 
 bench-matrix: bench
 	python3 scripts/bench_matrix.py
+
+server-stress: server
+	python3 scripts/stress_server.py --server ./server
+
+server-flood: server server_flood
+	./server_flood --server ./server --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30 --min-delivery-mps 2.5
+
+server-stress-composite: server server_flood
+	python3 scripts/stress_server_composite.py --server ./server --server-flood ./server_flood
+
+server-stress-composite-quick: server server_flood
+	python3 scripts/stress_server_composite.py --server ./server --server-flood ./server_flood --quick
+
+server-stress-composite-hour: server server_flood
+	python3 scripts/stress_server_composite.py --server ./server --server-flood ./server_flood --soak-hour
 
 verify-darwin: all
 	./scripts/verify_darwin.sh

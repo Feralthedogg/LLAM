@@ -31,23 +31,29 @@
 #include "llam_internal.h"
 #include "runtime_platform.h"
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+#include "runtime_windows_compat.h"
+#else
+#include <dirent.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#endif
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
 #include <pthread.h>
 #include <signal.h>
+#include <unistd.h>
+#endif
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
@@ -127,6 +133,8 @@ typedef struct llam_cpu_set {
 #define LLAM_TASK_SLAB_COUNT 16U
 /** Number of wait nodes allocated per wait-node slab. */
 #define LLAM_WAIT_NODE_SLAB_COUNT 64U
+/** Number of multi-channel select wait nodes embedded in each task. */
+#define LLAM_TASK_EMBEDDED_SELECT_NODES 4U
 /** Number of timer nodes allocated per timer-node slab. */
 #define LLAM_TIMER_NODE_SLAB_COUNT 64U
 /** Number of I/O requests allocated per request slab. */
@@ -170,6 +178,10 @@ typedef struct llam_shard llam_shard_t;
 typedef struct llam_node llam_node_t;
 /** @brief Metadata entry describing a cached stack mapping. */
 typedef struct llam_stack_cache_entry llam_stack_cache_entry_t;
+/** @brief Per-task task-local storage entry. */
+typedef struct llam_task_local_entry llam_task_local_entry_t;
+/** @brief Active multi-channel select wait owned by a parked task. */
+typedef struct llam_channel_select_state llam_channel_select_state_t;
 
 /** @brief Simple FIFO task queue used for hot, inject, overflow, and blocking queues. */
 typedef struct llam_queue {
@@ -266,6 +278,14 @@ typedef struct llam_metrics {
     uint64_t idle_spin_ns;
     uint64_t watchdog_hits;
     uint64_t long_no_safepoint;
+    uint64_t yield_direct_attempts;
+    uint64_t yield_direct_fast_hits;
+    uint64_t yield_direct_locked_hits;
+    uint64_t yield_direct_fail_context;
+    uint64_t yield_direct_fail_policy;
+    uint64_t yield_direct_fail_no_work;
+    uint64_t yield_direct_fail_self;
+    uint64_t yield_direct_fail_push;
     uint64_t opaque_compensations;
     uint64_t deadlock_suspicions;
     uint64_t queue_overflows;
@@ -349,6 +369,7 @@ typedef struct llam_io_req {
     struct sockaddr *addr;
     socklen_t *addrlen;
     socklen_t addr_len;
+    llam_fd_t fd_result;
     ssize_t result;
     int error_code;
     short poll_events;
@@ -369,6 +390,7 @@ typedef struct llam_io_req {
     uint64_t submit_ts_ns;
     uint64_t deadline_ns;
     unsigned short provided_bid;
+    void *platform_data;
     atomic_uint wait_mode;
     atomic_uint abort_reason;
     atomic_uint cancel_queued;
@@ -386,7 +408,9 @@ typedef struct llam_wait_node {
     struct llam_wait_node *next;
     struct llam_wait_node *alloc_next;
     void *value;
+    llam_channel_select_state_t *select_state;
     int error_code;
+    uint32_t select_kind;
     intptr_t scalar_value;
     unsigned owner_shard;
 } llam_wait_node_t;
@@ -397,6 +421,20 @@ typedef struct llam_wait_queue {
     llam_wait_node_t *tail;
     unsigned depth;
 } llam_wait_queue_t;
+
+/** @brief Parked state for a task waiting on multiple channel operations. */
+struct llam_channel_select_state {
+    llam_select_op_t *ops;
+    llam_wait_node_t **nodes;
+    llam_channel_t **channels;
+    size_t op_count;
+    size_t channel_count;
+    size_t selected_index;
+    void *selected_value;
+    int error_code;
+    atomic_uint completed;
+    atomic_uint wake_armed;
+};
 
 /** @brief Control messages processed by an I/O node thread. */
 typedef enum llam_io_control_kind {
@@ -599,6 +637,8 @@ struct llam_channel {
     void **buffer;
     struct llam_channel *cache_next;
     size_t capacity;
+    size_t ring_capacity;
+    size_t mask;
     size_t head;
     size_t tail;
     size_t count;
@@ -618,14 +658,16 @@ struct llam_task {
     llam_wait_reason_t wait_reason;
     unsigned flags;
     unsigned home_shard;
+    unsigned live_shard;
     unsigned last_shard;
     unsigned parked_shard;
-    llam_task_class_t task_class;
+    atomic_uint task_class;
+    atomic_uint base_task_class;
     uint64_t deadline_ns;
     llam_cancel_token_t *cancel_token;
     llam_task_fn entry;
     void *arg;
-    llam_ctx_t ctx;
+    _Alignas(16) llam_ctx_t ctx;
     void *stack_mapping;
     size_t mapping_size;
     void *stack_base;
@@ -633,6 +675,7 @@ struct llam_task {
     llam_stack_cache_entry_t stack_cache_entry;
     pthread_mutex_t lock;
     bool lock_initialized;
+    atomic_uint task_listed;
     llam_task_t *all_next;
     llam_task_t *all_prev;
     llam_task_t *alloc_next;
@@ -640,17 +683,21 @@ struct llam_task {
     llam_task_t *queue_prev;
     llam_task_t *join_waiters;
     unsigned join_waiter_count;
+    atomic_uint join_waiter_hint;
     llam_task_t *join_target;
     llam_task_t *wait_next;
     llam_task_t *cancel_next;
     llam_task_t *cancel_prev;
     llam_wait_node_t embedded_wait_node;
+    llam_wait_node_t embedded_select_nodes[LLAM_TASK_EMBEDDED_SELECT_NODES];
     llam_wait_node_t *active_wait_node;
     llam_wait_queue_t *active_wait_queue;
     pthread_mutex_t *active_wait_queue_lock;
+    llam_channel_select_state_t *active_select_state;
     llam_io_req_t embedded_io_req;
     llam_io_req_t *active_io_req;
     llam_block_job_t *active_block_job;
+    llam_task_local_entry_t *task_locals;
     bool cancel_registered;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
@@ -684,6 +731,23 @@ struct llam_task {
     unsigned forced_yield_budget;
 };
 
+/** @brief Intrusive task-local storage value linked from its owning task. */
+struct llam_task_local_entry {
+    llam_task_local_entry_t *next;
+    llam_task_local_key_t key;
+    void *value;
+};
+
+/** @brief Structured-concurrency group that owns a set of child task handles. */
+struct llam_task_group {
+    pthread_mutex_t lock;
+    llam_cancel_token_t *cancel_token;
+    llam_task_t **tasks;
+    size_t count;
+    size_t capacity;
+    bool lock_initialized;
+};
+
 /**
  * @brief Scheduler shard.  Each shard owns a worker thread, runnable queues, timer
  * heap, allocator, stack caches, metrics, and opaque-blocking compensation
@@ -707,7 +771,7 @@ struct llam_shard {
     pthread_mutex_t lock;
     pthread_mutex_t opaque_lock;
     pthread_cond_t opaque_cv;
-#if defined(__linux__)
+#if defined(__linux__) || LLAM_PLATFORM_WINDOWS || defined(__APPLE__)
     atomic_uint opaque_wake_seq;
 #endif
 #if defined(__APPLE__)
@@ -741,6 +805,7 @@ struct llam_shard {
     llam_queue_t hot_q;
     llam_queue_t norm_q;
     llam_cldeque_t norm_cldeque;
+    llam_task_t *all_tasks;
     llam_timer_node_t *timers;
     llam_timer_node_t **timer_heap;
     size_t timer_heap_len;
@@ -754,14 +819,17 @@ struct llam_shard {
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;
     pthread_mutex_t stack_cache_lock;
-    llam_ctx_t scheduler_ctx;
-    llam_ctx_t opaque_scheduler_ctx;
+    _Alignas(16) llam_ctx_t scheduler_ctx;
+    _Alignas(16) llam_ctx_t opaque_scheduler_ctx;
     _Atomic(llam_task_t *) current;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
     atomic_uint_fast64_t last_safepoint_ns;
     atomic_uint_fast64_t last_run_started_ns;
     uint64_t last_idle_wake_ns;
+    uint64_t next_task_seq;
     atomic_uint norm_depth;
     unsigned hot_streak;
+    unsigned direct_handoff_streak;
     llam_allocator_t allocator;
     llam_metrics_t metrics;
     llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
@@ -795,6 +863,20 @@ struct llam_node {
     int event_fd;
     uint32_t mach_wake_port;
     uint32_t mach_wake_pset;
+    void *windows_iocp_handle;
+    void *windows_fd_assoc_head;
+    void *windows_io_op_free;
+    void *windows_accept_socket_free;
+    void *windows_acceptex;
+    void *windows_connectex;
+    unsigned windows_completion_batch;
+    unsigned windows_use_skip_completion_on_success;
+    unsigned windows_io_op_free_count;
+    unsigned windows_io_op_free_max;
+    unsigned windows_accept_socket_free_count;
+    unsigned windows_accept_socket_free_max;
+    unsigned windows_accept_prepost;
+    unsigned windows_poll_timeout_ms;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t submit_lock;
     pthread_mutex_t watch_lock;
@@ -819,6 +901,10 @@ struct llam_node {
     uint64_t submit_entries;
     uint64_t submit_calls;
     uint64_t submit_syscalls;
+    uint64_t windows_cancel_controls;
+    uint64_t windows_cancel_success;
+    uint64_t windows_cancel_failures;
+    uint64_t windows_cancel_not_found;
     unsigned max_submit_batch;
     unsigned last_cq_depth;
     unsigned max_cq_depth;
@@ -856,6 +942,8 @@ struct llam_runtime {
     unsigned sqpoll_cpu_reserved;
     int sqpoll_cpu;
     bool xsave_enabled;
+    bool winsock_started;
+    unsigned windows_unsafe_skip_task_simd;
     uint64_t xsave_mask;
     size_t xsave_area_size;
     size_t xsave_area_alloc_size;
@@ -905,6 +993,7 @@ struct llam_runtime {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active_peak;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
+    _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_task_shards;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint active_io_waiters;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint next_task_id;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint overflow_depth;
@@ -919,10 +1008,16 @@ struct llam_runtime {
     unsigned trace_events_enabled;
     unsigned wake_latency_metrics_enabled;
     unsigned run_timing_enabled;
+    unsigned stack_sampling_enabled;
+    unsigned direct_handoff_stats_enabled;
+    unsigned direct_handoff_burst;
+    unsigned direct_handoff_live_limit;
     unsigned cheap_safepoint;
     unsigned safepoint_clock_period;
     unsigned preempt_poll_period;
     unsigned spawn_fanout_wake_interval;
+    unsigned spawn_fanout_wake_interval_forced;
+    unsigned spawn_fanout_adaptive;
     unsigned channel_local_handoff_enabled;
     atomic_uint steal_pause_active;
 };

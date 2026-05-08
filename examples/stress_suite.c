@@ -20,7 +20,9 @@
 
 #include "stress_internal.h"
 
+#if !LLAM_PLATFORM_WINDOWS
 #include <pthread.h>
+#endif
 
 typedef struct stress_phase_watchdog {
     atomic_uint done;
@@ -290,6 +292,195 @@ void run_poll_cancel_timeout_race(void) {
     }
 }
 
+typedef enum stress_select_race_mode {
+    STRESS_SELECT_RACE_SEND = 1,
+    STRESS_SELECT_RACE_CLOSE = 2,
+    STRESS_SELECT_RACE_CANCEL = 3,
+} stress_select_race_mode_t;
+
+typedef struct stress_select_race_state {
+    llam_channel_t *primary;
+    llam_channel_t *secondary;
+    llam_cancel_token_t *token;
+    stress_select_race_mode_t mode;
+    atomic_uint waiting;
+    atomic_uint completed;
+} stress_select_race_state_t;
+
+static void stress_select_race_waiter_task(void *arg) {
+    stress_select_race_state_t *state = arg;
+    void *received = NULL;
+    size_t selected = SIZE_MAX;
+    int saved_errno = 0;
+    llam_select_op_t ops[2] = {
+        {
+            .kind = LLAM_SELECT_OP_RECV,
+            .channel = state->primary,
+            .recv_out = &received,
+        },
+        {
+            .kind = LLAM_SELECT_OP_RECV,
+            .channel = state->secondary,
+            .recv_out = &received,
+        },
+    };
+
+    atomic_store_explicit(&state->waiting, 1U, memory_order_release);
+    if (llam_channel_select(ops, 2U, UINT64_MAX, &selected) != 0) {
+        saved_errno = errno;
+        if (state->mode == STRESS_SELECT_RACE_CANCEL && saved_errno == ECANCELED) {
+            atomic_fetch_add_explicit(&state->completed, 1U, memory_order_relaxed);
+            return;
+        }
+        stress_fail_errno("channel select race errno", saved_errno, ECANCELED);
+        return;
+    }
+
+    if (state->mode == STRESS_SELECT_RACE_SEND) {
+        if (selected != 1U || received != (void *)(uintptr_t)0x5E1EC7U) {
+            stress_fail_msg("channel select send race selected wrong operation");
+            return;
+        }
+    } else if (state->mode == STRESS_SELECT_RACE_CLOSE) {
+        if (selected != 1U || ops[1].result_errno != EPIPE) {
+            stress_fail_msg("channel select close race selected wrong operation");
+            return;
+        }
+    } else {
+        stress_fail_msg("channel select cancel race unexpectedly selected");
+        return;
+    }
+    atomic_fetch_add_explicit(&state->completed, 1U, memory_order_relaxed);
+}
+
+static void stress_select_race_trigger_task(void *arg) {
+    stress_select_race_state_t *state = arg;
+    unsigned spins;
+
+    for (spins = 0U; spins < 32U; ++spins) {
+        if (atomic_load_explicit(&state->waiting, memory_order_acquire) != 0U) {
+            break;
+        }
+        llam_yield();
+    }
+    llam_yield();
+    if (state->mode == STRESS_SELECT_RACE_SEND) {
+        if (llam_channel_send(state->secondary, (void *)(uintptr_t)0x5E1EC7U) != 0) {
+            stress_fail_msg("channel select race send failed");
+        }
+    } else if (state->mode == STRESS_SELECT_RACE_CLOSE) {
+        if (llam_channel_close(state->secondary) != 0) {
+            stress_fail_msg("channel select race close failed");
+        }
+    } else if (state->token != NULL) {
+        if (llam_cancel_token_cancel(state->token) != 0) {
+            stress_fail_msg("channel select race cancel failed");
+        }
+    }
+}
+
+static void stress_select_race_run_once(stress_select_race_mode_t mode) {
+    stress_select_race_state_t state;
+    llam_spawn_opts_t wait_opts;
+    llam_task_t *waiter;
+    llam_task_t *trigger;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.waiting, 0U);
+    atomic_init(&state.completed, 0U);
+    state.mode = mode;
+    state.primary = llam_channel_create(1U);
+    state.secondary = llam_channel_create(1U);
+    if (state.primary == NULL || state.secondary == NULL) {
+        stress_fail_msg("channel select race channel create failed");
+        if (state.primary != NULL) {
+            (void)llam_channel_destroy(state.primary);
+        }
+        if (state.secondary != NULL) {
+            (void)llam_channel_destroy(state.secondary);
+        }
+        return;
+    }
+    if (mode == STRESS_SELECT_RACE_CANCEL) {
+        state.token = llam_cancel_token_create();
+        if (state.token == NULL) {
+            stress_fail_msg("channel select race token create failed");
+            (void)llam_channel_destroy(state.primary);
+            (void)llam_channel_destroy(state.secondary);
+            return;
+        }
+    }
+
+    memset(&wait_opts, 0, sizeof(wait_opts));
+    wait_opts.cancel_token = state.token;
+    waiter = llam_spawn(stress_select_race_waiter_task, &state, &wait_opts);
+    trigger = llam_spawn(stress_select_race_trigger_task, &state, NULL);
+    if (waiter == NULL || trigger == NULL) {
+        stress_fail_msg("channel select race spawn failed");
+        (void)llam_channel_close(state.primary);
+        (void)llam_channel_close(state.secondary);
+        if (waiter != NULL) {
+            (void)llam_join(waiter);
+        }
+        if (trigger != NULL) {
+            (void)llam_join(trigger);
+        }
+    } else if (llam_join(waiter) != 0 || llam_join(trigger) != 0) {
+        stress_fail_msg("channel select race join failed");
+    }
+    if (atomic_load_explicit(&state.completed, memory_order_relaxed) != 1U) {
+        stress_fail_msg("channel select race did not complete exactly once");
+    }
+    if (state.token != NULL && llam_cancel_token_destroy(state.token) != 0) {
+        stress_fail_msg("channel select race token destroy failed");
+    }
+    if (llam_channel_destroy(state.primary) != 0 || llam_channel_destroy(state.secondary) != 0) {
+        stress_fail_msg("channel select race channel destroy failed");
+    }
+}
+
+void run_channel_select_race_paths(void) {
+    enum { kSelectRaceRounds = 8 };
+    unsigned i;
+
+    for (i = 0U; i < kSelectRaceRounds; ++i) {
+        void *received = NULL;
+        size_t selected = SIZE_MAX;
+        llam_channel_t *primary = llam_channel_create(1U);
+        llam_channel_t *secondary = llam_channel_create(1U);
+        llam_select_op_t ops[2];
+
+        if (primary == NULL || secondary == NULL) {
+            stress_fail_msg("channel select timeout channel create failed");
+            if (primary != NULL) {
+                (void)llam_channel_destroy(primary);
+            }
+            if (secondary != NULL) {
+                (void)llam_channel_destroy(secondary);
+            }
+            return;
+        }
+        memset(ops, 0, sizeof(ops));
+        ops[0].kind = LLAM_SELECT_OP_RECV;
+        ops[0].channel = primary;
+        ops[0].recv_out = &received;
+        ops[1].kind = LLAM_SELECT_OP_RECV;
+        ops[1].channel = secondary;
+        ops[1].recv_out = &received;
+        errno = 0;
+        if (llam_channel_select(ops, 2U, llam_now_ns(), &selected) != -1 || errno != ETIMEDOUT) {
+            stress_fail_msg("channel select immediate timeout failed");
+        }
+        if (llam_channel_destroy(primary) != 0 || llam_channel_destroy(secondary) != 0) {
+            stress_fail_msg("channel select timeout channel destroy failed");
+        }
+
+        stress_select_race_run_once(STRESS_SELECT_RACE_SEND);
+        stress_select_race_run_once(STRESS_SELECT_RACE_CLOSE);
+        stress_select_race_run_once(STRESS_SELECT_RACE_CANCEL);
+    }
+}
+
 void run_nested_opaque_path(void) {
     nested_opaque_state_t state;
     llam_task_t *task;
@@ -346,6 +537,8 @@ void stress_suite_task(void *arg) {
         run_cond_cancel_path();
         stress_trace_step("run_channel_timeout_paths");
         run_channel_timeout_paths();
+        stress_trace_step("run_channel_select_race_paths");
+        run_channel_select_race_paths();
         if (stress_platform_supports_owned_buffer_stress()) {
             stress_trace_step("run_owned_read_paths");
             run_owned_read_paths();
@@ -390,6 +583,7 @@ void dynamic_suite_task(void *arg) {
         run_dynamic_mutex_timeout_path();
         run_dynamic_cond_timeout_path();
         run_dynamic_channel_timeout_paths();
+        run_channel_select_race_paths();
         if (stress_platform_supports_basic_poll_stress()) {
             run_dynamic_poll_paths();
         }
