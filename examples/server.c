@@ -52,6 +52,7 @@
 #define CHAT_BACKLOG 128
 #define CHAT_OUTBOX_CAP 64U
 #define CHAT_READ_BUF 2048U
+#define CHAT_INPUT_CAP 4096U
 #define CHAT_MAX_BROADCAST_TARGETS 1024U
 // Broadcast fanout should shed slow receivers instead of letting one client
 // build a shutdown-sized backlog.
@@ -89,6 +90,8 @@ struct chat_client {
     atomic_int fd;
     unsigned id;
     char peer[96];
+    char input[CHAT_INPUT_CAP];
+    size_t input_len;
     llam_channel_t *outbox;
     atomic_uint refs;
     atomic_uint closing;
@@ -335,6 +338,78 @@ static void chat_broadcast_system(chat_server_t *server, const chat_client_t *cl
     free(message);
 }
 
+static void chat_client_broadcast_line(chat_client_t *client, const char *data, size_t len) {
+    char prefix[64];
+    char line[sizeof(prefix) + CHAT_INPUT_CAP];
+    int prefix_len = snprintf(prefix, sizeof(prefix), "[client %u] ", client->id);
+    size_t copy_len;
+
+    if (prefix_len < 0) {
+        return;
+    }
+    if ((size_t)prefix_len >= sizeof(prefix)) {
+        prefix_len = (int)sizeof(prefix) - 1;
+    }
+    copy_len = len;
+    if ((size_t)prefix_len + copy_len > sizeof(line)) {
+        copy_len = sizeof(line) - (size_t)prefix_len;
+    }
+    memcpy(line, prefix, (size_t)prefix_len);
+    memcpy(line + prefix_len, data, copy_len);
+    chat_broadcast(client->server, client, line, (size_t)prefix_len + copy_len);
+}
+
+static size_t chat_complete_line_span(const char *data, size_t len) {
+    for (size_t i = len; i > 0U; --i) {
+        if (data[i - 1U] == '\n') {
+            return i;
+        }
+    }
+    return 0U;
+}
+
+static void chat_client_process_input(chat_client_t *client, const char *data, size_t len) {
+    size_t off = 0U;
+
+    while (off < len) {
+        size_t span;
+        size_t space;
+        size_t copy_len;
+
+        if (client->input_len == 0U) {
+            span = chat_complete_line_span(data + off, len - off);
+            if (span > 0U) {
+                chat_client_broadcast_line(client, data + off, span);
+                off += span;
+                continue;
+            }
+        }
+
+        space = sizeof(client->input) - client->input_len;
+        copy_len = len - off;
+        if (copy_len > space) {
+            copy_len = space;
+        }
+        memcpy(client->input + client->input_len, data + off, copy_len);
+        client->input_len += copy_len;
+        off += copy_len;
+
+        span = chat_complete_line_span(client->input, client->input_len);
+        if (span > 0U) {
+            size_t tail_len = client->input_len - span;
+
+            chat_client_broadcast_line(client, client->input, span);
+            if (tail_len > 0U) {
+                memmove(client->input, client->input + span, tail_len);
+            }
+            client->input_len = tail_len;
+        } else if (client->input_len == sizeof(client->input)) {
+            chat_client_broadcast_line(client, client->input, client->input_len);
+            client->input_len = 0U;
+        }
+    }
+}
+
 static void chat_writer_drop_backlog(chat_client_t *client) {
     for (;;) {
         chat_message_t *message = NULL;
@@ -392,24 +467,7 @@ static void chat_reader_task(void *arg) {
         nread = llam_read(fd, buf, sizeof(buf));
 
         if (nread > 0) {
-            char prefix[64];
-            char line[sizeof(prefix) + CHAT_READ_BUF];
-            int prefix_len = snprintf(prefix, sizeof(prefix), "[client %u] ", client->id);
-            size_t copy_len;
-
-            if (prefix_len < 0) {
-                continue;
-            }
-            if ((size_t)prefix_len >= sizeof(prefix)) {
-                prefix_len = (int)sizeof(prefix) - 1;
-            }
-            copy_len = (size_t)nread;
-            if ((size_t)prefix_len + copy_len > sizeof(line)) {
-                copy_len = sizeof(line) - (size_t)prefix_len;
-            }
-            memcpy(line, prefix, (size_t)prefix_len);
-            memcpy(line + prefix_len, buf, copy_len);
-            chat_broadcast(client->server, client, line, (size_t)prefix_len + copy_len);
+            chat_client_process_input(client, buf, (size_t)nread);
             continue;
         }
         if (nread < 0 && errno == EINTR) {
@@ -418,6 +476,10 @@ static void chat_reader_task(void *arg) {
         break;
     }
 
+    if (client->input_len > 0U) {
+        chat_client_broadcast_line(client, client->input, client->input_len);
+        client->input_len = 0U;
+    }
     chat_broadcast_system(client->server, client, "left");
     chat_client_begin_close(client);
     chat_client_release(client);
