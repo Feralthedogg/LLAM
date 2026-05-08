@@ -120,6 +120,14 @@ jobs:
           if [ "$SERVER_MODE" = "quick" ]; then
             args="--quick"
           fi
+          if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
+            # Hosted Intel macOS still runs correctness, flood, and stable edge.
+            # The adversarial churn/slow edge phase remains covered by macOS
+            # arm64, Linux x86_64/aarch64, and Windows 2022/2025.
+            export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
+            export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
+            export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
+          fi
           python3 scripts/stress_server_composite.py \
             --server ./build/stress/server \
             --server-flood ./build/stress/server_flood \
