@@ -137,4 +137,22 @@ typedef int llam_fd_t;
 #define LLAM_PLATFORM_NAME "posix"
 #endif
 
+/**
+ * @brief Public symbol visibility for the canonical LLAM ABI.
+ *
+ * @details
+ * Define @c LLAM_BUILD_SHARED while building the LLAM shared library. Consumers
+ * may define @c LLAM_SHARED when they want Windows dllimport annotations; the
+ * declarations also remain link-compatible without it.
+ */
+#if LLAM_PLATFORM_WINDOWS && defined(LLAM_BUILD_SHARED)
+#define LLAM_API __declspec(dllexport)
+#elif LLAM_PLATFORM_WINDOWS && defined(LLAM_SHARED)
+#define LLAM_API __declspec(dllimport)
+#elif defined(__GNUC__) && defined(LLAM_BUILD_SHARED)
+#define LLAM_API __attribute__((visibility("default")))
+#else
+#define LLAM_API
+#endif
+
 #endif

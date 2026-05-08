@@ -118,4 +118,17 @@ typedef int nm_fd_t;
 #define NM_PLATFORM_NAME "posix"
 #endif
 
+/**
+ * @brief Public symbol visibility for the legacy nm_* compatibility ABI.
+ */
+#if NM_PLATFORM_WINDOWS && defined(NM_BUILD_SHARED)
+#define NM_API __declspec(dllexport)
+#elif NM_PLATFORM_WINDOWS && defined(NM_SHARED)
+#define NM_API __declspec(dllimport)
+#elif defined(__GNUC__) && defined(NM_BUILD_SHARED)
+#define NM_API __attribute__((visibility("default")))
+#else
+#define NM_API
+#endif
+
 #endif

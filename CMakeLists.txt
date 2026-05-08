@@ -230,6 +230,8 @@ foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
     endif()
 endforeach()
 
+target_compile_definitions(llam_runtime_shared PRIVATE LLAM_BUILD_SHARED=1 NM_BUILD_SHARED=1)
+
 find_package(Threads REQUIRED)
 target_link_libraries(llam_runtime PUBLIC Threads::Threads)
 target_link_libraries(llam_runtime_shared PUBLIC Threads::Threads)
