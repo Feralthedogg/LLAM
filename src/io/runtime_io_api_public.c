@@ -118,7 +118,8 @@ static bool llam_read_ready_direct_blocking_enabled(void) {
  *
  * Darwin one-shot accept readiness is correct for many workloads, but hosted
  * CI can expose a narrow registration/re-arm race in serial connect/accept
- * tests with peer-address output. The helper path keeps the listener
+ * tests with peer-address output. The helper path is only used for accept
+ * calls that cannot use the multishot accept-watch path. It keeps the listener
  * nonblocking and polls in short slices, so it does not pin a scheduler worker
  * and still observes task cancellation.
  */
@@ -562,7 +563,7 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
     req->addr = addr;
     req->addrlen = addrlen;
     req->recv_watch = NULL;
-    if (llam_accept_direct_blocking_enabled()) {
+    if (!allow_multishot && llam_accept_direct_blocking_enabled()) {
         req->task = g_llam_tls_task;
         if (llam_call_blocking_io(llam_blocking_accept_impl, req) != 0) {
             int saved_errno = errno;

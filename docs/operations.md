@@ -118,10 +118,12 @@ backlog can be consumed directly before LLAM submits a backend request. This
 keeps serial connect/accept tests from depending on backend re-arm timing and
 reduces one worker round trip on hot server paths.
 
-On macOS, not-ready managed `accept` defaults to the compensated helper path
-controlled by `LLAM_ACCEPT_DIRECT_BLOCKING`. The helper keeps the listener
-nonblocking and polls in short slices, avoiding scheduler-worker pinning while
-sidestepping one-shot kqueue accept races observed on hosted runners.
+On macOS, managed `accept` calls that cannot use multishot accept-watch default
+to the compensated helper path controlled by `LLAM_ACCEPT_DIRECT_BLOCKING`. The
+helper keeps the listener nonblocking and polls in short slices, avoiding
+scheduler-worker pinning while sidestepping one-shot kqueue accept races
+observed on hosted runners. Plain `llam_accept(fd, NULL, NULL)` still prefers
+the multishot accept-watch backend after the immediate direct backlog probe.
 
 The backend path is still the correctness path for not-ready descriptors,
 timeouts, cancellation, and unsupported direct operations. If a direct path

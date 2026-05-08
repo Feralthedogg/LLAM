@@ -527,7 +527,11 @@ $(OBJDIR)/tests/%.o: tests/%.c include/llam/runtime.h include/llam/nm_runtime.h
 clean:
 	rm -rf $(CLEAN_DIRS)
 	rm -f $(CLEAN_FILES)
-	find src examples tests -name '*.o' -delete
+	for dir in src examples tests; do \
+		if [ -d "$$dir" ]; then \
+			find "$$dir" -name '*.o' -delete; \
+		fi; \
+	done
 
 package: all test
 	./scripts/package_release.sh

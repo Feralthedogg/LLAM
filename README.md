@@ -676,7 +676,7 @@ The table lists canonical `LLAM_*` names. Legacy `NM_*` aliases and the older
 | `LLAM_ARM64_UNSAFE_SKIP_SCHEDULER_SIMD` | `0`, `1` | Alias for `LLAM_AARCH64_UNSAFE_SKIP_SCHEDULER_SIMD`. |
 | `LLAM_DIRECT_BLOCKING_IO` | `0`, `1` | Allow eligible blocking socket read/write operations to run through compensated direct blocking regions. |
 | `LLAM_DIRECT_BLOCKING_POLL` | `0`, `1`, unset | Control direct blocking poll fallback; Linux/Windows auto mode handles finite waits directly when profitable. |
-| `LLAM_ACCEPT_DIRECT_BLOCKING` | `0`, `1` | Route not-ready managed `accept` through a compensated helper poll loop; default is enabled on macOS and disabled elsewhere. |
+| `LLAM_ACCEPT_DIRECT_BLOCKING` | `0`, `1` | Route managed `accept` calls that cannot use multishot accept-watch through a compensated helper poll loop; default is enabled on macOS and disabled elsewhere. |
 | `LLAM_IO_POLL_REDIRECT_TIMEOUT_MS` | milliseconds | Redirect long direct-poll waits through opaque blocking compensation on Linux. |
 | `LLAM_IO_COOP_YIELD` | `0`, `1` | Enable cooperative yields around direct I/O fast paths; default is enabled on macOS, Linux, and Windows. |
 | `LLAM_IO_POLL_COOP_YIELD` | `0`, `1` | Enable cooperative yields in poll readiness paths; default is enabled on macOS, Linux, and Windows. |
