@@ -157,7 +157,7 @@ int llam_task_group_cancel(llam_task_group_t *group) {
     return llam_cancel_token_cancel(group->cancel_token);
 }
 
-int llam_task_group_join(llam_task_group_t *group) {
+static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline, uint64_t deadline_ns) {
     llam_task_t **tasks;
     size_t count;
     size_t i;
@@ -174,7 +174,9 @@ int llam_task_group_join(llam_task_group_t *group) {
     pthread_mutex_unlock(&group->lock);
 
     for (i = 0U; i < count; ++i) {
-        if (llam_join(tasks[i]) != 0) {
+        int join_rc = has_deadline ? llam_join_until(tasks[i], deadline_ns) : llam_join(tasks[i]);
+
+        if (join_rc != 0) {
             int saved_errno = errno;
 
             pthread_mutex_lock(&group->lock);
@@ -187,4 +189,12 @@ int llam_task_group_join(llam_task_group_t *group) {
         }
     }
     return 0;
+}
+
+int llam_task_group_join(llam_task_group_t *group) {
+    return llam_task_group_join_impl(group, false, 0U);
+}
+
+int llam_task_group_join_until(llam_task_group_t *group, uint64_t deadline_ns) {
+    return llam_task_group_join_impl(group, true, deadline_ns);
 }

@@ -674,6 +674,28 @@ int llam_opaque_wake_init(llam_shard_t *shard) {
     return 0;
 }
 
+#if defined(__APPLE__)
+/**
+ * @brief Return whether Darwin opaque semaphores should skip timed recovery.
+ *
+ * The default path keeps a bounded 1ms timed wait because opaque helper wake
+ * races can otherwise strand a helper on some Darwin schedules. Indefinite
+ * waits remain available as an opt-in probe for profiling controlled workloads.
+ */
+static bool llam_opaque_mach_sem_indefinite_wait_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_OPAQUE_MACH_SEM_INDEFINITE");
+
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+#endif
+
 /**
  * @brief Destroy optional opaque-helper wake resources for a shard.
  *
@@ -755,15 +777,22 @@ void llam_opaque_wake_wait(llam_shard_t *shard) {
 #if defined(__APPLE__)
     if (shard->opaque_sem_initialized) {
         kern_return_t kr;
-        mach_timespec_t timeout = {
-            .tv_sec = 0,
-            .tv_nsec = 1000000U,
-        };
 
         pthread_mutex_unlock(&shard->opaque_lock);
-        do {
-            kr = semaphore_timedwait(shard->opaque_sem, timeout);
-        } while (kr == KERN_ABORTED);
+        if (llam_opaque_mach_sem_indefinite_wait_enabled()) {
+            do {
+                kr = semaphore_wait(shard->opaque_sem);
+            } while (kr == KERN_ABORTED);
+        } else {
+            mach_timespec_t timeout = {
+                .tv_sec = 0,
+                .tv_nsec = 1000000U,
+            };
+
+            do {
+                kr = semaphore_timedwait(shard->opaque_sem, timeout);
+            } while (kr == KERN_ABORTED);
+        }
         pthread_mutex_lock(&shard->opaque_lock);
         return;
     }

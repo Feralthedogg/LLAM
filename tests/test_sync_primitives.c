@@ -800,6 +800,13 @@ int main(void) {
         return test_fail_errno("llam_task_group_spawn failed");
     }
     errno = 0;
+    if (llam_task_group_join_until(group, llam_now_ns()) != -1 || errno != ETIMEDOUT) {
+        (void)llam_task_group_destroy(group);
+        destroy_sync_state(&state);
+        llam_runtime_shutdown();
+        return test_fail("llam_task_group_join_until did not preserve pending children on timeout");
+    }
+    errno = 0;
     if (llam_task_group_destroy(group) != -1 || errno != EBUSY) {
         destroy_sync_state(&state);
         llam_runtime_shutdown();

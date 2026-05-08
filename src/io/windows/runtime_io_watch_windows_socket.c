@@ -188,6 +188,27 @@ bool llam_windows_socket_info(llam_fd_t fd, int *family_out, int *socket_type_ou
     return true;
 }
 
+/**
+ * @brief Return whether experimental TCP POLLIN IOCP probes are enabled.
+ *
+ * Stream read readiness uses a one-byte overlapped @c WSARecv(MSG_PEEK). It is
+ * useful for controlled Windows 10/11 experiments, but remains opt-in because
+ * repeated stream-readiness probes have shown workload-sensitive behavior on
+ * loopback.
+ */
+static bool llam_windows_iocp_tcp_pollin_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_WINDOWS_IOCP_TCP_POLLIN");
+
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
 bool llam_windows_iocp_poll_supported(llam_fd_t fd, short events) {
     int socket_type = 0;
     short unsupported = (short)(events & ~(POLLIN | POLLOUT | POLLHUP | POLLERR));
@@ -201,7 +222,7 @@ bool llam_windows_iocp_poll_supported(llam_fd_t fd, short events) {
         return false;
     }
     if (socket_type == SOCK_STREAM) {
-        return wants_write;
+        return wants_write || (wants_read && llam_windows_iocp_tcp_pollin_enabled());
     }
     return socket_type == SOCK_DGRAM && wants_read;
 }

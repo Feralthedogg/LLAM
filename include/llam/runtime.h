@@ -602,6 +602,19 @@ int llam_task_group_cancel(llam_task_group_t *group);
 int llam_task_group_join(llam_task_group_t *group);
 
 /**
+ * @brief Join all tasks owned by a group until an absolute deadline.
+ *
+ * @details
+ * @p deadline_ns is an absolute ::llam_now_ns deadline. @c 0 is treated as an
+ * already-expired deadline, matching ::llam_join_until. Successful joins consume
+ * completed child task handles. If the deadline expires or another join error
+ * occurs, the failed and remaining handles stay owned by the group.
+ *
+ * @return 0 when every child was joined, or -1 with @c errno set.
+ */
+int llam_task_group_join_until(llam_task_group_t *group, uint64_t deadline_ns);
+
+/**
  * @brief Sleep the current task until an absolute deadline.
  *
  * @details

@@ -8,7 +8,9 @@ Winsock socket I/O through IOCP for `WSARecv`, `WSASend`, `AcceptEx`, and
 overlapped `WSASend` and UDP `POLLIN` through `WSARecvFrom(MSG_PEEK)` so
 datagrams are not consumed. TCP `POLLIN` uses the cooperative/direct readiness
 fallback because repeated overlapped stream-readiness probes are not stable
-enough across Windows 10/11 loopback workloads yet. AF_UNIX, UDP `POLLOUT`, and
+enough across Windows 10/11 loopback workloads yet; `LLAM_WINDOWS_IOCP_TCP_POLLIN=1`
+enables an experimental one-byte `WSARecv(MSG_PEEK)` IOCP probe for controlled
+measurement. AF_UNIX, UDP `POLLOUT`, and
 multi-direction/unsupported poll masks remain on the direct/blocking fallback
 path.
 
@@ -20,7 +22,7 @@ path.
 | Windows 10/11 detection | Present. Windows 11 is NT 10.0 build `>= 22000`; Windows 10 is NT 10.0 below that build. |
 | IOCP tuning policy | Present. Both generations use IOCP, but `win10-conservative` and `win11-batched` are separate code paths with different batch, prepost, timeout, timer, and skip-completion defaults. |
 | Native scheduler backend | Present for Windows x86_64 through GNU as and MASM context-switch assembly, Windows event wake handles, `VirtualAlloc` stack mappings, and runtime lifecycle smoke coverage. |
-| Native I/O backend | Present for one-shot socket requests: WSARecv/WSASend, AcceptEx, ConnectEx, TCP `POLLOUT`, and UDP `POLLIN` readiness are bound to IOCP completions. TCP `POLLIN`, AF_UNIX, and unsupported poll masks remain fallback. |
+| Native I/O backend | Present for one-shot socket requests: WSARecv/WSASend, AcceptEx, ConnectEx, TCP `POLLOUT`, and UDP `POLLIN` readiness are bound to IOCP completions. TCP `POLLIN` has an opt-in IOCP probe through `LLAM_WINDOWS_IOCP_TCP_POLLIN=1`; AF_UNIX and unsupported poll masks remain fallback. |
 | IOCP source layout | In progress. State/control queue helpers, socket association/extension loading, accept/op pools, control packet processing, submit path, completion path, and unsupported fallback stubs are split out of the original monolithic backend. The remaining root file now owns worker lifetime and cleanup only. |
 | Native package artifacts | Not published until Windows 10 and Windows 11 CI pass the full acceptance gate. |
 | Verification today | Windows 10 has been verified with native MSVC CMake build/test/bench smoke. GitHub Actions covers Windows Server 2022 and Windows Server 2025 native stress smoke. WSL verification remains Linux-backend verification. |
@@ -42,7 +44,8 @@ same completion primitives on both:
 - Overlapped Winsock operations for `read`, `write`, `accept`, and `connect`.
 - Zero-byte overlapped `WSASend` for TCP `POLLOUT` readiness.
 - `WSARecvFrom(MSG_PEEK)` for UDP `POLLIN` readiness.
-- Cooperative/direct fallback for TCP `POLLIN` readiness.
+- Cooperative/direct fallback for TCP `POLLIN` readiness by default, with
+  `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` available for experimental native probes.
 
 The generation branch is a tuning decision, not a semantic decision. It is still
 implemented as an explicit code split so native backend code can consume one
@@ -113,8 +116,8 @@ Windows 10 and Windows 11:
 - Run the select benchmark smoke cases `select_recv_ready`, `select_park_wake`,
   and `select_timeout` alongside the scheduler and I/O cases.
 - Verify `llam_connect`, `llam_accept`, `llam_read`, `llam_write`, TCP
-  `llam_poll_fd(POLLOUT)`, and UDP `llam_poll_fd(POLLIN)` on native IOCP
-  sockets; verify TCP `llam_poll_fd(POLLIN)`, AF_UNIX poll fallback,
+  `llam_poll_fd(POLLOUT)`, UDP `llam_poll_fd(POLLIN)`, and opt-in TCP
+  `llam_poll_fd(POLLIN)` on native IOCP sockets; verify AF_UNIX poll fallback,
   `llam_read_owned`, and
   `llam_recv_owned`.
 - Verify shared-library loading and exported `llam_*` plus compatibility
@@ -129,7 +132,8 @@ Windows 10 and Windows 11:
 - Native Windows archives are not published until full Windows 10/11 CI lands.
 - The IOCP request backend covers one-shot socket `read`/`write`/`accept`/`connect`
   plus gated TCP `POLLOUT` and UDP `POLLIN` readiness; TCP `POLLIN` remains on
-  the cooperative/direct fallback path.
+  the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1`
+  is explicitly enabled.
 - Windows performance comparison is still gated on longer Windows 10/11 stress
   and benchmark coverage.
 - WSL verification is still Linux-backend verification, not native Windows support.
