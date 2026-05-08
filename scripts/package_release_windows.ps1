@@ -33,15 +33,18 @@ $Stage = Join-Path $OutDir $PackageName
 $Archive = Join-Path $OutDir "$PackageName.zip"
 
 Remove-Item -Recurse -Force $Stage, $Archive, "$Archive.sha256" -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force `
-    (Join-Path $Stage "bin") `
-    (Join-Path $Stage "docs") `
-    (Join-Path $Stage "examples") `
-    (Join-Path $Stage "include") `
-    (Join-Path $Stage "lib") `
-    (Join-Path $Stage "scripts") `
-    (Join-Path $Stage "share\llam\cmake") `
-    (Join-Path $Stage "lib\pkgconfig") | Out-Null
+foreach ($Dir in @(
+    "bin",
+    "docs",
+    "examples",
+    "include",
+    "lib",
+    "scripts",
+    "share\llam\cmake",
+    "lib\pkgconfig"
+)) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Stage $Dir) | Out-Null
+}
 
 function Require-Input([string]$Path) {
     if (-not (Test-Path $Path)) {
@@ -49,10 +52,24 @@ function Require-Input([string]$Path) {
     }
 }
 
-$StaticLib = Join-Path $ConfigDir "llam_runtime.lib"
-$SharedDll = Join-Path $ConfigDir "llam_runtime.dll"
-$SharedImportLib = Join-Path $ConfigDir "llam_runtime_shared.lib"
-$BenchExe = Join-Path $ConfigDir "bench.exe"
+function Find-BuildArtifact([string]$Name, [string]$Fallback) {
+    if ($Fallback -and (Test-Path $Fallback)) {
+        return (Resolve-Path $Fallback).Path
+    }
+
+    $Match = Get-ChildItem -Path $BuildRoot -Recurse -File -Filter $Name |
+        Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } |
+        Select-Object -First 1
+    if (-not $Match) {
+        throw "missing build artifact: $Name under $BuildRoot"
+    }
+    return $Match.FullName
+}
+
+$StaticLib = Find-BuildArtifact "llam_runtime.lib" (Join-Path $ConfigDir "llam_runtime.lib")
+$SharedDll = Find-BuildArtifact "llam_runtime.dll" (Join-Path $ConfigDir "llam_runtime.dll")
+$SharedImportLib = Find-BuildArtifact "llam_runtime_shared.lib" (Join-Path $ConfigDir "llam_runtime_shared.lib")
+$BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 
 Require-Input (Join-Path $Root "LICENSE")
 Require-Input (Join-Path $Root "README.md")
@@ -67,20 +84,21 @@ Require-Input $SharedImportLib
 Require-Input $BenchExe
 
 Set-Content -Path (Join-Path $Stage "VERSION") -Value $Version -NoNewline
-Copy-Item (Join-Path $Root "LICENSE"), (Join-Path $Root "README.md") $Stage
-Copy-Item -Recurse (Join-Path $Root "docs\*") (Join-Path $Stage "docs")
-Copy-Item -Recurse (Join-Path $Root "include\llam") (Join-Path $Stage "include")
-Copy-Item (Join-Path $Root "include\nm_runtime.h"), (Join-Path $Root "include\nm_platform.h") (Join-Path $Stage "include")
-Copy-Item (Join-Path $Root "examples\demo.c"), `
-          (Join-Path $Root "examples\bench.c"), `
-          (Join-Path $Root "examples\stress.c"), `
-          (Join-Path $Root "examples\server.c"), `
-          (Join-Path $Root "examples\server_flood.c") `
-          (Join-Path $Stage "examples")
-Copy-Item (Join-Path $Root "scripts\verify_windows.ps1") (Join-Path $Stage "scripts")
-Copy-Item $BenchExe (Join-Path $Stage "bin")
-Copy-Item $StaticLib, $SharedImportLib (Join-Path $Stage "lib")
-Copy-Item $SharedDll (Join-Path $Stage "bin")
+Copy-Item -Path @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md")) -Destination $Stage
+Copy-Item -Recurse -Path (Join-Path $Root "docs\*") -Destination (Join-Path $Stage "docs")
+Copy-Item -Recurse -Path (Join-Path $Root "include\llam") -Destination (Join-Path $Stage "include")
+Copy-Item -Path @((Join-Path $Root "include\nm_runtime.h"), (Join-Path $Root "include\nm_platform.h")) -Destination (Join-Path $Stage "include")
+Copy-Item -Path @(
+    (Join-Path $Root "examples\demo.c"),
+    (Join-Path $Root "examples\bench.c"),
+    (Join-Path $Root "examples\stress.c"),
+    (Join-Path $Root "examples\server.c"),
+    (Join-Path $Root "examples\server_flood.c")
+) -Destination (Join-Path $Stage "examples")
+Copy-Item -Path (Join-Path $Root "scripts\verify_windows.ps1") -Destination (Join-Path $Stage "scripts")
+Copy-Item -Path $BenchExe -Destination (Join-Path $Stage "bin")
+Copy-Item -Path @($StaticLib, $SharedImportLib) -Destination (Join-Path $Stage "lib")
+Copy-Item -Path $SharedDll -Destination (Join-Path $Stage "bin")
 
 $Pc = @'
 prefix=${pcfiledir}/../..
