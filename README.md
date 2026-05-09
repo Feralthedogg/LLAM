@@ -213,6 +213,14 @@ cd llam-1.0.0-macos-aarch64
 ./install.sh --prefix "$HOME/.local"
 ```
 
+Install a Windows release archive:
+
+```powershell
+Expand-Archive .\llam-1.0.0-windows-x86_64.zip
+cd .\llam-1.0.0-windows-x86_64
+.\install.ps1 -Prefix "$env:LOCALAPPDATA\LLAM"
+```
+
 Include the canonical public API:
 
 ```c

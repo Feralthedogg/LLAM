@@ -73,6 +73,7 @@ $BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 
 Require-Input (Join-Path $Root "LICENSE")
 Require-Input (Join-Path $Root "README.md")
+Require-Input (Join-Path $Root "scripts\install.ps1")
 Require-Input (Join-Path $Root "docs")
 Require-Input (Join-Path $Root "include\llam")
 Require-Input (Join-Path $Root "examples\bench.c")
@@ -83,6 +84,7 @@ Require-Input $BenchExe
 
 Set-Content -Path (Join-Path $Stage "VERSION") -Value $Version -NoNewline
 Copy-Item -Path @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md")) -Destination $Stage
+Copy-Item -Path (Join-Path $Root "scripts\install.ps1") -Destination $Stage
 Copy-Item -Recurse -Path (Join-Path $Root "docs\*") -Destination (Join-Path $Stage "docs")
 Copy-Item -Recurse -Path (Join-Path $Root "include\llam") -Destination (Join-Path $Stage "include")
 Copy-Item -Path @(

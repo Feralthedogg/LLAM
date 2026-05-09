@@ -61,6 +61,7 @@ require_input() {
 require_input "$root_dir/LICENSE"
 require_input "$root_dir/README.md"
 require_input "$root_dir/scripts/install.sh"
+require_input "$root_dir/scripts/install.ps1"
 require_input "$root_dir/scripts/stress_server.py"
 require_input "$root_dir/scripts/stress_server_composite.py"
 require_input "$root_dir/docs"
@@ -103,7 +104,7 @@ mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/l
 
 printf '%s\n' "$version" > "$stage/VERSION"
 cp "$root_dir/LICENSE" "$root_dir/README.md" "$stage/"
-cp "$root_dir/scripts/install.sh" "$stage/"
+cp "$root_dir/scripts/install.sh" "$root_dir/scripts/install.ps1" "$stage/"
 cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" "$stage/scripts/"
 cp -R "$root_dir/docs/." "$stage/docs/"
 cp -R "$root_dir/include/llam" "$stage/include/"

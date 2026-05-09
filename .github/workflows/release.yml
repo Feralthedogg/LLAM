@@ -143,11 +143,21 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v6
+
       - uses: actions/download-artifact@v7
         with:
           pattern: release-*
           path: release-artifacts
           merge-multiple: true
+
+      - name: Add standalone installers
+        run: |
+          cp scripts/install.sh release-artifacts/install.sh
+          cp scripts/install.ps1 release-artifacts/install.ps1
+          cd release-artifacts
+          sha256sum install.sh > install.sh.sha256
+          sha256sum install.ps1 > install.ps1.sha256
 
       - name: Build checksum manifest
         run: |
@@ -207,8 +217,15 @@ jobs:
             echo "- Static runtime library: \`libllam_runtime.a\` on POSIX or \`llam_runtime.lib\` on Windows."
             echo "- Platform shared runtime library: \`libllam_runtime.so\`, \`libllam_runtime.dylib\`, or \`llam_runtime.dll\`."
             echo "- CMake package files under \`share/llam/cmake/\` and pkg-config metadata under \`lib/pkgconfig/\`."
-            echo "- Optional archive installer: \`install.sh --prefix <dir>\`."
+            echo "- Archive installers: \`install.sh --prefix <dir>\` on Linux/macOS and \`install.ps1 -Prefix <dir>\` on Windows."
             echo "- Docs, examples, and bundled smoke executables where supported."
+            echo
+            echo "## Standalone Installers"
+            echo
+            echo "| File | Use | Checksum |"
+            echo "| --- | --- | --- |"
+            echo "| [install.sh](${base_url}/install.sh) | Linux/macOS release archives | [checksum](${base_url}/install.sh.sha256) |"
+            echo "| [install.ps1](${base_url}/install.ps1) | Windows release archives | [checksum](${base_url}/install.ps1.sha256) |"
             echo
             echo "## Verification"
             echo
