@@ -52,10 +52,6 @@ int main(void) {
         .port = 0,
         .label = "A",
     };
-    struct connect_job connect_b = {
-        .port = 0,
-        .label = "B",
-    };
     struct cond_state cond_state = {0};
     struct channel_state channel_state = {0};
     struct channel_state timeout_recv_channel_state = {0};
@@ -226,7 +222,6 @@ int main(void) {
     accept_state.listener_fd = listener_fd;
     accept_state.port = ntohs(listener_addr.sin_port);
     connect_a.port = accept_state.port;
-    connect_b.port = accept_state.port;
 
     if (llam_runtime_init(&runtime_opts) != 0) {
         perror("llam_runtime_init");
@@ -439,20 +434,8 @@ int main(void) {
                  .task_class = LLAM_TASK_CLASS_LATENCY,
                  .stack_class = LLAM_STACK_CLASS_DEFAULT,
              });
-    llam_spawn(accept_waiter_task,
-             &accept_state,
-             &(llam_spawn_opts_t){
-                 .task_class = LLAM_TASK_CLASS_LATENCY,
-                 .stack_class = LLAM_STACK_CLASS_DEFAULT,
-             });
     llam_spawn(accept_connector_task,
              &connect_a,
-             &(llam_spawn_opts_t){
-                 .task_class = LLAM_TASK_CLASS_DEFAULT,
-                 .stack_class = LLAM_STACK_CLASS_DEFAULT,
-             });
-    llam_spawn(accept_connector_task,
-             &connect_b,
              &(llam_spawn_opts_t){
                  .task_class = LLAM_TASK_CLASS_DEFAULT,
                  .stack_class = LLAM_STACK_CLASS_DEFAULT,
