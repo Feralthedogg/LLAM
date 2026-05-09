@@ -302,6 +302,32 @@ static inline int llam_windows_wsa_error_to_errno(int error_code) {
     }
 }
 
+static inline int llam_windows_system_error_to_errno(unsigned long error_code) {
+    switch (error_code) {
+    case 0:
+        return 0;
+    case ERROR_INVALID_PARAMETER:
+    case ERROR_INVALID_HANDLE:
+        return EINVAL;
+    case ERROR_NOT_ENOUGH_MEMORY:
+    case ERROR_OUTOFMEMORY:
+        return ENOMEM;
+    case WAIT_TIMEOUT:
+        return ETIMEDOUT;
+    case ERROR_OPERATION_ABORTED:
+        return ECANCELED;
+    case ERROR_ACCESS_DENIED:
+        return EACCES;
+    case ERROR_BROKEN_PIPE:
+    case ERROR_PIPE_NOT_CONNECTED:
+        return EPIPE;
+    case ERROR_IO_PENDING:
+        return EAGAIN;
+    default:
+        return EIO;
+    }
+}
+
 static inline int llam_windows_poll(struct pollfd *fds, unsigned long nfds, int timeout_ms) {
     int rc = WSAPoll((WSAPOLLFD *)fds, nfds, timeout_ms);
 

@@ -396,6 +396,36 @@ void *llam_blocking_write_impl(void *arg) {
 }
 
 /**
+ * @brief Blocking-worker fallback for generic handle reads.
+ */
+void *llam_blocking_handle_read_impl(void *arg) {
+    llam_io_req_t *req = arg;
+
+    if (req == NULL) {
+        return NULL;
+    }
+    do {
+        req->result = llam_platform_read_handle(req->handle, req->buf, req->count);
+    } while (req->result < 0 && errno == EINTR);
+    return req;
+}
+
+/**
+ * @brief Blocking-worker fallback for generic handle writes.
+ */
+void *llam_blocking_handle_write_impl(void *arg) {
+    llam_io_req_t *req = arg;
+
+    if (req == NULL) {
+        return NULL;
+    }
+    do {
+        req->result = llam_platform_write_handle(req->handle, req->buf, req->count);
+    } while (req->result < 0 && errno == EINTR);
+    return req;
+}
+
+/**
  * @brief Blocking-worker fallback for accept operations.
  *
  * @param arg Pointer to an initialized ::llam_io_req_t.
@@ -595,4 +625,59 @@ void *llam_blocking_poll_impl(void *arg) {
         }
     }
     return req;
+}
+
+/**
+ * @brief Blocking-worker fallback for generic waitable-handle polling.
+ */
+void *llam_blocking_handle_poll_impl(void *arg) {
+    llam_io_req_t *req = arg;
+    uint64_t deadline_ns;
+
+    if (req == NULL) {
+        return NULL;
+    }
+    deadline_ns = req->timeout_ms >= 0 ? llam_now_ns() + (uint64_t)req->timeout_ms * 1000000ULL : 0U;
+
+    for (;;) {
+        int slice_ms = 10;
+
+        if (req->task != NULL && req->task->cancel_token != NULL &&
+            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
+            errno = ECANCELED;
+            req->result = -1;
+            return req;
+        }
+        if (req->timeout_ms >= 0) {
+            uint64_t now_ns = llam_now_ns();
+            uint64_t remain_ns;
+
+            if (now_ns >= deadline_ns) {
+                req->poll_revents = 0;
+                req->result = 0;
+                return req;
+            }
+            remain_ns = deadline_ns - now_ns;
+            slice_ms = (int)(remain_ns / 1000000ULL);
+            if (slice_ms <= 0) {
+                slice_ms = 1;
+            } else if (slice_ms > 10) {
+                slice_ms = 10;
+            }
+        }
+
+        req->result = llam_platform_poll_handle(req->handle,
+                                                req->poll_events,
+                                                req->timeout_ms < 0 ? 10 : slice_ms,
+                                                &req->poll_revents);
+        if (req->result >= 0) {
+            if (req->result > 0 || req->timeout_ms >= 0) {
+                return req;
+            }
+            continue;
+        }
+        if (errno != EINTR) {
+            return req;
+        }
+    }
 }

@@ -70,6 +70,34 @@ static int llam_windows_submit_rw(llam_node_t *node, llam_io_req_t *req, llam_wi
     }
 }
 
+static int llam_windows_submit_handle_rw(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op, bool write_op) {
+    DWORD transferred = 0;
+    BOOL ok;
+
+    (void)node;
+    if (req->count > (size_t)ULONG_MAX || LLAM_HANDLE_IS_INVALID(req->handle)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (write_op) {
+        ok = WriteFile((HANDLE)req->handle, req->buf, (DWORD)req->count, &transferred, &op->overlapped);
+    } else {
+        ok = ReadFile((HANDLE)req->handle, req->buf, (DWORD)req->count, &transferred, &op->overlapped);
+    }
+    if (ok) {
+        return 0;
+    }
+    {
+        DWORD err = GetLastError();
+
+        if (err == ERROR_IO_PENDING) {
+            return 0;
+        }
+        errno = llam_windows_system_error_to_errno(err);
+        return -1;
+    }
+}
+
 static int llam_windows_submit_accept(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op) {
     LPFN_ACCEPTEX acceptex = NULL;
     DWORD bytes = 0;
@@ -189,7 +217,12 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
     int rc = -1;
     int saved_errno;
 
-    if (llam_windows_associate_fd(node, req->fd) != 0) {
+    if (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE) {
+        if (llam_windows_associate_handle(node, req->handle) != 0) {
+            llam_windows_complete_submit_error(node, req, errno);
+            return;
+        }
+    } else if (llam_windows_associate_fd(node, req->fd) != 0) {
         llam_windows_complete_submit_error(node, req, errno);
         return;
     }
@@ -206,6 +239,12 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
         break;
     case LLAM_IO_KIND_WRITE:
         rc = llam_windows_submit_rw(node, req, op, true);
+        break;
+    case LLAM_IO_KIND_HANDLE_READ:
+        rc = llam_windows_submit_handle_rw(node, req, op, false);
+        break;
+    case LLAM_IO_KIND_HANDLE_WRITE:
+        rc = llam_windows_submit_handle_rw(node, req, op, true);
         break;
     case LLAM_IO_KIND_ACCEPT:
         rc = llam_windows_submit_accept(node, req, op);

@@ -159,9 +159,13 @@ static int test_invalid_arguments(void) {
 
 static int test_platform_fd_contracts(void) {
     llam_fd_t llam_fd = LLAM_INVALID_FD;
+    llam_handle_t llam_handle = LLAM_INVALID_HANDLE;
 
     if (!LLAM_FD_IS_INVALID(llam_fd)) {
         return test_fail("LLAM invalid fd predicate does not recognize LLAM_INVALID_FD");
+    }
+    if (!LLAM_HANDLE_IS_INVALID(llam_handle)) {
+        return test_fail("LLAM invalid handle predicate does not recognize LLAM_INVALID_HANDLE");
     }
     return 0;
 }

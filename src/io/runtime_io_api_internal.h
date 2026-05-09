@@ -54,6 +54,54 @@ static inline ssize_t llam_platform_write_fd(llam_fd_t fd, const void *buf, size
 #endif
 }
 
+static inline ssize_t llam_platform_read_handle(llam_handle_t handle, void *buf, size_t count) {
+    if (buf == NULL && count != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    {
+        DWORD transferred = 0;
+
+        if (LLAM_HANDLE_IS_INVALID(handle) || count > (size_t)ULONG_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (!ReadFile((HANDLE)handle, buf, (DWORD)count, &transferred, NULL)) {
+            errno = llam_windows_system_error_to_errno(GetLastError());
+            return -1;
+        }
+        return (ssize_t)transferred;
+    }
+#else
+    return read((llam_fd_t)handle, buf, count);
+#endif
+}
+
+static inline ssize_t llam_platform_write_handle(llam_handle_t handle, const void *buf, size_t count) {
+    if (buf == NULL && count != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    {
+        DWORD transferred = 0;
+
+        if (LLAM_HANDLE_IS_INVALID(handle) || count > (size_t)ULONG_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (!WriteFile((HANDLE)handle, buf, (DWORD)count, &transferred, NULL)) {
+            errno = llam_windows_system_error_to_errno(GetLastError());
+            return -1;
+        }
+        return (ssize_t)transferred;
+    }
+#else
+    return write((llam_fd_t)handle, buf, count);
+#endif
+}
+
 static inline ssize_t llam_platform_recv_fd(llam_fd_t fd, void *buf, size_t count, int flags) {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     return llam_windows_socket_recv(fd, buf, count, flags);
@@ -87,6 +135,7 @@ static inline int llam_platform_connect_fd(llam_fd_t fd, const struct sockaddr *
 }
 
 int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
+int llam_platform_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents);
 int llam_platform_poll_now(llam_fd_t fd, short events, short *revents);
 int llam_try_direct_rw(llam_fd_t fd,
                      void *buf,
@@ -132,6 +181,9 @@ void *llam_blocking_write_impl(void *arg);
 void *llam_blocking_accept_impl(void *arg);
 void *llam_blocking_connect_impl(void *arg);
 void *llam_blocking_poll_impl(void *arg);
+void *llam_blocking_handle_read_impl(void *arg);
+void *llam_blocking_handle_write_impl(void *arg);
+void *llam_blocking_handle_poll_impl(void *arg);
 ssize_t llam_read_owned_impl(llam_fd_t fd,
                            size_t max_count,
                            int recv_flags,

@@ -59,7 +59,7 @@ with `errno` set on failure.
 | Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners or waiters remain. |
 | Channels | `llam_channel_*` | Pointer-valued bounded channel. Capacity must be at least `1`; `llam_channel_create(0)` fails with `EINVAL`. Destroy returns `EBUSY` while buffered values or waiters remain. Use result-style receive APIs when `NULL` is a valid payload. |
 | Blocking | `llam_call_blocking_result`, `llam_call_blocking`, `llam_enter_blocking`, `llam_leave_blocking` | Prevents long blocking work from pinning scheduler workers. `llam_call_blocking_result` is the unambiguous FFI-safe form. Blocking callback return value is user-owned. |
-| I/O | `llam_read`, `llam_write`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd` | Scheduler-safe descriptor/socket operations. File descriptor ownership follows POSIX convention unless owned-buffer APIs say otherwise. |
+| I/O | `llam_read`, `llam_write`, `llam_read_handle`, `llam_write_handle`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd`, `llam_poll_handle` | Scheduler-safe descriptor/socket/HANDLE operations. File descriptor and handle ownership follows platform convention unless owned-buffer APIs say otherwise. |
 | Owned buffers | `llam_io_buffer_data`, `llam_io_buffer_size`, `llam_io_buffer_capacity`, `llam_io_buffer_release` | Buffers returned by owned-read APIs are runtime-allocated and caller-released through `llam_io_buffer_release()`. |
 | Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats`, `llam_runtime_write_stats_json`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` for stats snapshots and JSON export for machine logs. |
 
@@ -220,11 +220,13 @@ platform supports it.
 
 Native Windows 10/11 support covers Windows x86_64 context switching, Windows
 event wake handles, IOCP policy primitives, and IOCP one-shot socket requests
-for `read`, `write`, `accept`, and `connect`. TCP `POLLOUT` and UDP `POLLIN`
-readiness are also IOCP-backed; TCP `POLLIN` remains fallback by default unless
+for `read`, `write`, `accept`, and `connect`, plus generic HANDLE `ReadFile`
+and `WriteFile` requests through `llam_read_handle()` and
+`llam_write_handle()`. TCP `POLLOUT` and UDP `POLLIN` readiness are also
+IOCP-backed; TCP `POLLIN` remains fallback by default unless
 `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark
 runs. The release workflow publishes a native Windows x86_64 archive after the
-Windows stress, shared-library export, and IOCP smoke gates pass.
+Windows stress, shared-library export, IOCP smoke, and HANDLE I/O gates pass.
 
 ## Runtime Lifecycle
 
@@ -355,16 +357,20 @@ or platform socket handles:
 ```c
 ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
 ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count);
+ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count);
+ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count);
 llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen);
 int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
+int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents);
 ```
 
 When called outside a managed task, these functions delegate to the platform
-syscall or polling primitive directly. `llam_poll_fd()` may block the calling
-OS thread according to its `timeout_ms` argument. `timeout_ms < 0` waits
-indefinitely, `timeout_ms == 0` performs a non-blocking readiness check, and
-positive values bound the wait in milliseconds.
+syscall or polling primitive directly. `llam_poll_fd()` and
+`llam_poll_handle()` may block the calling OS thread according to their
+`timeout_ms` argument. `timeout_ms < 0` waits indefinitely, `timeout_ms == 0`
+performs a non-blocking readiness check, and positive values bound the wait in
+milliseconds.
 
 When called inside a managed task, LLAM uses this order:
 
@@ -400,8 +406,12 @@ request completions. TCP `POLLOUT` readiness uses a zero-byte overlapped send,
 and UDP `POLLIN` readiness uses an overlapped peek receive so datagrams are not
 consumed. TCP `POLLIN` remains on the cooperative/direct fallback path by
 default; `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` enables the experimental IOCP stream
-readiness probe for controlled validation. Owned-buffer and unsupported poll
-paths keep the documented direct/blocking fallback behavior.
+readiness probe for controlled validation. Generic HANDLE read/write uses
+overlapped `ReadFile`/`WriteFile` through IOCP when the handle supports it;
+otherwise LLAM falls back to blocking offload. `llam_poll_handle()` waits on
+waitable HANDLE state and does not replace socket readiness polling.
+Owned-buffer and unsupported poll paths keep the documented direct/blocking
+fallback behavior.
 
 ## Error Contract
 

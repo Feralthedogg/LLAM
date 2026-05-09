@@ -241,6 +241,38 @@ int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
 #endif
 }
 
+int llam_platform_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents) {
+    if (revents != NULL) {
+        *revents = 0;
+    }
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    {
+        DWORD wait_ms;
+        DWORD rc;
+
+        if (LLAM_HANDLE_IS_INVALID(handle)) {
+            errno = EINVAL;
+            return -1;
+        }
+        wait_ms = timeout_ms < 0 ? INFINITE : (DWORD)timeout_ms;
+        rc = WaitForSingleObject((HANDLE)handle, wait_ms);
+        if (rc == WAIT_OBJECT_0) {
+            if (revents != NULL) {
+                *revents = events;
+            }
+            return 1;
+        }
+        if (rc == WAIT_TIMEOUT) {
+            return 0;
+        }
+        errno = llam_windows_system_error_to_errno(GetLastError());
+        return -1;
+    }
+#else
+    return llam_platform_poll_fd((llam_fd_t)handle, events, timeout_ms, revents);
+#endif
+}
+
 /**
  * @brief Poll a descriptor with a zero timeout, retrying interrupted syscalls.
  *

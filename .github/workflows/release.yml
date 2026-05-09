@@ -94,11 +94,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cmake --build build/release-windows --config Release --target bench test_windows_runtime_smoke test_windows_policy test_windows_iocp_io llam_runtime llam_runtime_shared
+          cmake --build build/release-windows --config Release --target bench test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io llam_runtime llam_runtime_shared
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
-          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io"
+          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }

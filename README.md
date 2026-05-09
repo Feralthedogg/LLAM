@@ -13,7 +13,7 @@
 
 LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, `connect`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
 
-LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darwin backend uses kqueue-based watch and completion paths, and the native Windows 10/11 backend uses IOCP for overlapped Winsock `read`/`write`/`accept`/`connect` requests.
+LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darwin backend uses kqueue-based watch and completion paths, and the native Windows 10/11 backend uses IOCP for overlapped Winsock `read`/`write`/`accept`/`connect` plus generic HANDLE `ReadFile`/`WriteFile` requests.
 
 ## Key Features
 
@@ -21,7 +21,7 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 - N:M scheduling over runtime worker threads.
 - Linux I/O backend based on io_uring/liburing.
 - macOS/Darwin I/O backend based on kqueue.
-- Windows 10/11 backend with IOCP request completions, Windows wake handles, and x86_64 context-switch assembly.
+- Windows 10/11 backend with IOCP request completions for sockets and overlapped HANDLEs, Windows wake handles, and x86_64 context-switch assembly.
 - Task primitives: `spawn`, `yield`, `join`, `sleep`, deadlines, and task metadata.
 - Synchronization primitives: mutex, condition variable, channel, and cancellation token.
 - Channel multiplexing with `llam_channel_select()` and focused select benchmarks.
@@ -40,9 +40,9 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 | Linux aarch64 | Supported | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
 | macOS x86_64 | Supported | kqueue + x86_64 asm context switch | Apple Clang | `CC=clang make verify-darwin` |
-| Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MinGW and MSVC/MASM via CMake | CMake Windows build plus `test_windows_policy`, `test_windows_runtime_smoke`, and `test_windows_iocp_io`; `scripts/verify_windows.ps1 -Native` |
+| Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx, overlapped HANDLE ReadFile/WriteFile, plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MinGW and MSVC/MASM via CMake | CMake Windows build plus `test_windows_policy`, `test_windows_runtime_smoke`, `test_windows_iocp_io`, and `test_windows_handle_io`; `scripts/verify_windows.ps1 -Native` |
 
-Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, and IOCP-backed socket requests. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
+Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, IOCP-backed socket requests, and overlapped HANDLE I/O. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
 
 Production and stress-operation guidance is documented in `docs/operations.md`.
 
@@ -374,7 +374,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers `read`, `read_when_ready`, `write`, `accept`, `connect`, `poll`, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers `read`, `read_when_ready`, `write`, HANDLE read/write, `accept`, `connect`, fd polling, HANDLE polling, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
 
 ```c
 #include "llam/runtime.h"
@@ -586,6 +586,8 @@ I/O:
 | --- | --- |
 | `llam_read` | Read from an fd. |
 | `llam_write` | Write to an fd. |
+| `llam_read_handle` | Read from a platform handle; Windows uses overlapped `ReadFile` through IOCP when possible, POSIX aliases to fd read. |
+| `llam_write_handle` | Write to a platform handle; Windows uses overlapped `WriteFile` through IOCP when possible, POSIX aliases to fd write. |
 | `llam_read_owned` | Read into a runtime-owned buffer. |
 | `llam_recv_owned` | Receive with flags into a runtime-owned buffer. |
 | `llam_io_buffer_release` | Release an owned buffer. |
@@ -595,6 +597,7 @@ I/O:
 | `llam_accept` | Accept a connection from a listener fd; returns `LLAM_INVALID_FD` on failure. |
 | `llam_connect` | Connect a socket without blocking the scheduler worker. |
 | `llam_poll_fd` | Wait for fd readiness. |
+| `llam_poll_handle` | Wait for platform handle state; Windows uses `WaitForSingleObject` semantics and POSIX aliases to fd poll. |
 
 Time, debug, and platform:
 
@@ -603,7 +606,9 @@ Time, debug, and platform:
 | `llam_now_ns` | Return a monotonic nanosecond timestamp. |
 | `llam_dump_runtime_state` | Dump runtime state to an fd. |
 | `llam_fd_t` | Platform-specific fd/socket handle type. |
+| `llam_handle_t` | Platform-specific generic handle type for HANDLE I/O APIs. |
 | `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Platform-correct invalid descriptor sentinel and predicate. |
+| `LLAM_INVALID_HANDLE` / `LLAM_HANDLE_IS_INVALID` | Platform-correct invalid generic-handle sentinel and predicate. |
 | `LLAM_PLATFORM_LINUX` | Linux build flag. |
 | `LLAM_PLATFORM_DARWIN` | macOS/Darwin build flag. |
 | `LLAM_PLATFORM_WINDOWS` | Windows build flag. |
@@ -860,7 +865,7 @@ flowchart LR
     Engine --> Blocking["blocking\ncompensation"]
     IO --> Linux["src/io/linux\nio_uring"]
     IO --> Darwin["src/io/darwin\nkqueue"]
-    IO --> Windows["Windows\nIOCP socket requests"]
+    IO --> Windows["Windows\nIOCP sockets + HANDLEs"]
     Core --> ASM["src/asm\ncontext switch"]
 ```
 
@@ -927,7 +932,7 @@ No syscall, no privilege transition, no TLB flush. Typical cost is tens of nanos
 
 ### I/O Backend
 
-LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each I/O call (`llam_read`, `llam_write`, `llam_accept`, `llam_connect`, `llam_poll_fd`) follows this path:
+LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each I/O call (`llam_read`, `llam_write`, `llam_read_handle`, `llam_write_handle`, `llam_accept`, `llam_connect`, `llam_poll_fd`, `llam_poll_handle`) follows this path:
 
 ```
 1. Direct nonblocking fast path (try without parking)
@@ -946,7 +951,9 @@ LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each 
 
 **Darwin backend** (`src/io/darwin/`): each node uses kqueue with `EVFILT_READ`, `EVFILT_WRITE`, and `EVFILT_USER` for wake signaling. Darwin nodes use Mach ports (`semaphore_t`, `mach_port_t`) for cross-thread wake when available.
 
-Both backends support **multishot watches** — a single registered watch serves multiple waiters, avoiding redundant kernel registrations for the same fd. Watch tables track fd identity by `(dev_t, ino_t)` to detect fd reuse.
+**Windows backend** (`src/io/windows/`): each node uses IOCP for overlapped Winsock operations and generic HANDLE `ReadFile`/`WriteFile` requests. Socket readiness policy stays conservative for stream `POLLIN` unless explicitly enabled; waitable HANDLE polling uses the platform wait path because it observes signaled handle state, not socket readiness.
+
+Linux and Darwin backends support **multishot watches** — a single registered watch serves multiple waiters, avoiding redundant kernel registrations for the same fd. Watch tables track fd identity by `(dev_t, ino_t)` to detect fd reuse.
 
 **I/O request lifecycle**: requests (`llam_io_req_t`) carry an atomic `wait_mode` that transitions through `NONE → SUBMIT_QUEUE → INFLIGHT → (completion)` or `NONE → POLL_WATCH/ACCEPT_WATCH/RECV_WATCH → (completion)`. An atomic `abort_reason` field handles cancellation and timeout races without locks.
 

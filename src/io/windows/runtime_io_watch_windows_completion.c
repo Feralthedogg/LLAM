@@ -178,7 +178,11 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
     req = op->req;
     node = op->node;
     transferred = completion->bytes;
-    if (!WSAGetOverlappedResult(req->fd, &op->overlapped, &transferred, FALSE, &flags)) {
+    if (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE) {
+        if (!GetOverlappedResult((HANDLE)req->handle, &op->overlapped, &transferred, FALSE)) {
+            err = llam_windows_system_error_to_errno(GetLastError());
+        }
+    } else if (!WSAGetOverlappedResult(req->fd, &op->overlapped, &transferred, FALSE, &flags)) {
         err = llam_windows_wsa_error_to_errno(WSAGetLastError());
     }
 

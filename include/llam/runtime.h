@@ -1025,6 +1025,22 @@ LLAM_API int llam_channel_select(llam_select_op_t *ops,
 LLAM_API ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
 
 /**
+ * @brief Read from a generic platform handle.
+ *
+ * @details
+ * On Windows this API submits overlapped @c ReadFile operations to the native
+ * IOCP backend when the handle supports overlapped I/O. If the backend cannot
+ * accept the handle, managed tasks fall back to the blocking-helper pool so the
+ * scheduler worker is not pinned. On POSIX, ::llam_handle_t aliases
+ * ::llam_fd_t and this function delegates to ::llam_read.
+ *
+ * This API is intended for pipe, device, and explicitly overlapped HANDLE
+ * integrations. Sequential disk-file wrappers may prefer blocking offload
+ * unless they manage file offsets explicitly.
+ */
+LLAM_API ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count);
+
+/**
  * @brief Wait for read readiness and read in one runtime operation.
  *
  * @details
@@ -1054,6 +1070,18 @@ LLAM_API ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int
  * primitive directly and may block the calling OS thread.
  */
 LLAM_API ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count);
+
+/**
+ * @brief Write to a generic platform handle.
+ *
+ * @details
+ * On Windows this API submits overlapped @c WriteFile operations to the native
+ * IOCP backend when the handle supports overlapped I/O. If the backend cannot
+ * accept the handle, managed tasks fall back to the blocking-helper pool. On
+ * POSIX, ::llam_handle_t aliases ::llam_fd_t and this function delegates to
+ * ::llam_write.
+ */
+LLAM_API ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count);
 
 /**
  * @brief Read into a runtime-owned buffer.
@@ -1127,6 +1155,17 @@ LLAM_API int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t a
  * milliseconds.
  */
 LLAM_API int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
+
+/**
+ * @brief Wait for a generic platform handle.
+ *
+ * @details
+ * On Windows this waits on waitable HANDLE state with @c WaitForSingleObject.
+ * Managed tasks execute finite/infinite waits through the blocking-helper pool
+ * so scheduler workers remain available. This is not socket readiness and does
+ * not replace ::llam_poll_fd. On POSIX this delegates to ::llam_poll_fd.
+ */
+LLAM_API int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents);
 
 /* ============================================================================
  * Time and task introspection

@@ -313,6 +313,8 @@ typedef enum llam_io_kind {
     LLAM_IO_KIND_ACCEPT = 2,
     LLAM_IO_KIND_POLL = 3,
     LLAM_IO_KIND_CONNECT = 4,
+    LLAM_IO_KIND_HANDLE_READ = 5,
+    LLAM_IO_KIND_HANDLE_WRITE = 6,
 } llam_io_kind_t;
 
 /** @brief Current ownership/wait state for an I/O request. */
@@ -364,6 +366,7 @@ typedef struct llam_block_job {
 typedef struct llam_io_req {
     llam_io_kind_t kind;
     llam_fd_t fd;
+    llam_handle_t handle;
     void *buf;
     size_t count;
     struct sockaddr *addr;

@@ -254,6 +254,58 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
 }
 
 /**
+ * @brief Read bytes from a generic platform handle.
+ */
+ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count) {
+    llam_io_req_t *req;
+    ssize_t result;
+
+    if (buf == NULL && count != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
+        return llam_platform_read_handle(handle, buf, count);
+    }
+
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
+    if (req == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    req->kind = LLAM_IO_KIND_HANDLE_READ;
+    req->handle = handle;
+    req->buf = buf;
+    req->count = count;
+    if (llam_issue_io(req, false, 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            return -1;
+        }
+        req->kind = LLAM_IO_KIND_HANDLE_READ;
+        req->handle = handle;
+        req->buf = buf;
+        req->count = count;
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_handle_read_impl, req) != 0) {
+            int saved_errno = errno;
+
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            errno = saved_errno;
+            return -1;
+        }
+        result = req->result;
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        return result;
+    }
+
+    result = req->result;
+    llam_api_io_req_release(g_llam_tls_shard, req);
+    return result;
+}
+
+/**
  * @brief Wait for read readiness and read without a separate public poll/read pair.
  *
  * This fused path is intended for event loops that always read immediately
@@ -519,6 +571,58 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
         req->count = count;
         req->task = g_llam_tls_task;
         if (llam_call_blocking_io(llam_blocking_write_impl, req) != 0) {
+            int saved_errno = errno;
+
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            errno = saved_errno;
+            return -1;
+        }
+        result = req->result;
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        return result;
+    }
+
+    result = req->result;
+    llam_api_io_req_release(g_llam_tls_shard, req);
+    return result;
+}
+
+/**
+ * @brief Write bytes to a generic platform handle.
+ */
+ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count) {
+    llam_io_req_t *req;
+    ssize_t result;
+
+    if (buf == NULL && count != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
+        return llam_platform_write_handle(handle, buf, count);
+    }
+
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
+    if (req == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    req->kind = LLAM_IO_KIND_HANDLE_WRITE;
+    req->handle = handle;
+    req->buf = (void *)buf;
+    req->count = count;
+    if (llam_issue_io(req, false, 0U) != 0) {
+        if (!llam_io_capability_error(errno)) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            return -1;
+        }
+        req->kind = LLAM_IO_KIND_HANDLE_WRITE;
+        req->handle = handle;
+        req->buf = (void *)buf;
+        req->count = count;
+        req->task = g_llam_tls_task;
+        if (llam_call_blocking_io(llam_blocking_handle_write_impl, req) != 0) {
             int saved_errno = errno;
 
             llam_api_io_req_release(g_llam_tls_shard, req);
@@ -820,6 +924,43 @@ int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
             errno = saved_errno;
             return -1;
         }
+    }
+    result = (int)req->result;
+    if (revents != NULL) {
+        *revents = req->poll_revents;
+    }
+    llam_api_io_req_release(g_llam_tls_shard, req);
+    return result;
+}
+
+/**
+ * @brief Poll a generic platform handle without pinning a scheduler worker.
+ */
+int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents) {
+    llam_io_req_t *req;
+    int result;
+
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL || timeout_ms == 0) {
+        return llam_platform_poll_handle(handle, events, timeout_ms, revents);
+    }
+
+    req = llam_api_io_req_acquire(g_llam_tls_shard);
+    if (req == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
+    req->kind = LLAM_IO_KIND_POLL;
+    req->handle = handle;
+    req->poll_events = events;
+    req->timeout_ms = timeout_ms;
+    req->task = g_llam_tls_task;
+    if (llam_call_blocking_io(llam_blocking_handle_poll_impl, req) != 0) {
+        int saved_errno = errno;
+
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        errno = saved_errno;
+        return -1;
     }
     result = (int)req->result;
     if (revents != NULL) {

@@ -61,6 +61,48 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
     return 0;
 }
 
+int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
+    uintptr_t key = (uintptr_t)raw_handle;
+    llam_windows_fd_assoc_t *assoc;
+    bool known_handle = false;
+    HANDLE handle;
+    DWORD error_code;
+
+    if (node == NULL || node->windows_iocp_handle == NULL || LLAM_HANDLE_IS_INVALID(raw_handle)) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (assoc = node->windows_fd_assoc_head; assoc != NULL; assoc = assoc->next) {
+        if ((uintptr_t)assoc->fd == key) {
+            known_handle = true;
+            break;
+        }
+    }
+
+    handle = CreateIoCompletionPort((HANDLE)raw_handle, (HANDLE)node->windows_iocp_handle, 0, 0);
+    if (handle == NULL) {
+        error_code = GetLastError();
+        if (error_code == ERROR_INVALID_PARAMETER && known_handle) {
+            return 0;
+        }
+        errno = llam_windows_system_error_to_errno(error_code);
+        return -1;
+    }
+    if (known_handle) {
+        return 0;
+    }
+
+    assoc = calloc(1, sizeof(*assoc));
+    if (assoc == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    assoc->fd = (llam_fd_t)key;
+    assoc->next = node->windows_fd_assoc_head;
+    node->windows_fd_assoc_head = assoc;
+    return 0;
+}
+
 int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTEX *fn_out) {
     GUID guid = WSAID_ACCEPTEX;
     LPFN_ACCEPTEX fn = NULL;

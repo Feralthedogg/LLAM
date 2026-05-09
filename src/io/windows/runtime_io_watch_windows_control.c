@@ -65,7 +65,11 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
             DWORD error_code;
 
             io_op->node->windows_cancel_controls += 1U;
-            if (CancelIoEx((HANDLE)(uintptr_t)req->fd, &io_op->overlapped)) {
+            HANDLE cancel_handle = (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE) ?
+                                       (HANDLE)req->handle :
+                                       (HANDLE)(uintptr_t)req->fd;
+
+            if (CancelIoEx(cancel_handle, &io_op->overlapped)) {
                 io_op->node->windows_cancel_success += 1U;
             } else {
                 error_code = GetLastError();

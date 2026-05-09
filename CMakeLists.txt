@@ -369,6 +369,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     )
     target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime)
+
+    add_executable(test_windows_handle_io
+        tests/test_windows_handle_io.c
+    )
+    target_include_directories(test_windows_handle_io PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    )
+    target_compile_definitions(test_windows_handle_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+    target_link_libraries(test_windows_handle_io PRIVATE llam_runtime)
 endif()
 
 add_executable(test_shared_load ${LLAM_POSIX_TEST_EXCLUDE}
@@ -405,6 +415,7 @@ add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_windows_iocp_io COMMAND test_windows_iocp_io)
+    add_test(NAME test_windows_handle_io COMMAND test_windows_handle_io)
 endif()
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_connect_io COMMAND test_connect_io)

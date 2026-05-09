@@ -65,6 +65,7 @@ typedef struct llam_windows_accept_socket_entry {
 } llam_windows_accept_socket_entry_t;
 
 int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd);
+int llam_windows_associate_handle(llam_node_t *node, llam_handle_t handle);
 int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTEX *fn_out);
 int llam_windows_load_connectex(llam_node_t *node, SOCKET socket_fd, LPFN_CONNECTEX *fn_out);
 int llam_windows_bind_connect_socket(SOCKET socket_fd, const struct sockaddr *addr);

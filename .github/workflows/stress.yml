@@ -157,18 +157,18 @@ jobs:
 
       - name: Build native Windows backend
         shell: pwsh
-        run: cmake --build build/windows --config Release --target bench test_windows_runtime_smoke test_windows_policy test_windows_iocp_io
+        run: cmake --build build/windows --config Release --target bench test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
 
       - name: CTest Windows backend
         shell: pwsh
-        run: ctest --test-dir build/windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io"
+        run: ctest --test-dir build/windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
 
       - name: Forced Windows 10/11 policy stress
         shell: pwsh
         run: |
           foreach ($generation in @("10", "11")) {
             $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
-            ctest --test-dir build/windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io"
+            ctest --test-dir build/windows --output-on-failure -C Release -R "test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
