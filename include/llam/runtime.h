@@ -60,7 +60,7 @@ extern "C" {
 /** @brief LLAM source/API version minor component. */
 #define LLAM_VERSION_MINOR 0U
 /** @brief LLAM source/API version patch component. */
-#define LLAM_VERSION_PATCH 0U
+#define LLAM_VERSION_PATCH 1U
 
 /** @brief Public ABI major version; incompatible binary changes increment this value. */
 #define LLAM_ABI_VERSION_MAJOR 1U

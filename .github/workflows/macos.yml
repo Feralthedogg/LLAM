@@ -48,7 +48,7 @@ jobs:
 
       - name: Package smoke
         run: |
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.0 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.1 ./scripts/package_release.sh "${{ matrix.package_target }}"
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt
           grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
