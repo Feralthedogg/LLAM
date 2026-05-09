@@ -227,6 +227,67 @@ jobs:
             echo "| [install.sh](${base_url}/install.sh) | Linux/macOS release archives | [checksum](${base_url}/install.sh.sha256) |"
             echo "| [install.ps1](${base_url}/install.ps1) | Windows release archives | [checksum](${base_url}/install.ps1.sha256) |"
             echo
+            echo "## Install Commands"
+            echo
+            echo "Linux x86_64:"
+            echo
+            echo "\`\`\`bash"
+            echo "curl -LO ${base_url}/llam-${version}-linux-x86_64.tar.xz"
+            echo "curl -LO ${base_url}/llam-${version}-linux-x86_64.tar.xz.sha256"
+            echo "sha256sum -c llam-${version}-linux-x86_64.tar.xz.sha256"
+            echo "tar -xf llam-${version}-linux-x86_64.tar.xz"
+            echo "cd llam-${version}-linux-x86_64"
+            echo "./install.sh --prefix \"\$HOME/.local\""
+            echo "\`\`\`"
+            echo
+            echo "Linux aarch64:"
+            echo
+            echo "\`\`\`bash"
+            echo "curl -LO ${base_url}/llam-${version}-linux-aarch64.tar.xz"
+            echo "curl -LO ${base_url}/llam-${version}-linux-aarch64.tar.xz.sha256"
+            echo "sha256sum -c llam-${version}-linux-aarch64.tar.xz.sha256"
+            echo "tar -xf llam-${version}-linux-aarch64.tar.xz"
+            echo "cd llam-${version}-linux-aarch64"
+            echo "./install.sh --prefix \"\$HOME/.local\""
+            echo "\`\`\`"
+            echo
+            echo "macOS arm64:"
+            echo
+            echo "\`\`\`bash"
+            echo "curl -LO ${base_url}/llam-${version}-macos-aarch64.tar.xz"
+            echo "curl -LO ${base_url}/llam-${version}-macos-aarch64.tar.xz.sha256"
+            echo "shasum -a 256 -c llam-${version}-macos-aarch64.tar.xz.sha256"
+            echo "tar -xf llam-${version}-macos-aarch64.tar.xz"
+            echo "cd llam-${version}-macos-aarch64"
+            echo "./install.sh --prefix \"\$HOME/.local\""
+            echo "\`\`\`"
+            echo
+            echo "macOS x86_64:"
+            echo
+            echo "\`\`\`bash"
+            echo "curl -LO ${base_url}/llam-${version}-macos-x86_64.tar.xz"
+            echo "curl -LO ${base_url}/llam-${version}-macos-x86_64.tar.xz.sha256"
+            echo "shasum -a 256 -c llam-${version}-macos-x86_64.tar.xz.sha256"
+            echo "tar -xf llam-${version}-macos-x86_64.tar.xz"
+            echo "cd llam-${version}-macos-x86_64"
+            echo "./install.sh --prefix \"\$HOME/.local\""
+            echo "\`\`\`"
+            echo
+            echo "Windows x86_64:"
+            echo
+            echo "\`\`\`powershell"
+            echo "\$archive = \"llam-${version}-windows-x86_64.zip\""
+            echo "\$checksum = \"\$archive.sha256\""
+            echo "Invoke-WebRequest \"${base_url}/\$archive\" -OutFile \$archive"
+            echo "Invoke-WebRequest \"${base_url}/\$checksum\" -OutFile \$checksum"
+            echo "\$expected = (Get-Content \$checksum).Split(\" \")[0].ToLowerInvariant()"
+            echo "\$actual = (Get-FileHash \$archive -Algorithm SHA256).Hash.ToLowerInvariant()"
+            echo "if (\$actual -ne \$expected) { throw \"checksum mismatch\" }"
+            echo "Expand-Archive \$archive -Force"
+            echo "cd .\\llam-${version}-windows-x86_64"
+            echo ".\\install.ps1 -Prefix \"\$env:LOCALAPPDATA\\LLAM\""
+            echo "\`\`\`"
+            echo
             echo "## Verification"
             echo
             echo "- Release workflow succeeded: ${run_url}"
@@ -246,4 +307,8 @@ jobs:
             release-artifacts/*.tar.xz.sha256
             release-artifacts/*.zip
             release-artifacts/*.zip.sha256
+            release-artifacts/install.sh
+            release-artifacts/install.sh.sha256
+            release-artifacts/install.ps1
+            release-artifacts/install.ps1.sha256
             release-artifacts/SHA256SUMS
