@@ -181,7 +181,7 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v1.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v1.0.1` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
 through `.github/workflows/release.yml`.
 
@@ -208,19 +208,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/install.sh | sh -s -- --version 1.0.0 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.1/install.sh | sh -s -- --version 1.0.1 --prefix "$HOME/.local"
 ```
 
 Install a specific Linux/macOS target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/install.sh | sh -s -- --version 1.0.0 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.1/install.sh | sh -s -- --version 1.0.1 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.1/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.0.1 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:

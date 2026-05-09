@@ -15,7 +15,7 @@ public symbols.
 The current public ABI version is:
 
 ```text
-LLAM_VERSION         = 1.0.0
+LLAM_VERSION         = 1.0.1
 LLAM_ABI_VERSION_MAJOR = 1
 LLAM_ABI_VERSION_MINOR = 0
 LLAM_ABI_VERSION       = (major << 16) | minor
@@ -209,7 +209,7 @@ make shared
 Expected dynamic artifacts:
 
 ```text
-Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.0
+Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.1
 macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.

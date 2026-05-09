@@ -2,7 +2,7 @@
 set -eu
 
 prefix="/usr/local"
-version="${LLAM_INSTALL_VERSION:-1.0.0}"
+version="${LLAM_INSTALL_VERSION:-1.0.1}"
 target=""
 base_url=""
 dry_run=0

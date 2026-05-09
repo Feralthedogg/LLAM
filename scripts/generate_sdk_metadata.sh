@@ -8,7 +8,7 @@ fi
 
 stage="$1"
 target="${2:-}"
-version="${LLAM_VERSION:-1.0.0}"
+version="${LLAM_VERSION:-1.0.1}"
 abi_major="${LLAM_ABI_MAJOR:-1}"
 
 if [ -z "$target" ]; then
