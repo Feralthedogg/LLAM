@@ -229,63 +229,22 @@ jobs:
             echo
             echo "## Install Commands"
             echo
-            echo "Linux x86_64:"
+            echo "Linux/macOS auto-detect:"
             echo
             echo "\`\`\`bash"
-            echo "curl -LO ${base_url}/llam-${version}-linux-x86_64.tar.xz"
-            echo "curl -LO ${base_url}/llam-${version}-linux-x86_64.tar.xz.sha256"
-            echo "sha256sum -c llam-${version}-linux-x86_64.tar.xz.sha256"
-            echo "tar -xf llam-${version}-linux-x86_64.tar.xz"
-            echo "cd llam-${version}-linux-x86_64"
-            echo "./install.sh --prefix \"\$HOME/.local\""
+            echo "curl -fsSL ${base_url}/install.sh | sh -s -- --version ${version} --base-url \"${base_url}\" --prefix \"\$HOME/.local\""
             echo "\`\`\`"
             echo
-            echo "Linux aarch64:"
+            echo "Linux/macOS explicit target:"
             echo
             echo "\`\`\`bash"
-            echo "curl -LO ${base_url}/llam-${version}-linux-aarch64.tar.xz"
-            echo "curl -LO ${base_url}/llam-${version}-linux-aarch64.tar.xz.sha256"
-            echo "sha256sum -c llam-${version}-linux-aarch64.tar.xz.sha256"
-            echo "tar -xf llam-${version}-linux-aarch64.tar.xz"
-            echo "cd llam-${version}-linux-aarch64"
-            echo "./install.sh --prefix \"\$HOME/.local\""
-            echo "\`\`\`"
-            echo
-            echo "macOS arm64:"
-            echo
-            echo "\`\`\`bash"
-            echo "curl -LO ${base_url}/llam-${version}-macos-aarch64.tar.xz"
-            echo "curl -LO ${base_url}/llam-${version}-macos-aarch64.tar.xz.sha256"
-            echo "shasum -a 256 -c llam-${version}-macos-aarch64.tar.xz.sha256"
-            echo "tar -xf llam-${version}-macos-aarch64.tar.xz"
-            echo "cd llam-${version}-macos-aarch64"
-            echo "./install.sh --prefix \"\$HOME/.local\""
-            echo "\`\`\`"
-            echo
-            echo "macOS x86_64:"
-            echo
-            echo "\`\`\`bash"
-            echo "curl -LO ${base_url}/llam-${version}-macos-x86_64.tar.xz"
-            echo "curl -LO ${base_url}/llam-${version}-macos-x86_64.tar.xz.sha256"
-            echo "shasum -a 256 -c llam-${version}-macos-x86_64.tar.xz.sha256"
-            echo "tar -xf llam-${version}-macos-x86_64.tar.xz"
-            echo "cd llam-${version}-macos-x86_64"
-            echo "./install.sh --prefix \"\$HOME/.local\""
+            echo "curl -fsSL ${base_url}/install.sh | sh -s -- --version ${version} --base-url \"${base_url}\" --target macos-aarch64 --prefix \"\$HOME/.local\""
             echo "\`\`\`"
             echo
             echo "Windows x86_64:"
             echo
             echo "\`\`\`powershell"
-            echo "\$archive = \"llam-${version}-windows-x86_64.zip\""
-            echo "\$checksum = \"\$archive.sha256\""
-            echo "Invoke-WebRequest \"${base_url}/\$archive\" -OutFile \$archive"
-            echo "Invoke-WebRequest \"${base_url}/\$checksum\" -OutFile \$checksum"
-            echo "\$expected = (Get-Content \$checksum).Split(\" \")[0].ToLowerInvariant()"
-            echo "\$actual = (Get-FileHash \$archive -Algorithm SHA256).Hash.ToLowerInvariant()"
-            echo "if (\$actual -ne \$expected) { throw \"checksum mismatch\" }"
-            echo "Expand-Archive \$archive -Force"
-            echo "cd .\\llam-${version}-windows-x86_64"
-            echo ".\\install.ps1 -Prefix \"\$env:LOCALAPPDATA\\LLAM\""
+            echo "Invoke-WebRequest \"${base_url}/install.ps1\" -OutFile install.ps1; .\\install.ps1 -Version ${version} -BaseUrl \"${base_url}\" -Prefix \"\$env:LOCALAPPDATA\\LLAM\""
             echo "\`\`\`"
             echo
             echo "## Verification"

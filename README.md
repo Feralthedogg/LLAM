@@ -205,41 +205,22 @@ Use an installed SDK with `pkg-config`:
 cc main.c $(pkg-config --cflags --libs llam) -o my_app
 ```
 
-Install on Linux x86_64:
+Install on Linux/macOS:
 
 ```bash
-curl -LO https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/llam-1.0.0-linux-x86_64.tar.xz
-curl -LO https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/llam-1.0.0-linux-x86_64.tar.xz.sha256
-sha256sum -c llam-1.0.0-linux-x86_64.tar.xz.sha256
-tar -xf llam-1.0.0-linux-x86_64.tar.xz
-cd llam-1.0.0-linux-x86_64
-./install.sh --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/install.sh | sh -s -- --version 1.0.0 --prefix "$HOME/.local"
 ```
 
-Install on macOS arm64:
+Install a specific Linux/macOS target:
 
 ```bash
-curl -LO https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/llam-1.0.0-macos-aarch64.tar.xz
-curl -LO https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/llam-1.0.0-macos-aarch64.tar.xz.sha256
-shasum -a 256 -c llam-1.0.0-macos-aarch64.tar.xz.sha256
-tar -xf llam-1.0.0-macos-aarch64.tar.xz
-cd llam-1.0.0-macos-aarch64
-./install.sh --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/install.sh | sh -s -- --version 1.0.0 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-$archive = "llam-1.0.0-windows-x86_64.zip"
-$checksum = "$archive.sha256"
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/$archive" -OutFile $archive
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/$checksum" -OutFile $checksum
-$expected = (Get-Content $checksum).Split(" ")[0].ToLowerInvariant()
-$actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actual -ne $expected) { throw "checksum mismatch" }
-Expand-Archive $archive -Force
-cd .\llam-1.0.0-windows-x86_64
-.\install.ps1 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
