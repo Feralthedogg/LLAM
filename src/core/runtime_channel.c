@@ -30,6 +30,8 @@
 
 #include "runtime_internal.h"
 
+static _Thread_local unsigned g_llam_tls_channel_safepoint_ops;
+
 /**
  * @brief Round a requested channel capacity to the internal ring size.
  *
@@ -138,6 +140,59 @@ static void llam_channel_handoff_yield(void) {
     g_llam_tls_io_handoff_yield += 1U;
     llam_yield();
     g_llam_tls_io_handoff_yield -= 1U;
+}
+
+/**
+ * @brief Throttle cooperative safepoints in pure buffered channel hot paths.
+ *
+ * Buffered channel send/recv loops can transfer many slots without parking.
+ * Running the full safepoint path on every successful transfer adds overhead
+ * without improving fairness for yield-heavy workloads, so release profiles
+ * batch those safepoints while forced-yield diagnostics keep exact behavior.
+ */
+static void llam_channel_hot_safepoint(void) {
+    unsigned interval = g_llam_runtime.channel_safepoint_interval;
+
+    if (interval <= 1U || g_llam_runtime.forced_yield_every != 0U) {
+        llam_task_safepoint();
+        return;
+    }
+    g_llam_tls_channel_safepoint_ops += 1U;
+    if (g_llam_tls_channel_safepoint_ops >= interval) {
+        g_llam_tls_channel_safepoint_ops = 0U;
+        llam_task_safepoint();
+    }
+}
+
+/**
+ * @brief Cheaply test whether a buffered channel send can hand off locally.
+ *
+ * The full direct-yield path remains the correctness gate. This hint only
+ * avoids failed handoff attempts in single-task buffered loops.
+ */
+static bool llam_channel_has_local_runnable_hint(void) {
+    llam_shard_t *shard = g_llam_tls_shard;
+    size_t top;
+    size_t bottom;
+
+    if (shard == NULL) {
+        return false;
+    }
+    if (shard->norm_q.depth != 0U) {
+        return true;
+    }
+    top = atomic_load_explicit(&shard->norm_cldeque.top, memory_order_acquire);
+    bottom = atomic_load_explicit(&shard->norm_cldeque.bottom, memory_order_acquire);
+    return bottom > top;
+}
+
+static bool llam_channel_buffered_handoff_enabled(void) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    return g_llam_runtime.channel_local_handoff_enabled != 0U &&
+           llam_channel_has_local_runnable_hint();
+#else
+    return false;
+#endif
 }
 
 /**
@@ -348,7 +403,7 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
     if (channel->count < channel->capacity) {
         bool buffered_handoff = !has_deadline &&
                                 channel->capacity == 1U &&
-                                g_llam_runtime.channel_local_handoff_enabled != 0U;
+                                llam_channel_buffered_handoff_enabled();
 
         if (channel->capacity == 1U) {
             channel->buffer[0] = value;
@@ -358,11 +413,12 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
         }
         channel->count += 1U;
         pthread_mutex_unlock(&channel->lock);
-        if (buffered_handoff && llam_yield_to_local_runnable()) {
+        if (buffered_handoff &&
+            llam_channel_has_local_runnable_hint() &&
+            llam_yield_to_local_runnable()) {
             return 0;
         }
-        // Pure buffered success can run in tight producer loops without parking.
-        llam_task_safepoint();
+        llam_channel_hot_safepoint();
         return 0;
     }
     if (has_deadline && llam_deadline_passed(deadline_ns)) {
@@ -473,7 +529,7 @@ int llam_channel_send(llam_channel_t *channel, void *value) {
 
     if (channel->count < channel->capacity) {
         bool buffered_handoff = channel->capacity == 1U &&
-                                g_llam_runtime.channel_local_handoff_enabled != 0U;
+                                llam_channel_buffered_handoff_enabled();
 
         if (channel->capacity == 1U) {
             channel->buffer[0] = value;
@@ -483,10 +539,12 @@ int llam_channel_send(llam_channel_t *channel, void *value) {
         }
         channel->count += 1U;
         pthread_mutex_unlock(&channel->lock);
-        if (buffered_handoff && llam_yield_to_local_runnable()) {
+        if (buffered_handoff &&
+            llam_channel_has_local_runnable_hint() &&
+            llam_yield_to_local_runnable()) {
             return 0;
         }
-        llam_task_safepoint();
+        llam_channel_hot_safepoint();
         return 0;
     }
 
@@ -529,6 +587,58 @@ int llam_channel_send(llam_channel_t *channel, void *value) {
         return -1;
     }
     return 0;
+}
+
+/**
+ * @brief Try to send a pointer through a channel without parking.
+ *
+ * @param channel Channel to send on.
+ * @param value   Pointer value to send.
+ *
+ * @return 0 on success, or -1 with @c errno set.
+ */
+int llam_channel_try_send(llam_channel_t *channel, void *value) {
+    llam_wait_node_t *receiver;
+
+    if (channel == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    pthread_mutex_lock(&channel->lock);
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->lock);
+        errno = EPIPE;
+        return -1;
+    }
+
+    receiver = llam_channel_pop_live_receiver(channel, value);
+    if (receiver != NULL) {
+        pthread_mutex_unlock(&channel->lock);
+        llam_channel_wake_waiter(receiver, LLAM_WAIT_CHANNEL_RECV);
+        return 0;
+    }
+
+    if (channel->count < channel->capacity) {
+        if (channel->capacity == 1U) {
+            channel->buffer[0] = value;
+        } else {
+            channel->buffer[channel->tail] = value;
+            channel->tail = (channel->tail + 1U) & channel->mask;
+        }
+        channel->count += 1U;
+        pthread_mutex_unlock(&channel->lock);
+        llam_channel_hot_safepoint();
+        return 0;
+    }
+
+    pthread_mutex_unlock(&channel->lock);
+    errno = ETIMEDOUT;
+    return -1;
 }
 
 /**
@@ -607,8 +717,7 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
         } else if (has_deadline ||
                    channel->capacity != 1U ||
                    g_llam_runtime.channel_local_handoff_enabled == 0U) {
-            // Pure buffered receive can run in tight consumer loops without parking.
-            llam_task_safepoint();
+            llam_channel_hot_safepoint();
         }
         *out = value;
         return 0;
@@ -713,6 +822,79 @@ int llam_channel_recv_until_result(llam_channel_t *channel, uint64_t deadline_ns
 }
 
 /**
+ * @brief Try to receive a pointer from a channel without parking.
+ *
+ * @param channel Channel to receive from.
+ * @param out     Destination for the received pointer.
+ *
+ * @return 0 on success, or -1 with @c errno set.
+ */
+int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
+    llam_wait_node_t *sender;
+    void *value;
+    void *refill_value;
+
+    if (channel == NULL || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    *out = NULL;
+
+    pthread_mutex_lock(&channel->lock);
+    if (channel->count > 0U) {
+        if (channel->capacity == 1U) {
+            value = channel->buffer[0];
+        } else {
+            value = channel->buffer[channel->head];
+            channel->head = (channel->head + 1U) & channel->mask;
+        }
+        channel->count -= 1U;
+
+        sender = llam_channel_pop_live_sender(channel, &refill_value);
+        if (sender != NULL) {
+            if (channel->capacity == 1U) {
+                channel->buffer[0] = refill_value;
+            } else {
+                channel->buffer[channel->tail] = refill_value;
+                channel->tail = (channel->tail + 1U) & channel->mask;
+            }
+            channel->count += 1U;
+        }
+        pthread_mutex_unlock(&channel->lock);
+        if (sender != NULL) {
+            llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
+        } else if (channel->capacity != 1U ||
+                   g_llam_runtime.channel_local_handoff_enabled == 0U) {
+            llam_channel_hot_safepoint();
+        }
+        *out = value;
+        return 0;
+    }
+
+    sender = llam_channel_pop_live_sender(channel, &value);
+    if (sender != NULL) {
+        pthread_mutex_unlock(&channel->lock);
+        llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
+        *out = value;
+        return 0;
+    }
+
+    if (channel->closed) {
+        pthread_mutex_unlock(&channel->lock);
+        errno = EPIPE;
+        return -1;
+    }
+
+    pthread_mutex_unlock(&channel->lock);
+    errno = ETIMEDOUT;
+    return -1;
+}
+
+/**
  * @brief Receive a pointer from a channel without a timeout.
  *
  * @param channel Channel to receive from.
@@ -764,7 +946,7 @@ void *llam_channel_recv(llam_channel_t *channel) {
             llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
         } else if (channel->capacity != 1U ||
                    g_llam_runtime.channel_local_handoff_enabled == 0U) {
-            llam_task_safepoint();
+            llam_channel_hot_safepoint();
         }
         if (value == NULL) {
             errno = 0;

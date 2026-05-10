@@ -292,7 +292,16 @@ def main() -> int:
             run_command(
                 root,
                 "Tokio",
-                ["cargo", "run", "--release", "--quiet", "--manifest-path", "scripts/bench_tokio_compare/Cargo.toml"],
+                [
+                    "cargo",
+                    "run",
+                    "--release",
+                    "--quiet",
+                    "--manifest-path",
+                    "scripts/bench_tokio_compare/Cargo.toml",
+                    "--bin",
+                    "bench_tokio_compare",
+                ],
                 env,
                 args.timeout,
             )

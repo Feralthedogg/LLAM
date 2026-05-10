@@ -120,6 +120,12 @@ typedef struct llam_runtime llam_runtime_t;
 /** @brief Opaque handle for structured task groups. */
 typedef struct llam_task_group llam_task_group_t;
 
+/** @brief Portable scatter/gather I/O slice used by ::llam_writev. */
+typedef struct llam_iovec {
+    const void *iov_base; /**< Pointer to bytes to write. */
+    size_t iov_len;      /**< Number of bytes in this slice. */
+} llam_iovec_t;
+
 /** @brief Task-local storage key. */
 typedef uint32_t llam_task_local_key_t;
 
@@ -903,6 +909,15 @@ LLAM_API int llam_channel_destroy(llam_channel_t *channel);
 LLAM_API int llam_channel_send(llam_channel_t *channel, void *value);
 
 /**
+ * @brief Try to send a pointer value without parking.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. Full channels fail with @c ETIMEDOUT, matching
+ * ::llam_channel_send_until with an already-expired deadline.
+ */
+LLAM_API int llam_channel_try_send(llam_channel_t *channel, void *value);
+
+/**
  * @brief Send a pointer value until an absolute deadline.
  *
  * @details Must be called from a managed LLAM task; outside task context fails
@@ -922,6 +937,19 @@ LLAM_API int llam_channel_send_until(llam_channel_t *channel, void *value, uint6
  * @return 0 on receive, -1 on close/cancellation/failure with @c errno set.
  */
 LLAM_API int llam_channel_recv_result(llam_channel_t *channel, void **out);
+
+/**
+ * @brief Try to receive a pointer value without parking.
+ *
+ * @details Must be called from a managed LLAM task; outside task context fails
+ * with @c ENOTSUP. Empty open channels fail with @c ETIMEDOUT, matching
+ * ::llam_channel_recv_until_result with an already-expired deadline.
+ *
+ * @param channel Channel to receive from.
+ * @param out Destination for the received pointer. Must not be NULL.
+ * @return 0 on receive, -1 on empty/close/cancellation/failure with @c errno set.
+ */
+LLAM_API int llam_channel_try_recv_result(llam_channel_t *channel, void **out);
 
 /**
  * @brief Receive a pointer value until an absolute deadline.
@@ -1070,6 +1098,22 @@ LLAM_API ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int
  * primitive directly and may block the calling OS thread.
  */
 LLAM_API ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count);
+
+/**
+ * @brief Scatter/gather write using the runtime I/O path where possible.
+ *
+ * @details Calls outside a managed LLAM task use the platform vector-write
+ * primitive where available. Managed POSIX tasks first try a nonblocking
+ * scatter/gather syscall and park cooperatively for writable readiness before
+ * falling back to per-slice ::llam_write. A partial return may occur after any
+ * slice boundary or partial slice write.
+ *
+ * @param fd File descriptor to write to.
+ * @param iov Array of buffers to write.
+ * @param iovcnt Number of buffers in @p iov.
+ * @return Number of bytes written, or -1 with @c errno set.
+ */
+LLAM_API ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt);
 
 /**
  * @brief Write to a generic platform handle.

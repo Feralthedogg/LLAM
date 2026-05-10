@@ -26,7 +26,7 @@
 
 #include "runtime_internal.h"
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
 #define LLAM_REINJECT_DIRECT_OWNER_HANDOFF 1
 #else
 #define LLAM_REINJECT_DIRECT_OWNER_HANDOFF 0
@@ -212,7 +212,8 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         rt->wake_latency_metrics_enabled == 0U &&
         llam_lockfree_normq_enabled(rt) &&
         !target->opaque_redirect_active &&
-        atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U) {
+        (rt->direct_handoff_allow_timers != 0U ||
+         atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U)) {
         current->forced_yield_budget = rt->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;

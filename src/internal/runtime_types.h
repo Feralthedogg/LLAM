@@ -1015,6 +1015,7 @@ struct llam_runtime {
     unsigned direct_handoff_stats_enabled;
     unsigned direct_handoff_burst;
     unsigned direct_handoff_live_limit;
+    unsigned direct_handoff_allow_timers;
     unsigned cheap_safepoint;
     unsigned safepoint_clock_period;
     unsigned preempt_poll_period;
@@ -1022,6 +1023,7 @@ struct llam_runtime {
     unsigned spawn_fanout_wake_interval_forced;
     unsigned spawn_fanout_adaptive;
     unsigned channel_local_handoff_enabled;
+    unsigned channel_safepoint_interval;
     atomic_uint steal_pause_active;
 };
 

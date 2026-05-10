@@ -376,6 +376,8 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
 #else
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 0U, 65535U);
 #endif
+    rt->direct_handoff_allow_timers =
+        llam_runtime_env_flag("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", 0U);
     if (light_safepoint_env != NULL && light_safepoint_env[0] != '\0') {
         rt->cheap_safepoint = strcmp(light_safepoint_env, "0") != 0 ? 1U : 0U;
     } else {
@@ -410,6 +412,18 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
     rt->channel_local_handoff_enabled =
         llam_runtime_env_flag("LLAM_CHANNEL_LOCAL_HANDOFF",
                             rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 1U);
+    rt->channel_safepoint_interval =
+        rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE
+            ? 1U
+            : (rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 64U : 32U);
+    if (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY) {
+        rt->channel_safepoint_interval = 32U;
+    }
+    rt->channel_safepoint_interval =
+        llam_runtime_env_u32("LLAM_CHANNEL_SAFEPOINT_INTERVAL", rt->channel_safepoint_interval, 65536U);
+    if (rt->channel_safepoint_interval == 0U) {
+        rt->channel_safepoint_interval = 1U;
+    }
     timer_heap_prewarm = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
                              ? 1024U
                              : (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ? 512U : 0U);

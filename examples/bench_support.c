@@ -641,7 +641,7 @@ void bench_select_task(void *arg) {
                 goto done_round;
             }
             if (bench_select_recv_once(state,
-                                       state->mode == BENCH_SELECT_TIMEOUT ? llam_now_ns() : UINT64_MAX,
+                                       state->mode == BENCH_SELECT_TIMEOUT ? 0U : UINT64_MAX,
                                        i) != 0) {
                 goto done_round;
             }

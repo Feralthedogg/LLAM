@@ -30,6 +30,10 @@
 
 #include "runtime_io_api_internal.h"
 
+#if LLAM_PLATFORM_POSIX
+#include <sys/uio.h>
+#endif
+
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 /** Number of Windows socket handles remembered as already set nonblocking. */
 #define LLAM_WINDOWS_NONBLOCK_CACHE_CAP 4096U
@@ -463,6 +467,135 @@ int llam_try_direct_rw(llam_fd_t fd,
         }
         return -1;
     }
+}
+
+/**
+ * @brief Try a small scatter/gather write as one immediate non-blocking syscall.
+ *
+ * The public ::llam_writev path uses this before falling back to per-slice
+ * cooperative writes. Keeping this direct helper small avoids heap allocation
+ * in the hot chat/server broadcast case.
+ */
+int llam_try_direct_writev(llam_fd_t fd,
+                           const llam_iovec_t *iov,
+                           int iovcnt,
+                           ssize_t *result_out,
+                           bool *socket_out) {
+#if LLAM_PLATFORM_POSIX
+    struct iovec native_iov[16];
+    int saved_flags;
+    bool restore_flags = false;
+    ssize_t rc;
+
+    if (result_out != NULL) {
+        *result_out = -1;
+    }
+    if (socket_out != NULL) {
+        *socket_out = false;
+    }
+    if (iovcnt < 0 || iovcnt > (int)(sizeof(native_iov) / sizeof(native_iov[0]))) {
+        return 0;
+    }
+    for (int i = 0; i < iovcnt; ++i) {
+        native_iov[i].iov_base = (void *)iov[i].iov_base;
+        native_iov[i].iov_len = iov[i].iov_len;
+    }
+
+#if defined(MSG_DONTWAIT)
+    {
+        struct msghdr msg;
+
+        memset(&msg, 0, sizeof(msg));
+        msg.msg_iov = native_iov;
+        msg.msg_iovlen = (size_t)iovcnt;
+        for (;;) {
+            rc = sendmsg(fd, &msg, MSG_DONTWAIT);
+            if (rc >= 0) {
+                if (result_out != NULL) {
+                    *result_out = rc;
+                }
+                if (socket_out != NULL) {
+                    *socket_out = true;
+                }
+                return 1;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0;
+            }
+            if (errno != ENOTSOCK && errno != EOPNOTSUPP
+#if defined(ENOTSUP)
+                && errno != ENOTSUP
+#endif
+            ) {
+                return -1;
+            }
+            break;
+        }
+    }
+#endif
+
+    saved_flags = fcntl(fd, F_GETFL, 0);
+    if (saved_flags < 0) {
+        return -1;
+    }
+    if ((saved_flags & O_NONBLOCK) == 0) {
+        if (fcntl(fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
+            return -1;
+        }
+        restore_flags = true;
+    }
+
+    for (;;) {
+        rc = writev(fd, native_iov, iovcnt);
+        if (rc >= 0) {
+            if (restore_flags) {
+                int saved_errno = errno;
+
+                (void)fcntl(fd, F_SETFL, saved_flags);
+                errno = saved_errno;
+            }
+            if (result_out != NULL) {
+                *result_out = rc;
+            }
+            return 1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (restore_flags) {
+                int saved_errno = errno;
+
+                (void)fcntl(fd, F_SETFL, saved_flags);
+                errno = saved_errno;
+            }
+            return 0;
+        }
+        {
+            int saved_errno = errno;
+
+            if (restore_flags) {
+                (void)fcntl(fd, F_SETFL, saved_flags);
+            }
+            errno = saved_errno;
+        }
+        return -1;
+    }
+#else
+    (void)fd;
+    (void)iov;
+    (void)iovcnt;
+    if (result_out != NULL) {
+        *result_out = -1;
+    }
+    if (socket_out != NULL) {
+        *socket_out = false;
+    }
+    return 0;
+#endif
 }
 
 /**

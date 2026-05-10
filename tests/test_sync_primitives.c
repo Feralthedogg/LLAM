@@ -189,10 +189,20 @@ static void timeout_and_close_task(void *arg) {
         task_fail(state, "empty channel recv timeout", errno);
         return;
     }
+    errno = 0;
+    if (llam_channel_try_recv_result(state->empty_channel, &value) != -1 || errno != ETIMEDOUT) {
+        task_fail(state, "empty channel try recv", errno);
+        return;
+    }
     atomic_fetch_add_explicit(&state->timeout_checks, 1U, memory_order_relaxed);
 
     if (llam_channel_send(state->full_channel, (void *)(uintptr_t)1U) != 0) {
         task_fail(state, "fill channel send", errno);
+        return;
+    }
+    errno = 0;
+    if (llam_channel_try_send(state->full_channel, (void *)(uintptr_t)2U) != -1 || errno != ETIMEDOUT) {
+        task_fail(state, "full channel try send", errno);
         return;
     }
     errno = 0;
@@ -230,12 +240,12 @@ static void null_channel_task(void *arg) {
     sync_state_t *state = arg;
     void *value = (void *)state;
 
-    if (llam_channel_send(state->null_channel, NULL) != 0) {
-        task_fail(state, "null channel send", errno);
+    if (llam_channel_try_send(state->null_channel, NULL) != 0) {
+        task_fail(state, "null channel try send", errno);
         return;
     }
-    if (llam_channel_recv_result(state->null_channel, &value) != 0) {
-        task_fail(state, "null channel recv result", errno);
+    if (llam_channel_try_recv_result(state->null_channel, &value) != 0) {
+        task_fail(state, "null channel try recv result", errno);
         return;
     }
     if (value != NULL) {

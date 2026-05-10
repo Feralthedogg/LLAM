@@ -51,16 +51,13 @@ static int llam_channel_select_validate_op(const llam_select_op_t *op) {
 static int llam_channel_select_try_one(llam_select_op_t *op) {
     int rc;
 
-    if (llam_channel_select_validate_op(op) != 0) {
-        return -1;
-    }
     op->result_errno = 0;
     switch (op->kind) {
     case LLAM_SELECT_OP_RECV:
-        rc = llam_channel_recv_until_result(op->channel, 0U, op->recv_out);
+        rc = llam_channel_try_recv_result(op->channel, op->recv_out);
         break;
     case LLAM_SELECT_OP_SEND:
-        rc = llam_channel_send_until(op->channel, op->send_value, 0U);
+        rc = llam_channel_try_send(op->channel, op->send_value);
         break;
     default:
         errno = EINVAL;
@@ -409,6 +406,7 @@ int llam_channel_select(llam_select_op_t *ops,
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
 
+#if LLAM_RUNTIME_BACKEND_WINDOWS
     if (deadline_ns == 0U) {
         bool ready;
 
@@ -435,18 +433,37 @@ int llam_channel_select(llam_select_op_t *ops,
             return -1;
         }
     }
+#endif
 
     for (;;) {
-        for (i = 0U; i < op_count; ++i) {
-            size_t index = (start + i) % op_count;
-            int selected = llam_channel_select_try_one(&ops[index]);
+        if (start == 0U) {
+            for (i = 0U; i < op_count; ++i) {
+                int selected = llam_channel_select_try_one(&ops[i]);
 
-            if (selected < 0) {
-                return -1;
+                if (selected < 0) {
+                    return -1;
+                }
+                if (selected > 0) {
+                    *selected_index = i;
+                    return 0;
+                }
             }
-            if (selected > 0) {
-                *selected_index = index;
-                return 0;
+        } else {
+            for (i = 0U; i < op_count; ++i) {
+                size_t index = start + i;
+                int selected;
+
+                if (index >= op_count) {
+                    index -= op_count;
+                }
+                selected = llam_channel_select_try_one(&ops[index]);
+                if (selected < 0) {
+                    return -1;
+                }
+                if (selected > 0) {
+                    *selected_index = index;
+                    return 0;
+                }
             }
         }
         if (deadline_ns == 0U || llam_deadline_passed(deadline_ns)) {

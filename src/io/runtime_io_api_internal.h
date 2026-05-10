@@ -145,6 +145,11 @@ int llam_try_direct_rw(llam_fd_t fd,
                      int recv_flags,
                      ssize_t *result_out,
                      bool *socket_out);
+int llam_try_direct_writev(llam_fd_t fd,
+                           const llam_iovec_t *iov,
+                           int iovcnt,
+                           ssize_t *result_out,
+                           bool *socket_out);
 int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen, llam_fd_t *result_out);
 bool llam_io_coop_yield_enabled(void);
 bool llam_io_poll_coop_yield_enabled(void);

@@ -34,7 +34,7 @@
 /** @brief Sentinel used to mark an explicit user yield without sampling a real timestamp. */
 #define LLAM_RECENT_EXPLICIT_YIELD UINT64_MAX
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
 #define LLAM_DIRECT_OWNER_HANDOFF 1
 #else
 #define LLAM_DIRECT_OWNER_HANDOFF 0
@@ -123,13 +123,7 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
             }
         } else {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
-            /*
-             * Windows task-to-task handoff remains opt-in while the scheduler
-             * wake path is the stable default. Tight channel handoff chains can
-             * otherwise keep work away from the scheduler in cancellation-heavy
-             * stress loops; LLAM_YIELD_DIRECT_HANDOFF=1 keeps the old experiment.
-             */
-            value = 0;
+            value = rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2 : 0;
 #elif defined(__linux__)
             /*
              * Linux owner-lane exchange is cheap enough to use for ordinary
@@ -138,7 +132,7 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
              */
             value = rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 2 : 0;
 #else
-            value = 0;
+            value = rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2 : 0;
 #endif
         }
         atomic_store_explicit(&cached, value, memory_order_release);
@@ -177,7 +171,8 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         !llam_lockfree_normq_enabled(rt) ||
         !llam_shard_accepts_new_work(shard) ||
         shard->opaque_redirect_active ||
-        atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U) {
+        (rt->direct_handoff_allow_timers == 0U &&
+         atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U)) {
         if (fail_reason != NULL) {
             *fail_reason = LLAM_YIELD_DIRECT_FAIL_POLICY;
         }
@@ -356,7 +351,7 @@ bool llam_yield_to_local_runnable(void) {
     pthread_mutex_lock(&shard->lock);
     if (shard->opaque_redirect_active ||
         shard->inject_q.depth > 0U ||
-        shard->timers != NULL ||
+        (shard->runtime->direct_handoff_allow_timers == 0U && shard->timers != NULL) ||
         shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
         pthread_mutex_unlock(&shard->lock);
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);

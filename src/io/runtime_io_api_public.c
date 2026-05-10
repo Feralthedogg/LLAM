@@ -32,6 +32,10 @@
 
 #include "runtime_io_api_internal.h"
 
+#if LLAM_PLATFORM_POSIX
+#include <sys/uio.h>
+#endif
+
 /**
  * @brief Run an I/O blocking fallback and ignore the callback payload.
  *
@@ -585,6 +589,112 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
     result = req->result;
     llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
+}
+
+/**
+ * @brief Scatter/gather write wrapper.
+ */
+ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
+    ssize_t total = 0;
+
+    if (iovcnt < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (iovcnt == 0) {
+        return 0;
+    }
+    if (iov == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (int i = 0; i < iovcnt; ++i) {
+        if (iov[i].iov_base == NULL && iov[i].iov_len != 0U) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
+#if LLAM_PLATFORM_POSIX
+        struct iovec stack_iov[16];
+        struct iovec *native_iov = stack_iov;
+        ssize_t result;
+
+        if (iovcnt > (int)(sizeof(stack_iov) / sizeof(stack_iov[0]))) {
+            native_iov = malloc((size_t)iovcnt * sizeof(*native_iov));
+            if (native_iov == NULL) {
+                errno = ENOMEM;
+                return -1;
+            }
+        }
+        for (int i = 0; i < iovcnt; ++i) {
+            native_iov[i].iov_base = (void *)iov[i].iov_base;
+            native_iov[i].iov_len = iov[i].iov_len;
+        }
+        result = writev(fd, native_iov, iovcnt);
+        if (native_iov != stack_iov) {
+            free(native_iov);
+        }
+        return result;
+#else
+        /* Windows has WSASend, but this public fd API also covers non-sockets.
+         * Keep the portable fallback exact and cooperative-compatible. */
+#endif
+    }
+
+#if LLAM_PLATFORM_POSIX
+    if (iovcnt <= 16) {
+        ssize_t direct_result;
+        bool direct_socket = false;
+        int direct_rc = llam_try_direct_writev(fd, iov, iovcnt, &direct_result, &direct_socket);
+
+        if (direct_rc > 0) {
+            llam_maybe_handoff_after_socket_write(fd, (size_t)direct_result, direct_socket);
+            return direct_result;
+        }
+        if (direct_rc < 0) {
+            return -1;
+        }
+        llam_task_safepoint();
+        if (llam_poll_fd(fd, POLLOUT, -1, NULL) > 0) {
+            direct_rc = llam_try_direct_writev(fd, iov, iovcnt, &direct_result, &direct_socket);
+            if (direct_rc > 0) {
+                llam_maybe_handoff_after_socket_write(fd, (size_t)direct_result, direct_socket);
+                return direct_result;
+            }
+            if (direct_rc < 0) {
+                return -1;
+            }
+        } else if (errno != EINTR) {
+            return -1;
+        }
+    }
+#endif
+
+    for (int i = 0; i < iovcnt; ++i) {
+        const char *bytes = (const char *)iov[i].iov_base;
+        size_t remaining = iov[i].iov_len;
+
+        while (remaining > 0U) {
+            ssize_t written = llam_write(fd, bytes, remaining);
+
+            if (written > 0) {
+                total += written;
+                bytes += written;
+                remaining -= (size_t)written;
+                continue;
+            }
+            if (written < 0 && errno == EINTR) {
+                continue;
+            }
+            if (total > 0) {
+                return total;
+            }
+            return -1;
+        }
+    }
+    return total;
 }
 
 /**
