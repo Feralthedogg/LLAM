@@ -14,7 +14,9 @@ CLEAN_DIRS = \
 	build \
 	CMakeFiles \
 	cmake-build-* \
-	scripts/bench_tokio_compare/target
+	scripts/bench_tokio_compare/target \
+	build-* \
+	target
 CLEAN_FILES = \
 	demo \
 	stress \
@@ -50,7 +52,8 @@ CLEAN_FILES = \
 	cmake_install.cmake \
 	compile_commands.json \
 	perf.data \
-	perf.data.old
+	perf.data.old \
+	test_nm_compat_runtime
 ifeq ($(OS),Windows_NT)
 UNAME_S := Windows_NT
 UNAME_M := $(PROCESSOR_ARCHITECTURE)
