@@ -903,6 +903,11 @@ static void chat_accept_task(void *arg) {
                 (void)close(fd);
                 break;
             }
+            if (chat_set_nonblocking(fd) != 0) {
+                perror("chat_set_nonblocking client");
+                (void)close(fd);
+                continue;
+            }
             client = chat_client_create(server, fd, &peer_addr, peer_len);
             if (client == NULL) {
                 perror("chat_client_create");
