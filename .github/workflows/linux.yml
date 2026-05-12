@@ -53,7 +53,15 @@ jobs:
 
       - name: Make sanitizer build
         if: ${{ contains(matrix.name, 'sanitizer') }}
-        run: make clean all CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
+        run: |
+          make clean all \
+            test_abi_contract \
+            test_abi_compat \
+            test_windows_policy \
+            test_shared_load \
+            shared \
+            CC="${{ matrix.cc }}" \
+            CFLAGS="${{ matrix.cflags }}"
 
       - name: Verify Linux
         if: ${{ !contains(matrix.name, 'sanitizer') }}
