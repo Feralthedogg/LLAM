@@ -228,6 +228,16 @@ static void cancel_storm_task(void *arg) {
     while (atomic_load_explicit(&state->waiting_count, memory_order_acquire) < CANCEL_WAITER_COUNT) {
         llam_yield();
     }
+    /*
+     * waiting_count is intentionally bumped before each waiter enters the
+     * cancellable sleep call. Give the scheduler a short cooperative window so
+     * this stress case measures parked-waiter cancellation instead of racing the
+     * pre-registration edge on slower CI workers.
+     */
+    if (llam_sleep_ns(5ULL * 1000ULL * 1000ULL) != 0) {
+        task_fail(state, "cancel storm settle sleep", errno);
+        return;
+    }
     if (llam_cancel_token_cancel(state->cancel_token) != 0) {
         task_fail(state, "cancel storm token cancel", errno);
     }

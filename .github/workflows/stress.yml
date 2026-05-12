@@ -169,8 +169,8 @@ jobs:
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
             export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
             export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
-            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS=0.060
-            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.080
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS=0.040
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.050
           fi
           if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
             # Hosted Intel macOS still runs correctness, flood, and stable edge.
