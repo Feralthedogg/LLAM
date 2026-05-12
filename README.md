@@ -102,6 +102,7 @@ Run the included programs:
 ./stress
 ./bench
 ./server 7777
+./server_lossless 7777
 ```
 
 Stress the chat server with real TCP clients:
@@ -122,6 +123,13 @@ make server-flood
 deliveries/sec. For chat fanout, one inbound message can produce `clients - 1`
 peer deliveries, so million-level delivery rates can appear before inbound
 message rates reach the same scale.
+
+`server` is intentionally a bounded-outbox, best-effort chat backend. Under
+high-rate fanout, slow clients can overflow their outbox and lose per-client
+deliveries; `server_flood` reports those drops through the server stats file.
+Use `server_lossless`, `./server --lossless`, or `LLAM_CHAT_LOSSLESS=1 ./server`
+when the test must apply producer backpressure instead of dropping outbox
+entries.
 
 Run the full composite server stress suite:
 
@@ -171,7 +179,8 @@ Build outputs:
 - `demo`: runnable examples of the public runtime API.
 - `stress`: regression coverage for scheduling, sync, timeouts, I/O, and dynamic workers.
 - `bench`: microbenchmarks for spawn/join, channels, channel select, I/O, poll, sleep fanout, and opaque blocking.
-- `server`: minimal LLAM-backed TCP chat backend for local testing.
+- `server`: minimal LLAM-backed TCP chat backend for local best-effort testing.
+- `server_lossless`: the same chat backend built with lossless outbox backpressure enabled by default.
 - `server_flood`: native nonblocking throughput flood driver for the chat server.
 - `scripts/bench_guard.py`: conservative microbenchmark regression guard for CI.
 - `scripts/stress_server.py`: TCP fanout stress test for the chat server.
@@ -846,6 +855,42 @@ make clean
 ```
 
 `make clean` removes generated files such as `object/`, `build/`, CMake cache files, example and benchmark binaries, and `perf.data*`.
+
+## Plan
+
+### 1. Core Runtime Completeness
+
+The 1.0.x line treats the current public C ABI as stable and keeps the default
+model to one active LLAM runtime per process. The next core-runtime work is
+focused on tightening the runtime itself, not changing the user-facing contract:
+
+- Keep expanding direct API tests for lifecycle, task ownership, cancellation, lost wakeups, channel close/select, blocking callbacks, and managed/unmanaged call boundaries.
+- Promote low-level stress cases that are currently example-driven into focused runtime tests so failures are attributable to LLAM rather than to a sample application policy.
+- Keep the runtime handle API documented as the embedding boundary while deferring true concurrent multi-runtime isolation until every global singleton and TLS dependency has a migration path.
+- Add stronger diagnostics for shutdown, cancellation, wake handoff, and I/O request ownership so rare hangs produce actionable state dumps instead of only a timeout.
+
+### 2. Performance Roadmap
+
+Performance work stays platform-local and benchmark-gated. Each optimization
+needs before/after numbers against LLAM's own baseline plus Go and Tokio where
+the comparison is meaningful.
+
+- Linux: continue reducing io_uring request allocation, CQE handoff, poll wake, and timer overhead until the Linux backend consistently matches the current macOS-level tuning envelope.
+- macOS: keep kqueue direct paths and Mach-aware scheduling stable; remaining work should target timer batching, helper handoff latency, and workload-specific poll wake profiles.
+- Windows 10/11: keep IOCP socket/HANDLE paths on the same public API while improving direct-handoff hit rate, queue handoff cost, and Windows-version-specific batching policy.
+- Scheduler: measure shard lock contention, worker wake storms, task reclaim cost, and timer heap locality before replacing primitives.
+- Channels: preserve correctness first; optimize buffered channel modulo/bitmask paths, select fanout, and wake accounting only with regression tests that catch lost wakeups.
+
+### 3. C Ecosystem And Operations
+
+The ecosystem target is a small, embeddable C runtime with reproducible builds,
+clear examples, and CI that catches platform regressions early.
+
+- Keep release archives self-contained: public headers, shared/static libraries, CMake config, pkg-config metadata, examples, install scripts, and operations docs.
+- Maintain separate examples for best-effort throughput behavior and lossless/backpressure behavior so benchmark logs are not misread as runtime message loss.
+- Keep CI layered: quick PR gates, platform stress gates, nightly sanitizer/fuzz/benchmark runs, and weekly soak runs.
+- Track benchmark artifacts as CSV/PNG outputs so performance claims can be tied to recorded runs instead of anecdotal local results.
+- Keep documentation focused on LLAM's C ABI, platform backends, operational limits, and verification commands.
 
 ## Architecture
 

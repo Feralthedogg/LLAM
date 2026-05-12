@@ -23,6 +23,7 @@ CLEAN_FILES = \
 	stress \
 	bench \
 	server \
+	server_lossless \
 	server_flood \
 	test_abi_contract \
 	test_abi_compat \
@@ -39,6 +40,7 @@ CLEAN_FILES = \
 	stress.exe \
 	bench.exe \
 	server.exe \
+	server_lossless.exe \
 	server_flood.exe \
 	test_abi_contract.exe \
 	test_abi_compat.exe \
@@ -266,7 +268,11 @@ BENCH_OBJS = \
 	$(OBJDIR)/examples/bench_support.o \
 	$(OBJDIR)/examples/bench_entry.o
 SERVER_OBJS = \
-	$(OBJDIR)/examples/server.o
+	$(OBJDIR)/examples/server.o \
+	$(OBJDIR)/examples/server_support.o
+SERVER_LOSSLESS_OBJS = \
+	$(OBJDIR)/examples/server_lossless.o \
+	$(OBJDIR)/examples/server_support.o
 SERVER_FLOOD_OBJS = \
 	$(OBJDIR)/examples/server_flood.o
 TEST_ABI_OBJS = \
@@ -292,11 +298,11 @@ TEST_SHARED_LOAD_OBJS = \
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 
-.PHONY: all clean static shared test test-quick test-full test-soak check package bench-matrix server-stress server-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported
+.PHONY: all clean static shared test test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported
 
 ifeq ($(HOST_PLATFORM),windows)
 
-all demo stress bench server server_flood static shared test check package bench-matrix server-stress server-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+all demo stress bench server server_lossless server_flood static shared test check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -315,7 +321,7 @@ verify-windows:
 
 else
 
-all: demo stress bench server server_flood static shared
+all: demo stress bench server server_lossless server_flood static shared
 
 static: libllam_runtime.a
 
@@ -372,6 +378,9 @@ bench: $(RUNTIME_OBJS) $(BENCH_OBJS)
 
 server: $(RUNTIME_OBJS) $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_OBJS) $(LDLIBS)
+
+server_lossless: $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS) $(LDLIBS)
 
 server_flood: $(SERVER_FLOOD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SERVER_FLOOD_OBJS) -pthread
@@ -538,7 +547,15 @@ $(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c include/llam/runtime.h 
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/server.o: examples/server.c include/llam/runtime.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/server.o: examples/server.c examples/server_support.h include/llam/runtime.h $(EXAMPLE_SHARED_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/examples/server_lossless.o: examples/server.c examples/server_support.h include/llam/runtime.h $(EXAMPLE_SHARED_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_CHAT_LOSSLESS_DEFAULT=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/examples/server_support.o: examples/server_support.c examples/server_support.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
@@ -570,6 +587,9 @@ server-stress: server
 
 server-flood: server server_flood
 	./server_flood --server ./server --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30 --min-delivery-mps 1.3
+
+server-lossless-flood: server_lossless server_flood
+	./server_flood --server ./server_lossless --clients 8 --duration 5 --message-bytes 8 --batch 32 --target-mps 0.02 --min-delivery-mps 0.05 --min-delivery-ratio 0.999 --fail-on-forced-stop
 
 server-stress-composite: server server_flood
 	python3 scripts/stress_server_composite.py --server ./server --server-flood ./server_flood

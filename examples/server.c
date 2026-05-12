@@ -34,6 +34,8 @@
 #include <stdio.h>
 
 #if LLAM_PLATFORM_POSIX
+#include "server_support.h"
+
 #include <errno.h>
 #include <inttypes.h>
 #include <fcntl.h>
@@ -62,6 +64,10 @@
 #define CHAT_PREFIX_CAP 64U
 #define CHAT_SHUTDOWN_DRAIN_MS 5000U
 
+#ifndef LLAM_CHAT_LOSSLESS_DEFAULT
+#define LLAM_CHAT_LOSSLESS_DEFAULT 0
+#endif
+
 #if !LLAM_PLATFORM_POSIX
 int main(void) {
     fprintf(stderr, "server example requires a POSIX socket backend in this build\n");
@@ -89,6 +95,7 @@ typedef struct chat_outbox {
     size_t count;
     bool closed;
     bool wake_pending;
+    bool lossless;
 } chat_outbox_t;
 
 typedef struct chat_client chat_client_t;
@@ -99,6 +106,7 @@ typedef struct chat_server {
     pthread_t signal_thread;
     bool signal_thread_started;
     bool quiet;
+    bool lossless_outbox;
     llam_cancel_token_t *stop_token;
     pthread_rwlock_t clients_lock;
     bool clients_lock_initialized;
@@ -321,10 +329,12 @@ static int chat_write_message(chat_client_t *client, const chat_message_t *messa
 
 static int chat_outbox_init(chat_outbox_t *outbox,
                             atomic_uint_fast64_t *full_drop_counter,
-                            atomic_uint_fast64_t *closed_drop_counter) {
+                            atomic_uint_fast64_t *closed_drop_counter,
+                            bool lossless) {
     memset(outbox, 0, sizeof(*outbox));
     outbox->full_drop_counter = full_drop_counter;
     outbox->closed_drop_counter = closed_drop_counter;
+    outbox->lossless = lossless;
     if (pthread_mutex_init(&outbox->lock, NULL) != 0) {
         return -1;
     }
@@ -389,44 +399,61 @@ static void chat_outbox_destroy(chat_outbox_t *outbox) {
 }
 
 static bool chat_outbox_push(chat_outbox_t *outbox, chat_message_t *message) {
-    bool need_wake = false;
-
     if (message == NULL) {
         return false;
     }
-    (void)pthread_mutex_lock(&outbox->lock);
-    if (outbox->closed || outbox->count >= CHAT_OUTBOX_CAP) {
+    for (;;) {
+        bool need_wake = false;
+
+        (void)pthread_mutex_lock(&outbox->lock);
         if (outbox->closed) {
             if (outbox->closed_drop_counter != NULL) {
                 (void)atomic_fetch_add_explicit(outbox->closed_drop_counter, 1U, memory_order_relaxed);
             }
-        } else if (outbox->full_drop_counter != NULL) {
-            (void)atomic_fetch_add_explicit(outbox->full_drop_counter, 1U, memory_order_relaxed);
+            (void)pthread_mutex_unlock(&outbox->lock);
+            chat_message_release(message);
+            return false;
         }
-        (void)pthread_mutex_unlock(&outbox->lock);
-        chat_message_release(message);
-        return false;
-    }
-    if (outbox->count == 0U && !outbox->wake_pending) {
-        outbox->wake_pending = true;
-        need_wake = true;
-    }
-    outbox->ring[outbox->tail] = message;
-    outbox->tail = (outbox->tail + 1U) % CHAT_OUTBOX_CAP;
-    outbox->count += 1U;
-    (void)pthread_mutex_unlock(&outbox->lock);
+        if (outbox->count < CHAT_OUTBOX_CAP) {
+            if (outbox->count == 0U && !outbox->wake_pending) {
+                outbox->wake_pending = true;
+                need_wake = true;
+            }
+            outbox->ring[outbox->tail] = message;
+            outbox->tail = (outbox->tail + 1U) % CHAT_OUTBOX_CAP;
+            outbox->count += 1U;
+            (void)pthread_mutex_unlock(&outbox->lock);
 
-    if (need_wake && llam_channel_try_send(outbox->wake, outbox) != 0 && errno == EPIPE) {
-        (void)pthread_mutex_lock(&outbox->lock);
-        outbox->closed = true;
-        chat_outbox_release_queued_locked(outbox);
-        (void)pthread_mutex_unlock(&outbox->lock);
-        if (outbox->closed_drop_counter != NULL) {
-            (void)atomic_fetch_add_explicit(outbox->closed_drop_counter, 1U, memory_order_relaxed);
+            if (need_wake && llam_channel_try_send(outbox->wake, outbox) != 0 && errno == EPIPE) {
+                (void)pthread_mutex_lock(&outbox->lock);
+                outbox->closed = true;
+                chat_outbox_release_queued_locked(outbox);
+                (void)pthread_mutex_unlock(&outbox->lock);
+                if (outbox->closed_drop_counter != NULL) {
+                    (void)atomic_fetch_add_explicit(outbox->closed_drop_counter, 1U, memory_order_relaxed);
+                }
+                return false;
+            }
+            return true;
         }
-        return false;
+        if (!outbox->lossless) {
+            if (outbox->full_drop_counter != NULL) {
+                (void)atomic_fetch_add_explicit(outbox->full_drop_counter, 1U, memory_order_relaxed);
+            }
+            (void)pthread_mutex_unlock(&outbox->lock);
+            chat_message_release(message);
+            return false;
+        }
+        (void)pthread_mutex_unlock(&outbox->lock);
+
+        if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+            chat_message_release(message);
+            return false;
+        }
+        // Lossless mode turns outbox capacity pressure into cooperative
+        // producer backpressure instead of hidden message loss.
+        llam_yield();
     }
-    return true;
 }
 
 static size_t chat_outbox_pop_batch(chat_outbox_t *outbox, chat_message_t **messages, size_t cap, bool *closed_out) {
@@ -842,33 +869,6 @@ static void chat_reader_task(void *arg) {
     chat_client_release(client);
 }
 
-static void chat_peer_name(const struct sockaddr_storage *addr, socklen_t addrlen, char *out, size_t out_size) {
-    const void *src = NULL;
-    unsigned port = 0U;
-    char ip[INET6_ADDRSTRLEN];
-
-    (void)addrlen;
-    if (out_size == 0U) {
-        return;
-    }
-    if (addr->ss_family == AF_INET) {
-        const struct sockaddr_in *in = (const struct sockaddr_in *)(const void *)addr;
-
-        src = &in->sin_addr;
-        port = ntohs(in->sin_port);
-    } else if (addr->ss_family == AF_INET6) {
-        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)(const void *)addr;
-
-        src = &in6->sin6_addr;
-        port = ntohs(in6->sin6_port);
-    }
-    if (src == NULL || inet_ntop(addr->ss_family, src, ip, sizeof(ip)) == NULL) {
-        (void)snprintf(out, out_size, "unknown");
-        return;
-    }
-    (void)snprintf(out, out_size, "%s:%u", ip, port);
-}
-
 static chat_client_t *chat_client_create(chat_server_t *server,
                                          int fd,
                                          const struct sockaddr_storage *peer_addr,
@@ -881,7 +881,10 @@ static chat_client_t *chat_client_create(chat_server_t *server,
     client->server = server;
     atomic_init(&client->fd, fd);
     client->id = atomic_fetch_add_explicit(&server->next_client_id, 1U, memory_order_relaxed) + 1U;
-    if (chat_outbox_init(&client->outbox, &server->outbox_full_drops, &server->outbox_closed_drops) != 0) {
+    if (chat_outbox_init(&client->outbox,
+                         &server->outbox_full_drops,
+                         &server->outbox_closed_drops,
+                         server->lossless_outbox) != 0) {
         free(client);
         return NULL;
     }
@@ -1116,22 +1119,6 @@ static void chat_destroy_clients_lock(chat_server_t *server) {
     server->clients_lock_initialized = false;
 }
 
-static uint16_t chat_parse_port(const char *value) {
-    char *end = NULL;
-    unsigned long port;
-
-    if (value == NULL || value[0] == '\0') {
-        return CHAT_DEFAULT_PORT;
-    }
-    errno = 0;
-    port = strtoul(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0' || port == 0UL || port > 65535UL) {
-        fprintf(stderr, "invalid port: %s\n", value);
-        return 0U;
-    }
-    return (uint16_t)port;
-}
-
 int main(int argc, char **argv) {
     chat_server_t server;
     llam_runtime_opts_t opts;
@@ -1140,15 +1127,27 @@ int main(int argc, char **argv) {
     const char *quiet_env;
     uint16_t port = CHAT_DEFAULT_PORT;
     bool public_bind = false;
+    bool lossless_outbox = LLAM_CHAT_LOSSLESS_DEFAULT != 0;
     int rc = 0;
     int err;
 
     (void)signal(SIGPIPE, SIG_IGN);
+    lossless_outbox = chat_env_enabled(getenv("LLAM_CHAT_LOSSLESS"), lossless_outbox);
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--public") == 0) {
             public_bind = true;
+        } else if (strcmp(argv[i], "--lossless") == 0) {
+            lossless_outbox = true;
+        } else if (strcmp(argv[i], "--best-effort") == 0) {
+            lossless_outbox = false;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            chat_print_usage(argv[0]);
+            return 0;
+        } else if (argv[i][0] == '-') {
+            chat_print_usage(argv[0]);
+            return 2;
         } else {
-            port = chat_parse_port(argv[i]);
+            port = chat_parse_port(argv[i], CHAT_DEFAULT_PORT);
             if (port == 0U) {
                 return 2;
             }
@@ -1166,6 +1165,7 @@ int main(int argc, char **argv) {
     atomic_init(&server.live_clients, 0U);
     quiet_env = getenv("LLAM_CHAT_QUIET");
     server.quiet = quiet_env != NULL && strcmp(quiet_env, "0") != 0;
+    server.lossless_outbox = lossless_outbox;
     atomic_store_explicit(&g_stop_requested, false, memory_order_release);
 
     (void)signal(SIGINT, SIG_DFL);
@@ -1215,9 +1215,10 @@ int main(int argc, char **argv) {
 
     if (!server.quiet) {
         fprintf(stdout,
-                "LLAM chat server listening on %s:%u\n",
+                "LLAM chat server listening on %s:%u mode=%s\n",
                 public_bind ? "0.0.0.0" : "127.0.0.1",
-                (unsigned)port);
+                (unsigned)port,
+                server.lossless_outbox ? "lossless" : "best-effort");
         fflush(stdout);
     }
 

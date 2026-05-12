@@ -303,6 +303,7 @@ target_link_libraries(bench PRIVATE llam_runtime)
 
 add_executable(server ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/server.c
+    examples/server_support.c
 )
 target_compile_definitions(server PRIVATE _GNU_SOURCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -311,6 +312,18 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(server PRIVATE _WIN32_WINNT=0x0A00)
 endif()
 target_link_libraries(server PRIVATE llam_runtime)
+
+add_executable(server_lossless ${LLAM_POSIX_EXAMPLE_EXCLUDE}
+    examples/server.c
+    examples/server_support.c
+)
+target_compile_definitions(server_lossless PRIVATE _GNU_SOURCE LLAM_CHAT_LOSSLESS_DEFAULT=1)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_compile_definitions(server_lossless PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(server_lossless PRIVATE _WIN32_WINNT=0x0A00)
+endif()
+target_link_libraries(server_lossless PRIVATE llam_runtime)
 
 add_executable(server_flood ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/server_flood.c
@@ -477,7 +490,7 @@ install(
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     install(
-        TARGETS demo stress bench server server_flood
+        TARGETS demo stress bench server server_lossless server_flood
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
 endif()
