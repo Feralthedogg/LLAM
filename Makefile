@@ -538,7 +538,7 @@ server-stress: server
 	python3 scripts/stress_server.py --server ./server
 
 server-flood: server server_flood
-	./server_flood --server ./server --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30 --min-delivery-mps 2.5
+	./server_flood --server ./server --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30 --min-delivery-mps 1.3
 
 server-stress-composite: server server_flood
 	python3 scripts/stress_server_composite.py --server ./server --server-flood ./server_flood

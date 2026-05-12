@@ -35,6 +35,8 @@
 
 #if LLAM_PLATFORM_POSIX
 #include <errno.h>
+#include <inttypes.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -50,7 +52,7 @@
 
 #define CHAT_DEFAULT_PORT 7777U
 #define CHAT_BACKLOG 128
-#define CHAT_OUTBOX_CAP 64U
+#define CHAT_OUTBOX_CAP 1024U
 #define CHAT_WRITE_BATCH 64U
 #define CHAT_READ_BUF 2048U
 #define CHAT_INPUT_CAP 4096U
@@ -76,6 +78,8 @@ typedef struct chat_outbox {
     pthread_mutex_t lock;
     bool lock_initialized;
     llam_channel_t *wake;
+    atomic_uint_fast64_t *full_drop_counter;
+    atomic_uint_fast64_t *closed_drop_counter;
     chat_message_t *ring[CHAT_OUTBOX_CAP];
     size_t head;
     size_t tail;
@@ -97,6 +101,11 @@ typedef struct chat_server {
     bool clients_lock_initialized;
     chat_client_t *clients;
     atomic_uint next_client_id;
+    atomic_uint_fast64_t outbox_full_drops;
+    atomic_uint_fast64_t outbox_closed_drops;
+    atomic_uint_fast64_t broadcast_messages_created;
+    atomic_uint_fast64_t broadcast_deliveries_attempted;
+    atomic_uint_fast64_t broadcast_deliveries_enqueued;
 } chat_server_t;
 
 struct chat_client {
@@ -118,6 +127,9 @@ static atomic_bool g_stop_requested;
 
 static void chat_client_close_fd(chat_client_t *client);
 static void chat_outbox_destroy(chat_outbox_t *outbox);
+static void chat_dump_runtime_if_requested(const char *phase);
+static void chat_print_stats(FILE *stream, const chat_server_t *server);
+static void chat_write_stats_file(const chat_server_t *server);
 
 static void chat_client_retain(chat_client_t *client) {
     (void)atomic_fetch_add_explicit(&client->refs, 1U, memory_order_relaxed);
@@ -186,12 +198,40 @@ static int chat_client_fd(const chat_client_t *client) {
     return atomic_load_explicit(&client->fd, memory_order_acquire);
 }
 
-static void chat_client_shutdown_fd(chat_client_t *client) {
-    int fd = chat_client_fd(client);
+static void chat_wake_listener(int listener_fd) {
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+    int fd;
 
-    if (fd >= 0) {
-        (void)shutdown(fd, SHUT_RDWR);
+    if (listener_fd < 0) {
+        return;
     }
+    memset(&addr, 0, sizeof(addr));
+    if (getsockname(listener_fd, (struct sockaddr *)(void *)&addr, &addr_len) != 0 ||
+        addr.sin_family != AF_INET) {
+        return;
+    }
+    if (addr.sin_addr.s_addr == htonl(INADDR_ANY)) {
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    }
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return;
+    }
+    (void)connect(fd, (struct sockaddr *)(void *)&addr, sizeof(addr));
+    close(fd);
+}
+
+static int chat_set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags < 0) {
+        return -1;
+    }
+    if ((flags & O_NONBLOCK) != 0) {
+        return 0;
+    }
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 static void chat_client_close_fd(chat_client_t *client) {
@@ -249,8 +289,12 @@ static int chat_write_message(chat_client_t *client, const chat_message_t *messa
     return 0;
 }
 
-static int chat_outbox_init(chat_outbox_t *outbox) {
+static int chat_outbox_init(chat_outbox_t *outbox,
+                            atomic_uint_fast64_t *full_drop_counter,
+                            atomic_uint_fast64_t *closed_drop_counter) {
     memset(outbox, 0, sizeof(*outbox));
+    outbox->full_drop_counter = full_drop_counter;
+    outbox->closed_drop_counter = closed_drop_counter;
     if (pthread_mutex_init(&outbox->lock, NULL) != 0) {
         return -1;
     }
@@ -314,17 +358,24 @@ static void chat_outbox_destroy(chat_outbox_t *outbox) {
     }
 }
 
-static void chat_outbox_push(chat_outbox_t *outbox, chat_message_t *message) {
+static bool chat_outbox_push(chat_outbox_t *outbox, chat_message_t *message) {
     bool need_wake = false;
 
     if (message == NULL) {
-        return;
+        return false;
     }
     (void)pthread_mutex_lock(&outbox->lock);
     if (outbox->closed || outbox->count >= CHAT_OUTBOX_CAP) {
+        if (outbox->closed) {
+            if (outbox->closed_drop_counter != NULL) {
+                (void)atomic_fetch_add_explicit(outbox->closed_drop_counter, 1U, memory_order_relaxed);
+            }
+        } else if (outbox->full_drop_counter != NULL) {
+            (void)atomic_fetch_add_explicit(outbox->full_drop_counter, 1U, memory_order_relaxed);
+        }
         (void)pthread_mutex_unlock(&outbox->lock);
         chat_message_release(message);
-        return;
+        return false;
     }
     if (outbox->count == 0U && !outbox->wake_pending) {
         outbox->wake_pending = true;
@@ -340,7 +391,12 @@ static void chat_outbox_push(chat_outbox_t *outbox, chat_message_t *message) {
         outbox->closed = true;
         chat_outbox_release_queued_locked(outbox);
         (void)pthread_mutex_unlock(&outbox->lock);
+        if (outbox->closed_drop_counter != NULL) {
+            (void)atomic_fetch_add_explicit(outbox->closed_drop_counter, 1U, memory_order_relaxed);
+        }
+        return false;
     }
+    return true;
 }
 
 static size_t chat_outbox_pop_batch(chat_outbox_t *outbox, chat_message_t **messages, size_t cap, bool *closed_out) {
@@ -402,7 +458,7 @@ static void chat_client_begin_close(chat_client_t *client) {
     }
     chat_server_remove_client(client->server, client);
     chat_outbox_close(&client->outbox);
-    chat_client_shutdown_fd(client);
+    chat_client_close_fd(client);
 }
 
 static void chat_server_close_all(chat_server_t *server) {
@@ -424,7 +480,7 @@ static void chat_server_close_all(chat_server_t *server) {
         }
         if (atomic_exchange_explicit(&client->closing, 1U, memory_order_acq_rel) == 0U) {
             chat_outbox_close(&client->outbox);
-            chat_client_shutdown_fd(client);
+            chat_client_close_fd(client);
         }
         // Drop the list reference removed above.
         chat_client_release(client);
@@ -442,38 +498,87 @@ static void chat_request_stop(chat_server_t *server) {
     if (server->stop_token != NULL) {
         (void)llam_cancel_token_cancel(server->stop_token);
     }
+    chat_write_stats_file(server);
+    fd = atomic_load_explicit(&server->listener_fd, memory_order_acquire);
+    chat_wake_listener(fd);
     fd = atomic_exchange_explicit(&server->listener_fd, -1, memory_order_acq_rel);
     if (fd >= 0) {
         (void)close(fd);
     }
-    chat_server_close_all(server);
     (void)llam_runtime_request_stop();
+    chat_server_close_all(server);
+    chat_dump_runtime_if_requested("request-stop");
 }
 
-static void chat_queue_message(chat_client_t *client, chat_message_t *message) {
-    if (message == NULL) {
+static void chat_print_stats(FILE *stream, const chat_server_t *server) {
+    fprintf(stream,
+            "server stopped; outbox_full_drops=%" PRIuFAST64
+            " outbox_closed_drops=%" PRIuFAST64
+            " broadcast_messages_created=%" PRIuFAST64
+            " broadcast_deliveries_attempted=%" PRIuFAST64
+            " broadcast_deliveries_enqueued=%" PRIuFAST64 "\n",
+            atomic_load_explicit(&server->outbox_full_drops, memory_order_relaxed),
+            atomic_load_explicit(&server->outbox_closed_drops, memory_order_relaxed),
+            atomic_load_explicit(&server->broadcast_messages_created, memory_order_relaxed),
+            atomic_load_explicit(&server->broadcast_deliveries_attempted, memory_order_relaxed),
+            atomic_load_explicit(&server->broadcast_deliveries_enqueued, memory_order_relaxed));
+}
+
+static void chat_write_stats_file(const chat_server_t *server) {
+    const char *path = getenv("LLAM_CHAT_STATS_PATH");
+    FILE *file;
+
+    if (path == NULL || path[0] == '\0') {
         return;
+    }
+    file = fopen(path, "a");
+    if (file == NULL) {
+        return;
+    }
+    chat_print_stats(file, server);
+    fclose(file);
+}
+
+static bool chat_queue_message(chat_client_t *client, chat_message_t *message) {
+    if (message == NULL) {
+        return false;
     }
     if (atomic_load_explicit(&client->closing, memory_order_acquire) != 0U) {
         chat_message_release(message);
-        return;
+        return false;
     }
-    chat_outbox_push(&client->outbox, message);
+    return chat_outbox_push(&client->outbox, message);
 }
 
 static void chat_queue_text(chat_client_t *client, const char *text) {
-    chat_queue_message(client, chat_message_create(text, strlen(text)));
+    (void)chat_queue_message(client, chat_message_create(text, strlen(text)));
 }
 
 static void chat_broadcast_message(chat_server_t *server, const chat_client_t *sender, chat_message_t *message) {
     chat_client_t *targets[CHAT_MAX_BROADCAST_TARGETS];
     unsigned count = 0U;
+    unsigned enqueued = 0U;
     unsigned i;
+    int lock_rc;
 
     if (message == NULL) {
         return;
     }
-    if (pthread_rwlock_rdlock(&server->clients_lock) != 0) {
+    for (;;) {
+        if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+            return;
+        }
+        lock_rc = pthread_rwlock_tryrdlock(&server->clients_lock);
+        if (lock_rc == 0) {
+            break;
+        }
+        if (lock_rc != EBUSY) {
+            return;
+        }
+        llam_yield();
+    }
+    if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+        (void)pthread_rwlock_unlock(&server->clients_lock);
         return;
     }
     for (chat_client_t *client = server->clients;
@@ -487,10 +592,19 @@ static void chat_broadcast_message(chat_server_t *server, const chat_client_t *s
     }
     (void)pthread_rwlock_unlock(&server->clients_lock);
 
+    (void)atomic_fetch_add_explicit(&server->broadcast_messages_created, 1U, memory_order_relaxed);
+    if (count > 0U) {
+        (void)atomic_fetch_add_explicit(&server->broadcast_deliveries_attempted, count, memory_order_relaxed);
+    }
     for (i = 0U; i < count; ++i) {
         chat_message_retain(message);
-        chat_queue_message(targets[i], message);
+        if (chat_queue_message(targets[i], message)) {
+            enqueued += 1U;
+        }
         chat_client_release(targets[i]);
+    }
+    if (enqueued > 0U) {
+        (void)atomic_fetch_add_explicit(&server->broadcast_deliveries_enqueued, enqueued, memory_order_relaxed);
     }
 }
 
@@ -512,6 +626,9 @@ static void chat_client_broadcast_line(chat_client_t *client, const char *data, 
     size_t copy_len;
     chat_message_t *message;
 
+    if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+        return;
+    }
     copy_len = len;
     if (copy_len > CHAT_INPUT_CAP) {
         copy_len = CHAT_INPUT_CAP;
@@ -525,10 +642,10 @@ static void chat_client_broadcast_line(chat_client_t *client, const char *data, 
 }
 
 static size_t chat_complete_line_span(const char *data, size_t len) {
-    for (size_t i = len; i > 0U; --i) {
-        if (data[i - 1U] == '\n') {
-            return i;
-        }
+    const void *newline = memchr(data, '\n', len);
+
+    if (newline != NULL) {
+        return (size_t)((const char *)newline - data) + 1U;
     }
     return 0U;
 }
@@ -536,7 +653,7 @@ static size_t chat_complete_line_span(const char *data, size_t len) {
 static void chat_client_process_input(chat_client_t *client, const char *data, size_t len) {
     size_t off = 0U;
 
-    while (off < len) {
+    while (off < len && !atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
         size_t span;
         size_t space;
         size_t copy_len;
@@ -559,8 +676,11 @@ static void chat_client_process_input(chat_client_t *client, const char *data, s
         client->input_len += copy_len;
         off += copy_len;
 
-        span = chat_complete_line_span(client->input, client->input_len);
-        if (span > 0U) {
+        for (;;) {
+            span = chat_complete_line_span(client->input, client->input_len);
+            if (span == 0U) {
+                break;
+            }
             size_t tail_len = client->input_len - span;
 
             chat_client_broadcast_line(client, client->input, span);
@@ -568,7 +688,8 @@ static void chat_client_process_input(chat_client_t *client, const char *data, s
                 memmove(client->input, client->input + span, tail_len);
             }
             client->input_len = tail_len;
-        } else if (client->input_len == sizeof(client->input)) {
+        }
+        if (client->input_len == sizeof(client->input)) {
             chat_client_broadcast_line(client, client->input, client->input_len);
             client->input_len = 0U;
         }
@@ -644,6 +765,9 @@ static void chat_reader_task(void *arg) {
         int fd = chat_client_fd(client);
         ssize_t nread;
 
+        if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+            break;
+        }
         if (fd < 0) {
             break;
         }
@@ -659,11 +783,15 @@ static void chat_reader_task(void *arg) {
         break;
     }
 
-    if (client->input_len > 0U) {
+    bool stopping = atomic_load_explicit(&g_stop_requested, memory_order_acquire);
+
+    if (!stopping && client->input_len > 0U) {
         chat_client_broadcast_line(client, client->input, client->input_len);
         client->input_len = 0U;
     }
-    chat_broadcast_system(client->server, client, "left");
+    if (!stopping) {
+        chat_broadcast_system(client->server, client, "left");
+    }
     chat_client_begin_close(client);
     chat_client_release(client);
 }
@@ -707,7 +835,7 @@ static chat_client_t *chat_client_create(chat_server_t *server,
     client->server = server;
     atomic_init(&client->fd, fd);
     client->id = atomic_fetch_add_explicit(&server->next_client_id, 1U, memory_order_relaxed) + 1U;
-    if (chat_outbox_init(&client->outbox) != 0) {
+    if (chat_outbox_init(&client->outbox, &server->outbox_full_drops, &server->outbox_closed_drops) != 0) {
         free(client);
         return NULL;
     }
@@ -734,93 +862,109 @@ static void chat_accept_task(void *arg) {
     chat_server_t *server = arg;
 
     while (!atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
-        struct sockaddr_storage peer_addr;
-        socklen_t peer_len = sizeof(peer_addr);
         int listener_fd = atomic_load_explicit(&server->listener_fd, memory_order_acquire);
-        int fd;
-        chat_client_t *client;
-        llam_task_t *reader;
-        llam_task_t *writer;
-        llam_spawn_opts_t client_opts;
+        bool accepted_any = false;
 
         if (listener_fd < 0) {
             break;
         }
-        memset(&peer_addr, 0, sizeof(peer_addr));
-        fd = llam_accept(listener_fd, NULL, NULL);
-        if (LLAM_FD_IS_INVALID(fd)) {
-            if (atomic_load_explicit(&g_stop_requested, memory_order_acquire) ||
-                errno == EBADF ||
-                errno == ECANCELED) {
+
+        for (;;) {
+            struct sockaddr_storage peer_addr;
+            socklen_t peer_len = sizeof(peer_addr);
+            int fd;
+            chat_client_t *client;
+            llam_task_t *reader;
+            llam_task_t *writer;
+            llam_spawn_opts_t client_opts;
+
+            if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
                 break;
             }
-            perror("llam_accept");
-            (void)llam_sleep_ns(10ULL * 1000ULL * 1000ULL);
-            continue;
-        }
-        if (getpeername(fd, (struct sockaddr *)(void *)&peer_addr, &peer_len) != 0) {
             memset(&peer_addr, 0, sizeof(peer_addr));
-            peer_len = 0;
-        }
+            fd = accept(listener_fd, (struct sockaddr *)(void *)&peer_addr, &peer_len);
+            if (fd < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+                if (atomic_load_explicit(&g_stop_requested, memory_order_acquire) ||
+                    errno == EBADF ||
+                    errno == ECANCELED) {
+                    break;
+                }
+                perror("accept");
+                break;
+            }
+            accepted_any = true;
+            if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+                (void)close(fd);
+                break;
+            }
+            client = chat_client_create(server, fd, &peer_addr, peer_len);
+            if (client == NULL) {
+                perror("chat_client_create");
+                (void)close(fd);
+                continue;
+            }
+            if (chat_server_add_client(server, client) != 0) {
+                perror("chat_server_add_client");
+                chat_client_release(client);
+                continue;
+            }
+            if (llam_spawn_opts_init(&client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+                perror("llam_spawn_opts_init client");
+                chat_client_begin_close(client);
+                chat_client_release(client);
+                continue;
+            }
+            client_opts.cancel_token = server->stop_token;
+            client_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_HUGE;
 
-        client = chat_client_create(server, fd, &peer_addr, peer_len);
-        if (client == NULL) {
-            perror("chat_client_create");
-            (void)close(fd);
-            continue;
-        }
-        if (chat_server_add_client(server, client) != 0) {
-            perror("chat_server_add_client");
-            chat_client_release(client);
-            continue;
-        }
-        if (llam_spawn_opts_init(&client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
-            perror("llam_spawn_opts_init client");
-            chat_client_begin_close(client);
-            chat_client_release(client);
-            continue;
-        }
-        client_opts.cancel_token = server->stop_token;
-        client_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_HUGE;
+            chat_client_retain(client);
+            writer = llam_spawn_ex(chat_writer_task, client, &client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
+            if (writer == NULL) {
+                perror("llam_spawn writer");
+                chat_client_begin_close(client);
+                chat_client_release(client);
+                chat_client_release(client);
+                continue;
+            }
+            if (llam_detach(writer) != 0) {
+                perror("llam_detach writer");
+                chat_client_begin_close(client);
+                chat_client_release(client);
+                continue;
+            }
 
-        chat_client_retain(client);
-        writer = llam_spawn_ex(chat_writer_task, client, &client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
-        if (writer == NULL) {
-            perror("llam_spawn writer");
-            chat_client_begin_close(client);
-            chat_client_release(client);
-            chat_client_release(client);
-            continue;
-        }
-        if (llam_detach(writer) != 0) {
-            perror("llam_detach writer");
-            chat_client_begin_close(client);
-            chat_client_release(client);
-            continue;
-        }
+            chat_client_retain(client);
+            reader = llam_spawn_ex(chat_reader_task, client, &client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
+            if (reader == NULL) {
+                perror("llam_spawn reader");
+                chat_client_begin_close(client);
+                chat_client_release(client);
+                chat_client_release(client);
+                continue;
+            }
+            if (llam_detach(reader) != 0) {
+                perror("llam_detach reader");
+                chat_client_begin_close(client);
+                chat_client_release(client);
+                continue;
+            }
 
-        chat_client_retain(client);
-        reader = llam_spawn_ex(chat_reader_task, client, &client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
-        if (reader == NULL) {
-            perror("llam_spawn reader");
-            chat_client_begin_close(client);
+            if (!server->quiet) {
+                fprintf(stdout, "client %u connected from %s\n", client->id, client->peer);
+                fflush(stdout);
+            }
+            chat_queue_text(client, "Welcome to LLAM chat. Type and press enter.\n");
             chat_client_release(client);
-            chat_client_release(client);
-            continue;
         }
-        if (llam_detach(reader) != 0) {
-            perror("llam_detach reader");
-            chat_client_begin_close(client);
-            chat_client_release(client);
-            continue;
+        if (!accepted_any) {
+            (void)llam_sleep_ns(1000ULL * 1000ULL);
         }
-
-        if (!server->quiet) {
-            fprintf(stdout, "client %u connected from %s\n", client->id, client->peer);
-            fflush(stdout);
-        }
-        chat_queue_text(client, "Welcome to LLAM chat. Type and press enter.\n");
-        chat_client_release(client);
     }
 
     chat_server_close_all(server);
@@ -864,6 +1008,10 @@ static int chat_create_listener(uint16_t port, bool public_bind) {
         close(fd);
         return -1;
     }
+    if (chat_set_nonblocking(fd) != 0) {
+        close(fd);
+        return -1;
+    }
     return fd;
 }
 
@@ -883,9 +1031,26 @@ static void chat_stop_signal_thread(chat_server_t *server) {
     if (!server->signal_thread_started) {
         return;
     }
-    (void)pthread_kill(server->signal_thread, SIGTERM);
+    (void)kill(getpid(), SIGTERM);
     (void)pthread_join(server->signal_thread, NULL);
     server->signal_thread_started = false;
+}
+
+static void chat_dump_runtime_if_requested(const char *phase) {
+    const char *path = getenv("LLAM_CHAT_DUMP_ON_STOP");
+    FILE *file;
+
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    file = fopen(path, "a");
+    if (file == NULL) {
+        return;
+    }
+    fprintf(file, "chat dump phase=%s\n", phase != NULL ? phase : "unknown");
+    fflush(file);
+    llam_dump_runtime_state(fileno(file));
+    fclose(file);
 }
 
 static void chat_destroy_clients_lock(chat_server_t *server) {
@@ -923,6 +1088,7 @@ int main(int argc, char **argv) {
     int rc = 0;
     int err;
 
+    (void)signal(SIGPIPE, SIG_IGN);
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--public") == 0) {
             public_bind = true;
@@ -937,10 +1103,17 @@ int main(int argc, char **argv) {
     memset(&server, 0, sizeof(server));
     atomic_init(&server.listener_fd, -1);
     atomic_init(&server.next_client_id, 0U);
+    atomic_init(&server.outbox_full_drops, 0U);
+    atomic_init(&server.outbox_closed_drops, 0U);
+    atomic_init(&server.broadcast_messages_created, 0U);
+    atomic_init(&server.broadcast_deliveries_attempted, 0U);
+    atomic_init(&server.broadcast_deliveries_enqueued, 0U);
     quiet_env = getenv("LLAM_CHAT_QUIET");
     server.quiet = quiet_env != NULL && strcmp(quiet_env, "0") != 0;
     atomic_store_explicit(&g_stop_requested, false, memory_order_release);
 
+    (void)signal(SIGINT, SIG_DFL);
+    (void)signal(SIGTERM, SIG_DFL);
     sigemptyset(&server.stop_signals);
     sigaddset(&server.stop_signals, SIGINT);
     sigaddset(&server.stop_signals, SIGTERM);
@@ -1044,6 +1217,12 @@ int main(int argc, char **argv) {
 
     if (listener_fd >= 0) {
         close(listener_fd);
+    }
+    chat_server_close_all(&server);
+    chat_write_stats_file(&server);
+    if (!server.quiet) {
+        chat_print_stats(stdout, &server);
+        fflush(stdout);
     }
     chat_stop_signal_thread(&server);
     (void)llam_cancel_token_destroy(server.stop_token);

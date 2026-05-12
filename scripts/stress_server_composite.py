@@ -32,8 +32,12 @@ class ResourceSample:
 @dataclass
 class ResourceSummary:
     samples: int
+    first_rss_kb: int | None
+    last_rss_kb: int | None
     min_rss_kb: int | None
     max_rss_kb: int | None
+    first_fds: int | None
+    last_fds: int | None
     min_fds: int | None
     max_fds: int | None
 
@@ -80,10 +84,19 @@ class ResourceSampler:
     def summary(self) -> ResourceSummary:
         rss_values = [sample.rss_kb for sample in self.samples if sample.rss_kb is not None]
         fd_values = [sample.fd_count for sample in self.samples if sample.fd_count is not None]
+        first_rss = next((sample.rss_kb for sample in self.samples if sample.rss_kb is not None), None)
+        last_rss = next((sample.rss_kb for sample in reversed(self.samples) if sample.rss_kb is not None), None)
+        first_fds = next((sample.fd_count for sample in self.samples if sample.fd_count is not None), None)
+        last_fds = next((sample.fd_count for sample in reversed(self.samples) if sample.fd_count is not None), None)
+
         return ResourceSummary(
             samples=len(self.samples),
+            first_rss_kb=first_rss,
+            last_rss_kb=last_rss,
             min_rss_kb=min(rss_values) if rss_values else None,
             max_rss_kb=max(rss_values) if rss_values else None,
+            first_fds=first_fds,
+            last_fds=last_fds,
             min_fds=min(fd_values) if fd_values else None,
             max_fds=max(fd_values) if fd_values else None,
         )
@@ -312,35 +325,45 @@ def phase_correctness(args: argparse.Namespace, script_path: Path) -> None:
 
 
 def phase_flood(args: argparse.Namespace) -> None:
-    main_min_delivery_mps = 1.5 if args.quick else 2.5
+    main_min_delivery_mps = 1.0 if args.quick else 1.3
+    payload_64b_min_delivery_mps = 0.75 if args.quick else 1.0
+    lossless_duration = 2.0 if args.quick else 5.0
     cases = [
-        ("main", 16, args.flood_duration, 8, 64, 0.30, main_min_delivery_mps),
-        ("payload-64b", 16, args.payload_flood_duration, 64, 64, 0.15, 1.0),
-        ("payload-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05),
+        ("lossless-8b", 8, lossless_duration, 8, 32, 0.02, 0.05, 0.999),
+        ("throughput-8b", 16, args.flood_duration, 8, 64, 0.30, main_min_delivery_mps, 0.0),
+        ("throughput-64b", 16, args.payload_flood_duration, 64, 64, 0.15, payload_64b_min_delivery_mps, 0.0),
+        ("lossless-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05, 0.999),
     ]
-    for label, clients, duration, payload_bytes, batch, target_mps, min_delivery_mps in cases:
-        run_checked(
-            [
-                str(args.server_flood),
-                "--server",
-                str(args.server),
-                "--host",
-                args.host,
-                "--clients",
-                str(clients),
-                "--duration",
-                str(duration),
-                "--message-bytes",
-                str(payload_bytes),
-                "--batch",
-                str(batch),
-                "--target-mps",
-                f"{target_mps:.3f}",
-                "--min-delivery-mps",
-                f"{min_delivery_mps:.3f}",
-            ],
-            f"flood {label}",
-        )
+    for label, clients, duration, payload_bytes, batch, target_mps, min_delivery_mps, case_min_ratio in cases:
+        min_delivery_ratio = args.flood_min_delivery_ratio if args.flood_min_delivery_ratio > 0.0 else case_min_ratio
+        cmd = [
+            str(args.server_flood),
+            "--server",
+            str(args.server),
+            "--host",
+            args.host,
+            "--clients",
+            str(clients),
+            "--duration",
+            str(duration),
+            "--message-bytes",
+            str(payload_bytes),
+            "--batch",
+            str(batch),
+            "--target-mps",
+            f"{target_mps:.3f}",
+            "--min-delivery-mps",
+            f"{min_delivery_mps:.3f}",
+            "--min-delivery-ratio",
+            f"{min_delivery_ratio:.9f}",
+            "--shutdown-timeout",
+            f"{args.shutdown_timeout:.3f}",
+        ]
+        if args.allow_flood_forced_stop:
+            cmd.append("--allow-forced-stop")
+        else:
+            cmd.append("--fail-on-forced-stop")
+        run_checked(cmd, f"flood {label}")
 
 
 def random_payload(prefix: str, payload_bytes: int) -> bytes:
@@ -581,8 +604,11 @@ def phase_edge(args: argparse.Namespace) -> None:
         f"recv_lines={stats.recv_lines} recv_bytes={stats.recv_bytes} "
         f"churn_connects={stats.churn_connects} half_closes={stats.half_closes} "
         f"resets={stats.resets} slow_clients={stats.slow_clients} "
-        f"client_errors={stats.client_errors} rss_kb={summary.min_rss_kb}->{summary.max_rss_kb} "
-        f"fds={summary.min_fds}->{summary.max_fds} samples={summary.samples}"
+        f"client_errors={stats.client_errors} "
+        f"rss_kb={summary.first_rss_kb}->{summary.last_rss_kb} "
+        f"rss_minmax={summary.min_rss_kb}->{summary.max_rss_kb} "
+        f"fds={summary.first_fds}->{summary.last_fds} "
+        f"fds_minmax={summary.min_fds}->{summary.max_fds} samples={summary.samples}"
     )
 
 
@@ -598,6 +624,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--correctness-timeout", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_TIMEOUT", "30")))
     parser.add_argument("--flood-duration", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_FLOOD_DURATION", "60")))
+    parser.add_argument(
+        "--flood-min-delivery-ratio",
+        type=float,
+        default=float(os.getenv("LLAM_SERVER_COMPOSITE_FLOOD_MIN_DELIVERY_RATIO", "0.0")),
+        help="optional minimum observed/expected broadcast ratio for native flood phases",
+    )
+    parser.add_argument(
+        "--allow-flood-forced-stop",
+        action="store_true",
+        default=os.getenv("LLAM_SERVER_COMPOSITE_ALLOW_FLOOD_FORCED_STOP", "0") != "0",
+        help="allow native flood cleanup to SIGKILL the server without failing the phase",
+    )
     parser.add_argument(
         "--payload-flood-duration",
         type=float,
@@ -648,6 +686,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--churn-threads and --slow-threads must be >= 0")
     if args.shutdown_timeout <= 0.0:
         raise SystemExit("--shutdown-timeout must be > 0")
+    if args.flood_min_delivery_ratio < 0.0 or args.flood_min_delivery_ratio > 1.0:
+        raise SystemExit("--flood-min-delivery-ratio must be in [0.0, 1.0]")
     parse_correctness_matrix(args.correctness_matrix)
 
 

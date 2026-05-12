@@ -86,6 +86,10 @@ typedef struct flood_opts {
     unsigned batch;
     double target_mps;
     double min_delivery_mps;
+    double min_delivery_ratio;
+    double shutdown_timeout_sec;
+    bool fail_on_forced_stop;
+    bool fail_on_missing_stats;
 } flood_opts_t;
 
 typedef struct flood_client {
@@ -96,6 +100,15 @@ typedef struct flood_client {
     uint64_t recv_bytes;
     bool closed;
 } flood_client_t;
+
+typedef struct flood_server_stats {
+    bool available;
+    uint64_t outbox_full_drops;
+    uint64_t outbox_closed_drops;
+    uint64_t broadcast_messages_created;
+    uint64_t broadcast_deliveries_attempted;
+    uint64_t broadcast_deliveries_enqueued;
+} flood_server_stats_t;
 
 static uint64_t flood_now_ns(void) {
     struct timespec ts;
@@ -142,7 +155,10 @@ static void flood_usage(const char *argv0) {
     fprintf(stderr,
             "usage: %s [--server ./server] [--host 127.0.0.1] [--clients N]\\n"
             "          [--duration SEC] [--drain-sec SEC] [--message-bytes N]\\n"
-            "          [--batch N] [--target-mps M] [--min-delivery-mps M]\\n",
+            "          [--batch N] [--target-mps M] [--min-delivery-mps M]\\n"
+            "          [--min-delivery-ratio R] [--shutdown-timeout SEC]\\n"
+            "          [--allow-forced-stop] [--fail-on-forced-stop]\\n"
+            "          [--allow-missing-stats] [--fail-on-missing-stats]\\n",
             argv0);
 }
 
@@ -157,6 +173,16 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
     opts->batch = flood_env_unsigned("LLAM_SERVER_FLOOD_BATCH", FLOOD_DEFAULT_BATCH);
     opts->target_mps = flood_env_double("LLAM_SERVER_FLOOD_TARGET_MPS", 0.0);
     opts->min_delivery_mps = flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_MPS", 0.0);
+    opts->min_delivery_ratio = flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_RATIO", 0.0);
+    opts->shutdown_timeout_sec = flood_env_double("LLAM_SERVER_FLOOD_SHUTDOWN_TIMEOUT", 30.0);
+    opts->fail_on_forced_stop = flood_env_unsigned("LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP", 0U) == 0U;
+    if (flood_env_unsigned("LLAM_SERVER_FLOOD_FAIL_ON_FORCED_STOP", 0U) != 0U) {
+        opts->fail_on_forced_stop = true;
+    }
+    opts->fail_on_missing_stats = flood_env_unsigned("LLAM_SERVER_FLOOD_ALLOW_MISSING_STATS", 0U) == 0U;
+    if (flood_env_unsigned("LLAM_SERVER_FLOOD_FAIL_ON_MISSING_STATS", 0U) != 0U) {
+        opts->fail_on_missing_stats = true;
+    }
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--server") == 0 && i + 1 < argc) {
@@ -177,6 +203,18 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
             opts->target_mps = strtod(argv[++i], NULL);
         } else if (strcmp(argv[i], "--min-delivery-mps") == 0 && i + 1 < argc) {
             opts->min_delivery_mps = strtod(argv[++i], NULL);
+        } else if (strcmp(argv[i], "--min-delivery-ratio") == 0 && i + 1 < argc) {
+            opts->min_delivery_ratio = strtod(argv[++i], NULL);
+        } else if (strcmp(argv[i], "--shutdown-timeout") == 0 && i + 1 < argc) {
+            opts->shutdown_timeout_sec = strtod(argv[++i], NULL);
+        } else if (strcmp(argv[i], "--allow-forced-stop") == 0) {
+            opts->fail_on_forced_stop = false;
+        } else if (strcmp(argv[i], "--fail-on-forced-stop") == 0) {
+            opts->fail_on_forced_stop = true;
+        } else if (strcmp(argv[i], "--allow-missing-stats") == 0) {
+            opts->fail_on_missing_stats = false;
+        } else if (strcmp(argv[i], "--fail-on-missing-stats") == 0) {
+            opts->fail_on_missing_stats = true;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             flood_usage(argv[0]);
             exit(0);
@@ -188,7 +226,9 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
 
     if (opts->clients < 2U || opts->duration_sec <= 0.0 || opts->drain_sec < 0.0 ||
         opts->message_bytes < 2U || opts->message_bytes > FLOOD_MAX_MESSAGE_BYTES ||
-        opts->batch == 0U || opts->target_mps < 0.0 || opts->min_delivery_mps < 0.0) {
+        opts->batch == 0U || opts->target_mps < 0.0 || opts->min_delivery_mps < 0.0 ||
+        opts->min_delivery_ratio < 0.0 || opts->min_delivery_ratio > 1.0 ||
+        opts->shutdown_timeout_sec <= 0.0) {
         flood_usage(argv[0]);
         return -1;
     }
@@ -234,7 +274,7 @@ static int flood_find_free_port(const char *host) {
     return port;
 }
 
-static pid_t flood_start_server(const char *server_path, int port) {
+static pid_t flood_start_server(const char *server_path, int port, const char *stats_path) {
     char port_arg[32];
     pid_t pid;
 
@@ -251,8 +291,137 @@ static pid_t flood_start_server(const char *server_path, int port) {
         (void)dup2(devnull, STDERR_FILENO);
         close(devnull);
     }
+    if (stats_path != NULL && stats_path[0] != '\0') {
+        (void)setenv("LLAM_CHAT_STATS_PATH", stats_path, 1);
+    }
     execl(server_path, server_path, port_arg, (char *)NULL);
     _exit(127);
+}
+
+static bool flood_parse_u64_field(const char *line, const char *key, uint64_t *out) {
+    const char *cursor = strstr(line, key);
+    char *end = NULL;
+    unsigned long long parsed;
+
+    if (cursor == NULL || out == NULL) {
+        return false;
+    }
+    cursor += strlen(key);
+    if (*cursor != '=') {
+        return false;
+    }
+    cursor += 1;
+    errno = 0;
+    parsed = strtoull(cursor, &end, 10);
+    if (errno != 0 || end == cursor) {
+        return false;
+    }
+    *out = (uint64_t)parsed;
+    return true;
+}
+
+static bool flood_read_server_stats(const char *stats_path, flood_server_stats_t *stats) {
+    char line[512];
+    char last_line[512];
+    FILE *file;
+
+    if (stats == NULL) {
+        return false;
+    }
+    memset(stats, 0, sizeof(*stats));
+    if (stats_path == NULL || stats_path[0] == '\0') {
+        return false;
+    }
+    file = fopen(stats_path, "r");
+    if (file == NULL) {
+        return false;
+    }
+    last_line[0] = '\0';
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (line[0] != '\0') {
+            (void)snprintf(last_line, sizeof(last_line), "%s", line);
+        }
+    }
+    fclose(file);
+    if (last_line[0] == '\0') {
+        return false;
+    }
+    last_line[strcspn(last_line, "\r\n")] = '\0';
+    if (!flood_parse_u64_field(last_line, "outbox_full_drops", &stats->outbox_full_drops) ||
+        !flood_parse_u64_field(last_line, "outbox_closed_drops", &stats->outbox_closed_drops) ||
+        !flood_parse_u64_field(last_line, "broadcast_messages_created", &stats->broadcast_messages_created) ||
+        !flood_parse_u64_field(last_line, "broadcast_deliveries_attempted", &stats->broadcast_deliveries_attempted) ||
+        !flood_parse_u64_field(last_line, "broadcast_deliveries_enqueued", &stats->broadcast_deliveries_enqueued)) {
+        return false;
+    }
+    stats->available = true;
+    return true;
+}
+
+static void flood_print_server_stats(const flood_server_stats_t *stats) {
+    printf("server flood stats: server stopped; outbox_full_drops=%" PRIu64
+           " outbox_closed_drops=%" PRIu64
+           " broadcast_messages_created=%" PRIu64
+           " broadcast_deliveries_attempted=%" PRIu64
+           " broadcast_deliveries_enqueued=%" PRIu64 "\n",
+           stats->outbox_full_drops,
+           stats->outbox_closed_drops,
+           stats->broadcast_messages_created,
+           stats->broadcast_deliveries_attempted,
+           stats->broadcast_deliveries_enqueued);
+}
+
+static intmax_t flood_delta_u64(uint64_t lhs, uint64_t rhs) {
+    if (lhs >= rhs) {
+        return (intmax_t)(lhs - rhs);
+    }
+    return -(intmax_t)(rhs - lhs);
+}
+
+static intmax_t flood_abs_imax(intmax_t value) {
+    return value < 0 ? -value : value;
+}
+
+static intmax_t flood_print_accounting(const flood_server_stats_t *stats,
+                                       uint64_t expected_deliveries,
+                                       uint64_t observed_deliveries,
+                                       uint64_t missing_deliveries) {
+    uint64_t outbox_drops = stats->outbox_full_drops + stats->outbox_closed_drops;
+    intmax_t expected_minus_attempted =
+        flood_delta_u64(expected_deliveries, stats->broadcast_deliveries_attempted);
+    intmax_t enqueued_minus_observed =
+        flood_delta_u64(stats->broadcast_deliveries_enqueued, observed_deliveries);
+    intmax_t explained_missing =
+        expected_minus_attempted + (intmax_t)outbox_drops + enqueued_minus_observed;
+    intmax_t accounting_gap = (intmax_t)missing_deliveries - explained_missing;
+    double drop_explained_ratio =
+        missing_deliveries > 0U ? (double)outbox_drops / (double)missing_deliveries : 0.0;
+
+    printf("server flood accounting: expected_minus_attempted=%" PRIdMAX
+           " outbox_drops=%" PRIu64
+           " enqueued_minus_observed=%" PRIdMAX
+           " explained_missing=%" PRIdMAX
+           " accounting_gap=%" PRIdMAX
+           " drop_explained_ratio=%.9f\n",
+           expected_minus_attempted,
+           outbox_drops,
+           enqueued_minus_observed,
+           explained_missing,
+           accounting_gap,
+           drop_explained_ratio);
+    return accounting_gap;
+}
+
+static intmax_t flood_accounting_tolerance(uint64_t expected_deliveries) {
+    uint64_t scaled = expected_deliveries / 1000000U;
+
+    if (scaled < 4096U) {
+        scaled = 4096U;
+    }
+    if (scaled > 100000U) {
+        scaled = 100000U;
+    }
+    return (intmax_t)scaled;
 }
 
 static bool flood_server_running(pid_t pid) {
@@ -273,31 +442,43 @@ static bool flood_server_running(pid_t pid) {
     return errno == EINTR;
 }
 
-static void flood_stop_server(pid_t pid) {
+static void flood_report_abnormal_server_status(const char *context, int status) {
+    if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "server %s with status %d\n", context, WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        fprintf(stderr, "server %s from signal %d\n", context, WTERMSIG(status));
+    }
+}
+
+static bool flood_stop_server(pid_t pid, double timeout_sec) {
     uint64_t deadline;
     int status;
 
     if (pid <= 0) {
-        return;
+        return false;
     }
     if (waitpid(pid, &status, WNOHANG) == pid) {
-        return;
+        flood_report_abnormal_server_status("exited before cleanup", status);
+        return false;
     }
+    (void)kill(pid, SIGTERM);
     (void)kill(pid, SIGINT);
-    deadline = flood_now_ns() + 5000000000ULL;
+    deadline = flood_now_ns() + (uint64_t)(timeout_sec * 1000000000.0);
     while (flood_now_ns() < deadline) {
         pid_t rc = waitpid(pid, &status, WNOHANG);
 
         if (rc == pid) {
-            return;
+            flood_report_abnormal_server_status("stopped during cleanup", status);
+            return false;
         }
         if (rc < 0 && errno != EINTR) {
-            return;
+            return false;
         }
         usleep(10000);
     }
     (void)kill(pid, SIGKILL);
     (void)waitpid(pid, &status, 0);
+    return true;
 }
 
 static int flood_connect_client(const char *host, int port, uint64_t deadline_ns) {
@@ -594,9 +775,12 @@ int main(int argc, char **argv) {
     uint64_t total_sent = 0U;
     uint64_t total_recv_lines = 0U;
     uint64_t total_recv_bytes = 0U;
+    uint64_t expected_deliveries = 0U;
+    uint64_t missing_deliveries = 0U;
     uint64_t send_cursor = 0U;
     uint64_t loops_without_progress = 0U;
     pid_t server_pid = -1;
+    char stats_path[256] = "";
     int port;
     int rc = 1;
 
@@ -620,7 +804,13 @@ int main(int argc, char **argv) {
         perror("find free port");
         goto done;
     }
-    server_pid = flood_start_server(opts.server_path, port);
+    (void)snprintf(stats_path,
+                   sizeof(stats_path),
+                   "/tmp/llam_server_flood_stats_%ld_%d.txt",
+                   (long)getpid(),
+                   port);
+    (void)unlink(stats_path);
+    server_pid = flood_start_server(opts.server_path, port, stats_path);
     if (server_pid < 0) {
         perror("fork server");
         goto done;
@@ -735,13 +925,14 @@ int main(int argc, char **argv) {
     double sent_mps = active_sec > 0.0 ? (double)total_sent / active_sec / 1000000.0 : 0.0;
     double sent_total_mps = measured_sec > 0.0 ? (double)total_sent / measured_sec / 1000000.0 : 0.0;
     double delivery_mps = measured_sec > 0.0 ? (double)total_recv_lines / measured_sec / 1000000.0 : 0.0;
-    uint64_t expected_deliveries = total_sent * (uint64_t)(opts.clients - 1U);
+    expected_deliveries = total_sent * (uint64_t)(opts.clients - 1U);
+    missing_deliveries = expected_deliveries > total_recv_lines ? expected_deliveries - total_recv_lines : 0U;
     double delivery_ratio = expected_deliveries > 0U ? (double)total_recv_lines / (double)expected_deliveries : 0.0;
 
     printf("server flood ok: clients=%u active_sec=%.3f total_sec=%.3f sent=%" PRIu64
            " inbound_mps=%.3f inbound_total_mps=%.3f expected_deliveries=%" PRIu64
-           " observed_deliveries=%" PRIu64 " delivery_mps=%.3f"
-           " delivery_ratio=%.3f recv_bytes=%" PRIu64 "\n",
+           " observed_deliveries=%" PRIu64 " missing_deliveries=%" PRIu64
+           " delivery_mps=%.3f delivery_ratio=%.9f recv_bytes=%" PRIu64 "\n",
            opts.clients,
            active_sec,
            measured_sec,
@@ -750,6 +941,7 @@ int main(int argc, char **argv) {
            sent_total_mps,
            expected_deliveries,
            total_recv_lines,
+           missing_deliveries,
            delivery_mps,
            delivery_ratio,
            total_recv_bytes);
@@ -762,6 +954,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "delivery_mps %.3f below required %.3f\n", delivery_mps, opts.min_delivery_mps);
         goto done;
     }
+    if (opts.min_delivery_ratio > 0.0 && expected_deliveries > 0U && delivery_ratio < opts.min_delivery_ratio) {
+        fprintf(stderr,
+                "delivery_ratio %.9f below required %.9f; missing_deliveries=%" PRIu64 "\n",
+                delivery_ratio,
+                opts.min_delivery_ratio,
+                missing_deliveries);
+        goto done;
+    }
     rc = 0;
 
 done:
@@ -769,8 +969,46 @@ done:
         flood_close_clients(clients, opts.clients);
     }
     if (server_pid > 0) {
-        flood_stop_server(server_pid);
+        bool killed = flood_stop_server(server_pid, opts.shutdown_timeout_sec);
+        flood_server_stats_t stats;
+
+        if (flood_read_server_stats(stats_path, &stats)) {
+            intmax_t accounting_gap;
+            intmax_t tolerance;
+
+            flood_print_server_stats(&stats);
+            accounting_gap = flood_print_accounting(&stats, expected_deliveries, total_recv_lines, missing_deliveries);
+            tolerance = flood_accounting_tolerance(expected_deliveries);
+            if (stats.outbox_closed_drops != 0U && rc == 0) {
+                fprintf(stderr,
+                        "outbox_closed_drops=%" PRIu64 " indicates cleanup race or late enqueue to closed clients\n",
+                        stats.outbox_closed_drops);
+                rc = 1;
+            }
+            if (flood_abs_imax(accounting_gap) > tolerance && rc == 0) {
+                fprintf(stderr,
+                        "accounting_gap=%" PRIdMAX " exceeds tolerance=%" PRIdMAX "\n",
+                        accounting_gap,
+                        tolerance);
+                rc = 1;
+            }
+        } else {
+            printf("server flood stats: unavailable\n");
+            if (opts.fail_on_missing_stats && rc == 0) {
+                fprintf(stderr, "server stats unavailable\n");
+                rc = 1;
+            }
+        }
+        if (killed) {
+            fprintf(stderr,
+                    "server did not stop within %.1fs after SIGTERM/SIGINT; killed\n",
+                    opts.shutdown_timeout_sec);
+            if (opts.fail_on_forced_stop && rc == 0) {
+                rc = 1;
+            }
+        }
     }
+    (void)unlink(stats_path);
     free(fds);
     free(clients);
     return rc;

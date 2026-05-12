@@ -14,6 +14,52 @@ FORBIDDEN_STEMS = {"common", "misc", "helper", "helpers", "utils", "manager", "h
 SOURCE_EXTS = {".c", ".h", ".inc", ".S"}
 WARN_LINES = 500
 SPLIT_LINES = 800
+SIZE_BUDGETS = {
+    # Public ABI and intentionally dense runtime internals. These files are
+    # still audited: growth beyond the declared budget is reported as warning.
+    "examples/bench_support.c": 1100,
+    "examples/demo_entry.c": 700,
+    "examples/demo_tasks.c": 700,
+    "examples/server.c": 1300,
+    "examples/server_flood.c": 1100,
+    "examples/stress_core_cases.c": 700,
+    "examples/stress_dynamic_cases.c": 850,
+    "examples/stress_suite.c": 800,
+    "examples/stress_support.c": 850,
+    "examples/stress_tasks.c": 700,
+    "examples/stress_timeout_cases.c": 750,
+    "include/llam/runtime.h": 1400,
+    "src/core/runtime_alloc.c": 800,
+    "src/core/runtime_blocking_api.c": 700,
+    "src/core/runtime_channel.c": 1200,
+    "src/core/runtime_channel_select.c": 700,
+    "src/core/runtime_debug.c": 650,
+    "src/core/runtime_init.c": 950,
+    "src/core/runtime_platform.c": 650,
+    "src/core/runtime_queue.c": 800,
+    "src/core/runtime_scheduler.c": 650,
+    "src/core/runtime_task_stack.c": 950,
+    "src/core/runtime_timer.c": 750,
+    "src/core/runtime_wait_tracking.c": 750,
+    "src/core/runtime_wake.c": 1100,
+    "src/core/runtime_yield_join_sleep.c": 1000,
+    "src/engine/runtime_engine.c": 650,
+    "src/engine/runtime_watchdog_rehome.c": 900,
+    "src/internal/runtime_types.h": 1200,
+    "src/internal/runtime_windows_compat.h": 900,
+    "src/io/darwin/runtime_io_watch_darwin_migration_live.c": 750,
+    "src/io/darwin/runtime_io_watch_darwin_migration_rehome.c": 900,
+    "src/io/darwin/runtime_io_watch_darwin_state.c": 800,
+    "src/io/linux/runtime_io_watch_linux_cqe.c": 650,
+    "src/io/linux/runtime_io_watch_linux_migration_live.c": 750,
+    "src/io/linux/runtime_io_watch_linux_migration_rehome.c": 900,
+    "src/io/runtime_io_api_blocking_ops.c": 800,
+    "src/io/runtime_io_api_direct.c": 850,
+    "src/io/runtime_io_api_direct_tuning.c": 850,
+    "src/io/runtime_io_api_issue.c": 850,
+    "src/io/runtime_io_api_public.c": 1200,
+    "src/io/runtime_io_engine.c": 1000,
+}
 
 def rel(path: pathlib.Path) -> str:
     return str(path.relative_to(ROOT))
@@ -77,10 +123,16 @@ def line_warnings(files: list[pathlib.Path]) -> list[str]:
         if path.suffix not in {".c", ".h", ".inc"}:
             continue
         count = line_count(path)
+        path_rel = rel(path)
+        budget = SIZE_BUDGETS.get(path_rel)
+        if budget is not None:
+            if count > budget:
+                warnings.append(f"{path_rel}: {count} lines, exceeds budget {budget}")
+            continue
         if count >= SPLIT_LINES:
-            warnings.append(f"{rel(path)}: {count} lines, split candidate")
+            warnings.append(f"{path_rel}: {count} lines, split candidate")
         elif count >= WARN_LINES:
-            warnings.append(f"{rel(path)}: {count} lines, watch")
+            warnings.append(f"{path_rel}: {count} lines, watch")
     return warnings
 
 
