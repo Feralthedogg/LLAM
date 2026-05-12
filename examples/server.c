@@ -37,6 +37,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -47,6 +48,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #endif
 
@@ -58,6 +60,7 @@
 #define CHAT_INPUT_CAP 4096U
 #define CHAT_MAX_BROADCAST_TARGETS 1024U
 #define CHAT_PREFIX_CAP 64U
+#define CHAT_SHUTDOWN_DRAIN_MS 5000U
 
 #if !LLAM_PLATFORM_POSIX
 int main(void) {
@@ -106,6 +109,7 @@ typedef struct chat_server {
     atomic_uint_fast64_t broadcast_messages_created;
     atomic_uint_fast64_t broadcast_deliveries_attempted;
     atomic_uint_fast64_t broadcast_deliveries_enqueued;
+    atomic_uint live_clients;
 } chat_server_t;
 
 struct chat_client {
@@ -136,11 +140,15 @@ static void chat_client_retain(chat_client_t *client) {
 }
 
 static void chat_client_release(chat_client_t *client) {
+    chat_server_t *server;
+
     if (atomic_fetch_sub_explicit(&client->refs, 1U, memory_order_acq_rel) != 1U) {
         return;
     }
+    server = client->server;
     chat_client_close_fd(client);
     chat_outbox_destroy(&client->outbox);
+    (void)atomic_fetch_sub_explicit(&server->live_clients, 1U, memory_order_acq_rel);
     free(client);
 }
 
@@ -254,6 +262,7 @@ static int chat_write_message(chat_client_t *client, const chat_message_t *messa
     while (off < total_len) {
         int fd = chat_client_fd(client);
         llam_iovec_t iov[2];
+        struct iovec native_iov[2];
         int iovcnt = 0;
         ssize_t nwritten;
 
@@ -276,12 +285,33 @@ static int chat_write_message(chat_client_t *client, const chat_message_t *messa
             iov[iovcnt].iov_len = message->data_len - data_off;
             iovcnt += 1;
         }
-        nwritten = llam_writev(fd, iov, iovcnt);
+        for (int i = 0; i < iovcnt; ++i) {
+            native_iov[i].iov_base = (void *)iov[i].iov_base;
+            native_iov[i].iov_len = iov[i].iov_len;
+        }
+        nwritten = writev(fd, native_iov, iovcnt);
         if (nwritten > 0) {
             off += (size_t)nwritten;
             continue;
         }
         if (nwritten < 0 && errno == EINTR) {
+            continue;
+        }
+        if (nwritten < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            short revents = 0;
+            int poll_rc;
+
+            if (atomic_load_explicit(&client->closing, memory_order_acquire) != 0U ||
+                atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+                return -1;
+            }
+            poll_rc = llam_poll_fd(fd, POLLOUT, 100, &revents);
+            if (poll_rc == 0 || (poll_rc < 0 && errno == EINTR)) {
+                continue;
+            }
+            if (poll_rc < 0 || (revents & (POLLOUT | POLLHUP | POLLERR)) == 0) {
+                return -1;
+            }
             continue;
         }
         return -1;
@@ -487,6 +517,19 @@ static void chat_server_close_all(chat_server_t *server) {
     }
 }
 
+static bool chat_wait_clients_drained(const chat_server_t *server, unsigned timeout_ms) {
+    unsigned waited_ms = 0U;
+
+    while (atomic_load_explicit(&server->live_clients, memory_order_acquire) != 0U) {
+        if (waited_ms >= timeout_ms) {
+            return false;
+        }
+        usleep(10000U);
+        waited_ms += 10U;
+    }
+    return true;
+}
+
 static void chat_request_stop(chat_server_t *server) {
     int fd;
 
@@ -498,16 +541,17 @@ static void chat_request_stop(chat_server_t *server) {
     if (server->stop_token != NULL) {
         (void)llam_cancel_token_cancel(server->stop_token);
     }
-    chat_write_stats_file(server);
     fd = atomic_load_explicit(&server->listener_fd, memory_order_acquire);
     chat_wake_listener(fd);
     fd = atomic_exchange_explicit(&server->listener_fd, -1, memory_order_acq_rel);
     if (fd >= 0) {
         (void)close(fd);
     }
-    (void)llam_runtime_request_stop();
     chat_server_close_all(server);
+    (void)chat_wait_clients_drained(server, CHAT_SHUTDOWN_DRAIN_MS);
     chat_dump_runtime_if_requested("request-stop");
+    chat_write_stats_file(server);
+    (void)llam_runtime_request_stop();
 }
 
 static void chat_print_stats(FILE *stream, const chat_server_t *server) {
@@ -771,13 +815,13 @@ static void chat_reader_task(void *arg) {
         if (fd < 0) {
             break;
         }
-        nread = llam_read(fd, buf, sizeof(buf));
+        nread = llam_read_when_ready(fd, buf, sizeof(buf), 100);
 
         if (nread > 0) {
             chat_client_process_input(client, buf, (size_t)nread);
             continue;
         }
-        if (nread < 0 && errno == EINTR) {
+        if (nread < 0 && (errno == EINTR || errno == ETIMEDOUT || errno == EAGAIN || errno == EWOULDBLOCK)) {
             continue;
         }
         break;
@@ -839,6 +883,7 @@ static chat_client_t *chat_client_create(chat_server_t *server,
         free(client);
         return NULL;
     }
+    (void)atomic_fetch_add_explicit(&server->live_clients, 1U, memory_order_relaxed);
     // The accept loop owns the initial local reference. The client list and
     // spawned reader/writer tasks take explicit additional references.
     atomic_init(&client->refs, 1U);
@@ -876,7 +921,8 @@ static void chat_accept_task(void *arg) {
             chat_client_t *client;
             llam_task_t *reader;
             llam_task_t *writer;
-            llam_spawn_opts_t client_opts;
+            llam_spawn_opts_t reader_opts;
+            llam_spawn_opts_t writer_opts;
 
             if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
                 break;
@@ -919,17 +965,19 @@ static void chat_accept_task(void *arg) {
                 chat_client_release(client);
                 continue;
             }
-            if (llam_spawn_opts_init(&client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+            if (llam_spawn_opts_init(&writer_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0 ||
+                llam_spawn_opts_init(&reader_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
                 perror("llam_spawn_opts_init client");
                 chat_client_begin_close(client);
                 chat_client_release(client);
                 continue;
             }
-            client_opts.cancel_token = server->stop_token;
-            client_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_HUGE;
+            writer_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_HUGE;
+            reader_opts.cancel_token = server->stop_token;
+            reader_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_HUGE;
 
             chat_client_retain(client);
-            writer = llam_spawn_ex(chat_writer_task, client, &client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
+            writer = llam_spawn_ex(chat_writer_task, client, &writer_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
             if (writer == NULL) {
                 perror("llam_spawn writer");
                 chat_client_begin_close(client);
@@ -945,7 +993,7 @@ static void chat_accept_task(void *arg) {
             }
 
             chat_client_retain(client);
-            reader = llam_spawn_ex(chat_reader_task, client, &client_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
+            reader = llam_spawn_ex(chat_reader_task, client, &reader_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
             if (reader == NULL) {
                 perror("llam_spawn reader");
                 chat_client_begin_close(client);
@@ -1113,6 +1161,7 @@ int main(int argc, char **argv) {
     atomic_init(&server.broadcast_messages_created, 0U);
     atomic_init(&server.broadcast_deliveries_attempted, 0U);
     atomic_init(&server.broadcast_deliveries_enqueued, 0U);
+    atomic_init(&server.live_clients, 0U);
     quiet_env = getenv("LLAM_CHAT_QUIET");
     server.quiet = quiet_env != NULL && strcmp(quiet_env, "0") != 0;
     atomic_store_explicit(&g_stop_requested, false, memory_order_release);
@@ -1224,6 +1273,7 @@ int main(int argc, char **argv) {
         close(listener_fd);
     }
     chat_server_close_all(&server);
+    (void)chat_wait_clients_drained(&server, CHAT_SHUTDOWN_DRAIN_MS);
     chat_write_stats_file(&server);
     if (!server.quiet) {
         chat_print_stats(stdout, &server);
