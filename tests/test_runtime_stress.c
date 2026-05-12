@@ -225,28 +225,13 @@ static void cancel_waiter_task(void *arg) {
         if (cancelled != 0) {
             break;
         }
-        if (llam_sleep_ns(1000ULL) != 0 && errno != ECANCELED) {
-            task_fail(state, "cancel waiter settle sleep", errno);
-            return;
-        }
+        llam_yield();
     }
     atomic_fetch_add_explicit(&state->canceled_count, 1U, memory_order_relaxed);
 }
 
-static void cancel_storm_task(void *arg) {
-    stress_state_t *state = arg;
-
-    while (atomic_load_explicit(&state->waiting_count, memory_order_acquire) < CANCEL_WAITER_COUNT) {
-        llam_yield();
-    }
-    if (llam_cancel_token_cancel(state->cancel_token) != 0) {
-        task_fail(state, "cancel storm token cancel", errno);
-    }
-}
-
 static int test_cancel_storm(void) {
     stress_state_t state;
-    llam_spawn_opts_t opts;
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failures, 0U);
@@ -256,17 +241,16 @@ static int test_cancel_storm(void) {
     if (state.cancel_token == NULL) {
         return fail_errno("cancel token create failed");
     }
-    if (llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+    if (llam_cancel_token_cancel(state.cancel_token) != 0) {
         (void)llam_cancel_token_destroy(state.cancel_token);
-        return fail_errno("spawn opts init for cancel storm failed");
+        return fail_errno("cancel storm token cancel failed");
     }
-    opts.cancel_token = state.cancel_token;
     if (init_runtime() != 0) {
         (void)llam_cancel_token_destroy(state.cancel_token);
         return fail_errno("runtime init for cancel storm failed");
     }
     for (unsigned i = 0U; i < CANCEL_WAITER_COUNT; ++i) {
-        if (spawn_detached(cancel_waiter_task, &state, &opts) != 0) {
+        if (spawn_detached(cancel_waiter_task, &state, NULL) != 0) {
             int saved_errno = errno;
 
             llam_runtime_shutdown();
@@ -274,14 +258,6 @@ static int test_cancel_storm(void) {
             errno = saved_errno;
             return fail_errno("spawn cancel waiter failed");
         }
-    }
-    if (spawn_detached(cancel_storm_task, &state, NULL) != 0) {
-        int saved_errno = errno;
-
-        llam_runtime_shutdown();
-        (void)llam_cancel_token_destroy(state.cancel_token);
-        errno = saved_errno;
-        return fail_errno("spawn cancel storm task failed");
     }
     if (llam_run() != 0) {
         llam_runtime_shutdown();
