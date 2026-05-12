@@ -301,6 +301,17 @@ def parse_correctness_matrix(value: str) -> list[tuple[int, int, int]]:
     return cases
 
 
+def env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be a float, got {raw!r}") from exc
+
+
 def phase_correctness(args: argparse.Namespace, script_path: Path) -> None:
     for clients, messages, payload_bytes in parse_correctness_matrix(args.correctness_matrix):
         run_checked(
@@ -330,11 +341,53 @@ def phase_flood(args: argparse.Namespace) -> None:
         # Hosted CI runners vary heavily; quick mode is a smoke/stability
         # profile, not a throughput benchmark. The standard/soak profiles keep
         # the high-rate best-effort flood.
+        quick_lossless_target_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_TARGET_MPS", 0.02)
+        quick_lossless_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_MIN_DELIVERY_MPS", 0.05)
+        quick_throughput_8b_target_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS", 0.08)
+        quick_throughput_8b_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS", 0.10)
+        quick_throughput_64b_target_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_64B_TARGET_MPS", 0.05)
+        quick_throughput_64b_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_64B_MIN_DELIVERY_MPS", 0.08)
         cases = [
-            ("lossless-8b", 8, lossless_duration, 8, 32, 0.02, 0.05, 0.999),
-            ("throughput-8b", 8, args.flood_duration, 8, 32, 0.08, 0.10, 0.0),
-            ("throughput-64b", 8, args.payload_flood_duration, 64, 32, 0.05, 0.08, 0.0),
-            ("lossless-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05, 0.999),
+            (
+                "lossless-8b",
+                8,
+                lossless_duration,
+                8,
+                32,
+                quick_lossless_target_mps,
+                quick_lossless_min_delivery_mps,
+                0.999,
+            ),
+            (
+                "throughput-8b",
+                8,
+                args.flood_duration,
+                8,
+                32,
+                quick_throughput_8b_target_mps,
+                quick_throughput_8b_min_delivery_mps,
+                0.0,
+            ),
+            (
+                "throughput-64b",
+                8,
+                args.payload_flood_duration,
+                64,
+                32,
+                quick_throughput_64b_target_mps,
+                quick_throughput_64b_min_delivery_mps,
+                0.0,
+            ),
+            (
+                "lossless-1kb",
+                8,
+                args.payload_flood_duration,
+                1024,
+                16,
+                quick_lossless_target_mps,
+                quick_lossless_min_delivery_mps,
+                0.999,
+            ),
         ]
     else:
         cases = [
