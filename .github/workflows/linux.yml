@@ -59,11 +59,17 @@ jobs:
         if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: make verify-linux CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
 
-      - name: Sanitizer stress
+      - name: Sanitizer smoke
         if: ${{ contains(matrix.name, 'sanitizer') }}
         run: |
-          make test CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
-          LLAM_STRESS_ROUNDS=4 ./stress
+          # GCC ASan does not reliably model LLAM's hand-written stackful
+          # context switches without fiber annotations. Keep this job focused on
+          # sanitizer-instrumented ABI/policy/load tests and leave scheduler
+          # stress to the native Linux and dedicated stress matrices.
+          ./test_abi_contract
+          ./test_abi_compat
+          ./test_windows_policy
+          ./test_shared_load ./libllam_runtime.so.1.0.1
 
       - name: CMake build
         if: ${{ !contains(matrix.name, 'sanitizer') }}

@@ -49,6 +49,31 @@ typedef enum llam_yield_direct_fail {
     LLAM_YIELD_DIRECT_FAIL_PUSH,
 } llam_yield_direct_fail_t;
 
+/**
+ * @brief Check whether the current task's cancellation token is already set.
+ *
+ * @details
+ * Cancellation normally wakes a parked task by storing @c ECANCELED in the task
+ * wake-error slot.  Sleep is intentionally timer-backed and has a narrow race
+ * where a cancellation request can be observed after the timer ownership fields
+ * have been detached.  The post-wake token check below preserves the public
+ * contract that long sleeps return @c ECANCELED once their token is cancelled.
+ */
+static bool llam_task_cancel_token_is_cancelled(const llam_task_t *task) {
+    llam_cancel_token_t *token;
+    bool cancelled;
+
+    if (task == NULL || task->cancel_token == NULL) {
+        return false;
+    }
+
+    token = task->cancel_token;
+    pthread_mutex_lock(&token->lock);
+    cancelled = token->cancelled;
+    pthread_mutex_unlock(&token->lock);
+    return cancelled;
+}
+
 static void llam_yield_direct_record_attempt(llam_shard_t *shard) {
     if (shard != NULL &&
         shard->runtime != NULL &&
@@ -843,7 +868,12 @@ int llam_sleep_until(uint64_t deadline_ns) {
         llam_cancel_token_unregister_task(task);
     }
     llam_task_clear_wait_tracking(task);
-    if (llam_consume_task_wake_error(task) != 0) {
+    rc = llam_consume_task_wake_error(task);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    if (!llam_deadline_passed(deadline_ns) && llam_task_cancel_token_is_cancelled(task)) {
         errno = ECANCELED;
         return -1;
     }
