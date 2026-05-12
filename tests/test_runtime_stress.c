@@ -212,11 +212,12 @@ static int test_nested_spawn_storm(void) {
 
 static void cancel_waiter_task(void *arg) {
     stress_state_t *state = arg;
+    void *value = NULL;
 
     atomic_fetch_add_explicit(&state->waiting_count, 1U, memory_order_release);
     errno = 0;
-    if (llam_sleep_ns(60ULL * 1000ULL * 1000ULL * 1000ULL) != -1 || errno != ECANCELED) {
-        task_fail(state, "cancel waiter sleep", errno);
+    if (llam_channel_recv_result(state->channel, &value) != -1 || errno != ECANCELED) {
+        task_fail(state, "cancel waiter channel recv", errno);
         return;
     }
     atomic_fetch_add_explicit(&state->canceled_count, 1U, memory_order_relaxed);
@@ -251,17 +252,24 @@ static int test_cancel_storm(void) {
     atomic_init(&state.failures, 0U);
     atomic_init(&state.waiting_count, 0U);
     atomic_init(&state.canceled_count, 0U);
+    state.channel = llam_channel_create(1U);
+    if (state.channel == NULL) {
+        return fail_errno("cancel storm channel create failed");
+    }
     state.cancel_token = llam_cancel_token_create();
     if (state.cancel_token == NULL) {
+        (void)llam_channel_destroy(state.channel);
         return fail_errno("cancel token create failed");
     }
     if (llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
         (void)llam_cancel_token_destroy(state.cancel_token);
+        (void)llam_channel_destroy(state.channel);
         return fail_errno("spawn opts init for cancel storm failed");
     }
     opts.cancel_token = state.cancel_token;
     if (init_runtime() != 0) {
         (void)llam_cancel_token_destroy(state.cancel_token);
+        (void)llam_channel_destroy(state.channel);
         return fail_errno("runtime init for cancel storm failed");
     }
     for (unsigned i = 0U; i < CANCEL_WAITER_COUNT; ++i) {
@@ -270,6 +278,7 @@ static int test_cancel_storm(void) {
 
             llam_runtime_shutdown();
             (void)llam_cancel_token_destroy(state.cancel_token);
+            (void)llam_channel_destroy(state.channel);
             errno = saved_errno;
             return fail_errno("spawn cancel waiter failed");
         }
@@ -279,27 +288,36 @@ static int test_cancel_storm(void) {
 
         llam_runtime_shutdown();
         (void)llam_cancel_token_destroy(state.cancel_token);
+        (void)llam_channel_destroy(state.channel);
         errno = saved_errno;
         return fail_errno("spawn cancel storm task failed");
     }
     if (llam_run() != 0) {
         llam_runtime_shutdown();
         (void)llam_cancel_token_destroy(state.cancel_token);
+        (void)llam_channel_destroy(state.channel);
         return fail_errno("llam_run cancel storm failed");
     }
     if (check_task_failures(&state) != 0) {
         llam_runtime_shutdown();
         (void)llam_cancel_token_destroy(state.cancel_token);
+        (void)llam_channel_destroy(state.channel);
         return 1;
     }
     if (atomic_load_explicit(&state.canceled_count, memory_order_relaxed) != CANCEL_WAITER_COUNT) {
         llam_runtime_shutdown();
         (void)llam_cancel_token_destroy(state.cancel_token);
+        (void)llam_channel_destroy(state.channel);
         return fail_msg("cancel storm count mismatch");
     }
     if (llam_cancel_token_destroy(state.cancel_token) != 0) {
         llam_runtime_shutdown();
+        (void)llam_channel_destroy(state.channel);
         return fail_errno("cancel token destroy after storm failed");
+    }
+    if (llam_channel_destroy(state.channel) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("cancel storm channel destroy failed");
     }
     llam_runtime_shutdown();
     return 0;
