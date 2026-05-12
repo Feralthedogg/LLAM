@@ -325,15 +325,24 @@ def phase_correctness(args: argparse.Namespace, script_path: Path) -> None:
 
 
 def phase_flood(args: argparse.Namespace) -> None:
-    main_min_delivery_mps = 1.0 if args.quick else 1.3
-    payload_64b_min_delivery_mps = 0.75 if args.quick else 1.0
     lossless_duration = 2.0 if args.quick else 5.0
-    cases = [
-        ("lossless-8b", 8, lossless_duration, 8, 32, 0.02, 0.05, 0.999),
-        ("throughput-8b", 16, args.flood_duration, 8, 64, 0.30, main_min_delivery_mps, 0.0),
-        ("throughput-64b", 16, args.payload_flood_duration, 64, 64, 0.15, payload_64b_min_delivery_mps, 0.0),
-        ("lossless-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05, 0.999),
-    ]
+    if args.quick:
+        # Hosted CI runners vary heavily; quick mode is a smoke/stability
+        # profile, not a throughput benchmark. The standard/soak profiles keep
+        # the high-rate best-effort flood.
+        cases = [
+            ("lossless-8b", 8, lossless_duration, 8, 32, 0.02, 0.05, 0.999),
+            ("throughput-8b", 8, args.flood_duration, 8, 32, 0.08, 0.10, 0.0),
+            ("throughput-64b", 8, args.payload_flood_duration, 64, 32, 0.05, 0.08, 0.0),
+            ("lossless-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05, 0.999),
+        ]
+    else:
+        cases = [
+            ("lossless-8b", 8, lossless_duration, 8, 32, 0.02, 0.05, 0.999),
+            ("throughput-8b", 16, args.flood_duration, 8, 64, 0.30, 1.3, 0.0),
+            ("throughput-64b", 16, args.payload_flood_duration, 64, 64, 0.15, 1.0, 0.0),
+            ("lossless-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05, 0.999),
+        ]
     for label, clients, duration, payload_bytes, batch, target_mps, min_delivery_mps, case_min_ratio in cases:
         min_delivery_ratio = args.flood_min_delivery_ratio if args.flood_min_delivery_ratio > 0.0 else case_min_ratio
         cmd = [
