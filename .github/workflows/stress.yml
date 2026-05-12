@@ -166,6 +166,7 @@ jobs:
             # Hosted macOS quick runs are stability smoke tests for the
             # example server. Linux, Windows, and the scheduled soak profile
             # carry the heavier adversarial churn/slow-client coverage.
+            args="$args --skip-edge"
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
             export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
             export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
