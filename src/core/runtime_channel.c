@@ -437,6 +437,7 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
     node->task = task;
     node->owner_shard = shard->id;
     node->value = value;
+    node->error_code = task->cancel_token != NULL ? ECANCELED : 0;
     llam_wait_queue_push_tail(&channel->send_waiters, node);
     pthread_mutex_unlock(&channel->lock);
     llam_task_ensure_listed(task);
@@ -558,6 +559,7 @@ int llam_channel_send(llam_channel_t *channel, void *value) {
     node->task = task;
     node->owner_shard = shard->id;
     node->value = value;
+    node->error_code = task->cancel_token != NULL ? ECANCELED : 0;
     llam_wait_queue_push_tail(&channel->send_waiters, node);
     pthread_mutex_unlock(&channel->lock);
     llam_task_ensure_listed(task);
@@ -751,6 +753,7 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
 
     node->task = task;
     node->owner_shard = shard->id;
+    node->error_code = task->cancel_token != NULL ? ECANCELED : 0;
     llam_wait_queue_push_tail(&channel->recv_waiters, node);
     pthread_mutex_unlock(&channel->lock);
     llam_task_ensure_listed(task);
@@ -979,6 +982,7 @@ void *llam_channel_recv(llam_channel_t *channel) {
 
     node->task = task;
     node->owner_shard = shard->id;
+    node->error_code = task->cancel_token != NULL ? ECANCELED : 0;
     llam_wait_queue_push_tail(&channel->recv_waiters, node);
     pthread_mutex_unlock(&channel->lock);
     llam_task_ensure_listed(task);

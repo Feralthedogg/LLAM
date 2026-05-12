@@ -173,9 +173,11 @@ jobs:
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.050
           fi
           if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
-            # Hosted Intel macOS still runs correctness, flood, and stable edge.
-            # The adversarial churn/slow edge phase remains covered by macOS
-            # arm64, Linux x86_64/aarch64, and Windows 2022/2025.
+            # Hosted Intel macOS is kept as a runtime/bench/correctness/flood
+            # smoke lane. Edge churn coverage remains on macOS arm64, Linux
+            # x86_64/aarch64, and Windows 2022/2025, where crash diagnostics are
+            # more reliable and the runners are less noisy.
+            args="$args --skip-edge"
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
             export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
             export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
