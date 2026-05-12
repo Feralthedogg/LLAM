@@ -881,7 +881,21 @@ the comparison is meaningful.
 - Scheduler: measure shard lock contention, worker wake storms, task reclaim cost, and timer heap locality before replacing primitives.
 - Channels: preserve correctness first; optimize buffered channel modulo/bitmask paths, select fanout, and wake accounting only with regression tests that catch lost wakeups.
 
-### 3. C Ecosystem And Operations
+### 3. Platform Expansion: BSD And RISC-V
+
+New platform work should extend the existing backend model without weakening
+the Linux, Darwin, or Windows fast paths. The priority is correctness first,
+then native I/O integration, then platform-specific context-switch tuning.
+
+- BSD: start with FreeBSD as the first target because it has mature kqueue semantics and a practical CI story; use kqueue for socket readiness, timer integration, and user wakeups instead of trying to emulate Linux io_uring.
+- BSD variants: keep OpenBSD and NetBSD as follow-up targets after FreeBSD is stable; isolate differences in `src/io/bsd/` and `src/platform/` so the public ABI remains unchanged.
+- BSD portability: avoid Linux-only assumptions such as `eventfd`, `epoll`, `timerfd`, and io_uring in shared code; prefer POSIX primitives plus kqueue `EVFILT_USER` or pipe-based fallback where needed.
+- RISC-V: start with Linux `riscv64` on the existing io_uring backend and portable context path, then add dedicated `src/asm/linux/riscv64/` context switching once ABI save/restore rules are fully tested.
+- RISC-V ABI: add explicit tests for stack alignment, callee-saved register preservation, atomic width assumptions, and task entry/exit trampolines before enabling the assembly path by default.
+- CI: add riscv64 cross-build and QEMU smoke first, then native runner stress if available; add FreeBSD CI through a VM/action runner before marking BSD as supported.
+- Release policy: do not publish BSD or RISC-V release artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
+
+### 4. C Ecosystem And Operations
 
 The ecosystem target is a small, embeddable C runtime with reproducible builds,
 clear examples, and CI that catches platform regressions early.
