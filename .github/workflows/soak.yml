@@ -1,0 +1,94 @@
+name: Weekly Soak
+
+on:
+  schedule:
+    - cron: "15 16 * * 6"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Deterministic seed for server composite soak
+        required: false
+        default: "9001"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  posix-hour-soak:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-hour-soak
+            runner: ubuntu-24.04
+            cc: gcc
+          - name: macos-aarch64-hour-soak
+            runner: macos-14
+            cc: clang
+
+    env:
+      OUT_DIR: .artifacts/soak/${{ matrix.name }}
+      SOAK_SEED: ${{ github.event.inputs.seed || '9001' }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git python3 xz-utils
+
+      - name: Build liburing
+        if: runner.os == 'Linux'
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/soak \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
+            -DCMAKE_ASM_COMPILER="${{ matrix.cc }}"
+
+      - name: Build
+        run: cmake --build build/soak -j 4
+
+      - name: Pre-soak unit gate
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          ctest --test-dir build/soak --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
+          for i in $(seq 1 50); do
+            echo "[test_runtime_stress repeat $i/50]"
+            ./build/soak/test_runtime_stress
+          done 2>&1 | tee "$OUT_DIR/test_runtime_stress_repeat.log"
+
+      - name: One-hour server composite soak
+        run: |
+          set -o pipefail
+          python3 scripts/stress_server_composite.py \
+            --server ./build/soak/server \
+            --server-flood ./build/soak/server_flood \
+            --soak-hour \
+            --seed "$SOAK_SEED" 2>&1 | tee "$OUT_DIR/server_composite_hour.log"
+
+      - name: Upload soak diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: soak-diagnostics-${{ matrix.name }}
+          path: .artifacts/soak/${{ matrix.name }}
+          if-no-files-found: ignore

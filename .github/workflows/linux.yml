@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -57,7 +61,9 @@ jobs:
 
       - name: Sanitizer stress
         if: ${{ contains(matrix.name, 'sanitizer') }}
-        run: LLAM_STRESS_ROUNDS=4 ./stress
+        run: |
+          make test CC="${{ matrix.cc }}" CFLAGS="${{ matrix.cflags }}"
+          LLAM_STRESS_ROUNDS=4 ./stress
 
       - name: CMake build
         if: ${{ !contains(matrix.name, 'sanitizer') }}

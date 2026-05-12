@@ -313,7 +313,7 @@ def env_float(name: str, default: float) -> float:
 
 
 def phase_correctness(args: argparse.Namespace, script_path: Path) -> None:
-    for clients, messages, payload_bytes in parse_correctness_matrix(args.correctness_matrix):
+    for index, (clients, messages, payload_bytes) in enumerate(parse_correctness_matrix(args.correctness_matrix)):
         run_checked(
             [
                 sys.executable,
@@ -330,6 +330,8 @@ def phase_correctness(args: argparse.Namespace, script_path: Path) -> None:
                 str(payload_bytes),
                 "--timeout",
                 str(args.correctness_timeout),
+                "--seed",
+                str(args.seed + 1000 + index),
             ],
             f"correctness clients={clients} payload={payload_bytes}",
         )
@@ -343,6 +345,14 @@ def phase_flood(args: argparse.Namespace) -> None:
         # the high-rate best-effort flood.
         quick_lossless_target_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_TARGET_MPS", 0.02)
         quick_lossless_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_MIN_DELIVERY_MPS", 0.05)
+        quick_lossless_1kb_target_mps = env_float(
+            "LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_TARGET_MPS",
+            quick_lossless_target_mps,
+        )
+        quick_lossless_1kb_min_delivery_mps = env_float(
+            "LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_MIN_DELIVERY_MPS",
+            quick_lossless_min_delivery_mps,
+        )
         quick_throughput_8b_target_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS", 0.08)
         quick_throughput_8b_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS", 0.10)
         quick_throughput_64b_target_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_64B_TARGET_MPS", 0.05)
@@ -384,8 +394,8 @@ def phase_flood(args: argparse.Namespace) -> None:
                 args.payload_flood_duration,
                 1024,
                 16,
-                quick_lossless_target_mps,
-                quick_lossless_min_delivery_mps,
+                quick_lossless_1kb_target_mps,
+                quick_lossless_1kb_min_delivery_mps,
                 0.999,
             ),
         ]
@@ -711,6 +721,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shutdown-timeout", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_SHUTDOWN_TIMEOUT", "30")))
     parser.add_argument("--max-rss-mb", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_RSS_MB", "2048")))
     parser.add_argument("--max-fds", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_FDS", "4096")))
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=int(os.getenv("LLAM_SERVER_COMPOSITE_SEED")) if os.getenv("LLAM_SERVER_COMPOSITE_SEED") else None,
+        help="random seed for deterministic edge payload/churn behavior",
+    )
     parser.add_argument("--skip-correctness", action="store_true")
     parser.add_argument("--skip-flood", action="store_true")
     parser.add_argument("--skip-edge", action="store_true")
@@ -756,8 +772,13 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     validate_args(args)
+    if args.seed is None:
+        args.seed = random.SystemRandom().randrange(1, 2**63)
+    random.seed(args.seed)
     script_path = Path(__file__).with_name("stress_server.py")
     started = time.monotonic()
+
+    print(f"server composite seed={args.seed}")
 
     if not args.skip_correctness:
         phase_correctness(args, script_path)

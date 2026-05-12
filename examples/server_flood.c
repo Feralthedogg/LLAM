@@ -358,6 +358,19 @@ static bool flood_read_server_stats(const char *stats_path, flood_server_stats_t
     return true;
 }
 
+static bool flood_read_server_stats_retry(const char *stats_path, flood_server_stats_t *stats) {
+    uint64_t deadline = flood_now_ns() + 2000000000ULL;
+
+    do {
+        if (flood_read_server_stats(stats_path, stats)) {
+            return true;
+        }
+        usleep(10000);
+    } while (flood_now_ns() < deadline);
+
+    return false;
+}
+
 static void flood_print_server_stats(const flood_server_stats_t *stats) {
     printf("server flood stats: server stopped; outbox_full_drops=%" PRIu64
            " outbox_closed_drops=%" PRIu64
@@ -461,7 +474,6 @@ static bool flood_stop_server(pid_t pid, double timeout_sec) {
         flood_report_abnormal_server_status("exited before cleanup", status);
         return false;
     }
-    (void)kill(pid, SIGTERM);
     (void)kill(pid, SIGINT);
     deadline = flood_now_ns() + (uint64_t)(timeout_sec * 1000000000.0);
     while (flood_now_ns() < deadline) {
@@ -972,7 +984,7 @@ done:
         bool killed = flood_stop_server(server_pid, opts.shutdown_timeout_sec);
         flood_server_stats_t stats;
 
-        if (flood_read_server_stats(stats_path, &stats)) {
+        if (flood_read_server_stats_retry(stats_path, &stats)) {
             intmax_t accounting_gap;
             intmax_t tolerance;
 
@@ -1001,7 +1013,7 @@ done:
         }
         if (killed) {
             fprintf(stderr,
-                    "server did not stop within %.1fs after SIGTERM/SIGINT; killed\n",
+                    "server did not stop within %.1fs after SIGINT; killed\n",
                     opts.shutdown_timeout_sec);
             if (opts.fail_on_forced_stop && rc == 0) {
                 rc = 1;

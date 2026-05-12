@@ -1,0 +1,332 @@
+name: Nightly Deep CI
+
+on:
+  schedule:
+    - cron: "30 17 * * *"
+  workflow_dispatch:
+    inputs:
+      runtime_stress_repeat:
+        description: Re-run the direct runtime stress binary this many times
+        required: false
+        default: "20"
+      stress_rounds:
+        description: Runtime stress rounds per phase
+        required: false
+        default: "8"
+      dynamic_rounds:
+        description: Dynamic stress rounds per phase
+        required: false
+        default: "8"
+      server_seed:
+        description: Deterministic seed for server composite edge/correctness phases
+        required: false
+        default: "424242"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-deep-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  posix-deep-stress:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-deep
+            runner: ubuntu-24.04
+            cc: gcc
+            server_mode: standard
+          - name: linux-aarch64-deep
+            runner: ubuntu-24.04-arm
+            cc: gcc
+            server_mode: standard
+          - name: macos-aarch64-deep
+            runner: macos-14
+            cc: clang
+            server_mode: standard
+          - name: macos-x86_64-deep
+            runner: macos-15-intel
+            cc: clang
+            server_mode: quick
+
+    env:
+      RUNTIME_STRESS_REPEAT: ${{ github.event.inputs.runtime_stress_repeat || '20' }}
+      STRESS_ROUNDS: ${{ github.event.inputs.stress_rounds || '8' }}
+      DYNAMIC_ROUNDS: ${{ github.event.inputs.dynamic_rounds || '8' }}
+      SERVER_SEED: ${{ github.event.inputs.server_seed || '424242' }}
+      SERVER_MODE: ${{ matrix.server_mode }}
+      OUT_DIR: .artifacts/nightly/${{ matrix.name }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git python3 xz-utils
+
+      - name: Build liburing
+        if: runner.os == 'Linux'
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: Configure
+        run: |
+          cmake -S . -B build/nightly \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
+            -DCMAKE_ASM_COMPILER="${{ matrix.cc }}"
+
+      - name: Build
+        run: cmake --build build/nightly -j 4
+
+      - name: CTest
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          ctest --test-dir build/nightly --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
+
+      - name: Direct runtime stress repeat
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          for i in $(seq 1 "$RUNTIME_STRESS_REPEAT"); do
+            echo "[test_runtime_stress repeat $i/$RUNTIME_STRESS_REPEAT]"
+            ./build/nightly/test_runtime_stress
+          done 2>&1 | tee "$OUT_DIR/test_runtime_stress_repeat.log"
+
+      - name: Runtime stress suite
+        run: |
+          set -o pipefail
+          env \
+            LLAM_STRESS_ROUNDS="$STRESS_ROUNDS" \
+            LLAM_STRESS_DYNAMIC_ROUNDS="$DYNAMIC_ROUNDS" \
+            LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS=128 \
+            LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS=1024 \
+            LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US=1000 \
+            ./build/nightly/stress 2>&1 | tee "$OUT_DIR/runtime_stress.log"
+
+      - name: Benchmark stress smoke
+        run: |
+          set -o pipefail
+          env \
+            LLAM_BENCH_ROUNDS=5 \
+            LLAM_BENCH_WARMUP_ROUNDS=1 \
+            LLAM_BENCH_SELECT_OPS=256 \
+            LLAM_BENCH_IO_MESSAGES=256 \
+            LLAM_BENCH_POLL_EVENTS=256 \
+            ./build/nightly/bench 2>&1 | tee "$OUT_DIR/bench_smoke.log"
+
+      - name: Performance guardrail
+        run: |
+          set -o pipefail
+          python3 scripts/bench_guard.py \
+            --bench ./build/nightly/bench \
+            --rounds 5 \
+            --select-ops 1024 \
+            --out "$OUT_DIR/perf_guard.json" 2>&1 | tee "$OUT_DIR/perf_guard.log"
+
+      - name: Server composite
+        run: |
+          set -o pipefail
+          args=""
+          if [ "$SERVER_MODE" = "quick" ]; then
+            args="--quick"
+          fi
+          python3 scripts/stress_server_composite.py \
+            --server ./build/nightly/server \
+            --server-flood ./build/nightly/server_flood \
+            --seed "$SERVER_SEED" \
+            $args 2>&1 | tee "$OUT_DIR/server_composite.log"
+
+      - name: Upload nightly diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-diagnostics-${{ matrix.name }}
+          path: .artifacts/nightly/${{ matrix.name }}
+          if-no-files-found: ignore
+
+  linux-asan-ubsan:
+    name: linux-x86_64-asan-ubsan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OUT_DIR: .artifacts/nightly/linux-x86_64-asan-ubsan
+      SERVER_SEED: ${{ github.event.inputs.server_seed || '424242' }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential ca-certificates cmake git python3 xz-utils
+
+      - name: Build liburing
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: ASan/UBSan quick gate
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          make clean all CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/build.log"
+          make test CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/make_test.log"
+          env LLAM_RUNTIME_FUZZ_SCENARIOS=96 ./test_runtime_fuzz 2>&1 | tee "$OUT_DIR/runtime_fuzz.log"
+          env LLAM_STRESS_ROUNDS=6 LLAM_STRESS_DYNAMIC_ROUNDS=4 ./stress 2>&1 | tee "$OUT_DIR/runtime_stress.log"
+          python3 scripts/stress_server_composite.py \
+            --server ./server \
+            --server-flood ./server_flood \
+            --quick \
+            --seed "$SERVER_SEED" 2>&1 | tee "$OUT_DIR/server_composite_quick.log"
+
+      - name: Upload sanitizer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-diagnostics-linux-x86_64-asan-ubsan
+          path: .artifacts/nightly/linux-x86_64-asan-ubsan
+          if-no-files-found: ignore
+
+  linux-tsan-experimental:
+    name: linux-x86_64-tsan-experimental
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    env:
+      OUT_DIR: .artifacts/nightly/linux-x86_64-tsan-experimental
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang ca-certificates git python3
+
+      - name: Build liburing
+        run: |
+          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
+          make -C /tmp/liburing -j"$(nproc)"
+          sudo make -C /tmp/liburing install
+          sudo ldconfig
+
+      - name: TSan runtime smoke
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          make clean test_runtime_stress \
+            CC=clang \
+            CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=thread -fno-omit-frame-pointer" \
+            LDLIBS="-pthread -luring -fsanitize=thread" 2>&1 | tee "$OUT_DIR/build.log"
+          ./test_runtime_stress 2>&1 | tee "$OUT_DIR/test_runtime_stress.log"
+
+      - name: Upload TSan diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-diagnostics-linux-x86_64-tsan-experimental
+          path: .artifacts/nightly/linux-x86_64-tsan-experimental
+          if-no-files-found: ignore
+
+  windows-deep-stress:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-2022-deep
+            runner: windows-2022
+          - name: windows-2025-deep
+            runner: windows-2025
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build/nightly-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/nightly-windows --config Release --target bench test_abi_compat test_runtime_stress test_runtime_fuzz test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
+
+      - name: Deep Windows policy/runtime stress
+        shell: pwsh
+        run: |
+          $artifactDir = ".artifacts\nightly\${{ matrix.name }}"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $repeat = [int]("${{ github.event.inputs.runtime_stress_repeat || '20' }}")
+          & {
+            ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            for ($i = 1; $i -le $repeat; $i++) {
+              "[test_runtime_stress repeat $i/$repeat]"
+              .\build\nightly-windows\Release\test_runtime_stress.exe
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+            foreach ($generation in @("10", "11")) {
+              $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
+              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+              $env:LLAM_WINDOWS_IOCP_TCP_POLLIN = "1"
+              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_windows_iocp_io"
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+              Remove-Item Env:\LLAM_WINDOWS_IOCP_TCP_POLLIN -ErrorAction SilentlyContinue
+            }
+            Remove-Item Env:\LLAM_WINDOWS_FORCE_GENERATION -ErrorAction SilentlyContinue
+            foreach ($case in @("spawn_join", "channel_pingpong", "select_recv_ready", "select_park_wake", "select_timeout", "io_echo", "poll_wake", "sleep_fanout", "opaque_block")) {
+              $env:LLAM_BENCH_ONLY = $case
+              $env:LLAM_BENCH_ROUNDS = "5"
+              $env:LLAM_BENCH_WARMUP_ROUNDS = "1"
+              $env:LLAM_BENCH_SELECT_OPS = "256"
+              .\build\nightly-windows\Release\bench.exe
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+            python scripts\bench_guard.py --bench ".\build\nightly-windows\Release\bench.exe" --rounds 5 --select-ops 1024 --out "$artifactDir\perf_guard.json"
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          } *>&1 | Tee-Object -FilePath "$artifactDir\nightly_windows_stress.log"
+
+      - name: Upload nightly Windows diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-diagnostics-${{ matrix.name }}
+          path: .artifacts/nightly/${{ matrix.name }}
+          if-no-files-found: ignore

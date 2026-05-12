@@ -126,15 +126,20 @@ message rates reach the same scale.
 Run the full composite server stress suite:
 
 ```bash
+make test-quick
+make test-full
+make test-soak
 make server-stress-composite
 make server-stress-composite-quick
 make server-stress-composite-hour
 python3 scripts/stress_server_composite.py --quick
+python3 scripts/stress_server_composite.py --quick --seed 1234
 ```
 
 The composite suite combines exact fanout checks, 60-second native flood,
 payload-size variation, connection churn, slow receivers, half-close/reset
-patterns, and RSS/fd sampling.
+patterns, and RSS/fd sampling. Pass `--seed N` to replay randomized correctness
+payloads and edge churn behavior from a previous run.
 
 `--quick` is intended for hosted CI runners. It keeps exact-delivery checks but
 uses a lower absolute flood delivery threshold than standard and hour-long runs.
@@ -149,6 +154,18 @@ Run focused API/ABI tests:
 make test
 ```
 
+`make test-quick` runs API/ABI tests plus the quick composite server suite.
+`make test-full` runs API/ABI tests plus the standard composite suite.
+`make test-soak` runs API/ABI tests plus the hour-long soak profile.
+
+GitHub Actions is split by cost and depth:
+
+- `linux`, `macos`, and `Stress` are PR/push gates.
+- `Stress` repeats `test_runtime_stress`, pins/reports server stress seeds, and uploads diagnostics logs on failure.
+- `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental TSan, and benchmark guardrails from `.github/workflows/nightly.yml`.
+- `Weekly Soak` runs the hour-long composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
+- `Runtime Benchmarks` runs scheduled LLAM/Go/Tokio benchmark comparisons and uploads graphs/results.
+
 Build outputs:
 
 - `demo`: runnable examples of the public runtime API.
@@ -156,11 +173,15 @@ Build outputs:
 - `bench`: microbenchmarks for spawn/join, channels, channel select, I/O, poll, sleep fanout, and opaque blocking.
 - `server`: minimal LLAM-backed TCP chat backend for local testing.
 - `server_flood`: native nonblocking throughput flood driver for the chat server.
+- `scripts/bench_guard.py`: conservative microbenchmark regression guard for CI.
 - `scripts/stress_server.py`: TCP fanout stress test for the chat server.
 - `scripts/stress_server_composite.py`: long-running composite server stability suite.
 - `test_abi_contract`: ABI metadata and size handshakes.
+- `test_abi_compat`: old-prefix option/stat struct compatibility.
 - `test_connect_io`: direct and runtime-managed `llam_connect()` success and invalid-input checks.
 - `test_runtime_core`: lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats checks.
+- `test_runtime_stress`: direct LLAM scheduler, cancel, channel, condvar, nested spawn, and I/O cancel stress.
+- `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
 - `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
 - `test_shared_load`: `dlopen()` coverage for the shared library ABI surface.

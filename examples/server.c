@@ -547,11 +547,11 @@ static void chat_request_stop(chat_server_t *server) {
     if (fd >= 0) {
         (void)close(fd);
     }
+    (void)llam_runtime_request_stop();
     chat_server_close_all(server);
     (void)chat_wait_clients_drained(server, CHAT_SHUTDOWN_DRAIN_MS);
     chat_dump_runtime_if_requested("request-stop");
     chat_write_stats_file(server);
-    (void)llam_runtime_request_stop();
 }
 
 static void chat_print_stats(FILE *stream, const chat_server_t *server) {
@@ -580,6 +580,8 @@ static void chat_write_stats_file(const chat_server_t *server) {
         return;
     }
     chat_print_stats(file, server);
+    fflush(file);
+    (void)fsync(fileno(file));
     fclose(file);
 }
 
@@ -1084,7 +1086,7 @@ static void chat_stop_signal_thread(chat_server_t *server) {
     if (!server->signal_thread_started) {
         return;
     }
-    (void)kill(getpid(), SIGTERM);
+    (void)pthread_kill(server->signal_thread, SIGTERM);
     (void)pthread_join(server->signal_thread, NULL);
     server->signal_thread_started = false;
 }

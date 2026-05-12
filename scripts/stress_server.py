@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         default=float(os.getenv("LLAM_SERVER_STRESS_CONNECT_SPREAD_MS", "5")),
         help="delay between client connects to avoid testing only listen backlog behavior",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=int(os.getenv("LLAM_SERVER_STRESS_SEED")) if os.getenv("LLAM_SERVER_STRESS_SEED") else None,
+        help="random seed for deterministic payload generation",
+    )
     return parser.parse_args()
 
 
@@ -149,6 +155,10 @@ def main() -> int:
     args = parse_args()
     server_path = Path(args.server)
 
+    if args.seed is None:
+        args.seed = random.SystemRandom().randrange(1, 2**63)
+    random.seed(args.seed)
+
     if args.clients < 2:
         raise SystemExit("--clients must be >= 2")
     if args.messages < 1:
@@ -218,7 +228,8 @@ def main() -> int:
             "server stress ok: "
             f"clients={args.clients} messages={total_messages} "
             f"expected_deliveries={total_expected_deliveries} "
-            f"received_bytes={total_received_bytes} elapsed={elapsed:.3f}s"
+            f"received_bytes={total_received_bytes} elapsed={elapsed:.3f}s "
+            f"seed={args.seed}"
         )
         return 0
     finally:

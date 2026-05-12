@@ -14,6 +14,7 @@ CLEAN_DIRS = \
 	build \
 	CMakeFiles \
 	cmake-build-* \
+	.artifacts \
 	scripts/bench_tokio_compare/target \
 	build-* \
 	target
@@ -24,8 +25,11 @@ CLEAN_FILES = \
 	server \
 	server_flood \
 	test_abi_contract \
+	test_abi_compat \
 	test_connect_io \
 	test_runtime_core \
+	test_runtime_stress \
+	test_runtime_fuzz \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -37,8 +41,11 @@ CLEAN_FILES = \
 	server.exe \
 	server_flood.exe \
 	test_abi_contract.exe \
+	test_abi_compat.exe \
 	test_connect_io.exe \
 	test_runtime_core.exe \
+	test_runtime_stress.exe \
+	test_runtime_fuzz.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
@@ -264,10 +271,16 @@ SERVER_FLOOD_OBJS = \
 	$(OBJDIR)/examples/server_flood.o
 TEST_ABI_OBJS = \
 	$(OBJDIR)/tests/test_abi_contract.o
+TEST_ABI_COMPAT_OBJS = \
+	$(OBJDIR)/tests/test_abi_compat.o
 TEST_CONNECT_OBJS = \
 	$(OBJDIR)/tests/test_connect_io.o
 TEST_RUNTIME_CORE_OBJS = \
 	$(OBJDIR)/tests/test_runtime_core.o
+TEST_RUNTIME_STRESS_OBJS = \
+	$(OBJDIR)/tests/test_runtime_stress.o
+TEST_RUNTIME_FUZZ_OBJS = \
+	$(OBJDIR)/tests/test_runtime_fuzz.o
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
@@ -279,7 +292,7 @@ TEST_SHARED_LOAD_OBJS = \
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 
-.PHONY: all clean static shared test check package bench-matrix server-stress server-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported
+.PHONY: all clean static shared test test-quick test-full test-soak check package bench-matrix server-stress server-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported
 
 ifeq ($(HOST_PLATFORM),windows)
 
@@ -311,16 +324,25 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_connect_io test_runtime_core test_sync_primitives test_io_buffers test_windows_policy test_shared_load shared
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_stress test_runtime_fuzz test_sync_primitives test_io_buffers test_windows_policy test_shared_load shared
 	./test_abi_contract
+	./test_abi_compat
 	./test_connect_io
 	./test_runtime_core
+	./test_runtime_stress
+	./test_runtime_fuzz
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
 	./test_shared_load ./$(SHLIB_REAL)
 
 check: test
+
+test-quick: test server-stress-composite-quick
+
+test-full: test server-stress-composite
+
+test-soak: test server-stress-composite-hour
 
 ifeq ($(HOST_PLATFORM),darwin)
 $(SHLIB_LINK): $(SHLIB_REAL)
@@ -357,11 +379,20 @@ server_flood: $(SERVER_FLOOD_OBJS)
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
 
+test_abi_compat: $(RUNTIME_OBJS) $(TEST_ABI_COMPAT_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_COMPAT_OBJS) $(LDLIBS)
+
 test_connect_io: $(RUNTIME_OBJS) $(TEST_CONNECT_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_CONNECT_OBJS) $(LDLIBS)
 
 test_runtime_core: $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
+
+test_runtime_stress: $(RUNTIME_OBJS) $(TEST_RUNTIME_STRESS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_STRESS_OBJS) $(LDLIBS)
+
+test_runtime_fuzz: $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS) $(LDLIBS)
 
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)

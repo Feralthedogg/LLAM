@@ -329,6 +329,11 @@ add_executable(test_abi_contract
 )
 target_link_libraries(test_abi_contract PRIVATE llam_runtime)
 
+add_executable(test_abi_compat
+    tests/test_abi_compat.c
+)
+target_link_libraries(test_abi_compat PRIVATE llam_runtime)
+
 add_executable(test_connect_io ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_connect_io.c
 )
@@ -338,6 +343,16 @@ add_executable(test_runtime_core
     tests/test_runtime_core.c
 )
 target_link_libraries(test_runtime_core PRIVATE llam_runtime)
+
+add_executable(test_runtime_stress
+    tests/test_runtime_stress.c
+)
+target_link_libraries(test_runtime_stress PRIVATE llam_runtime)
+
+add_executable(test_runtime_fuzz
+    tests/test_runtime_fuzz.c
+)
+target_link_libraries(test_runtime_fuzz PRIVATE llam_runtime)
 
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c
@@ -389,8 +404,11 @@ add_dependencies(test_shared_load llam_runtime_shared)
 
 foreach(LLAM_TEST_TARGET
         test_abi_contract
+        test_abi_compat
         test_connect_io
         test_runtime_core
+        test_runtime_stress
+        test_runtime_fuzz
         test_sync_primitives
         test_io_buffers
         test_windows_policy
@@ -409,7 +427,10 @@ foreach(LLAM_TEST_TARGET
 endforeach()
 
 add_test(NAME test_abi_contract COMMAND test_abi_contract)
+add_test(NAME test_abi_compat COMMAND test_abi_compat)
 add_test(NAME test_runtime_core COMMAND test_runtime_core)
+add_test(NAME test_runtime_stress COMMAND test_runtime_stress)
+add_test(NAME test_runtime_fuzz COMMAND test_runtime_fuzz)
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)

@@ -237,10 +237,17 @@ Before tagging a 1.0.x build, require:
 - Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
   the Windows 2022/2025 stress jobs, including forced Windows 10/11 policies and
   opt-in TCP `POLLIN` IOCP smoke.
-- `python3 scripts/stress_server_composite.py --quick` on at least one POSIX
+- `Nightly Deep CI` on at least one recent `main` commit before a release
+  candidate: POSIX standard composite, Windows 2022/2025 policy stress,
+  deterministic runtime fuzz, conservative benchmark guardrails, ASan/UBSan
+  quick gate, and experimental TSan diagnostics.
+- `Weekly Soak` hour-long server composite on Linux x86_64 and macOS arm64
+  before claiming long-running server stability.
+- `python3 scripts/stress_server_composite.py --quick --seed 1234` on at least one POSIX
   platform. Quick mode is a hosted-runner smoke gate and uses a lower absolute
   flood delivery threshold than standard/hour mode; delivery ratio must still
-  remain exact.
+  remain exact. Keep the printed seed from failed randomized edge runs so the
+  same churn/reset sequence can be replayed.
 - The hour-long server composite profile before claiming server stability.
 - `python3 scripts/bench_runtime_compare.py --runtime all` for the public
   LLAM/Go/Tokio comparison graph.

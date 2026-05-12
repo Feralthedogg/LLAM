@@ -3,6 +3,7 @@ object-pic/
 build/
 build-*/
 target/
+.artifacts/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
