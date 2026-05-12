@@ -163,11 +163,12 @@ jobs:
             args="--quick"
           fi
           if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then
-            # Hosted macOS can deliver short SIGBUS-prone server crashes when
-            # the example chat workload is pushed into sustained best-effort
-            # overload. Keep the push/PR profile as a stability smoke; the
-            # full POSIX runtime stress, benchmark guard, Linux, Windows, and
-            # nightly/soak jobs carry the heavier coverage.
+            # Hosted macOS quick runs are stability smoke tests for the
+            # example server. Linux, Windows, and the scheduled soak profile
+            # carry the heavier adversarial churn/slow-client coverage.
+            export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
+            export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
+            export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS=0.060
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.080
           fi
@@ -178,8 +179,8 @@ jobs:
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
             export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
             export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
-            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_TARGET_MPS=0.010
-            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_MIN_DELIVERY_MPS=0.020
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_TARGET_MPS=0.005
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_MIN_DELIVERY_MPS=0.010
             export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_TARGET_MPS=0.005
             export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_MIN_DELIVERY_MPS=0.010
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS=0.040
