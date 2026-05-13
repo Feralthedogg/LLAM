@@ -129,9 +129,21 @@ jobs:
               "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS": "512",
               "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US": "1000",
           })
+          timeout = 900
+          if os.environ.get("RUNNER_OS") == "macOS":
+              # Hosted macOS runners are used as fast Darwin smoke lanes. The
+              # heavier dynamic live-watch pressure remains covered by Linux
+              # stress, Windows stress, and scheduled soak/deep jobs.
+              env.update({
+                  "LLAM_STRESS_ROUNDS": "1",
+                  "LLAM_STRESS_DYNAMIC_ROUNDS": "1",
+                  "LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS": "32",
+                  "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS": "256",
+              })
+              timeout = 180
           os.makedirs(os.environ["OUT_DIR"], exist_ok=True)
           with open(os.path.join(os.environ["OUT_DIR"], "runtime_stress.log"), "w", encoding="utf-8") as log:
-              proc = subprocess.run(["./build/stress/stress"], env=env, timeout=900, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              proc = subprocess.run(["./build/stress/stress"], env=env, timeout=timeout, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
               print(proc.stdout, end="")
               log.write(proc.stdout)
               if proc.returncode != 0:
