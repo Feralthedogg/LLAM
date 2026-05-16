@@ -114,9 +114,28 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$OUT_DIR"
-          for i in $(seq 1 "$RUNTIME_STRESS_REPEAT"); do
-            echo "[test_runtime_stress repeat $i/$RUNTIME_STRESS_REPEAT]"
-            ./build/stress/test_runtime_stress
+          repeat="$RUNTIME_STRESS_REPEAT"
+          timeout=120
+          if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
+            # Hosted Intel macOS already runs test_runtime_stress through
+            # CTest. Avoid duplicating the same stackful-context stress loop
+            # without gaining extra platform coverage on the noisiest runner.
+            repeat=0
+          fi
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            timeout=90
+          fi
+          if [ "$repeat" -le 0 ]; then
+            echo "[test_runtime_stress repeat skipped for ${{ matrix.name }}]"
+            exit 0
+          fi
+          for i in $(seq 1 "$repeat"); do
+            echo "[test_runtime_stress repeat $i/$repeat]"
+            python3 scripts/run_with_timeout.py \
+              --timeout "$timeout" \
+              --dump-on-timeout "$OUT_DIR/test_runtime_stress_repeat_$i.timeout-dump.log" \
+              --log "$OUT_DIR/test_runtime_stress_repeat_$i.log" \
+              -- ./build/stress/test_runtime_stress
           done 2>&1 | tee "$OUT_DIR/test_runtime_stress_repeat.log"
 
       - name: Seeded runtime invariant repeat
