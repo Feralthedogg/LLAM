@@ -27,6 +27,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -120,33 +121,59 @@ static uint64_t flood_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-static unsigned flood_env_unsigned(const char *name, unsigned fallback) {
-    const char *value = getenv(name);
+static bool flood_parse_unsigned_value(const char *value, unsigned *out) {
     char *end = NULL;
     unsigned long parsed;
 
-    if (value == NULL || value[0] == '\0') {
-        return fallback;
+    if (value == NULL || value[0] == '\0' || out == NULL) {
+        return false;
     }
     errno = 0;
     parsed = strtoul(value, &end, 10);
     if (errno != 0 || end == value || *end != '\0' || parsed > UINT32_MAX) {
+        return false;
+    }
+    *out = (unsigned)parsed;
+    return true;
+}
+
+static bool flood_parse_double_value(const char *value, double *out) {
+    char *end = NULL;
+    double parsed;
+
+    if (value == NULL || value[0] == '\0' || out == NULL) {
+        return false;
+    }
+    errno = 0;
+    parsed = strtod(value, &end);
+    if (errno != 0 || end == value || *end != '\0' || !isfinite(parsed)) {
+        return false;
+    }
+    *out = parsed;
+    return true;
+}
+
+static unsigned flood_env_unsigned(const char *name, unsigned fallback) {
+    const char *value = getenv(name);
+    unsigned parsed;
+
+    if (value == NULL || value[0] == '\0') {
         return fallback;
     }
-    return (unsigned)parsed;
+    if (!flood_parse_unsigned_value(value, &parsed)) {
+        return fallback;
+    }
+    return parsed;
 }
 
 static double flood_env_double(const char *name, double fallback) {
     const char *value = getenv(name);
-    char *end = NULL;
     double parsed;
 
     if (value == NULL || value[0] == '\0') {
         return fallback;
     }
-    errno = 0;
-    parsed = strtod(value, &end);
-    if (errno != 0 || end == value || *end != '\0') {
+    if (!flood_parse_double_value(value, &parsed)) {
         return fallback;
     }
     return parsed;
@@ -154,13 +181,13 @@ static double flood_env_double(const char *name, double fallback) {
 
 static void flood_usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s [--server ./server] [--host 127.0.0.1] [--clients N]\\n"
-            "          [--duration SEC] [--drain-sec SEC] [--message-bytes N]\\n"
-            "          [--batch N] [--target-mps M] [--min-delivery-mps M]\\n"
-            "          [--min-delivery-ratio R] [--shutdown-timeout SEC]\\n"
-            "          [--server-lossless] [--server-best-effort]\\n"
-            "          [--allow-forced-stop] [--fail-on-forced-stop]\\n"
-            "          [--allow-missing-stats] [--fail-on-missing-stats]\\n",
+            "usage: %s [--server ./server] [--host 127.0.0.1] [--clients N]\n"
+            "          [--duration SEC] [--drain-sec SEC] [--message-bytes N]\n"
+            "          [--batch N] [--target-mps M] [--min-delivery-mps M]\n"
+            "          [--min-delivery-ratio R] [--shutdown-timeout SEC]\n"
+            "          [--server-lossless] [--server-best-effort]\n"
+            "          [--allow-forced-stop] [--fail-on-forced-stop]\n"
+            "          [--allow-missing-stats] [--fail-on-missing-stats]\n",
             argv0);
 }
 
@@ -187,29 +214,37 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
         opts->fail_on_missing_stats = true;
     }
 
+#define FLOOD_PARSE_ARG(expr)             \
+    do {                                  \
+        if (!(expr)) {                    \
+            flood_usage(argv[0]);         \
+            return -1;                    \
+        }                                 \
+    } while (0)
+
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--server") == 0 && i + 1 < argc) {
             opts->server_path = argv[++i];
         } else if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
             opts->host = argv[++i];
         } else if (strcmp(argv[i], "--clients") == 0 && i + 1 < argc) {
-            opts->clients = (unsigned)strtoul(argv[++i], NULL, 10);
+            FLOOD_PARSE_ARG(flood_parse_unsigned_value(argv[++i], &opts->clients));
         } else if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc) {
-            opts->duration_sec = strtod(argv[++i], NULL);
+            FLOOD_PARSE_ARG(flood_parse_double_value(argv[++i], &opts->duration_sec));
         } else if (strcmp(argv[i], "--drain-sec") == 0 && i + 1 < argc) {
-            opts->drain_sec = strtod(argv[++i], NULL);
+            FLOOD_PARSE_ARG(flood_parse_double_value(argv[++i], &opts->drain_sec));
         } else if (strcmp(argv[i], "--message-bytes") == 0 && i + 1 < argc) {
-            opts->message_bytes = (unsigned)strtoul(argv[++i], NULL, 10);
+            FLOOD_PARSE_ARG(flood_parse_unsigned_value(argv[++i], &opts->message_bytes));
         } else if (strcmp(argv[i], "--batch") == 0 && i + 1 < argc) {
-            opts->batch = (unsigned)strtoul(argv[++i], NULL, 10);
+            FLOOD_PARSE_ARG(flood_parse_unsigned_value(argv[++i], &opts->batch));
         } else if (strcmp(argv[i], "--target-mps") == 0 && i + 1 < argc) {
-            opts->target_mps = strtod(argv[++i], NULL);
+            FLOOD_PARSE_ARG(flood_parse_double_value(argv[++i], &opts->target_mps));
         } else if (strcmp(argv[i], "--min-delivery-mps") == 0 && i + 1 < argc) {
-            opts->min_delivery_mps = strtod(argv[++i], NULL);
+            FLOOD_PARSE_ARG(flood_parse_double_value(argv[++i], &opts->min_delivery_mps));
         } else if (strcmp(argv[i], "--min-delivery-ratio") == 0 && i + 1 < argc) {
-            opts->min_delivery_ratio = strtod(argv[++i], NULL);
+            FLOOD_PARSE_ARG(flood_parse_double_value(argv[++i], &opts->min_delivery_ratio));
         } else if (strcmp(argv[i], "--shutdown-timeout") == 0 && i + 1 < argc) {
-            opts->shutdown_timeout_sec = strtod(argv[++i], NULL);
+            FLOOD_PARSE_ARG(flood_parse_double_value(argv[++i], &opts->shutdown_timeout_sec));
         } else if (strcmp(argv[i], "--server-lossless") == 0) {
             opts->server_lossless = true;
         } else if (strcmp(argv[i], "--server-best-effort") == 0) {
@@ -230,6 +265,8 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
             return -1;
         }
     }
+
+#undef FLOOD_PARSE_ARG
 
     if (opts->clients < 2U || opts->duration_sec <= 0.0 || opts->drain_sec < 0.0 ||
         opts->message_bytes < 2U || opts->message_bytes > FLOOD_MAX_MESSAGE_BYTES ||

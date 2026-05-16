@@ -368,7 +368,7 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load shared
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load server_flood shared
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -387,6 +387,16 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_r
 	./test_windows_runtime_smoke
 	./test_windows_iocp_dump
 	./test_shared_load ./$(SHLIB_REAL)
+	@if ./server_flood --clients 8x >/tmp/llam-server-flood-invalid.out 2>&1; then \
+		echo "server_flood accepted invalid --clients value" >&2; \
+		cat /tmp/llam-server-flood-invalid.out >&2; \
+		exit 1; \
+	fi
+	@if ./server_flood --duration nan >/tmp/llam-server-flood-invalid.out 2>&1; then \
+		echo "server_flood accepted invalid --duration value" >&2; \
+		cat /tmp/llam-server-flood-invalid.out >&2; \
+		exit 1; \
+	fi
 
 check: test
 

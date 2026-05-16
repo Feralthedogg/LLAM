@@ -52,8 +52,23 @@ jobs:
 
       - name: Package smoke
         run: |
+          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v1.0.2/'
           LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.2 ./scripts/package_release.sh "${{ matrix.package_target }}"
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
+          grep '/CHANGELOG.md$' package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt
           grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
           grep '/lib/pkgconfig/llam.pc$' package-files.txt
+          tmp_install="$(mktemp -d)"
+          tar -C "$tmp_install" -xJf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz"
+          mkdir -p "$tmp_install/prefix/include/llam"
+          printf 'sentinel\n' > "$tmp_install/prefix/include/llam/runtime.h"
+          if "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix" > "$tmp_install/install.out" 2>&1; then
+            echo "installer overwrote an existing SDK file without --force" >&2
+            cat "$tmp_install/install.out"
+            exit 1
+          fi
+          grep 'refusing to overwrite' "$tmp_install/install.out"
+          "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix" --force
+          test -f "$tmp_install/prefix/share/llam/CHANGELOG.md"
+          rm -rf "$tmp_install" package-files.txt

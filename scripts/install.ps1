@@ -35,6 +35,16 @@ function Copy-DirectoryIfPresent {
         Write-Host "copy $Source -> $Destination"
         return
     }
+    if ((Test-Path -LiteralPath $Destination -PathType Container) -and -not $Force) {
+        $sourceRoot = (Resolve-Path -LiteralPath $Source).Path.TrimEnd("\", "/")
+        foreach ($Item in Get-ChildItem -LiteralPath $Source -Recurse -File) {
+            $relative = $Item.FullName.Substring($sourceRoot.Length).TrimStart("\", "/")
+            $target = Join-Path $Destination $relative
+            if (Test-Path -LiteralPath $target) {
+                throw "refusing to overwrite $target; pass -Force"
+            }
+        }
+    }
 
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     Copy-Item -Recurse -Force -Path (Join-Path $Source "*") -Destination $Destination
@@ -83,6 +93,7 @@ function Install-ArchiveContents {
 
     Copy-FileIfPresent (Join-Path $SourceDir "README.md") (Join-Path $Prefix "share\llam\README.md")
     Copy-FileIfPresent (Join-Path $SourceDir "LICENSE") (Join-Path $Prefix "share\llam\LICENSE")
+    Copy-FileIfPresent (Join-Path $SourceDir "CHANGELOG.md") (Join-Path $Prefix "share\llam\CHANGELOG.md")
     Copy-FileIfPresent (Join-Path $SourceDir "VERSION") (Join-Path $Prefix "share\llam\VERSION")
 
     if (-not $DryRun) {
@@ -91,12 +102,16 @@ function Install-ArchiveContents {
 }
 
 function Install-Standalone {
+    $releaseTag = $Version
+    if (-not $releaseTag.StartsWith("v")) {
+        $releaseTag = "v$releaseTag"
+    }
     $releaseVersion = $Version.TrimStart("v")
     if ([string]::IsNullOrWhiteSpace($Target)) {
         $Target = Get-DefaultTarget
     }
     if ([string]::IsNullOrWhiteSpace($BaseUrl)) {
-        $BaseUrl = "https://github.com/Feralthedogg/LLAM/releases/download/$Version"
+        $BaseUrl = "https://github.com/Feralthedogg/LLAM/releases/download/$releaseTag"
     }
 
     $package = "llam-$releaseVersion-$Target"

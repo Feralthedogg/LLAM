@@ -83,6 +83,17 @@ copy_dir() {
     dst="$2"
 
     [ -d "$src" ] || return 0
+    if [ "$force" -ne 1 ] && [ -d "$dst" ]; then
+        # Existing system include/lib/bin directories are normal. Only refuse
+        # paths that this archive would actually overwrite.
+        (cd "$src" && find . \( -type f -o -type l \) -print) | while IFS= read -r rel; do
+            rel="${rel#./}"
+            if [ -e "$dst/$rel" ] || [ -L "$dst/$rel" ]; then
+                echo "refusing to overwrite $dst/$rel; pass --force" >&2
+                exit 1
+            fi
+        done
+    fi
     if [ "$dry_run" -eq 1 ]; then
         echo "copy $src -> $dst"
         return 0
@@ -158,15 +169,21 @@ run_archive_install() {
 
     copy_file "$src_dir/README.md" "$prefix/share/llam/README.md"
     copy_file "$src_dir/LICENSE" "$prefix/share/llam/LICENSE"
+    copy_file "$src_dir/CHANGELOG.md" "$prefix/share/llam/CHANGELOG.md"
     copy_file "$src_dir/VERSION" "$prefix/share/llam/VERSION"
 
     [ "$dry_run" -eq 1 ] || echo "installed LLAM into $prefix"
 }
 
 run_standalone_install() {
+    release_tag="$version"
     release_version="${version#v}"
     target="${target:-$(detect_target)}"
-    base_url="${base_url:-https://github.com/Feralthedogg/LLAM/releases/download/$version}"
+    case "$release_tag" in
+        v*) ;;
+        *) release_tag="v$release_tag" ;;
+    esac
+    base_url="${base_url:-https://github.com/Feralthedogg/LLAM/releases/download/$release_tag}"
     package="llam-$release_version-$target"
     archive="$package.tar.xz"
 

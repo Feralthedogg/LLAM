@@ -116,6 +116,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $dryRun = (& .\scripts\install.ps1 -DryRun -Target "${{ matrix.target }}" 6>&1 | Out-String)
+          if ($dryRun -notmatch "/releases/download/v1\.0\.2/") {
+            throw "standalone Windows installer default URL did not use the v1.0.2 release tag"
+          }
           $version = "1.0.2"
           $releaseVersion = "dev"
           if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
