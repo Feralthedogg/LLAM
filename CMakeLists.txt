@@ -562,7 +562,7 @@ install(
 )
 
 install(
-    FILES README.md LICENSE
+    FILES README.md LICENSE CHANGELOG.md
     DESTINATION ${CMAKE_INSTALL_DATADIR}/llam
 )
 

@@ -155,9 +155,11 @@ jobs:
         run: |
           cp scripts/install.sh release-artifacts/install.sh
           cp scripts/install.ps1 release-artifacts/install.ps1
+          cp CHANGELOG.md release-artifacts/CHANGELOG.md
           cd release-artifacts
           sha256sum install.sh > install.sh.sha256
           sha256sum install.ps1 > install.ps1.sha256
+          sha256sum CHANGELOG.md > CHANGELOG.md.sha256
 
       - name: Build checksum manifest
         run: |
@@ -218,7 +220,17 @@ jobs:
             echo "- Platform shared runtime library: \`libllam_runtime.so\`, \`libllam_runtime.dylib\`, or \`llam_runtime.dll\`."
             echo "- CMake package files under \`share/llam/cmake/\` and pkg-config metadata under \`lib/pkgconfig/\`."
             echo "- Archive installers: \`install.sh --prefix <dir>\` on Linux/macOS and \`install.ps1 -Prefix <dir>\` on Windows."
-            echo "- Docs, examples, and bundled smoke executables where supported."
+            echo "- Docs, examples, \`CHANGELOG.md\`, and bundled smoke executables where supported."
+            echo
+            echo "## Changelog"
+            echo
+            echo "- [CHANGELOG.md](${base_url}/CHANGELOG.md) is attached to this release and included inside every platform archive."
+            echo
+            awk '
+              /^## 1\.0\.2 / { in_section=1; print; next }
+              /^## / && in_section { exit }
+              in_section { print }
+            ' ../CHANGELOG.md
             echo
             echo "## Standalone Installers"
             echo
@@ -270,4 +282,6 @@ jobs:
             release-artifacts/install.sh.sha256
             release-artifacts/install.ps1
             release-artifacts/install.ps1.sha256
+            release-artifacts/CHANGELOG.md
+            release-artifacts/CHANGELOG.md.sha256
             release-artifacts/SHA256SUMS

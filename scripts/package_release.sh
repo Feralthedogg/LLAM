@@ -60,6 +60,7 @@ require_input() {
 
 require_input "$root_dir/LICENSE"
 require_input "$root_dir/README.md"
+require_input "$root_dir/CHANGELOG.md"
 require_input "$root_dir/scripts/install.sh"
 require_input "$root_dir/scripts/install.ps1"
 require_input "$root_dir/scripts/stress_server.py"
@@ -106,7 +107,7 @@ rm -rf "$stage" "$archive" "$archive.sha256" "$out_dir/$package_name.tar.gz" "$o
 mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib" "$stage/scripts"
 
 printf '%s\n' "$version" > "$stage/VERSION"
-cp "$root_dir/LICENSE" "$root_dir/README.md" "$stage/"
+cp "$root_dir/LICENSE" "$root_dir/README.md" "$root_dir/CHANGELOG.md" "$stage/"
 cp "$root_dir/scripts/install.sh" "$root_dir/scripts/install.ps1" "$stage/"
 cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" "$stage/scripts/"
 cp -R "$root_dir/docs/." "$stage/docs/"
