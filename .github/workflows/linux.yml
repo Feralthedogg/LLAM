@@ -77,7 +77,7 @@ jobs:
           ./test_abi_contract
           ./test_abi_compat
           ./test_windows_policy
-          ./test_shared_load ./libllam_runtime.so.1.0.1
+          ./test_shared_load ./libllam_runtime.so.1.0.2
 
       - name: CMake build
         if: ${{ !contains(matrix.name, 'sanitizer') }}
@@ -99,7 +99,7 @@ jobs:
       - name: Package smoke
         if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: |
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.1 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.2 ./scripts/package_release.sh "${{ matrix.package_target }}"
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt
           grep '/share/llam/cmake/llam-config.cmake$' package-files.txt

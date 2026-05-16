@@ -10,11 +10,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.0.1" }
+    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.0.2" }
 }
 $Version = $Version.TrimStart("v").Replace("/", "-")
 if ([string]::IsNullOrWhiteSpace($LibraryVersion)) {
-    $LibraryVersion = "1.0.1"
+    $LibraryVersion = "1.0.2"
 }
 if ([string]::IsNullOrWhiteSpace($AbiMajor)) {
     $AbiMajor = "1"

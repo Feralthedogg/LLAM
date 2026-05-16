@@ -56,6 +56,22 @@ static void task_fail(io_dump_state_t *state, const char *message) {
     }
 }
 
+static void wake_reader_after_setup_failure(io_dump_state_t *state) {
+    ssize_t written;
+
+    /*
+     * The fallback path still has to drive the parked poll task to completion.
+     * Check write(2) explicitly so Linux CI with warn_unused_result keeps this
+     * failure path covered instead of treating it as a discarded diagnostic.
+     */
+    do {
+        written = write(state->write_fd, "x", 1U);
+    } while (written < 0 && errno == EINTR);
+    if (written != 1) {
+        task_fail(state, "failed to wake reader after setup failure");
+    }
+}
+
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
 
@@ -213,7 +229,7 @@ int main(void) {
         thread_started = 1;
     } else {
         task_fail(&state, "pthread_create failed");
-        (void)write(state.write_fd, "x", 1U);
+        wake_reader_after_setup_failure(&state);
     }
 
     if (llam_run() != 0) {
