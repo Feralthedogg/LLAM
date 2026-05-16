@@ -157,6 +157,33 @@ static uint64_t llam_spawn_next_task_id(llam_runtime_t *rt, llam_shard_t *target
     return (uint64_t)atomic_fetch_add_explicit(&rt->next_task_id, 1U, memory_order_relaxed) + 1U;
 }
 
+/**
+ * @brief Drop the spawn-time cancellation-token reference before publication.
+ *
+ * Spawn increments the token refcount before stack allocation so the task can
+ * safely observe the token once it becomes runnable. If a later
+ * pre-publication step fails, the task is not visible to the scheduler or
+ * cancellation waiter list yet, so cleanup only needs to return that retained
+ * reference.
+ *
+ * @param task Task whose optional token reference should be released.
+ */
+static void llam_spawn_release_unpublished_cancel_token(llam_task_t *task) {
+    llam_cancel_token_t *token;
+
+    if (task == NULL || task->cancel_token == NULL) {
+        return;
+    }
+
+    token = task->cancel_token;
+    pthread_mutex_lock(&token->lock);
+    if (token->refcount > 0U) {
+        token->refcount -= 1U;
+    }
+    pthread_mutex_unlock(&token->lock);
+    task->cancel_token = NULL;
+}
+
 /** @brief Return true when @p task_class is a supported public task class. */
 static bool llam_public_task_class_valid(uint32_t task_class) {
     return task_class == (uint32_t)LLAM_TASK_CLASS_LATENCY ||
@@ -268,15 +295,23 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     task->live_shard = shard_id;
     task->last_shard = shard_id;
     atomic_init(&task->preempt_requested, 0U);
+    atomic_init(&task->completed, 0U);
     atomic_init(&task->reclaim_ready, 0U);
     atomic_init(&task->reclaim_claimed, 0U);
+    atomic_init(&task->join_claimed, 0U);
     atomic_init(&task->detached, 0U);
     atomic_init(&task->task_listed, 0U);
+    atomic_init(&task->scan_refs, 0U);
     atomic_init(&task->join_waiter_hint, 0U);
     task->join_waiter_count_at_exit = 0U;
 
     if (llam_alloc_task_stack(task, stack_class) != 0) {
         int saved_errno = errno;
+
+        // Stack allocation is the only post-token failure point before the task
+        // is published. Return the token reference here; otherwise destroy()
+        // would see a permanently busy cancellation token after ENOMEM.
+        llam_spawn_release_unpublished_cancel_token(task);
         llam_task_allocator_free(task);
         errno = saved_errno;
         return NULL;

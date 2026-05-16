@@ -78,7 +78,9 @@ void *llam_io_worker_main(void *arg) {
         llam_io_submit_batch(node);
         llam_io_drain_completions(node);
 
-        if (atomic_load(&rt->stop_requested) && pending == 0U && atomic_load(&node->pending_ops) == 0U) {
+        if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
+            pending == 0U &&
+            atomic_load(&node->pending_ops) == 0U) {
             break;
         }
 

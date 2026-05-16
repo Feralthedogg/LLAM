@@ -116,7 +116,8 @@ Run the native maximum-throughput flood driver:
 
 ```bash
 make server-flood
-./server_flood --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30
+./server_flood --server ./server --server-best-effort \
+  --clients 16 --duration 60 --message-bytes 8 --batch 64 --target-mps 0.30
 ```
 
 `server_flood` reports both inbound messages/sec and observed broadcast
@@ -129,7 +130,8 @@ high-rate fanout, slow clients can overflow their outbox and lose per-client
 deliveries; `server_flood` reports those drops through the server stats file.
 Use `server_lossless`, `./server --lossless`, or `LLAM_CHAT_LOSSLESS=1 ./server`
 when the test must apply producer backpressure instead of dropping outbox
-entries.
+entries. `server_flood --server-lossless` starts the target server in that
+mode, while `--server-best-effort` pins the bounded-drop throughput policy.
 
 Run the full composite server stress suite:
 
@@ -146,8 +148,10 @@ python3 scripts/stress_server_composite.py --quick --seed 1234
 
 The composite suite combines exact fanout checks, 60-second native flood,
 payload-size variation, connection churn, slow receivers, half-close/reset
-patterns, and RSS/fd sampling. Pass `--seed N` to replay randomized correctness
-payloads and edge churn behavior from a previous run.
+patterns, and RSS/fd sampling. Edge logs split client socket failures into
+expected churn/cleanup errors and `unexpected_client_errors`; the latter must
+stay at zero. Pass `--seed N` to replay randomized correctness payloads and
+edge churn behavior from a previous run.
 
 `--quick` is intended for hosted CI runners. It keeps exact-delivery checks but
 uses a lower absolute flood delivery threshold than standard and hour-long runs.
@@ -169,7 +173,7 @@ make test
 GitHub Actions is split by cost and depth:
 
 - `linux`, `macos`, and `Stress` are PR/push gates.
-- `Stress` repeats `test_runtime_stress`, pins/reports server stress seeds, and uploads diagnostics logs on failure.
+- `Stress` repeats `test_runtime_stress`, pins/reports server stress seeds, streams long stress logs through `scripts/run_with_timeout.py`, and uploads diagnostics logs on failure or timeout.
 - `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental TSan, and benchmark guardrails from `.github/workflows/nightly.yml`.
 - `Weekly Soak` runs the hour-long composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
 - `Runtime Benchmarks` runs scheduled LLAM/Go/Tokio benchmark comparisons and uploads graphs/results.
@@ -183,16 +187,22 @@ Build outputs:
 - `server_lossless`: the same chat backend built with lossless outbox backpressure enabled by default.
 - `server_flood`: native nonblocking throughput flood driver for the chat server.
 - `scripts/bench_guard.py`: conservative microbenchmark regression guard for CI.
+- `scripts/run_with_timeout.py`: CI-safe long-process runner that preserves partial logs before interrupting/killing hung stress jobs.
 - `scripts/stress_server.py`: TCP fanout stress test for the chat server.
 - `scripts/stress_server_composite.py`: long-running composite server stability suite.
 - `test_abi_contract`: ABI metadata and size handshakes.
 - `test_abi_compat`: old-prefix option/stat struct compatibility.
 - `test_connect_io`: direct and runtime-managed `llam_connect()` success and invalid-input checks.
 - `test_runtime_core`: lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats checks.
+- `test_runtime_api_edges`: focused public API edge coverage for task ownership, cancellation, channel close/drain, blocking callbacks, cond/mutex deadlines, and managed/unmanaged call boundaries.
+- `test_runtime_select_edges`: focused `llam_channel_select()` send/close/cancel race coverage for lost-wakeup attribution outside the example server.
+- `test_runtime_io_dump`: focused live-I/O diagnostic coverage proving a parked fd-readiness wait appears in `llam_dump_runtime_state()` either as native request ownership or as an explicit blocking fallback job.
+- `test_runtime_group_local_edges`: focused task-local isolation and structured task-group join/cancel/destroy ownership coverage.
 - `test_runtime_stress`: direct LLAM scheduler, cancel, channel, condvar, nested spawn, and I/O cancel stress.
 - `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
 - `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
+- `test_windows_iocp_dump`: Windows-only IOCP pending-request dump coverage for parked `AcceptEx` ownership.
 - `test_shared_load`: `dlopen()` coverage for the shared library ABI surface.
 
 ## Using LLAM In An Application
@@ -211,7 +221,7 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v1.0.1` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v1.0.2` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
 through `.github/workflows/release.yml`.
 
@@ -238,19 +248,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.1/install.sh | sh -s -- --version 1.0.1 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.2/install.sh | sh -s -- --version 1.0.2 --prefix "$HOME/.local"
 ```
 
 Install a specific Linux/macOS target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.1/install.sh | sh -s -- --version 1.0.1 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.2/install.sh | sh -s -- --version 1.0.2 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.1/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.0.1 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.2/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.0.2 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
@@ -864,10 +874,10 @@ The 1.0.x line treats the current public C ABI as stable and keeps the default
 model to one active LLAM runtime per process. The next core-runtime work is
 focused on tightening the runtime itself, not changing the user-facing contract:
 
-- Keep expanding direct API tests for lifecycle, task ownership, cancellation, lost wakeups, channel close/select, blocking callbacks, and managed/unmanaged call boundaries.
-- Promote low-level stress cases that are currently example-driven into focused runtime tests so failures are attributable to LLAM rather than to a sample application policy.
-- Keep the runtime handle API documented as the embedding boundary while deferring true concurrent multi-runtime isolation until every global singleton and TLS dependency has a migration path.
-- Add stronger diagnostics for shutdown, cancellation, wake handoff, and I/O request ownership so rare hangs produce actionable state dumps instead of only a timeout.
+- Maintain focused direct API tests for lifecycle, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`; future regressions should add a minimal direct test before relying on example-server reproduction.
+- Keep promoting low-level stress cases out of examples when the failure belongs to LLAM itself. Example-server stress remains useful for integration and policy validation, but scheduler, cancellation, wakeup, select, and ownership failures should be reduced into focused runtime tests.
+- Treat the runtime handle API as the supported embedding boundary for 1.x. The public header, ABI guide, operations guide, and direct tests now pin the current contract: one active process runtime, `EBUSY` on a second live create, `EINVAL` on non-default run handles, and no promise of concurrent multi-runtime isolation until global singleton/TLS dependencies are migrated.
+- Keep rare-hang diagnostics actionable. `llam_dump_runtime_state()` now emits lifecycle/stop state, active I/O waiters, block-helper wake state, node submit/control/watch queues, shard wake/I/O ownership, and task-level wait ownership (`wait_owner`, cancellation registration, deadlines, active I/O requests, and blocking jobs) so shutdown, cancellation, wake handoff, and I/O ownership issues can be diagnosed from one dump. CI long-running stress jobs stream partial output through `scripts/run_with_timeout.py`, request a signal-driven runtime dump before timeout shutdown on POSIX stress binaries, and server composite runs can emit stop-time runtime dumps into the artifact directory.
 
 ### 2. Performance Roadmap
 

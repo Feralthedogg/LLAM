@@ -71,6 +71,9 @@ int stress_socketpair_windows(int domain, int type, int protocol, int sv[2]);
 #define write(fd, buf, count) send((SOCKET)(uintptr_t)(fd), (const char *)(buf), (int)(count), 0)
 #endif
 
+void stress_setup_signal_dump(void);
+void stress_teardown_signal_dump(void);
+
 typedef struct storm_state {
     atomic_uint completed;
     unsigned yields_per_task;

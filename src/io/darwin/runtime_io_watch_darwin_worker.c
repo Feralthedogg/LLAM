@@ -309,7 +309,8 @@ void *llam_io_worker_main(void *arg) {
         llam_darwin_process_submissions(node);
 
         pending = atomic_load(&node->pending_ops);
-        if (atomic_load(&rt->stop_requested) && pending == 0U) {
+        if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
+            pending == 0U) {
             break;
         }
 

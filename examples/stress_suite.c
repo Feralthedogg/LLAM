@@ -572,9 +572,14 @@ void stress_suite_task(void *arg) {
 
 void dynamic_suite_task(void *arg) {
     dynamic_suite_state_t *state = arg;
-    unsigned round_count = state != NULL ? state->round_count : 2U;
+    unsigned round_count;
     unsigned round;
 
+    if (state == NULL) {
+        stress_fail_msg("dynamic suite state missing");
+        return;
+    }
+    round_count = state->round_count;
     for (round = 0; round < round_count; ++round) {
         run_spawn_join_storm();
         run_channel_ping_pong();
@@ -625,8 +630,8 @@ int stress_run_phase(const char *phase_name,
                             unsigned require_dynamic_motion,
                             unsigned require_floor_reach) {
     llam_runtime_stats_t stats;
-    stress_phase_watchdog_t watchdog;
-    pthread_t watchdog_thread;
+    stress_phase_watchdog_t watchdog = {0};
+    pthread_t watchdog_thread = (pthread_t)0;
     int watchdog_started = 0;
     unsigned failures_before = atomic_load(&g_failures);
 

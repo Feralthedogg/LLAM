@@ -9,6 +9,10 @@ on:
         description: Re-run the direct runtime stress binary this many times
         required: false
         default: "20"
+      runtime_invariant_repeat:
+        description: Re-run seeded runtime invariant checks this many times
+        required: false
+        default: "50"
       stress_rounds:
         description: Runtime stress rounds per phase
         required: false
@@ -57,6 +61,7 @@ jobs:
 
     env:
       RUNTIME_STRESS_REPEAT: ${{ github.event.inputs.runtime_stress_repeat || '20' }}
+      RUNTIME_INVARIANT_REPEAT: ${{ github.event.inputs.runtime_invariant_repeat || '50' }}
       STRESS_ROUNDS: ${{ github.event.inputs.stress_rounds || '8' }}
       DYNAMIC_ROUNDS: ${{ github.event.inputs.dynamic_rounds || '8' }}
       SERVER_SEED: ${{ github.event.inputs.server_seed || '424242' }}
@@ -107,16 +112,30 @@ jobs:
             ./build/nightly/test_runtime_stress
           done 2>&1 | tee "$OUT_DIR/test_runtime_stress_repeat.log"
 
-      - name: Runtime stress suite
+      - name: Seeded runtime invariant repeat
         run: |
           set -o pipefail
-          env \
-            LLAM_STRESS_ROUNDS="$STRESS_ROUNDS" \
-            LLAM_STRESS_DYNAMIC_ROUNDS="$DYNAMIC_ROUNDS" \
-            LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS=128 \
-            LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS=1024 \
-            LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US=1000 \
-            ./build/nightly/stress 2>&1 | tee "$OUT_DIR/runtime_stress.log"
+          mkdir -p "$OUT_DIR"
+          for i in $(seq 1 "$RUNTIME_INVARIANT_REPEAT"); do
+            seed=$((SERVER_SEED + i * 104729))
+            echo "[test_runtime_invariants repeat $i/$RUNTIME_INVARIANT_REPEAT seed=$seed]"
+            LLAM_RUNTIME_INVARIANT_SEED="$seed" \
+            LLAM_RUNTIME_INVARIANT_SCENARIOS=96 \
+              ./build/nightly/test_runtime_invariants
+          done 2>&1 | tee "$OUT_DIR/test_runtime_invariants_repeat.log"
+
+      - name: Runtime stress suite
+        run: |
+          export LLAM_STRESS_ROUNDS="$STRESS_ROUNDS"
+          export LLAM_STRESS_DYNAMIC_ROUNDS="$DYNAMIC_ROUNDS"
+          export LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS=128
+          export LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS=1024
+          export LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US=1000
+          python3 scripts/run_with_timeout.py \
+            --timeout 3600 \
+            --dump-on-timeout "$OUT_DIR/runtime_stress.timeout-dump.log" \
+            --log "$OUT_DIR/runtime_stress.log" \
+            -- ./build/nightly/stress
 
       - name: Benchmark stress smoke
         run: |
@@ -191,7 +210,13 @@ jobs:
           make clean all CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/build.log"
           make test CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/make_test.log"
           env LLAM_RUNTIME_FUZZ_SCENARIOS=96 ./test_runtime_fuzz 2>&1 | tee "$OUT_DIR/runtime_fuzz.log"
-          env LLAM_STRESS_ROUNDS=6 LLAM_STRESS_DYNAMIC_ROUNDS=4 ./stress 2>&1 | tee "$OUT_DIR/runtime_stress.log"
+          env LLAM_RUNTIME_INVARIANT_SCENARIOS=96 ./test_runtime_invariants 2>&1 | tee "$OUT_DIR/runtime_invariants.log"
+          env LLAM_STRESS_ROUNDS=6 LLAM_STRESS_DYNAMIC_ROUNDS=4 \
+            python3 scripts/run_with_timeout.py \
+              --timeout 1800 \
+              --dump-on-timeout "$OUT_DIR/runtime_stress.timeout-dump.log" \
+              --log "$OUT_DIR/runtime_stress.log" \
+              -- ./stress
           python3 scripts/stress_server_composite.py \
             --server ./server \
             --server-flood ./server_flood \
@@ -236,10 +261,12 @@ jobs:
           set -o pipefail
           mkdir -p "$OUT_DIR"
           make clean test_runtime_stress \
+            test_runtime_invariants \
             CC=clang \
             CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=thread -fno-omit-frame-pointer" \
             LDLIBS="-pthread -luring -fsanitize=thread" 2>&1 | tee "$OUT_DIR/build.log"
           ./test_runtime_stress 2>&1 | tee "$OUT_DIR/test_runtime_stress.log"
+          env LLAM_RUNTIME_INVARIANT_SCENARIOS=16 ./test_runtime_invariants 2>&1 | tee "$OUT_DIR/test_runtime_invariants.log"
 
       - name: Upload TSan diagnostics
         if: always()
@@ -273,7 +300,7 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build build/nightly-windows --config Release --target bench test_abi_compat test_runtime_stress test_runtime_fuzz test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
+        run: cmake --build build/nightly-windows --config Release --target bench test_abi_compat test_runtime_stress test_runtime_fuzz test_runtime_invariants test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
 
       - name: Deep Windows policy/runtime stress
         shell: pwsh
@@ -282,7 +309,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           $repeat = [int]("${{ github.event.inputs.runtime_stress_repeat || '20' }}")
           & {
-            ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
+            ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
@@ -293,9 +320,23 @@ jobs:
                 exit $LASTEXITCODE
               }
             }
+            $invariantRepeat = [int]("${{ github.event.inputs.runtime_invariant_repeat || '50' }}")
+            $seedBase = [int64]("${{ github.event.inputs.server_seed || '424242' }}")
+            for ($i = 1; $i -le $invariantRepeat; $i++) {
+              $seed = $seedBase + ($i * 104729)
+              "[test_runtime_invariants repeat $i/$invariantRepeat seed=$seed]"
+              $env:LLAM_RUNTIME_INVARIANT_SEED = [string]$seed
+              $env:LLAM_RUNTIME_INVARIANT_SCENARIOS = "96"
+              .\build\nightly-windows\Release\test_runtime_invariants.exe
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+            Remove-Item Env:\LLAM_RUNTIME_INVARIANT_SEED -ErrorAction SilentlyContinue
+            Remove-Item Env:\LLAM_RUNTIME_INVARIANT_SCENARIOS -ErrorAction SilentlyContinue
             foreach ($generation in @("10", "11")) {
               $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
-              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
+              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
               if ($LASTEXITCODE -ne 0) {
                 exit $LASTEXITCODE
               }

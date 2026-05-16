@@ -191,19 +191,30 @@ const char *llam_stack_profile_hint(const llam_task_t *task) {
  * @return Cached page size from @c sysconf(_SC_PAGESIZE).
  */
 long llam_page_size(void) {
-    static long cached_page_size = 0;
+    static atomic_long cached_page_size;
+    long page_size;
 
-    if (cached_page_size == 0) {
+    page_size = atomic_load_explicit(&cached_page_size, memory_order_acquire);
+    if (page_size == 0) {
 #if LLAM_PLATFORM_WINDOWS
         SYSTEM_INFO system_info;
 
         memset(&system_info, 0, sizeof(system_info));
         GetSystemInfo(&system_info);
-        cached_page_size = system_info.dwPageSize != 0U ? (long)system_info.dwPageSize : 4096L;
+        page_size = system_info.dwPageSize != 0U ? (long)system_info.dwPageSize : 4096L;
 #else
-        cached_page_size = sysconf(_SC_PAGESIZE);
+        page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) {
+            page_size = 4096L;
+        }
 #endif
+        /*
+         * Multiple native workers may query this helper before the runtime is
+         * fully warm.  Racing stores of the same page size are harmless only if
+         * they are atomic; keep the cache lock-free but data-race free.
+         */
+        atomic_store_explicit(&cached_page_size, page_size, memory_order_release);
     }
 
-    return cached_page_size;
+    return page_size;
 }

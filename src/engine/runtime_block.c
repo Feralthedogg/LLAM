@@ -47,7 +47,8 @@ void *llam_block_worker_main(void *arg) {
         llam_block_job_t *job;
 
         pthread_mutex_lock(&rt->block_lock);
-        while (rt->block_head == NULL && !atomic_load(&rt->stop_requested)) {
+        while (rt->block_head == NULL &&
+               !atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire)) {
 #if defined(__linux__)
             unsigned wait_seq = atomic_load_explicit(&rt->block_wake_seq, memory_order_acquire);
 
@@ -65,9 +66,20 @@ void *llam_block_worker_main(void *arg) {
             pthread_cond_wait(&rt->block_cv, &rt->block_lock);
 #endif
         }
-        if (rt->block_head == NULL && atomic_load(&rt->stop_requested)) {
+        if (rt->block_head == NULL) {
+            if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire)) {
+                pthread_mutex_unlock(&rt->block_lock);
+                break;
+            }
+            /*
+             * Natural llam_run() drain briefly raises stop_requested to wake
+             * scheduler workers, but block workers are runtime-lifetime
+             * helpers. Only runtime_shutdown() may terminate them; otherwise
+             * loop instead of treating an empty queue as a real job. This also
+             * makes the worker robust to spurious condvar wakes on POSIX.
+             */
             pthread_mutex_unlock(&rt->block_lock);
-            break;
+            continue;
         }
 
         job = rt->block_head;
@@ -102,6 +114,17 @@ void *llam_block_worker_main(void *arg) {
             unsigned expected = LLAM_BLOCK_JOB_RUNNING;
 
             if (!atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_FINISHED)) {
+                /*
+                 * Cancellation can mark a RUNNING callback as ABORTED, but it
+                 * cannot safely stop user code already executing on this
+                 * worker.  Wake the task only after the callback has returned
+                 * so the caller cannot free or reuse callback-owned state while
+                 * the worker is still touching it.
+                 */
+                if (expected == LLAM_BLOCK_JOB_ABORTED) {
+                    job->task->wake_error_code = ECANCELED;
+                    llam_reinject_task(rt, job->task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
+                }
                 llam_block_job_release(rt, job);
                 continue;
             }

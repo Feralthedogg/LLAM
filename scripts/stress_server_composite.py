@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import random
 import shutil
@@ -62,6 +63,15 @@ class EdgeStats:
     resets: int = 0
     slow_clients: int = 0
     client_errors: int = 0
+    expected_client_errors: int = 0
+    unexpected_client_errors: int = 0
+    error_reset: int = 0
+    error_pipe: int = 0
+    error_timeout: int = 0
+    error_refused: int = 0
+    error_bad_fd: int = 0
+    error_other: int = 0
+    error_samples: list[str] = field(default_factory=list)
 
 
 class ResourceSampler:
@@ -152,8 +162,13 @@ def connect_client(host: str, port: int, deadline_sec: float, timeout_sec: float
 def start_server(server_path: Path, host: str, timeout_sec: float) -> RunningServer:
     port = find_free_port(host)
     env = os.environ.copy()
+    dump_dir = os.environ.get("LLAM_SERVER_COMPOSITE_DUMP_DIR") or os.environ.get("OUT_DIR")
 
     env.setdefault("LLAM_CHAT_QUIET", "1")
+    if dump_dir and "LLAM_CHAT_DUMP_ON_STOP" not in env:
+        dump_path = Path(dump_dir) / f"server-runtime-dump-{port}.log"
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        env["LLAM_CHAT_DUMP_ON_STOP"] = str(dump_path)
     proc = subprocess.Popen(
         [str(server_path.resolve()), str(port)],
         stdout=subprocess.PIPE,
@@ -431,6 +446,10 @@ def phase_flood(args: argparse.Namespace) -> None:
             "--shutdown-timeout",
             f"{args.shutdown_timeout:.3f}",
         ]
+        if label.startswith("lossless-"):
+            cmd.append("--server-lossless")
+        else:
+            cmd.append("--server-best-effort")
         if args.allow_flood_forced_stop:
             cmd.append("--allow-forced-stop")
         else:
@@ -461,6 +480,65 @@ def reset_socket(sock: socket.socket) -> None:
     except OSError:
         pass
     sock.close()
+
+
+def edge_error_category(exc: BaseException) -> str:
+    err_no = getattr(exc, "errno", None)
+
+    if isinstance(exc, TimeoutError) or err_no == errno.ETIMEDOUT:
+        return "timeout"
+    if isinstance(exc, BrokenPipeError) or err_no == errno.EPIPE:
+        return "pipe"
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError)) or err_no in {
+        errno.ECONNRESET,
+        errno.ECONNABORTED,
+    }:
+        return "reset"
+    if isinstance(exc, ConnectionRefusedError) or err_no == errno.ECONNREFUSED:
+        return "refused"
+    if err_no in {
+        errno.EBADF,
+        getattr(errno, "ENOTCONN", -1),
+        getattr(errno, "ESHUTDOWN", -1),
+    }:
+        return "bad_fd"
+    return "other"
+
+
+def edge_error_is_expected(context: str, category: str, stopping: bool) -> bool:
+    if stopping:
+        return True
+    if context in {"churn", "slow"} and category in {"reset", "pipe", "bad_fd"}:
+        return True
+    return False
+
+
+def edge_record_client_error(stats: EdgeStats, context: str, exc: BaseException, stopping: bool) -> None:
+    category = edge_error_category(exc)
+    expected = edge_error_is_expected(context, category, stopping)
+    err_no = getattr(exc, "errno", None)
+    err_name = errno.errorcode.get(err_no, type(exc).__name__) if isinstance(err_no, int) else type(exc).__name__
+
+    stats.client_errors += 1
+    if expected:
+        stats.expected_client_errors += 1
+    else:
+        stats.unexpected_client_errors += 1
+    if category == "reset":
+        stats.error_reset += 1
+    elif category == "pipe":
+        stats.error_pipe += 1
+    elif category == "timeout":
+        stats.error_timeout += 1
+    elif category == "refused":
+        stats.error_refused += 1
+    elif category == "bad_fd":
+        stats.error_bad_fd += 1
+    else:
+        stats.error_other += 1
+    if len(stats.error_samples) < 8:
+        disposition = "expected" if expected else "unexpected"
+        stats.error_samples.append(f"{context}:{category}:{err_name}:{disposition}")
 
 
 def reader_loop(sock: socket.socket, stop_event: threading.Event, stats: EdgeStats, lock: threading.Lock, slow: bool) -> None:
@@ -502,9 +580,9 @@ def stable_sender_loop(
             else:
                 sock.sendall(payload)
             sent += 1
-        except OSError:
+        except OSError as exc:
             with lock:
-                stats.client_errors += 1
+                edge_record_client_error(stats, "stable", exc, stop_event.is_set())
             return
         if sent % 16 == 0:
             time.sleep(0.001)
@@ -548,9 +626,9 @@ def churn_loop(
                     stats.resets += 1
             else:
                 sock.close()
-        except OSError:
+        except OSError as exc:
             with lock:
-                stats.client_errors += 1
+                edge_record_client_error(stats, "churn", exc, stop_event.is_set())
             if sock is not None:
                 sock.close()
         sequence += 1
@@ -582,9 +660,9 @@ def slow_client_loop(
                     stats.resets += 1
             else:
                 sock.close()
-        except OSError:
+        except OSError as exc:
             with lock:
-                stats.client_errors += 1
+                edge_record_client_error(stats, "slow", exc, stop_event.is_set())
             if sock is not None:
                 sock.close()
         sequence += 1
@@ -669,6 +747,12 @@ def phase_edge(args: argparse.Namespace) -> None:
         raise RuntimeError(f"server RSS exceeded limit: {summary.max_rss_kb} KiB > {args.max_rss_mb} MiB")
     if summary.max_fds is not None and summary.max_fds > args.max_fds:
         raise RuntimeError(f"server fd count exceeded limit: {summary.max_fds} > {args.max_fds}")
+    if args.max_unexpected_client_errors >= 0 and stats.unexpected_client_errors > args.max_unexpected_client_errors:
+        samples = ",".join(stats.error_samples) if stats.error_samples else "none"
+        raise RuntimeError(
+            "unexpected edge client errors exceeded limit: "
+            f"{stats.unexpected_client_errors} > {args.max_unexpected_client_errors}; samples={samples}"
+        )
 
     print(
         "server edge stress ok: "
@@ -677,6 +761,12 @@ def phase_edge(args: argparse.Namespace) -> None:
         f"churn_connects={stats.churn_connects} half_closes={stats.half_closes} "
         f"resets={stats.resets} slow_clients={stats.slow_clients} "
         f"client_errors={stats.client_errors} "
+        f"expected_client_errors={stats.expected_client_errors} "
+        f"unexpected_client_errors={stats.unexpected_client_errors} "
+        f"error_reset={stats.error_reset} error_pipe={stats.error_pipe} "
+        f"error_timeout={stats.error_timeout} error_refused={stats.error_refused} "
+        f"error_bad_fd={stats.error_bad_fd} error_other={stats.error_other} "
+        f"error_samples={','.join(stats.error_samples) if stats.error_samples else 'none'} "
         f"rss_kb={summary.first_rss_kb}->{summary.last_rss_kb} "
         f"rss_minmax={summary.min_rss_kb}->{summary.max_rss_kb} "
         f"fds={summary.first_fds}->{summary.last_fds} "
@@ -722,6 +812,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-rss-mb", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_RSS_MB", "2048")))
     parser.add_argument("--max-fds", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_FDS", "4096")))
     parser.add_argument(
+        "--max-unexpected-client-errors",
+        type=int,
+        default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_UNEXPECTED_CLIENT_ERRORS", "0")),
+        help="maximum edge client errors outside expected reset/pipe/bad-fd churn; use -1 to disable",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=int(os.getenv("LLAM_SERVER_COMPOSITE_SEED")) if os.getenv("LLAM_SERVER_COMPOSITE_SEED") else None,
@@ -764,6 +860,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--churn-threads and --slow-threads must be >= 0")
     if args.shutdown_timeout <= 0.0:
         raise SystemExit("--shutdown-timeout must be > 0")
+    if args.max_unexpected_client_errors < -1:
+        raise SystemExit("--max-unexpected-client-errors must be >= -1")
     if args.flood_min_delivery_ratio < 0.0 or args.flood_min_delivery_ratio > 1.0:
         raise SystemExit("--flood-min-delivery-ratio must be in [0.0, 1.0]")
     parse_correctness_matrix(args.correctness_matrix)

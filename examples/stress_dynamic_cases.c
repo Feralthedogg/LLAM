@@ -39,6 +39,41 @@ static int stress_join_until_retry_oom(llam_task_t *task, uint64_t deadline_ns) 
     return -1;
 }
 
+static void stress_print_dynamic_downscale_miss(const char *phase,
+                                                unsigned floor,
+                                                unsigned last_online,
+                                                unsigned min_online,
+                                                unsigned max_online,
+                                                unsigned completed,
+                                                bool saw_scale_up,
+                                                bool reached_floor) {
+    unsigned live = llam_runtime_live_tasks(&g_llam_runtime);
+    unsigned active_io = atomic_load_explicit(&g_llam_runtime.active_io_waiters, memory_order_acquire);
+    unsigned effective_live = live > active_io ? live - active_io : 0U;
+
+    /*
+     * These stress phases intentionally run immediately after a timer-heavy
+     * fanout wave.  If a downscale assertion fires again, live/effective counts
+     * tell whether the runtime was actually eligible to downscale or whether
+     * the test window ended while prior timer work was still draining.
+     */
+    fprintf(stderr,
+            "[stress] %s stats floor=%u last_online=%u min_online=%u max_online=%u "
+            "saw_scale_up=%u reached_floor=%u completed=%u live=%u active_io=%u effective_live=%u block_pending=%u\n",
+            phase,
+            floor,
+            last_online,
+            min_online == UINT_MAX ? 0U : min_online,
+            max_online,
+            saw_scale_up ? 1U : 0U,
+            reached_floor ? 1U : 0U,
+            completed,
+            live,
+            active_io,
+            effective_live,
+            atomic_load_explicit(&g_llam_runtime.block_pending, memory_order_acquire));
+}
+
 void dynamic_live_poll_watch_task(void *arg) {
     dynamic_live_poll_watch_state_t *state = arg;
     dynamic_live_poll_waiter_state_t *waiter_states = NULL;
@@ -551,15 +586,14 @@ void dynamic_live_accept_watch_task(void *arg) {
     if (stats.dynamic_workers != 0U &&
         stats.active_workers > live_wait_floor &&
         saw_scale_up && !reached_live_floor) {
-        fprintf(stderr,
-                "[stress] dynamic live accept stats floor=%u last_online=%u min_online=%u max_online=%u saw_scale_up=%u reached_floor=%u completed=%u\n",
-                live_wait_floor,
-                last_online,
-                min_online == UINT_MAX ? 0U : min_online,
-                max_online,
-                saw_scale_up ? 1U : 0U,
-                reached_live_floor ? 1U : 0U,
-                atomic_load(&completed));
+        stress_print_dynamic_downscale_miss("dynamic live accept",
+                                            live_wait_floor,
+                                            last_online,
+                                            min_online,
+                                            max_online,
+                                            atomic_load(&completed),
+                                            saw_scale_up,
+                                            reached_live_floor);
         stress_fail_msg("dynamic live accept waiters did not downscale while parked");
     }
 

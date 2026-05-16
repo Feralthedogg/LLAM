@@ -4,7 +4,7 @@ project(llam C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 1)
 set(LLAM_ABI_VERSION_MINOR 0)
-set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.1")
+set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.2")
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -40,6 +40,8 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_cancel_api.c
     src/core/runtime_context_portable.c
     src/core/runtime_debug.c
+    src/core/runtime_debug_dump_helpers.c
+    src/core/runtime_debug_stats_json.c
     src/core/runtime_fault.c
     src/core/runtime_fp.c
     src/core/runtime_io_object_alloc.c
@@ -275,6 +277,7 @@ add_executable(stress ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/stress_dynamic_cases.c
     examples/stress_suite.c
     examples/stress_entry.c
+    examples/stress_signal_dump.c
 )
 target_include_directories(stress PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -357,6 +360,31 @@ add_executable(test_runtime_core
 )
 target_link_libraries(test_runtime_core PRIVATE llam_runtime)
 
+add_executable(test_runtime_api_edges
+    tests/test_runtime_api_edges.c
+)
+target_link_libraries(test_runtime_api_edges PRIVATE llam_runtime)
+
+add_executable(test_runtime_select_edges
+    tests/test_runtime_select_edges.c
+)
+target_link_libraries(test_runtime_select_edges PRIVATE llam_runtime)
+
+add_executable(test_runtime_io_dump ${LLAM_POSIX_TEST_EXCLUDE}
+    tests/test_runtime_io_dump.c
+)
+target_link_libraries(test_runtime_io_dump PRIVATE llam_runtime)
+
+add_executable(test_runtime_group_local_edges
+    tests/test_runtime_group_local_edges.c
+)
+target_link_libraries(test_runtime_group_local_edges PRIVATE llam_runtime)
+
+add_executable(test_runtime_unmanaged_join
+    tests/test_runtime_unmanaged_join.c
+)
+target_link_libraries(test_runtime_unmanaged_join PRIVATE llam_runtime)
+
 add_executable(test_runtime_stress
     tests/test_runtime_stress.c
 )
@@ -366,6 +394,11 @@ add_executable(test_runtime_fuzz
     tests/test_runtime_fuzz.c
 )
 target_link_libraries(test_runtime_fuzz PRIVATE llam_runtime)
+
+add_executable(test_runtime_invariants
+    tests/test_runtime_invariants.c
+)
+target_link_libraries(test_runtime_invariants PRIVATE llam_runtime)
 
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c
@@ -407,6 +440,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     )
     target_compile_definitions(test_windows_handle_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     target_link_libraries(test_windows_handle_io PRIVATE llam_runtime)
+
+    add_executable(test_windows_iocp_dump
+        tests/test_windows_iocp_dump.c
+    )
+    target_include_directories(test_windows_iocp_dump PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    )
+    target_compile_definitions(test_windows_iocp_dump PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+    target_link_libraries(test_windows_iocp_dump PRIVATE llam_runtime)
 endif()
 
 add_executable(test_shared_load ${LLAM_POSIX_TEST_EXCLUDE}
@@ -420,8 +463,14 @@ foreach(LLAM_TEST_TARGET
         test_abi_compat
         test_connect_io
         test_runtime_core
+        test_runtime_api_edges
+        test_runtime_select_edges
+        test_runtime_io_dump
+        test_runtime_group_local_edges
+        test_runtime_unmanaged_join
         test_runtime_stress
         test_runtime_fuzz
+        test_runtime_invariants
         test_sync_primitives
         test_io_buffers
         test_windows_policy
@@ -442,17 +491,24 @@ endforeach()
 add_test(NAME test_abi_contract COMMAND test_abi_contract)
 add_test(NAME test_abi_compat COMMAND test_abi_compat)
 add_test(NAME test_runtime_core COMMAND test_runtime_core)
+add_test(NAME test_runtime_api_edges COMMAND test_runtime_api_edges)
+add_test(NAME test_runtime_select_edges COMMAND test_runtime_select_edges)
+add_test(NAME test_runtime_group_local_edges COMMAND test_runtime_group_local_edges)
+add_test(NAME test_runtime_unmanaged_join COMMAND test_runtime_unmanaged_join)
 add_test(NAME test_runtime_stress COMMAND test_runtime_stress)
 add_test(NAME test_runtime_fuzz COMMAND test_runtime_fuzz)
+add_test(NAME test_runtime_invariants COMMAND test_runtime_invariants)
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_windows_iocp_io COMMAND test_windows_iocp_io)
+    add_test(NAME test_windows_iocp_dump COMMAND test_windows_iocp_dump)
     add_test(NAME test_windows_handle_io COMMAND test_windows_handle_io)
 endif()
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_connect_io COMMAND test_connect_io)
+    add_test(NAME test_runtime_io_dump COMMAND test_runtime_io_dump)
     add_test(NAME test_io_buffers COMMAND test_io_buffers)
     add_test(NAME test_shared_load COMMAND test_shared_load $<TARGET_FILE:llam_runtime_shared>)
 endif()

@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #if LLAM_PLATFORM_POSIX
 #include <unistd.h>
@@ -384,6 +385,16 @@ static int test_runtime_handle_api(void) {
         return test_fail("llam_runtime_create returned unexpected handle");
     }
     errno = 0;
+    if (llam_runtime_run_handle(NULL) != -1 || errno != EINVAL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_run_handle(NULL) did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_run_handle((llam_runtime_t *)(void *)&state) != -1 || errno != EINVAL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_run_handle(non-default) did not fail with EINVAL");
+    }
+    errno = 0;
     if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &second_runtime) != -1 ||
         errno != EBUSY ||
         second_runtime != NULL) {
@@ -558,6 +569,66 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
             llam_runtime_shutdown();
             return test_fail("stats json did not contain expected fields");
         }
+        {
+            const char *idle_spin_fallbacks = strstr(json, "\"idle_spin_fallbacks\":");
+
+            if (idle_spin_fallbacks == NULL ||
+                strstr(idle_spin_fallbacks + 1, "\"idle_spin_fallbacks\":") != NULL) {
+                llam_runtime_shutdown();
+                return test_fail("stats json field set is missing or duplicated");
+            }
+        }
+    }
+    {
+        char path[] = "/tmp/llam-runtime-dump-XXXXXX";
+        int dump_fd = mkstemp(path);
+        off_t dump_size;
+        char *dump = NULL;
+        ssize_t dump_read;
+
+        if (dump_fd < 0) {
+            llam_runtime_shutdown();
+            return test_fail_errno("mkstemp for runtime dump failed");
+        }
+        (void)unlink(path);
+        llam_dump_runtime_state(dump_fd);
+        dump_size = lseek(dump_fd, 0, SEEK_END);
+        if (dump_size <= 0 || dump_size > (off_t)(1024U * 1024U) ||
+            lseek(dump_fd, 0, SEEK_SET) < 0) {
+            int saved_errno = errno;
+
+            close(dump_fd);
+            llam_runtime_shutdown();
+            errno = saved_errno;
+            return test_fail_errno("runtime dump sizing failed");
+        }
+        dump = malloc((size_t)dump_size + 1U);
+        if (dump == NULL) {
+            close(dump_fd);
+            llam_runtime_shutdown();
+            return test_fail_errno("runtime dump allocation failed");
+        }
+        dump_read = read(dump_fd, dump, (size_t)dump_size);
+        close(dump_fd);
+        if (dump_read != dump_size) {
+            free(dump);
+            llam_runtime_shutdown();
+            return test_fail("runtime dump read was incomplete");
+        }
+        dump[dump_read] = '\0';
+        if (strstr(dump, "lifecycle:") == NULL ||
+            strstr(dump, "stop_requested=") == NULL ||
+            strstr(dump, "active_io_waiters=") == NULL ||
+            strstr(dump, "io_queues(") == NULL ||
+            strstr(dump, "inflight_io_waiters=") == NULL ||
+            strstr(dump, "wait_owner=") == NULL ||
+            strstr(dump, "io_req=") == NULL ||
+            strstr(dump, "block_job=") == NULL) {
+            free(dump);
+            llam_runtime_shutdown();
+            return test_fail("runtime dump did not contain ownership diagnostics");
+        }
+        free(dump);
     }
 #endif
 

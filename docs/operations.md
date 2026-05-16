@@ -197,6 +197,34 @@ Use structured stats for automation and human dumps for incidents:
 - `llam_dump_runtime_state(fd)` for bug reports and post-failure diagnostics.
 - `LLAM_TRACE_EVENTS=1` and `LLAM_WAKE_LATENCY_METRICS=1` only when diagnosing
   tail latency, because they add measurement overhead.
+- `scripts/run_with_timeout.py` for long CI stress commands that must preserve
+  partial output before the runner interrupts or kills a hung process.
+
+The human dump is the incident artifact to attach when a rare hang is reported.
+It intentionally includes lifecycle state (`initialized`, `exec_started`,
+`stop_requested`, live tasks, live shards, active I/O waiters), block-helper
+state, node submit/control/watch queue depths, shard wake and I/O ownership
+state, and task-level wait ownership. For a parked task, inspect
+`wait_owner=`, `cancel_registered=`, `deadline_ns=`, `io_req=`, and
+`block_job=` first; those fields distinguish cancellation loss, timeout loss,
+wake handoff loss, I/O request ownership races, and opaque blocking stalls.
+
+The `stress` executable honors `LLAM_RUNTIME_DUMP_ON_SIGNAL` on POSIX. When set,
+`SIGUSR2` requests a dump to that path from a helper thread. CI uses this through
+`scripts/run_with_timeout.py --dump-on-timeout ...` before sending the final
+interrupt, so timeout artifacts contain both the partial stress log and the
+latest runtime ownership snapshot.
+
+Server edge stress logs split client-side socket failures into expected
+churn/cleanup errors and unexpected failures. Treat
+`unexpected_client_errors` as the gating signal; expected `EPIPE`, reset, or
+cleanup-fd errors can occur when the harness intentionally resets, half-closes,
+or tears down sockets.
+
+When `OUT_DIR` or `LLAM_SERVER_COMPOSITE_DUMP_DIR` is set, the composite server
+harness also wires `LLAM_CHAT_DUMP_ON_STOP` to a per-server artifact path. This
+keeps shutdown-time runtime dumps next to the stress logs without requiring a
+manual reproduction pass.
 
 Minimum production counters to export are `ctx_switches`, `parks`, `wakes`,
 `io_submits`, `io_submit_syscalls`, `io_completions`, `active_workers`,

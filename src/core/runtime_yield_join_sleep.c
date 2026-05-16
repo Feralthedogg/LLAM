@@ -338,10 +338,7 @@ void llam_yield(void) {
  */
 bool llam_yield_to_local_runnable(void) {
     llam_shard_t *shard = g_llam_tls_shard;
-    llam_task_t *current = g_llam_tls_task;
-    llam_task_t *next = NULL;
     llam_yield_direct_fail_t fail_reason = LLAM_YIELD_DIRECT_FAIL_NONE;
-    int caller_errno = errno;
 
     llam_yield_direct_record_attempt(shard);
     if (llam_yield_to_local_runnable_unlocked(&fail_reason)) {
@@ -358,6 +355,11 @@ bool llam_yield_to_local_runnable(void) {
     llam_yield_direct_record_fail(shard, fail_reason);
     return false;
 #endif
+
+#if !LLAM_DIRECT_OWNER_HANDOFF
+    llam_task_t *current = g_llam_tls_task;
+    llam_task_t *next = NULL;
+    int caller_errno = errno;
 
     if (shard == NULL || current == NULL || shard->runtime == NULL) {
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_CONTEXT);
@@ -424,6 +426,7 @@ bool llam_yield_to_local_runnable(void) {
     errno = caller_errno;
     llam_switch_task_to_task_hot(current, next);
     return true;
+#endif
 }
 
 /**
@@ -558,6 +561,34 @@ static bool llam_join_try_completed_fast(llam_runtime_t *rt, llam_task_t *task) 
 }
 
 /**
+ * @brief Claim exclusive ownership of a public task handle for join.
+ *
+ * @details
+ * Managed tasks already serialize parked join waiters through the target task
+ * lock, but unmanaged OS threads poll completion without entering that waiter
+ * list.  This claim is the API-level handle owner bit: exactly one joiner may
+ * consume the task, and timed/cancelled joins release the claim before they
+ * return so the handle remains joinable.
+ */
+static bool llam_task_try_claim_join(llam_task_t *task) {
+    unsigned expected = 0U;
+
+    return task != NULL &&
+           atomic_compare_exchange_strong_explicit(&task->join_claimed,
+                                                   &expected,
+                                                   1U,
+                                                   memory_order_acq_rel,
+                                                   memory_order_acquire);
+}
+
+/** @brief Release a timed-out or cancelled join claim without consuming the task handle. */
+static void llam_task_release_join_claim(llam_task_t *task) {
+    if (task != NULL) {
+        atomic_store_explicit(&task->join_claimed, 0U, memory_order_release);
+    }
+}
+
+/**
  * @brief Join a task, optionally bounded by an absolute deadline.
  *
  * Managed callers park on the target task's join waiter list and resume when
@@ -588,11 +619,38 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         return -1;
     }
 
+    if (self == task) {
+        errno = EDEADLK;
+        return -1;
+    }
+
+    if (!llam_task_try_claim_join(task)) {
+        errno = EBUSY;
+        return -1;
+    }
+
+    /*
+     * Detach also owns task->lock while it turns a public handle into a
+     * detached handle.  Rechecking under the same lock prevents this join claim
+     * from racing a detach that observed join_claimed==0 just before we claimed
+     * it.
+     */
+    pthread_mutex_lock(&task->lock);
+    if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
+        pthread_mutex_unlock(&task->lock);
+        llam_task_release_join_claim(task);
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_unlock(&task->lock);
+
     if (self == NULL) {
-        while (task->state != LLAM_TASK_STATE_DEAD && atomic_load(&rt->fatal_errno) == 0) {
+        while (atomic_load_explicit(&task->completed, memory_order_acquire) == 0U &&
+               atomic_load(&rt->fatal_errno) == 0) {
             struct timespec ts;
 
             if (has_deadline && llam_deadline_passed(deadline_ns)) {
+                llam_task_release_join_claim(task);
                 errno = ETIMEDOUT;
                 return -1;
             }
@@ -601,17 +659,18 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
             nanosleep(&ts, NULL);
         }
         if (atomic_load(&rt->fatal_errno) != 0) {
+            llam_task_release_join_claim(task);
             errno = atomic_load(&rt->fatal_errno);
+            return -1;
+        }
+        if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
+            llam_task_release_join_claim(task);
+            errno = EINVAL;
             return -1;
         }
         llam_try_reclaim_joined_task(rt, task);
         errno = caller_errno;
         return 0;
-    }
-
-    if (self == task) {
-        errno = EDEADLK;
-        return -1;
     }
 
     if (llam_join_try_completed_fast(rt, task)) {
@@ -622,10 +681,11 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
     pthread_mutex_lock(&task->lock);
     if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
         pthread_mutex_unlock(&task->lock);
+        llam_task_release_join_claim(task);
         errno = EINVAL;
         return -1;
     }
-    if (task->state == LLAM_TASK_STATE_DEAD) {
+    if (atomic_load_explicit(&task->completed, memory_order_acquire) != 0U) {
         pthread_mutex_unlock(&task->lock);
         llam_try_reclaim_joined_task(rt, task);
         errno = caller_errno;
@@ -633,11 +693,13 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
     }
     if (task->join_waiter_count > 0U) {
         pthread_mutex_unlock(&task->lock);
+        llam_task_release_join_claim(task);
         errno = EBUSY;
         return -1;
     }
     if (has_deadline && llam_deadline_passed(deadline_ns)) {
         pthread_mutex_unlock(&task->lock);
+        llam_task_release_join_claim(task);
         errno = ETIMEDOUT;
         return -1;
     }
@@ -650,6 +712,7 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         self->state = LLAM_TASK_STATE_RUNNING;
         self->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(self);
+        llam_task_release_join_claim(task);
         return -1;
     }
     if (self->cancel_token != NULL && llam_cancel_token_register_task(self) != 0) {
@@ -658,6 +721,7 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         self->state = LLAM_TASK_STATE_RUNNING;
         self->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(self);
+        llam_task_release_join_claim(task);
         return -1;
     }
     self->wait_next = task->join_waiters;
@@ -677,6 +741,11 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         llam_switch_task_to_scheduler(self,
                                     g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
     }
+    if (has_deadline) {
+        // Join completion can race with deadline setup before the waiter fully
+        // parks.  Remove any timer that the wake path could not disarm.
+        llam_disarm_task_wait_deadline(self);
+    }
     if (self->cancel_registered) {
         llam_cancel_token_unregister_task(self);
     }
@@ -685,6 +754,7 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         int wake_error = llam_consume_task_wake_error(self);
 
         if (wake_error != 0) {
+            llam_task_release_join_claim(task);
             errno = wake_error;
             return -1;
         }
@@ -726,7 +796,7 @@ int llam_join_until(llam_task_t *task, uint64_t deadline_ns) {
  *
  * @return 0 on detach.
  * @return -1 with @c errno set to @c EINVAL for invalid input or @c EBUSY
- *         when a join waiter already owns completion.
+ *         when another join/detach path already owns the public handle.
  */
 int llam_detach(llam_task_t *task) {
     llam_runtime_t *rt = &g_llam_runtime;
@@ -747,6 +817,11 @@ int llam_detach(llam_task_t *task) {
         return -1;
     }
     if (task->join_waiter_count > 0U) {
+        pthread_mutex_unlock(&task->lock);
+        errno = EBUSY;
+        return -1;
+    }
+    if (atomic_load_explicit(&task->join_claimed, memory_order_acquire) != 0U) {
         pthread_mutex_unlock(&task->lock);
         errno = EBUSY;
         return -1;

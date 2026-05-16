@@ -75,6 +75,13 @@ int llam_run(void) {
         return -1;
     }
 
+    /*
+     * Natural drain uses the same stop flag that explicit runtime-stop requests
+     * use to wake idle workers out of their scheduler loops.  Once a run has
+     * completed cleanly, clear that internal drain signal so embedders can
+     * spawn more work and call llam_run() again on the same initialized runtime.
+     */
+    atomic_store_explicit(&rt->stop_requested, false, memory_order_release);
     return 0;
 }
 

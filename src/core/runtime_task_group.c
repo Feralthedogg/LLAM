@@ -78,7 +78,7 @@ int llam_task_group_destroy(llam_task_group_t *group) {
     }
 
     pthread_mutex_lock(&group->lock);
-    if (group->count != 0U) {
+    if (group->count != 0U || group->active_spawns != 0U || group->joining) {
         pthread_mutex_unlock(&group->lock);
         errno = EBUSY;
         return -1;
@@ -125,19 +125,25 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
     }
 
     pthread_mutex_lock(&group->lock);
+    if (group->joining) {
+        pthread_mutex_unlock(&group->lock);
+        errno = EBUSY;
+        return NULL;
+    }
     if (llam_task_group_reserve_locked(group, group->count + 1U) != 0) {
         pthread_mutex_unlock(&group->lock);
         return NULL;
     }
+    group->active_spawns += 1U;
     pthread_mutex_unlock(&group->lock);
 
     task = llam_spawn_ex(fn, arg, &effective_opts, sizeof(effective_opts));
-    if (task == NULL) {
-        return NULL;
-    }
 
     pthread_mutex_lock(&group->lock);
-    group->tasks[group->count++] = task;
+    group->active_spawns -= 1U;
+    if (task != NULL) {
+        group->tasks[group->count++] = task;
+    }
     pthread_mutex_unlock(&group->lock);
     return task;
 }
@@ -168,6 +174,12 @@ static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline
     }
 
     pthread_mutex_lock(&group->lock);
+    if (group->active_spawns != 0U || group->joining) {
+        pthread_mutex_unlock(&group->lock);
+        errno = EBUSY;
+        return -1;
+    }
+    group->joining = true;
     tasks = group->tasks;
     count = group->count;
     group->count = 0U;
@@ -183,11 +195,15 @@ static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline
             while (i < count) {
                 group->tasks[group->count++] = tasks[i++];
             }
+            group->joining = false;
             pthread_mutex_unlock(&group->lock);
             errno = saved_errno;
             return -1;
         }
     }
+    pthread_mutex_lock(&group->lock);
+    group->joining = false;
+    pthread_mutex_unlock(&group->lock);
     return 0;
 }
 

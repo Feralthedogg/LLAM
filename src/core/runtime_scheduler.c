@@ -278,6 +278,16 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         if (llam_shard_pause_for_merge(shard)) {
             continue;
         }
+        if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire) &&
+            llam_runtime_has_live_tasks(rt)) {
+            /*
+             * A task can enter a blocking wait after another task has already
+             * requested runtime stop.  Re-run the stop cancellation pass from
+             * the scheduler loop so those late parkers observe ECANCELED
+             * instead of waiting for a producer that may never arrive.
+             */
+            llam_runtime_cancel_parked_waiters(rt);
+        }
         if (rt->experimental_dynamic_shards != 0U &&
             atomic_load_explicit(&shard->online, memory_order_acquire) == 0U) {
             if (!llam_shard_has_local_work(shard)) {
@@ -417,6 +427,10 @@ void *llam_opaque_helper_main(void *arg) {
             }
             if (llam_shard_pause_for_merge(shard)) {
                 continue;
+            }
+            if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire) &&
+                llam_runtime_has_live_tasks(rt)) {
+                llam_runtime_cancel_parked_waiters(rt);
             }
             llam_allocator_quiescent(shard);
             llam_drain_inject_queue(shard);

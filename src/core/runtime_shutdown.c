@@ -46,6 +46,7 @@ void llam_runtime_shutdown(void) {
     g_llam_tls_shard = NULL;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
+    atomic_store_explicit(&rt->shutdown_requested, true, memory_order_release);
     llam_request_stop(rt);
 
     if (rt->ctrl_thread_started) {

@@ -7,7 +7,7 @@ OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 PICFLAGS ?= -fPIC
 LLAM_ABI_MAJOR ?= 1
-LLAM_VERSION ?= 1.0.1
+LLAM_VERSION ?= 1.0.2
 CLEAN_DIRS = \
 	$(OBJDIR) \
 	$(SHARED_OBJDIR) \
@@ -29,11 +29,19 @@ CLEAN_FILES = \
 	test_abi_compat \
 	test_connect_io \
 	test_runtime_core \
+	test_runtime_api_edges \
+	test_runtime_select_edges \
+	test_runtime_io_dump \
+	test_runtime_group_local_edges \
+	test_runtime_unmanaged_join \
 	test_runtime_stress \
 	test_runtime_fuzz \
+	test_runtime_invariants \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
+	test_windows_runtime_smoke \
+	test_windows_iocp_dump \
 	test_shared_load \
 	libllam_runtime.a \
 	demo.exe \
@@ -46,11 +54,19 @@ CLEAN_FILES = \
 	test_abi_compat.exe \
 	test_connect_io.exe \
 	test_runtime_core.exe \
+	test_runtime_api_edges.exe \
+	test_runtime_select_edges.exe \
+	test_runtime_io_dump.exe \
+	test_runtime_group_local_edges.exe \
+	test_runtime_unmanaged_join.exe \
 	test_runtime_stress.exe \
 	test_runtime_fuzz.exe \
+	test_runtime_invariants.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
+	test_windows_runtime_smoke.exe \
+	test_windows_iocp_dump.exe \
 	test_shared_load.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
@@ -99,6 +115,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_windows_compat.h \
 	src/internal/runtime_windows.h \
 	src/internal/runtime_windows_iocp.h \
+	src/internal/runtime_debug_dump_helpers.h \
 	src/internal/llam_internal.h \
 	src/internal/runtime_internal.h \
 	src/internal/runtime_types.h \
@@ -180,6 +197,8 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/runtime_io_api_blocking_ops.o \
 	$(OBJDIR)/src/io/runtime_io_api_public.o \
 	$(OBJDIR)/src/io/windows/runtime_windows_iocp.o \
+	$(OBJDIR)/src/core/runtime_debug_dump_helpers.o \
+	$(OBJDIR)/src/core/runtime_debug_stats_json.o \
 	$(OBJDIR)/src/core/runtime_debug.o \
 	$(OBJDIR)/src/io/runtime_io_watch.o
 
@@ -262,7 +281,8 @@ STRESS_OBJS = \
 	$(OBJDIR)/examples/stress_timeout_cases.o \
 	$(OBJDIR)/examples/stress_dynamic_cases.o \
 	$(OBJDIR)/examples/stress_suite.o \
-	$(OBJDIR)/examples/stress_entry.o
+	$(OBJDIR)/examples/stress_entry.o \
+	$(OBJDIR)/examples/stress_signal_dump.o
 BENCH_OBJS = \
 	$(OBJDIR)/examples/bench.o \
 	$(OBJDIR)/examples/bench_support.o \
@@ -283,16 +303,34 @@ TEST_CONNECT_OBJS = \
 	$(OBJDIR)/tests/test_connect_io.o
 TEST_RUNTIME_CORE_OBJS = \
 	$(OBJDIR)/tests/test_runtime_core.o
+TEST_RUNTIME_API_EDGES_OBJS = \
+	$(OBJDIR)/tests/test_runtime_api_edges.o
+TEST_RUNTIME_SELECT_EDGES_OBJS = \
+	$(OBJDIR)/tests/test_runtime_select_edges.o
+TEST_RUNTIME_IO_DUMP_OBJS = \
+	$(OBJDIR)/tests/test_runtime_io_dump.o
+TEST_RUNTIME_GROUP_LOCAL_EDGES_OBJS = \
+	$(OBJDIR)/tests/test_runtime_group_local_edges.o
+TEST_RUNTIME_UNMANAGED_JOIN_OBJS = \
+	$(OBJDIR)/tests/test_runtime_unmanaged_join.o
 TEST_RUNTIME_STRESS_OBJS = \
 	$(OBJDIR)/tests/test_runtime_stress.o
 TEST_RUNTIME_FUZZ_OBJS = \
 	$(OBJDIR)/tests/test_runtime_fuzz.o
+TEST_RUNTIME_INVARIANTS_OBJS = \
+	$(OBJDIR)/tests/test_runtime_invariants.o
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
 	$(OBJDIR)/tests/test_io_buffers.o
 TEST_WINDOWS_POLICY_OBJS = \
 	$(OBJDIR)/tests/test_windows_policy.o
+# Keep Make parity with CMake for portable Windows diagnostics; IOCP dump
+# builds everywhere and skips at runtime on non-Windows hosts.
+TEST_WINDOWS_RUNTIME_SMOKE_OBJS = \
+	$(OBJDIR)/tests/test_windows_runtime_smoke.o
+TEST_WINDOWS_IOCP_DUMP_OBJS = \
+	$(OBJDIR)/tests/test_windows_iocp_dump.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
@@ -330,16 +368,24 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_stress test_runtime_fuzz test_sync_primitives test_io_buffers test_windows_policy test_shared_load shared
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load shared
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
 	./test_runtime_core
+	./test_runtime_api_edges
+	./test_runtime_select_edges
+	./test_runtime_io_dump
+	./test_runtime_group_local_edges
+	./test_runtime_unmanaged_join
 	./test_runtime_stress
 	./test_runtime_fuzz
+	./test_runtime_invariants
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
+	./test_windows_runtime_smoke
+	./test_windows_iocp_dump
 	./test_shared_load ./$(SHLIB_REAL)
 
 check: test
@@ -397,11 +443,29 @@ test_connect_io: $(RUNTIME_OBJS) $(TEST_CONNECT_OBJS)
 test_runtime_core: $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
 
+test_runtime_api_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS) $(LDLIBS)
+
+test_runtime_select_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS) $(LDLIBS)
+
+test_runtime_io_dump: $(RUNTIME_OBJS) $(TEST_RUNTIME_IO_DUMP_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_IO_DUMP_OBJS) $(LDLIBS)
+
+test_runtime_group_local_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_GROUP_LOCAL_EDGES_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_GROUP_LOCAL_EDGES_OBJS) $(LDLIBS)
+
+test_runtime_unmanaged_join: $(RUNTIME_OBJS) $(TEST_RUNTIME_UNMANAGED_JOIN_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_UNMANAGED_JOIN_OBJS) $(LDLIBS)
+
 test_runtime_stress: $(RUNTIME_OBJS) $(TEST_RUNTIME_STRESS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_STRESS_OBJS) $(LDLIBS)
 
 test_runtime_fuzz: $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS) $(LDLIBS)
+
+test_runtime_invariants: $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS) $(LDLIBS)
 
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)
@@ -411,6 +475,12 @@ test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
 
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)
+
+test_windows_runtime_smoke: $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) $(LDLIBS)
+
+test_windows_iocp_dump: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
@@ -532,6 +602,10 @@ $(OBJDIR)/examples/stress_suite.o: examples/stress_suite.c include/llam/runtime.
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_entry.o: examples/stress_entry.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/examples/stress_signal_dump.o: examples/stress_signal_dump.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

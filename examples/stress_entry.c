@@ -185,7 +185,13 @@ int main(void) {
     dynamic_sleep_us = stress_env_u32("LLAM_STRESS_DYNAMIC_SLEEP_US", 30000U, 1000000U);
     dynamic_live_poll_waiters = stress_env_u32("LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS", 128U, 2048U);
     dynamic_live_poll_waiters = stress_fd_budget_waiters(dynamic_live_poll_waiters, 2U, 256U);
-    dynamic_live_poll_monitor_rounds = stress_env_u32("LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS", 256U, 4096U);
+    /*
+     * Live-I/O downscale checks run immediately after a timer-heavy fanout wave.
+     * The scaler may still be draining cooldown/down-streak state from that
+     * wave, so the default monitor window needs to cover more than the nominal
+     * park latency.  Shorter windows made this test a false-negative race.
+     */
+    dynamic_live_poll_monitor_rounds = stress_env_u32("LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS", 1024U, 4096U);
     dynamic_live_poll_monitor_us = stress_env_u32("LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US", 2000U, 1000000U);
     dynamic_state.round_count = dynamic_rounds;
     dynamic_state.sleep_tasks = dynamic_sleep_tasks;
@@ -269,6 +275,7 @@ int main(void) {
            sqpoll,
            runtime_opts.sqpoll_cpu);
     atomic_init(&g_failures, 0U);
+    stress_setup_signal_dump();
     if (deterministic_phase != 0U &&
         stress_run_phase("deterministic", stress_suite_task, &stress_rounds, &runtime_opts, 0U, 0U) != 0) {
         fprintf(stderr, "[stress] failures=%u\n", atomic_load(&g_failures));
@@ -410,5 +417,6 @@ cleanup:
     if (rc == 0) {
         printf("[stress] ok\n");
     }
+    stress_teardown_signal_dump();
     return rc;
 }

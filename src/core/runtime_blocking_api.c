@@ -200,9 +200,12 @@ static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned exp
  * token if present, queues the job under @c block_lock, wakes a blocking worker,
  * and context-switches back to the scheduler until completion.
  *
- * Completion and cancellation share the same wake path. After the task resumes,
- * any registered cancellation waiter is removed, the wait bookkeeping is
- * cleared, and the callback result or wake error is returned to the caller.
+ * Queued callbacks may be cancelled before a worker starts them. Once a worker
+ * is executing user code, cancellation is reported only after the callback
+ * returns so the caller cannot outlive or free callback arguments prematurely.
+ * After the task resumes, any registered cancellation waiter is removed, the
+ * wait bookkeeping is cleared, and the callback result or wake error is
+ * returned to the caller.
  *
  * @param fn  Blocking callback to execute.
  * @param arg User argument passed to @p fn.

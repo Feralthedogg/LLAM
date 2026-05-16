@@ -206,10 +206,11 @@ static void llam_channel_wake_waiter(llam_wait_node_t *node, llam_wait_reason_t 
         return;
     }
     if (node->select_state != NULL) {
-        if (atomic_load_explicit(&node->select_state->wake_armed, memory_order_acquire) == 0U ||
-            node->task->state != LLAM_TASK_STATE_PARKED) {
+        if (!llam_channel_select_node_should_wake(node)) {
             return;
         }
+    } else if (!llam_wait_node_prepare_wake(node)) {
+        return;
     }
     llam_reinject_task_on_shard(&g_llam_runtime,
                               node->task,
@@ -232,17 +233,30 @@ static bool llam_channel_wake_waiter_and_handoff(llam_wait_node_t *node, llam_wa
         return false;
     }
     if (node->select_state != NULL) {
-        if (atomic_load_explicit(&node->select_state->wake_armed, memory_order_acquire) == 0U ||
-            node->task->state != LLAM_TASK_STATE_PARKED) {
+        if (!llam_channel_select_node_should_wake(node)) {
             return false;
         }
+    } else if (!llam_wait_node_prepare_wake(node)) {
+        return false;
     }
-    return llam_reinject_task_on_shard_and_yield_current(&g_llam_runtime,
-                                                       node->task,
-                                                       node->task->parked_shard,
-                                                       true,
-                                                       LLAM_TRACE_WAKE,
-                                                       reason);
+    if (llam_reinject_task_on_shard_and_yield_current(&g_llam_runtime,
+                                                     node->task,
+                                                     node->task->parked_shard,
+                                                     true,
+                                                     LLAM_TRACE_WAKE,
+                                                     reason)) {
+        return true;
+    }
+    if (node->select_state == NULL) {
+        llam_reinject_task_on_shard(&g_llam_runtime,
+                                  node->task,
+                                  node->task->parked_shard,
+                                  true,
+                                  LLAM_TRACE_WAKE,
+                                  reason);
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -466,7 +480,14 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
         return -1;
     }
 
-    llam_park_current_task(LLAM_WAIT_CHANNEL_SEND, LLAM_TRACE_STATE);
+    if (llam_wait_node_should_park(node)) {
+        llam_park_current_task(LLAM_WAIT_CHANNEL_SEND, LLAM_TRACE_STATE);
+    }
+    if (has_deadline) {
+        // A receiver may consume this node before deadline arming completes;
+        // clear any timer the wake path could not have seen yet.
+        llam_disarm_task_wait_deadline(task);
+    }
     if (task->cancel_registered) {
         llam_cancel_token_unregister_task(task);
     }
@@ -577,7 +598,9 @@ int llam_channel_send(llam_channel_t *channel, void *value) {
         return -1;
     }
 
-    llam_park_current_task(LLAM_WAIT_CHANNEL_SEND, LLAM_TRACE_STATE);
+    if (llam_wait_node_should_park(node)) {
+        llam_park_current_task(LLAM_WAIT_CHANNEL_SEND, LLAM_TRACE_STATE);
+    }
     if (task->cancel_registered) {
         llam_cancel_token_unregister_task(task);
     }
@@ -783,7 +806,14 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
         return -1;
     }
 
-    llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
+    if (llam_wait_node_should_park(node)) {
+        llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
+    }
+    if (has_deadline) {
+        // A sender may satisfy this node before deadline arming completes;
+        // clear any timer the wake path could not have seen yet.
+        llam_disarm_task_wait_deadline(task);
+    }
     if (task->cancel_registered) {
         llam_cancel_token_unregister_task(task);
     }
@@ -1001,7 +1031,9 @@ void *llam_channel_recv(llam_channel_t *channel) {
         return NULL;
     }
 
-    llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
+    if (llam_wait_node_should_park(node)) {
+        llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
+    }
     if (task->cancel_registered) {
         llam_cancel_token_unregister_task(task);
     }

@@ -491,6 +491,13 @@ void llam_wake_wait_node(llam_wait_node_t *node, bool hot, llam_wait_reason_t re
     if (node == NULL || node->task == NULL) {
         return;
     }
+    if (node->select_state != NULL) {
+        if (!llam_channel_select_node_should_wake(node)) {
+            return;
+        }
+    } else if (!llam_wait_node_prepare_wake(node)) {
+        return;
+    }
     llam_reinject_task(&g_llam_runtime, node->task, hot, LLAM_TRACE_WAKE, reason);
 }
 

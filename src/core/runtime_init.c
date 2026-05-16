@@ -677,10 +677,18 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
         return -1;
     }
 
-    if (rt->experimental_shard_rings != 0U) {
-        memcpy(rt->kernel_node_ids, io_node_ids, rt->active_nodes * sizeof(*io_node_ids));
-    } else {
-        memcpy(rt->kernel_node_ids, locality_node_ids, rt->active_nodes * sizeof(*locality_node_ids));
+    {
+        const unsigned *node_ids =
+            rt->experimental_shard_rings != 0U ? io_node_ids : locality_node_ids;
+
+        if (node_ids == NULL) {
+            free(io_node_ids);
+            free(locality_node_ids);
+            llam_runtime_shutdown();
+            errno = ENOMEM;
+            return -1;
+        }
+        memcpy(rt->kernel_node_ids, node_ids, rt->active_nodes * sizeof(*node_ids));
     }
     free(io_node_ids);
     free(locality_node_ids);

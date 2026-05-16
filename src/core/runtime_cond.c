@@ -196,7 +196,14 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         return -1;
     }
 
-    llam_park_current_task(LLAM_WAIT_COND, LLAM_TRACE_STATE);
+    if (llam_wait_node_should_park(node)) {
+        llam_park_current_task(LLAM_WAIT_COND, LLAM_TRACE_STATE);
+    }
+    if (has_deadline) {
+        // Early signal/broadcast can race ahead of timer arming.  The waiter
+        // disarms any leftover deadline before reacquiring the user mutex.
+        llam_disarm_task_wait_deadline(task);
+    }
     if (task->cancel_registered) {
         llam_cancel_token_unregister_task(task);
     }

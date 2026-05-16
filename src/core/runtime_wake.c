@@ -682,53 +682,54 @@ int llam_opaque_wake_init(llam_shard_t *shard) {
 typedef int (*llam_darwin_ulock_wait_fn)(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
 typedef int (*llam_darwin_ulock_wake_fn)(uint32_t operation, void *addr, uint64_t wake_value);
 
+static pthread_once_t g_llam_darwin_ulock_once = PTHREAD_ONCE_INIT;
+static int g_llam_darwin_ulock_enabled = 0;
+static llam_darwin_ulock_wait_fn g_llam_darwin_ulock_wait = NULL;
+static llam_darwin_ulock_wake_fn g_llam_darwin_ulock_wake = NULL;
+
+static void llam_darwin_ulock_resolve_once(void) {
+    const char *env = llam_env_get("LLAM_OPAQUE_DARWIN_ULOCK");
+
+    if (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) {
+        union {
+            void *object;
+            llam_darwin_ulock_wait_fn function;
+        } wait_symbol;
+        union {
+            void *object;
+            llam_darwin_ulock_wake_fn function;
+        } wake_symbol;
+
+        wait_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wait");
+        wake_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wake");
+        g_llam_darwin_ulock_wait = wait_symbol.function;
+        g_llam_darwin_ulock_wake = wake_symbol.function;
+        g_llam_darwin_ulock_enabled =
+            g_llam_darwin_ulock_wait != NULL && g_llam_darwin_ulock_wake != NULL ? 1 : 0;
+    }
+}
+
 /**
  * @brief Resolve private Darwin ulock entry points for opt-in opaque wake probes.
  *
  * @details
- * The symbols are resolved lazily with @c dlsym so the normal public Mach
- * semaphore path remains the default ABI-safe implementation.  The ulock path is
- * only used when @c LLAM_OPAQUE_DARWIN_ULOCK is explicitly enabled.
+ * The symbols are resolved once with @c pthread_once so concurrent first use
+ * cannot race on the cached function pointers.  The normal public Mach
+ * semaphore path remains the default ABI-safe implementation.
  */
 static bool llam_darwin_ulock_functions(llam_darwin_ulock_wait_fn *wait_out,
                                         llam_darwin_ulock_wake_fn *wake_out) {
-    static atomic_int cached = -1;
-    static llam_darwin_ulock_wait_fn wait_fn = NULL;
-    static llam_darwin_ulock_wake_fn wake_fn = NULL;
-    int value = atomic_load_explicit(&cached, memory_order_acquire);
-
-    if (value < 0) {
-        const char *env = llam_env_get("LLAM_OPAQUE_DARWIN_ULOCK");
-
-        value = 0;
-        if (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) {
-            union {
-                void *object;
-                llam_darwin_ulock_wait_fn function;
-            } wait_symbol;
-            union {
-                void *object;
-                llam_darwin_ulock_wake_fn function;
-            } wake_symbol;
-
-            wait_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wait");
-            wake_symbol.object = dlsym(RTLD_DEFAULT, "__ulock_wake");
-            wait_fn = wait_symbol.function;
-            wake_fn = wake_symbol.function;
-            value = wait_fn != NULL && wake_fn != NULL ? 1 : 0;
-        }
-        atomic_store_explicit(&cached, value, memory_order_release);
-    }
-    if (value == 0) {
+    (void)pthread_once(&g_llam_darwin_ulock_once, llam_darwin_ulock_resolve_once);
+    if (g_llam_darwin_ulock_enabled == 0) {
         return false;
     }
     if (wait_out != NULL) {
-        *wait_out = wait_fn;
+        *wait_out = g_llam_darwin_ulock_wait;
     }
     if (wake_out != NULL) {
-        *wake_out = wake_fn;
+        *wake_out = g_llam_darwin_ulock_wake;
     }
-    return true;
+    return g_llam_darwin_ulock_wait != NULL && g_llam_darwin_ulock_wake != NULL;
 }
 
 /**
@@ -793,7 +794,7 @@ void llam_opaque_wake_signal(llam_shard_t *shard) {
     {
         llam_darwin_ulock_wake_fn ulock_wake = NULL;
 
-        if (llam_darwin_ulock_functions(NULL, &ulock_wake)) {
+        if (llam_darwin_ulock_functions(NULL, &ulock_wake) && ulock_wake != NULL) {
             int saved_errno = errno;
 
             atomic_fetch_add_explicit(&shard->opaque_wake_seq, 1U, memory_order_release);
@@ -848,7 +849,7 @@ void llam_opaque_wake_wait(llam_shard_t *shard) {
     {
         llam_darwin_ulock_wait_fn ulock_wait = NULL;
 
-        if (llam_darwin_ulock_functions(&ulock_wait, NULL)) {
+        if (llam_darwin_ulock_functions(&ulock_wait, NULL) && ulock_wait != NULL) {
             unsigned seq = atomic_load_explicit(&shard->opaque_wake_seq, memory_order_acquire);
             int saved_errno = errno;
 
@@ -920,6 +921,7 @@ void llam_wake_all_nodes(llam_runtime_t *rt) {
  */
 void llam_request_stop(llam_runtime_t *rt) {
     atomic_store(&rt->stop_requested, true);
+    llam_runtime_cancel_parked_waiters(rt);
     if (rt->block_lock_initialized) {
         atomic_fetch_add_explicit(&rt->block_wake_seq, 1U, memory_order_release);
 #if defined(__linux__)

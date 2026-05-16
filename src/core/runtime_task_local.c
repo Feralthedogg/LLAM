@@ -130,6 +130,12 @@ void *llam_task_local_get(llam_task_local_key_t key) {
             return entry->value;
         }
     }
+    /*
+     * NULL is a valid "no value has been set" result for an active key. Clear
+     * errno so callers can distinguish that successful miss from ENOTSUP/EINVAL
+     * without depending on whatever errno happened to contain on entry.
+     */
+    errno = 0;
     return NULL;
 }
 

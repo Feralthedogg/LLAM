@@ -25,6 +25,7 @@
  */
 
 #include "runtime_internal.h"
+#include "runtime_debug_dump_helpers.h"
 
 /**
  * @brief Return a task's runtime-assigned id.
@@ -175,83 +176,7 @@ int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
     return llam_runtime_collect_stats_ex(stats, stats != NULL ? sizeof(*stats) : 0U);
 }
 
-static int llam_stats_json_u64(int fd, const char *name, uint64_t value, unsigned *field_count) {
-    int rc = dprintf(fd,
-                     "%s\"%s\":%llu",
-                     *field_count == 0U ? "" : ",",
-                     name,
-                     (unsigned long long)value);
-
-    if (rc < 0) {
-        return -1;
-    }
-    *field_count += 1U;
-    return 0;
-}
-
-int llam_runtime_write_stats_json(int fd) {
-    llam_runtime_stats_t stats;
-    unsigned fields = 0U;
-
-    if (fd < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (llam_runtime_collect_stats(&stats) != 0) {
-        return -1;
-    }
-    if (dprintf(fd, "{") < 0 ||
-        llam_stats_json_u64(fd, "ctx_switches", stats.ctx_switches, &fields) != 0 ||
-        llam_stats_json_u64(fd, "yields", stats.yields, &fields) != 0 ||
-        llam_stats_json_u64(fd, "parks", stats.parks, &fields) != 0 ||
-        llam_stats_json_u64(fd, "wakes", stats.wakes, &fields) != 0 ||
-        llam_stats_json_u64(fd, "steals", stats.steals, &fields) != 0 ||
-        llam_stats_json_u64(fd, "migrations", stats.migrations, &fields) != 0 ||
-        llam_stats_json_u64(fd, "blocking_calls", stats.blocking_calls, &fields) != 0 ||
-        llam_stats_json_u64(fd, "blocking_completions", stats.blocking_completions, &fields) != 0 ||
-        llam_stats_json_u64(fd, "io_submits", stats.io_submits, &fields) != 0 ||
-        llam_stats_json_u64(fd, "io_submit_calls", stats.io_submit_calls, &fields) != 0 ||
-        llam_stats_json_u64(fd, "io_submit_syscalls", stats.io_submit_syscalls, &fields) != 0 ||
-        llam_stats_json_u64(fd, "io_completions", stats.io_completions, &fields) != 0 ||
-        llam_stats_json_u64(fd, "idle_polls", stats.idle_polls, &fields) != 0 ||
-        llam_stats_json_u64(fd, "idle_spin_loops", stats.idle_spin_loops, &fields) != 0 ||
-        llam_stats_json_u64(fd, "idle_spin_hits", stats.idle_spin_hits, &fields) != 0 ||
-        llam_stats_json_u64(fd, "idle_spin_fallbacks", stats.idle_spin_fallbacks, &fields) != 0 ||
-        llam_stats_json_u64(fd, "idle_spin_ns", stats.idle_spin_ns, &fields) != 0 ||
-        llam_stats_json_u64(fd, "queue_overflows", stats.queue_overflows, &fields) != 0 ||
-        llam_stats_json_u64(fd, "overflow_depth", stats.overflow_depth, &fields) != 0 ||
-        llam_stats_json_u64(fd, "active_workers", stats.active_workers, &fields) != 0 ||
-        llam_stats_json_u64(fd, "online_workers", stats.online_workers, &fields) != 0 ||
-        llam_stats_json_u64(fd, "online_workers_floor", stats.online_workers_floor, &fields) != 0 ||
-        llam_stats_json_u64(fd, "online_workers_min", stats.online_workers_min, &fields) != 0 ||
-        llam_stats_json_u64(fd, "online_workers_max", stats.online_workers_max, &fields) != 0 ||
-        llam_stats_json_u64(fd, "active_nodes", stats.active_nodes, &fields) != 0 ||
-        llam_stats_json_u64(fd, "dynamic_workers", stats.dynamic_workers, &fields) != 0 ||
-        llam_stats_json_u64(fd, "worker_rings", stats.worker_rings, &fields) != 0 ||
-        llam_stats_json_u64(fd, "worker_rings_multishot", stats.worker_rings_multishot, &fields) != 0 ||
-        llam_stats_json_u64(fd, "lockfree_normq", stats.lockfree_normq, &fields) != 0 ||
-        llam_stats_json_u64(fd, "huge_alloc", stats.huge_alloc, &fields) != 0 ||
-        llam_stats_json_u64(fd, "sqpoll", stats.sqpoll, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_block_ns", stats.opaque_block_ns, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_block_samples", stats.opaque_block_samples, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_block_max_ns", stats.opaque_block_max_ns, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_enter_wait_ns", stats.opaque_enter_wait_ns, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_enter_wait_samples", stats.opaque_enter_wait_samples, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_enter_wait_max_ns", stats.opaque_enter_wait_max_ns, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_leave_wait_ns", stats.opaque_leave_wait_ns, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_leave_wait_samples", stats.opaque_leave_wait_samples, &fields) != 0 ||
-        llam_stats_json_u64(fd, "opaque_leave_wait_max_ns", stats.opaque_leave_wait_max_ns, &fields) != 0 ||
-        dprintf(fd, "}\n") < 0) {
-        return -1;
-    }
-    return 0;
-}
-
-/**
- * @brief Write a human-readable runtime dump to an fd.
- *
- * @param fd Destination file descriptor.
- */
+/** @brief Write a human-readable runtime dump to an fd. */
 void llam_dump_runtime_state(int fd) {
     llam_runtime_t *rt = &g_llam_runtime;
     unsigned i;
@@ -303,71 +228,166 @@ void llam_dump_runtime_state(int fd) {
             (unsigned long long)rt->xsave_mask,
             rt->xsave_area_size);
 
+    dprintf(fd,
+            "lifecycle:\n"
+            "  initialized=%u exec_started=%u stop_requested=%u shutdown_requested=%u live_tasks=%u live_task_shards=%u active_io_waiters=%u fatal_errno=%d global_epoch=%llu\n",
+            rt->initialized ? 1U : 0U,
+            rt->exec_started ? 1U : 0U,
+            atomic_load_explicit(&rt->stop_requested, memory_order_acquire) ? 1U : 0U,
+            atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) ? 1U : 0U,
+            atomic_load_explicit(&rt->live_tasks, memory_order_acquire),
+            atomic_load_explicit(&rt->live_task_shards, memory_order_acquire),
+            atomic_load_explicit(&rt->active_io_waiters, memory_order_acquire),
+            atomic_load_explicit(&rt->fatal_errno, memory_order_acquire),
+            (unsigned long long)atomic_load_explicit(&rt->global_epoch, memory_order_acquire));
+
     // The dump format is intentionally text-first for bug reports and benchmark
     // logs; machine consumers should use llam_runtime_collect_stats().
     dprintf(fd,
             "block:\n"
-            "  workers=%u pending=%u active=%u queued=%u peak_active=%u\n",
+            "  workers=%u pending=%u active=%u queued=%u peak_active=%u wake_seq=%u\n",
             rt->block_worker_count,
             block_pending,
             block_active,
             block_pending > block_active ? block_pending - block_active : 0U,
-            atomic_load(&rt->block_active_peak));
+            atomic_load(&rt->block_active_peak),
+            atomic_load_explicit(&rt->block_wake_seq, memory_order_acquire));
 
     dprintf(fd, "nodes:\n");
     for (i = 0; i < rt->active_nodes; ++i) {
+        llam_node_t *node = &rt->nodes[i];
+        unsigned submit_depth = 0U;
+        unsigned control_depth = 0U;
+        unsigned poll_watch_count = 0U;
+        unsigned poll_waiters = 0U;
+        unsigned accept_watch_count = 0U;
+        unsigned accept_waiters = 0U;
+        unsigned accept_ready = 0U;
+        unsigned recv_watch_count = 0U;
+        unsigned recv_waiters = 0U;
+        unsigned recv_ready = 0U;
+        const char *submit_lock_state = "ok";
+        const char *watch_lock_state = "ok";
+
+        if (pthread_mutex_trylock(&node->submit_lock) == 0) {
+            submit_depth = llam_io_req_list_count_diag(node->submit_head);
+            control_depth = llam_io_control_list_count_diag(node->control_head);
+            pthread_mutex_unlock(&node->submit_lock);
+        } else {
+            submit_lock_state = "busy";
+        }
+
+        if (pthread_mutex_trylock(&node->watch_lock) == 0) {
+            for (llam_poll_watch_t *watch = node->poll_watches; watch != NULL; watch = watch->next) {
+                poll_watch_count += 1U;
+                poll_waiters += llam_io_req_list_count_diag(watch->wait_head);
+            }
+            for (llam_accept_watch_t *watch = node->accept_watches; watch != NULL; watch = watch->next) {
+                accept_watch_count += 1U;
+                accept_waiters += llam_io_req_list_count_diag(watch->wait_head);
+                for (llam_accept_ready_t *ready = watch->ready_head; ready != NULL; ready = ready->next) {
+                    accept_ready += 1U;
+                }
+            }
+            for (llam_recv_watch_t *watch = node->recv_watches; watch != NULL; watch = watch->next) {
+                recv_watch_count += 1U;
+                recv_waiters += llam_io_req_list_count_diag(watch->wait_head);
+                for (llam_recv_ready_t *ready = watch->ready_head; ready != NULL; ready = ready->next) {
+                    recv_ready += 1U;
+                }
+            }
+            pthread_mutex_unlock(&node->watch_lock);
+        } else {
+            watch_lock_state = "busy";
+        }
+
         dprintf(fd,
-                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu cancel(ctrl=%llu ok=%llu fail=%llu not_found=%llu) max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
-                rt->nodes[i].index,
-                rt->nodes[i].kernel_node_id,
-                rt->nodes[i].ring_ready ? 1U : 0U,
-                rt->nodes[i].sqpoll_enabled ? 1U : 0U,
-                rt->nodes[i].sqpoll_enabled ? (int)rt->nodes[i].sqpoll_cpu : -1,
-                rt->nodes[i].supports_read ? 1U : 0U,
-                rt->nodes[i].supports_recv ? 1U : 0U,
-                rt->nodes[i].supports_write ? 1U : 0U,
-                rt->nodes[i].supports_accept ? 1U : 0U,
-                rt->nodes[i].supports_connect ? 1U : 0U,
-                rt->nodes[i].supports_poll ? 1U : 0U,
-                rt->nodes[i].supports_multishot_recv ? 1U : 0U,
-                rt->nodes[i].supports_multishot_accept ? 1U : 0U,
-                rt->nodes[i].supports_multishot_poll ? 1U : 0U,
-                rt->nodes[i].supports_provided_buffers ? 1U : 0U,
-                atomic_load(&rt->nodes[i].pending_ops),
-                (unsigned long long)rt->nodes[i].submit_batches,
-                (unsigned long long)rt->nodes[i].submit_entries,
-                (unsigned long long)rt->nodes[i].submit_calls,
-                (unsigned long long)rt->nodes[i].submit_syscalls,
-                (unsigned long long)rt->nodes[i].windows_cancel_controls,
-                (unsigned long long)rt->nodes[i].windows_cancel_success,
-                (unsigned long long)rt->nodes[i].windows_cancel_failures,
-                (unsigned long long)rt->nodes[i].windows_cancel_not_found,
-                rt->nodes[i].max_submit_batch,
-                rt->nodes[i].last_cq_depth,
-                rt->nodes[i].max_cq_depth,
-                (unsigned long long)rt->nodes[i].unsupported_ops,
-                (unsigned long long)rt->nodes[i].provided_buf_acquires,
-                (unsigned long long)rt->nodes[i].provided_buf_returns);
+                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u locks(submit=%s watch=%s) io_queues(submit=%u control=%u poll_watch=%u poll_waiters=%u accept_watch=%u accept_waiters=%u accept_ready=%u recv_watch=%u recv_waiters=%u recv_ready=%u) submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu cancel(ctrl=%llu ok=%llu fail=%llu not_found=%llu) max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
+                node->index,
+                node->kernel_node_id,
+                node->ring_ready ? 1U : 0U,
+                node->sqpoll_enabled ? 1U : 0U,
+                node->sqpoll_enabled ? (int)node->sqpoll_cpu : -1,
+                node->supports_read ? 1U : 0U,
+                node->supports_recv ? 1U : 0U,
+                node->supports_write ? 1U : 0U,
+                node->supports_accept ? 1U : 0U,
+                node->supports_connect ? 1U : 0U,
+                node->supports_poll ? 1U : 0U,
+                node->supports_multishot_recv ? 1U : 0U,
+                node->supports_multishot_accept ? 1U : 0U,
+                node->supports_multishot_poll ? 1U : 0U,
+                node->supports_provided_buffers ? 1U : 0U,
+                atomic_load_explicit(&node->pending_ops, memory_order_acquire),
+                submit_lock_state,
+                watch_lock_state,
+                submit_depth,
+                control_depth,
+                poll_watch_count,
+                poll_waiters,
+                accept_watch_count,
+                accept_waiters,
+                accept_ready,
+                recv_watch_count,
+                recv_waiters,
+                recv_ready,
+                (unsigned long long)node->submit_batches,
+                (unsigned long long)node->submit_entries,
+                (unsigned long long)node->submit_calls,
+                (unsigned long long)node->submit_syscalls,
+                (unsigned long long)node->windows_cancel_controls,
+                (unsigned long long)node->windows_cancel_success,
+                (unsigned long long)node->windows_cancel_failures,
+                (unsigned long long)node->windows_cancel_not_found,
+                node->max_submit_batch,
+                node->last_cq_depth,
+                node->max_cq_depth,
+                (unsigned long long)node->unsupported_ops,
+                (unsigned long long)node->provided_buf_acquires,
+                (unsigned long long)node->provided_buf_returns);
     }
 
     dprintf(fd, "shards:\n");
     for (i = 0; i < rt->active_shards; ++i) {
         llam_shard_t *shard = &rt->shards[i];
-        size_t trace_count = shard->trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : shard->trace_head;
-        unsigned begin = shard->trace_head > LLAM_TRACE_RING_CAP ? shard->trace_head - LLAM_TRACE_RING_CAP : 0U;
+        size_t trace_count;
+        unsigned begin;
         unsigned j;
         llam_task_t *current;
 
-        pthread_mutex_lock(&shard->lock);
+        if (pthread_mutex_trylock(&shard->lock) != 0) {
+            current = atomic_load_explicit(&shard->current, memory_order_acquire);
+            dprintf(fd,
+                    "  shard=%u lock=busy online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu\n",
+                    shard->id,
+                    llam_shard_is_online(shard) ? 1U : 0U,
+                    shard->cpu_id,
+                    shard->node_index,
+                    shard->io_node_index,
+                    current != NULL ? (unsigned long long)current->id : 0ULL,
+                    atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
+                    atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
+                    atomic_load_explicit(&shard->event_pending, memory_order_acquire),
+                    (unsigned long long)atomic_load_explicit(&shard->last_safepoint_ns, memory_order_acquire),
+                    (unsigned long long)atomic_load_explicit(&shard->last_run_started_ns, memory_order_acquire));
+            continue;
+        }
+        trace_count = shard->trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : shard->trace_head;
+        begin = shard->trace_head > LLAM_TRACE_RING_CAP ? shard->trace_head - LLAM_TRACE_RING_CAP : 0U;
         current = atomic_load_explicit(&shard->current, memory_order_acquire);
         dprintf(fd,
-                "  shard=%u online=%u cpu=%u node=%u io_node=%u current=%llu opaque_redirect=%u opaque_helper(started=%u ready=%u active=%u) opaque_depth=%u/%u redirect_depth=%u/%u queues(inject=%u hot=%u norm=%u timers=%u)\n",
+                "  shard=%u online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu opaque_redirect=%u opaque_helper(started=%u ready=%u active=%u) opaque_depth=%u/%u redirect_depth=%u/%u queues(inject=%u hot=%u norm=%u timers=%u)\n",
                 shard->id,
                 llam_shard_is_online(shard) ? 1U : 0U,
                 shard->cpu_id,
                 shard->node_index,
                 shard->io_node_index,
                 current != NULL ? (unsigned long long)current->id : 0ULL,
+                atomic_load_explicit(&shard->live_tasks, memory_order_acquire),
+                atomic_load_explicit(&shard->inflight_io_waiters, memory_order_acquire),
+                atomic_load_explicit(&shard->event_pending, memory_order_acquire),
+                (unsigned long long)atomic_load_explicit(&shard->last_safepoint_ns, memory_order_acquire),
+                (unsigned long long)atomic_load_explicit(&shard->last_run_started_ns, memory_order_acquire),
                 shard->opaque_redirect_active ? 1U : 0U,
                 shard->opaque_helper_thread_started ? 1U : 0U,
                 shard->opaque_helper_ready ? 1U : 0U,
@@ -506,17 +526,37 @@ void llam_dump_runtime_state(int fd) {
     for (i = 0; i < rt->active_shards; ++i) {
         llam_shard_t *shard = &rt->shards[i];
 
-        pthread_mutex_lock(&shard->lock);
+        if (pthread_mutex_trylock(&shard->lock) != 0) {
+            dprintf(fd, "  shard=%u tasks_unavailable=lock_busy\n", shard->id);
+            continue;
+        }
         for (llam_task_t *task = shard->all_tasks; task != NULL; task = task->all_next) {
+            llam_io_req_t *req = task->active_io_req;
+            llam_block_job_t *job = task->active_block_job;
+
             dprintf(fd,
-                    "  id=%llu state=%s class=%d flags=0x%x home=%u last=%u wait=%s stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
+                    "  id=%llu state=%s class=%d flags=0x%x home=%u live=%u last=%u parked=%u wait=%s wait_owner=%s wait_node=%p select=%p join_target=%llu timer=%p deadline_ns=%llu cancel_token=%p cancel_registered=%u wake_error=%d completed=%u join_claimed=%u detached=%u stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
                     (unsigned long long)task->id,
                     llam_state_name_from_id(task->state),
                     (int)atomic_load_explicit(&task->task_class, memory_order_acquire),
                     task->flags,
                     task->home_shard,
+                    task->live_shard,
                     task->last_shard,
+                    task->parked_shard,
                     llam_wait_reason_name(task->wait_reason),
+                    llam_task_wait_owner_name_diag(task),
+                    (void *)task->active_wait_node,
+                    (void *)task->active_select_state,
+                    task->join_target != NULL ? (unsigned long long)task->join_target->id : 0ULL,
+                    (void *)task->active_timer,
+                    (unsigned long long)task->deadline_ns,
+                    (void *)task->cancel_token,
+                    task->cancel_registered ? 1U : 0U,
+                    task->wake_error_code,
+                    atomic_load_explicit(&task->completed, memory_order_acquire),
+                    atomic_load_explicit(&task->join_claimed, memory_order_acquire),
+                    atomic_load_explicit(&task->detached, memory_order_acquire),
                     task->stack_size,
                     task->last_stack_used,
                     task->stack_high_water,
@@ -526,6 +566,43 @@ void llam_dump_runtime_state(int fd) {
                     (unsigned long long)task->last_opaque_block_ns,
                     (unsigned long long)task->max_opaque_block_ns,
                     (unsigned long long)task->opaque_block_count);
+            if (req != NULL) {
+                unsigned wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
+                unsigned abort_reason = atomic_load_explicit(&req->abort_reason, memory_order_acquire);
+                unsigned inflight_owner = atomic_load_explicit(&req->inflight_owner_shard, memory_order_acquire);
+
+                dprintf(fd,
+                        "    io_req=%p kind=%s fd=%lld handle=0x%llx owner_shard=%u alloc_owner=%u attached_node=%u inflight_owner=%u wait_mode=%s abort=%s cancel_queued=%u deadline_ns=%llu result=%lld errno=%d poll(events=0x%x revents=0x%x) owned_buffer=%p\n",
+                        (void *)req,
+                        llam_io_kind_name_diag(req->kind),
+                        (long long)req->fd,
+                        (unsigned long long)(uintptr_t)req->handle,
+                        req->owner_shard,
+                        req->alloc_owner_shard,
+                        req->attached_node_index,
+                        inflight_owner,
+                        llam_io_wait_mode_name_diag(wait_mode),
+                        llam_io_abort_reason_name_diag(abort_reason),
+                        atomic_load_explicit(&req->cancel_queued, memory_order_acquire),
+                        (unsigned long long)req->deadline_ns,
+                        (long long)req->result,
+                        req->error_code,
+                        req->poll_events,
+                        req->poll_revents,
+                        (void *)req->owned_buffer);
+            } else {
+                dprintf(fd, "    io_req=none\n");
+            }
+            if (job != NULL) {
+                dprintf(fd,
+                        "    block_job=%p state=%s errno=%d result=%p\n",
+                        (void *)job,
+                        llam_block_job_state_name_diag(atomic_load_explicit(&job->state, memory_order_acquire)),
+                        job->error_code,
+                        job->result);
+            } else {
+                dprintf(fd, "    block_job=none\n");
+            }
         }
         pthread_mutex_unlock(&shard->lock);
     }

@@ -416,6 +416,9 @@ typedef struct llam_wait_node {
     uint32_t select_kind;
     intptr_t scalar_value;
     unsigned owner_shard;
+    atomic_uint wake_armed;
+    atomic_uint wake_completed;
+    atomic_uint wake_queued;
 } llam_wait_node_t;
 
 /** @brief FIFO waiter queue guarded by the owning primitive's lock. */
@@ -437,6 +440,7 @@ struct llam_channel_select_state {
     int error_code;
     atomic_uint completed;
     atomic_uint wake_armed;
+    atomic_uint wake_queued;
 };
 
 /** @brief Control messages processed by an I/O node thread. */
@@ -679,6 +683,7 @@ struct llam_task {
     pthread_mutex_t lock;
     bool lock_initialized;
     atomic_uint task_listed;
+    atomic_uint scan_refs;
     llam_task_t *all_next;
     llam_task_t *all_prev;
     llam_task_t *alloc_next;
@@ -727,8 +732,10 @@ struct llam_task {
     llam_timer_node_t embedded_timer_node;
     llam_timer_node_t *active_timer;
     atomic_uint preempt_requested;
+    atomic_uint completed;
     atomic_uint reclaim_ready;
     atomic_uint reclaim_claimed;
+    atomic_uint join_claimed;
     atomic_uint detached;
     unsigned join_waiter_count_at_exit;
     unsigned forced_yield_budget;
@@ -748,6 +755,8 @@ struct llam_task_group {
     llam_task_t **tasks;
     size_t count;
     size_t capacity;
+    size_t active_spawns;
+    bool joining;
     bool lock_initialized;
 };
 
@@ -1002,6 +1011,7 @@ struct llam_runtime {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint overflow_depth;
     atomic_uint_fast64_t global_epoch;
     atomic_bool stop_requested;
+    atomic_bool shutdown_requested;
     atomic_int fatal_errno;
     uint64_t deadlock_progress_snapshot;
     unsigned deadlock_probe_streak;

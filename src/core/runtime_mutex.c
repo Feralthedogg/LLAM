@@ -223,7 +223,18 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
         return -1;
     }
 
-    llam_park_current_task(LLAM_WAIT_MUTEX, LLAM_TRACE_STATE);
+    if (llam_wait_node_should_park(node)) {
+        llam_park_current_task(LLAM_WAIT_MUTEX, LLAM_TRACE_STATE);
+    }
+    if (has_deadline) {
+        /*
+         * A peer can complete the wait after this node is queued but before the
+         * task has actually switched to the scheduler.  In that early-wake
+         * case the generic wake path cannot disarm a timer that has not been
+         * armed yet, so the waiter owns the final cleanup after it resumes.
+         */
+        llam_disarm_task_wait_deadline(task);
+    }
     if (register_cancel && task->cancel_registered) {
         llam_cancel_token_unregister_task(task);
     }

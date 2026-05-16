@@ -60,8 +60,11 @@ void llam_task_exit_internal(void) {
         abort();
     }
 
+    pthread_mutex_lock(&task->lock);
     task->state = LLAM_TASK_STATE_DEAD;
     task->wait_reason = LLAM_WAIT_NONE;
+    atomic_store_explicit(&task->completed, 1U, memory_order_release);
+    pthread_mutex_unlock(&task->lock);
     llam_trace_shard(g_llam_tls_shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_DEAD, LLAM_WAIT_NONE);
     llam_reinject_join_waiters(rt, task);
 
@@ -321,6 +324,11 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     }
     llam_task_sample_live_stack(task);
     llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
+    if (has_deadline) {
+        // Fast I/O completion can win the race before deadline setup is fully
+        // visible to the wake path.  Disarm defensively after the task resumes.
+        llam_disarm_task_wait_deadline(task);
+    }
     if (task->cancel_registered) {
         llam_cancel_token_unregister_task(task);
     }

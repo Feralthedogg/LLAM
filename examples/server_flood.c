@@ -90,6 +90,7 @@ typedef struct flood_opts {
     double shutdown_timeout_sec;
     bool fail_on_forced_stop;
     bool fail_on_missing_stats;
+    bool server_lossless;
 } flood_opts_t;
 
 typedef struct flood_client {
@@ -157,6 +158,7 @@ static void flood_usage(const char *argv0) {
             "          [--duration SEC] [--drain-sec SEC] [--message-bytes N]\\n"
             "          [--batch N] [--target-mps M] [--min-delivery-mps M]\\n"
             "          [--min-delivery-ratio R] [--shutdown-timeout SEC]\\n"
+            "          [--server-lossless] [--server-best-effort]\\n"
             "          [--allow-forced-stop] [--fail-on-forced-stop]\\n"
             "          [--allow-missing-stats] [--fail-on-missing-stats]\\n",
             argv0);
@@ -175,6 +177,7 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
     opts->min_delivery_mps = flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_MPS", 0.0);
     opts->min_delivery_ratio = flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_RATIO", 0.0);
     opts->shutdown_timeout_sec = flood_env_double("LLAM_SERVER_FLOOD_SHUTDOWN_TIMEOUT", 30.0);
+    opts->server_lossless = flood_env_unsigned("LLAM_SERVER_FLOOD_SERVER_LOSSLESS", 0U) != 0U;
     opts->fail_on_forced_stop = flood_env_unsigned("LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP", 0U) == 0U;
     if (flood_env_unsigned("LLAM_SERVER_FLOOD_FAIL_ON_FORCED_STOP", 0U) != 0U) {
         opts->fail_on_forced_stop = true;
@@ -207,6 +210,10 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
             opts->min_delivery_ratio = strtod(argv[++i], NULL);
         } else if (strcmp(argv[i], "--shutdown-timeout") == 0 && i + 1 < argc) {
             opts->shutdown_timeout_sec = strtod(argv[++i], NULL);
+        } else if (strcmp(argv[i], "--server-lossless") == 0) {
+            opts->server_lossless = true;
+        } else if (strcmp(argv[i], "--server-best-effort") == 0) {
+            opts->server_lossless = false;
         } else if (strcmp(argv[i], "--allow-forced-stop") == 0) {
             opts->fail_on_forced_stop = false;
         } else if (strcmp(argv[i], "--fail-on-forced-stop") == 0) {
@@ -274,8 +281,13 @@ static int flood_find_free_port(const char *host) {
     return port;
 }
 
-static pid_t flood_start_server(const char *server_path, int port, const char *stats_path) {
+static pid_t flood_start_server(const char *server_path,
+                                int port,
+                                const char *stats_path,
+                                const char *dump_path,
+                                bool lossless) {
     char port_arg[32];
+    const char *mode_arg = lossless ? "--lossless" : "--best-effort";
     pid_t pid;
 
     snprintf(port_arg, sizeof(port_arg), "%d", port);
@@ -294,7 +306,10 @@ static pid_t flood_start_server(const char *server_path, int port, const char *s
     if (stats_path != NULL && stats_path[0] != '\0') {
         (void)setenv("LLAM_CHAT_STATS_PATH", stats_path, 1);
     }
-    execl(server_path, server_path, port_arg, (char *)NULL);
+    if (dump_path != NULL && dump_path[0] != '\0') {
+        (void)setenv("LLAM_CHAT_DUMP_ON_STOP", dump_path, 1);
+    }
+    execl(server_path, server_path, mode_arg, port_arg, (char *)NULL);
     _exit(127);
 }
 
@@ -793,6 +808,8 @@ int main(int argc, char **argv) {
     uint64_t loops_without_progress = 0U;
     pid_t server_pid = -1;
     char stats_path[256] = "";
+    char dump_path[512] = "";
+    const char *dump_dir;
     int port;
     int rc = 1;
 
@@ -822,7 +839,22 @@ int main(int argc, char **argv) {
                    (long)getpid(),
                    port);
     (void)unlink(stats_path);
-    server_pid = flood_start_server(opts.server_path, port, stats_path);
+    dump_dir = getenv("LLAM_SERVER_FLOOD_DUMP_DIR");
+    if (dump_dir == NULL || dump_dir[0] == '\0') {
+        dump_dir = getenv("LLAM_SERVER_COMPOSITE_DUMP_DIR");
+    }
+    if (dump_dir == NULL || dump_dir[0] == '\0') {
+        dump_dir = getenv("OUT_DIR");
+    }
+    if (dump_dir != NULL && dump_dir[0] != '\0') {
+        (void)snprintf(dump_path,
+                       sizeof(dump_path),
+                       "%s/server-flood-runtime-dump-%ld-%d.log",
+                       dump_dir,
+                       (long)getpid(),
+                       port);
+    }
+    server_pid = flood_start_server(opts.server_path, port, stats_path, dump_path, opts.server_lossless);
     if (server_pid < 0) {
         perror("fork server");
         goto done;
@@ -941,10 +973,11 @@ int main(int argc, char **argv) {
     missing_deliveries = expected_deliveries > total_recv_lines ? expected_deliveries - total_recv_lines : 0U;
     double delivery_ratio = expected_deliveries > 0U ? (double)total_recv_lines / (double)expected_deliveries : 0.0;
 
-    printf("server flood ok: clients=%u active_sec=%.3f total_sec=%.3f sent=%" PRIu64
+    printf("server flood ok: server_mode=%s clients=%u active_sec=%.3f total_sec=%.3f sent=%" PRIu64
            " inbound_mps=%.3f inbound_total_mps=%.3f expected_deliveries=%" PRIu64
            " observed_deliveries=%" PRIu64 " missing_deliveries=%" PRIu64
            " delivery_mps=%.3f delivery_ratio=%.9f recv_bytes=%" PRIu64 "\n",
+           opts.server_lossless ? "lossless" : "best-effort",
            opts.clients,
            active_sec,
            measured_sec,

@@ -15,7 +15,7 @@ public symbols.
 The current public ABI version is:
 
 ```text
-LLAM_VERSION         = 1.0.1
+LLAM_VERSION         = 1.0.2
 LLAM_ABI_VERSION_MAJOR = 1
 LLAM_ABI_VERSION_MINOR = 0
 LLAM_ABI_VERSION       = (major << 16) | minor
@@ -161,6 +161,11 @@ for unknown class values and `-1/ENOTSUP` outside a managed task.
 
 - `llam_runtime_init_ex()`, `llam_runtime_init()`, and
   `llam_runtime_shutdown()` are not reentrant.
+- `llam_runtime_create()`, `llam_runtime_run_handle()`, and
+  `llam_runtime_destroy()` are the canonical embedding-facing lifecycle calls
+  for 1.x, but their handle is an alias for the process-global runtime. Passing
+  a non-default handle to `llam_runtime_run_handle()` fails with `EINVAL`, and a
+  second live runtime creation fails with `EBUSY`.
 - A process must not call `llam_runtime_shutdown()` while another thread is
   concurrently creating tasks or runtime-owned synchronization objects.
 - User pointers passed to tasks, channels, blocking callbacks, or I/O buffers
@@ -209,7 +214,7 @@ make shared
 Expected dynamic artifacts:
 
 ```text
-Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.1
+Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.2
 macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.

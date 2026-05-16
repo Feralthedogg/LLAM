@@ -38,19 +38,32 @@
  */
 uint64_t llam_now_ns(void) {
 #if defined(__APPLE__)
-    static mach_timebase_info_data_t timebase;
+    static atomic_uint timebase_numer;
+    static atomic_uint timebase_denom;
     uint64_t ticks;
     uint32_t numer;
     uint32_t denom;
 
-    if (timebase.denom == 0U) {
+    denom = atomic_load_explicit(&timebase_denom, memory_order_acquire);
+    if (denom == 0U) {
+        mach_timebase_info_data_t timebase;
+
         if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.denom == 0U) {
             return 0U;
         }
+        /*
+         * Time queries can run from user threads before worker startup has
+         * settled. Publish numer before denom so an acquire load of denom sees
+         * a complete timebase without racing on a mutable static struct.
+         */
+        atomic_store_explicit(&timebase_numer, timebase.numer, memory_order_release);
+        atomic_store_explicit(&timebase_denom, timebase.denom, memory_order_release);
+        numer = timebase.numer;
+        denom = timebase.denom;
+    } else {
+        numer = atomic_load_explicit(&timebase_numer, memory_order_acquire);
     }
     ticks = mach_absolute_time();
-    numer = timebase.numer;
-    denom = timebase.denom;
     if (numer == denom) {
         return ticks;
     }

@@ -228,7 +228,8 @@ void *llam_ctrl_worker_main(void *arg) {
         uint64_t now_ns = llam_now_ns();
         unsigned i;
 
-        if (atomic_load(&rt->stop_requested) && !llam_runtime_has_live_tasks(rt)) {
+        if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
+            !llam_runtime_has_live_tasks(rt)) {
             break;
         }
 

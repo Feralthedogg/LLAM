@@ -142,6 +142,7 @@ bool llam_shard_is_online(const llam_shard_t *shard);
  */
 int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t deadline_ns);
 void llam_cancel_task_wait(llam_task_t *task);
+void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt);
 int llam_cancel_token_register_task(llam_task_t *task);
 void llam_cancel_token_unregister_task(llam_task_t *task);
 bool llam_deadline_passed(uint64_t deadline_ns);

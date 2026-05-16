@@ -26,6 +26,13 @@
 
 #include "runtime_internal.h"
 
+enum {
+    LLAM_WAIT_NODE_UNARMED = 0U,
+    LLAM_WAIT_NODE_ARMED = 1U,
+    LLAM_WAIT_NODE_COMPLETED_INLINE = 2U,
+    LLAM_WAIT_NODE_COMPLETED_QUEUED = 3U
+};
+
 /**
  * @brief Require that the caller is running inside a managed task context.
  *
@@ -88,6 +95,100 @@ void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node) {
         return;
     }
     llam_wait_node_free(shard, node);
+}
+
+/**
+ * @brief Publish wait-node completion and decide whether to enqueue the task.
+ *
+ * @details
+ * A producer can complete a wait node after it has been queued but before the
+ * waiter has committed to parking. In that case the producer records
+ * completion but must not enqueue the still-running task.
+ *
+ * @c wake_armed is a compact state machine, not a boolean. The waiter commits
+ * with a 0->1 compare/exchange; producers complete with either 0->2 for an
+ * inline wake or 1->3 for a queued wake. That single atomic state prevents the
+ * lost-wakeup window where separate armed/completed stores can both miss each
+ * other under cross-worker races. Task state is deliberately not sampled here:
+ * it is scheduler/diagnostic state, not the wait-node synchronization flag.
+ *
+ * @param node Wait node being completed by a synchronization primitive.
+ * @return true when the caller should reinject @p node->task, false when the
+ *         waiter will consume the completion inline.
+ */
+bool llam_wait_node_prepare_wake(llam_wait_node_t *node) {
+    unsigned state;
+
+    if (node == NULL || node->task == NULL) {
+        return false;
+    }
+
+    state = atomic_load_explicit(&node->wake_armed, memory_order_acquire);
+    for (;;) {
+        switch (state) {
+        case LLAM_WAIT_NODE_UNARMED:
+            if (atomic_compare_exchange_weak_explicit(&node->wake_armed,
+                                                      &state,
+                                                      LLAM_WAIT_NODE_COMPLETED_INLINE,
+                                                      memory_order_acq_rel,
+                                                      memory_order_acquire)) {
+                atomic_store_explicit(&node->wake_completed, 1U, memory_order_release);
+                return false;
+            }
+            break;
+        case LLAM_WAIT_NODE_ARMED:
+            if (atomic_compare_exchange_weak_explicit(&node->wake_armed,
+                                                      &state,
+                                                      LLAM_WAIT_NODE_COMPLETED_QUEUED,
+                                                      memory_order_acq_rel,
+                                                      memory_order_acquire)) {
+                atomic_store_explicit(&node->wake_queued, 1U, memory_order_release);
+                atomic_store_explicit(&node->wake_completed, 1U, memory_order_release);
+                return true;
+            }
+            break;
+        default:
+            return false;
+        }
+    }
+}
+
+/**
+ * @brief Arm a wait node and decide whether the current task must park.
+ *
+ * @details
+ * If completion already happened before arming, no runnable queue entry exists
+ * and the caller should skip parking.  If completion raced after arming, the
+ * producer recorded a queued wake; the caller must park to consume it.
+ *
+ * @param node Wait node owned by the current task.
+ * @return true when the caller should park, false when completion is already
+ *         available inline.
+ */
+bool llam_wait_node_should_park(llam_wait_node_t *node) {
+    unsigned state = LLAM_WAIT_NODE_UNARMED;
+
+    if (node == NULL) {
+        return false;
+    }
+
+    if (atomic_compare_exchange_strong_explicit(&node->wake_armed,
+                                                &state,
+                                                LLAM_WAIT_NODE_ARMED,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire)) {
+        return true;
+    }
+
+    if (state == LLAM_WAIT_NODE_COMPLETED_QUEUED ||
+        atomic_load_explicit(&node->wake_queued, memory_order_acquire) != 0U) {
+        return true;
+    }
+    if (node->task != NULL) {
+        node->task->state = LLAM_TASK_STATE_RUNNING;
+        node->task->wait_reason = LLAM_WAIT_NONE;
+    }
+    return false;
 }
 
 /**

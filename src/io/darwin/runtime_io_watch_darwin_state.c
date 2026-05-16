@@ -622,6 +622,7 @@ void llam_darwin_recv_completion_drain(llam_node_t *node, llam_darwin_recv_compl
                                            head->copy_data,
                                            head->copy_capacity)) {
             free(head->copy_data);
+            head->copy_data = NULL;
             if (req != NULL) {
                 req->use_provided_buffer = false;
                 llam_io_complete_req(node, req, -ENOMEM, false);

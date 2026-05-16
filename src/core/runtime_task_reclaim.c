@@ -187,6 +187,23 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
         return;
     }
     (void)llam_remove_task_from_list(rt, task);
+    /*
+     * Stop/fatal scans take short references while they cancel parked waiters
+     * outside the shard-list lock.  Reclaim waits here so those scans cannot
+     * race a listed task into use-after-free.
+     */
+    while (atomic_load_explicit(&task->scan_refs, memory_order_acquire) != 0U) {
+        if (g_llam_tls_task != NULL) {
+            llam_yield();
+        } else {
+            struct timespec ts = {
+                .tv_sec = 0,
+                .tv_nsec = 100000L,
+            };
+
+            nanosleep(&ts, NULL);
+        }
+    }
     llam_free_task(task);
 }
 
@@ -202,9 +219,6 @@ void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL) {
         return;
     }
-    if (task->join_waiter_count_at_exit > 1U) {
-        return;
-    }
     // The final join waiter marks reclaim_ready. A non-runtime thread sleeps
     // briefly; a fiber yields so another runnable can complete the handoff.
     while (atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) == 0U) {
@@ -218,6 +232,9 @@ void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task) {
 
             nanosleep(&ts, NULL);
         }
+    }
+    if (task->join_waiter_count_at_exit > 1U) {
+        return;
     }
     if (!atomic_compare_exchange_strong_explicit(&task->reclaim_claimed,
                                                  &expected,

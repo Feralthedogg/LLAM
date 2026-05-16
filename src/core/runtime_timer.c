@@ -406,28 +406,87 @@ void llam_cancel_task_wait(llam_task_t *task) {
             llam_block_job_t *job = task->active_block_job;
             unsigned expected = LLAM_BLOCK_JOB_QUEUED;
 
-            if (!atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_ABORTED)) {
-                expected = LLAM_BLOCK_JOB_RUNNING;
-                if (!atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_ABORTED)) {
-                    break;
+            if (atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_ABORTED)) {
+                if (task->parked_shard < g_llam_runtime.active_shards) {
+                    llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard];
+
+                    pthread_mutex_lock(&shard->lock);
+                    shard->metrics.cancel_wakes += 1U;
+                    pthread_mutex_unlock(&shard->lock);
                 }
+                task->wake_error_code = ECANCELED;
+                llam_task_clear_wait_tracking(task);
+                llam_reinject_task(&g_llam_runtime, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
+                break;
             }
 
-            if (task->parked_shard < g_llam_runtime.active_shards) {
-                llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard];
-
-                pthread_mutex_lock(&shard->lock);
-                shard->metrics.cancel_wakes += 1U;
-                pthread_mutex_unlock(&shard->lock);
+            expected = LLAM_BLOCK_JOB_RUNNING;
+            if (atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_ABORTED)) {
+                /*
+                 * The worker already owns user code.  Do not wake the task
+                 * here: the worker completion path will report ECANCELED after
+                 * the callback returns, preserving callback argument lifetime.
+                 */
+                break;
             }
-            task->wake_error_code = ECANCELED;
-            llam_task_clear_wait_tracking(task);
-            llam_reinject_task(&g_llam_runtime, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
         }
         break;
     default:
         break;
     }
+}
+
+/**
+ * @brief Cancel every currently parked managed wait during runtime stop.
+ *
+ * @details
+ * Runtime stop/fatal shutdown is not tied to a user cancellation token, so
+ * parked waits on channels, mutexes, joins, sleeps, I/O, or blocking callbacks
+ * would otherwise keep the live-task count non-zero forever.  The diagnostic
+ * task lists already contain every parked task; this pass takes short scan
+ * references under the shard-list locks, then resolves waits outside those
+ * locks to preserve the wait-queue lock ordering used by normal producers.
+ *
+ * @param rt Runtime whose listed parked tasks should observe ECANCELED.
+ */
+void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt) {
+    llam_task_t **tasks;
+    size_t count = 0U;
+    size_t capacity;
+    unsigned i;
+
+    if (rt == NULL || rt->shards == NULL || rt->active_shards == 0U) {
+        return;
+    }
+
+    capacity = (size_t)llam_runtime_live_tasks(rt) + (size_t)rt->active_shards + 16U;
+    tasks = calloc(capacity, sizeof(*tasks));
+    if (tasks == NULL) {
+        return;
+    }
+
+    for (i = 0U; i < rt->active_shards && count < capacity; ++i) {
+        llam_shard_t *owner = &rt->shards[i];
+        llam_task_t *task;
+
+        pthread_mutex_lock(&owner->lock);
+        for (task = owner->all_tasks; task != NULL && count < capacity; task = task->all_next) {
+            if (task->state != LLAM_TASK_STATE_PARKED || task->wait_reason == LLAM_WAIT_NONE ||
+                atomic_load_explicit(&task->reclaim_claimed, memory_order_acquire) != 0U) {
+                continue;
+            }
+            atomic_fetch_add_explicit(&task->scan_refs, 1U, memory_order_acq_rel);
+            tasks[count++] = task;
+        }
+        pthread_mutex_unlock(&owner->lock);
+    }
+
+    for (i = 0U; i < count; ++i) {
+        llam_cancel_task_wait(tasks[i]);
+        atomic_fetch_sub_explicit(&tasks[i]->scan_refs, 1U, memory_order_acq_rel);
+    }
+
+    free(tasks);
 }
 
 /**

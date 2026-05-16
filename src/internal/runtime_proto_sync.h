@@ -62,6 +62,8 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
                                     unsigned parked_shard);
 llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard);
 void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node);
+bool llam_wait_node_prepare_wake(llam_wait_node_t *node);
+bool llam_wait_node_should_park(llam_wait_node_t *node);
 
 /*
  * FIFO wait-queue primitives and wake dispatch.
@@ -72,6 +74,7 @@ bool llam_wait_queue_remove(llam_wait_queue_t *queue, llam_wait_node_t *node);
 void llam_wake_wait_node(llam_wait_node_t *node, bool hot, llam_wait_reason_t reason);
 void llam_wake_wait_queue_all(llam_wait_queue_t *queue, int error_code, llam_wait_reason_t reason);
 bool llam_channel_select_complete_node(llam_wait_node_t *node, void *value, int error_code);
+bool llam_channel_select_node_should_wake(llam_wait_node_t *node);
 bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam_wait_reason_t reason);
 
 #endif

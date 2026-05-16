@@ -26,6 +26,8 @@
 
 #include "runtime_internal.h"
 
+#define LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST 8U
+
 /**
  * @brief Return the best-effort normal queue depth for a shard.
  *
@@ -177,6 +179,24 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
 
     deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)] = NULL;
     return task;
+}
+
+/**
+ * @brief Return whether the owner-side deque has runnable work.
+ *
+ * Direct-yield handoff can otherwise let a pair of FIFO-yielding tasks exchange
+ * with each other forever while fresh owner-deque work waits behind them.
+ */
+static bool llam_cldeque_has_work(llam_cldeque_t *deque) {
+    size_t top;
+    size_t bottom;
+
+    if (deque == NULL) {
+        return false;
+    }
+    top = atomic_load_explicit(&deque->top, memory_order_acquire);
+    bottom = atomic_load_explicit(&deque->bottom, memory_order_acquire);
+    return top < bottom;
 }
 
 /**
@@ -345,6 +365,7 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
                                              llam_task_t **out_next,
                                              bool *out_push_failed) {
     llam_task_t *next = NULL;
+    bool prefer_owner_deque;
 
     if (out_next != NULL) {
         *out_next = NULL;
@@ -360,8 +381,18 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
      * Direct yields should prefer older yielded peers before fresh owner-side
      * spawn work. This also keeps tight ping-pong handoffs on the FIFO lane and
      * avoids an unnecessary Chase-Lev owner pop on the common exchange path.
+     *
+     * That preference must be bounded: if FIFO tasks keep yielding to each
+     * other while owner-deque work exists, a task can starve before it reaches
+     * its first blocking/I/O operation. Periodically pull from the owner deque
+     * to keep direct handoff fair without forcing a scheduler round trip.
      */
-    next = llam_queue_pop_head(&shard->norm_q);
+    prefer_owner_deque =
+        shard->direct_handoff_streak >= LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
+        llam_cldeque_has_work(&shard->norm_cldeque);
+    if (!prefer_owner_deque) {
+        next = llam_queue_pop_head(&shard->norm_q);
+    }
     if (next == NULL) {
         if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
             if (out_push_failed != NULL) {
@@ -373,6 +404,9 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
         if (next == NULL) {
             return false;
         }
+    }
+    if (prefer_owner_deque) {
+        shard->direct_handoff_streak = 0U;
     }
 
     llam_queue_push_tail(&shard->norm_q, current);

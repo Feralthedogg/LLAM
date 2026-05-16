@@ -20,6 +20,10 @@ on:
         description: Re-run the direct runtime stress binary this many times
         required: false
         default: "5"
+      runtime_invariant_repeat:
+        description: Re-run seeded runtime invariant checks this many times
+        required: false
+        default: "10"
       server_seed:
         description: Deterministic seed for server composite edge/correctness phases
         required: false
@@ -66,6 +70,7 @@ jobs:
       STRESS_ROUNDS: ${{ github.event.inputs.stress_rounds || '2' }}
       DYNAMIC_ROUNDS: ${{ github.event.inputs.dynamic_rounds || '2' }}
       RUNTIME_STRESS_REPEAT: ${{ github.event.inputs.runtime_stress_repeat || '5' }}
+      RUNTIME_INVARIANT_REPEAT: ${{ github.event.inputs.runtime_invariant_repeat || '10' }}
       SERVER_SEED: ${{ github.event.inputs.server_seed || '1234' }}
       SERVER_MODE: ${{ github.event.inputs.server_mode || 'quick' }}
       OUT_DIR: .artifacts/stress/${{ matrix.name }}
@@ -114,41 +119,42 @@ jobs:
             ./build/stress/test_runtime_stress
           done 2>&1 | tee "$OUT_DIR/test_runtime_stress_repeat.log"
 
+      - name: Seeded runtime invariant repeat
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          for i in $(seq 1 "$RUNTIME_INVARIANT_REPEAT"); do
+            seed=$((SERVER_SEED + i * 104729))
+            echo "[test_runtime_invariants repeat $i/$RUNTIME_INVARIANT_REPEAT seed=$seed]"
+            LLAM_RUNTIME_INVARIANT_SEED="$seed" \
+            LLAM_RUNTIME_INVARIANT_SCENARIOS=48 \
+              ./build/stress/test_runtime_invariants
+          done 2>&1 | tee "$OUT_DIR/test_runtime_invariants_repeat.log"
+
       - name: Runtime stress
         run: |
-          python3 - <<'PY'
-          import os
-          import subprocess
-          import sys
-
-          env = os.environ.copy()
-          env.update({
-              "LLAM_STRESS_ROUNDS": os.environ["STRESS_ROUNDS"],
-              "LLAM_STRESS_DYNAMIC_ROUNDS": os.environ["DYNAMIC_ROUNDS"],
-              "LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS": "64",
-              "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS": "512",
-              "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US": "1000",
-          })
-          timeout = 900
-          if os.environ.get("RUNNER_OS") == "macOS":
-              # Hosted macOS runners are used as fast Darwin smoke lanes. The
-              # heavier dynamic live-watch pressure remains covered by Linux
-              # stress, Windows stress, and scheduled soak/deep jobs.
-              env.update({
-                  "LLAM_STRESS_ROUNDS": "1",
-                  "LLAM_STRESS_DYNAMIC_ROUNDS": "1",
-                  "LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS": "32",
-                  "LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS": "256",
-              })
-              timeout = 180
-          os.makedirs(os.environ["OUT_DIR"], exist_ok=True)
-          with open(os.path.join(os.environ["OUT_DIR"], "runtime_stress.log"), "w", encoding="utf-8") as log:
-              proc = subprocess.run(["./build/stress/stress"], env=env, timeout=timeout, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-              print(proc.stdout, end="")
-              log.write(proc.stdout)
-              if proc.returncode != 0:
-                  raise SystemExit(proc.returncode)
-          PY
+          mkdir -p "$OUT_DIR"
+          export LLAM_STRESS_ROUNDS="$STRESS_ROUNDS"
+          export LLAM_STRESS_DYNAMIC_ROUNDS="$DYNAMIC_ROUNDS"
+          export LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS=64
+          export LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS=512
+          export LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_US=1000
+          timeout=900
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Hosted macOS runners are used as fast Darwin smoke lanes. The
+            # heavier dynamic live-watch pressure remains covered by Linux
+            # stress, Windows stress, and scheduled soak/deep jobs.
+            export LLAM_STRESS_ROUNDS=1
+            export LLAM_STRESS_DYNAMIC_ROUNDS=1
+            export LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS=32
+            export LLAM_STRESS_DYNAMIC_LIVE_POLL_MONITOR_ROUNDS=256
+            timeout=180
+          fi
+          python3 scripts/run_with_timeout.py \
+            --timeout "$timeout" \
+            --dump-on-timeout "$OUT_DIR/runtime_stress.timeout-dump.log" \
+            --log "$OUT_DIR/runtime_stress.log" \
+            -- ./build/stress/stress
 
       - name: I/O benchmark stress smoke
         run: |
@@ -229,6 +235,9 @@ jobs:
             runner: windows-2022
           - name: windows-2025-x86_64-stress
             runner: windows-2025
+    env:
+      RUNTIME_INVARIANT_REPEAT: ${{ github.event.inputs.runtime_invariant_repeat || '10' }}
+      SERVER_SEED: ${{ github.event.inputs.server_seed || '1234' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -241,14 +250,14 @@ jobs:
 
       - name: Build native Windows backend
         shell: pwsh
-        run: cmake --build build/windows --config Release --target bench test_abi_compat test_runtime_stress test_runtime_fuzz test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
+        run: cmake --build build/windows --config Release --target bench test_abi_compat test_runtime_stress test_runtime_fuzz test_runtime_invariants test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
 
       - name: CTest Windows backend
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
+          ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
             Tee-Object -FilePath "$artifactDir\ctest.log"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
@@ -271,13 +280,36 @@ jobs:
             }
           } *>&1 | Tee-Object -FilePath "$artifactDir\test_runtime_stress_repeat.log"
 
+      - name: Seeded runtime invariant repeat
+        shell: pwsh
+        run: |
+          $artifactDir = ".artifacts\stress\${{ matrix.name }}"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $repeat = [int]($env:RUNTIME_INVARIANT_REPEAT)
+          $seedBase = [int64]($env:SERVER_SEED)
+          $test = ".\build\windows\Release\test_runtime_invariants.exe"
+          & {
+            for ($i = 1; $i -le $repeat; $i++) {
+              $seed = $seedBase + ($i * 104729)
+              "[test_runtime_invariants repeat $i/$repeat seed=$seed]"
+              $env:LLAM_RUNTIME_INVARIANT_SEED = [string]$seed
+              $env:LLAM_RUNTIME_INVARIANT_SCENARIOS = "48"
+              & $test
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+            Remove-Item Env:\LLAM_RUNTIME_INVARIANT_SEED -ErrorAction SilentlyContinue
+            Remove-Item Env:\LLAM_RUNTIME_INVARIANT_SCENARIOS -ErrorAction SilentlyContinue
+          } *>&1 | Tee-Object -FilePath "$artifactDir\test_runtime_invariants_repeat.log"
+
       - name: Forced Windows 10/11 policy stress
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
           foreach ($generation in @("10", "11")) {
             $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
-            ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
+            ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
               Tee-Object -FilePath "$artifactDir\forced-windows-$generation.log"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE

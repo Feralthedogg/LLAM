@@ -60,7 +60,7 @@ extern "C" {
 /** @brief LLAM source/API version minor component. */
 #define LLAM_VERSION_MINOR 0U
 /** @brief LLAM source/API version patch component. */
-#define LLAM_VERSION_PATCH 1U
+#define LLAM_VERSION_PATCH 2U
 
 /** @brief Public ABI major version; incompatible binary changes increment this value. */
 #define LLAM_ABI_VERSION_MAJOR 1U
@@ -406,8 +406,10 @@ LLAM_API int llam_runtime_collect_stats(llam_runtime_stats_t *stats);
  * @brief Return the process-global runtime handle.
  *
  * @details
- * LLAM 1.x still uses one runtime singleton internally. The handle API exists
- * so embedders can move to explicit handles without changing call sites later.
+ * LLAM 1.x still uses one runtime singleton internally. The handle API is the
+ * embedding boundary, not a second-runtime facility; the returned pointer is
+ * accepted by handle-shaped calls and remains tied to the process-wide
+ * singleton until ::llam_runtime_shutdown.
  *
  * @return The default runtime handle.
  */
@@ -419,8 +421,10 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
  * @details
  * Current LLAM builds support only one live runtime per process. This function
  * initializes the singleton and returns its handle. A second live runtime fails
- * with @c EBUSY. Future ABI-compatible versions may allocate independent
- * runtime objects behind this handle.
+ * with @c EBUSY. Embedders should use this as the canonical lifecycle entry
+ * point while treating the handle as an alias for ::llam_runtime_default.
+ * True concurrent multi-runtime isolation is deferred until every global
+ * singleton and TLS dependency has a migration path.
  *
  * @param opts Optional runtime options; pass NULL for defaults.
  * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
@@ -432,15 +436,20 @@ LLAM_API int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_si
 /**
  * @brief Run a runtime handle.
  *
- * @details Current builds accept only ::llam_runtime_default().
+ * @details
+ * Current builds accept only ::llam_runtime_default(). Passing NULL or any
+ * non-default handle fails with @c EINVAL; it never creates or drives a second
+ * scheduler instance.
  */
 LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
 
 /**
  * @brief Destroy a runtime handle.
  *
- * @details Current builds accept only ::llam_runtime_default() and delegate to
- * ::llam_runtime_shutdown.
+ * @details
+ * Current builds accept only NULL or ::llam_runtime_default() and delegate to
+ * ::llam_runtime_shutdown. The call is idempotent for the singleton. 1.x
+ * embedders must not assume independent runtime ownership from this handle.
  */
 LLAM_API void llam_runtime_destroy(llam_runtime_t *runtime);
 
@@ -524,7 +533,9 @@ LLAM_API void llam_task_safepoint(void);
  * A successful join consumes @p task; the pointer must not be used again.
  * Managed-task callers park cooperatively. Unmanaged OS-thread callers block
  * until the target is already complete or another thread is actively driving
- * ::llam_run; unmanaged joins do not run the scheduler.
+ * ::llam_run; unmanaged joins do not run the scheduler. Concurrent joins on
+ * the same handle are rejected with @c EBUSY so the handle is consumed exactly
+ * once.
  * @return 0 on completion, -1 on failure with errno set.
  */
 LLAM_API int llam_join(llam_task_t *task);
@@ -537,6 +548,7 @@ LLAM_API int llam_join(llam_task_t *task);
  * A successful timed join consumes @p task. If the call fails with @c ETIMEDOUT,
  * the task remains joinable by the same handle. @p deadline_ns is an absolute
  * ::llam_now_ns deadline; @c 0 is treated as an already-expired deadline.
+ * Concurrent joins on the same handle fail with @c EBUSY.
  * @return 0 on completion, -1 on timeout/failure with errno set.
  */
 LLAM_API int llam_join_until(llam_task_t *task, uint64_t deadline_ns);
@@ -547,7 +559,8 @@ LLAM_API int llam_join_until(llam_task_t *task, uint64_t deadline_ns);
  * @details
  * A successful detach consumes @p task; the pointer must not be used again.
  * Detached tasks still run to completion and remain counted as live runtime
- * work until their entry function returns.
+ * work until their entry function returns. Detach fails with @c EBUSY if a
+ * join caller already owns the handle.
  * @return 0 on detach, -1 on failure with errno set.
  */
 LLAM_API int llam_detach(llam_task_t *task);
@@ -566,7 +579,8 @@ LLAM_API llam_task_group_t *llam_task_group_create(void);
  * @brief Destroy an empty task group.
  *
  * @return 0 on success, or -1 with @c errno set to @c EBUSY if unjoined tasks
- * remain.
+ * remain, another thread is currently spawning into the group, or a group join
+ * is in progress.
  */
 LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
 
@@ -576,7 +590,8 @@ LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
  * @details
  * If @p opts does not provide a cancellation token, the group cancellation token
  * is attached automatically. The returned task pointer is borrowed for
- * diagnostics; callers must not join or detach it outside the group.
+ * diagnostics; callers must not join or detach it outside the group. Spawning
+ * while another thread is joining the group fails with @c EBUSY.
  */
 LLAM_API llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       llam_task_fn fn,
@@ -601,7 +616,8 @@ LLAM_API int llam_task_group_cancel(llam_task_group_t *group);
  * @brief Join all tasks owned by a group.
  *
  * @details Successful joins consume the child task handles. If an error occurs,
- * the failed and remaining handles stay owned by the group.
+ * the failed and remaining handles stay owned by the group. The function fails
+ * with @c EBUSY while another spawn or join is in progress for the same group.
  */
 LLAM_API int llam_task_group_join(llam_task_group_t *group);
 
@@ -612,7 +628,9 @@ LLAM_API int llam_task_group_join(llam_task_group_t *group);
  * @p deadline_ns is an absolute ::llam_now_ns deadline. @c 0 is treated as an
  * already-expired deadline, matching ::llam_join_until. Successful joins consume
  * completed child task handles. If the deadline expires or another join error
- * occurs, the failed and remaining handles stay owned by the group.
+ * occurs, the failed and remaining handles stay owned by the group. The
+ * function fails with @c EBUSY while another spawn or join is in progress for
+ * the same group.
  *
  * @return 0 when every child was joined, or -1 with @c errno set.
  */
@@ -650,7 +668,11 @@ LLAM_API int llam_sleep_ns(uint64_t duration_ns);
  *
  * @details
  * This is the unambiguous FFI-safe blocking API. A callback that legitimately
- * returns @c NULL still succeeds and stores @c NULL in @p out.
+ * returns @c NULL still succeeds and stores @c NULL in @p out. If cancellation
+ * reaches a queued callback before a worker starts it, the callback is skipped.
+ * If cancellation reaches a callback that is already running, LLAM reports
+ * @c ECANCELED only after the callback returns, so @p arg remains owned by the
+ * callback for its full execution.
  *
  * @param fn Blocking callback. Must not be NULL.
  * @param arg User pointer passed to fn.
@@ -700,6 +722,13 @@ LLAM_API int llam_task_set_class(uint32_t task_class);
 
 /**
  * @brief Write a human-readable runtime dump to an fd.
+ *
+ * @details
+ * The dump is intended for rare hang and crash diagnostics. It includes
+ * lifecycle/stop state, active I/O waiter counts, node submit/watch queues,
+ * shard wake and I/O ownership state, and per-task wait ownership including
+ * cancellation, select, blocking-job, and I/O request details.
+ *
  * @param fd Destination file descriptor.
  */
 LLAM_API void llam_dump_runtime_state(int fd);
