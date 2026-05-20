@@ -22,7 +22,9 @@
 
 #include <errno.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -42,6 +44,13 @@
 #define COND_ROUNDS 12000U
 #define PREEMPT_HOG_TASKS 32U
 #define PREEMPT_POLL_INTERVAL 128U
+
+typedef int (*stress_case_fn)(void);
+
+typedef struct stress_case_def {
+    const char *name;
+    stress_case_fn fn;
+} stress_case_def_t;
 
 typedef struct stress_state {
     atomic_uint failures;
@@ -81,6 +90,49 @@ static int fail_msg(const char *message) {
 static int fail_errno(const char *message) {
     fprintf(stderr, "[test_runtime_stress] %s: errno=%d (%s)\n", message, errno, strerror(errno));
     return 1;
+}
+
+static int run_case(const char *name, stress_case_fn fn) {
+    int rc;
+
+    /*
+     * CI failure mode matters for this test: a runtime bug often aborts before
+     * normal task-level diagnostics can run.  Print a compact phase marker
+     * before each case so ctest --output-on-failure reports the last active
+     * stress path even on SIGSEGV/abort/Windows fast-fail exits.
+     */
+    fprintf(stderr, "[test_runtime_stress] begin %s\n", name);
+    fflush(stderr);
+    rc = fn();
+    fprintf(stderr, "[test_runtime_stress] %s %s\n", rc == 0 ? "ok" : "fail", name);
+    fflush(stderr);
+    return rc;
+}
+
+static int case_matches_filter(const char *filter, const char *name) {
+    return filter == NULL || filter[0] == '\0' || strcmp(filter, name) == 0;
+}
+
+static int run_cases(const stress_case_def_t *cases, size_t count) {
+    const char *filter = getenv("LLAM_RUNTIME_STRESS_CASE");
+    bool matched = false;
+
+    for (size_t i = 0U; i < count; ++i) {
+        if (!case_matches_filter(filter, cases[i].name)) {
+            continue;
+        }
+        matched = true;
+        if (run_case(cases[i].name, cases[i].fn) != 0) {
+            return 1;
+        }
+    }
+    if (!matched) {
+        fprintf(stderr,
+                "[test_runtime_stress] no case matched LLAM_RUNTIME_STRESS_CASE=%s\n",
+                filter != NULL ? filter : "");
+        return 1;
+    }
+    return 0;
 }
 
 static void task_fail(stress_state_t *state, const char *where, int err) {
@@ -910,35 +962,23 @@ static int test_posix_io_cancel_wait(void) {
 #endif
 
 int main(void) {
-    if (test_task_storm() != 0) {
-        return 1;
-    }
-    if (test_nested_spawn_storm() != 0) {
-        return 1;
-    }
-    if (test_cancel_storm() != 0) {
-        return 1;
-    }
-    if (test_cancel_reclaim_race() != 0) {
-        return 1;
-    }
-    if (test_blocking_job_storm() != 0) {
-        return 1;
-    }
-    if (test_channel_wakeup_storm() != 0) {
-        return 1;
-    }
-    if (test_cond_wakeup_storm() != 0) {
-        return 1;
-    }
+    static const stress_case_def_t cases[] = {
+        {"task_storm", test_task_storm},
+        {"nested_spawn_storm", test_nested_spawn_storm},
+        {"cancel_storm", test_cancel_storm},
+        {"cancel_reclaim_race", test_cancel_reclaim_race},
+        {"blocking_job_storm", test_blocking_job_storm},
+        {"channel_wakeup_storm", test_channel_wakeup_storm},
+        {"cond_wakeup_storm", test_cond_wakeup_storm},
 #if LLAM_PLATFORM_POSIX
-    if (test_automatic_preemption_fairness() != 0) {
-        return 1;
-    }
-    if (test_posix_io_cancel_wait() != 0) {
-        return 1;
-    }
+        {"automatic_preemption_fairness", test_automatic_preemption_fairness},
+        {"posix_io_cancel_wait", test_posix_io_cancel_wait},
 #endif
+    };
+
+    if (run_cases(cases, sizeof(cases) / sizeof(cases[0])) != 0) {
+        return 1;
+    }
     puts("test_runtime_stress ok");
     return 0;
 }
