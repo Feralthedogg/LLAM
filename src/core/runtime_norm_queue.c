@@ -54,7 +54,7 @@ void llam_cldeque_init(llam_cldeque_t *deque) {
     atomic_init(&deque->top, 0U);
     atomic_init(&deque->bottom, 0U);
     for (i = 0; i < LLAM_NORM_QUEUE_CAP; ++i) {
-        deque->buffer[i] = NULL;
+        atomic_init(&deque->buffer[i], NULL);
     }
 }
 
@@ -79,11 +79,12 @@ bool llam_cldeque_push_bottom(llam_cldeque_t *deque, llam_task_t *task) {
         return false;
     }
 
-    deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)] = task;
-    // Publish the task pointer before moving bottom so thieves never observe an
-    // initialized slot as available without the payload.
-    atomic_thread_fence(memory_order_release);
-    atomic_store_explicit(&deque->bottom, bottom + 1U, memory_order_relaxed);
+    // The slot is shared with thieves; publish it atomically before increasing
+    // bottom so a thief that observes the new range can acquire the payload.
+    atomic_store_explicit(&deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)],
+                          task,
+                          memory_order_release);
+    atomic_store_explicit(&deque->bottom, bottom + 1U, memory_order_release);
     return true;
 }
 
@@ -116,7 +117,7 @@ static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
         return NULL;
     }
 
-    task = deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)];
+    task = atomic_load_explicit(&deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)], memory_order_acquire);
     if (top == bottom) {
         size_t expected = top;
 
@@ -133,7 +134,9 @@ static llam_task_t *llam_cldeque_pop_bottom(llam_cldeque_t *deque) {
     }
 
     if (task != NULL) {
-        deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)] = NULL;
+        atomic_store_explicit(&deque->buffer[bottom & (LLAM_NORM_QUEUE_CAP - 1U)],
+                              NULL,
+                              memory_order_release);
     }
     return task;
 }
@@ -160,7 +163,7 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
         return NULL;
     }
 
-    task = deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)];
+    task = atomic_load_explicit(&deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)], memory_order_acquire);
     if (task == NULL) {
         return NULL;
     }
@@ -177,7 +180,7 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
         }
     }
 
-    deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)] = NULL;
+    atomic_store_explicit(&deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)], NULL, memory_order_release);
     return task;
 }
 
@@ -407,6 +410,17 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
     }
     if (prefer_owner_deque) {
         shard->direct_handoff_streak = 0U;
+    }
+    if (next == current) {
+        /*
+         * The running task should never already be present in runnable queues.
+         * Treat that as a failed direct exchange rather than queueing a second
+         * reference and corrupting task ownership.
+         */
+        if (out_next != NULL) {
+            *out_next = current;
+        }
+        return false;
     }
 
     llam_queue_push_tail(&shard->norm_q, current);

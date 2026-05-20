@@ -200,14 +200,20 @@ void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
                                         off,
                                         (uintptr_t)task->stack_base + (uintptr_t)task->stack_size);
         off = llam_buf_append_str(buf, sizeof(buf), off, ")\n");
-        if (shard != NULL && shard->trace_head > 0U) {
-            const llam_trace_event_t *event = &shard->trace_ring[(shard->trace_head - 1U) % LLAM_TRACE_RING_CAP];
+        if (shard != NULL) {
+            unsigned trace_head = atomic_load_explicit(&shard->trace_head, memory_order_acquire);
 
-            off = llam_buf_append_str(buf, sizeof(buf), off, "  last_trace=");
-            off = llam_buf_append_str(buf, sizeof(buf), off, llam_trace_kind_name((llam_trace_kind_t)event->kind));
-            off = llam_buf_append_str(buf, sizeof(buf), off, " reason=");
-            off = llam_buf_append_str(buf, sizeof(buf), off, llam_wait_reason_name((llam_wait_reason_t)event->reason));
-            off = llam_buf_append_char(buf, sizeof(buf), off, '\n');
+            if (trace_head > 0U) {
+                const llam_trace_event_t *event = &shard->trace_ring[(trace_head - 1U) % LLAM_TRACE_RING_CAP];
+                unsigned kind = atomic_load_explicit(&event->kind, memory_order_acquire);
+                unsigned reason = atomic_load_explicit(&event->reason, memory_order_relaxed);
+
+                off = llam_buf_append_str(buf, sizeof(buf), off, "  last_trace=");
+                off = llam_buf_append_str(buf, sizeof(buf), off, llam_trace_kind_name((llam_trace_kind_t)kind));
+                off = llam_buf_append_str(buf, sizeof(buf), off, " reason=");
+                off = llam_buf_append_str(buf, sizeof(buf), off, llam_wait_reason_name((llam_wait_reason_t)reason));
+                off = llam_buf_append_char(buf, sizeof(buf), off, '\n');
+            }
         }
         off = llam_buf_append_str(buf,
                                 sizeof(buf),

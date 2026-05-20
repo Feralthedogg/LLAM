@@ -36,6 +36,7 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason);
 llam_wait_reason_t llam_io_abort_wait_reason(llam_io_abort_reason_t reason);
 void llam_io_set_abort_result(llam_io_req_t *req, llam_io_abort_reason_t reason);
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard);
+llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
 void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
 
 /*
@@ -68,6 +69,7 @@ void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *
  * Request allocation, capability checks, and submission queues.
  */
 bool llam_io_capability_error(int error_code);
+void llam_io_req_reset(llam_io_req_t *req, unsigned owner_shard, unsigned alloc_owner_shard);
 llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard);
 void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req);
 int llam_io_req_node_index(const llam_io_req_t *req);

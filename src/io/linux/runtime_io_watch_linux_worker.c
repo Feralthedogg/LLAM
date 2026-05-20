@@ -40,10 +40,8 @@ void llam_io_drain_completions(llam_node_t *node) {
     unsigned i;
 
     cq_depth = io_uring_cq_ready(&node->ring);
-    node->last_cq_depth = cq_depth;
-    if (cq_depth > node->max_cq_depth) {
-        node->max_cq_depth = cq_depth;
-    }
+    atomic_store_explicit(&node->last_cq_depth, cq_depth, memory_order_relaxed);
+    llam_atomic_update_peak(&node->max_cq_depth, cq_depth);
     count = io_uring_peek_batch_cqe(&node->ring, cqes, 32U);
     for (i = 0; i < count; ++i) {
         llam_io_handle_cqe(node, cqes[i]);

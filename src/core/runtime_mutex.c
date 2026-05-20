@@ -59,15 +59,19 @@ static void llam_mutex_donate_priority(uintptr_t owner_value, const llam_task_t 
  */
 llam_mutex_t *llam_mutex_create(void) {
     llam_mutex_t *mutex = calloc(1, sizeof(*mutex));
+    int rc;
 
     if (mutex == NULL) {
         return NULL;
     }
 
     atomic_init(&mutex->owner, (uintptr_t)0);
-    if (pthread_mutex_init(&mutex->lock, NULL) != 0) {
+    rc = pthread_mutex_init(&mutex->lock, NULL);
+    if (rc != 0) {
         free(mutex);
-        errno = ENOMEM;
+        // pthread mutex APIs return the error code directly; do not collapse
+        // resource exhaustion, permission, or system-limit failures to ENOMEM.
+        errno = rc;
         return NULL;
     }
 
@@ -202,9 +206,18 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_MUTEX;
     if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         pthread_mutex_lock(&mutex->lock);
-        (void)llam_wait_queue_remove(&mutex->waiters, node);
+        removed = llam_wait_queue_remove(&mutex->waiters, node);
         pthread_mutex_unlock(&mutex->lock);
+        if (!removed) {
+            /* unlock already transferred ownership to this waiter. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -212,10 +225,19 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
         return -1;
     }
     if (register_cancel && task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         llam_disarm_task_wait_deadline(task);
         pthread_mutex_lock(&mutex->lock);
-        (void)llam_wait_queue_remove(&mutex->waiters, node);
+        removed = llam_wait_queue_remove(&mutex->waiters, node);
         pthread_mutex_unlock(&mutex->lock);
+        if (!removed) {
+            /* unlock already transferred ownership to this waiter. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -223,6 +245,7 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
         return -1;
     }
 
+wait_ready:
     if (llam_wait_node_should_park(node)) {
         llam_park_current_task(LLAM_WAIT_MUTEX, LLAM_TRACE_STATE);
     }
@@ -235,7 +258,7 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
          */
         llam_disarm_task_wait_deadline(task);
     }
-    if (register_cancel && task->cancel_registered) {
+    if (register_cancel) {
         llam_cancel_token_unregister_task(task);
     }
     llam_task_clear_wait_tracking(task);

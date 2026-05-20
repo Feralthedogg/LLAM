@@ -242,7 +242,10 @@ release_pause:
             hot_depth = shard->hot_q.depth;
             inject_depth = shard->inject_q.depth;
             has_current = atomic_load_explicit(&shard->current, memory_order_acquire) != NULL ? 1U : 0U;
-            has_timers = shard->timers != NULL ? 1U : 0U;
+            has_timers = (shard->timers != NULL ||
+                          atomic_load_explicit(&shard->timer_callbacks_active, memory_order_acquire) != 0U)
+                             ? 1U
+                             : 0U;
             pthread_mutex_unlock(&shard->lock);
             fprintf(stderr,
                     "[dynamic] offline blocked shard=%u target=%u reason=%s online=%u live=%u active_io=%u norm=%u hot=%u inject=%u current=%u timers=%u\n",

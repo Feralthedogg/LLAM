@@ -27,17 +27,43 @@
 #include "runtime_internal.h"
 
 /**
+ * @brief Close an accepted socket descriptor retained by a backend watch.
+ *
+ * Accept-watch ready queues store public @c llam_fd_t values, not scheduler
+ * wake handles.  On POSIX that is a file descriptor and @c close is correct;
+ * on Windows it is a Winsock @c SOCKET and must be released with
+ * @c closesocket.  Using the CRT close shim on Windows leaves the socket open
+ * and can leak accepted sockets during partial shutdown or watch teardown.
+ */
+static void llam_runtime_close_ready_fd(llam_fd_t fd) {
+    if (LLAM_FD_IS_INVALID(fd)) {
+        return;
+    }
+#if LLAM_PLATFORM_WINDOWS
+    (void)closesocket(fd);
+#else
+    (void)close(fd);
+#endif
+}
+
+/**
  * @brief Stop the runtime and release every runtime-owned resource.
  *
  * The function tolerates partial initialization so failed init paths can reuse
  * normal shutdown cleanup.
  */
-void llam_runtime_shutdown(void) {
+static void llam_runtime_shutdown_unlocked(void) {
     llam_runtime_t *rt = &g_llam_runtime;
     llam_task_t *task;
     unsigned i;
 
-    if (!rt->initialized && !rt->exec_started && rt->allowed_cpus == NULL && rt->shards == NULL && rt->nodes == NULL) {
+    if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
+        !atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
+        rt->allowed_cpus == NULL && rt->shards == NULL && rt->nodes == NULL
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        && !rt->winsock_started
+#endif
+    ) {
         return;
     }
 
@@ -56,96 +82,121 @@ void llam_runtime_shutdown(void) {
 
     // Shard zero is driven by llam_run() on the caller thread, so only auxiliary
     // worker threads are joined here.
-    if (rt->exec_started) {
+    if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
         for (i = 1; i < rt->active_shards; ++i) {
             if (rt->shards[i].thread_started) {
                 pthread_join(rt->shards[i].thread, NULL);
                 rt->shards[i].thread_started = false;
             }
         }
-        rt->exec_started = false;
+        atomic_store_explicit(&rt->exec_started, false, memory_order_release);
     }
 
     if (rt->block_threads != NULL) {
-        for (i = 0; i < rt->block_worker_count; ++i) {
-            if (rt->block_threads[i] != 0) {
-                pthread_join(rt->block_threads[i], NULL);
-            }
+        // Only join block workers whose pthread_create call completed
+        // successfully; failed creates may leave an arbitrary pthread_t value.
+        for (i = 0; i < rt->block_threads_started; ++i) {
+            pthread_join(rt->block_threads[i], NULL);
+            rt->block_threads[i] = 0;
         }
+        rt->block_threads_started = 0U;
     }
 
-    for (i = 0; i < rt->active_nodes; ++i) {
-        if (rt->nodes[i].thread_started) {
-            pthread_join(rt->nodes[i].thread, NULL);
-            rt->nodes[i].thread_started = false;
-        }
-        pthread_mutex_lock(&rt->nodes[i].watch_lock);
-        // Control operations are heap-allocated command nodes owned by the I/O
-        // node after enqueue.
-        while (rt->nodes[i].control_head != NULL) {
-            llam_io_control_op_t *next = rt->nodes[i].control_head->next;
-            free(rt->nodes[i].control_head);
-            rt->nodes[i].control_head = next;
-        }
-        // Watch tables own their watch objects and any buffered readiness data
-        // that has not yet been consumed by a task.
-        while (rt->nodes[i].poll_watches != NULL) {
-            llam_poll_watch_t *next = rt->nodes[i].poll_watches->next;
+    // Drain any channel cache entries retained by the shutdown caller and the
+    // process-wide fallback cache. Scheduler workers drain their own TLS caches
+    // as their loops exit before the joins above complete.
+    llam_channel_tls_cache_drain();
+    llam_channel_global_cache_drain();
 
-            free(rt->nodes[i].poll_watches);
-            rt->nodes[i].poll_watches = next;
-        }
-        while (rt->nodes[i].accept_watches != NULL) {
-            llam_accept_watch_t *next = rt->nodes[i].accept_watches->next;
-
-            while (rt->nodes[i].accept_watches->ready_head != NULL) {
-                llam_accept_ready_t *ready_next = rt->nodes[i].accept_watches->ready_head->next;
-
-                close(rt->nodes[i].accept_watches->ready_head->fd);
-                free(rt->nodes[i].accept_watches->ready_head);
-                rt->nodes[i].accept_watches->ready_head = ready_next;
+    if (rt->nodes != NULL) {
+        for (i = 0; i < rt->active_nodes; ++i) {
+            if (rt->nodes[i].thread_started) {
+                pthread_join(rt->nodes[i].thread, NULL);
+                rt->nodes[i].thread_started = false;
             }
-            free(rt->nodes[i].accept_watches);
-            rt->nodes[i].accept_watches = next;
-        }
-            while (rt->nodes[i].recv_watches != NULL) {
-                llam_recv_watch_t *next = rt->nodes[i].recv_watches->next;
-
-                while (rt->nodes[i].recv_watches->ready_head != NULL) {
-                    llam_recv_ready_t *ready_next = rt->nodes[i].recv_watches->ready_head->next;
-                    llam_node_t *owner = &rt->nodes[i];
-
-                    if (rt->nodes[i].recv_watches->ready_head->has_buffer &&
-                        rt->nodes[i].recv_watches->ready_head->node_index < rt->active_nodes) {
-                        owner = &rt->nodes[rt->nodes[i].recv_watches->ready_head->node_index];
-                    }
-                    if (owner->ring_ready && owner->supports_provided_buffers &&
-                        rt->nodes[i].recv_watches->ready_head->has_buffer) {
-                        // Provided buffers belong to the node that produced
-                        // them, which may differ after live watch migration.
-                        (void)llam_node_recycle_recv_buffer(owner, rt->nodes[i].recv_watches->ready_head->bid);
-                    }
-                    free(rt->nodes[i].recv_watches->ready_head);
-                    rt->nodes[i].recv_watches->ready_head = ready_next;
+            if (rt->nodes[i].watch_lock_initialized) {
+                pthread_mutex_lock(&rt->nodes[i].watch_lock);
+                // Control operations are heap-allocated command nodes owned by the
+                // I/O node after enqueue.
+                while (rt->nodes[i].control_head != NULL) {
+                    llam_io_control_op_t *next = rt->nodes[i].control_head->next;
+                    free(rt->nodes[i].control_head);
+                    rt->nodes[i].control_head = next;
                 }
-                free(rt->nodes[i].recv_watches);
-            rt->nodes[i].recv_watches = next;
+                // Watch tables own their watch objects and any buffered readiness
+                // data that has not yet been consumed by a task.
+                while (rt->nodes[i].poll_watches != NULL) {
+                    llam_poll_watch_t *next = rt->nodes[i].poll_watches->next;
+
+                    free(rt->nodes[i].poll_watches);
+                    rt->nodes[i].poll_watches = next;
+                }
+                while (rt->nodes[i].accept_watches != NULL) {
+                    llam_accept_watch_t *next = rt->nodes[i].accept_watches->next;
+
+                    while (rt->nodes[i].accept_watches->ready_head != NULL) {
+                        llam_accept_ready_t *ready_next = rt->nodes[i].accept_watches->ready_head->next;
+
+                        llam_runtime_close_ready_fd(rt->nodes[i].accept_watches->ready_head->fd);
+                        free(rt->nodes[i].accept_watches->ready_head);
+                        rt->nodes[i].accept_watches->ready_head = ready_next;
+                    }
+                    free(rt->nodes[i].accept_watches);
+                    rt->nodes[i].accept_watches = next;
+                }
+                while (rt->nodes[i].recv_watches != NULL) {
+                    llam_recv_watch_t *next = rt->nodes[i].recv_watches->next;
+
+                    while (rt->nodes[i].recv_watches->ready_head != NULL) {
+                        llam_recv_ready_t *ready_next = rt->nodes[i].recv_watches->ready_head->next;
+                        llam_node_t *owner = &rt->nodes[i];
+
+                        if (rt->nodes[i].recv_watches->ready_head->has_buffer &&
+                            rt->nodes[i].recv_watches->ready_head->node_index < rt->active_nodes) {
+                            owner = &rt->nodes[rt->nodes[i].recv_watches->ready_head->node_index];
+                        }
+                        if (owner->ring_ready && owner->supports_provided_buffers &&
+                            rt->nodes[i].recv_watches->ready_head->has_buffer) {
+                            // Provided buffers belong to the node that produced
+                            // them, which may differ after live watch migration.
+                            (void)llam_node_recycle_recv_buffer(owner, rt->nodes[i].recv_watches->ready_head->bid);
+                        }
+                        // Shutdown owns queued copied payloads just like the
+                        // normal recv-watch destroy path.
+                        free(rt->nodes[i].recv_watches->ready_head->copy_data);
+                        free(rt->nodes[i].recv_watches->ready_head);
+                        rt->nodes[i].recv_watches->ready_head = ready_next;
+                    }
+                    free(rt->nodes[i].recv_watches);
+                    rt->nodes[i].recv_watches = next;
+                }
+                pthread_mutex_unlock(&rt->nodes[i].watch_lock);
+            }
+            if (rt->nodes[i].ring_ready) {
+                // liburing resources must be dismantled before node mutexes and
+                // wake descriptors disappear.
+                llam_node_unregister_cq_eventfd(&rt->nodes[i]);
+                llam_node_destroy_recv_buf_ring(&rt->nodes[i]);
+                io_uring_queue_exit(&rt->nodes[i].ring);
+                rt->nodes[i].ring_ready = false;
+            }
+            if (rt->nodes[i].event_fd >= 0) {
+                llam_wake_handle_close(rt->nodes[i].event_fd);
+                rt->nodes[i].event_fd = -1;
+            }
+            if (rt->nodes[i].submit_lock_initialized) {
+                pthread_mutex_destroy(&rt->nodes[i].submit_lock);
+                rt->nodes[i].submit_lock_initialized = false;
+            }
+            if (rt->nodes[i].watch_lock_initialized) {
+                pthread_mutex_destroy(&rt->nodes[i].watch_lock);
+                rt->nodes[i].watch_lock_initialized = false;
+            }
+            if (rt->nodes[i].recv_buf_lock_initialized) {
+                pthread_mutex_destroy(&rt->nodes[i].recv_buf_lock);
+                rt->nodes[i].recv_buf_lock_initialized = false;
+            }
         }
-        pthread_mutex_unlock(&rt->nodes[i].watch_lock);
-        if (rt->nodes[i].ring_ready) {
-            // liburing resources must be dismantled before node mutexes and
-            // wake descriptors disappear.
-            llam_node_unregister_cq_eventfd(&rt->nodes[i]);
-            llam_node_destroy_recv_buf_ring(&rt->nodes[i]);
-            io_uring_queue_exit(&rt->nodes[i].ring);
-            rt->nodes[i].ring_ready = false;
-        }
-        if (rt->nodes[i].event_fd >= 0) {
-            llam_wake_handle_close(rt->nodes[i].event_fd);
-        }
-        pthread_mutex_destroy(&rt->nodes[i].submit_lock);
-        pthread_mutex_destroy(&rt->nodes[i].watch_lock);
-        pthread_mutex_destroy(&rt->nodes[i].recv_buf_lock);
     }
 
     if (rt->shards != NULL) {
@@ -163,6 +214,7 @@ void llam_runtime_shutdown(void) {
             }
             if (rt->shards[i].event_fd >= 0) {
                 llam_wake_handle_close(rt->shards[i].event_fd);
+                rt->shards[i].event_fd = -1;
             }
             if (rt->shards[i].signal_stack != NULL) {
                 munmap(rt->shards[i].signal_stack, rt->shards[i].signal_stack_size);
@@ -174,15 +226,25 @@ void llam_runtime_shutdown(void) {
             rt->shards[i].timer_heap_len = 0U;
             rt->shards[i].timer_heap_cap = 0U;
             rt->shards[i].timers = NULL;
+            atomic_store_explicit(&rt->shards[i].timer_callbacks_active, 0U, memory_order_release);
             llam_shard_drain_stack_cache(&rt->shards[i]);
-            pthread_mutex_destroy(&rt->shards[i].lock);
+            if (rt->shards[i].lock_initialized) {
+                pthread_mutex_destroy(&rt->shards[i].lock);
+                rt->shards[i].lock_initialized = false;
+            }
             if (rt->shards[i].stack_cache_lock_initialized) {
                 pthread_mutex_destroy(&rt->shards[i].stack_cache_lock);
                 rt->shards[i].stack_cache_lock_initialized = false;
             }
             llam_opaque_wake_destroy(&rt->shards[i]);
-            pthread_cond_destroy(&rt->shards[i].opaque_cv);
-            pthread_mutex_destroy(&rt->shards[i].opaque_lock);
+            if (rt->shards[i].opaque_cv_initialized) {
+                pthread_cond_destroy(&rt->shards[i].opaque_cv);
+                rt->shards[i].opaque_cv_initialized = false;
+            }
+            if (rt->shards[i].opaque_lock_initialized) {
+                pthread_mutex_destroy(&rt->shards[i].opaque_lock);
+                rt->shards[i].opaque_lock_initialized = false;
+            }
         }
     }
 
@@ -266,4 +328,33 @@ void llam_runtime_shutdown(void) {
     llam_clear_xsave_globals();
     // Clear the singleton last so accidental post-shutdown reads fail closed.
     memset(rt, 0, sizeof(*rt));
+}
+
+void llam_runtime_shutdown(void) {
+    /*
+     * A managed task runs on scheduler-owned stack/context state.  Tearing the
+     * singleton down from that same execution frame can deadlock in worker joins
+     * or free the task currently returning from this function.  Treat in-runtime
+     * calls as a cooperative stop request; the host thread that owns llam_run()
+     * must perform the actual resource teardown after the scheduler exits.
+     */
+    if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
+        int saved_errno = errno;
+
+        if (atomic_load_explicit(&g_llam_runtime.initialized, memory_order_acquire)) {
+            llam_request_stop(&g_llam_runtime);
+        }
+        errno = saved_errno;
+        return;
+    }
+
+    /*
+     * Shutdown must be serialized with runtime construction.  The initialized
+     * flag is published late, but partial-init resources are published earlier
+     * for failure cleanup; tearing those down from another host thread while
+     * init still consumes them can corrupt the singleton.
+     */
+    llam_runtime_lifecycle_lock();
+    llam_runtime_shutdown_unlocked();
+    llam_runtime_lifecycle_unlock();
 }

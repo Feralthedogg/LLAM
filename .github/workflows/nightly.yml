@@ -103,6 +103,19 @@ jobs:
           mkdir -p "$OUT_DIR"
           ctest --test-dir build/nightly --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
 
+      - name: Fault and completion-order edge repeat
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          for i in $(seq 1 20); do
+            echo "[test_runtime_api_edges repeat $i/20]"
+            python3 scripts/run_with_timeout.py \
+              --timeout 180 \
+              --dump-on-timeout "$OUT_DIR/test_runtime_api_edges_repeat_$i.timeout-dump.log" \
+              --log "$OUT_DIR/test_runtime_api_edges_repeat_$i.log" \
+              -- ./build/nightly/test_runtime_api_edges
+          done 2>&1 | tee "$OUT_DIR/test_runtime_api_edges_repeat.log"
+
       - name: Direct runtime stress repeat
         run: |
           set -o pipefail
@@ -339,6 +352,13 @@ jobs:
               ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
               if ($LASTEXITCODE -ne 0) {
                 exit $LASTEXITCODE
+              }
+              for ($i = 1; $i -le 20; $i++) {
+                "[test_windows_iocp_io generation=$generation repeat $i/20]"
+                .\build\nightly-windows\Release\test_windows_iocp_io.exe
+                if ($LASTEXITCODE -ne 0) {
+                  exit $LASTEXITCODE
+                }
               }
               $env:LLAM_WINDOWS_IOCP_TCP_POLLIN = "1"
               ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_windows_iocp_io"

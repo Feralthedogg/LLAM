@@ -48,6 +48,41 @@ int llam_require_task_context(void) {
 }
 
 /**
+ * @brief Reinitialize a wait node for reuse.
+ *
+ * @details
+ * Wait nodes contain atomic wake state used by producers and parked waiters.
+ * Reset fields explicitly so embedded and heap-backed node recycling never
+ * writes over an already initialized atomic object with a byte clear.
+ *
+ * @param node        Wait node to reset.
+ * @param owner_shard Allocation-owner shard, or @c UINT_MAX for embedded nodes.
+ */
+void llam_wait_node_reset(llam_wait_node_t *node, unsigned owner_shard) {
+    if (node == NULL) {
+        return;
+    }
+
+    node->task = NULL;
+    node->next = NULL;
+    node->alloc_next = NULL;
+    node->value = NULL;
+    node->select_state = NULL;
+    node->error_code = 0;
+    node->select_kind = 0U;
+    node->scalar_value = 0;
+    node->owner_shard = owner_shard;
+    /*
+     * This helper also resets embedded nodes immediately after a producer has
+     * completed them.  Use atomic stores, not atomic_init(), because the latter
+     * is only valid for one-time initialization before any concurrent access.
+     */
+    atomic_store_explicit(&node->wake_armed, 0U, memory_order_release);
+    atomic_store_explicit(&node->wake_completed, 0U, memory_order_release);
+    atomic_store_explicit(&node->wake_queued, 0U, memory_order_release);
+}
+
+/**
  * @brief Acquire a wait node for a synchronization primitive.
  *
  * The current task's embedded wait node is used when it is free. Otherwise a
@@ -63,9 +98,8 @@ llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard) {
 
     if (task != NULL && task->active_wait_node == NULL) {
         node = &task->embedded_wait_node;
-        memset(node, 0, sizeof(*node));
+        llam_wait_node_reset(node, UINT_MAX);
         node->task = task;
-        node->owner_shard = UINT_MAX;
         return node;
     }
 
@@ -91,7 +125,7 @@ void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node) {
         return;
     }
     if (node->task != NULL && node == &node->task->embedded_wait_node) {
-        memset(node, 0, sizeof(*node));
+        llam_wait_node_reset(node, UINT_MAX);
         return;
     }
     llam_wait_node_free(shard, node);
@@ -151,6 +185,19 @@ bool llam_wait_node_prepare_wake(llam_wait_node_t *node) {
             return false;
         }
     }
+}
+
+/**
+ * @brief Return whether a producer already completed this wait node.
+ *
+ * Cancellation is registered after a waiter is visible to peers.  If a peer
+ * completes the node in that small window, completion must win over a
+ * pre-cancelled token because the operation's value/ownership has already
+ * crossed the primitive boundary.
+ */
+bool llam_wait_node_completed(const llam_wait_node_t *node) {
+    return node != NULL &&
+           atomic_load_explicit(&node->wake_completed, memory_order_acquire) != 0U;
 }
 
 /**

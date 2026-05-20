@@ -43,8 +43,12 @@ ASSERT_FIELD_U32(llam_runtime_opts_t, forced_yield_every);
 ASSERT_FIELD_U32(llam_runtime_opts_t, idle_spin_max_iters);
 ASSERT_FIELD_U32(llam_runtime_opts_t, profile);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved0);
+ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_mode);
+ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_poll_period);
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->experimental_flags) == sizeof(uint64_t),
                "llam_runtime_opts_t.experimental_flags must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns) == sizeof(uint64_t),
+               "llam_runtime_opts_t.preempt_quantum_ns must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->sqpoll_cpu) == sizeof(int32_t),
                "llam_runtime_opts_t.sqpoll_cpu must be fixed-width");
 ASSERT_FIELD_U32(llam_runtime_stats_t, active_workers);
@@ -59,6 +63,8 @@ ASSERT_FIELD_U32(llam_runtime_stats_t, worker_rings_multishot);
 ASSERT_FIELD_U32(llam_runtime_stats_t, lockfree_normq);
 ASSERT_FIELD_U32(llam_runtime_stats_t, huge_alloc);
 ASSERT_FIELD_U32(llam_runtime_stats_t, sqpoll);
+ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_mode);
+ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_poll_period);
 _Static_assert(sizeof(llam_task_class((const llam_task_t *)0)) == sizeof(uint32_t),
                "llam_task_class result must be fixed-width");
 _Static_assert(sizeof(llam_task_flags((const llam_task_t *)0)) == sizeof(uint32_t),
@@ -208,10 +214,32 @@ static int test_llam_option_initializers(void) {
     return 0;
 }
 
+static int test_preempt_poll_macro_hygiene(void) {
+    size_t llam_preempt_poll_counter_ = 0U;
+    size_t llam_preempt_poll_interval_ = 2U;
+    size_t side_effect_counter = 0U;
+    size_t side_effect_interval = 2U;
+
+    /*
+     * Public macros must be safe in ordinary user scopes.  This intentionally
+     * uses the names from the old macro implementation to catch accidental
+     * reintroduction of implementation-local declarations.
+     */
+    LLAM_PREEMPT_POLL_EVERY(llam_preempt_poll_counter_, llam_preempt_poll_interval_);
+    llam_preempt_poll_counter_ += 1U;
+    LLAM_PREEMPT_POLL_EVERY(llam_preempt_poll_counter_, 0U);
+    LLAM_PREEMPT_POLL_EVERY(side_effect_counter++, side_effect_interval++);
+    if (side_effect_counter != 1U || side_effect_interval != 3U) {
+        return test_fail("LLAM_PREEMPT_POLL_EVERY evaluated an argument more than once");
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_llam_full_info() != 0 ||
         test_llam_prefix_info() != 0 ||
         test_llam_option_initializers() != 0 ||
+        test_preempt_poll_macro_hygiene() != 0 ||
         test_platform_fd_contracts() != 0 ||
         test_invalid_arguments() != 0) {
         return 1;

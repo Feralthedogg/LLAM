@@ -20,6 +20,38 @@
 
 #include "runtime_io_watch_windows_internal.h"
 
+static llam_windows_fd_assoc_t *llam_windows_find_assoc(llam_node_t *node, uintptr_t key) {
+    llam_windows_fd_assoc_t *assoc;
+
+    if (node == NULL) {
+        return NULL;
+    }
+    for (assoc = node->windows_fd_assoc_head; assoc != NULL; assoc = assoc->next) {
+        if ((uintptr_t)assoc->fd == key) {
+            return assoc;
+        }
+    }
+    return NULL;
+}
+
+static unsigned llam_windows_try_skip_completion_on_success(llam_node_t *node, HANDLE handle) {
+    if (node == NULL || handle == NULL || node->windows_use_skip_completion_on_success == 0U) {
+        return 0U;
+    }
+    /*
+     * Windows 11 tuning can skip IOCP packets for immediately successful
+     * overlapped requests.  That removes a completion-port round trip on the
+     * hot direct-success path; submit.c completes those requests inline only
+     * when this per-handle opt-in succeeded.
+     */
+    if (SetFileCompletionNotificationModes(handle, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)) {
+        atomic_fetch_add_explicit(&node->windows_skip_completion_handles, 1U, memory_order_relaxed);
+        return 1U;
+    }
+    atomic_fetch_add_explicit(&node->windows_skip_completion_failures, 1U, memory_order_relaxed);
+    return 0U;
+}
+
 int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
     llam_windows_fd_assoc_t *assoc;
     bool known_fd = false;
@@ -30,12 +62,8 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
         errno = EINVAL;
         return -1;
     }
-    for (assoc = node->windows_fd_assoc_head; assoc != NULL; assoc = assoc->next) {
-        if (assoc->fd == fd) {
-            known_fd = true;
-            break;
-        }
-    }
+    assoc = llam_windows_find_assoc(node, (uintptr_t)fd);
+    known_fd = assoc != NULL;
 
     handle = CreateIoCompletionPort((HANDLE)(uintptr_t)fd, (HANDLE)node->windows_iocp_handle, 0, 0);
     if (handle == NULL) {
@@ -56,6 +84,7 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
         return -1;
     }
     assoc->fd = fd;
+    assoc->skip_completion_on_success = llam_windows_try_skip_completion_on_success(node, (HANDLE)(uintptr_t)fd);
     assoc->next = node->windows_fd_assoc_head;
     node->windows_fd_assoc_head = assoc;
     return 0;
@@ -72,12 +101,8 @@ int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
         errno = EINVAL;
         return -1;
     }
-    for (assoc = node->windows_fd_assoc_head; assoc != NULL; assoc = assoc->next) {
-        if ((uintptr_t)assoc->fd == key) {
-            known_handle = true;
-            break;
-        }
-    }
+    assoc = llam_windows_find_assoc(node, key);
+    known_handle = assoc != NULL;
 
     handle = CreateIoCompletionPort((HANDLE)raw_handle, (HANDLE)node->windows_iocp_handle, 0, 0);
     if (handle == NULL) {
@@ -98,9 +123,22 @@ int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
         return -1;
     }
     assoc->fd = (llam_fd_t)key;
+    assoc->skip_completion_on_success = llam_windows_try_skip_completion_on_success(node, (HANDLE)raw_handle);
     assoc->next = node->windows_fd_assoc_head;
     node->windows_fd_assoc_head = assoc;
     return 0;
+}
+
+bool llam_windows_fd_skips_completion_on_success(llam_node_t *node, llam_fd_t fd) {
+    llam_windows_fd_assoc_t *assoc = llam_windows_find_assoc(node, (uintptr_t)fd);
+
+    return assoc != NULL && assoc->skip_completion_on_success != 0U;
+}
+
+bool llam_windows_handle_skips_completion_on_success(llam_node_t *node, llam_handle_t handle) {
+    llam_windows_fd_assoc_t *assoc = llam_windows_find_assoc(node, (uintptr_t)handle);
+
+    return assoc != NULL && assoc->skip_completion_on_success != 0U;
 }
 
 int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTEX *fn_out) {
@@ -113,7 +151,7 @@ int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTE
         return -1;
     }
     if (node->windows_acceptex != NULL) {
-        *fn_out = (LPFN_ACCEPTEX)node->windows_acceptex;
+        *fn_out = node->windows_acceptex;
         return 0;
     }
     if (WSAIoctl(socket_fd,
@@ -128,7 +166,7 @@ int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTE
         errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
         return -1;
     }
-    node->windows_acceptex = (void *)fn;
+    node->windows_acceptex = fn;
     *fn_out = fn;
     return 0;
 }
@@ -143,7 +181,7 @@ int llam_windows_load_connectex(llam_node_t *node, SOCKET socket_fd, LPFN_CONNEC
         return -1;
     }
     if (node->windows_connectex != NULL) {
-        *fn_out = (LPFN_CONNECTEX)node->windows_connectex;
+        *fn_out = node->windows_connectex;
         return 0;
     }
     if (WSAIoctl(socket_fd,
@@ -158,7 +196,7 @@ int llam_windows_load_connectex(llam_node_t *node, SOCKET socket_fd, LPFN_CONNEC
         errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
         return -1;
     }
-    node->windows_connectex = (void *)fn;
+    node->windows_connectex = fn;
     *fn_out = fn;
     return 0;
 }

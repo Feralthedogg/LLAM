@@ -24,6 +24,7 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
     llam_io_abort_reason_t abort_reason;
     llam_wait_reason_t wake_reason = LLAM_WAIT_IO;
     unsigned inflight_owner = UINT_MAX;
+    unsigned completion_owner = UINT_MAX;
     unsigned wait_mode;
 
     if (decrement_pending) {
@@ -31,12 +32,19 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
     }
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
     if (wait_mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
+        /*
+         * The exchanged owner is authoritative for completion routing.  A
+         * concurrent dynamic rehome may still be rewriting req->owner_shard
+         * after it successfully transferred this atomic in-flight owner.
+         */
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
         if (inflight_owner < node->runtime->active_shards) {
             llam_shard_note_inflight_io_waiter(inflight_owner, -1);
+            completion_owner = inflight_owner;
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+        completion_owner = req->owner_shard;
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
@@ -69,8 +77,8 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
         }
     }
 
-    if (req->owner_shard < node->runtime->active_shards) {
-        llam_shard_t *shard = &node->runtime->shards[req->owner_shard];
+    if (completion_owner < node->runtime->active_shards) {
+        llam_shard_t *shard = &node->runtime->shards[completion_owner];
         uint64_t now_ns = llam_now_ns();
 
         pthread_mutex_lock(&shard->lock);
@@ -88,7 +96,7 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
 
     llam_reinject_task_on_shard(node->runtime,
                               req->task,
-                              req->owner_shard,
+                              completion_owner,
                               true,
                               LLAM_TRACE_IO_COMPLETE,
                               wake_reason);
@@ -214,6 +222,25 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
     llam_windows_io_op_free(op);
 }
 
+void llam_windows_complete_immediate_op(llam_windows_io_op_t *op, DWORD bytes) {
+    llam_windows_iocp_completion_t completion;
+
+    if (op == NULL || op->node == NULL) {
+        return;
+    }
+    atomic_fetch_add_explicit(&op->node->windows_immediate_completions, 1U, memory_order_relaxed);
+    /*
+     * Handles configured with FILE_SKIP_COMPLETION_PORT_ON_SUCCESS do not post
+     * an IOCP packet for synchronous overlapped success.  Reuse the ordinary
+     * completion finalizer so AcceptEx/ConnectEx context updates, owned-buffer
+     * sizing, owner routing, and op recycling stay identical to queued packets.
+     */
+    memset(&completion, 0, sizeof(completion));
+    completion.overlapped = (uintptr_t)&op->overlapped;
+    completion.bytes = (uint32_t)bytes;
+    llam_windows_handle_completion(&completion);
+}
+
 void llam_windows_drain_completions(llam_node_t *node, DWORD timeout_ms) {
     llam_windows_iocp_completion_t entries[LLAM_WINDOWS_IOCP_BATCH_MAX];
     size_t batch = node->windows_completion_batch != 0U ? node->windows_completion_batch : 64U;
@@ -232,10 +259,8 @@ void llam_windows_drain_completions(llam_node_t *node, DWORD timeout_ms) {
             }
             return;
         }
-        node->last_cq_depth = (unsigned)count;
-        if ((unsigned)count > node->max_cq_depth) {
-            node->max_cq_depth = (unsigned)count;
-        }
+        atomic_store_explicit(&node->last_cq_depth, (unsigned)count, memory_order_relaxed);
+        llam_atomic_update_peak(&node->max_cq_depth, (unsigned)count);
         for (i = 0U; i < count; ++i) {
             if (entries[i].overlapped == 0U && entries[i].key == LLAM_WINDOWS_IOCP_WAKE_KEY) {
                 llam_drain_node_wake(node);

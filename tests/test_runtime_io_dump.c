@@ -133,6 +133,25 @@ static bool dump_contains_pending_io_or_blocking_fallback(const char *dump, int 
            strstr(dump, "io_fallbacks=") != NULL;
 }
 
+static bool dump_reports_live_tasks(const char *dump) {
+    const char *lifecycle;
+    const char *field;
+    unsigned value;
+
+    if (dump == NULL) {
+        return false;
+    }
+    lifecycle = strstr(dump, "lifecycle:");
+    field = lifecycle != NULL ? strstr(lifecycle, "live_tasks=") : NULL;
+    /*
+     * The dump is used to debug hangs while work is still parked. A stale zero
+     * here hides the only high-level signal that the runtime still owns tasks.
+     */
+    return field != NULL &&
+           sscanf(field, "live_tasks=%u", &value) == 1 &&
+           value > 0U;
+}
+
 static void *dump_thread_main(void *arg) {
     io_dump_state_t *state = arg;
     unsigned i;
@@ -149,8 +168,13 @@ static void *dump_thread_main(void *arg) {
 
         if (dump != NULL) {
             if (dump_contains_pending_io_or_blocking_fallback(dump, state->read_fd)) {
-                atomic_store_explicit(&state->dump_seen, 1U, memory_order_release);
+                if (dump_reports_live_tasks(dump)) {
+                    atomic_store_explicit(&state->dump_seen, 1U, memory_order_release);
+                    free(dump);
+                    break;
+                }
                 free(dump);
+                task_fail(state, "runtime dump lifecycle live_tasks was stale while I/O task was live");
                 break;
             }
             free(dump);

@@ -56,22 +56,40 @@ have stopped or have observed cancellation.
 
 ## 4. CPU-Bound Tasks
 
-LLAM is cooperative. Long C loops that neither call LLAM waits nor yield can
-delay cancellation, watchdog progress, allocator quiescence, and runnable task
-handoff. Use `llam_task_safepoint()` inside CPU-heavy loops when an immediate
-yield would be too expensive, and use `llam_yield()` when fairness matters more
-than raw loop throughput.
+LLAM remains stackful and cooperative at the actual context-switch boundary.
+Automatic preemption is request-based: watchdog/runtime policy can ask an
+over-budget task to give up the worker, but the task must still hit a LLAM
+boundary such as `llam_task_safepoint()`, `LLAM_PREEMPT_POLL`,
+`LLAM_PREEMPT_POLL_EVERY`, `llam_yield()`, a wait, or an I/O call. Long C loops
+that never reach one of those boundaries can delay cancellation, watchdog
+progress, allocator quiescence, and runnable task handoff.
+
+Use `LLAM_PREEMPT_POLL_EVERY` inside CPU-heavy loops when an immediate yield
+would be too expensive, and use `llam_yield()` when fairness matters more than
+raw loop throughput.
 
 Example:
 
 ```c
+size_t poll_counter = 0;
+
 for (uint64_t i = 0; i < work_items; ++i) {
     process_item(i);
-    if ((i & 0x3ffU) == 0U) {
-        llam_task_safepoint();
-    }
+    LLAM_PREEMPT_POLL_EVERY(poll_counter++, 1024U);
 }
 ```
+
+Operational knobs:
+
+- `LLAM_PREEMPT_MODE=off|cooperative|auto|strict` selects the preemption
+  policy. `auto` is the normal diagnostic-safe mode; `strict` is for finding
+  loops that do not poll often enough.
+- `LLAM_PREEMPT_POLL_PERIOD` overrides the task-local safepoint flag-poll
+  period. Use this only when measuring CPU-loop latency vs overhead.
+- `LLAM_PREEMPT_QUANTUM_NS` overrides the runtime slice budget. Keep it at `0`
+  unless a benchmark or incident investigation needs a fixed quantum.
+- `LLAM_SAFEPOINT_CLOCK_PERIOD` controls cheap-safepoint clock sampling and can
+  reduce timestamp overhead in very hot loops.
 
 ## 5. Memory and Stack Pressure
 
@@ -106,10 +124,22 @@ cooperative/direct fallback path by default; set
 `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` only for controlled native-probe smoke or
 benchmark runs. Waitable HANDLE polling uses `WaitForSingleObject` semantics;
 AF_UNIX sockets and unsupported poll masks remain documented fallback cases.
+Windows 11 policy also attempts `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` on
+associated socket/HANDLE objects. When Windows accepts that mode and an
+overlapped operation succeeds synchronously, LLAM completes the request inline
+through the normal completion finalizer instead of waiting for an IOCP packet.
+Runtime dumps report `windows_skip(success_handles=... failures=...
+immediate=...)` so this optimization's hit rate and compatibility can be
+checked per host.
 
 Production rollout is gated by native Windows CMake/CTest, Windows 2022/2025
 stress, forced Windows 10/11 policy checks, IOCP smoke coverage, HANDLE I/O
 coverage, shared-library export checks, and benchmark smoke coverage.
+The top-level Makefile does not maintain a separate Windows compiler pipeline:
+when `HOST_PLATFORM=windows` it delegates build, test, shared/static, package,
+and explicit executable/test targets to the native CMake backend. This keeps the
+Windows entry point available to `make` users while preserving CMake as the
+single source of truth for MSVC/MASM and IOCP target wiring.
 
 Verification must be platform-local:
 
@@ -150,11 +180,11 @@ regress.
 
 `llam_runtime_create()`, `llam_runtime_run_handle()`, and
 `llam_runtime_destroy()` are the canonical embedding-facing lifecycle APIs, but
-LLAM 1.0 still has one active runtime per process. The handle currently names
+LLAM 1.x still has one active runtime per process. The handle currently names
 that active runtime and makes future ABI expansion explicit; it does not yet
 allow two independent schedulers in one address space.
 
-This is intentional for the 1.0 line because global task context, TLS shard/task
+This is intentional for the 1.x line because global task context, TLS shard/task
 state, signal/fault hooks, and platform I/O ownership are still process-scoped.
 Embedders should treat a second `llam_runtime_create()` returning `EBUSY` as the
 defined behavior, not as a transient initialization failure.
@@ -231,6 +261,60 @@ Minimum production counters to export are `ctx_switches`, `parks`, `wakes`,
 `online_workers`, `queue_overflows`, `overflow_depth`, and opaque blocking
 duration counters.
 
+## 8.1 Bug-Hunter Validation Profile
+
+When investigating LLAM itself, reproduce failures against focused runtime
+tests before changing the implementation. The current high-signal profile is:
+
+```bash
+make -B test
+
+make OBJDIR=object-asan-hunt CC=clang \
+  CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' \
+  test_runtime_api_edges test_runtime_core test_runtime_fuzz \
+  test_runtime_invariants test_runtime_shutdown_internal \
+  test_runtime_stress test_io_buffers test_sync_primitives
+
+ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  LLAM_RUNTIME_FUZZ_SCENARIOS=512 ./test_runtime_fuzz
+
+ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  LLAM_RUNTIME_STRESS_ROUNDS=6 \
+  LLAM_RUNTIME_STRESS_DYNAMIC_ROUNDS=4 \
+  ./test_runtime_stress
+```
+
+The Makefile records object-build and link signatures, so custom sanitizer or
+`OBJDIR=object-*` builds cannot silently reuse normal test binaries or leave a
+normal target linked from mismatched objects. Run `make clean` between unrelated
+profiles when you want a fully empty tree; it removes `object-*`, analyzer
+`.plist` files, and link-signature files in addition to ordinary build outputs.
+
+Use ThreadSanitizer on focused race tests rather than the longest stackful
+edge tests:
+
+```bash
+make OBJDIR=object-tsan-hunt CC=clang \
+  CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=thread -fno-omit-frame-pointer' \
+  LDLIBS='-pthread -fsanitize=thread' \
+  test_runtime_invariants test_runtime_fuzz test_sync_primitives
+
+LLAM_RUNTIME_INVARIANT_SCENARIOS=24 ./test_runtime_invariants
+LLAM_RUNTIME_FUZZ_SCENARIOS=64 ./test_runtime_fuzz
+./test_sync_primitives
+```
+
+Treat a finding as actionable only after it is reproduced by one of the above
+tests, a deterministic seed, or a small targeted reproducer. Static review
+findings should become tests first unless the failure is an obvious compile-time
+or contract violation.
+
+The current direct runtime tests are intended to catch bugs independent of the
+example chat server policy: lifecycle races, task handle ownership, cancellation
+token destroy/cancel races, lost wakeups, channel close/select races, blocking
+callback cancellation, managed/unmanaged boundary behavior, POSIX I/O edge
+semantics, owned-buffer lifetime after shutdown, and runtime dump ownership.
+
 ## 9. Channel Select Benchmarking
 
 Channel select has three focused benchmark cases:
@@ -258,7 +342,7 @@ python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1
 
 ## 10. Release Gate
 
-Before tagging a 1.0.x build, require:
+Before tagging a 1.x build, require:
 
 - `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
 - `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.

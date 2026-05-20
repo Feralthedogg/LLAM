@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 project(llam C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 1)
-set(LLAM_ABI_VERSION_MINOR 0)
-set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.2")
+set(LLAM_ABI_VERSION_MINOR 1)
+set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.0")
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -400,6 +400,14 @@ add_executable(test_runtime_invariants
 )
 target_link_libraries(test_runtime_invariants PRIVATE llam_runtime)
 
+add_executable(test_runtime_shutdown_internal
+    tests/test_runtime_shutdown_internal.c
+)
+target_include_directories(test_runtime_shutdown_internal PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime)
+
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c
 )
@@ -471,6 +479,7 @@ foreach(LLAM_TEST_TARGET
         test_runtime_stress
         test_runtime_fuzz
         test_runtime_invariants
+        test_runtime_shutdown_internal
         test_sync_primitives
         test_io_buffers
         test_windows_policy
@@ -498,6 +507,7 @@ add_test(NAME test_runtime_unmanaged_join COMMAND test_runtime_unmanaged_join)
 add_test(NAME test_runtime_stress COMMAND test_runtime_stress)
 add_test(NAME test_runtime_fuzz COMMAND test_runtime_fuzz)
 add_test(NAME test_runtime_invariants COMMAND test_runtime_invariants)
+add_test(NAME test_runtime_shutdown_internal COMMAND test_runtime_shutdown_internal)
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)

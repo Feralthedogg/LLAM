@@ -195,9 +195,18 @@ void llam_allocator_unlock(llam_allocator_t *allocator) {
  *
  * @param allocator Allocator storage to initialize.
  */
-void llam_allocator_init(llam_allocator_t *allocator) {
+int llam_allocator_init(llam_allocator_t *allocator) {
+    int rc;
+
     memset(allocator, 0, sizeof(*allocator));
-    (void)pthread_mutex_init(&allocator->lock, NULL);
+    rc = pthread_mutex_init(&allocator->lock, NULL);
+    if (rc != 0) {
+        // Allocator locks protect all shard-local slabs.  Startup must fail
+        // rather than publishing a shard with an unusable allocator lock.
+        errno = rc;
+        return -1;
+    }
+    allocator->lock_initialized = true;
     atomic_store(&allocator->remote_free_pending, 0U);
     atomic_store(&allocator->task_remote_free, NULL);
     atomic_store(&allocator->wait_remote_free, NULL);
@@ -205,6 +214,7 @@ void llam_allocator_init(llam_allocator_t *allocator) {
     atomic_store(&allocator->io_req_remote_free, NULL);
     atomic_store(&allocator->io_buffer_remote_free, NULL);
     atomic_store(&allocator->local_epoch, 0U);
+    return 0;
 }
 
 /**
@@ -238,7 +248,57 @@ void llam_allocator_destroy(llam_allocator_t *allocator) {
         chunk = next;
     }
 
-    pthread_mutex_destroy(&allocator->lock);
+    if (allocator->lock_initialized) {
+        pthread_mutex_destroy(&allocator->lock);
+        allocator->lock_initialized = false;
+    }
+}
+
+/**
+ * @brief Initialize a fresh blocking-job object before first publication.
+ *
+ * Blocking jobs carry an atomic state observed by producer, worker, timeout,
+ * and cancellation paths. Fresh slab objects use @c atomic_init before any
+ * thread can observe them.
+ *
+ * @param job Job object to initialize.
+ */
+static void llam_block_job_init(llam_block_job_t *job) {
+    if (job == NULL) {
+        return;
+    }
+
+    job->fn = NULL;
+    job->arg = NULL;
+    atomic_init(&job->result, NULL);
+    atomic_init(&job->error_code, 0);
+    job->task = NULL;
+    atomic_init(&job->state, LLAM_BLOCK_JOB_ABORTED);
+    job->next = NULL;
+}
+
+/**
+ * @brief Reset a blocking-job object for reuse.
+ *
+ * @details
+ * Reused jobs already contain a live atomic state object. Use an atomic store
+ * instead of @c atomic_init so recycling remains valid after previous
+ * cross-thread state-machine access.
+ *
+ * @param job Job object to reset.
+ */
+static void llam_block_job_reset(llam_block_job_t *job) {
+    if (job == NULL) {
+        return;
+    }
+
+    job->fn = NULL;
+    job->arg = NULL;
+    atomic_store_explicit(&job->result, NULL, memory_order_release);
+    atomic_store_explicit(&job->error_code, 0, memory_order_release);
+    job->task = NULL;
+    atomic_store_explicit(&job->state, LLAM_BLOCK_JOB_ABORTED, memory_order_release);
+    job->next = NULL;
 }
 
 /**
@@ -257,7 +317,6 @@ static int llam_block_job_grow_pool(llam_runtime_t *rt) {
     llam_alloc_chunk_t *chunk;
     llam_block_job_t *head;
     llam_block_job_t *tail;
-    llam_block_job_t *old_head;
     unsigned i;
 
     if (items == NULL) {
@@ -273,28 +332,23 @@ static int llam_block_job_grow_pool(llam_runtime_t *rt) {
     chunk->storage = items;
     chunk->bytes = alloc_bytes;
     chunk->mmapped = mmapped;
-    pthread_mutex_lock(&rt->block_lock);
-    chunk->next = rt->block_job_chunks;
-    rt->block_job_chunks = chunk;
-    pthread_mutex_unlock(&rt->block_lock);
-
-    // Build the new slab as a local list, then publish the whole batch with one
-    // CAS so racing producers can continue using the global free list.
+    // Build the new slab as a local list, then publish the whole batch under
+    // block_lock. This free list supports both pop and push, so a lock-free
+    // Treiber stack would need ABA protection once jobs can be recycled.
     head = NULL;
     tail = &items[0];
     for (i = 0; i < LLAM_BLOCK_JOB_SLAB_COUNT; ++i) {
+        llam_block_job_init(&items[i]);
         items[i].next = head;
         head = &items[i];
     }
 
-    do {
-        old_head = atomic_load_explicit(&rt->block_job_free, memory_order_acquire);
-        tail->next = old_head;
-    } while (!atomic_compare_exchange_weak_explicit(&rt->block_job_free,
-                                                    &old_head,
-                                                    head,
-                                                    memory_order_acq_rel,
-                                                    memory_order_acquire));
+    pthread_mutex_lock(&rt->block_lock);
+    chunk->next = rt->block_job_chunks;
+    rt->block_job_chunks = chunk;
+    tail->next = atomic_load_explicit(&rt->block_job_free, memory_order_relaxed);
+    atomic_store_explicit(&rt->block_job_free, head, memory_order_release);
+    pthread_mutex_unlock(&rt->block_lock);
 
     return 0;
 }
@@ -310,7 +364,6 @@ static int llam_block_job_grow_pool(llam_runtime_t *rt) {
  */
 llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt) {
     llam_block_job_t *job;
-    llam_block_job_t *next;
 
     if (rt == NULL) {
         errno = EINVAL;
@@ -318,21 +371,19 @@ llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt) {
     }
 
     for (;;) {
+        pthread_mutex_lock(&rt->block_lock);
         job = atomic_load_explicit(&rt->block_job_free, memory_order_acquire);
-        if (job == NULL) {
-            if (llam_block_job_grow_pool(rt) != 0) {
-                return NULL;
-            }
-            continue;
-        }
-        next = job->next;
-        if (atomic_compare_exchange_weak_explicit(&rt->block_job_free,
-                                                  &job,
-                                                  next,
-                                                  memory_order_acq_rel,
-                                                  memory_order_acquire)) {
-            memset(job, 0, sizeof(*job));
+        if (job != NULL) {
+            atomic_store_explicit(&rt->block_job_free, job->next, memory_order_release);
+            pthread_mutex_unlock(&rt->block_lock);
+            job->next = NULL;
+            llam_block_job_reset(job);
             return job;
+        }
+        pthread_mutex_unlock(&rt->block_lock);
+
+        if (llam_block_job_grow_pool(rt) != 0) {
+            return NULL;
         }
     }
 }
@@ -350,14 +401,11 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
         return;
     }
 
-    do {
-        head = atomic_load_explicit(&rt->block_job_free, memory_order_acquire);
-        job->next = head;
-    } while (!atomic_compare_exchange_weak_explicit(&rt->block_job_free,
-                                                    &head,
-                                                    job,
-                                                    memory_order_acq_rel,
-                                                    memory_order_acquire));
+    pthread_mutex_lock(&rt->block_lock);
+    head = atomic_load_explicit(&rt->block_job_free, memory_order_relaxed);
+    job->next = head;
+    atomic_store_explicit(&rt->block_job_free, job, memory_order_release);
+    pthread_mutex_unlock(&rt->block_lock);
 }
 
 /**
@@ -509,7 +557,7 @@ int llam_allocator_grow_wait_slab(llam_shard_t *shard) {
     llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_WAIT_NODE_SLAB_COUNT; ++i) {
-        items[i].owner_shard = shard->id;
+        llam_wait_node_reset(&items[i], shard->id);
         items[i].alloc_next = shard->allocator.wait_free;
         shard->allocator.wait_free = &items[i];
         shard->allocator.wait_allocs += 1U;
@@ -594,10 +642,7 @@ int llam_allocator_grow_io_req_slab(llam_shard_t *shard) {
         // Requests track both logical owner and allocation owner because live
         // I/O can migrate/rehome while the backing object still returns to the
         // original slab owner.
-        items[i].owner_shard = shard->id;
-        items[i].alloc_owner_shard = shard->id;
-        items[i].attached_node_index = UINT_MAX;
-        atomic_init(&items[i].inflight_owner_shard, UINT_MAX);
+        llam_io_req_reset(&items[i], shard->id, shard->id);
         items[i].alloc_next = shard->allocator.io_req_free;
         shard->allocator.io_req_free = &items[i];
         shard->allocator.io_req_allocs += 1U;

@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -50,6 +51,7 @@
 #define CHAT_BACKLOG 128
 #define CHAT_OUTBOX_CAP 1024U
 #define CHAT_WRITE_BATCH 64U
+#define CHAT_WRITE_IOV_CAP 128U
 #define CHAT_READ_BUF 2048U
 #define CHAT_INPUT_CAP 4096U
 #define CHAT_MAX_BROADCAST_TARGETS 1024U
@@ -347,6 +349,124 @@ static int chat_write_message(chat_client_t *client, const chat_message_t *messa
     return 0;
 }
 
+static size_t chat_write_iov_limit(void) {
+#ifdef IOV_MAX
+    return IOV_MAX < CHAT_WRITE_IOV_CAP ? (size_t)IOV_MAX : CHAT_WRITE_IOV_CAP;
+#else
+    return CHAT_WRITE_IOV_CAP;
+#endif
+}
+
+static int chat_message_append_iov(const chat_message_t *message,
+                                   size_t offset,
+                                   struct iovec *iov,
+                                   size_t iov_limit,
+                                   size_t *iov_count) {
+    if (message == NULL || *iov_count >= iov_limit) {
+        return 0;
+    }
+    if (offset < message->prefix_len) {
+        iov[*iov_count].iov_base = (void *)(message->prefix + offset);
+        iov[*iov_count].iov_len = message->prefix_len - offset;
+        *iov_count += 1U;
+        if (message->data_len > 0U && *iov_count < iov_limit) {
+            iov[*iov_count].iov_base = (void *)message->data;
+            iov[*iov_count].iov_len = message->data_len;
+            *iov_count += 1U;
+        }
+        return 0;
+    }
+    if (offset < message->prefix_len + message->data_len) {
+        size_t data_offset = offset - message->prefix_len;
+
+        iov[*iov_count].iov_base = (void *)(message->data + data_offset);
+        iov[*iov_count].iov_len = message->data_len - data_offset;
+        *iov_count += 1U;
+    }
+    return 0;
+}
+
+static void chat_advance_written(chat_message_t **messages,
+                                 size_t count,
+                                 size_t *index,
+                                 size_t *offset,
+                                 size_t written) {
+    while (*index < count && written > 0U) {
+        chat_message_t *message = messages[*index];
+        size_t total_len = message->prefix_len + message->data_len;
+        size_t remaining = total_len > *offset ? total_len - *offset : 0U;
+
+        if (written < remaining) {
+            *offset += written;
+            return;
+        }
+        written -= remaining;
+        *index += 1U;
+        *offset = 0U;
+    }
+}
+
+static int chat_write_batch(chat_client_t *client, chat_message_t **messages, size_t count) {
+    size_t index = 0U;
+    size_t offset = 0U;
+    size_t iov_limit = chat_write_iov_limit();
+
+    if (count == 0U) {
+        return 0;
+    }
+    if (count == 1U) {
+        return chat_write_message(client, messages[0]);
+    }
+    while (index < count) {
+        struct iovec iov[CHAT_WRITE_IOV_CAP];
+        size_t iov_count = 0U;
+        ssize_t nwritten;
+        int fd = chat_client_fd(client);
+
+        if (fd < 0) {
+            return -1;
+        }
+        for (size_t i = index; i < count && iov_count < iov_limit; ++i) {
+            chat_message_append_iov(messages[i], i == index ? offset : 0U, iov, iov_limit, &iov_count);
+        }
+        if (iov_count == 0U) {
+            return 0;
+        }
+        /*
+         * Outbox batches are already ordered per client. Coalescing adjacent
+         * message prefix/data slices into one writev keeps chat semantics while
+         * avoiding one syscall per tiny broadcast delivery.
+         */
+        nwritten = writev(fd, iov, (int)iov_count);
+        if (nwritten > 0) {
+            chat_advance_written(messages, count, &index, &offset, (size_t)nwritten);
+            continue;
+        }
+        if (nwritten < 0 && errno == EINTR) {
+            continue;
+        }
+        if (nwritten < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            short revents = 0;
+            int poll_rc;
+
+            if (atomic_load_explicit(&client->closing, memory_order_acquire) != 0U ||
+                atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
+                return -1;
+            }
+            poll_rc = llam_poll_fd(fd, POLLOUT, 100, &revents);
+            if (poll_rc == 0 || (poll_rc < 0 && errno == EINTR)) {
+                continue;
+            }
+            if (poll_rc < 0 || (revents & (POLLOUT | POLLHUP | POLLERR)) == 0) {
+                return -1;
+            }
+            continue;
+        }
+        return -1;
+    }
+    return 0;
+}
+
 static int chat_outbox_init(chat_outbox_t *outbox,
                             atomic_uint_fast64_t *full_drop_counter,
                             atomic_uint_fast64_t *closed_drop_counter,
@@ -412,7 +532,14 @@ static void chat_outbox_destroy(chat_outbox_t *outbox) {
     if (outbox->wake != NULL) {
         void *ignored = NULL;
 
-        while (llam_channel_recv_until_result(outbox->wake, 0U, &ignored) == 0) {
+        /*
+         * Final client release owns the outbox exclusively, but it can happen
+         * from host-side cleanup after the runtime has already stopped.  Only
+         * the nonblocking receive API is valid for draining buffered wake tokens
+         * across that shutdown boundary.
+         */
+        while (llam_channel_try_recv_result(outbox->wake, &ignored) == 0) {
+            ignored = NULL;
         }
         (void)llam_channel_destroy(outbox->wake);
         outbox->wake = NULL;
@@ -851,16 +978,14 @@ static void chat_writer_task(void *arg) {
                 }
                 break;
             }
-            for (size_t i = 0U; i < count; ++i) {
-                if (atomic_load_explicit(&client->closing, memory_order_acquire) != 0U ||
-                    chat_write_message(client, batch[i]) != 0) {
-                    chat_client_begin_close(client);
-                    chat_writer_release_batch(&batch[i], count - i);
-                    chat_writer_drop_backlog(client);
-                    goto done;
-                }
-                chat_message_release(batch[i]);
+            if (atomic_load_explicit(&client->closing, memory_order_acquire) != 0U ||
+                chat_write_batch(client, batch, count) != 0) {
+                chat_client_begin_close(client);
+                chat_writer_release_batch(batch, count);
+                chat_writer_drop_backlog(client);
+                goto done;
             }
+            chat_writer_release_batch(batch, count);
             count = chat_outbox_pop_batch(&client->outbox, batch, CHAT_WRITE_BATCH, &closed);
         }
     }

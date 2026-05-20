@@ -35,6 +35,7 @@
 #include <limits.h>
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 #include "runtime_windows_compat.h"
+#include <mswsock.h>
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -194,18 +195,18 @@ typedef struct llam_queue {
 typedef struct llam_cldeque {
     _Alignas(LLAM_CACHELINE_BYTES) _Atomic size_t top;
     _Alignas(LLAM_CACHELINE_BYTES) _Atomic size_t bottom;
-    _Alignas(LLAM_CACHELINE_BYTES) llam_task_t *buffer[LLAM_NORM_QUEUE_CAP];
+    _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_task_t *) buffer[LLAM_NORM_QUEUE_CAP];
 } llam_cldeque_t;
 
 /** @brief Compact scheduler trace event stored in a per-shard ring buffer. */
 typedef struct llam_trace_event {
-    uint64_t ts_ns;
-    uint64_t task_id;
-    uint32_t kind;
-    uint16_t from_state;
-    uint16_t to_state;
-    uint16_t reason;
-    uint16_t shard;
+    atomic_uint_fast64_t ts_ns;
+    atomic_uint_fast64_t task_id;
+    atomic_uint kind;
+    atomic_uint from_state;
+    atomic_uint to_state;
+    atomic_uint reason;
+    atomic_uint shard;
 } llam_trace_event_t;
 
 /** @brief Metadata for a cached stack mapping and its usable stack range. */
@@ -249,61 +250,65 @@ typedef struct llam_recv_ready llam_recv_ready_t;
 
 /** @brief Per-shard counters collected into public runtime stats and diagnostics. */
 typedef struct llam_metrics {
-    uint64_t ctx_switches;
-    uint64_t yields;
-    uint64_t parks;
-    uint64_t wakes;
-    uint64_t timeout_wakes;
-    uint64_t cancel_wakes;
-    uint64_t sleeps;
-    uint64_t joins;
-    uint64_t steals;
-    uint64_t migrations;
-    uint64_t blocking_calls;
-    uint64_t blocking_completions;
-    uint64_t io_submits;
-    uint64_t io_completions;
-    uint64_t io_completion_latency_ns;
-    uint64_t io_completion_samples;
-    uint64_t io_fallbacks;
-    uint64_t hot_enqueues;
-    uint64_t norm_enqueues;
-    uint64_t inject_enqueues;
-    uint64_t wake_latency_ns;
-    uint64_t wake_samples;
-    uint64_t idle_polls;
-    uint64_t idle_spin_loops;
-    uint64_t idle_spin_hits;
-    uint64_t idle_spin_fallbacks;
-    uint64_t idle_spin_ns;
-    uint64_t watchdog_hits;
-    uint64_t long_no_safepoint;
-    uint64_t yield_direct_attempts;
-    uint64_t yield_direct_fast_hits;
-    uint64_t yield_direct_locked_hits;
-    uint64_t yield_direct_fail_context;
-    uint64_t yield_direct_fail_policy;
-    uint64_t yield_direct_fail_no_work;
-    uint64_t yield_direct_fail_self;
-    uint64_t yield_direct_fail_push;
-    uint64_t opaque_compensations;
-    uint64_t deadlock_suspicions;
-    uint64_t queue_overflows;
-    uint64_t slice_budget_ns;
-    uint64_t max_run_ns;
-    uint64_t slice_overruns;
-    uint64_t total_run_ns;
-    uint64_t opaque_block_ns;
-    uint64_t opaque_block_samples;
-    uint64_t opaque_block_max_ns;
-    uint64_t opaque_enter_wait_ns;
-    uint64_t opaque_enter_wait_samples;
-    uint64_t opaque_enter_wait_max_ns;
-    uint64_t opaque_leave_wait_ns;
-    uint64_t opaque_leave_wait_samples;
-    uint64_t opaque_leave_wait_max_ns;
-    uint64_t opaque_redirect_activations;
-    uint64_t wake_reason_hist[LLAM_WAIT_TIMEOUT + 1U];
+    atomic_uint_fast64_t ctx_switches;
+    atomic_uint_fast64_t yields;
+    atomic_uint_fast64_t parks;
+    atomic_uint_fast64_t wakes;
+    atomic_uint_fast64_t timeout_wakes;
+    atomic_uint_fast64_t cancel_wakes;
+    atomic_uint_fast64_t sleeps;
+    atomic_uint_fast64_t joins;
+    atomic_uint_fast64_t steals;
+    atomic_uint_fast64_t migrations;
+    atomic_uint_fast64_t blocking_calls;
+    atomic_uint_fast64_t blocking_completions;
+    atomic_uint_fast64_t io_submits;
+    atomic_uint_fast64_t io_completions;
+    atomic_uint_fast64_t io_completion_latency_ns;
+    atomic_uint_fast64_t io_completion_samples;
+    atomic_uint_fast64_t io_fallbacks;
+    atomic_uint_fast64_t hot_enqueues;
+    atomic_uint_fast64_t norm_enqueues;
+    atomic_uint_fast64_t inject_enqueues;
+    atomic_uint_fast64_t wake_latency_ns;
+    atomic_uint_fast64_t wake_samples;
+    atomic_uint_fast64_t idle_polls;
+    atomic_uint_fast64_t idle_spin_loops;
+    atomic_uint_fast64_t idle_spin_hits;
+    atomic_uint_fast64_t idle_spin_fallbacks;
+    atomic_uint_fast64_t idle_spin_ns;
+    atomic_uint_fast64_t watchdog_hits;
+    atomic_uint_fast64_t long_no_safepoint;
+    atomic_uint_fast64_t preempt_requests;
+    atomic_uint_fast64_t preempt_yields;
+    atomic_uint_fast64_t preempt_suppressed;
+    atomic_uint_fast64_t preempt_signals;
+    atomic_uint_fast64_t yield_direct_attempts;
+    atomic_uint_fast64_t yield_direct_fast_hits;
+    atomic_uint_fast64_t yield_direct_locked_hits;
+    atomic_uint_fast64_t yield_direct_fail_context;
+    atomic_uint_fast64_t yield_direct_fail_policy;
+    atomic_uint_fast64_t yield_direct_fail_no_work;
+    atomic_uint_fast64_t yield_direct_fail_self;
+    atomic_uint_fast64_t yield_direct_fail_push;
+    atomic_uint_fast64_t opaque_compensations;
+    atomic_uint_fast64_t deadlock_suspicions;
+    atomic_uint_fast64_t queue_overflows;
+    atomic_uint_fast64_t slice_budget_ns;
+    atomic_uint_fast64_t max_run_ns;
+    atomic_uint_fast64_t slice_overruns;
+    atomic_uint_fast64_t total_run_ns;
+    atomic_uint_fast64_t opaque_block_ns;
+    atomic_uint_fast64_t opaque_block_samples;
+    atomic_uint_fast64_t opaque_block_max_ns;
+    atomic_uint_fast64_t opaque_enter_wait_ns;
+    atomic_uint_fast64_t opaque_enter_wait_samples;
+    atomic_uint_fast64_t opaque_enter_wait_max_ns;
+    atomic_uint_fast64_t opaque_leave_wait_ns;
+    atomic_uint_fast64_t opaque_leave_wait_samples;
+    atomic_uint_fast64_t opaque_leave_wait_max_ns;
+    atomic_uint_fast64_t opaque_redirect_activations;
+    atomic_uint_fast64_t wake_reason_hist[LLAM_WAIT_TIMEOUT + 1U];
 } llam_metrics_t;
 
 /** @brief Logical I/O operation kind. */
@@ -332,6 +337,7 @@ typedef enum llam_io_abort_reason {
     LLAM_IO_ABORT_NONE = 0,
     LLAM_IO_ABORT_CANCEL = 1,
     LLAM_IO_ABORT_TIMEOUT = 2,
+    LLAM_IO_ABORT_ERROR = 3,
 } llam_io_abort_reason_t;
 
 /** @brief State machine for runtime-wide blocking jobs. */
@@ -350,8 +356,8 @@ typedef enum llam_block_job_state {
 typedef struct llam_block_job {
     llam_blocking_fn fn;
     void *arg;
-    void *result;
-    int error_code;
+    _Atomic(void *) result;
+    atomic_int error_code;
     llam_task_t *task;
     atomic_uint state;
     struct llam_block_job *next;
@@ -553,6 +559,7 @@ typedef struct llam_timer_node {
  */
 typedef struct llam_allocator {
     pthread_mutex_t lock;
+    bool lock_initialized;
     llam_alloc_chunk_t *chunks;
     llam_task_t *task_free;
     llam_wait_node_t *wait_free;
@@ -619,9 +626,11 @@ struct llam_io_buffer {
 
 /** @brief Shared cancellation state.  Waiters are task links protected by lock. */
 struct llam_cancel_token {
+    struct llam_cancel_token *registry_next;
     pthread_mutex_t lock;
     bool cancelled;
     unsigned refcount;
+    size_t active_ops;
     llam_task_t *waiters;
 };
 
@@ -636,6 +645,12 @@ struct llam_mutex {
 struct llam_cond {
     pthread_mutex_t lock;
     llam_wait_queue_t waiters;
+    /*
+     * A signal/broadcast removes waiters from waiters before the task returns
+     * from llam_cond_wait(). Keep destroy from freeing the cond while those
+     * wake results are still being consumed by resumed waiters.
+     */
+    atomic_uint inflight_waiters;
 };
 
 /** @brief Bounded pointer channel with separate sender and receiver wait queues. */
@@ -649,6 +664,7 @@ struct llam_channel {
     size_t head;
     size_t tail;
     size_t count;
+    atomic_uint inflight_waiters;
     bool closed;
     llam_wait_queue_t send_waiters;
     llam_wait_queue_t recv_waiters;
@@ -661,13 +677,20 @@ struct llam_channel {
  */
 struct llam_task {
     uint64_t id;
-    llam_task_state_id_t state;
-    llam_wait_reason_t wait_reason;
+    /*
+     * The scheduler owns most task state transitions, but wake producers,
+     * watchdog/debug, timeout, and dynamic-rehome paths can sample or rewrite
+     * wait diagnostics concurrently. Keep the externally sampled state fields
+     * atomic so those control paths stay race-free without taking every hot
+     * scheduler-path lock.
+     */
+    atomic_uint state;
+    atomic_uint wait_reason;
     unsigned flags;
     unsigned home_shard;
     unsigned live_shard;
     unsigned last_shard;
-    unsigned parked_shard;
+    atomic_uint parked_shard;
     atomic_uint task_class;
     atomic_uint base_task_class;
     uint64_t deadline_ns;
@@ -703,8 +726,8 @@ struct llam_task {
     pthread_mutex_t *active_wait_queue_lock;
     llam_channel_select_state_t *active_select_state;
     llam_io_req_t embedded_io_req;
-    llam_io_req_t *active_io_req;
-    llam_block_job_t *active_block_job;
+    _Atomic(llam_io_req_t *) active_io_req;
+    _Atomic(llam_block_job_t *) active_block_job;
     llam_task_local_entry_t *task_locals;
     bool cancel_registered;
     unsigned enqueue_hot;
@@ -722,7 +745,7 @@ struct llam_task {
     int saved_errno;
     int blocking_errno;
     int wake_error_code;
-    unsigned opaque_blocking_depth;
+    atomic_uint opaque_blocking_depth;
     bool opaque_uses_helper;
     bool opaque_uses_redirect;
     unsigned safepoint_tick;
@@ -751,11 +774,13 @@ struct llam_task_local_entry {
 /** @brief Structured-concurrency group that owns a set of child task handles. */
 struct llam_task_group {
     pthread_mutex_t lock;
+    struct llam_task_group *registry_next;
     llam_cancel_token_t *cancel_token;
     llam_task_t **tasks;
     size_t count;
     size_t capacity;
     size_t active_spawns;
+    size_t active_ops;
     bool joining;
     bool lock_initialized;
 };
@@ -783,6 +808,9 @@ struct llam_shard {
     pthread_mutex_t lock;
     pthread_mutex_t opaque_lock;
     pthread_cond_t opaque_cv;
+    bool lock_initialized;
+    bool opaque_lock_initialized;
+    bool opaque_cv_initialized;
 #if defined(__linux__) || LLAM_PLATFORM_WINDOWS || defined(__APPLE__)
     atomic_uint opaque_wake_seq;
 #endif
@@ -823,6 +851,7 @@ struct llam_shard {
     size_t timer_heap_len;
     size_t timer_heap_cap;
     atomic_uint timer_count;
+    atomic_uint timer_callbacks_active;
     llam_stack_cache_entry_t *stack_cache_default;
     llam_stack_cache_entry_t *stack_cache_large;
     llam_stack_cache_entry_t *stack_cache_huge;
@@ -845,7 +874,7 @@ struct llam_shard {
     llam_allocator_t allocator;
     llam_metrics_t metrics;
     llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
-    unsigned trace_head;
+    atomic_uint trace_head;
 };
 
 /**
@@ -879,8 +908,13 @@ struct llam_node {
     void *windows_fd_assoc_head;
     void *windows_io_op_free;
     void *windows_accept_socket_free;
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    LPFN_ACCEPTEX windows_acceptex;
+    LPFN_CONNECTEX windows_connectex;
+#else
     void *windows_acceptex;
     void *windows_connectex;
+#endif
     unsigned windows_completion_batch;
     unsigned windows_use_skip_completion_on_success;
     unsigned windows_io_op_free_count;
@@ -893,6 +927,9 @@ struct llam_node {
     pthread_mutex_t submit_lock;
     pthread_mutex_t watch_lock;
     pthread_mutex_t recv_buf_lock;
+    bool submit_lock_initialized;
+    bool watch_lock_initialized;
+    bool recv_buf_lock_initialized;
     llam_io_req_t *submit_head;
     llam_io_req_t *submit_tail;
     llam_io_control_op_t *control_head;
@@ -909,20 +946,23 @@ struct llam_node {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint pending_ops;
     bool sqpoll_enabled;
     unsigned sqpoll_cpu;
-    uint64_t submit_batches;
-    uint64_t submit_entries;
-    uint64_t submit_calls;
-    uint64_t submit_syscalls;
-    uint64_t windows_cancel_controls;
-    uint64_t windows_cancel_success;
-    uint64_t windows_cancel_failures;
-    uint64_t windows_cancel_not_found;
-    unsigned max_submit_batch;
-    unsigned last_cq_depth;
-    unsigned max_cq_depth;
-    uint64_t unsupported_ops;
-    uint64_t provided_buf_acquires;
-    uint64_t provided_buf_returns;
+    atomic_uint_fast64_t submit_batches;
+    atomic_uint_fast64_t submit_entries;
+    atomic_uint_fast64_t submit_calls;
+    atomic_uint_fast64_t submit_syscalls;
+    atomic_uint_fast64_t windows_cancel_controls;
+    atomic_uint_fast64_t windows_cancel_success;
+    atomic_uint_fast64_t windows_cancel_failures;
+    atomic_uint_fast64_t windows_cancel_not_found;
+    atomic_uint_fast64_t windows_immediate_completions;
+    atomic_uint_fast64_t windows_skip_completion_handles;
+    atomic_uint_fast64_t windows_skip_completion_failures;
+    atomic_uint max_submit_batch;
+    atomic_uint last_cq_depth;
+    atomic_uint max_cq_depth;
+    atomic_uint_fast64_t unsupported_ops;
+    atomic_uint_fast64_t provided_buf_acquires;
+    atomic_uint_fast64_t provided_buf_returns;
 };
 
 /**
@@ -931,8 +971,8 @@ struct llam_node {
  * process-wide signal/affinity state until shutdown.
  */
 struct llam_runtime {
-    bool initialized;
-    bool exec_started;
+    atomic_bool initialized;
+    atomic_bool exec_started;
     unsigned observed_shards;
     unsigned active_shards;
     atomic_uint online_shards;
@@ -961,8 +1001,9 @@ struct llam_runtime {
     size_t xsave_area_alloc_size;
     uint64_t idle_spin_ns;
     unsigned idle_spin_max_iters;
-    unsigned next_spawn_shard;
+    atomic_uint next_spawn_shard;
     unsigned block_worker_count;
+    unsigned block_threads_started;
     pthread_t init_thread;
     llam_cpu_set_t init_thread_affinity;
     bool init_thread_affinity_valid;
@@ -1028,7 +1069,9 @@ struct llam_runtime {
     unsigned direct_handoff_allow_timers;
     unsigned cheap_safepoint;
     unsigned safepoint_clock_period;
+    unsigned preempt_mode;
     unsigned preempt_poll_period;
+    uint64_t preempt_quantum_ns;
     unsigned spawn_fanout_wake_interval;
     unsigned spawn_fanout_wake_interval_forced;
     unsigned spawn_fanout_adaptive;

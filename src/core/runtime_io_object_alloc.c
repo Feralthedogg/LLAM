@@ -27,6 +27,61 @@
 #include "runtime_internal.h"
 
 /**
+ * @brief Reinitialize an I/O request object for reuse.
+ *
+ * @details
+ * Requests are recycled aggressively and contain several atomic handshake
+ * fields shared by task, cancellation, timeout, backend completion, and rehome
+ * paths.  Reset fields explicitly so recycling never byte-writes over an
+ * already initialized atomic object.
+ *
+ * @param req               Request object to reset.
+ * @param owner_shard       Logical owner shard to publish.
+ * @param alloc_owner_shard Allocation-owner shard for cache return.
+ */
+void llam_io_req_reset(llam_io_req_t *req, unsigned owner_shard, unsigned alloc_owner_shard) {
+    if (req == NULL) {
+        return;
+    }
+
+    req->kind = LLAM_IO_KIND_READ;
+    req->fd = LLAM_INVALID_FD;
+    req->handle = LLAM_INVALID_HANDLE;
+    req->buf = NULL;
+    req->count = 0U;
+    req->addr = NULL;
+    req->addrlen = NULL;
+    req->addr_len = 0U;
+    req->result = 0;
+    req->error_code = 0;
+    req->poll_events = 0;
+    req->poll_revents = 0;
+    req->timeout_ms = 0;
+    req->recv_flags = 0;
+    req->task = NULL;
+    req->next = NULL;
+    req->alloc_next = NULL;
+    req->poll_watch = NULL;
+    req->accept_watch = NULL;
+    req->recv_watch = NULL;
+    req->owned_buffer = NULL;
+    req->owner_shard = owner_shard;
+    req->alloc_owner_shard = alloc_owner_shard;
+    req->attached_node_index = UINT_MAX;
+    req->fd_result = LLAM_INVALID_FD;
+    atomic_init(&req->inflight_owner_shard, UINT_MAX);
+    req->submit_ts_ns = 0U;
+    req->deadline_ns = 0U;
+    req->provided_bid = 0U;
+    req->platform_data = NULL;
+    atomic_init(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
+    atomic_init(&req->abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req->cancel_queued, 0U);
+    req->use_recv_op = false;
+    req->use_provided_buffer = false;
+}
+
+/**
  * @brief Allocate a cleared I/O request object from a shard cache.
  *
  * @param shard Preferred allocation-owner shard.
@@ -48,11 +103,7 @@ llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
             if (req != NULL) {
                 shard->allocator.io_req_free = req->alloc_next;
                 shard->allocator.io_req_reuses += 1U;
-                memset(req, 0, sizeof(*req));
-                req->owner_shard = shard->id;
-                req->alloc_owner_shard = shard->id;
-                req->attached_node_index = UINT_MAX;
-                atomic_store(&req->inflight_owner_shard, UINT_MAX);
+                llam_io_req_reset(req, shard->id, shard->id);
                 return req;
             }
         } else {
@@ -63,11 +114,7 @@ llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
                 shard->allocator.io_req_free = req->alloc_next;
                 shard->allocator.io_req_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
-                memset(req, 0, sizeof(*req));
-                req->owner_shard = shard->id;
-                req->alloc_owner_shard = shard->id;
-                req->attached_node_index = UINT_MAX;
-                atomic_store(&req->inflight_owner_shard, UINT_MAX);
+                llam_io_req_reset(req, shard->id, shard->id);
                 return req;
             }
             llam_allocator_unlock(&shard->allocator);

@@ -299,10 +299,8 @@ void llam_free_task(llam_task_t *task) {
             task->cancel_next = NULL;
             task->cancel_registered = false;
         }
-        if (task->cancel_token->refcount > 0U) {
-            task->cancel_token->refcount -= 1U;
-        }
         pthread_mutex_unlock(&task->cancel_token->lock);
+        llam_cancel_token_release_task_ref(task->cancel_token);
     }
     llam_ctx_destroy_fp_state(&task->ctx);
     if (task->stack_mapping != NULL && task->mapping_size != 0U) {

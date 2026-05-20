@@ -896,6 +896,9 @@ void llam_opaque_wake_wait(llam_shard_t *shard) {
 void llam_wake_all_shards(llam_runtime_t *rt) {
     unsigned i;
 
+    if (rt == NULL || rt->shards == NULL) {
+        return;
+    }
     for (i = 0; i < rt->active_shards; ++i) {
         llam_kick_shard(&rt->shards[i]);
     }
@@ -909,6 +912,9 @@ void llam_wake_all_shards(llam_runtime_t *rt) {
 void llam_wake_all_nodes(llam_runtime_t *rt) {
     unsigned i;
 
+    if (rt == NULL || rt->nodes == NULL) {
+        return;
+    }
     for (i = 0; i < rt->active_nodes; ++i) {
         llam_kick_node(&rt->nodes[i]);
     }
@@ -921,7 +927,15 @@ void llam_wake_all_nodes(llam_runtime_t *rt) {
  */
 void llam_request_stop(llam_runtime_t *rt) {
     atomic_store(&rt->stop_requested, true);
-    llam_runtime_cancel_parked_waiters(rt);
+    /*
+     * Partial-init failure paths reuse shutdown cleanup before any public task
+     * can exist. Avoid scanning shard task lists there: shard locks may not have
+     * been initialized yet, and there are no parked waiters to cancel.
+     */
+    if (atomic_load_explicit(&rt->initialized, memory_order_acquire) ||
+        atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+        llam_runtime_cancel_parked_waiters(rt);
+    }
     if (rt->block_lock_initialized) {
         atomic_fetch_add_explicit(&rt->block_wake_seq, 1U, memory_order_release);
 #if defined(__linux__)

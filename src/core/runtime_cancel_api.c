@@ -26,6 +26,73 @@
 
 #include "runtime_internal.h"
 
+static pthread_mutex_t g_llam_cancel_token_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+static llam_cancel_token_t *g_llam_cancel_token_registry;
+
+static void llam_cancel_token_register_live(llam_cancel_token_t *token) {
+    pthread_mutex_lock(&g_llam_cancel_token_registry_lock);
+    token->registry_next = g_llam_cancel_token_registry;
+    g_llam_cancel_token_registry = token;
+    pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+}
+
+static bool llam_cancel_token_is_live_locked(const llam_cancel_token_t *token) {
+    const llam_cancel_token_t *iter;
+
+    for (iter = g_llam_cancel_token_registry; iter != NULL; iter = iter->registry_next) {
+        if (iter == token) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int llam_cancel_token_begin_op_locked(llam_cancel_token_t *token) {
+    if (token == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_llam_cancel_token_registry_lock);
+    if (!llam_cancel_token_is_live_locked(token)) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
+
+    /*
+     * Destroy removes the token from the live registry only while holding this
+     * same registry lock.  Increment active_ops before taking token->lock so a
+     * concurrent destroy sees a live public operation and returns EBUSY instead
+     * of freeing the storage underneath it.
+     */
+    token->active_ops += 1U;
+    pthread_mutex_lock(&token->lock);
+    pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+    return 0;
+}
+
+static void llam_cancel_token_end_op(llam_cancel_token_t *token) {
+    pthread_mutex_lock(&g_llam_cancel_token_registry_lock);
+    if (llam_cancel_token_is_live_locked(token) && token->active_ops > 0U) {
+        token->active_ops -= 1U;
+    }
+    pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+}
+
+static void llam_cancel_token_unregister_live_locked(llam_cancel_token_t *token) {
+    llam_cancel_token_t **link = &g_llam_cancel_token_registry;
+
+    while (*link != NULL) {
+        if (*link == token) {
+            *link = token->registry_next;
+            token->registry_next = NULL;
+            return;
+        }
+        link = &(*link)->registry_next;
+    }
+}
+
 /** @brief Return true when @p task_class is a supported public task class. */
 static bool llam_public_task_class_valid(uint32_t task_class) {
     return task_class == (uint32_t)LLAM_TASK_CLASS_LATENCY ||
@@ -76,15 +143,19 @@ uint32_t llam_task_flags(const llam_task_t *task) {
  */
 llam_cancel_token_t *llam_cancel_token_create(void) {
     llam_cancel_token_t *token = calloc(1, sizeof(*token));
+    int rc;
 
     if (token == NULL) {
         return NULL;
     }
-    if (pthread_mutex_init(&token->lock, NULL) != 0) {
+    rc = pthread_mutex_init(&token->lock, NULL);
+    if (rc != 0) {
         free(token);
-        errno = ENOMEM;
+        // pthread_mutex_init reports the error through its return value.
+        errno = rc;
         return NULL;
     }
+    llam_cancel_token_register_live(token);
     return token;
 }
 
@@ -104,16 +175,52 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
         return -1;
     }
 
+    pthread_mutex_lock(&g_llam_cancel_token_registry_lock);
+    if (!llam_cancel_token_is_live_locked(token)) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
     pthread_mutex_lock(&token->lock);
-    if (token->waiters != NULL || token->refcount != 0U) {
+    if (token->waiters != NULL || token->refcount != 0U || token->active_ops != 0U) {
         pthread_mutex_unlock(&token->lock);
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
         errno = EBUSY;
         return -1;
     }
+    llam_cancel_token_unregister_live_locked(token);
     pthread_mutex_unlock(&token->lock);
     pthread_mutex_destroy(&token->lock);
     free(token);
+    pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
     return 0;
+}
+
+int llam_cancel_token_retain_task_ref(llam_cancel_token_t *token) {
+    if (llam_cancel_token_begin_op_locked(token) != 0) {
+        return -1;
+    }
+    token->refcount += 1U;
+    pthread_mutex_unlock(&token->lock);
+    llam_cancel_token_end_op(token);
+    return 0;
+}
+
+void llam_cancel_token_release_task_ref(llam_cancel_token_t *token) {
+    if (token == NULL) {
+        return;
+    }
+
+    /*
+     * The caller owns a task reference, so destroy cannot free the token until
+     * this refcount is dropped.  A direct token lock is therefore sufficient and
+     * avoids registry traffic on every task reclamation path.
+     */
+    pthread_mutex_lock(&token->lock);
+    if (token->refcount > 0U) {
+        token->refcount -= 1U;
+    }
+    pthread_mutex_unlock(&token->lock);
 }
 
 /**
@@ -129,35 +236,51 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
  */
 int llam_cancel_token_cancel(llam_cancel_token_t *token) {
     llam_task_t *waiters;
+    llam_task_t *iter;
 
     if (token == NULL) {
         errno = EINVAL;
         return -1;
     }
 
-    pthread_mutex_lock(&token->lock);
+    if (llam_cancel_token_begin_op_locked(token) != 0) {
+        return -1;
+    }
     if (token->cancelled) {
         pthread_mutex_unlock(&token->lock);
+        llam_cancel_token_end_op(token);
         return 0;
     }
     token->cancelled = true;
     waiters = token->waiters;
     token->waiters = NULL;
-    if (waiters != NULL) {
-        waiters->cancel_prev = NULL;
+    for (iter = waiters; iter != NULL; iter = iter->cancel_next) {
+        /*
+         * Mark the entire detached chain unregistered while still holding the
+         * token lock.  Otherwise a concurrently completing wait can call
+         * unregister on a node that is no longer in token->waiters and corrupt
+         * either token->waiters or this detached cancellation chain.
+         *
+         * The chain is processed after releasing the token lock. Hold a short
+         * scan reference so a naturally completing detached task cannot be
+         * reclaimed while this cancel call still owns its raw list pointer.
+         */
+        atomic_fetch_add_explicit(&iter->scan_refs, 1U, memory_order_acq_rel);
+        iter->cancel_prev = NULL;
+        iter->cancel_registered = false;
     }
     pthread_mutex_unlock(&token->lock);
 
     while (waiters != NULL) {
         llam_task_t *next = waiters->cancel_next;
 
-        waiters->cancel_prev = NULL;
         waiters->cancel_next = NULL;
-        waiters->cancel_registered = false;
         llam_cancel_task_wait(waiters);
+        atomic_fetch_sub_explicit(&waiters->scan_refs, 1U, memory_order_acq_rel);
         waiters = next;
     }
 
+    llam_cancel_token_end_op(token);
     return 0;
 }
 
@@ -179,8 +302,11 @@ int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token) {
     }
 
     mutable_token = (llam_cancel_token_t *)token;
-    pthread_mutex_lock(&mutable_token->lock);
+    if (llam_cancel_token_begin_op_locked(mutable_token) != 0) {
+        return -1;
+    }
     cancelled = mutable_token->cancelled ? 1 : 0;
     pthread_mutex_unlock(&mutable_token->lock);
+    llam_cancel_token_end_op(mutable_token);
     return cancelled;
 }

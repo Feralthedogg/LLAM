@@ -10,11 +10,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.0.2" }
+    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.1.0" }
 }
 $Version = $Version.TrimStart("v").Replace("/", "-")
 if ([string]::IsNullOrWhiteSpace($LibraryVersion)) {
-    $LibraryVersion = "1.0.2"
+    $LibraryVersion = "1.1.0"
 }
 if ([string]::IsNullOrWhiteSpace($AbiMajor)) {
     $AbiMajor = "1"
@@ -77,7 +77,7 @@ Require-Input (Join-Path $Root "CHANGELOG.md")
 Require-Input (Join-Path $Root "scripts\install.ps1")
 Require-Input (Join-Path $Root "docs")
 Require-Input (Join-Path $Root "include\llam")
-Require-Input (Join-Path $Root "examples\bench.c")
+Require-Input (Join-Path $Root "examples")
 Require-Input $StaticLib
 Require-Input $SharedDll
 Require-Input $SharedImportLib
@@ -88,13 +88,7 @@ Copy-Item -Path @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md"), (J
 Copy-Item -Path (Join-Path $Root "scripts\install.ps1") -Destination $Stage
 Copy-Item -Recurse -Path (Join-Path $Root "docs\*") -Destination (Join-Path $Stage "docs")
 Copy-Item -Recurse -Path (Join-Path $Root "include\llam") -Destination (Join-Path $Stage "include")
-Copy-Item -Path @(
-    (Join-Path $Root "examples\demo.c"),
-    (Join-Path $Root "examples\bench.c"),
-    (Join-Path $Root "examples\stress.c"),
-    (Join-Path $Root "examples\server.c"),
-    (Join-Path $Root "examples\server_flood.c")
-) -Destination (Join-Path $Stage "examples")
+Copy-Item -Path @((Join-Path $Root "examples\*.c"), (Join-Path $Root "examples\*.h")) -Destination (Join-Path $Stage "examples")
 Copy-Item -Path (Join-Path $Root "scripts\verify_windows.ps1") -Destination (Join-Path $Stage "scripts")
 Copy-Item -Path $BenchExe -Destination (Join-Path $Stage "bin")
 Copy-Item -Path @($StaticLib, $SharedImportLib) -Destination (Join-Path $Stage "lib")

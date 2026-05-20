@@ -20,6 +20,7 @@
  *
  * Common errno values:
  *  - @c EINVAL: invalid argument, invalid enum/policy value, or invalid handle use.
+ *  - @c EAGAIN: nonblocking operation would block.
  *  - @c ETIMEDOUT: absolute deadline or relative timeout expired.
  *  - @c ECANCELED: cancellation token or cooperative runtime stop was observed.
  *  - @c EPIPE: channel closed or peer-closed equivalent.
@@ -58,14 +59,14 @@ extern "C" {
 /** @brief LLAM source/API version major component. */
 #define LLAM_VERSION_MAJOR 1U
 /** @brief LLAM source/API version minor component. */
-#define LLAM_VERSION_MINOR 0U
+#define LLAM_VERSION_MINOR 1U
 /** @brief LLAM source/API version patch component. */
-#define LLAM_VERSION_PATCH 2U
+#define LLAM_VERSION_PATCH 0U
 
 /** @brief Public ABI major version; incompatible binary changes increment this value. */
 #define LLAM_ABI_VERSION_MAJOR 1U
 /** @brief Public ABI minor version; additive binary-compatible changes increment this value. */
-#define LLAM_ABI_VERSION_MINOR 0U
+#define LLAM_ABI_VERSION_MINOR 1U
 /** @brief Packed public ABI version used by dynamic loaders. */
 #define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
 
@@ -197,6 +198,14 @@ typedef enum llam_runtime_profile {
     LLAM_RUNTIME_PROFILE_IO_LATENCY = 3,   /**< Favor I/O wakeup latency. */
 } llam_runtime_profile_t;
 
+/** @brief Cooperative automatic preemption policy. */
+typedef enum llam_preempt_mode {
+    LLAM_PREEMPT_OFF = 0,         /**< Disable automatic preemption requests. */
+    LLAM_PREEMPT_COOPERATIVE = 1, /**< Honor explicit safepoints, but do not auto-request preemption. */
+    LLAM_PREEMPT_AUTO = 2,        /**< Request preemption only when runnable/timer/I/O pressure exists. */
+    LLAM_PREEMPT_STRICT = 3,      /**< Diagnostic mode: preempt over-budget tasks even without pressure. */
+} llam_preempt_mode_t;
+
 /** @brief Bit flags accepted by llam_spawn_opts_t::flags. */
 enum {
     LLAM_SPAWN_F_PINNED = 1U << 0,           /**< Prefer keeping the task on its home worker. */
@@ -240,6 +249,9 @@ typedef struct llam_runtime_opts {
     int32_t sqpoll_cpu;                             /**< Requested SQPOLL CPU, or -1 for automatic selection. */
     uint32_t profile;                               /**< High-level policy; one of ::llam_runtime_profile_t. */
     uint32_t reserved0;                             /**< Reserved for future fixed-width fields; initialize to 0. */
+    uint32_t preempt_mode;                          /**< Cooperative preemption policy; one of ::llam_preempt_mode_t. */
+    uint32_t preempt_poll_period;                   /**< Safepoint flag-poll period; 0 selects a profile default. */
+    uint64_t preempt_quantum_ns;                    /**< Global preempt slice override; 0 uses task-class budgets. */
 } llam_runtime_opts_t;
 
 /** @brief Current size to pass to ::llam_runtime_init_ex and ::llam_runtime_opts_init. */
@@ -295,6 +307,13 @@ typedef struct llam_runtime_stats {
     uint64_t yield_direct_fail_no_work; /**< Direct handoff failures with no local runnable work. */
     uint64_t yield_direct_fail_self;    /**< Direct handoff failures that only found the caller. */
     uint64_t yield_direct_fail_push;    /**< Direct handoff failures requeueing the caller. */
+    uint64_t preempt_requests;          /**< Automatic preemption requests published by safepoints/watchdog. */
+    uint64_t preempt_yields;            /**< Safepoints that yielded because of automatic preemption. */
+    uint64_t preempt_suppressed;        /**< Over-budget observations suppressed by policy or lack of pressure. */
+    uint64_t preempt_signals;           /**< Worker wake signals sent for watchdog preemption requests. */
+    uint32_t preempt_mode;              /**< Active ::llam_preempt_mode_t policy. */
+    uint32_t preempt_poll_period;       /**< Active preempt flag-poll period. */
+    uint64_t preempt_quantum_ns;        /**< Active global preempt slice override, or 0 for task-class budgets. */
 } llam_runtime_stats_t;
 
 /** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */
@@ -377,6 +396,10 @@ LLAM_API int llam_runtime_request_stop(void);
  * that were started, releases backend resources, and invalidates all remaining
  * runtime-owned handles. It is not a task-join API: callers that need graceful
  * task completion should request stop and drive ::llam_run before shutdown.
+ *
+ * Calls from a managed LLAM task or scheduler frame do not tear the singleton
+ * down directly. They are treated as ::llam_runtime_request_stop; the host
+ * thread that owns ::llam_run remains responsible for final shutdown.
  */
 LLAM_API void llam_runtime_shutdown(void);
 
@@ -527,6 +550,39 @@ LLAM_API void llam_yield(void);
 LLAM_API void llam_task_safepoint(void);
 
 /**
+ * @brief Low-overhead preemption poll for CPU-bound loops.
+ *
+ * @details
+ * This macro intentionally expands to the public safepoint API so callers do
+ * not depend on private scheduler state.  It is safe outside managed LLAM tasks
+ * and becomes a no-op there.
+ */
+#define LLAM_PREEMPT_POLL() llam_task_safepoint()
+
+/**
+ * @brief Inline implementation for ::LLAM_PREEMPT_POLL_EVERY.
+ *
+ * Keeping the state in an inline function avoids public macro hygiene hazards:
+ * caller variables cannot collide with implementation-local names, and both
+ * arguments are evaluated exactly once before the helper is entered.
+ */
+static inline void llam_preempt_poll_every(size_t counter, size_t interval) {
+    if (interval <= 1U || (counter % interval) == 0U) {
+        llam_task_safepoint();
+    }
+}
+
+/**
+ * @brief Poll for cooperative preemption every @p interval loop iterations.
+ *
+ * @details
+ * @p counter is evaluated once.  @p interval values 0 and 1 poll every call.
+ * Use this in tight CPU loops that would otherwise not call any LLAM API.
+ */
+#define LLAM_PREEMPT_POLL_EVERY(counter, interval) \
+    llam_preempt_poll_every((size_t)(counter), (size_t)(interval))
+
+/**
  * @brief Wait indefinitely for task completion.
  * @param task Task returned by llam_spawn().
  * @details
@@ -571,7 +627,9 @@ LLAM_API int llam_detach(llam_task_t *task);
  * @details
  * A group owns the task handles spawned through it. Use
  * ::llam_task_group_join to consume all child handles, or
- * ::llam_task_group_cancel to request cooperative cancellation first.
+ * ::llam_task_group_cancel to request cooperative cancellation first. Group
+ * cancellation is delivered through the group's own token; children spawned
+ * with an explicit caller-owned token remain controlled by that token.
  */
 LLAM_API llam_task_group_t *llam_task_group_create(void);
 
@@ -579,8 +637,8 @@ LLAM_API llam_task_group_t *llam_task_group_create(void);
  * @brief Destroy an empty task group.
  *
  * @return 0 on success, or -1 with @c errno set to @c EBUSY if unjoined tasks
- * remain, another thread is currently spawning into the group, or a group join
- * is in progress.
+ * remain, another thread is currently spawning/cancelling through the group, or
+ * a group join is in progress.
  */
 LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
 
@@ -591,7 +649,9 @@ LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
  * If @p opts does not provide a cancellation token, the group cancellation token
  * is attached automatically. The returned task pointer is borrowed for
  * diagnostics; callers must not join or detach it outside the group. Spawning
- * while another thread is joining the group fails with @c EBUSY.
+ * while another thread is joining the group fails with @c EBUSY. Calls racing
+ * with a completed group destroy fail with @c EINVAL instead of dereferencing a
+ * reclaimed handle.
  */
 LLAM_API llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       llam_task_fn fn,
@@ -608,7 +668,12 @@ LLAM_API llam_task_t *llam_task_group_spawn(llam_task_group_t *group,
                                    const llam_spawn_opts_t *opts);
 
 /**
- * @brief Request cooperative cancellation for all group children.
+ * @brief Request cooperative cancellation for children using the group token.
+ *
+ * @details
+ * The group cancels the token automatically attached to children that did not
+ * provide @c opts.cancel_token. It does not cancel caller-owned explicit tokens,
+ * because those tokens may be shared with tasks outside the group.
  */
 LLAM_API int llam_task_group_cancel(llam_task_group_t *group);
 
@@ -783,14 +848,26 @@ LLAM_API llam_cancel_token_t *llam_cancel_token_create(void);
  * @details
  * The token must not have live waiters or task/I/O observers. Destroying a
  * token with active observers fails with @c EBUSY; it does not invalidate
- * active observers behind the caller's back.
+ * active observers behind the caller's back. Destroy also fails with @c EBUSY
+ * while another thread is cancelling, querying, or retaining the token for a
+ * new task; calls that race with a completed destroy fail with @c EINVAL.
  */
 LLAM_API int llam_cancel_token_destroy(llam_cancel_token_t *token);
 
-/** @brief Request cancellation for all current and future observers of token. */
+/**
+ * @brief Request cancellation for all current and future observers of token.
+ *
+ * @details Calls racing with a completed destroy fail with @c EINVAL instead
+ * of dereferencing reclaimed token storage.
+ */
 LLAM_API int llam_cancel_token_cancel(llam_cancel_token_t *token);
 
-/** @brief Return non-zero when token has been cancelled. */
+/**
+ * @brief Return non-zero when token has been cancelled.
+ *
+ * @details Calls racing with a completed destroy fail with @c EINVAL instead
+ * of dereferencing reclaimed token storage.
+ */
 LLAM_API int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token);
 
 /* ============================================================================
@@ -858,7 +935,8 @@ LLAM_API llam_cond_t *llam_cond_create(void);
  *
  * @details
  * Destroy fails with @c EBUSY while a task is currently waiting on the
- * condition.
+ * condition, including the interval after signal/broadcast has selected the
+ * waiter but before that task has returned from llam_cond_wait().
  */
 LLAM_API int llam_cond_destroy(llam_cond_t *cond);
 
@@ -940,9 +1018,10 @@ LLAM_API int llam_channel_send(llam_channel_t *channel, void *value);
 /**
  * @brief Try to send a pointer value without parking.
  *
- * @details Must be called from a managed LLAM task; outside task context fails
- * with @c ENOTSUP. Full channels fail with @c ETIMEDOUT, matching
- * ::llam_channel_send_until with an already-expired deadline.
+ * @details This operation never parks. Calls from managed tasks and unmanaged
+ * OS threads are both allowed after runtime initialization. Full channels fail
+ * with @c EAGAIN. Timed send APIs use @c ETIMEDOUT only when a real deadline
+ * expires.
  */
 LLAM_API int llam_channel_try_send(llam_channel_t *channel, void *value);
 
@@ -970,9 +1049,12 @@ LLAM_API int llam_channel_recv_result(llam_channel_t *channel, void **out);
 /**
  * @brief Try to receive a pointer value without parking.
  *
- * @details Must be called from a managed LLAM task; outside task context fails
- * with @c ENOTSUP. Empty open channels fail with @c ETIMEDOUT, matching
- * ::llam_channel_recv_until_result with an already-expired deadline.
+ * @details This operation never parks. Calls from managed tasks and unmanaged
+ * OS threads are both allowed after runtime initialization. Already-buffered
+ * values may also be drained after runtime shutdown so host cleanup code can
+ * destroy channels after stopping the scheduler. Empty open channels fail with
+ * @c EAGAIN while the runtime is alive and @c ENOTSUP after shutdown. Timed
+ * receive APIs use @c ETIMEDOUT only when a real deadline expires.
  *
  * @param channel Channel to receive from.
  * @param out Destination for the received pointer. Must not be NULL.
@@ -1161,9 +1243,11 @@ LLAM_API ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t
  *
  * @details
  * On success with a positive byte count, @p out receives a non-NULL buffer that
- * must be released with ::llam_io_buffer_release. On EOF or zero-byte read, the
- * function returns @c 0 and stores @c NULL in @p out. On failure, the function
- * returns @c -1, stores @c NULL in @p out, and sets @c errno.
+ * must be released with ::llam_io_buffer_release. The returned buffer remains
+ * valid until release, even if the runtime is shut down first. On EOF or
+ * zero-byte read, the function returns @c 0 and stores @c NULL in @p out. On
+ * failure, the function returns @c -1, stores @c NULL in @p out, and sets
+ * @c errno.
  */
 LLAM_API ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_t **out);
 
@@ -1172,9 +1256,11 @@ LLAM_API ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_
  *
  * @details
  * On success with a positive byte count, @p out receives a non-NULL buffer that
- * must be released with ::llam_io_buffer_release. On EOF or zero-byte receive,
- * the function returns @c 0 and stores @c NULL in @p out. On failure, the
- * function returns @c -1, stores @c NULL in @p out, and sets @c errno.
+ * must be released with ::llam_io_buffer_release. The returned buffer remains
+ * valid until release, even if the runtime is shut down first. On EOF or
+ * zero-byte receive, the function returns @c 0 and stores @c NULL in @p out. On
+ * failure, the function returns @c -1, stores @c NULL in @p out, and sets
+ * @c errno.
  */
 LLAM_API ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out);
 

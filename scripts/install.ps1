@@ -17,7 +17,7 @@ if ([string]::IsNullOrWhiteSpace($Prefix)) {
     }
 }
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = "1.0.2"
+    $Version = "1.1.0"
 }
 
 $SourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -123,7 +123,11 @@ function Install-Standalone {
         Write-Host "download $BaseUrl/$checksum"
         Write-Host "verify $checksum"
         Write-Host "extract $archive"
-        Write-Host "run $package\install.ps1 -Prefix $Prefix"
+        if ($Force) {
+            Write-Host "run $package\install.ps1 -Prefix $Prefix -Force"
+        } else {
+            Write-Host "run $package\install.ps1 -Prefix $Prefix"
+        }
         return
     }
 

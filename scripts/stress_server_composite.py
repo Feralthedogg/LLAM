@@ -7,6 +7,7 @@ import argparse
 import errno
 import os
 import random
+import re
 import shutil
 import signal
 import socket
@@ -286,6 +287,111 @@ def count_fds(pid: int) -> int | None:
     return max(0, len(lines) - 1)
 
 
+def parse_metric_fields(line: str | None) -> dict[str, str]:
+    if not line:
+        return {}
+    fields: dict[str, str] = {}
+    for token in line.replace(",", " ").split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def find_line(text: str, prefix: str) -> str | None:
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line
+    return None
+
+
+def first_matching(text: str, pattern: str) -> re.Match[str] | None:
+    return re.search(pattern, text, re.MULTILINE)
+
+
+def diagnostic_field(fields: dict[str, str], key: str) -> str:
+    value = fields.get(key)
+    return f"{key}={value}" if value is not None else ""
+
+
+def diagnose_flood_result(label: str, rc: int, stdout: str, stderr: str) -> str:
+    flood_fields = parse_metric_fields(find_line(stdout, "server flood ok:"))
+    stats_fields = parse_metric_fields(find_line(stdout, "server flood stats:"))
+    accounting_fields = parse_metric_fields(find_line(stdout, "server flood accounting:"))
+    class_name = "ok" if rc == 0 else "unknown_nonzero"
+    reason = "completed" if rc == 0 else "nonzero_exit"
+
+    signal_match = first_matching(stderr, r"server exited early from signal\s+(\d+)")
+    mps_match = first_matching(stderr, r"delivery_mps\s+([0-9.]+)\s+below required\s+([0-9.]+)")
+    ratio_match = first_matching(stderr, r"delivery_ratio\s+([0-9.]+)\s+below required\s+([0-9.]+)")
+    accounting_match = first_matching(stderr, r"accounting_gap=([-0-9]+)\s+exceeds tolerance=([-0-9]+)")
+
+    if signal_match is not None:
+        class_name = "server_crash"
+        reason = f"server_signal_{signal_match.group(1)}"
+    elif "server did not stop within" in stderr and "killed" in stderr:
+        class_name = "forced_stop"
+        reason = "shutdown_timeout"
+    elif "server stats unavailable" in stderr:
+        class_name = "missing_stats"
+        reason = "stats_file_missing_or_unparseable"
+    elif accounting_match is not None:
+        class_name = "accounting_gap"
+        reason = f"gap_{accounting_match.group(1)}_tolerance_{accounting_match.group(2)}"
+    elif "outbox_closed_drops=" in stderr:
+        class_name = "closed_outbox_drop"
+        reason = "late_enqueue_or_cleanup_race"
+    elif mps_match is not None:
+        class_name = "throughput_guardrail"
+        reason = f"delivery_mps_{mps_match.group(1)}_below_{mps_match.group(2)}"
+    elif ratio_match is not None:
+        class_name = "delivery_ratio_guardrail"
+        reason = f"delivery_ratio_{ratio_match.group(1)}_below_{ratio_match.group(2)}"
+    elif "flood produced no measurable traffic" in stderr:
+        class_name = "no_traffic"
+        reason = "zero_sent_or_zero_received"
+
+    # Keep this line grep-friendly: one phase, one classification, key metrics.
+    parts = [
+        "diagnostic:",
+        f"phase={label.replace(' ', ':')}",
+        f"class={class_name}",
+        f"rc={rc}",
+        f"reason={reason}",
+    ]
+    for key in (
+        "server_mode",
+        "clients",
+        "sent",
+        "expected_deliveries",
+        "observed_deliveries",
+        "missing_deliveries",
+        "delivery_mps",
+        "delivery_ratio",
+    ):
+        parts.append(diagnostic_field(flood_fields, key))
+    for key in (
+        "outbox_full_drops",
+        "outbox_closed_drops",
+        "broadcast_deliveries_attempted",
+        "broadcast_deliveries_enqueued",
+    ):
+        parts.append(diagnostic_field(stats_fields, key))
+    for key in ("accounting_gap", "drop_explained_ratio"):
+        parts.append(diagnostic_field(accounting_fields, key))
+    return " ".join(part for part in parts if part)
+
+
+def diagnose_checked_result(label: str, rc: int, stdout: str, stderr: str) -> str | None:
+    if label.startswith("flood "):
+        return diagnose_flood_result(label, rc, stdout, stderr)
+    if rc != 0:
+        stderr_tail = stderr.strip().splitlines()[-1] if stderr.strip() else "none"
+        return f"diagnostic: phase={label.replace(' ', ':')} class=nonzero_exit rc={rc} stderr_tail={stderr_tail}"
+    return None
+
+
 def run_checked(cmd: list[str], label: str) -> None:
     print(f"[{label}] {' '.join(cmd)}", flush=True)
     started = time.monotonic()
@@ -295,8 +401,12 @@ def run_checked(cmd: list[str], label: str) -> None:
         print(proc.stdout.rstrip())
     if proc.stderr:
         print(proc.stderr.rstrip(), file=sys.stderr)
+    diagnostic = diagnose_checked_result(label, proc.returncode, proc.stdout, proc.stderr)
+    if diagnostic is not None:
+        print(diagnostic, file=sys.stderr if proc.returncode != 0 else sys.stdout, flush=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"{label} failed with rc={proc.returncode}")
+        suffix = f"; {diagnostic}" if diagnostic is not None else ""
+        raise RuntimeError(f"{label} failed with rc={proc.returncode}{suffix}")
     print(f"[{label}] ok elapsed={elapsed:.3f}s", flush=True)
 
 

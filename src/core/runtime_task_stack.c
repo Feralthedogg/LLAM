@@ -822,13 +822,20 @@ void llam_task_release_stack(llam_task_t *task) {
 unsigned llam_pick_spawn_shard(llam_runtime_t *rt) {
     unsigned start_id;
     unsigned shard_id;
+    unsigned ticket;
     unsigned i;
 
     if (g_llam_tls_shard != NULL) {
         return g_llam_tls_shard->id;
     }
 
-    start_id = rt->next_spawn_shard % rt->active_shards;
+    /*
+     * Unmanaged host threads may call llam_spawn() concurrently.  The ticket is
+     * only a placement hint, but it still must be atomic to avoid corrupting
+     * the singleton runtime state under multi-threaded embedders.
+     */
+    ticket = atomic_fetch_add_explicit(&rt->next_spawn_shard, 1U, memory_order_relaxed);
+    start_id = ticket % rt->active_shards;
     shard_id = start_id;
     // Round-robin across shards that currently accept work; this avoids pushing
     // new tasks into shards that are draining or marked offline.
@@ -836,11 +843,9 @@ unsigned llam_pick_spawn_shard(llam_runtime_t *rt) {
         unsigned candidate = (start_id + i) % rt->active_shards;
 
         if (llam_shard_accepts_new_work(&rt->shards[candidate])) {
-            rt->next_spawn_shard = (candidate + 1U) % rt->active_shards;
             return candidate;
         }
     }
 
-    rt->next_spawn_shard = (shard_id + 1U) % rt->active_shards;
     return shard_id;
 }

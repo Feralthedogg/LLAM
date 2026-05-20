@@ -84,14 +84,27 @@ bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req) {
     return false;
 }
 
-/** @brief Detach all queued submissions from a node. */
+/** @brief Detach all queued submissions and mark them in-flight. */
 llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
     llam_io_req_t *head;
+    llam_io_req_t *cursor;
 
     pthread_mutex_lock(&node->submit_lock);
     head = node->submit_head;
     node->submit_head = NULL;
     node->submit_tail = NULL;
+    cursor = head;
+    while (cursor != NULL) {
+        /*
+         * Ownership changes before submit_lock is released.  Cancellation and
+         * timeout paths that miss the submit queue must then see INFLIGHT and
+         * enqueue a backend cancel instead of silently doing nothing.
+         */
+        atomic_store_explicit(&cursor->inflight_owner_shard, cursor->owner_shard, memory_order_release);
+        atomic_store(&cursor->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
+        llam_shard_note_inflight_io_waiter(cursor->owner_shard, 1);
+        cursor = cursor->next;
+    }
     pthread_mutex_unlock(&node->submit_lock);
     return head;
 }
@@ -107,10 +120,21 @@ void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req
     watch->wait_tail = req;
 }
 
-/** @brief Remove a poll waiter while watch_lock is held. */
+/**
+ * @brief Remove a poll waiter while watch_lock is held.
+ *
+ * A racing completion can clear the request's watch pointer before setup-abort
+ * cleanup observes the old wait mode. Treat a NULL watch as already detached.
+ */
 bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
     llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur = watch->wait_head;
+    llam_io_req_t *cur;
+
+    if (watch == NULL || req == NULL) {
+        return false;
+    }
+
+    cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -169,10 +193,20 @@ int llam_accept_watch_pop_ready(llam_accept_watch_t *watch) {
     return fd;
 }
 
-/** @brief Remove an accept waiter while watch_lock is held. */
+/**
+ * @brief Remove an accept waiter while watch_lock is held.
+ *
+ * A NULL watch means completion already detached the request.
+ */
 bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
     llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur = watch->wait_head;
+    llam_io_req_t *cur;
+
+    if (watch == NULL || req == NULL) {
+        return false;
+    }
+
+    cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {

@@ -39,6 +39,8 @@ int llam_require_task_context(void);
  */
 llam_channel_t *llam_channel_cache_acquire(void);
 bool llam_channel_cache_release(llam_channel_t *channel);
+void llam_channel_tls_cache_drain(void);
+void llam_channel_global_cache_drain(void);
 
 /*
  * Mutex internal entry point shared by normal, timed, and condvar reacquire
@@ -62,8 +64,11 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
                                     unsigned parked_shard);
 llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard);
 void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node);
+void llam_wait_node_reset(llam_wait_node_t *node, unsigned owner_shard);
 bool llam_wait_node_prepare_wake(llam_wait_node_t *node);
+bool llam_wait_node_completed(const llam_wait_node_t *node);
 bool llam_wait_node_should_park(llam_wait_node_t *node);
+void llam_channel_waiter_consumed(llam_channel_t *channel);
 
 /*
  * FIFO wait-queue primitives and wake dispatch.

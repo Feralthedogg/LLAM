@@ -67,6 +67,7 @@ static size_t llam_channel_round_capacity(size_t capacity) {
 llam_channel_t *llam_channel_create(size_t capacity) {
     llam_channel_t *channel;
     size_t ring_capacity;
+    int rc;
 
     if (capacity == 0U) {
         errno = EINVAL;
@@ -99,10 +100,13 @@ llam_channel_t *llam_channel_create(size_t capacity) {
     channel->ring_capacity = ring_capacity;
     channel->mask = ring_capacity - 1U;
 
-    if (pthread_mutex_init(&channel->lock, NULL) != 0) {
+    rc = pthread_mutex_init(&channel->lock, NULL);
+    if (rc != 0) {
         free(channel->buffer);
         free(channel);
-        errno = ENOMEM;
+        // Preserve the exact pthread failure so callers can distinguish
+        // transient resource limits from ordinary heap exhaustion.
+        errno = rc;
         return NULL;
     }
 
@@ -127,7 +131,13 @@ static bool llam_channel_should_handoff_to_waiter(const llam_wait_node_t *node, 
     if (node == NULL || node->task == NULL || g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return false;
     }
-    if (node->task->parked_shard != g_llam_tls_shard->id || node->task->last_shard != g_llam_tls_shard->id) {
+    /*
+     * The wait node is visible to producers before the waiter finishes
+     * publishing task wait-tracking fields.  Use node->owner_shard, which is set
+     * before enqueue, rather than racing on task->parked_shard/last_shard for
+     * this optimization-only decision.
+     */
+    if (node->owner_shard != g_llam_tls_shard->id) {
         return false;
     }
     return true;
@@ -193,6 +203,34 @@ static bool llam_channel_buffered_handoff_enabled(void) {
 #else
     return false;
 #endif
+}
+
+/**
+ * @brief Mark a popped waiter as still owning a channel lifetime reference.
+ *
+ * @details
+ * Closing a channel removes waiters from its queues before they resume.  Keep a
+ * small in-flight count so destroy cannot recycle/free the channel while a
+ * close/send/recv wake result is still waiting to be consumed by the task.
+ */
+static void llam_channel_waiter_popped(llam_channel_t *channel, llam_wait_node_t *node) {
+    if (node != NULL && node->select_state == NULL) {
+        node->scalar_value = 1;
+    }
+    if (channel != NULL) {
+        atomic_fetch_add_explicit(&channel->inflight_waiters, 1U, memory_order_acq_rel);
+    }
+}
+
+/**
+ * @brief Release a channel waiter lifetime reference after the waiter resumes.
+ *
+ * @param channel Channel that supplied the wait completion.
+ */
+void llam_channel_waiter_consumed(llam_channel_t *channel) {
+    if (channel != NULL) {
+        atomic_fetch_sub_explicit(&channel->inflight_waiters, 1U, memory_order_acq_rel);
+    }
 }
 
 /**
@@ -278,6 +316,7 @@ static llam_wait_node_t *llam_channel_pop_live_receiver(llam_channel_t *channel,
             receiver->value = value;
             receiver->error_code = 0;
         }
+        llam_channel_waiter_popped(channel, receiver);
         return receiver;
     }
     return NULL;
@@ -300,6 +339,7 @@ static llam_wait_node_t *llam_channel_pop_live_sender(llam_channel_t *channel, v
             sender->error_code = 0;
         }
         *out_value = value;
+        llam_channel_waiter_popped(channel, sender);
         return sender;
     }
     return NULL;
@@ -308,7 +348,10 @@ static llam_wait_node_t *llam_channel_pop_live_sender(llam_channel_t *channel, v
 /**
  * @brief Wake all channel waiters, completing select waiters at most once.
  */
-static void llam_channel_wake_all_waiters(llam_wait_queue_t *queue, int error_code, llam_wait_reason_t reason) {
+static void llam_channel_wake_all_waiters(llam_channel_t *channel,
+                                          llam_wait_queue_t *queue,
+                                          int error_code,
+                                          llam_wait_reason_t reason) {
     llam_wait_node_t *node;
 
     while ((node = llam_wait_queue_pop_head(queue)) != NULL) {
@@ -319,6 +362,7 @@ static void llam_channel_wake_all_waiters(llam_wait_queue_t *queue, int error_co
         } else {
             node->error_code = error_code;
         }
+        llam_channel_waiter_popped(channel, node);
         llam_wake_wait_node(node, true, reason);
     }
 }
@@ -340,6 +384,7 @@ int llam_channel_destroy(llam_channel_t *channel) {
 
     pthread_mutex_lock(&channel->lock);
     if (channel->count != 0U ||
+        atomic_load_explicit(&channel->inflight_waiters, memory_order_acquire) != 0U ||
         channel->send_waiters.head != NULL ||
         channel->send_waiters.depth != 0U ||
         channel->recv_waiters.head != NULL ||
@@ -374,7 +419,7 @@ int llam_channel_destroy(llam_channel_t *channel) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadline, uint64_t deadline_ns) {
+static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadline, uint64_t deadline_ns) {
     llam_shard_t *shard;
     llam_task_t *task;
     llam_wait_node_t *receiver;
@@ -459,9 +504,18 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_CHANNEL_SEND;
     if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         pthread_mutex_lock(&channel->lock);
-        (void)llam_wait_queue_remove(&channel->send_waiters, node);
+        removed = llam_wait_queue_remove(&channel->send_waiters, node);
         pthread_mutex_unlock(&channel->lock);
+        if (!removed) {
+            /* A receiver already popped the node; park/consume that completion. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -469,10 +523,19 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
         return -1;
     }
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         llam_disarm_task_wait_deadline(task);
         pthread_mutex_lock(&channel->lock);
-        (void)llam_wait_queue_remove(&channel->send_waiters, node);
+        removed = llam_wait_queue_remove(&channel->send_waiters, node);
         pthread_mutex_unlock(&channel->lock);
+        if (!removed) {
+            /* A receiver already popped the node; park/consume that completion. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -480,6 +543,7 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
         return -1;
     }
 
+wait_ready:
     if (llam_wait_node_should_park(node)) {
         llam_park_current_task(LLAM_WAIT_CHANNEL_SEND, LLAM_TRACE_STATE);
     }
@@ -488,11 +552,12 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
         // clear any timer the wake path could not have seen yet.
         llam_disarm_task_wait_deadline(task);
     }
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     rc = node->error_code;
+    if (node->scalar_value != 0) {
+        llam_channel_waiter_consumed(channel);
+    }
     llam_sync_wait_node_release(shard, node);
     if (rc != 0) {
         errno = rc;
@@ -510,108 +575,7 @@ int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has_deadli
  * @return 0 on success, or -1 with @c errno set.
  */
 int llam_channel_send(llam_channel_t *channel, void *value) {
-    llam_shard_t *shard;
-    llam_task_t *task;
-    llam_wait_node_t *receiver;
-    llam_wait_node_t *node;
-    int rc;
-
-    if (channel == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
-        errno = ENOTSUP;
-        return -1;
-    }
-    task = g_llam_tls_task;
-    shard = g_llam_tls_shard;
-
-    pthread_mutex_lock(&channel->lock);
-    if (channel->closed) {
-        pthread_mutex_unlock(&channel->lock);
-        errno = EPIPE;
-        return -1;
-    }
-
-    receiver = llam_channel_pop_live_receiver(channel, value);
-    if (receiver != NULL) {
-        bool handoff = llam_channel_should_handoff_to_waiter(receiver, false);
-
-        pthread_mutex_unlock(&channel->lock);
-        if (handoff && llam_channel_wake_waiter_and_handoff(receiver, LLAM_WAIT_CHANNEL_RECV)) {
-            return 0;
-        }
-        llam_channel_wake_waiter(receiver, LLAM_WAIT_CHANNEL_RECV);
-        if (handoff) {
-            llam_channel_handoff_yield();
-        }
-        return 0;
-    }
-
-    if (channel->count < channel->capacity) {
-        bool buffered_handoff = channel->capacity == 1U &&
-                                llam_channel_buffered_handoff_enabled();
-
-        if (channel->capacity == 1U) {
-            channel->buffer[0] = value;
-        } else {
-            channel->buffer[channel->tail] = value;
-            channel->tail = (channel->tail + 1U) & channel->mask;
-        }
-        channel->count += 1U;
-        pthread_mutex_unlock(&channel->lock);
-        if (buffered_handoff &&
-            llam_channel_has_local_runnable_hint() &&
-            llam_yield_to_local_runnable()) {
-            return 0;
-        }
-        llam_channel_hot_safepoint();
-        return 0;
-    }
-
-    node = llam_sync_wait_node_acquire(shard);
-    if (node == NULL) {
-        pthread_mutex_unlock(&channel->lock);
-        errno = ENOMEM;
-        return -1;
-    }
-
-    node->task = task;
-    node->owner_shard = shard->id;
-    node->value = value;
-    node->error_code = task->cancel_token != NULL ? ECANCELED : 0;
-    llam_wait_queue_push_tail(&channel->send_waiters, node);
-    pthread_mutex_unlock(&channel->lock);
-    llam_task_ensure_listed(task);
-    llam_task_set_wait_node_tracking(task, node, &channel->send_waiters, &channel->lock, shard->id);
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_CHANNEL_SEND;
-    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
-        pthread_mutex_lock(&channel->lock);
-        (void)llam_wait_queue_remove(&channel->send_waiters, node);
-        pthread_mutex_unlock(&channel->lock);
-        task->state = LLAM_TASK_STATE_RUNNING;
-        task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(task);
-        llam_sync_wait_node_release(shard, node);
-        return -1;
-    }
-
-    if (llam_wait_node_should_park(node)) {
-        llam_park_current_task(LLAM_WAIT_CHANNEL_SEND, LLAM_TRACE_STATE);
-    }
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
-    llam_task_clear_wait_tracking(task);
-    rc = node->error_code;
-    llam_sync_wait_node_release(shard, node);
-    if (rc != 0) {
-        errno = rc;
-        return -1;
-    }
-    return 0;
+    return llam_channel_send_impl(channel, value, false, 0U);
 }
 
 /**
@@ -629,7 +593,7 @@ int llam_channel_try_send(llam_channel_t *channel, void *value) {
         errno = EINVAL;
         return -1;
     }
-    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+    if (!g_llam_runtime.initialized) {
         errno = ENOTSUP;
         return -1;
     }
@@ -662,7 +626,7 @@ int llam_channel_try_send(llam_channel_t *channel, void *value) {
     }
 
     pthread_mutex_unlock(&channel->lock);
-    errno = ETIMEDOUT;
+    errno = EAGAIN;
     return -1;
 }
 
@@ -784,9 +748,18 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_CHANNEL_RECV;
     if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         pthread_mutex_lock(&channel->lock);
-        (void)llam_wait_queue_remove(&channel->recv_waiters, node);
+        removed = llam_wait_queue_remove(&channel->recv_waiters, node);
         pthread_mutex_unlock(&channel->lock);
+        if (!removed) {
+            /* A sender/close path already popped the node; consume that result. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -794,10 +767,19 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
         return -1;
     }
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         llam_disarm_task_wait_deadline(task);
         pthread_mutex_lock(&channel->lock);
-        (void)llam_wait_queue_remove(&channel->recv_waiters, node);
+        removed = llam_wait_queue_remove(&channel->recv_waiters, node);
         pthread_mutex_unlock(&channel->lock);
+        if (!removed) {
+            /* A sender/close path already popped the node; consume that result. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -806,6 +788,7 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
         return -1;
     }
 
+wait_ready:
     if (llam_wait_node_should_park(node)) {
         llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
     }
@@ -814,12 +797,13 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
         // clear any timer the wake path could not have seen yet.
         llam_disarm_task_wait_deadline(task);
     }
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     value = node->value;
     rc = node->error_code;
+    if (node->scalar_value != 0) {
+        llam_channel_waiter_consumed(channel);
+    }
     llam_sync_wait_node_release(shard, node);
     if (rc != 0) {
         errno = rc;
@@ -871,13 +855,37 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
         errno = EINVAL;
         return -1;
     }
-    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
-        errno = ENOTSUP;
-        return -1;
-    }
     *out = NULL;
 
     pthread_mutex_lock(&channel->lock);
+    if (!g_llam_runtime.initialized) {
+        /*
+         * Channels can outlive the scheduler singleton.  Host cleanup code may
+         * still need to drain already-buffered values before destroy; do that
+         * without touching parked senders, which require a live runtime to wake.
+         */
+        if (channel->count > 0U) {
+            if (channel->capacity == 1U) {
+                value = channel->buffer[0];
+            } else {
+                value = channel->buffer[channel->head];
+                channel->head = (channel->head + 1U) & channel->mask;
+            }
+            channel->count -= 1U;
+            pthread_mutex_unlock(&channel->lock);
+            *out = value;
+            return 0;
+        }
+        if (channel->closed) {
+            pthread_mutex_unlock(&channel->lock);
+            errno = EPIPE;
+            return -1;
+        }
+        pthread_mutex_unlock(&channel->lock);
+        errno = ENOTSUP;
+        return -1;
+    }
+
     if (channel->count > 0U) {
         if (channel->capacity == 1U) {
             value = channel->buffer[0];
@@ -923,7 +931,7 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
     }
 
     pthread_mutex_unlock(&channel->lock);
-    errno = ETIMEDOUT;
+    errno = EAGAIN;
     return -1;
 }
 
@@ -1020,9 +1028,18 @@ void *llam_channel_recv(llam_channel_t *channel) {
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_CHANNEL_RECV;
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         pthread_mutex_lock(&channel->lock);
-        (void)llam_wait_queue_remove(&channel->recv_waiters, node);
+        removed = llam_wait_queue_remove(&channel->recv_waiters, node);
         pthread_mutex_unlock(&channel->lock);
+        if (!removed) {
+            /* A sender/close path already popped the node; consume that result. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -1031,15 +1048,17 @@ void *llam_channel_recv(llam_channel_t *channel) {
         return NULL;
     }
 
+wait_ready:
     if (llam_wait_node_should_park(node)) {
         llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
     }
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     value = node->value;
     rc = node->error_code;
+    if (node->scalar_value != 0) {
+        llam_channel_waiter_consumed(channel);
+    }
     llam_sync_wait_node_release(shard, node);
     if (rc != 0) {
         errno = rc;
@@ -1092,8 +1111,8 @@ int llam_channel_close(llam_channel_t *channel) {
         return 0;
     }
     channel->closed = true;
-    llam_channel_wake_all_waiters(&channel->send_waiters, EPIPE, LLAM_WAIT_CHANNEL_SEND);
-    llam_channel_wake_all_waiters(&channel->recv_waiters, EPIPE, LLAM_WAIT_CHANNEL_RECV);
+    llam_channel_wake_all_waiters(channel, &channel->send_waiters, EPIPE, LLAM_WAIT_CHANNEL_SEND);
+    llam_channel_wake_all_waiters(channel, &channel->recv_waiters, EPIPE, LLAM_WAIT_CHANNEL_RECV);
     pthread_mutex_unlock(&channel->lock);
     return 0;
 }

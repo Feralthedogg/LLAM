@@ -89,7 +89,7 @@ static inline void llam_switch_task_to_task_hot(llam_task_t *from, llam_task_t *
  * runtime. Remote frees are drained only at quiescent/safepoint-friendly points.
  */
 void llam_allocator_destroy(llam_allocator_t *allocator);
-void llam_allocator_init(llam_allocator_t *allocator);
+int llam_allocator_init(llam_allocator_t *allocator);
 void llam_allocator_quiescent(llam_shard_t *shard);
 int llam_allocator_grow_io_buffer_slab(llam_shard_t *shard);
 int llam_allocator_grow_io_req_slab(llam_shard_t *shard);
@@ -173,6 +173,9 @@ int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns);
 llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt);
 void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job);
 int llam_consume_task_wake_error(llam_task_t *task);
+void llam_runtime_lifecycle_lock(void);
+int llam_runtime_lifecycle_trylock(void);
+void llam_runtime_lifecycle_unlock(void);
 void llam_record_fatal(llam_runtime_t *rt, int err);
 void llam_request_stop(llam_runtime_t *rt);
 bool llam_runtime_has_live_tasks(llam_runtime_t *rt);

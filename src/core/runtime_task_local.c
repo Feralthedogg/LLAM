@@ -30,11 +30,13 @@
 
 static pthread_mutex_t g_llam_task_local_key_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned char *g_llam_task_local_key_active;
+static size_t *g_llam_task_local_key_refcount;
 static size_t g_llam_task_local_key_capacity;
 static uint32_t g_llam_task_local_next_key = 1U;
 
 static int llam_task_local_key_ensure_capacity(uint32_t key) {
-    unsigned char *items;
+    unsigned char *active_items;
+    size_t *refcount_items;
     size_t new_capacity;
 
     if ((size_t)key < g_llam_task_local_key_capacity) {
@@ -48,13 +50,26 @@ static int llam_task_local_key_ensure_capacity(uint32_t key) {
         }
         new_capacity *= 2U;
     }
-    items = realloc(g_llam_task_local_key_active, new_capacity * sizeof(*items));
-    if (items == NULL) {
+    active_items = calloc(new_capacity, sizeof(*active_items));
+    refcount_items = calloc(new_capacity, sizeof(*refcount_items));
+    if (active_items == NULL || refcount_items == NULL) {
+        free(active_items);
+        free(refcount_items);
         errno = ENOMEM;
         return -1;
     }
-    memset(items + g_llam_task_local_key_capacity, 0, new_capacity - g_llam_task_local_key_capacity);
-    g_llam_task_local_key_active = items;
+    if (g_llam_task_local_key_capacity != 0U) {
+        memcpy(active_items,
+               g_llam_task_local_key_active,
+               g_llam_task_local_key_capacity * sizeof(*active_items));
+        memcpy(refcount_items,
+               g_llam_task_local_key_refcount,
+               g_llam_task_local_key_capacity * sizeof(*refcount_items));
+    }
+    free(g_llam_task_local_key_active);
+    free(g_llam_task_local_key_refcount);
+    g_llam_task_local_key_active = active_items;
+    g_llam_task_local_key_refcount = refcount_items;
     g_llam_task_local_key_capacity = new_capacity;
     return 0;
 }
@@ -75,8 +90,57 @@ static bool llam_task_local_key_is_active(llam_task_local_key_t key) {
     return active;
 }
 
+static bool llam_task_local_find_reusable_key_locked(uint32_t *out_key) {
+    size_t key;
+    size_t limit;
+
+    if (out_key == NULL || g_llam_task_local_key_active == NULL) {
+        return false;
+    }
+    limit = g_llam_task_local_key_capacity < (size_t)LLAM_TASK_LOCAL_MAX_KEYS
+        ? g_llam_task_local_key_capacity
+        : (size_t)LLAM_TASK_LOCAL_MAX_KEYS;
+    for (key = 1U; key < limit; ++key) {
+        /*
+         * Deleted keys can remain present in live tasks until those tasks clear
+         * the value or exit.  Reuse only when no task-local entry still carries
+         * this id, otherwise a new key could observe an old value.
+         */
+        if (g_llam_task_local_key_active[key] == 0U &&
+            g_llam_task_local_key_refcount[key] == 0U) {
+            *out_key = (uint32_t)key;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int llam_task_local_key_ref_acquire(llam_task_local_key_t key) {
+    int rc = 0;
+
+    pthread_mutex_lock(&g_llam_task_local_key_lock);
+    if (!llam_task_local_key_is_active_locked(key)) {
+        errno = EINVAL;
+        rc = -1;
+    } else {
+        g_llam_task_local_key_refcount[key] += 1U;
+    }
+    pthread_mutex_unlock(&g_llam_task_local_key_lock);
+    return rc;
+}
+
+static void llam_task_local_key_ref_release(llam_task_local_key_t key) {
+    pthread_mutex_lock(&g_llam_task_local_key_lock);
+    if ((size_t)key < g_llam_task_local_key_capacity &&
+        g_llam_task_local_key_refcount[key] != 0U) {
+        g_llam_task_local_key_refcount[key] -= 1U;
+    }
+    pthread_mutex_unlock(&g_llam_task_local_key_lock);
+}
+
 int llam_task_local_key_create(llam_task_local_key_t *out_key) {
-    uint32_t key;
+    uint32_t key = 0U;
+    bool new_key = false;
 
     if (out_key == NULL) {
         errno = EINVAL;
@@ -84,15 +148,22 @@ int llam_task_local_key_create(llam_task_local_key_t *out_key) {
     }
 
     pthread_mutex_lock(&g_llam_task_local_key_lock);
-    if (g_llam_task_local_next_key >= LLAM_TASK_LOCAL_MAX_KEYS) {
-        pthread_mutex_unlock(&g_llam_task_local_key_lock);
-        errno = ENOSPC;
-        return -1;
+    if (!llam_task_local_find_reusable_key_locked(&key)) {
+        if (g_llam_task_local_next_key >= LLAM_TASK_LOCAL_MAX_KEYS) {
+            pthread_mutex_unlock(&g_llam_task_local_key_lock);
+            errno = ENOSPC;
+            return -1;
+        }
+        key = g_llam_task_local_next_key;
+        new_key = true;
     }
-    key = g_llam_task_local_next_key++;
     if (llam_task_local_key_ensure_capacity(key) != 0) {
         pthread_mutex_unlock(&g_llam_task_local_key_lock);
         return -1;
+    }
+    if (new_key) {
+        // A transient allocation failure must not consume a public key id.
+        g_llam_task_local_next_key = key + 1U;
     }
     g_llam_task_local_key_active[key] = 1U;
     pthread_mutex_unlock(&g_llam_task_local_key_lock);
@@ -147,14 +218,14 @@ int llam_task_local_set(llam_task_local_key_t key, void *value) {
         errno = ENOTSUP;
         return -1;
     }
-    if (!llam_task_local_key_is_active(key)) {
-        errno = EINVAL;
-        return -1;
-    }
 
     for (entry = g_llam_tls_task->task_locals; entry != NULL; entry = entry->next) {
         if (entry->key == key) {
             if (value != NULL) {
+                if (!llam_task_local_key_is_active(key)) {
+                    errno = EINVAL;
+                    return -1;
+                }
                 entry->value = value;
                 return 0;
             }
@@ -163,18 +234,32 @@ int llam_task_local_set(llam_task_local_key_t key, void *value) {
             } else {
                 g_llam_tls_task->task_locals = entry->next;
             }
+            /*
+             * Deleting a key only marks it inactive globally; live tasks may
+             * still hold entries.  Allow those entries to be cleared so hosts
+             * can discard plugin/task state without waiting for task exit.
+             */
+            llam_task_local_key_ref_release(entry->key);
             free(entry);
             return 0;
         }
         prev = entry;
     }
 
+    if (!llam_task_local_key_is_active(key)) {
+        errno = EINVAL;
+        return -1;
+    }
     if (value == NULL) {
         return 0;
     }
     entry = calloc(1, sizeof(*entry));
     if (entry == NULL) {
         errno = ENOMEM;
+        return -1;
+    }
+    if (llam_task_local_key_ref_acquire(key) != 0) {
+        free(entry);
         return -1;
     }
     entry->key = key;
@@ -195,6 +280,7 @@ void llam_task_local_clear(llam_task_t *task) {
     while (entry != NULL) {
         llam_task_local_entry_t *next = entry->next;
 
+        llam_task_local_key_ref_release(entry->key);
         free(entry);
         entry = next;
     }

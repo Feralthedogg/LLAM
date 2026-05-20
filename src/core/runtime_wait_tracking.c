@@ -26,6 +26,39 @@
 
 #include "runtime_internal.h"
 
+static llam_io_req_t *llam_task_swap_active_io_req(llam_task_t *task, llam_io_req_t *req) {
+    llam_io_req_t *old_req;
+
+    if (task == NULL) {
+        return NULL;
+    }
+
+    old_req = atomic_exchange_explicit(&task->active_io_req, req, memory_order_acq_rel);
+    if (g_llam_runtime.initialized) {
+        if (old_req == NULL && req != NULL) {
+            // active_io_waiters tracks tasks, not request objects.
+            atomic_fetch_add_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
+        } else if (old_req != NULL && req == NULL) {
+            atomic_fetch_sub_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
+        }
+    }
+    return old_req;
+}
+
+llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task) {
+    if (task == NULL) {
+        return NULL;
+    }
+    return atomic_load_explicit(&((llam_task_t *)task)->active_io_req, memory_order_acquire);
+}
+
+llam_block_job_t *llam_task_active_block_job_load(const llam_task_t *task) {
+    if (task == NULL) {
+        return NULL;
+    }
+    return atomic_load_explicit(&((llam_task_t *)task)->active_block_job, memory_order_acquire);
+}
+
 /**
  * @brief Clear all wait ownership fields on a task.
  *
@@ -36,18 +69,22 @@ void llam_task_clear_wait_tracking(llam_task_t *task) {
         return;
     }
 
-    if (task->active_io_req != NULL && g_llam_runtime.initialized) {
-        // active_io_waiters tracks tasks, not requests. Decrement once when the
-        // task leaves any I/O wait state.
-        atomic_fetch_sub_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
-    }
-
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
     task->active_select_state = NULL;
-    task->active_io_req = NULL;
-    task->active_block_job = NULL;
+    /*
+     * Completion, cancellation, and dynamic rehome can run on different OS
+     * threads.  Use an exchange so only the first resolver that observes the
+     * active I/O owner decrements global I/O waiter accounting.
+     */
+    (void)llam_task_swap_active_io_req(task, NULL);
+    /*
+     * Blocking-job completion/cancellation can clear this field from a helper
+     * OS thread while watchdog and timeout diagnostics sample it. Keep the
+     * ownership handoff atomic just like active I/O request tracking.
+     */
+    atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = task->last_shard;
 }
@@ -70,8 +107,8 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
     task->active_wait_queue = queue;
     task->active_wait_queue_lock = queue_lock;
     task->active_select_state = NULL;
-    task->active_io_req = NULL;
-    task->active_block_job = NULL;
+    (void)llam_task_swap_active_io_req(task, NULL);
+    atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
     task->wake_error_code = 0;
@@ -89,8 +126,8 @@ void llam_task_set_join_tracking(llam_task_t *task, llam_task_t *target, unsigne
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
     task->active_select_state = NULL;
-    task->active_io_req = NULL;
-    task->active_block_job = NULL;
+    (void)llam_task_swap_active_io_req(task, NULL);
+    atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = target;
     task->parked_shard = parked_shard;
     task->wake_error_code = 0;
@@ -107,8 +144,8 @@ void llam_task_set_sleep_tracking(llam_task_t *task, unsigned parked_shard) {
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
     task->active_select_state = NULL;
-    task->active_io_req = NULL;
-    task->active_block_job = NULL;
+    (void)llam_task_swap_active_io_req(task, NULL);
+    atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
     task->wake_error_code = 0;
@@ -125,16 +162,12 @@ void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned p
     if (task == NULL) {
         return;
     }
-    if (task->active_io_req == NULL && g_llam_runtime.initialized) {
-        // Count the transition into I/O wait once per task.
-        atomic_fetch_add_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
-    }
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
     task->active_select_state = NULL;
-    task->active_io_req = req;
-    task->active_block_job = NULL;
+    (void)llam_task_swap_active_io_req(task, req);
+    atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
     task->wake_error_code = 0;
@@ -152,8 +185,8 @@ void llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsi
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
     task->active_select_state = NULL;
-    task->active_io_req = NULL;
-    task->active_block_job = job;
+    (void)llam_task_swap_active_io_req(task, NULL);
+    atomic_store_explicit(&task->active_block_job, job, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
     task->wake_error_code = 0;
@@ -169,6 +202,23 @@ bool llam_deadline_passed(uint64_t deadline_ns) {
     return deadline_ns <= llam_now_ns();
 }
 
+static llam_shard_t *llam_task_deadline_shard(llam_task_t *task) {
+    if (task == NULL || g_llam_runtime.active_shards == 0U) {
+        return NULL;
+    }
+
+    if (task->parked_shard < g_llam_runtime.active_shards) {
+        return &g_llam_runtime.shards[task->parked_shard];
+    }
+
+    /*
+     * Teardown, rehome, and partially failed setup paths can leave parked_shard
+     * defensive rather than authoritative.  last_shard still maps the task to a
+     * valid shard for timer cleanup.
+     */
+    return &g_llam_runtime.shards[task->last_shard % g_llam_runtime.active_shards];
+}
+
 /**
  * @brief Arm a deadline timer for a parked task.
  *
@@ -181,6 +231,8 @@ bool llam_deadline_passed(uint64_t deadline_ns) {
  * @return 0 on success, -1 on invalid args or timer allocation failure.
  */
 int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t deadline_ns) {
+    bool inserted;
+
     if (task == NULL || shard == NULL) {
         errno = EINVAL;
         return -1;
@@ -189,8 +241,15 @@ int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t
     task->deadline_ns = deadline_ns;
     pthread_mutex_lock(&shard->lock);
     llam_timer_insert_locked(shard, task);
+    /*
+     * Decide allocation success while the timer heap lock is still held.  A
+     * very short deadline can be popped by the watchdog immediately after this
+     * lock is released; that also clears active_timer, but it is completion, not
+     * allocation failure.
+     */
+    inserted = task->active_timer != NULL;
     pthread_mutex_unlock(&shard->lock);
-    if (task->active_timer == NULL) {
+    if (!inserted) {
         task->deadline_ns = 0U;
         errno = ENOMEM;
         return -1;
@@ -199,25 +258,42 @@ int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t
 }
 
 /**
+ * @brief Check whether a task still owns an active deadline timer.
+ *
+ * @details
+ * Timer expiry clears @c active_timer under the shard timer lock, including
+ * from watchdog/helper pthreads. Readers must use the same lock; otherwise a
+ * producer wake can race with timer expiry while deciding whether a direct
+ * handoff is safe.
+ *
+ * @param task Task whose deadline ownership should be checked.
+ * @return true if the task currently has an active timer node.
+ */
+bool llam_task_wait_deadline_active(llam_task_t *task) {
+    llam_shard_t *shard = llam_task_deadline_shard(task);
+    bool active = false;
+
+    if (shard == NULL) {
+        return false;
+    }
+
+    pthread_mutex_lock(&shard->lock);
+    active = task->active_timer != NULL;
+    pthread_mutex_unlock(&shard->lock);
+    return active;
+}
+
+/**
  * @brief Remove a task's active wait deadline, if one exists.
  *
  * @param task Task whose timer should be removed.
  */
 void llam_disarm_task_wait_deadline(llam_task_t *task) {
-    llam_shard_t *shard;
+    llam_shard_t *shard = llam_task_deadline_shard(task);
 
-    if (task == NULL || task->active_timer == NULL || g_llam_runtime.active_shards == 0U) {
+    if (shard == NULL) {
         return;
     }
-
-    if (task->parked_shard < g_llam_runtime.active_shards) {
-        shard = &g_llam_runtime.shards[task->parked_shard];
-    } else {
-        // Fallback for defensive cleanup when parked_shard was not set or has
-        // become invalid due to teardown/rehome state.
-        shard = &g_llam_runtime.shards[task->last_shard % g_llam_runtime.active_shards];
-    }
-
     pthread_mutex_lock(&shard->lock);
     if (task->active_timer != NULL) {
         (void)llam_timer_remove_locked(shard, task);
@@ -267,21 +343,31 @@ int llam_cancel_token_register_task(llam_task_t *task) {
  */
 void llam_cancel_token_unregister_task(llam_task_t *task) {
     llam_cancel_token_t *token;
+    llam_task_t *cur;
+    bool linked = false;
 
-    if (task == NULL || task->cancel_token == NULL || !task->cancel_registered) {
+    if (task == NULL || task->cancel_token == NULL) {
         return;
     }
 
     token = task->cancel_token;
     pthread_mutex_lock(&token->lock);
     if (task->cancel_registered) {
-        if (task->cancel_prev != NULL) {
-            task->cancel_prev->cancel_next = task->cancel_next;
-        } else {
-            token->waiters = task->cancel_next;
+        for (cur = token->waiters; cur != NULL; cur = cur->cancel_next) {
+            if (cur == task) {
+                linked = true;
+                break;
+            }
         }
-        if (task->cancel_next != NULL) {
-            task->cancel_next->cancel_prev = task->cancel_prev;
+        if (linked) {
+            if (task->cancel_prev != NULL) {
+                task->cancel_prev->cancel_next = task->cancel_next;
+            } else {
+                token->waiters = task->cancel_next;
+            }
+            if (task->cancel_next != NULL) {
+                task->cancel_next->cancel_prev = task->cancel_prev;
+            }
         }
         task->cancel_prev = NULL;
         task->cancel_next = NULL;
@@ -328,7 +414,13 @@ void llam_io_set_abort_result(llam_io_req_t *req, llam_io_abort_reason_t reason)
     }
 
     req->result = -1;
-    req->error_code = reason == LLAM_IO_ABORT_TIMEOUT ? ETIMEDOUT : ECANCELED;
+    if (reason == LLAM_IO_ABORT_ERROR) {
+        if (req->error_code == 0) {
+            req->error_code = EIO;
+        }
+    } else {
+        req->error_code = reason == LLAM_IO_ABORT_TIMEOUT ? ETIMEDOUT : ECANCELED;
+    }
 }
 
 /**
@@ -343,6 +435,8 @@ llam_wait_reason_t llam_io_abort_wait_reason(llam_io_abort_reason_t reason) {
         return LLAM_WAIT_CANCEL;
     case LLAM_IO_ABORT_TIMEOUT:
         return LLAM_WAIT_TIMEOUT;
+    case LLAM_IO_ABORT_ERROR:
+        return LLAM_WAIT_IO;
     default:
         return LLAM_WAIT_IO;
     }
@@ -404,12 +498,16 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
     llam_shard_t *shard;
     unsigned mode;
     bool removed = false;
+    unsigned parked_shard;
 
-    if (task == NULL || task->active_io_req == NULL || g_llam_runtime.active_shards == 0U) {
+    if (task == NULL || g_llam_runtime.active_shards == 0U) {
         return false;
     }
 
-    req = task->active_io_req;
+    req = llam_task_active_io_req_load(task);
+    if (req == NULL) {
+        return false;
+    }
     node_index = llam_io_req_node_index(req);
     if (node_index < 0) {
         return false;
@@ -459,7 +557,14 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
         // the actual wake once the backend acknowledges or reports the request.
         atomic_store(&req->abort_reason, (unsigned)reason);
         if (atomic_exchange(&req->cancel_queued, 1U) == 0U) {
-            (void)llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req);
+            if (llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req) != 0) {
+                /*
+                 * The backend still owns the request.  Leave the waiter parked
+                 * and allow a later abort attempt or natural completion instead
+                 * of pretending the request was detached.
+                 */
+                atomic_store(&req->cancel_queued, 0U);
+            }
         }
         return false;
     }
@@ -468,12 +573,17 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
         return false;
     }
 
+    parked_shard = task->parked_shard;
     llam_io_set_abort_result(req, reason);
     llam_account_io_abort_wake(shard, reason);
-    llam_task_clear_wait_tracking(task);
+    /*
+     * Keep the wait ownership intact until the generic reinject path runs.
+     * It still needs the original parked_shard to remove any active deadline
+     * timer from the correct shard before clearing task tracking.
+     */
     llam_reinject_task_on_shard(&g_llam_runtime,
                               task,
-                              task->parked_shard,
+                              parked_shard,
                               true,
                               LLAM_TRACE_WAKE,
                               llam_io_abort_wait_reason(reason));
@@ -552,18 +662,22 @@ static bool llam_reinject_single_local_join_waiter(llam_runtime_t *rt, llam_task
     if (g_llam_tls_shard != target ||
         g_llam_tls_task == NULL ||
         !llam_shard_accepts_new_work(target) ||
-        waiter->active_timer != NULL) {
+        llam_task_wait_deadline_active(waiter)) {
         return false;
     }
-
-    from = waiter->state;
-    llam_task_clear_wait_tracking(waiter);
 
     pthread_mutex_lock(&target->lock);
     if (target->opaque_redirect_active) {
         pthread_mutex_unlock(&target->lock);
         return false;
     }
+    /*
+     * The local fast path can still reject the waiter above.  Do not clear wait
+     * ownership until this path has committed; the generic reinject fallback
+     * needs the original parked_shard and join tracking intact.
+     */
+    from = waiter->state;
+    llam_task_clear_wait_tracking(waiter);
     waiter->state = LLAM_TASK_STATE_RUNNABLE;
     waiter->wait_reason = LLAM_WAIT_NONE;
     waiter->enqueue_hot = 0U;

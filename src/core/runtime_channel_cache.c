@@ -43,6 +43,22 @@ static _Thread_local llam_channel_t *g_llam_tls_channel_cache_head;
 static _Thread_local unsigned g_llam_tls_channel_cache_count;
 
 /**
+ * @brief Free a cached channel object and its retained one-slot buffer.
+ *
+ * Cached channels keep their mutex initialized while idle so acquisition can
+ * reuse the object directly.  Draining a cache must therefore destroy the mutex
+ * before releasing the backing storage.
+ */
+static void llam_channel_cache_free_entry(llam_channel_t *channel) {
+    if (channel == NULL) {
+        return;
+    }
+    pthread_mutex_destroy(&channel->lock);
+    free(channel->buffer);
+    free(channel);
+}
+
+/**
  * @brief Return the configured per-thread channel cache capacity.
  *
  * @return Capacity parsed from @c LLAM_CHANNEL_TLS_CACHE_CAP, capped to 1024.
@@ -120,6 +136,7 @@ static void llam_channel_reset_for_reuse(llam_channel_t *channel) {
     channel->head = 0U;
     channel->tail = 0U;
     channel->count = 0U;
+    atomic_store_explicit(&channel->inflight_waiters, 0U, memory_order_release);
     channel->closed = false;
     channel->send_waiters = (llam_wait_queue_t){0};
     channel->recv_waiters = (llam_wait_queue_t){0};
@@ -133,6 +150,9 @@ static void llam_channel_reset_for_reuse(llam_channel_t *channel) {
 static llam_channel_t *llam_channel_tls_cache_acquire(void) {
     llam_channel_t *channel;
 
+    if (g_llam_tls_shard == NULL && g_llam_tls_task == NULL) {
+        return NULL;
+    }
     if (llam_channel_tls_cache_cap() == 0U) {
         return NULL;
     }
@@ -162,6 +182,9 @@ static bool llam_channel_tls_cache_release(llam_channel_t *channel) {
     if (channel == NULL) {
         return false;
     }
+    if (g_llam_tls_shard == NULL && g_llam_tls_task == NULL) {
+        return false;
+    }
 
     cap = llam_channel_tls_cache_cap();
     if (cap == 0U || g_llam_tls_channel_cache_count >= cap) {
@@ -183,6 +206,9 @@ static bool llam_channel_tls_cache_release(llam_channel_t *channel) {
 llam_channel_t *llam_channel_cache_acquire(void) {
     llam_channel_t *channel;
 
+    if (g_llam_tls_shard == NULL && g_llam_tls_task == NULL) {
+        return NULL;
+    }
     channel = llam_channel_tls_cache_acquire();
     if (channel != NULL) {
         return channel;
@@ -218,8 +244,15 @@ bool llam_channel_cache_release(llam_channel_t *channel) {
     unsigned cap;
 
     if (channel == NULL || channel->capacity != 1U || channel->send_waiters.depth != 0U ||
-        channel->recv_waiters.depth != 0U || channel->send_waiters.head != NULL || channel->recv_waiters.head != NULL) {
+        channel->recv_waiters.depth != 0U ||
+        atomic_load_explicit(&channel->inflight_waiters, memory_order_acquire) != 0U ||
+        channel->send_waiters.head != NULL || channel->recv_waiters.head != NULL) {
         // Only a completely idle one-slot channel is safe to recycle here.
+        return false;
+    }
+    if (g_llam_tls_shard == NULL && g_llam_tls_task == NULL) {
+        // Outside managed scheduler threads there is no reliable lifecycle hook
+        // to drain TLS cache entries. Preserve destroy-as-free semantics there.
         return false;
     }
 
@@ -243,4 +276,49 @@ bool llam_channel_cache_release(llam_channel_t *channel) {
     g_llam_channel_cache_count += 1U;
     pthread_mutex_unlock(&g_llam_channel_cache_lock);
     return true;
+}
+
+/**
+ * @brief Release every capacity-one channel cached by the current OS thread.
+ *
+ * Worker threads own independent TLS caches.  Without an explicit drain before
+ * thread exit, cached channel objects become unreachable even though the public
+ * channel has already been destroyed.
+ */
+void llam_channel_tls_cache_drain(void) {
+    llam_channel_t *channel = g_llam_tls_channel_cache_head;
+
+    g_llam_tls_channel_cache_head = NULL;
+    g_llam_tls_channel_cache_count = 0U;
+    while (channel != NULL) {
+        llam_channel_t *next = channel->cache_next;
+
+        channel->cache_next = NULL;
+        llam_channel_cache_free_entry(channel);
+        channel = next;
+    }
+}
+
+/**
+ * @brief Release every channel retained by the process-wide fallback cache.
+ *
+ * Runtime shutdown calls this after workers have stopped so repeated
+ * init/shutdown cycles do not keep stale cache storage indefinitely.
+ */
+void llam_channel_global_cache_drain(void) {
+    llam_channel_t *channel;
+
+    pthread_mutex_lock(&g_llam_channel_cache_lock);
+    channel = g_llam_channel_cache_head;
+    g_llam_channel_cache_head = NULL;
+    g_llam_channel_cache_count = 0U;
+    pthread_mutex_unlock(&g_llam_channel_cache_lock);
+
+    while (channel != NULL) {
+        llam_channel_t *next = channel->cache_next;
+
+        channel->cache_next = NULL;
+        llam_channel_cache_free_entry(channel);
+        channel = next;
+    }
 }

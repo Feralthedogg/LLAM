@@ -245,6 +245,9 @@ void llam_darwin_queue_shutdown_controls(llam_node_t *node) {
             watch->deactivate_queued = true;
             if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch) == 0) {
                 kicked = true;
+            } else {
+                // Keep shutdown retryable if control allocation fails.
+                watch->deactivate_queued = false;
             }
         }
     }
@@ -253,6 +256,8 @@ void llam_darwin_queue_shutdown_controls(llam_node_t *node) {
             watch->deactivate_queued = true;
             if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch) == 0) {
                 kicked = true;
+            } else {
+                watch->deactivate_queued = false;
             }
         }
     }
@@ -261,6 +266,8 @@ void llam_darwin_queue_shutdown_controls(llam_node_t *node) {
             watch->deactivate_queued = true;
             if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch) == 0) {
                 kicked = true;
+            } else {
+                watch->deactivate_queued = false;
             }
         }
     }

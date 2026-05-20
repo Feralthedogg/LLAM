@@ -37,6 +37,7 @@
 
 typedef struct llam_windows_fd_assoc {
     llam_fd_t fd;
+    unsigned skip_completion_on_success;
     struct llam_windows_fd_assoc *next;
 } llam_windows_fd_assoc_t;
 
@@ -51,6 +52,7 @@ typedef struct llam_windows_io_op {
     unsigned poll_backend;
     short poll_events;
     DWORD poll_flags;
+    DWORD immediate_bytes;
     char poll_byte;
     struct sockaddr_storage poll_from;
     int poll_from_len;
@@ -66,6 +68,8 @@ typedef struct llam_windows_accept_socket_entry {
 
 int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd);
 int llam_windows_associate_handle(llam_node_t *node, llam_handle_t handle);
+bool llam_windows_fd_skips_completion_on_success(llam_node_t *node, llam_fd_t fd);
+bool llam_windows_handle_skips_completion_on_success(llam_node_t *node, llam_handle_t handle);
 int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTEX *fn_out);
 int llam_windows_load_connectex(llam_node_t *node, SOCKET socket_fd, LPFN_CONNECTEX *fn_out);
 int llam_windows_bind_connect_socket(SOCKET socket_fd, const struct sockaddr *addr);
@@ -80,6 +84,7 @@ void llam_windows_io_op_free(llam_windows_io_op_t *op);
 void llam_windows_io_op_pool_destroy(llam_node_t *node);
 void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool decrement_pending);
 void llam_windows_complete_submit_error(llam_node_t *node, llam_io_req_t *req, int err);
+void llam_windows_complete_immediate_op(llam_windows_io_op_t *op, DWORD bytes);
 void llam_windows_process_controls(llam_node_t *node);
 void llam_windows_process_submissions(llam_node_t *node);
 void llam_windows_drain_completions(llam_node_t *node, DWORD timeout_ms);

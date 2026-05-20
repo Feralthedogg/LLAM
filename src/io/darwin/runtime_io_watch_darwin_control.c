@@ -67,10 +67,20 @@ void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req
     watch->wait_tail = req;
 }
 
-/** @brief Remove a receive waiter while watch_lock is held. */
+/**
+ * @brief Remove a receive waiter while watch_lock is held.
+ *
+ * A NULL watch means completion already detached the request.
+ */
 bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
     llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur = watch->wait_head;
+    llam_io_req_t *cur;
+
+    if (watch == NULL || req == NULL) {
+        return false;
+    }
+
+    cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -126,6 +136,9 @@ bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
         *copy_data_out = ready->copy_data;
         ready->copy_data = NULL;
     }
+    // If the caller does not accept ownership, the ready node still owns the
+    // copied payload and must release it before disappearing.
+    free(ready->copy_data);
     if (copy_capacity_out != NULL) {
         *copy_capacity_out = ready->copy_capacity;
     }

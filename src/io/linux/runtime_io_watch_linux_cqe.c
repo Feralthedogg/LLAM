@@ -27,6 +27,26 @@
 #include "runtime_io_watch_linux_internal.h"
 
 /**
+ * @brief Queue a deactivate control and roll back the watch flag on failure.
+ *
+ * @details
+ * CQE handling marks a multishot watch as "deactivation queued" before the
+ * worker observes the cancellation completion. If the control allocation fails,
+ * leaving that flag set would hide the watch from future deactivate attempts.
+ */
+static bool llam_queue_deactivate_control_locked(llam_node_t *node,
+                                                 llam_io_control_kind_t kind,
+                                                 void *watch,
+                                                 bool *deactivate_queued) {
+    *deactivate_queued = true;
+    if (llam_node_queue_control_locked(node, kind, watch) == 0) {
+        return true;
+    }
+    *deactivate_queued = false;
+    return false;
+}
+
+/**
  * @brief Dispatch one io_uring completion queue entry.
  *
  * @param node Node whose ring produced the CQE.
@@ -55,7 +75,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             llam_io_req_t *waiters = NULL;
             bool release_pending = false;
             bool queue_activate = false;
-            bool queue_deactivate = false;
+            bool kick_deactivate = false;
             unsigned live_target = UINT_MAX;
             int live_fd = -1;
             short live_events = 0;
@@ -117,16 +137,16 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                         live_fd = watch->fd;
                         live_events = watch->events;
                         if (watch->active && !watch->deactivate_queued) {
-                            watch->deactivate_queued = true;
-                            queue_deactivate = true;
+                            kick_deactivate = llam_queue_deactivate_control_locked(
+                                node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch, &watch->deactivate_queued);
                         }
                     } else {
                         // Sticky readiness lets a later waiter consume an event
                         // that arrived before it parked.
                         watch->sticky_revents = (short)res;
                         if (watch->active && !watch->deactivate_queued) {
-                            watch->deactivate_queued = true;
-                            queue_deactivate = true;
+                            kick_deactivate = llam_queue_deactivate_control_locked(
+                                node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch, &watch->deactivate_queued);
                         }
                     }
                 }
@@ -161,8 +181,8 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     llam_kick_node(node);
                 }
             }
-            if (queue_deactivate) {
-                (void)llam_node_queue_control(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch);
+            if (kick_deactivate) {
+                llam_kick_node(node);
             }
             while (waiters != NULL) {
                 llam_io_req_t *next = waiters->next;
@@ -178,7 +198,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             llam_io_req_t *waiter = NULL;
             llam_io_req_t *waiters = NULL;
             bool release_pending = false;
-            bool queue_deactivate = false;
+            bool kick_deactivate = false;
             unsigned live_target = UINT_MAX;
             int live_fd = -1;
             bool live_consumed = false;
@@ -218,14 +238,14 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                         live_target = watch->migrate_target_node_index;
                         live_fd = watch->fd;
                         if (watch->active && !watch->deactivate_queued) {
-                            watch->deactivate_queued = true;
-                            queue_deactivate = true;
+                            kick_deactivate = llam_queue_deactivate_control_locked(
+                                node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch, &watch->deactivate_queued);
                         }
                     } else {
                         llam_accept_watch_push_ready(watch, res);
                         if (watch->active && !watch->deactivate_queued) {
-                            watch->deactivate_queued = true;
-                            queue_deactivate = true;
+                            kick_deactivate = llam_queue_deactivate_control_locked(
+                                node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch, &watch->deactivate_queued);
                         }
                     }
                 }
@@ -252,8 +272,8 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     }
                 }
             }
-            if (queue_deactivate) {
-                (void)llam_node_queue_control(node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch);
+            if (kick_deactivate) {
+                llam_kick_node(node);
             }
             if (waiter != NULL) {
                 llam_io_complete_req(node, waiter, res, cqe_flags, false);
@@ -272,7 +292,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             llam_io_req_t *waiter = NULL;
             llam_io_req_t *waiters = NULL;
             bool release_pending = false;
-            bool queue_deactivate = false;
+            bool kick_deactivate = false;
             bool queued_ready = false;
             bool has_buffer = false;
             unsigned short bid = 0U;
@@ -290,7 +310,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 bid = (unsigned short)(cqe_flags >> IORING_CQE_BUFFER_SHIFT);
                 has_buffer = bid < node->recv_buf_entries;
                 if (has_buffer) {
-                    node->provided_buf_acquires += 1U;
+                    atomic_fetch_add_explicit(&node->provided_buf_acquires, 1U, memory_order_relaxed);
                 }
             }
             if (res == -ENOBUFS) {
@@ -338,24 +358,24 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                         live_st_dev = watch->st_dev;
                         live_st_ino = watch->st_ino;
                         if (watch->active && !watch->deactivate_queued) {
-                            watch->deactivate_queued = true;
-                            queue_deactivate = true;
+                            kick_deactivate = llam_queue_deactivate_control_locked(
+                                node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch, &watch->deactivate_queued);
                         }
                     } else {
                         queued_ready = llam_recv_watch_push_ready(watch, (size_t)res, bid, has_buffer, node->index, NULL, 0U);
                         if (watch->active && !watch->deactivate_queued) {
-                            watch->deactivate_queued = true;
-                            queue_deactivate = true;
+                            kick_deactivate = llam_queue_deactivate_control_locked(
+                                node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch, &watch->deactivate_queued);
                         }
                     }
                 } else if (watch->active && watch->wait_head == NULL && !watch->deactivate_queued) {
                     // Owned recv is demand-driven, so tear the watch down once
                     // no waiter remains.
-                    watch->deactivate_queued = true;
-                    queue_deactivate = true;
+                    kick_deactivate = llam_queue_deactivate_control_locked(
+                        node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch, &watch->deactivate_queued);
                 }
             }
-            if (!queue_deactivate) {
+            if (!kick_deactivate) {
                 llam_maybe_destroy_recv_watch_locked(node, watch);
             }
             pthread_mutex_unlock(&node->watch_lock);
@@ -383,8 +403,8 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     queued_ready = true;
                 }
             }
-            if (queue_deactivate) {
-                (void)llam_node_queue_control(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch);
+            if (kick_deactivate) {
+                llam_kick_node(node);
             }
             if (waiter != NULL) {
                 if (has_buffer && waiter->owned_buffer != NULL && node->recv_buf_storage != NULL) {

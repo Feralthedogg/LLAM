@@ -130,9 +130,9 @@ bool llam_node_submit_needs_syscall(llam_node_t *node) {
 int llam_node_submit_ring(llam_node_t *node) {
     int rc;
 
-    node->submit_calls += 1U;
+    atomic_fetch_add_explicit(&node->submit_calls, 1U, memory_order_relaxed);
     if (llam_node_submit_needs_syscall(node)) {
-        node->submit_syscalls += 1U;
+        atomic_fetch_add_explicit(&node->submit_syscalls, 1U, memory_order_relaxed);
     }
     rc = io_uring_submit(&node->ring);
     return rc;

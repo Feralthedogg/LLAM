@@ -173,6 +173,9 @@ static uint64_t llam_watchdog_sum_u64(const uint64_t *values, size_t count) {
 }
 
 static uint64_t llam_watchdog_metrics_progress_sum(const llam_metrics_t *metrics) {
+    uint64_t first_group[6];
+    uint64_t second_group[2];
+    uint64_t third_group[4];
     uint64_t sum;
 
     /*
@@ -180,12 +183,25 @@ static uint64_t llam_watchdog_metrics_progress_sum(const llam_metrics_t *metrics
      * scheduler/I/O progress, but do not include watchdog-owned counters that
      * could mask a real stall.
      */
-    sum = llam_watchdog_sum_u64(&metrics->ctx_switches, 6U);
-    sum += llam_watchdog_sum_u64(&metrics->steals, 2U);
-    sum += llam_watchdog_sum_u64(&metrics->blocking_calls, 4U);
-    sum += metrics->opaque_compensations;
-    sum += metrics->opaque_redirect_activations;
-    sum += metrics->total_run_ns;
+    first_group[0] = atomic_load_explicit(&metrics->ctx_switches, memory_order_relaxed);
+    first_group[1] = atomic_load_explicit(&metrics->yields, memory_order_relaxed);
+    first_group[2] = atomic_load_explicit(&metrics->parks, memory_order_relaxed);
+    first_group[3] = atomic_load_explicit(&metrics->wakes, memory_order_relaxed);
+    first_group[4] = atomic_load_explicit(&metrics->timeout_wakes, memory_order_relaxed);
+    first_group[5] = atomic_load_explicit(&metrics->cancel_wakes, memory_order_relaxed);
+    second_group[0] = atomic_load_explicit(&metrics->steals, memory_order_relaxed);
+    second_group[1] = atomic_load_explicit(&metrics->migrations, memory_order_relaxed);
+    third_group[0] = atomic_load_explicit(&metrics->blocking_calls, memory_order_relaxed);
+    third_group[1] = atomic_load_explicit(&metrics->blocking_completions, memory_order_relaxed);
+    third_group[2] = atomic_load_explicit(&metrics->io_submits, memory_order_relaxed);
+    third_group[3] = atomic_load_explicit(&metrics->io_completions, memory_order_relaxed);
+
+    sum = llam_watchdog_sum_u64(first_group, 6U);
+    sum += llam_watchdog_sum_u64(second_group, 2U);
+    sum += llam_watchdog_sum_u64(third_group, 4U);
+    sum += atomic_load_explicit(&metrics->opaque_compensations, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->opaque_redirect_activations, memory_order_relaxed);
+    sum += atomic_load_explicit(&metrics->total_run_ns, memory_order_relaxed);
     return sum;
 }
 
@@ -210,6 +226,49 @@ static uint64_t llam_runtime_progress_snapshot(llam_runtime_t *rt) {
     }
 
     return snapshot;
+}
+
+/**
+ * @brief Return whether a parked task can still be woken by an unmanaged host thread.
+ *
+ * @details
+ * Some public non-parking APIs are explicitly valid outside a managed LLAM
+ * task.  In particular, host threads may use channel try-send/try-recv/close
+ * and condition-variable signal/broadcast to wake managed tasks that are
+ * currently parked.  When any such waiter exists, the watchdog cannot prove a
+ * global runtime deadlock only from an idle scheduler snapshot; the external
+ * host event may simply not have happened yet.
+ *
+ * Mutex waiters are intentionally not included here because unmanaged
+ * @c llam_mutex_unlock() is rejected with @c ENOTSUP, so a parked mutex waiter
+ * does not have the same documented external wake path.
+ */
+static bool llam_runtime_has_external_sync_waiters(llam_runtime_t *rt) {
+    unsigned i;
+
+    if (rt == NULL || rt->shards == NULL) {
+        return false;
+    }
+    for (i = 0U; i < rt->active_shards; ++i) {
+        llam_shard_t *shard = &rt->shards[i];
+        llam_task_t *task;
+
+        pthread_mutex_lock(&shard->lock);
+        for (task = shard->all_tasks; task != NULL; task = task->all_next) {
+            unsigned state = atomic_load_explicit(&task->state, memory_order_acquire);
+            unsigned reason = atomic_load_explicit(&task->wait_reason, memory_order_acquire);
+
+            if (state == LLAM_TASK_STATE_PARKED &&
+                (reason == LLAM_WAIT_CHANNEL_SEND ||
+                 reason == LLAM_WAIT_CHANNEL_RECV ||
+                 reason == LLAM_WAIT_COND)) {
+                pthread_mutex_unlock(&shard->lock);
+                return true;
+            }
+        }
+        pthread_mutex_unlock(&shard->lock);
+    }
+    return false;
 }
 
 /**
@@ -251,7 +310,8 @@ void *llam_ctrl_worker_main(void *arg) {
             !llam_runtime_has_pending_timers(rt) &&
             atomic_load(&rt->block_pending) == 0U &&
             !llam_runtime_has_io_pending(rt) &&
-            !llam_runtime_has_opaque_blocking(rt)) {
+            !llam_runtime_has_opaque_blocking(rt) &&
+            !llam_runtime_has_external_sync_waiters(rt)) {
             uint64_t snapshot = llam_runtime_progress_snapshot(rt);
 
             if (snapshot == rt->deadlock_progress_snapshot) {

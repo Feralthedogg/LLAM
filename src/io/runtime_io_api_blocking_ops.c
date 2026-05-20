@@ -37,6 +37,50 @@ static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
 }
 
 /**
+ * @brief Check whether a blocking-worker I/O fallback should abort.
+ *
+ * Blocking fallback callbacks run after the submitting task has parked.  Task
+ * cancellation is delivered through the task token, while runtime stop aborts
+ * all parked waits even when no per-task token exists.  The callbacks poll in
+ * short slices, so they must observe both signals themselves; otherwise a
+ * running block job can keep the runtime alive forever after stop is requested.
+ */
+static bool llam_blocking_req_cancelled(const llam_io_req_t *req) {
+    if (atomic_load_explicit(&g_llam_runtime.stop_requested, memory_order_acquire)) {
+        return true;
+    }
+    return req != NULL &&
+           req->task != NULL &&
+           req->task->cancel_token != NULL &&
+           llam_cancel_token_is_cancelled(req->task->cancel_token) > 0;
+}
+
+/**
+ * @brief Mark a blocking fallback request as cooperatively cancelled.
+ */
+static void llam_blocking_req_set_cancelled(llam_io_req_t *req) {
+    errno = ECANCELED;
+    if (req != NULL) {
+        req->result = -1;
+        req->fd_result = LLAM_INVALID_FD;
+    }
+}
+
+/**
+ * @brief Restore temporary descriptor flags without clobbering operation errno.
+ */
+static void llam_restore_fd_flags_preserve_errno(llam_fd_t fd, bool restore_flags, int saved_flags) {
+    int saved_errno;
+
+    if (!restore_flags) {
+        return;
+    }
+    saved_errno = errno;
+    (void)fcntl(fd, F_SETFL, saved_flags);
+    errno = saved_errno;
+}
+
+/**
  * @brief Blocking-worker fallback for read/recv-style operations.
  *
  * The descriptor is temporarily forced non-blocking when needed. EAGAIN is
@@ -66,6 +110,10 @@ void *llam_blocking_read_impl(void *arg) {
     }
 
     for (;;) {
+        if (llam_blocking_req_cancelled(req)) {
+            llam_blocking_req_set_cancelled(req);
+            break;
+        }
         req->result = req->use_recv_op ? llam_platform_recv_fd(req->fd, req->buf, req->count, req->recv_flags) :
                                          llam_platform_read_fd(req->fd, req->buf, req->count);
         if (req->result >= 0) {
@@ -77,21 +125,13 @@ void *llam_blocking_read_impl(void *arg) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             break;
         }
-        if (req->task != NULL && req->task->cancel_token != NULL &&
-            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
-            errno = ECANCELED;
-            req->result = -1;
-            break;
-        }
         if (llam_platform_poll_fd(req->fd, POLLIN, 10, NULL) < 0 && errno != EINTR) {
             req->result = -1;
             break;
         }
     }
 
-    if (restore_flags) {
-        (void)fcntl(req->fd, F_SETFL, saved_flags);
-    }
+    llam_restore_fd_flags_preserve_errno(req->fd, restore_flags, saved_flags);
     return req;
 }
 
@@ -185,9 +225,8 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
     ssize_t result;
     int saved_errno = 0;
     int socket_type = 0;
-    bool is_socket = llam_fd_get_socket_type(fd, &socket_type);
-    bool socket_recv = force_recv || is_socket;
-    bool prefer_provided = false;
+    bool is_socket;
+    bool socket_recv;
     bool prefer_multishot = false;
 
     if (out == NULL) {
@@ -196,13 +235,25 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
     }
     *out = NULL;
     if (max_count == 0U) {
-        errno = EINVAL;
-        return -1;
+        /*
+         * Match the public owned-buffer contract and ordinary read(2)
+         * zero-count semantics: no descriptor inspection, no allocation, and
+         * no owned wrapper is produced.
+         */
+        return 0;
     }
     llam_task_safepoint();
 
+    errno = 0;
+    is_socket = llam_fd_get_socket_type(fd, &socket_type);
+    socket_recv = force_recv || is_socket;
     if (force_recv && !is_socket) {
-        errno = ENOTSOCK;
+        /*
+         * recv-owned requires socket semantics, but an invalid descriptor must
+         * still surface as EBADF just like recv(2).  Only a valid non-socket
+         * descriptor is normalized to ENOTSOCK.
+         */
+        errno = errno == EBADF ? EBADF : ENOTSOCK;
         return -1;
     }
 
@@ -229,7 +280,13 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
         return result;
     }
 
-    buffer = llam_io_buffer_alloc(g_llam_tls_shard, max_count);
+    /*
+     * Public owned buffers are allowed to escape the task that produced them.
+     * Keep their wrapper and payload detached from shard slabs so releasing an
+     * otherwise valid buffer after runtime_shutdown() cannot read freed
+     * allocator storage.
+     */
+    buffer = llam_io_buffer_alloc_detached(max_count);
     if (buffer == NULL) {
         errno = ENOMEM;
         return -1;
@@ -239,7 +296,6 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
         (socket_type == SOCK_DGRAM || socket_type == SOCK_SEQPACKET)) {
         llam_node_t *node = &g_llam_runtime.nodes[g_llam_tls_shard->io_node_index];
 
-        prefer_provided = node->supports_provided_buffers || node->supports_multishot_recv;
         prefer_multishot = !node->supports_provided_buffers && node->supports_multishot_recv;
     }
 
@@ -253,13 +309,12 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
 
     req->kind = LLAM_IO_KIND_READ;
     req->fd = fd;
-    req->buf = prefer_provided ? NULL : buffer->data;
     req->count = max_count;
     req->recv_flags = recv_flags;
     req->owned_buffer = buffer;
     req->use_recv_op = socket_recv;
-    req->use_provided_buffer = prefer_provided && g_llam_runtime.nodes[g_llam_tls_shard->io_node_index].supports_provided_buffers;
-    req->buf = (req->use_provided_buffer || prefer_multishot) ? NULL : buffer->data;
+    req->use_provided_buffer = false;
+    req->buf = prefer_multishot ? NULL : buffer->data;
     if (prefer_multishot && llam_issue_multishot_recv(req) == 0) {
         result = req->result;
         if (result < 0 && (req->error_code == 0 || llam_io_capability_error(req->error_code))) {
@@ -367,6 +422,10 @@ void *llam_blocking_write_impl(void *arg) {
     }
 
     for (;;) {
+        if (llam_blocking_req_cancelled(req)) {
+            llam_blocking_req_set_cancelled(req);
+            break;
+        }
         req->result = llam_platform_write_fd(req->fd, req->buf, req->count);
         if (req->result >= 0) {
             break;
@@ -377,21 +436,13 @@ void *llam_blocking_write_impl(void *arg) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             break;
         }
-        if (req->task != NULL && req->task->cancel_token != NULL &&
-            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
-            errno = ECANCELED;
-            req->result = -1;
-            break;
-        }
         if (llam_platform_poll_fd(req->fd, POLLOUT, 10, NULL) < 0 && errno != EINTR) {
             req->result = -1;
             break;
         }
     }
 
-    if (restore_flags) {
-        (void)fcntl(req->fd, F_SETFL, saved_flags);
-    }
+    llam_restore_fd_flags_preserve_errno(req->fd, restore_flags, saved_flags);
     return req;
 }
 
@@ -448,6 +499,10 @@ void *llam_blocking_accept_impl(void *arg) {
     }
 
     for (;;) {
+        if (llam_blocking_req_cancelled(req)) {
+            llam_blocking_req_set_cancelled(req);
+            break;
+        }
         {
             llam_fd_t accepted = llam_platform_accept_fd(req->fd, req->addr, req->addrlen);
 
@@ -463,21 +518,13 @@ void *llam_blocking_accept_impl(void *arg) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             break;
         }
-        if (req->task != NULL && req->task->cancel_token != NULL &&
-            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
-            errno = ECANCELED;
-            req->result = -1;
-            break;
-        }
         if (llam_platform_poll_fd(req->fd, POLLIN, 10, NULL) < 0 && errno != EINTR) {
             req->result = -1;
             break;
         }
     }
 
-    if (restore_flags) {
-        (void)fcntl(req->fd, F_SETFL, saved_flags);
-    }
+    llam_restore_fd_flags_preserve_errno(req->fd, restore_flags, saved_flags);
     return req;
 }
 
@@ -512,6 +559,10 @@ void *llam_blocking_connect_impl(void *arg) {
     }
 
     for (;;) {
+        if (llam_blocking_req_cancelled(req)) {
+            llam_blocking_req_set_cancelled(req);
+            break;
+        }
         if (!wait_ready) {
             if (llam_platform_connect_fd(req->fd, req->addr, req->addr_len) == 0) {
                 req->result = 0;
@@ -529,12 +580,6 @@ void *llam_blocking_connect_impl(void *arg) {
                 break;
             }
             wait_ready = true;
-        }
-        if (req->task != NULL && req->task->cancel_token != NULL &&
-            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
-            errno = ECANCELED;
-            req->result = -1;
-            break;
         }
         {
             int poll_rc = llam_platform_poll_fd(req->fd, POLLOUT, 10, NULL);
@@ -558,12 +603,7 @@ void *llam_blocking_connect_impl(void *arg) {
         break;
     }
 
-    if (restore_flags) {
-        int saved_errno = errno;
-
-        (void)fcntl(req->fd, F_SETFL, saved_flags);
-        errno = saved_errno;
-    }
+    llam_restore_fd_flags_preserve_errno(req->fd, restore_flags, saved_flags);
     return req;
 }
 
@@ -589,10 +629,8 @@ void *llam_blocking_poll_impl(void *arg) {
     for (;;) {
         int slice_ms = 10;
 
-        if (req->task != NULL && req->task->cancel_token != NULL &&
-            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
-            errno = ECANCELED;
-            req->result = -1;
+        if (llam_blocking_req_cancelled(req)) {
+            llam_blocking_req_set_cancelled(req);
             return req;
         }
         if (req->timeout_ms >= 0) {
@@ -642,10 +680,8 @@ void *llam_blocking_handle_poll_impl(void *arg) {
     for (;;) {
         int slice_ms = 10;
 
-        if (req->task != NULL && req->task->cancel_token != NULL &&
-            llam_cancel_token_is_cancelled(req->task->cancel_token) > 0) {
-            errno = ECANCELED;
-            req->result = -1;
+        if (llam_blocking_req_cancelled(req)) {
+            llam_blocking_req_set_cancelled(req);
             return req;
         }
         if (req->timeout_ms >= 0) {

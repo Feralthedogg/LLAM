@@ -80,7 +80,12 @@ static int llam_channel_select_try_one(llam_select_op_t *op) {
     if (rc == 0) {
         return 1;
     }
-    if (errno == ETIMEDOUT) {
+    /*
+     * Select probes use nonblocking channel APIs.  EAGAIN means this
+     * operation is not ready yet; keep scanning or park the select waiter.
+     * ETIMEDOUT is accepted for compatibility with older internal probes.
+     */
+    if (errno == EAGAIN || errno == ETIMEDOUT) {
         return 0;
     }
     if (errno == EPIPE || errno == ECANCELED) {
@@ -224,13 +229,13 @@ static void llam_channel_select_release_nodes(llam_shard_t *shard,
             continue;
         }
         if (task != NULL && nodes[i] == &task->embedded_wait_node) {
-            memset(nodes[i], 0, sizeof(*nodes[i]));
+            llam_wait_node_reset(nodes[i], UINT_MAX);
             continue;
         }
         if (task != NULL) {
             for (embedded_index = 0U; embedded_index < LLAM_TASK_EMBEDDED_SELECT_NODES; ++embedded_index) {
                 if (nodes[i] == &task->embedded_select_nodes[embedded_index]) {
-                    memset(nodes[i], 0, sizeof(*nodes[i]));
+                    llam_wait_node_reset(nodes[i], UINT_MAX);
                     break;
                 }
             }
@@ -257,7 +262,7 @@ static int llam_channel_select_alloc_nodes(llam_shard_t *shard,
             task->active_select_state == NULL &&
             i < LLAM_TASK_EMBEDDED_SELECT_NODES) {
             node = &task->embedded_select_nodes[i];
-            memset(node, 0, sizeof(*node));
+            llam_wait_node_reset(node, UINT_MAX);
         } else {
             node = llam_wait_node_alloc(shard);
         }
@@ -297,12 +302,17 @@ static void llam_channel_select_set_task_tracking(llam_task_t *task,
                                                   llam_channel_select_state_t *state,
                                                   unsigned parked_shard,
                                                   llam_wait_reason_t reason) {
+    /*
+     * Select waits are not I/O waits.  Clear any stale active I/O owner through
+     * the centralized exchange helper so dynamic rehome and completion threads
+     * cannot race on task->active_io_req.
+     */
+    llam_task_clear_wait_tracking(task);
     task->active_wait_node = NULL;
     task->active_wait_queue = NULL;
     task->active_wait_queue_lock = NULL;
     task->active_select_state = state;
-    task->active_io_req = NULL;
-    task->active_block_job = NULL;
+    atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
     task->wake_error_code = 0;
@@ -579,7 +589,19 @@ int llam_channel_select(llam_select_op_t *ops,
                                              shard->id,
                                              ops[0].kind == LLAM_SELECT_OP_SEND ? LLAM_WAIT_CHANNEL_SEND : LLAM_WAIT_CHANNEL_RECV);
         if (deadline_ns != UINT64_MAX && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
+            if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
+                goto select_ready;
+            }
             llam_channel_select_cleanup_nodes(&state);
+            if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
+                /*
+                 * A peer can pop and complete a select node after the first
+                 * pending check but before cleanup holds every channel lock.
+                 * Completion has already transferred value/error ownership, so
+                 * consume it instead of reporting the setup failure.
+                 */
+                goto select_ready;
+            }
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
             llam_task_clear_wait_tracking(task);
@@ -591,8 +613,19 @@ int llam_channel_select(llam_select_op_t *ops,
             return -1;
         }
         if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+            if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
+                goto select_ready;
+            }
             llam_disarm_task_wait_deadline(task);
             llam_channel_select_cleanup_nodes(&state);
+            if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
+                /*
+                 * Cancellation setup lost a race with a peer operation that had
+                 * already popped one of our nodes.  The selected operation wins
+                 * over the cancellation setup error.
+                 */
+                goto select_ready;
+            }
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
             llam_task_clear_wait_tracking(task);
@@ -605,6 +638,7 @@ int llam_channel_select(llam_select_op_t *ops,
             return -1;
         }
 
+select_ready:
         {
             unsigned completed = llam_channel_select_completed_state(&state);
 
@@ -624,12 +658,13 @@ int llam_channel_select(llam_select_op_t *ops,
             // parking; remove any deadline not observed by the wake path.
             llam_disarm_task_wait_deadline(task);
         }
-        if (task->cancel_registered) {
-            llam_cancel_token_unregister_task(task);
-        }
+        llam_cancel_token_unregister_task(task);
         llam_task_clear_wait_tracking(task);
         llam_channel_select_cleanup_nodes(&state);
         rc = llam_channel_select_finish(&state, selected_index);
+        if (state.selected_index != SIZE_MAX && state.selected_index < op_count) {
+            llam_channel_waiter_consumed(ops[state.selected_index].channel);
+        }
         llam_channel_select_release_nodes(shard, task, nodes, op_count);
         if (heap_arrays) {
             free(nodes);

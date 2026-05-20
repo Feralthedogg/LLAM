@@ -25,6 +25,84 @@
 
 #include "runtime_internal.h"
 
+/**
+ * @brief Return true when an ABI prefix contains a complete spawn option field.
+ *
+ * Task groups normalize spawn options before adding their shared cancellation
+ * token.  Match ::llam_spawn_ex by ignoring partially present fixed-width
+ * fields instead of letting byte prefixes overwrite documented defaults.
+ */
+#define LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(prefix_size, field) \
+    ((prefix_size) >= offsetof(llam_spawn_opts_t, field) + sizeof(((llam_spawn_opts_t *)0)->field))
+
+static pthread_mutex_t g_llam_task_group_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+static llam_task_group_t *g_llam_task_group_registry;
+
+/**
+ * @brief Register a newly-created task group in the live-handle set.
+ */
+static void llam_task_group_register_live(llam_task_group_t *group) {
+    pthread_mutex_lock(&g_llam_task_group_registry_lock);
+    group->registry_next = g_llam_task_group_registry;
+    g_llam_task_group_registry = group;
+    pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+}
+
+/**
+ * @brief Return true when @p group is still a live task-group handle.
+ */
+static bool llam_task_group_is_live_locked(const llam_task_group_t *group) {
+    const llam_task_group_t *iter;
+
+    for (iter = g_llam_task_group_registry; iter != NULL; iter = iter->registry_next) {
+        if (iter == group) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief Lock a group only after validating it against the live registry.
+ *
+ * The registry prevents a destroy/spawn race from turning a stale task-group
+ * pointer into a mutex lock on freed memory. Once the per-group lock is held,
+ * destroy cannot remove the handle until the caller drops that lock or records
+ * an active operation.
+ */
+static int llam_task_group_lock_live(llam_task_group_t *group) {
+    if (group == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_llam_task_group_registry_lock);
+    if (!llam_task_group_is_live_locked(group)) {
+        pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&group->lock);
+    pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+    return 0;
+}
+
+/**
+ * @brief Remove a live group from the registry while both locks are held.
+ */
+static void llam_task_group_unregister_live_locked(llam_task_group_t *group) {
+    llam_task_group_t **link = &g_llam_task_group_registry;
+
+    while (*link != NULL) {
+        if (*link == group) {
+            *link = group->registry_next;
+            group->registry_next = NULL;
+            return;
+        }
+        link = &(*link)->registry_next;
+    }
+}
+
 static int llam_task_group_reserve_locked(llam_task_group_t *group, size_t needed) {
     llam_task_t **items;
     size_t new_capacity;
@@ -52,13 +130,16 @@ static int llam_task_group_reserve_locked(llam_task_group_t *group, size_t neede
 
 llam_task_group_t *llam_task_group_create(void) {
     llam_task_group_t *group = calloc(1, sizeof(*group));
+    int rc;
 
     if (group == NULL) {
         return NULL;
     }
-    if (pthread_mutex_init(&group->lock, NULL) != 0) {
+    rc = pthread_mutex_init(&group->lock, NULL);
+    if (rc != 0) {
         free(group);
-        errno = ENOMEM;
+        // Preserve pthread's direct error code for FFI callers.
+        errno = rc;
         return NULL;
     }
     group->lock_initialized = true;
@@ -68,26 +149,34 @@ llam_task_group_t *llam_task_group_create(void) {
         free(group);
         return NULL;
     }
+    llam_task_group_register_live(group);
     return group;
 }
 
 int llam_task_group_destroy(llam_task_group_t *group) {
-    if (group == NULL) {
+    pthread_mutex_lock(&g_llam_task_group_registry_lock);
+    if (group == NULL || !llam_task_group_is_live_locked(group)) {
+        pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         errno = EINVAL;
         return -1;
     }
-
     pthread_mutex_lock(&group->lock);
-    if (group->count != 0U || group->active_spawns != 0U || group->joining) {
+    if (group->count != 0U || group->active_spawns != 0U || group->active_ops != 0U || group->joining) {
         pthread_mutex_unlock(&group->lock);
+        pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         errno = EBUSY;
         return -1;
     }
-    pthread_mutex_unlock(&group->lock);
-
     if (group->cancel_token != NULL && llam_cancel_token_destroy(group->cancel_token) != 0) {
+        pthread_mutex_unlock(&group->lock);
+        pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         return -1;
     }
+    group->cancel_token = NULL;
+    llam_task_group_unregister_live_locked(group);
+    pthread_mutex_unlock(&group->lock);
+    pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+
     if (group->lock_initialized) {
         pthread_mutex_destroy(&group->lock);
     }
@@ -101,6 +190,7 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       void *arg,
                                       const llam_spawn_opts_t *opts,
                                       size_t opts_size) {
+    llam_spawn_opts_t raw_opts;
     llam_spawn_opts_t effective_opts;
     size_t copy_size;
     llam_task_t *task;
@@ -117,14 +207,28 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
             errno = EINVAL;
             return NULL;
         }
-        copy_size = opts_size < sizeof(effective_opts) ? opts_size : sizeof(effective_opts);
-        memcpy(&effective_opts, opts, copy_size);
+        memset(&raw_opts, 0, sizeof(raw_opts));
+        copy_size = opts_size < sizeof(raw_opts) ? opts_size : sizeof(raw_opts);
+        memcpy(&raw_opts, opts, copy_size);
+        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, task_class)) {
+            effective_opts.task_class = raw_opts.task_class;
+        }
+        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, stack_class)) {
+            effective_opts.stack_class = raw_opts.stack_class;
+        }
+        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, flags)) {
+            effective_opts.flags = raw_opts.flags;
+        }
+        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, deadline_ns)) {
+            effective_opts.deadline_ns = raw_opts.deadline_ns;
+        }
+        if (LLAM_TASK_GROUP_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, cancel_token)) {
+            effective_opts.cancel_token = raw_opts.cancel_token;
+        }
     }
-    if (effective_opts.cancel_token == NULL) {
-        effective_opts.cancel_token = group->cancel_token;
+    if (llam_task_group_lock_live(group) != 0) {
+        return NULL;
     }
-
-    pthread_mutex_lock(&group->lock);
     if (group->joining) {
         pthread_mutex_unlock(&group->lock);
         errno = EBUSY;
@@ -135,6 +239,9 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
         return NULL;
     }
     group->active_spawns += 1U;
+    if (effective_opts.cancel_token == NULL) {
+        effective_opts.cancel_token = group->cancel_token;
+    }
     pthread_mutex_unlock(&group->lock);
 
     task = llam_spawn_ex(fn, arg, &effective_opts, sizeof(effective_opts));
@@ -156,11 +263,34 @@ llam_task_t *llam_task_group_spawn(llam_task_group_t *group,
 }
 
 int llam_task_group_cancel(llam_task_group_t *group) {
-    if (group == NULL || group->cancel_token == NULL) {
+    llam_cancel_token_t *token;
+
+    if (llam_task_group_lock_live(group) != 0) {
+        return -1;
+    }
+    if (group->cancel_token == NULL) {
+        pthread_mutex_unlock(&group->lock);
         errno = EINVAL;
         return -1;
     }
-    return llam_cancel_token_cancel(group->cancel_token);
+    token = group->cancel_token;
+    group->active_ops += 1U;
+    pthread_mutex_unlock(&group->lock);
+
+    if (llam_cancel_token_cancel(token) != 0) {
+        int saved_errno = errno;
+
+        pthread_mutex_lock(&group->lock);
+        group->active_ops -= 1U;
+        pthread_mutex_unlock(&group->lock);
+        errno = saved_errno;
+        return -1;
+    }
+
+    pthread_mutex_lock(&group->lock);
+    group->active_ops -= 1U;
+    pthread_mutex_unlock(&group->lock);
+    return 0;
 }
 
 static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline, uint64_t deadline_ns) {
@@ -168,13 +298,11 @@ static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline
     size_t count;
     size_t i;
 
-    if (group == NULL) {
-        errno = EINVAL;
+    if (llam_task_group_lock_live(group) != 0) {
         return -1;
     }
 
-    pthread_mutex_lock(&group->lock);
-    if (group->active_spawns != 0U || group->joining) {
+    if (group->active_spawns != 0U || group->active_ops != 0U || group->joining) {
         pthread_mutex_unlock(&group->lock);
         errno = EBUSY;
         return -1;

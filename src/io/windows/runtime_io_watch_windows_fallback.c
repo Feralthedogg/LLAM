@@ -38,6 +38,11 @@ int llam_accept_watch_pop_ready(llam_accept_watch_t *watch) {
 }
 
 bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
+    /*
+     * The generic setup-abort path may call remove after a racing completion has
+     * already cleared the request's watch pointer. Unsupported Windows watch
+     * stubs therefore keep the same no-op NULL contract as POSIX backends.
+     */
     (void)watch;
     (void)req;
     return false;

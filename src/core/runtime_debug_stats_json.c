@@ -86,6 +86,26 @@ int llam_runtime_write_stats_json(int fd) {
         llam_stats_json_u64(fd, "opaque_leave_wait_ns", stats.opaque_leave_wait_ns, &fields) != 0 ||
         llam_stats_json_u64(fd, "opaque_leave_wait_samples", stats.opaque_leave_wait_samples, &fields) != 0 ||
         llam_stats_json_u64(fd, "opaque_leave_wait_max_ns", stats.opaque_leave_wait_max_ns, &fields) != 0 ||
+        /*
+         * Keep JSON in lockstep with llam_runtime_stats_t.  These handoff
+         * counters are used by CI and benchmark logs to explain yield/direct
+         * regressions without parsing the human-readable dump.
+         */
+        llam_stats_json_u64(fd, "yield_direct_attempts", stats.yield_direct_attempts, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yield_direct_fast_hits", stats.yield_direct_fast_hits, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yield_direct_locked_hits", stats.yield_direct_locked_hits, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yield_direct_fail_context", stats.yield_direct_fail_context, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yield_direct_fail_policy", stats.yield_direct_fail_policy, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yield_direct_fail_no_work", stats.yield_direct_fail_no_work, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yield_direct_fail_self", stats.yield_direct_fail_self, &fields) != 0 ||
+        llam_stats_json_u64(fd, "yield_direct_fail_push", stats.yield_direct_fail_push, &fields) != 0 ||
+        llam_stats_json_u64(fd, "preempt_requests", stats.preempt_requests, &fields) != 0 ||
+        llam_stats_json_u64(fd, "preempt_yields", stats.preempt_yields, &fields) != 0 ||
+        llam_stats_json_u64(fd, "preempt_suppressed", stats.preempt_suppressed, &fields) != 0 ||
+        llam_stats_json_u64(fd, "preempt_signals", stats.preempt_signals, &fields) != 0 ||
+        llam_stats_json_u64(fd, "preempt_mode", stats.preempt_mode, &fields) != 0 ||
+        llam_stats_json_u64(fd, "preempt_poll_period", stats.preempt_poll_period, &fields) != 0 ||
+        llam_stats_json_u64(fd, "preempt_quantum_ns", stats.preempt_quantum_ns, &fields) != 0 ||
         dprintf(fd, "}\n") < 0) {
         return -1;
     }

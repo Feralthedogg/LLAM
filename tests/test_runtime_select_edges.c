@@ -24,9 +24,11 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-#define SELECT_RACE_ROUNDS 16U
+#define SELECT_RACE_DEFAULT_ROUNDS 16U
+#define SELECT_RACE_MAX_ROUNDS 65536U
 
 enum {
     SELECT_RACE_SEND = 1U,
@@ -79,6 +81,32 @@ static int init_runtime(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     return llam_runtime_init(&opts);
+}
+
+/**
+ * @brief Read the select-race intensity knob used by CI and local repro runs.
+ *
+ * Invalid values fall back to the fast default so a malformed environment does
+ * not accidentally disable the edge test.
+ */
+static unsigned select_race_rounds_from_env(void) {
+    const char *value = getenv("LLAM_SELECT_RACE_ROUNDS");
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (value == NULL || value[0] == '\0') {
+        return SELECT_RACE_DEFAULT_ROUNDS;
+    }
+
+    errno = 0;
+    parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0UL) {
+        return SELECT_RACE_DEFAULT_ROUNDS;
+    }
+    if (parsed > SELECT_RACE_MAX_ROUNDS) {
+        return SELECT_RACE_MAX_ROUNDS;
+    }
+    return (unsigned)parsed;
 }
 
 static void select_race_waiter_task(void *arg) {
@@ -235,12 +263,13 @@ cleanup:
 }
 
 int main(void) {
+    unsigned rounds = select_race_rounds_from_env();
     unsigned i;
 
     if (init_runtime() != 0) {
         return fail_errno("runtime init for select races failed");
     }
-    for (i = 0U; i < SELECT_RACE_ROUNDS; ++i) {
+    for (i = 0U; i < rounds; ++i) {
         if (run_select_race_once(SELECT_RACE_SEND) != 0 ||
             run_select_race_once(SELECT_RACE_CLOSE) != 0 ||
             run_select_race_once(SELECT_RACE_CANCEL) != 0) {
@@ -249,6 +278,6 @@ int main(void) {
         }
     }
     llam_runtime_shutdown();
-    puts("test_runtime_select_edges ok");
+    printf("test_runtime_select_edges ok: rounds=%u\n", rounds);
     return 0;
 }

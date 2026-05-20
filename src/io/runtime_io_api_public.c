@@ -32,9 +32,84 @@
 
 #include "runtime_io_api_internal.h"
 
+#include <limits.h>
+
 #if LLAM_PLATFORM_POSIX
 #include <sys/uio.h>
 #endif
+
+#ifndef IOV_MAX
+#define LLAM_WRITEV_IOV_MAX_FALLBACK 1024
+#endif
+
+/**
+ * @brief Return the maximum public iovec count accepted by ::llam_writev.
+ *
+ * POSIX writev rejects counts above IOV_MAX with EINVAL. LLAM validates that
+ * limit before touching user iovec memory so an invalid count cannot make the
+ * wrapper scan beyond the caller-provided array.
+ */
+static int llam_writev_iovcnt_max(void) {
+#ifdef IOV_MAX
+    return IOV_MAX;
+#else
+    return LLAM_WRITEV_IOV_MAX_FALLBACK;
+#endif
+}
+
+/**
+ * @brief Return the largest aggregate byte count accepted before writev fallback.
+ */
+static size_t llam_writev_byte_count_max(void) {
+#if LLAM_PLATFORM_DARWIN
+    /*
+     * Darwin rejects write/writev counts above INT_MAX with EINVAL. Mirror that
+     * limit before the cooperative fallback writes any earlier slice.
+     */
+    return (size_t)INT_MAX;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
+    return (size_t)ULONG_MAX;
+#else
+#ifdef SSIZE_MAX
+    return (size_t)SSIZE_MAX;
+#else
+    return SIZE_MAX >> 1U;
+#endif
+#endif
+}
+
+/**
+ * @brief Validate scatter/gather slices before per-slice fallback writes.
+ *
+ * Native writev rejects an iovec whose total byte length cannot be represented
+ * by ssize_t. The managed fallback writes each slice separately, so it must
+ * perform aggregate validation before that fallback or an invalid tail slice
+ * could be reported as a partial successful write after earlier slices were
+ * already submitted.
+ *
+ * Native descriptors such as /dev/null may legally accept non-NULL byte counts
+ * from a NULL base because the kernel never consumes user bytes. Keep that
+ * platform-specific behavior on native writev paths; only the fallback rejects
+ * NULL non-empty slices because it cannot preserve native all-or-nothing
+ * validation while writing one slice at a time.
+ */
+static int llam_writev_validate_fallback_iov(const llam_iovec_t *iov, int iovcnt) {
+    size_t total = 0U;
+    size_t max_total = llam_writev_byte_count_max();
+
+    for (int i = 0; i < iovcnt; ++i) {
+        if (iov[i].iov_base == NULL && iov[i].iov_len != 0U) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (iov[i].iov_len > max_total - total) {
+            errno = EINVAL;
+            return -1;
+        }
+        total += iov[i].iov_len;
+    }
+    return 0;
+}
 
 /**
  * @brief Run an I/O blocking fallback and ignore the callback payload.
@@ -261,6 +336,14 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
  * @brief Read bytes from a generic platform handle.
  */
 ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count) {
+#if LLAM_PLATFORM_POSIX
+    /*
+     * Public POSIX handles are file descriptors. Route through llam_read so
+     * managed and unmanaged callers get the same syscall-level edge semantics
+     * and scheduler behavior as the fd API promised by the public header.
+     */
+    return llam_read((llam_fd_t)handle, buf, count);
+#else
     llam_io_req_t *req;
     ssize_t result;
 
@@ -307,6 +390,7 @@ ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count) {
     result = req->result;
     llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
+#endif
 }
 
 /**
@@ -537,7 +621,7 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
         int direct_rc = llam_try_direct_rw(fd, (void *)buf, count, true, false, 0, &direct_result, &direct_socket);
 
         if (direct_rc > 0) {
-            llam_maybe_handoff_after_socket_write(fd, count, direct_socket);
+            llam_maybe_handoff_after_socket_write(fd, (size_t)direct_result, direct_socket);
             return direct_result;
         }
         if (direct_rc < 0) {
@@ -546,7 +630,7 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
         llam_task_safepoint();
         direct_rc = llam_try_direct_blocking_rw(fd, (void *)buf, count, true, false, 0, &direct_result);
         if (direct_rc > 0) {
-            llam_maybe_handoff_after_socket_write(fd, count, false);
+            llam_maybe_handoff_after_socket_write(fd, (size_t)direct_result, false);
             return direct_result;
         }
         if (direct_rc < 0) {
@@ -604,17 +688,14 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
     if (iovcnt == 0) {
         return 0;
     }
+    if (iovcnt > llam_writev_iovcnt_max()) {
+        errno = EINVAL;
+        return -1;
+    }
     if (iov == NULL) {
         errno = EINVAL;
         return -1;
     }
-    for (int i = 0; i < iovcnt; ++i) {
-        if (iov[i].iov_base == NULL && iov[i].iov_len != 0U) {
-            errno = EINVAL;
-            return -1;
-        }
-    }
-
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
 #if LLAM_PLATFORM_POSIX
         struct iovec stack_iov[16];
@@ -672,6 +753,10 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
     }
 #endif
 
+    if (llam_writev_validate_fallback_iov(iov, iovcnt) != 0) {
+        return -1;
+    }
+
     for (int i = 0; i < iovcnt; ++i) {
         const char *bytes = (const char *)iov[i].iov_base;
         size_t remaining = iov[i].iov_len;
@@ -701,6 +786,14 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
  * @brief Write bytes to a generic platform handle.
  */
 ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count) {
+#if LLAM_PLATFORM_POSIX
+    /*
+     * Public POSIX handles alias file descriptors. Keep the handle wrapper a
+     * thin fd-API delegate so device-specific native behavior is not filtered
+     * by the generic Windows HANDLE validation rules.
+     */
+    return llam_write((llam_fd_t)handle, buf, count);
+#else
     llam_io_req_t *req;
     ssize_t result;
 
@@ -747,6 +840,7 @@ ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count) {
     result = req->result;
     llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
+#endif
 }
 
 /**
@@ -1047,6 +1141,14 @@ int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
  * @brief Poll a generic platform handle without pinning a scheduler worker.
  */
 int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents) {
+#if LLAM_PLATFORM_POSIX
+    /*
+     * POSIX handles are file descriptors in the public ABI.  Delegate to the
+     * fd poll path so infinite waits, runtime-stop cancellation, backend aborts,
+     * and direct readiness probes keep the same semantics as llam_poll_fd.
+     */
+    return llam_poll_fd((llam_fd_t)handle, events, timeout_ms, revents);
+#else
     llam_io_req_t *req;
     int result;
 
@@ -1078,4 +1180,5 @@ int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *
     }
     llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
+#endif
 }

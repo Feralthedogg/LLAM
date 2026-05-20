@@ -36,8 +36,12 @@
 #define NESTED_PARENT_COUNT 96U
 #define NESTED_CHILDREN_PER_PARENT 32U
 #define CANCEL_WAITER_COUNT 768U
+#define CANCEL_RECLAIM_RACE_COUNT 4096U
+#define BLOCKING_JOB_STORM_COUNT 4096U
 #define CHANNEL_ROUNDS 50000U
 #define COND_ROUNDS 12000U
+#define PREEMPT_HOG_TASKS 32U
+#define PREEMPT_POLL_INTERVAL 128U
 
 typedef struct stress_state {
     atomic_uint failures;
@@ -53,11 +57,18 @@ typedef struct stress_state {
     atomic_uint cond_completed;
     atomic_uint io_waiting;
     atomic_uint io_canceled;
+    atomic_uint blocking_count;
+    atomic_uint preempt_stop;
+    atomic_uint preempt_timer_done;
+    atomic_uint preempt_io_done;
+    atomic_uint preempt_io_waiting;
+    atomic_uint_fast64_t preempt_hog_iters;
     llam_channel_t *channel;
     llam_mutex_t *mutex;
     llam_cond_t *cond;
     llam_cancel_token_t *cancel_token;
     int io_fd;
+    int write_fd;
     int first_errno;
     char first_case[128];
 } stress_state_t;
@@ -282,6 +293,143 @@ static int test_cancel_storm(void) {
     return 0;
 }
 
+static void cancel_reclaim_sleep_task(void *arg) {
+    stress_state_t *state = arg;
+
+    atomic_fetch_add_explicit(&state->waiting_count, 1U, memory_order_release);
+    if (llam_sleep_ns(1000000ULL) != 0 && errno != ECANCELED) {
+        task_fail(state, "cancel reclaim sleep", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_count, 1U, memory_order_relaxed);
+}
+
+static void cancel_reclaim_canceller_task(void *arg) {
+    stress_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->waiting_count, memory_order_acquire) < CANCEL_RECLAIM_RACE_COUNT) {
+        llam_yield();
+    }
+    /*
+     * These waiters are detached tasks with short deadlines.  Cancelling while
+     * timers can also expire forces token cancellation to hold a reclaim guard
+     * for the detached token waiter chain.
+     */
+    if (llam_cancel_token_cancel(state->cancel_token) != 0) {
+        task_fail(state, "cancel reclaim token cancel", errno);
+    }
+}
+
+static int test_cancel_reclaim_race(void) {
+    stress_state_t state;
+    llam_spawn_opts_t opts;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.waiting_count, 0U);
+    atomic_init(&state.canceled_count, 0U);
+    state.cancel_token = llam_cancel_token_create();
+    if (state.cancel_token == NULL) {
+        return fail_errno("cancel reclaim token create failed");
+    }
+    opts.cancel_token = state.cancel_token;
+    if (init_runtime() != 0) {
+        (void)llam_cancel_token_destroy(state.cancel_token);
+        return fail_errno("runtime init for cancel reclaim race failed");
+    }
+    for (unsigned i = 0U; i < CANCEL_RECLAIM_RACE_COUNT; ++i) {
+        if (spawn_detached(cancel_reclaim_sleep_task, &state, &opts) != 0) {
+            int saved_errno = errno;
+
+            llam_runtime_shutdown();
+            (void)llam_cancel_token_destroy(state.cancel_token);
+            errno = saved_errno;
+            return fail_errno("spawn cancel reclaim sleep task failed");
+        }
+    }
+    if (spawn_detached(cancel_reclaim_canceller_task, &state, NULL) != 0) {
+        int saved_errno = errno;
+
+        llam_runtime_shutdown();
+        (void)llam_cancel_token_destroy(state.cancel_token);
+        errno = saved_errno;
+        return fail_errno("spawn cancel reclaim canceller failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        (void)llam_cancel_token_destroy(state.cancel_token);
+        return fail_errno("llam_run cancel reclaim race failed");
+    }
+    if (check_task_failures(&state) != 0) {
+        llam_runtime_shutdown();
+        (void)llam_cancel_token_destroy(state.cancel_token);
+        return 1;
+    }
+    if (atomic_load_explicit(&state.canceled_count, memory_order_relaxed) != CANCEL_RECLAIM_RACE_COUNT) {
+        llam_runtime_shutdown();
+        (void)llam_cancel_token_destroy(state.cancel_token);
+        return fail_msg("cancel reclaim race count mismatch");
+    }
+    if (llam_cancel_token_destroy(state.cancel_token) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("cancel token destroy after reclaim race failed");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static void *blocking_storm_callback(void *arg) {
+    stress_state_t *state = arg;
+
+    atomic_fetch_add_explicit(&state->blocking_count, 1U, memory_order_relaxed);
+    return state;
+}
+
+static void blocking_storm_task(void *arg) {
+    stress_state_t *state = arg;
+    void *result = NULL;
+
+    if (llam_call_blocking_result(blocking_storm_callback, state, &result) != 0 || result != state) {
+        task_fail(state, "blocking job storm callback", errno);
+        return;
+    }
+}
+
+static int test_blocking_job_storm(void) {
+    stress_state_t state;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.blocking_count, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for blocking job storm failed");
+    }
+    for (unsigned i = 0U; i < BLOCKING_JOB_STORM_COUNT; ++i) {
+        if (spawn_detached(blocking_storm_task, &state, NULL) != 0) {
+            int saved_errno = errno;
+
+            llam_runtime_shutdown();
+            errno = saved_errno;
+            return fail_errno("spawn blocking job storm task failed");
+        }
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("llam_run blocking job storm failed");
+    }
+    if (check_task_failures(&state) != 0) {
+        llam_runtime_shutdown();
+        return 1;
+    }
+    if (atomic_load_explicit(&state.blocking_count, memory_order_relaxed) != BLOCKING_JOB_STORM_COUNT) {
+        llam_runtime_shutdown();
+        return fail_msg("blocking job storm count mismatch");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
 static void channel_receiver_task(void *arg) {
     stress_state_t *state = arg;
 
@@ -480,6 +628,180 @@ static int set_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+static int init_preempt_runtime(void) {
+    llam_runtime_opts_t opts;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_IO_LATENCY;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    opts.preempt_mode = LLAM_PREEMPT_STRICT;
+    opts.preempt_poll_period = 1U;
+    opts.preempt_quantum_ns = 1000U;
+    return llam_runtime_init(&opts);
+}
+
+static void preempt_hog_task(void *arg) {
+    stress_state_t *state = arg;
+    uint64_t counter = 0U;
+
+    while (atomic_load_explicit(&state->preempt_stop, memory_order_acquire) == 0U) {
+        atomic_fetch_add_explicit(&state->preempt_hog_iters, 1U, memory_order_relaxed);
+        LLAM_PREEMPT_POLL_EVERY(counter, PREEMPT_POLL_INTERVAL);
+        counter += 1U;
+    }
+}
+
+static void preempt_timer_task(void *arg) {
+    stress_state_t *state = arg;
+    uint64_t started_ns = llam_now_ns();
+
+    if (llam_sleep_ns(5000000ULL) != 0) {
+        task_fail(state, "preempt timer sleep", errno);
+        return;
+    }
+    if (llam_now_ns() - started_ns > 500000000ULL) {
+        task_fail(state, "preempt timer starved", ETIMEDOUT);
+        return;
+    }
+    atomic_store_explicit(&state->preempt_timer_done, 1U, memory_order_release);
+}
+
+static void preempt_io_reader_task(void *arg) {
+    stress_state_t *state = arg;
+    char byte = 0;
+    ssize_t nread;
+
+    atomic_store_explicit(&state->preempt_io_waiting, 1U, memory_order_release);
+    nread = llam_read((llam_fd_t)state->io_fd, &byte, 1U);
+    if (nread != 1 || byte != 'p') {
+        task_fail(state, "preempt io read", nread < 0 ? errno : EIO);
+        return;
+    }
+    atomic_store_explicit(&state->preempt_io_done, 1U, memory_order_release);
+}
+
+static void preempt_io_writer_task(void *arg) {
+    stress_state_t *state = arg;
+    const char byte = 'p';
+
+    while (atomic_load_explicit(&state->preempt_io_waiting, memory_order_acquire) == 0U) {
+        LLAM_PREEMPT_POLL();
+        llam_yield();
+    }
+    if (llam_sleep_ns(5000000ULL) != 0) {
+        task_fail(state, "preempt io writer sleep", errno);
+        return;
+    }
+    if (llam_write((llam_fd_t)state->write_fd, &byte, 1U) != 1) {
+        task_fail(state, "preempt io write", errno);
+    }
+}
+
+static void preempt_monitor_task(void *arg) {
+    stress_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->preempt_timer_done, memory_order_acquire) == 0U ||
+           atomic_load_explicit(&state->preempt_io_done, memory_order_acquire) == 0U) {
+        LLAM_PREEMPT_POLL();
+        llam_yield();
+    }
+    atomic_store_explicit(&state->preempt_stop, 1U, memory_order_release);
+}
+
+static int test_automatic_preemption_fairness(void) {
+    stress_state_t state;
+    llam_runtime_stats_t stats;
+    int fds[2] = {-1, -1};
+
+    memset(&state, 0, sizeof(state));
+    memset(&stats, 0, sizeof(stats));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.preempt_stop, 0U);
+    atomic_init(&state.preempt_timer_done, 0U);
+    atomic_init(&state.preempt_io_done, 0U);
+    atomic_init(&state.preempt_io_waiting, 0U);
+    atomic_init(&state.preempt_hog_iters, 0U);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        return fail_errno("socketpair for preempt fairness failed");
+    }
+    if (set_nonblocking(fds[0]) != 0 ||
+        set_nonblocking(fds[1]) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return fail_errno("set_nonblocking for preempt fairness failed");
+    }
+    state.io_fd = fds[0];
+    state.write_fd = fds[1];
+    if (init_preempt_runtime() != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return fail_errno("runtime init for preempt fairness failed");
+    }
+    for (unsigned i = 0U; i < PREEMPT_HOG_TASKS; ++i) {
+        if (spawn_detached(preempt_hog_task, &state, NULL) != 0) {
+            int saved_errno = errno;
+
+            llam_runtime_shutdown();
+            close(fds[0]);
+            close(fds[1]);
+            errno = saved_errno;
+            return fail_errno("spawn preempt hog failed");
+        }
+    }
+    if (spawn_detached(preempt_timer_task, &state, NULL) != 0 ||
+        spawn_detached(preempt_io_reader_task, &state, NULL) != 0 ||
+        spawn_detached(preempt_io_writer_task, &state, NULL) != 0 ||
+        spawn_detached(preempt_monitor_task, &state, NULL) != 0) {
+        int saved_errno = errno;
+
+        llam_runtime_shutdown();
+        close(fds[0]);
+        close(fds[1]);
+        errno = saved_errno;
+        return fail_errno("spawn preempt fairness tasks failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        close(fds[0]);
+        close(fds[1]);
+        return fail_errno("llam_run preempt fairness failed");
+    }
+    if (llam_runtime_collect_stats(&stats) != 0) {
+        llam_runtime_shutdown();
+        close(fds[0]);
+        close(fds[1]);
+        return fail_errno("collect preempt fairness stats failed");
+    }
+    if (check_task_failures(&state) != 0) {
+        llam_runtime_shutdown();
+        close(fds[0]);
+        close(fds[1]);
+        return 1;
+    }
+    if (atomic_load_explicit(&state.preempt_timer_done, memory_order_relaxed) == 0U ||
+        atomic_load_explicit(&state.preempt_io_done, memory_order_relaxed) == 0U ||
+        atomic_load_explicit(&state.preempt_hog_iters, memory_order_relaxed) == 0U) {
+        llam_runtime_shutdown();
+        close(fds[0]);
+        close(fds[1]);
+        return fail_msg("preempt fairness progress mismatch");
+    }
+    if (stats.preempt_mode != LLAM_PREEMPT_STRICT ||
+        stats.preempt_poll_period != 1U ||
+        stats.preempt_yields == 0U) {
+        llam_runtime_shutdown();
+        close(fds[0]);
+        close(fds[1]);
+        return fail_msg("preempt fairness metrics missing");
+    }
+    llam_runtime_shutdown();
+    close(fds[0]);
+    close(fds[1]);
+    return 0;
+}
+
 static void io_cancel_reader_task(void *arg) {
     stress_state_t *state = arg;
     char buf[16];
@@ -597,6 +919,12 @@ int main(void) {
     if (test_cancel_storm() != 0) {
         return 1;
     }
+    if (test_cancel_reclaim_race() != 0) {
+        return 1;
+    }
+    if (test_blocking_job_storm() != 0) {
+        return 1;
+    }
     if (test_channel_wakeup_storm() != 0) {
         return 1;
     }
@@ -604,6 +932,9 @@ int main(void) {
         return 1;
     }
 #if LLAM_PLATFORM_POSIX
+    if (test_automatic_preemption_fairness() != 0) {
+        return 1;
+    }
     if (test_posix_io_cancel_wait() != 0) {
         return 1;
     }

@@ -102,6 +102,7 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
     llam_io_abort_reason_t abort_reason;
     llam_wait_reason_t wake_reason = LLAM_WAIT_IO;
     unsigned inflight_owner = UINT_MAX;
+    unsigned completion_owner = UINT_MAX;
     unsigned wait_mode;
 
     if (decrement_pending) {
@@ -109,14 +110,21 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
     }
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
     if (wait_mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
-        // Clear in-flight ownership exactly once so shard pressure accounting is
-        // balanced with llam_take_node_submissions().
+        /*
+         * Clear in-flight ownership exactly once so shard pressure accounting
+         * is balanced with llam_take_node_submissions().  The exchanged owner
+         * is also the authoritative completion target because dynamic rehome
+         * can update req->owner_shard concurrently after transferring this
+         * atomic owner.
+         */
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
         if (inflight_owner < node->runtime->active_shards) {
             llam_shard_note_inflight_io_waiter(inflight_owner, -1);
+            completion_owner = inflight_owner;
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+        completion_owner = req->owner_shard;
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
@@ -141,7 +149,7 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
                     req->owned_buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
                     req->owned_buffer->size = (size_t)res;
                     req->provided_bid = bid;
-                    node->provided_buf_acquires += 1U;
+                    atomic_fetch_add_explicit(&node->provided_buf_acquires, 1U, memory_order_relaxed);
                     req->result = res;
                     req->error_code = 0;
                     req->poll_revents = 0;
@@ -173,8 +181,8 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
             req->poll_revents = 0;
         }
     }
-    if (req->owner_shard < node->runtime->active_shards) {
-        llam_shard_t *shard = &node->runtime->shards[req->owner_shard];
+    if (completion_owner < node->runtime->active_shards) {
+        llam_shard_t *shard = &node->runtime->shards[completion_owner];
         uint64_t now_ns = llam_now_ns();
 
         pthread_mutex_lock(&shard->lock);
@@ -191,10 +199,106 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
     }
     llam_reinject_task_on_shard(node->runtime,
                               req->task,
-                              req->owner_shard,
+                              completion_owner,
                               true,
                               LLAM_TRACE_IO_COMPLETE,
                               wake_reason);
+}
+
+/** @brief Drop an unsubmitted control op without leaving synthetic queue state behind. */
+static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op) {
+    llam_io_req_t *waiters = NULL;
+    int error = -EAGAIN;
+
+    if (op == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&node->watch_lock);
+    switch (op->kind) {
+    case LLAM_IO_CONTROL_POLL_ACTIVATE: {
+        llam_poll_watch_t *watch = op->target;
+
+        if (watch != NULL) {
+            watch->activating = false;
+            waiters = llam_poll_watch_take_waiters(watch);
+            watch->sticky_revents = 0;
+        }
+        break;
+    }
+    case LLAM_IO_CONTROL_ACCEPT_ACTIVATE: {
+        llam_accept_watch_t *watch = op->target;
+
+        if (watch != NULL) {
+            watch->activating = false;
+            waiters = watch->wait_head;
+            watch->wait_head = NULL;
+            watch->wait_tail = NULL;
+        }
+        break;
+    }
+    case LLAM_IO_CONTROL_RECV_ACTIVATE: {
+        llam_recv_watch_t *watch = op->target;
+
+        if (watch != NULL) {
+            watch->activating = false;
+            waiters = watch->wait_head;
+            watch->wait_head = NULL;
+            watch->wait_tail = NULL;
+            llam_maybe_destroy_recv_watch_locked(node, watch);
+        }
+        break;
+    }
+    case LLAM_IO_CONTROL_POLL_DEACTIVATE: {
+        llam_poll_watch_t *watch = op->target;
+
+        if (watch != NULL) {
+            watch->deactivate_queued = false;
+        }
+        break;
+    }
+    case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE: {
+        llam_accept_watch_t *watch = op->target;
+
+        if (watch != NULL) {
+            watch->deactivate_queued = false;
+        }
+        break;
+    }
+    case LLAM_IO_CONTROL_RECV_DEACTIVATE: {
+        llam_recv_watch_t *watch = op->target;
+
+        if (watch != NULL) {
+            watch->deactivate_queued = false;
+            llam_maybe_destroy_recv_watch_locked(node, watch);
+        }
+        break;
+    }
+    case LLAM_IO_CONTROL_REQ_CANCEL: {
+        llam_io_req_t *req = op->target;
+
+        if (req != NULL) {
+            /*
+             * The request remains backend-owned.  Roll back only the queued bit
+             * so a later timeout/cancel pass can retry backend cancellation.
+             */
+            atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+
+    while (waiters != NULL) {
+        llam_io_req_t *next = waiters->next;
+
+        waiters->next = NULL;
+        llam_io_complete_req(node, waiters, error, 0U, false);
+        waiters = next;
+    }
+    free(op);
 }
 
 /**
@@ -211,13 +315,13 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         int rc = llam_node_submit_ring(node);
         if (rc < 0) {
             llam_record_fatal(node->runtime, -rc);
-            free(op);
+            llam_io_fail_control_op(node, op);
             return;
         }
         sqe = io_uring_get_sqe(&node->ring);
     }
     if (sqe == NULL) {
-        free(op);
+        llam_io_fail_control_op(node, op);
         return;
     }
 

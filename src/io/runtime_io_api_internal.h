@@ -55,14 +55,14 @@ static inline ssize_t llam_platform_write_fd(llam_fd_t fd, const void *buf, size
 }
 
 static inline ssize_t llam_platform_read_handle(llam_handle_t handle, void *buf, size_t count) {
-    if (buf == NULL && count != 0U) {
-        errno = EINVAL;
-        return -1;
-    }
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     {
         DWORD transferred = 0;
 
+        if (buf == NULL && count != 0U) {
+            errno = EINVAL;
+            return -1;
+        }
         if (LLAM_HANDLE_IS_INVALID(handle) || count > (size_t)ULONG_MAX) {
             errno = EINVAL;
             return -1;
@@ -79,14 +79,14 @@ static inline ssize_t llam_platform_read_handle(llam_handle_t handle, void *buf,
 }
 
 static inline ssize_t llam_platform_write_handle(llam_handle_t handle, const void *buf, size_t count) {
-    if (buf == NULL && count != 0U) {
-        errno = EINVAL;
-        return -1;
-    }
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     {
         DWORD transferred = 0;
 
+        if (buf == NULL && count != 0U) {
+            errno = EINVAL;
+            return -1;
+        }
         if (LLAM_HANDLE_IS_INVALID(handle) || count > (size_t)ULONG_MAX) {
             errno = EINVAL;
             return -1;

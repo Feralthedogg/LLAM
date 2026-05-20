@@ -105,8 +105,13 @@ void *llam_block_worker_main(void *arg) {
             llam_atomic_update_peak(&rt->block_active_peak, active);
         }
         errno = 0;
-        job->result = job->fn(job->arg);
-        job->error_code = errno;
+        /*
+         * Runtime dumps can sample an active block job while the helper is
+         * finishing user code. Publish result/errno atomically so diagnostics
+         * never race with callback completion.
+         */
+        atomic_store_explicit(&job->result, job->fn(job->arg), memory_order_release);
+        atomic_store_explicit(&job->error_code, errno, memory_order_release);
         atomic_fetch_sub(&rt->block_active, 1U);
         atomic_fetch_sub(&rt->block_pending, 1U);
 
@@ -130,8 +135,8 @@ void *llam_block_worker_main(void *arg) {
             }
         }
 
-        job->task->blocking_result = job->result;
-        job->task->blocking_errno = job->error_code;
+        job->task->blocking_result = atomic_load_explicit(&job->result, memory_order_acquire);
+        job->task->blocking_errno = atomic_load_explicit(&job->error_code, memory_order_acquire);
         llam_reinject_task(rt, job->task, true, LLAM_TRACE_BLOCK_COMPLETE, LLAM_WAIT_BLOCKING);
         llam_block_job_release(rt, job);
     }

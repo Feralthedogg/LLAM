@@ -31,9 +31,11 @@ typedef struct sync_state {
     llam_mutex_t *cond_mutex;
     llam_mutex_t *destroy_mutex;
     llam_mutex_t *busy_cond_mutex;
+    llam_mutex_t *signaled_cond_mutex;
     llam_cond_t *cond;
     llam_cond_t *destroy_cond;
     llam_cond_t *busy_cond;
+    llam_cond_t *signaled_cond;
     llam_channel_t *channel;
     llam_channel_t *empty_channel;
     llam_channel_t *full_channel;
@@ -57,6 +59,9 @@ typedef struct sync_state {
     atomic_uint busy_cond_waiting;
     atomic_uint busy_cond_release;
     atomic_uint busy_cond_destroy_checked;
+    atomic_uint signaled_cond_waiting;
+    atomic_uint signaled_cond_returned;
+    atomic_uint signaled_cond_destroy_checked;
     atomic_uint errno_peer_waiting;
     atomic_uint channel_sum;
     atomic_uint timeout_checks;
@@ -190,7 +195,7 @@ static void timeout_and_close_task(void *arg) {
         return;
     }
     errno = 0;
-    if (llam_channel_try_recv_result(state->empty_channel, &value) != -1 || errno != ETIMEDOUT) {
+    if (llam_channel_try_recv_result(state->empty_channel, &value) != -1 || errno != EAGAIN) {
         task_fail(state, "empty channel try recv", errno);
         return;
     }
@@ -201,7 +206,7 @@ static void timeout_and_close_task(void *arg) {
         return;
     }
     errno = 0;
-    if (llam_channel_try_send(state->full_channel, (void *)(uintptr_t)2U) != -1 || errno != ETIMEDOUT) {
+    if (llam_channel_try_send(state->full_channel, (void *)(uintptr_t)2U) != -1 || errno != EAGAIN) {
         task_fail(state, "full channel try send", errno);
         return;
     }
@@ -421,6 +426,53 @@ static void busy_cond_destroyer_task(void *arg) {
     if (llam_mutex_unlock(state->busy_cond_mutex) != 0) {
         task_fail(state, "busy cond destroyer mutex unlock", errno);
     }
+}
+
+static void signaled_cond_waiter_task(void *arg) {
+    sync_state_t *state = arg;
+
+    if (llam_mutex_lock(state->signaled_cond_mutex) != 0) {
+        task_fail(state, "signaled cond waiter mutex lock", errno);
+        return;
+    }
+    atomic_store_explicit(&state->signaled_cond_waiting, 1U, memory_order_release);
+    if (llam_cond_wait(state->signaled_cond, state->signaled_cond_mutex) != 0) {
+        task_fail(state, "signaled cond wait", errno);
+        (void)llam_mutex_unlock(state->signaled_cond_mutex);
+        return;
+    }
+    atomic_store_explicit(&state->signaled_cond_returned, 1U, memory_order_release);
+    if (llam_mutex_unlock(state->signaled_cond_mutex) != 0) {
+        task_fail(state, "signaled cond waiter mutex unlock", errno);
+    }
+}
+
+static void signaled_cond_destroyer_task(void *arg) {
+    sync_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->signaled_cond_waiting, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    for (unsigned i = 0U; i < 64U; ++i) {
+        llam_yield();
+    }
+    if (llam_cond_signal(state->signaled_cond) != 0) {
+        task_fail(state, "signaled cond signal", errno);
+        return;
+    }
+    /*
+     * A signaled waiter has been removed from the cond queue but has not yet
+     * returned from llam_cond_wait().  Destroy must still reject the cond so a
+     * host cannot recycle/free it while the wait completion is being consumed.
+     */
+    if (atomic_load_explicit(&state->signaled_cond_returned, memory_order_acquire) == 0U) {
+        errno = 0;
+        if (llam_cond_destroy(state->signaled_cond) != -1 || errno != EBUSY) {
+            task_fail(state, "signaled cond destroy before waiter return", errno);
+            return;
+        }
+    }
+    atomic_store_explicit(&state->signaled_cond_destroy_checked, 1U, memory_order_release);
 }
 
 static void select_task(void *arg) {
@@ -653,6 +705,9 @@ static void destroy_sync_state(sync_state_t *state) {
     if (state->busy_cond != NULL) {
         (void)llam_cond_destroy(state->busy_cond);
     }
+    if (state->signaled_cond != NULL) {
+        (void)llam_cond_destroy(state->signaled_cond);
+    }
     if (state->cond != NULL) {
         (void)llam_cond_destroy(state->cond);
     }
@@ -661,6 +716,9 @@ static void destroy_sync_state(sync_state_t *state) {
     }
     if (state->busy_cond_mutex != NULL) {
         (void)llam_mutex_destroy(state->busy_cond_mutex);
+    }
+    if (state->signaled_cond_mutex != NULL) {
+        (void)llam_mutex_destroy(state->signaled_cond_mutex);
     }
     if (state->cond_mutex != NULL) {
         (void)llam_mutex_destroy(state->cond_mutex);
@@ -680,6 +738,9 @@ static int init_sync_state(sync_state_t *state) {
     atomic_init(&state->busy_cond_waiting, 0U);
     atomic_init(&state->busy_cond_release, 0U);
     atomic_init(&state->busy_cond_destroy_checked, 0U);
+    atomic_init(&state->signaled_cond_waiting, 0U);
+    atomic_init(&state->signaled_cond_returned, 0U);
+    atomic_init(&state->signaled_cond_destroy_checked, 0U);
     atomic_init(&state->errno_peer_waiting, 0U);
     atomic_init(&state->channel_sum, 0U);
     atomic_init(&state->timeout_checks, 0U);
@@ -698,9 +759,11 @@ static int init_sync_state(sync_state_t *state) {
     state->cond_mutex = llam_mutex_create();
     state->destroy_mutex = llam_mutex_create();
     state->busy_cond_mutex = llam_mutex_create();
+    state->signaled_cond_mutex = llam_mutex_create();
     state->cond = llam_cond_create();
     state->destroy_cond = llam_cond_create();
     state->busy_cond = llam_cond_create();
+    state->signaled_cond = llam_cond_create();
     state->channel = llam_channel_create(2U);
     state->empty_channel = llam_channel_create(1U);
     state->full_channel = llam_channel_create(1U);
@@ -723,9 +786,11 @@ static int init_sync_state(sync_state_t *state) {
         state->cond_mutex == NULL ||
         state->destroy_mutex == NULL ||
         state->busy_cond_mutex == NULL ||
+        state->signaled_cond_mutex == NULL ||
         state->cond == NULL ||
         state->destroy_cond == NULL ||
         state->busy_cond == NULL ||
+        state->signaled_cond == NULL ||
         state->channel == NULL ||
         state->empty_channel == NULL ||
         state->full_channel == NULL ||
@@ -836,6 +901,8 @@ int main(void) {
         llam_spawn(destroy_contract_task, &state, NULL) == NULL ||
         llam_spawn(busy_cond_waiter_task, &state, NULL) == NULL ||
         llam_spawn(busy_cond_destroyer_task, &state, NULL) == NULL ||
+        llam_spawn(signaled_cond_waiter_task, &state, NULL) == NULL ||
+        llam_spawn(signaled_cond_destroyer_task, &state, NULL) == NULL ||
         llam_spawn(select_task, &state, NULL) == NULL ||
         llam_spawn(select_park_waiter_task, &state, NULL) == NULL ||
         llam_spawn(select_park_sender_task, &state, NULL) == NULL ||
@@ -877,6 +944,7 @@ int main(void) {
     if (atomic_load_explicit(&state.counter, memory_order_relaxed) != 200U ||
         atomic_load_explicit(&state.cond_signaled, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.busy_cond_destroy_checked, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.signaled_cond_destroy_checked, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.channel_sum, memory_order_relaxed) != 15U ||
         atomic_load_explicit(&state.timeout_checks, memory_order_relaxed) != 3U ||
         atomic_load_explicit(&state.null_checks, memory_order_relaxed) != 1U ||

@@ -73,75 +73,96 @@ llam_task_t *llam_current_task(void) {
  */
 static void llam_runtime_collect_stats_full(llam_runtime_stats_t *stats) {
     llam_runtime_t *rt = &g_llam_runtime;
+    llam_shard_t *shards = rt->shards;
+    llam_node_t *nodes = rt->nodes;
+    unsigned active_shards = rt->active_shards;
+    unsigned active_nodes = rt->active_nodes;
     unsigned i;
 
     memset(stats, 0, sizeof(*stats));
-    stats->active_workers = rt->active_shards;
+    stats->active_workers = active_shards;
     stats->online_workers = llam_runtime_online_shards(rt);
     stats->online_workers_floor = llam_runtime_online_shards_floor(rt);
     stats->online_workers_min = llam_runtime_online_shards_min(rt);
     stats->online_workers_max = llam_runtime_online_shards_max(rt);
-    stats->active_nodes = rt->active_nodes;
+    stats->active_nodes = active_nodes;
     stats->dynamic_workers = rt->experimental_dynamic_shards != 0U ? 1U : 0U;
     stats->worker_rings = rt->experimental_shard_rings != 0U ? 1U : 0U;
     stats->worker_rings_multishot = rt->experimental_shard_rings_multishot != 0U ? 1U : 0U;
     stats->lockfree_normq = rt->experimental_lockfree_normq != 0U ? 1U : 0U;
     stats->huge_alloc = rt->experimental_huge_alloc_active != 0U ? 1U : 0U;
     stats->sqpoll = rt->experimental_sqpoll_active != 0U ? 1U : 0U;
+    stats->preempt_mode = rt->preempt_mode;
+    stats->preempt_poll_period = rt->preempt_poll_period;
+    stats->preempt_quantum_ns = rt->preempt_quantum_ns;
     stats->overflow_depth = llam_runtime_overflow_depth(rt);
 
-    // Shard metrics are protected by the shard lock so the snapshot does not
-    // read partially updated multi-field groups.
-    for (i = 0; i < rt->active_shards; ++i) {
-        llam_shard_t *shard = &rt->shards[i];
+    /*
+     * Diagnostics are callable from unmanaged host threads.  The public entry
+     * serializes with init/shutdown, and the pointer guards below keep this
+     * helper safe for recursive diagnostic calls made by partial-init cleanup.
+     */
+    if (shards != NULL) {
+        // Shard metrics are atomic because many updates happen on scheduler hot
+        // paths without the shard lock. The lock still stabilizes adjacent queue
+        // state for the verbose dump path, but stats only require race-free loads.
+        for (i = 0; i < active_shards; ++i) {
+            llam_shard_t *shard = &shards[i];
 
-        pthread_mutex_lock(&shard->lock);
-        stats->ctx_switches += shard->metrics.ctx_switches;
-        stats->yields += shard->metrics.yields;
-        stats->parks += shard->metrics.parks;
-        stats->wakes += shard->metrics.wakes;
-        stats->steals += shard->metrics.steals;
-        stats->migrations += shard->metrics.migrations;
-        stats->blocking_calls += shard->metrics.blocking_calls;
-        stats->blocking_completions += shard->metrics.blocking_completions;
-        stats->io_submits += shard->metrics.io_submits;
-        stats->io_completions += shard->metrics.io_completions;
-        stats->idle_polls += shard->metrics.idle_polls;
-        stats->idle_spin_loops += shard->metrics.idle_spin_loops;
-        stats->idle_spin_hits += shard->metrics.idle_spin_hits;
-        stats->idle_spin_fallbacks += shard->metrics.idle_spin_fallbacks;
-        stats->idle_spin_ns += shard->metrics.idle_spin_ns;
-        stats->yield_direct_attempts += shard->metrics.yield_direct_attempts;
-        stats->yield_direct_fast_hits += shard->metrics.yield_direct_fast_hits;
-        stats->yield_direct_locked_hits += shard->metrics.yield_direct_locked_hits;
-        stats->yield_direct_fail_context += shard->metrics.yield_direct_fail_context;
-        stats->yield_direct_fail_policy += shard->metrics.yield_direct_fail_policy;
-        stats->yield_direct_fail_no_work += shard->metrics.yield_direct_fail_no_work;
-        stats->yield_direct_fail_self += shard->metrics.yield_direct_fail_self;
-        stats->yield_direct_fail_push += shard->metrics.yield_direct_fail_push;
-        stats->queue_overflows += shard->metrics.queue_overflows;
-        stats->opaque_block_ns += shard->metrics.opaque_block_ns;
-        stats->opaque_block_samples += shard->metrics.opaque_block_samples;
-        if (shard->metrics.opaque_block_max_ns > stats->opaque_block_max_ns) {
-            stats->opaque_block_max_ns = shard->metrics.opaque_block_max_ns;
+            pthread_mutex_lock(&shard->lock);
+            stats->ctx_switches += shard->metrics.ctx_switches;
+            stats->yields += shard->metrics.yields;
+            stats->parks += shard->metrics.parks;
+            stats->wakes += shard->metrics.wakes;
+            stats->steals += shard->metrics.steals;
+            stats->migrations += shard->metrics.migrations;
+            stats->blocking_calls += shard->metrics.blocking_calls;
+            stats->blocking_completions += shard->metrics.blocking_completions;
+            stats->io_submits += shard->metrics.io_submits;
+            stats->io_completions += shard->metrics.io_completions;
+            stats->idle_polls += shard->metrics.idle_polls;
+            stats->idle_spin_loops += shard->metrics.idle_spin_loops;
+            stats->idle_spin_hits += shard->metrics.idle_spin_hits;
+            stats->idle_spin_fallbacks += shard->metrics.idle_spin_fallbacks;
+            stats->idle_spin_ns += shard->metrics.idle_spin_ns;
+            stats->yield_direct_attempts += shard->metrics.yield_direct_attempts;
+            stats->yield_direct_fast_hits += shard->metrics.yield_direct_fast_hits;
+            stats->yield_direct_locked_hits += shard->metrics.yield_direct_locked_hits;
+            stats->yield_direct_fail_context += shard->metrics.yield_direct_fail_context;
+            stats->yield_direct_fail_policy += shard->metrics.yield_direct_fail_policy;
+            stats->yield_direct_fail_no_work += shard->metrics.yield_direct_fail_no_work;
+            stats->yield_direct_fail_self += shard->metrics.yield_direct_fail_self;
+            stats->yield_direct_fail_push += shard->metrics.yield_direct_fail_push;
+            stats->preempt_requests += shard->metrics.preempt_requests;
+            stats->preempt_yields += shard->metrics.preempt_yields;
+            stats->preempt_suppressed += shard->metrics.preempt_suppressed;
+            stats->preempt_signals += shard->metrics.preempt_signals;
+            stats->queue_overflows += shard->metrics.queue_overflows;
+            stats->opaque_block_ns += shard->metrics.opaque_block_ns;
+            stats->opaque_block_samples += shard->metrics.opaque_block_samples;
+            if (shard->metrics.opaque_block_max_ns > stats->opaque_block_max_ns) {
+                stats->opaque_block_max_ns = shard->metrics.opaque_block_max_ns;
+            }
+            stats->opaque_enter_wait_ns += shard->metrics.opaque_enter_wait_ns;
+            stats->opaque_enter_wait_samples += shard->metrics.opaque_enter_wait_samples;
+            if (shard->metrics.opaque_enter_wait_max_ns > stats->opaque_enter_wait_max_ns) {
+                stats->opaque_enter_wait_max_ns = shard->metrics.opaque_enter_wait_max_ns;
+            }
+            stats->opaque_leave_wait_ns += shard->metrics.opaque_leave_wait_ns;
+            stats->opaque_leave_wait_samples += shard->metrics.opaque_leave_wait_samples;
+            if (shard->metrics.opaque_leave_wait_max_ns > stats->opaque_leave_wait_max_ns) {
+                stats->opaque_leave_wait_max_ns = shard->metrics.opaque_leave_wait_max_ns;
+            }
+            pthread_mutex_unlock(&shard->lock);
         }
-        stats->opaque_enter_wait_ns += shard->metrics.opaque_enter_wait_ns;
-        stats->opaque_enter_wait_samples += shard->metrics.opaque_enter_wait_samples;
-        if (shard->metrics.opaque_enter_wait_max_ns > stats->opaque_enter_wait_max_ns) {
-            stats->opaque_enter_wait_max_ns = shard->metrics.opaque_enter_wait_max_ns;
-        }
-        stats->opaque_leave_wait_ns += shard->metrics.opaque_leave_wait_ns;
-        stats->opaque_leave_wait_samples += shard->metrics.opaque_leave_wait_samples;
-        if (shard->metrics.opaque_leave_wait_max_ns > stats->opaque_leave_wait_max_ns) {
-            stats->opaque_leave_wait_max_ns = shard->metrics.opaque_leave_wait_max_ns;
-        }
-        pthread_mutex_unlock(&shard->lock);
     }
-    // Node submit counters are monotonic diagnostics; exact atomicity is less
-    // important than keeping the collection path lightweight.
-    for (i = 0; i < rt->active_nodes; ++i) {
-        stats->io_submit_calls += rt->nodes[i].submit_calls;
-        stats->io_submit_syscalls += rt->nodes[i].submit_syscalls;
+    // Node submit counters are backend-thread diagnostics. Use relaxed atomics:
+    // callers need a race-free snapshot, not a synchronization edge.
+    if (nodes != NULL) {
+        for (i = 0; i < active_nodes; ++i) {
+            stats->io_submit_calls += atomic_load_explicit(&nodes[i].submit_calls, memory_order_relaxed);
+            stats->io_submit_syscalls += atomic_load_explicit(&nodes[i].submit_syscalls, memory_order_relaxed);
+        }
     }
 }
 
@@ -157,15 +178,38 @@ static void llam_runtime_collect_stats_full(llam_runtime_stats_t *stats) {
  * @return 0 on success, -1 with @c errno set on invalid arguments.
  */
 int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size) {
+    llam_runtime_t *rt = &g_llam_runtime;
     llam_runtime_stats_t full_stats;
     size_t copy_size;
+    int saved_errno;
 
     if (stats == NULL || stats_size == 0U) {
         errno = EINVAL;
         return -1;
     }
 
-    llam_runtime_collect_stats_full(&full_stats);
+    memset(&full_stats, 0, sizeof(full_stats));
+    saved_errno = errno;
+    /*
+     * Before initialization is published, diagnostics must not take the
+     * lifecycle gate.  Otherwise a polling monitor can win the gate briefly and
+     * make the real runtime initializer report EBUSY.  Returning an empty
+     * prefix-safe snapshot is the only useful pre-init contract anyway.
+     */
+    if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
+        !atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+        errno = saved_errno;
+    } else if (llam_runtime_lifecycle_trylock() == 0) {
+        llam_runtime_collect_stats_full(&full_stats);
+        llam_runtime_lifecycle_unlock();
+    } else {
+        /*
+         * A monitoring thread can race construction or teardown.  Return a
+         * valid empty snapshot instead of blocking behind shutdown joins or
+         * walking partially published arrays.
+         */
+        errno = saved_errno;
+    }
     memset(stats, 0, stats_size);
     copy_size = stats_size < sizeof(full_stats) ? stats_size : sizeof(full_stats);
     memcpy(stats, &full_stats, copy_size);
@@ -179,17 +223,49 @@ int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
 /** @brief Write a human-readable runtime dump to an fd. */
 void llam_dump_runtime_state(int fd) {
     llam_runtime_t *rt = &g_llam_runtime;
+    llam_shard_t *shards;
+    llam_node_t *nodes;
     unsigned i;
-    unsigned block_pending = atomic_load(&rt->block_pending);
-    unsigned block_active = atomic_load(&rt->block_active);
-    unsigned overflow_depth = llam_runtime_overflow_depth(rt);
-    unsigned online_shards = llam_max_unsigned(1U, llam_runtime_online_shards(rt));
-    unsigned online_floor = llam_runtime_online_shards_floor(rt);
-    unsigned online_min = llam_runtime_online_shards_min(rt);
-    unsigned online_max = llam_runtime_online_shards_max(rt);
-    unsigned overflow_threshold = llam_max_unsigned(4U, online_shards * 2U);
-    unsigned pressure = llam_runtime_pressure_signal(rt) ? 1U : 0U;
-    const char *profile = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
+    unsigned active_shards;
+    unsigned active_nodes;
+    unsigned block_pending;
+    unsigned block_active;
+    unsigned overflow_depth;
+    unsigned online_shards;
+    unsigned online_floor;
+    unsigned online_min;
+    unsigned online_max;
+    unsigned overflow_threshold;
+    unsigned pressure;
+    const char *profile;
+
+    /*
+     * Like stats collection, pre-init dumps must not briefly occupy the
+     * lifecycle gate and turn a concurrent legitimate init into EBUSY.
+     */
+    if ((!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
+         !atomic_load_explicit(&rt->exec_started, memory_order_acquire)) ||
+        llam_runtime_lifecycle_trylock() != 0) {
+        dprintf(fd,
+                "runtime:\n"
+                "  lifecycle_lock=busy diagnostics_unavailable=partial_init_or_shutdown\n");
+        return;
+    }
+
+    shards = rt->shards;
+    nodes = rt->nodes;
+    active_shards = rt->active_shards;
+    active_nodes = rt->active_nodes;
+    block_pending = atomic_load(&rt->block_pending);
+    block_active = atomic_load(&rt->block_active);
+    overflow_depth = llam_runtime_overflow_depth(rt);
+    online_shards = llam_max_unsigned(1U, llam_runtime_online_shards(rt));
+    online_floor = llam_runtime_online_shards_floor(rt);
+    online_min = llam_runtime_online_shards_min(rt);
+    online_max = llam_runtime_online_shards_max(rt);
+    overflow_threshold = llam_max_unsigned(4U, online_shards * 2U);
+    pressure = llam_runtime_pressure_signal(rt) ? 1U : 0U;
+    profile = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
                               ? "release-fast"
                               : (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE
                                      ? "debug-safe"
@@ -199,12 +275,12 @@ void llam_dump_runtime_state(int fd) {
             "runtime:\n"
             "  observed_shards=%u active_shards=%u online_shards=%u online_floor=%u online_min=%u online_max=%u active_nodes=%u profile=%s deterministic=%u forced_yield_every=%u dynamic_shards=%u dynamic_cooldown=%u shard_rings=%u shard_rings_multishot=%u lockfree_normq=%u huge_alloc=%u sqpoll=%u sqpoll_cpu=%d sqpoll_reserved=%u idle_spin_ns=%llu idle_spin_max_iters=%u pressure=%u overflow_depth=%u overflow_threshold=%u live_tasks=%u fatal_errno=%d xsave=%u xsave_mask=0x%llx xsave_area=%zu\n",
             rt->observed_shards,
-            rt->active_shards,
+            active_shards,
             online_shards,
             online_floor,
             online_min,
             online_max,
-            rt->active_nodes,
+            active_nodes,
             profile,
             rt->deterministic,
             rt->forced_yield_every,
@@ -231,11 +307,11 @@ void llam_dump_runtime_state(int fd) {
     dprintf(fd,
             "lifecycle:\n"
             "  initialized=%u exec_started=%u stop_requested=%u shutdown_requested=%u live_tasks=%u live_task_shards=%u active_io_waiters=%u fatal_errno=%d global_epoch=%llu\n",
-            rt->initialized ? 1U : 0U,
-            rt->exec_started ? 1U : 0U,
+            atomic_load_explicit(&rt->initialized, memory_order_acquire) ? 1U : 0U,
+            atomic_load_explicit(&rt->exec_started, memory_order_acquire) ? 1U : 0U,
             atomic_load_explicit(&rt->stop_requested, memory_order_acquire) ? 1U : 0U,
             atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) ? 1U : 0U,
-            atomic_load_explicit(&rt->live_tasks, memory_order_acquire),
+            llam_runtime_live_tasks(rt),
             atomic_load_explicit(&rt->live_task_shards, memory_order_acquire),
             atomic_load_explicit(&rt->active_io_waiters, memory_order_acquire),
             atomic_load_explicit(&rt->fatal_errno, memory_order_acquire),
@@ -254,8 +330,11 @@ void llam_dump_runtime_state(int fd) {
             atomic_load_explicit(&rt->block_wake_seq, memory_order_acquire));
 
     dprintf(fd, "nodes:\n");
-    for (i = 0; i < rt->active_nodes; ++i) {
-        llam_node_t *node = &rt->nodes[i];
+    if (nodes == NULL && active_nodes != 0U) {
+        dprintf(fd, "  nodes_unavailable=partial_init active_nodes=%u\n", active_nodes);
+    }
+    for (i = 0; nodes != NULL && i < active_nodes; ++i) {
+        llam_node_t *node = &nodes[i];
         unsigned submit_depth = 0U;
         unsigned control_depth = 0U;
         unsigned poll_watch_count = 0U;
@@ -302,7 +381,7 @@ void llam_dump_runtime_state(int fd) {
         }
 
         dprintf(fd,
-                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u locks(submit=%s watch=%s) io_queues(submit=%u control=%u poll_watch=%u poll_waiters=%u accept_watch=%u accept_waiters=%u accept_ready=%u recv_watch=%u recv_waiters=%u recv_ready=%u) submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu cancel(ctrl=%llu ok=%llu fail=%llu not_found=%llu) max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
+                "  node=%u kernel_node=%u ring_ready=%u sqpoll=%u sqpoll_cpu=%d supports(read=%u recv=%u write=%u accept=%u connect=%u poll=%u ms_recv=%u ms_accept=%u ms_poll=%u pbuf=%u) pending_ops=%u locks(submit=%s watch=%s) io_queues(submit=%u control=%u poll_watch=%u poll_waiters=%u accept_watch=%u accept_waiters=%u accept_ready=%u recv_watch=%u recv_waiters=%u recv_ready=%u) submit_batches=%llu submit_entries=%llu submit_calls=%llu submit_syscalls=%llu cancel(ctrl=%llu ok=%llu fail=%llu not_found=%llu) windows_skip(success_handles=%llu failures=%llu immediate=%llu) max_submit=%u cq_depth=%u cq_depth_max=%u unsupported_ops=%llu pbuf(acquire=%llu return=%llu)\n",
                 node->index,
                 node->kernel_node_id,
                 node->ring_ready ? 1U : 0U,
@@ -331,26 +410,33 @@ void llam_dump_runtime_state(int fd) {
                 recv_watch_count,
                 recv_waiters,
                 recv_ready,
-                (unsigned long long)node->submit_batches,
-                (unsigned long long)node->submit_entries,
-                (unsigned long long)node->submit_calls,
-                (unsigned long long)node->submit_syscalls,
-                (unsigned long long)node->windows_cancel_controls,
-                (unsigned long long)node->windows_cancel_success,
-                (unsigned long long)node->windows_cancel_failures,
-                (unsigned long long)node->windows_cancel_not_found,
-                node->max_submit_batch,
-                node->last_cq_depth,
-                node->max_cq_depth,
-                (unsigned long long)node->unsupported_ops,
-                (unsigned long long)node->provided_buf_acquires,
-                (unsigned long long)node->provided_buf_returns);
+                (unsigned long long)atomic_load_explicit(&node->submit_batches, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->submit_entries, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->submit_calls, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->submit_syscalls, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->windows_cancel_controls, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->windows_cancel_success, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->windows_cancel_failures, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->windows_cancel_not_found, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->windows_skip_completion_handles, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->windows_skip_completion_failures, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->windows_immediate_completions, memory_order_relaxed),
+                atomic_load_explicit(&node->max_submit_batch, memory_order_relaxed),
+                atomic_load_explicit(&node->last_cq_depth, memory_order_relaxed),
+                atomic_load_explicit(&node->max_cq_depth, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->unsupported_ops, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->provided_buf_acquires, memory_order_relaxed),
+                (unsigned long long)atomic_load_explicit(&node->provided_buf_returns, memory_order_relaxed));
     }
 
     dprintf(fd, "shards:\n");
-    for (i = 0; i < rt->active_shards; ++i) {
-        llam_shard_t *shard = &rt->shards[i];
+    if (shards == NULL && active_shards != 0U) {
+        dprintf(fd, "  shards_unavailable=partial_init active_shards=%u\n", active_shards);
+    }
+    for (i = 0; shards != NULL && i < active_shards; ++i) {
+        llam_shard_t *shard = &shards[i];
         size_t trace_count;
+        unsigned trace_head;
         unsigned begin;
         unsigned j;
         llam_task_t *current;
@@ -372,8 +458,9 @@ void llam_dump_runtime_state(int fd) {
                     (unsigned long long)atomic_load_explicit(&shard->last_run_started_ns, memory_order_acquire));
             continue;
         }
-        trace_count = shard->trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : shard->trace_head;
-        begin = shard->trace_head > LLAM_TRACE_RING_CAP ? shard->trace_head - LLAM_TRACE_RING_CAP : 0U;
+        trace_head = atomic_load_explicit(&shard->trace_head, memory_order_acquire);
+        trace_count = trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : trace_head;
+        begin = trace_head > LLAM_TRACE_RING_CAP ? trace_head - LLAM_TRACE_RING_CAP : 0U;
         current = atomic_load_explicit(&shard->current, memory_order_acquire);
         dprintf(fd,
                 "  shard=%u online=%u cpu=%u node=%u io_node=%u current=%llu live_tasks=%u inflight_io_waiters=%u event_pending=%u last_safepoint_ns=%llu last_run_started_ns=%llu opaque_redirect=%u opaque_helper(started=%u ready=%u active=%u) opaque_depth=%u/%u redirect_depth=%u/%u queues(inject=%u hot=%u norm=%u timers=%u)\n",
@@ -419,6 +506,15 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.cancel_wakes,
                 (unsigned long long)shard->metrics.wake_latency_ns,
                 (unsigned long long)shard->metrics.wake_samples);
+        dprintf(fd,
+                "    metrics preempt(requests=%llu yields=%llu suppressed=%llu signals=%llu mode=%u poll_period=%u quantum_ns=%llu)\n",
+                (unsigned long long)shard->metrics.preempt_requests,
+                (unsigned long long)shard->metrics.preempt_yields,
+                (unsigned long long)shard->metrics.preempt_suppressed,
+                (unsigned long long)shard->metrics.preempt_signals,
+                rt->preempt_mode,
+                rt->preempt_poll_period,
+                (unsigned long long)rt->preempt_quantum_ns);
         dprintf(fd,
                 "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) direct_yield(attempts=%llu fast=%llu locked=%llu context=%llu policy=%llu no_work=%llu self=%llu push=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
                 (unsigned long long)shard->metrics.blocking_calls,
@@ -510,29 +606,36 @@ void llam_dump_runtime_state(int fd) {
         dprintf(fd, "    trace:\n");
         for (j = begin; j < begin + (unsigned)trace_count; ++j) {
             const llam_trace_event_t *event = &shard->trace_ring[j % LLAM_TRACE_RING_CAP];
+            unsigned kind = atomic_load_explicit(&event->kind, memory_order_acquire);
+            unsigned from_state = atomic_load_explicit(&event->from_state, memory_order_relaxed);
+            unsigned to_state = atomic_load_explicit(&event->to_state, memory_order_relaxed);
+            unsigned reason = atomic_load_explicit(&event->reason, memory_order_relaxed);
             dprintf(fd,
                     "      ts=%llu kind=%s task=%llu %s->%s reason=%s\n",
-                    (unsigned long long)event->ts_ns,
-                    llam_trace_kind_name((llam_trace_kind_t)event->kind),
-                    (unsigned long long)event->task_id,
-                    llam_state_name_from_id((llam_task_state_id_t)event->from_state),
-                    llam_state_name_from_id((llam_task_state_id_t)event->to_state),
-                    llam_wait_reason_name((llam_wait_reason_t)event->reason));
+                    (unsigned long long)atomic_load_explicit(&event->ts_ns, memory_order_relaxed),
+                    llam_trace_kind_name((llam_trace_kind_t)kind),
+                    (unsigned long long)atomic_load_explicit(&event->task_id, memory_order_relaxed),
+                    llam_state_name_from_id((llam_task_state_id_t)from_state),
+                    llam_state_name_from_id((llam_task_state_id_t)to_state),
+                    llam_wait_reason_name((llam_wait_reason_t)reason));
         }
         pthread_mutex_unlock(&shard->lock);
     }
 
     dprintf(fd, "tasks:\n");
-    for (i = 0; i < rt->active_shards; ++i) {
-        llam_shard_t *shard = &rt->shards[i];
+    if (shards == NULL && active_shards != 0U) {
+        dprintf(fd, "  tasks_unavailable=partial_init active_shards=%u\n", active_shards);
+    }
+    for (i = 0; shards != NULL && i < active_shards; ++i) {
+        llam_shard_t *shard = &shards[i];
 
         if (pthread_mutex_trylock(&shard->lock) != 0) {
             dprintf(fd, "  shard=%u tasks_unavailable=lock_busy\n", shard->id);
             continue;
         }
         for (llam_task_t *task = shard->all_tasks; task != NULL; task = task->all_next) {
-            llam_io_req_t *req = task->active_io_req;
-            llam_block_job_t *job = task->active_block_job;
+            llam_io_req_t *req = llam_task_active_io_req_load(task);
+            llam_block_job_t *job = llam_task_active_block_job_load(task);
 
             dprintf(fd,
                     "  id=%llu state=%s class=%d flags=0x%x home=%u live=%u last=%u parked=%u wait=%s wait_owner=%s wait_node=%p select=%p join_target=%llu timer=%p deadline_ns=%llu cancel_token=%p cancel_registered=%u wake_error=%d completed=%u join_claimed=%u detached=%u stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
@@ -598,12 +701,13 @@ void llam_dump_runtime_state(int fd) {
                         "    block_job=%p state=%s errno=%d result=%p\n",
                         (void *)job,
                         llam_block_job_state_name_diag(atomic_load_explicit(&job->state, memory_order_acquire)),
-                        job->error_code,
-                        job->result);
+                        atomic_load_explicit(&job->error_code, memory_order_acquire),
+                        atomic_load_explicit(&job->result, memory_order_acquire));
             } else {
                 dprintf(fd, "    block_job=none\n");
             }
         }
         pthread_mutex_unlock(&shard->lock);
     }
+    llam_runtime_lifecycle_unlock();
 }

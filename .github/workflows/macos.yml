@@ -52,15 +52,36 @@ jobs:
 
       - name: Package smoke
         run: |
-          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v1.0.2/'
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.0.2 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v1.1.0/'
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.1.0 ./scripts/package_release.sh "${{ matrix.package_target }}"
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
           grep '/CHANGELOG.md$' package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt
+          grep '/examples/demo_internal.h$' package-files.txt
+          grep '/examples/bench_support.c$' package-files.txt
+          grep '/examples/stress_internal.h$' package-files.txt
+          grep '/examples/env_compat.h$' package-files.txt
           grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
           grep '/lib/pkgconfig/llam.pc$' package-files.txt
           tmp_install="$(mktemp -d)"
           tar -C "$tmp_install" -xJf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz"
+          pkg_root="$tmp_install/llam-ci-${{ matrix.package_target }}"
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
+            -I"$pkg_root/include" -I"$pkg_root/examples" \
+            "$pkg_root/examples/demo.c" \
+            "$pkg_root/examples/demo_tasks.c" \
+            "$pkg_root/examples/demo_entry.c" \
+            "$pkg_root/lib/libllam_runtime.a" \
+            -pthread \
+            -o "$tmp_install/demo-from-sdk"
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
+            -I"$pkg_root/include" -I"$pkg_root/examples" \
+            "$pkg_root/examples/bench.c" \
+            "$pkg_root/examples/bench_support.c" \
+            "$pkg_root/examples/bench_entry.c" \
+            "$pkg_root/lib/libllam_runtime.a" \
+            -pthread \
+            -o "$tmp_install/bench-from-sdk"
           mkdir -p "$tmp_install/prefix/include/llam"
           printf 'sentinel\n' > "$tmp_install/prefix/include/llam/runtime.h"
           if "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix" > "$tmp_install/install.out" 2>&1; then

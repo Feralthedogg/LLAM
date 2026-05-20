@@ -546,7 +546,8 @@ static int llam_try_direct_blocking_rw_impl(llam_fd_t fd,
                                             int recv_flags,
                                             ssize_t *result_out,
                                             bool force_enabled) {
-    ssize_t rc;
+    struct pollfd pfd;
+    ssize_t direct_result;
     int saved_errno = 0;
 
     if (result_out != NULL) {
@@ -567,32 +568,52 @@ static int llam_try_direct_blocking_rw_impl(llam_fd_t fd,
         return 0;
     }
 
+    pfd.fd = fd;
+    pfd.events = write_op ? POLLOUT : POLLIN;
+    pfd.revents = 0;
+    /*
+     * This path exists only as an opt-in latency shortcut, but it still runs on a
+     * scheduler thread.  Do not block forever inside read/write/recv/send: wait
+     * for readiness in short slices, observe runtime stop, then perform the actual
+     * transfer through the non-blocking direct helper.
+     */
     for (;;) {
-        if (write_op) {
-            rc = llam_platform_write_fd(fd, buf, count);
-        } else if (recv_op) {
-            rc = llam_platform_recv_fd(fd, buf, count, recv_flags);
-        } else {
-            rc = llam_platform_read_fd(fd, buf, count);
-        }
-        if (rc >= 0) {
+        int poll_rc;
+        int direct_rc;
+
+        if (atomic_load_explicit(&g_llam_runtime.stop_requested, memory_order_acquire)) {
+            saved_errno = ECANCELED;
             break;
         }
-        if (errno == EINTR) {
+        pfd.revents = 0;
+        do {
+            poll_rc = poll(&pfd, 1, 10);
+        } while (poll_rc < 0 && errno == EINTR);
+        if (poll_rc < 0) {
+            saved_errno = errno;
+            break;
+        }
+        if (poll_rc == 0) {
             continue;
         }
-        saved_errno = errno;
-        break;
+        direct_rc = llam_try_direct_rw(fd, buf, count, write_op, recv_op, recv_flags, &direct_result, NULL);
+        if (direct_rc > 0) {
+            if (result_out != NULL) {
+                *result_out = direct_result;
+            }
+            if (llam_leave_blocking() != 0) {
+                return -1;
+            }
+            return 1;
+        }
+        if (direct_rc < 0) {
+            saved_errno = errno;
+            break;
+        }
     }
 
-    if (llam_leave_blocking() != 0 && rc >= 0) {
+    if (llam_leave_blocking() != 0) {
         return -1;
-    }
-    if (rc >= 0) {
-        if (result_out != NULL) {
-            *result_out = rc;
-        }
-        return 1;
     }
     errno = saved_errno;
     return -1;
@@ -626,26 +647,31 @@ int llam_try_direct_blocking_rw_forced(llam_fd_t fd,
 int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents) {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     u_long available = 0UL;
+    int saved_errno = errno;
 
     if (!llam_poll_socket_peek_enabled() || (events & POLLIN) == 0 || (events & POLLOUT) != 0) {
         return INT_MIN;
     }
     if (ioctlsocket(fd, FIONREAD, &available) != 0) {
+        errno = saved_errno;
         return INT_MIN;
     }
     if (available > 0UL) {
         if (revents != NULL) {
             *revents = POLLIN;
         }
+        errno = saved_errno;
         return 1;
     }
     if (revents != NULL) {
         *revents = 0;
     }
+    errno = saved_errno;
     return 0;
 #elif defined(MSG_PEEK) && defined(MSG_DONTWAIT)
     char byte;
     ssize_t rc;
+    int saved_errno = errno;
 
     if (!llam_poll_socket_peek_enabled() || (events & POLLIN) == 0 || (events & POLLOUT) != 0) {
         return INT_MIN;
@@ -656,9 +682,11 @@ int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents) {
             if (revents != NULL) {
                 *revents = POLLIN;
             }
+            errno = saved_errno;
             return 1;
         }
         if (rc == 0) {
+            errno = saved_errno;
             return INT_MIN;
         }
         if (errno == EINTR) {
@@ -668,8 +696,10 @@ int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents) {
             if (revents != NULL) {
                 *revents = 0;
             }
+            errno = saved_errno;
             return 0;
         }
+        errno = saved_errno;
         return INT_MIN;
     }
 #else
@@ -690,6 +720,7 @@ int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, sh
     struct pollfd pfd;
     int rc;
     int saved_errno = 0;
+    uint64_t deadline_ns = 0U;
     unsigned redirect_threshold_ms;
     bool redirect_hint = false;
 
@@ -724,11 +755,54 @@ int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, sh
     pfd.fd = fd;
     pfd.events = events;
     pfd.revents = 0;
-    do {
-        rc = poll(&pfd, 1, timeout_ms);
-    } while (rc < 0 && errno == EINTR);
+    if (timeout_ms > 0) {
+        deadline_ns = llam_now_ns() + (uint64_t)timeout_ms * 1000000ULL;
+    }
+    /*
+     * Direct blocking poll runs on the scheduler thread under opaque-blocking
+     * compensation.  Never pass an unbounded or long timeout directly to poll(2):
+     * runtime stop cannot interrupt that syscall, so slice waits and observe the
+     * stop flag between slices.
+     */
+    for (;;) {
+        int slice_ms = 10;
+
+        if (atomic_load_explicit(&g_llam_runtime.stop_requested, memory_order_acquire)) {
+            rc = -1;
+            saved_errno = ECANCELED;
+            break;
+        }
+        if (timeout_ms > 0) {
+            uint64_t now_ns = llam_now_ns();
+            uint64_t remain_ns;
+
+            if (now_ns >= deadline_ns) {
+                rc = 0;
+                break;
+            }
+            remain_ns = deadline_ns - now_ns;
+            slice_ms = (int)(remain_ns / 1000000ULL);
+            if (slice_ms <= 0) {
+                slice_ms = 1;
+            } else if (slice_ms > 10) {
+                slice_ms = 10;
+            }
+        } else if (timeout_ms < 0) {
+            slice_ms = 10;
+        }
+        pfd.revents = 0;
+        rc = poll(&pfd, 1, slice_ms);
+        if (rc < 0 && errno == EINTR) {
+            continue;
+        }
+        if (rc != 0 || timeout_ms == 0) {
+            break;
+        }
+    }
     if (rc < 0) {
-        saved_errno = errno;
+        if (saved_errno == 0) {
+            saved_errno = errno;
+        }
     }
     if (llam_leave_blocking() != 0 && rc >= 0) {
         return -1;

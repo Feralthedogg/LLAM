@@ -21,11 +21,21 @@
 #include "llam/runtime.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+#if !LLAM_PLATFORM_WINDOWS
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 typedef struct edge_state {
     atomic_uint failures;
@@ -36,6 +46,10 @@ typedef struct edge_state {
     atomic_uint blocking_finished;
     atomic_uint blocking_returned_before_finish;
     atomic_uint canceled_waits;
+    atomic_uint external_waiter_started;
+    atomic_uint external_waiter_done;
+    atomic_uint channel_destroy_waiter_started;
+    atomic_uint channel_destroy_busy_checked;
     int first_errno;
     char first_case[160];
     llam_channel_t *primary;
@@ -44,7 +58,61 @@ typedef struct edge_state {
     llam_mutex_t *mutex;
     llam_cond_t *cond;
     llam_cancel_token_t *token;
+#if !LLAM_PLATFORM_WINDOWS
+    int io_fds[2];
+#endif
 } edge_state_t;
+
+typedef struct cancel_destroy_race_state {
+    llam_cancel_token_t *token;
+    atomic_uint ready;
+    atomic_uint start;
+    int cancel_rc;
+    int cancel_errno;
+    int destroy_rc;
+    int destroy_errno;
+} cancel_destroy_race_state_t;
+
+static void ownership_task(void *arg);
+
+#if !LLAM_PLATFORM_WINDOWS
+typedef struct io_reorder_state {
+    atomic_uint failures;
+    atomic_uint reader_ready;
+    atomic_uint read_successes;
+    atomic_uint read_cancellations;
+    llam_cancel_token_t *token;
+    unsigned writer_delay;
+    unsigned cancel_delay;
+    int fds[2];
+    int first_errno;
+    char first_case[160];
+} io_reorder_state_t;
+#endif
+
+static void cancel_destroy_race_wait_start(cancel_destroy_race_state_t *state) {
+    atomic_fetch_add_explicit(&state->ready, 1U, memory_order_acq_rel);
+    while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+    }
+}
+
+static void *cancel_token_race_cancel_thread(void *arg) {
+    cancel_destroy_race_state_t *state = arg;
+
+    cancel_destroy_race_wait_start(state);
+    state->cancel_rc = llam_cancel_token_cancel(state->token);
+    state->cancel_errno = errno;
+    return NULL;
+}
+
+static void *cancel_token_race_destroy_thread(void *arg) {
+    cancel_destroy_race_state_t *state = arg;
+
+    cancel_destroy_race_wait_start(state);
+    state->destroy_rc = llam_cancel_token_destroy(state->token);
+    state->destroy_errno = errno;
+    return NULL;
+}
 
 static int fail_msg(const char *message) {
     fprintf(stderr, "[test_runtime_api_edges] %s\n", message);
@@ -75,6 +143,59 @@ static int check_task_failures(edge_state_t *state) {
     return 1;
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static void io_reorder_fail(io_reorder_state_t *state, const char *where, int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err;
+        (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static int check_io_reorder_failures(io_reorder_state_t *state) {
+    if (atomic_load_explicit(&state->failures, memory_order_relaxed) == 0U) {
+        return 0;
+    }
+    fprintf(stderr,
+            "[test_runtime_api_edges] io reorder failed at %s errno=%d (%s)\n",
+            state->first_case,
+            state->first_errno,
+            strerror(state->first_errno));
+    return 1;
+}
+
+static void io_reorder_wait_ready(io_reorder_state_t *state) {
+    while (atomic_load_explicit(&state->reader_ready, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+}
+
+static void io_reorder_delay(unsigned yields) {
+    for (unsigned i = 0U; i < yields; ++i) {
+        llam_yield();
+    }
+}
+#endif
+
+static int wait_until_atomic_nonzero(atomic_uint *flag, uint64_t timeout_ns) {
+    uint64_t deadline = llam_now_ns() + timeout_ns;
+
+    while (llam_now_ns() < deadline) {
+        if (atomic_load_explicit(flag, memory_order_acquire) != 0U) {
+            return 0;
+        }
+        {
+            struct timespec ts = {
+                .tv_sec = 0,
+                .tv_nsec = 1000000L,
+            };
+
+            nanosleep(&ts, NULL);
+        }
+    }
+    errno = ETIMEDOUT;
+    return -1;
+}
+
 static int init_runtime(void) {
     llam_runtime_opts_t opts;
 
@@ -84,6 +205,156 @@ static int init_runtime(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     return llam_runtime_init(&opts);
+}
+
+static int test_cancel_token_destroy_race(void) {
+    for (unsigned i = 0U; i < 4000U; ++i) {
+        cancel_destroy_race_state_t state;
+        pthread_t canceler;
+        pthread_t destroyer;
+
+        memset(&state, 0, sizeof(state));
+        atomic_init(&state.ready, 0U);
+        atomic_init(&state.start, 0U);
+        state.cancel_rc = -2;
+        state.destroy_rc = -2;
+        state.token = llam_cancel_token_create();
+        if (state.token == NULL) {
+            return fail_errno("cancel token race create failed");
+        }
+
+        if (pthread_create(&canceler, NULL, cancel_token_race_cancel_thread, &state) != 0 ||
+            pthread_create(&destroyer, NULL, cancel_token_race_destroy_thread, &state) != 0) {
+            return fail_errno("cancel token race pthread_create failed");
+        }
+
+        while (atomic_load_explicit(&state.ready, memory_order_acquire) != 2U) {
+        }
+        atomic_store_explicit(&state.start, 1U, memory_order_release);
+        (void)pthread_join(canceler, NULL);
+        (void)pthread_join(destroyer, NULL);
+
+        if (!(state.cancel_rc == 0 ||
+              (state.cancel_rc == -1 && state.cancel_errno == EINVAL))) {
+            return fail_msg("cancel token race cancel returned unexpected result");
+        }
+        if (!(state.destroy_rc == 0 ||
+              (state.destroy_rc == -1 && state.destroy_errno == EBUSY))) {
+            return fail_msg("cancel token race destroy returned unexpected result");
+        }
+
+        /*
+         * If cancellation retained the token long enough to make destroy return
+         * EBUSY, the caller still owns the handle and must be able to destroy it
+         * after the racing operation exits.
+         */
+        if (state.destroy_rc == -1 && llam_cancel_token_destroy(state.token) != 0) {
+            return fail_errno("cancel token race cleanup destroy failed");
+        }
+    }
+    return 0;
+}
+
+static int test_fault_boundary_contracts(void) {
+    edge_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    llam_spawn_opts_t spawn_opts;
+    llam_runtime_stats_t stats;
+    llam_task_group_t *group;
+    llam_task_t *task;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+
+    errno = 0;
+    if (llam_runtime_opts_init(NULL, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
+        return fail_msg("runtime opts init NULL did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_spawn_opts_init(NULL, LLAM_SPAWN_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
+        return fail_msg("spawn opts init NULL did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_collect_stats_ex(NULL, LLAM_RUNTIME_STATS_CURRENT_SIZE) != -1 || errno != EINVAL) {
+        return fail_msg("stats NULL did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_channel_create(0U) != NULL || errno != EINVAL) {
+        return fail_msg("channel create zero capacity did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_channel_create((SIZE_MAX / 2U) + 2U) != NULL || errno != ENOMEM) {
+        return fail_msg("channel huge capacity did not fail with ENOMEM");
+    }
+
+    if (llam_runtime_opts_init(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("runtime opts init failed");
+    }
+    runtime_opts.profile = UINT32_MAX;
+    errno = 0;
+    if (llam_runtime_init_ex(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime invalid profile did not fail with EINVAL");
+    }
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init after invalid profile failed");
+    }
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0 ||
+        stats.active_workers == 0U) {
+        llam_runtime_shutdown();
+        return fail_errno("stats after invalid-profile recovery failed");
+    }
+
+    if (llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn opts init for invalid task class failed");
+    }
+    spawn_opts.task_class = UINT32_MAX;
+    errno = 0;
+    task = llam_spawn_ex(ownership_task, &state, &spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
+    if (task != NULL || errno != EINVAL) {
+        if (task != NULL) {
+            (void)llam_detach(task);
+        }
+        llam_runtime_shutdown();
+        return fail_msg("spawn invalid task class did not fail with EINVAL");
+    }
+
+    if (llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn opts init for invalid stack class failed");
+    }
+    spawn_opts.stack_class = UINT32_MAX;
+    errno = 0;
+    task = llam_spawn_ex(ownership_task, &state, &spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE);
+    if (task != NULL || errno != EINVAL) {
+        if (task != NULL) {
+            (void)llam_detach(task);
+        }
+        llam_runtime_shutdown();
+        return fail_msg("spawn invalid stack class did not fail with EINVAL");
+    }
+
+    group = llam_task_group_create();
+    if (group == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("task group create for fault boundary failed");
+    }
+    errno = 0;
+    if (llam_task_group_spawn_ex(group, ownership_task, &state, &spawn_opts, 0U) != NULL ||
+        errno != EINVAL) {
+        (void)llam_task_group_destroy(group);
+        llam_runtime_shutdown();
+        return fail_msg("group spawn non-NULL opts with zero size did not fail with EINVAL");
+    }
+    if (llam_task_group_destroy(group) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("task group destroy after fault boundary failed");
+    }
+    llam_runtime_shutdown();
+    return 0;
 }
 
 static void *blocking_echo(void *arg) {
@@ -207,6 +478,52 @@ static void blocking_release_task(void *arg) {
     atomic_store_explicit(&state->blocking_can_finish, 1U, memory_order_release);
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static void io_reorder_reader_task(void *arg) {
+    io_reorder_state_t *state = arg;
+    unsigned char byte = 0U;
+    ssize_t rc;
+
+    atomic_store_explicit(&state->reader_ready, 1U, memory_order_release);
+    errno = 0;
+    rc = llam_read_when_ready(state->fds[0], &byte, 1U, -1);
+    if (rc == 1 && byte == 0x5aU) {
+        atomic_fetch_add_explicit(&state->read_successes, 1U, memory_order_relaxed);
+        return;
+    }
+    if (rc == -1 && errno == ECANCELED) {
+        atomic_fetch_add_explicit(&state->read_cancellations, 1U, memory_order_relaxed);
+        return;
+    }
+    io_reorder_fail(state, "read completion/cancel result", errno);
+}
+
+static void io_reorder_writer_task(void *arg) {
+    io_reorder_state_t *state = arg;
+    unsigned char byte = 0x5aU;
+    ssize_t written;
+
+    io_reorder_wait_ready(state);
+    io_reorder_delay(state->writer_delay);
+    do {
+        written = write(state->fds[1], &byte, 1U);
+    } while (written < 0 && errno == EINTR);
+    if (written != 1) {
+        io_reorder_fail(state, "write completion trigger", errno);
+    }
+}
+
+static void io_reorder_cancel_task(void *arg) {
+    io_reorder_state_t *state = arg;
+
+    io_reorder_wait_ready(state);
+    io_reorder_delay(state->cancel_delay);
+    if (llam_cancel_token_cancel(state->token) != 0) {
+        io_reorder_fail(state, "cancel completion trigger", errno);
+    }
+}
+#endif
+
 static void channel_close_select_task(void *arg) {
     edge_state_t *state = arg;
     void *received = (void *)(uintptr_t)0xBADU;
@@ -280,6 +597,44 @@ static void channel_close_select_task(void *arg) {
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 
+static void channel_destroy_waiter_task(void *arg) {
+    edge_state_t *state = arg;
+    void *received = NULL;
+
+    atomic_store_explicit(&state->channel_destroy_waiter_started, 1U, memory_order_release);
+    if (llam_channel_recv_result(state->primary, &received) != -1 || errno != EPIPE) {
+        task_fail(state, "channel destroy waiter close result", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void channel_destroy_probe_task(void *arg) {
+    edge_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->channel_destroy_waiter_started, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    for (unsigned i = 0U; i < 16U; ++i) {
+        llam_yield();
+    }
+    if (llam_channel_close(state->primary) != 0) {
+        task_fail(state, "channel destroy probe close", errno);
+        return;
+    }
+    /*
+     * Close removes the waiter from the channel queue before the waiter resumes.
+     * Destroy must still report EBUSY until that close wake is consumed;
+     * otherwise select waiters can later clean up through a freed channel.
+     */
+    errno = 0;
+    if (llam_channel_destroy(state->primary) != -1 || errno != EBUSY) {
+        task_fail(state, "channel destroy close-woken waiter busy", errno);
+        return;
+    }
+    atomic_store_explicit(&state->channel_destroy_busy_checked, 1U, memory_order_release);
+}
+
 static void cond_mutex_task(void *arg) {
     edge_state_t *state = arg;
 
@@ -320,10 +675,27 @@ static void cond_mutex_task(void *arg) {
 static void precancel_wait_task(void *arg) {
     edge_state_t *state = arg;
     void *received = NULL;
+#if !LLAM_PLATFORM_WINDOWS
+    char byte = '\0';
+    short revents = 0;
+#endif
 
     errno = 0;
     if (llam_sleep_ns(1000000000ULL) != -1 || errno != ECANCELED) {
         task_fail(state, "pre-cancel sleep", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+
+    errno = 0;
+    /*
+     * This duration intentionally overflows when added to the current
+     * monotonic timestamp.  The runtime must saturate the absolute deadline so
+     * cancellation still wins instead of treating the wrapped deadline as an
+     * already-expired successful sleep.
+     */
+    if (llam_sleep_ns(UINT64_MAX) != -1 || errno != ECANCELED) {
+        task_fail(state, "pre-cancel huge relative sleep", errno);
         return;
     }
     atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
@@ -334,6 +706,69 @@ static void precancel_wait_task(void *arg) {
         return;
     }
     atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+
+    errno = 0;
+    if (llam_channel_recv(state->primary) != NULL || errno != ECANCELED) {
+        task_fail(state, "pre-cancel legacy channel recv", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+
+    /*
+     * Immediate operations may still complete with a pre-cancelled token; the
+     * token is observed only once the second send has to publish a wait node.
+     */
+    if (llam_channel_send(state->secondary, state) != 0) {
+        task_fail(state, "pre-cancel legacy channel send setup", errno);
+        return;
+    }
+    errno = 0;
+    if (llam_channel_send(state->secondary, state) != -1 || errno != ECANCELED) {
+        task_fail(state, "pre-cancel legacy channel send wait", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+
+#if !LLAM_PLATFORM_WINDOWS
+    errno = 0;
+    /*
+     * The request is published before cancellation registration is checked.
+     * A pre-cancelled token must detach it from the submit/watch owner before
+     * returning, otherwise the backend can later observe a stale request.
+     */
+    if (llam_read(state->io_fds[0], &byte, 1U) != -1 || errno != ECANCELED) {
+        task_fail(state, "pre-cancel io read", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+
+    errno = 0;
+    revents = 0;
+    if (llam_poll_fd(state->io_fds[0], POLLIN, 1000, &revents) != -1 || errno != ECANCELED) {
+        task_fail(state, "pre-cancel timed poll", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+#endif
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void tiny_deadline_sleep_task(void *arg) {
+    edge_state_t *state = arg;
+
+    /*
+     * Exercise the timer setup boundary where a watchdog or scheduler can pop
+     * a just-armed timer before the sleeper reaches the context switch.  That
+     * path must be treated as completion, not as timer allocation failure.
+     */
+    for (unsigned i = 0U; i < 4096U; ++i) {
+        uint64_t deadline_ns = llam_now_ns() + 1U;
+
+        if (llam_sleep_until(deadline_ns) != 0) {
+            task_fail(state, "tiny deadline sleep", errno);
+            return;
+        }
+    }
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 
@@ -371,6 +806,72 @@ static void stop_late_waiter_task(void *arg) {
     stop_waiter_task(state);
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static void stop_poll_handle_waiter_task(void *arg) {
+    edge_state_t *state = arg;
+    short revents = 0;
+
+    errno = 0;
+    /*
+     * POSIX handles alias fds.  Infinite handle polling must therefore use the
+     * fd poll path, where runtime stop can abort the parked I/O request instead
+     * of waiting for an uninterruptible blocking-helper callback to return.
+     */
+    if (llam_poll_handle((llam_handle_t)state->io_fds[0], POLLIN, -1, &revents) != -1 ||
+        errno != ECANCELED) {
+        task_fail(state, "runtime stop POSIX poll_handle waiter", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void stop_direct_read_waiter_task(void *arg) {
+    edge_state_t *state = arg;
+    char byte = 0;
+
+    errno = 0;
+    /*
+     * LLAM_DIRECT_BLOCKING_IO forces the compensated direct-read shortcut.  An
+     * empty blocking socket must still observe runtime stop instead of pinning a
+     * scheduler thread in an uninterruptible read(2)/recv(2).
+     */
+    if (llam_read(state->io_fds[0], &byte, 1U) != -1 || errno != ECANCELED) {
+        task_fail(state, "runtime stop direct blocking read waiter", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void stop_accept_waiter_task(void *arg) {
+    edge_state_t *state = arg;
+    struct sockaddr_storage addr;
+    socklen_t addr_len = sizeof(addr);
+    llam_fd_t accepted;
+
+    errno = 0;
+    /*
+     * LLAM_ACCEPT_DIRECT_BLOCKING forces the accept helper fallback for address
+     * reporting calls.  With no inbound clients, runtime stop must cancel the
+     * helper's sliced accept loop; otherwise a running block job keeps
+     * llam_run() alive indefinitely.
+     */
+    accepted = llam_accept(state->io_fds[0], (struct sockaddr *)&addr, &addr_len);
+    if (!LLAM_FD_IS_INVALID(accepted)) {
+        (void)close(accepted);
+        task_fail(state, "runtime stop blocking accept unexpectedly succeeded", 0);
+        return;
+    }
+    if (errno != ECANCELED) {
+        task_fail(state, "runtime stop blocking accept waiter", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+#endif
+
 static void second_run_waiter_task(void *arg) {
     edge_state_t *state = arg;
     void *received = NULL;
@@ -393,6 +894,39 @@ static void second_run_sender_task(void *arg) {
     if (llam_channel_send(state->primary, (void *)(uintptr_t)0x51EC0DULL) != 0) {
         task_fail(state, "second run channel send", errno);
     }
+}
+
+static void unmanaged_drain_sender_task(void *arg) {
+    edge_state_t *state = arg;
+
+    if (llam_channel_send(state->primary, (void *)(uintptr_t)0xD0A1U) != 0) {
+        task_fail(state, "unmanaged drain sender", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void unmanaged_external_recv_waiter_task(void *arg) {
+    edge_state_t *state = arg;
+    void *received = NULL;
+
+    atomic_store_explicit(&state->external_waiter_started, 1U, memory_order_release);
+    if (llam_channel_recv_result(state->primary, &received) != 0 ||
+        received != (void *)(uintptr_t)0x1234U) {
+        task_fail(state, "unmanaged external channel recv", errno);
+        return;
+    }
+    atomic_store_explicit(&state->external_waiter_done, 1U, memory_order_release);
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void *unmanaged_external_run_thread(void *arg) {
+    edge_state_t *state = arg;
+
+    if (llam_run() != 0) {
+        task_fail(state, "unmanaged external channel run", errno);
+    }
+    return NULL;
 }
 
 static int test_unmanaged_boundary_contracts(void) {
@@ -485,20 +1019,29 @@ static int test_unmanaged_boundary_contracts(void) {
         llam_runtime_shutdown();
         return fail_msg("unmanaged channel send did not fail with ENOTSUP");
     }
-    errno = 0;
-    if (llam_channel_try_send(channel, &state) != -1 || errno != ENOTSUP) {
+    if (llam_channel_try_send(channel, &state) != 0) {
         llam_runtime_shutdown();
-        return fail_msg("unmanaged channel try_send did not fail with ENOTSUP");
+        return fail_errno("unmanaged channel try_send failed");
+    }
+    errno = 0;
+    if (llam_channel_try_send(channel, &state) != -1 || errno != EAGAIN) {
+        llam_runtime_shutdown();
+        return fail_msg("unmanaged channel try_send full case did not fail with EAGAIN");
     }
     errno = 0;
     if (llam_channel_recv_result(channel, &out) != -1 || errno != ENOTSUP) {
         llam_runtime_shutdown();
         return fail_msg("unmanaged channel recv did not fail with ENOTSUP");
     }
-    errno = 0;
-    if (llam_channel_try_recv_result(channel, &out) != -1 || errno != ENOTSUP) {
+    out = NULL;
+    if (llam_channel_try_recv_result(channel, &out) != 0 || out != &state) {
         llam_runtime_shutdown();
-        return fail_msg("unmanaged channel try_recv did not fail with ENOTSUP");
+        return fail_errno("unmanaged channel try_recv failed to drain host-sent value");
+    }
+    errno = 0;
+    if (llam_channel_try_recv_result(channel, &out) != -1 || errno != EAGAIN) {
+        llam_runtime_shutdown();
+        return fail_msg("unmanaged channel try_recv empty case did not fail with EAGAIN");
     }
     memset(ops, 0, sizeof(ops));
     ops[0].kind = LLAM_SELECT_OP_RECV;
@@ -528,6 +1071,191 @@ static int test_unmanaged_boundary_contracts(void) {
         return fail_errno("unmanaged fixture destroy failed");
     }
     return 0;
+}
+
+static int test_unmanaged_channel_try_drain_after_run(void) {
+    edge_state_t state;
+    llam_task_t *sender = NULL;
+    void *out = NULL;
+
+    memset(&state, 0, sizeof(state));
+    state.primary = llam_channel_create(1U);
+    if (state.primary == NULL) {
+        return fail_errno("unmanaged channel drain fixture create failed");
+    }
+    if (init_runtime() != 0) {
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("runtime init for unmanaged channel drain failed");
+    }
+
+    sender = llam_spawn(unmanaged_drain_sender_task, &state, NULL);
+    if (sender == NULL) {
+        llam_runtime_shutdown();
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("unmanaged drain sender spawn failed");
+    }
+    if (llam_run() != 0 || llam_join(sender) != 0 || check_task_failures(&state) != 0) {
+        llam_runtime_shutdown();
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("unmanaged drain sender run/join failed");
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        llam_runtime_shutdown();
+        (void)llam_channel_destroy(state.primary);
+        return fail_msg("unmanaged drain sender did not run");
+    }
+
+    /*
+     * Host embedders must be able to drain buffered values after the scheduler
+     * has quiesced; otherwise the documented destroy-EBUSY cleanup path is
+     * impossible without spawning a synthetic managed task.
+     */
+    out = NULL;
+    if (llam_channel_try_recv_result(state.primary, &out) != 0 ||
+        out != (void *)(uintptr_t)0xD0A1U) {
+        llam_runtime_shutdown();
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("unmanaged host drain of task-sent channel value failed");
+    }
+
+    llam_runtime_shutdown();
+    if (llam_channel_destroy(state.primary) != 0) {
+        return fail_errno("unmanaged drained channel destroy failed");
+    }
+    return 0;
+}
+
+static int test_unmanaged_channel_try_drain_after_shutdown(void) {
+    edge_state_t state;
+    llam_task_t *sender = NULL;
+    void *out = NULL;
+
+    memset(&state, 0, sizeof(state));
+    state.primary = llam_channel_create(1U);
+    if (state.primary == NULL) {
+        return fail_errno("post-shutdown channel drain fixture create failed");
+    }
+    if (init_runtime() != 0) {
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("runtime init for post-shutdown channel drain failed");
+    }
+
+    sender = llam_spawn(unmanaged_drain_sender_task, &state, NULL);
+    if (sender == NULL) {
+        llam_runtime_shutdown();
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("post-shutdown drain sender spawn failed");
+    }
+    if (llam_run() != 0 || llam_join(sender) != 0 || check_task_failures(&state) != 0) {
+        llam_runtime_shutdown();
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("post-shutdown drain sender run/join failed");
+    }
+    llam_runtime_shutdown();
+
+    /*
+     * Destroying a channel is independent of the runtime singleton.  Buffered
+     * payloads therefore remain drainable after shutdown, but no parked sender
+     * is woken without a live scheduler.
+     */
+    out = NULL;
+    if (llam_channel_try_recv_result(state.primary, &out) != 0 ||
+        out != (void *)(uintptr_t)0xD0A1U) {
+        (void)llam_channel_destroy(state.primary);
+        return fail_errno("post-shutdown host drain of task-sent channel value failed");
+    }
+    if (llam_channel_destroy(state.primary) != 0) {
+        return fail_errno("post-shutdown drained channel destroy failed");
+    }
+    return 0;
+}
+
+static int test_unmanaged_try_send_wakes_parked_channel_waiter(void) {
+    edge_state_t state;
+    llam_task_t *waiter = NULL;
+    pthread_t runner;
+    int runner_created = 0;
+    int runner_joined = 0;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.external_waiter_started, 0U);
+    atomic_init(&state.external_waiter_done, 0U);
+    state.primary = llam_channel_create(1U);
+    if (state.primary == NULL) {
+        return fail_errno("unmanaged external wake channel create failed");
+    }
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+
+    waiter = llam_spawn(unmanaged_external_recv_waiter_task, &state, NULL);
+    if (waiter == NULL) {
+        goto cleanup_runtime;
+    }
+    if (pthread_create(&runner, NULL, unmanaged_external_run_thread, &state) != 0) {
+        goto cleanup_runtime;
+    }
+    runner_created = 1;
+
+    if (wait_until_atomic_nonzero(&state.external_waiter_started, 1000000000ULL) != 0) {
+        goto cleanup_runtime;
+    }
+    /*
+     * Leave the receiver parked across several watchdog intervals.  Before the
+     * watchdog learned about externally wakeable channel waits, this delay made
+     * the runtime report EDEADLK even though the host thread could still
+     * complete the wait with the documented non-parking try_send API.
+     */
+    {
+        struct timespec ts = {
+            .tv_sec = 0,
+            .tv_nsec = 30000000L,
+        };
+
+        nanosleep(&ts, NULL);
+    }
+    if (llam_channel_try_send(state.primary, (void *)(uintptr_t)0x1234U) != 0) {
+        goto cleanup_runtime;
+    }
+    if (pthread_join(runner, NULL) != 0) {
+        goto cleanup_runtime;
+    }
+    runner_joined = 1;
+    if (check_task_failures(&state) != 0 ||
+        llam_join(waiter) != 0) {
+        waiter = NULL;
+        goto cleanup_runtime;
+    }
+    waiter = NULL;
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.external_waiter_done, memory_order_acquire) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (runner_created != 0 && runner_joined == 0) {
+        (void)llam_channel_close(state.primary);
+        (void)llam_runtime_request_stop();
+        (void)pthread_join(runner, NULL);
+        runner_joined = 1;
+    }
+    if (runner_joined != 0 && waiter != NULL) {
+        (void)llam_join(waiter);
+        waiter = NULL;
+    }
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (state.primary != NULL && llam_channel_destroy(state.primary) != 0) {
+        rc = 1;
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("unmanaged external channel wake edge failed");
+    }
+    return rc;
 }
 
 static int test_repeated_run_clears_internal_drain_stop(void) {
@@ -809,6 +1537,57 @@ cleanup_no_runtime:
     return rc;
 }
 
+static int test_channel_destroy_rejects_close_woken_waiter(void) {
+    edge_state_t state;
+    llam_task_t *waiter = NULL;
+    llam_task_t *probe = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.channel_destroy_waiter_started, 0U);
+    atomic_init(&state.channel_destroy_busy_checked, 0U);
+    state.primary = llam_channel_create(1U);
+    if (state.primary == NULL) {
+        goto cleanup_no_runtime;
+    }
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+    waiter = llam_spawn(channel_destroy_waiter_task, &state, NULL);
+    probe = llam_spawn(channel_destroy_probe_task, &state, NULL);
+    if (waiter == NULL || probe == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_task_failures(&state) != 0 ||
+        llam_join(waiter) != 0 ||
+        llam_join(probe) != 0) {
+        waiter = NULL;
+        probe = NULL;
+        goto cleanup_runtime;
+    }
+    waiter = NULL;
+    probe = NULL;
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.channel_destroy_busy_checked, memory_order_acquire) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (state.primary != NULL && llam_channel_destroy(state.primary) != 0) {
+        rc = 1;
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("channel destroy close-woken waiter edge failed");
+    }
+    return rc;
+}
+
 static int test_cond_mutex_deadline_edges(void) {
     edge_state_t state;
     llam_task_t *task;
@@ -859,14 +1638,24 @@ static int test_precancel_wait_edges(void) {
     int rc = 1;
 
     memset(&state, 0, sizeof(state));
+#if !LLAM_PLATFORM_WINDOWS
+    state.io_fds[0] = -1;
+    state.io_fds[1] = -1;
+#endif
     atomic_init(&state.failures, 0U);
     atomic_init(&state.ran, 0U);
     atomic_init(&state.canceled_waits, 0U);
     state.primary = llam_channel_create(1U);
+    state.secondary = llam_channel_create(1U);
     state.token = llam_cancel_token_create();
-    if (state.primary == NULL || state.token == NULL) {
+    if (state.primary == NULL || state.secondary == NULL || state.token == NULL) {
         goto cleanup_no_runtime;
     }
+#if !LLAM_PLATFORM_WINDOWS
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, state.io_fds) != 0) {
+        goto cleanup_no_runtime;
+    }
+#endif
     if (llam_cancel_token_cancel(state.token) != 0 ||
         llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
         goto cleanup_no_runtime;
@@ -883,7 +1672,13 @@ static int test_precancel_wait_edges(void) {
         goto cleanup_runtime;
     }
     if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
-        atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 2U) {
+        atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) !=
+#if LLAM_PLATFORM_WINDOWS
+            5U
+#else
+            7U
+#endif
+    ) {
         goto cleanup_runtime;
     }
     rc = 0;
@@ -891,17 +1686,175 @@ static int test_precancel_wait_edges(void) {
 cleanup_runtime:
     llam_runtime_shutdown();
 cleanup_no_runtime:
+#if !LLAM_PLATFORM_WINDOWS
+    if (state.io_fds[0] >= 0) {
+        close(state.io_fds[0]);
+    }
+    if (state.io_fds[1] >= 0) {
+        close(state.io_fds[1]);
+    }
+#endif
     if (state.token != NULL && llam_cancel_token_destroy(state.token) != 0) {
         rc = 1;
     }
     if (state.primary != NULL && llam_channel_destroy(state.primary) != 0) {
         rc = 1;
     }
+    if (state.secondary != NULL) {
+        void *drained = NULL;
+
+        (void)llam_channel_try_recv_result(state.secondary, &drained);
+        if (llam_channel_destroy(state.secondary) != 0) {
+            rc = 1;
+        }
+    }
     if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
         return fail_errno("pre-cancel wait edge failed");
     }
     return rc;
 }
+
+static int test_tiny_deadline_sleep_race(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for tiny deadline sleep failed");
+    }
+
+    task = llam_spawn(tiny_deadline_sleep_task, &state, NULL);
+    if (task == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 || check_task_failures(&state) != 0 || llam_join(task) != 0) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("tiny deadline sleep race failed");
+    }
+    return rc;
+}
+
+#if !LLAM_PLATFORM_WINDOWS
+static int run_io_completion_cancel_reorder_round(unsigned round, unsigned writer_delay, unsigned cancel_delay) {
+    io_reorder_state_t state;
+    llam_spawn_opts_t opts;
+    llam_task_t *reader = NULL;
+    llam_task_t *writer = NULL;
+    llam_task_t *canceller = NULL;
+    unsigned completions;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.fds[0] = -1;
+    state.fds[1] = -1;
+    state.writer_delay = writer_delay;
+    state.cancel_delay = cancel_delay;
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.reader_ready, 0U);
+    atomic_init(&state.read_successes, 0U);
+    atomic_init(&state.read_cancellations, 0U);
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, state.fds) != 0) {
+        return fail_errno("io reorder socketpair setup failed");
+    }
+    state.token = llam_cancel_token_create();
+    if (state.token == NULL ||
+        llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        goto cleanup_no_runtime;
+    }
+    opts.cancel_token = state.token;
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+
+    reader = llam_spawn(io_reorder_reader_task, &state, &opts);
+    writer = llam_spawn(io_reorder_writer_task, &state, NULL);
+    canceller = llam_spawn(io_reorder_cancel_task, &state, NULL);
+    if (reader == NULL || writer == NULL || canceller == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_io_reorder_failures(&state) != 0 ||
+        llam_join(reader) != 0 ||
+        llam_join(writer) != 0 ||
+        llam_join(canceller) != 0) {
+        reader = NULL;
+        writer = NULL;
+        canceller = NULL;
+        goto cleanup_runtime;
+    }
+    reader = NULL;
+    writer = NULL;
+    canceller = NULL;
+    completions = atomic_load_explicit(&state.read_successes, memory_order_relaxed) +
+                  atomic_load_explicit(&state.read_cancellations, memory_order_relaxed);
+    if (completions != 1U) {
+        fprintf(stderr,
+                "[test_runtime_api_edges] io reorder round=%u produced %u terminal results\n",
+                round,
+                completions);
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (reader != NULL) {
+        (void)llam_join(reader);
+    }
+    if (writer != NULL) {
+        (void)llam_join(writer);
+    }
+    if (canceller != NULL) {
+        (void)llam_join(canceller);
+    }
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (state.token != NULL && llam_cancel_token_destroy(state.token) != 0) {
+        rc = 1;
+    }
+    if (state.fds[0] >= 0) {
+        (void)close(state.fds[0]);
+    }
+    if (state.fds[1] >= 0) {
+        (void)close(state.fds[1]);
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("io completion/cancel reorder round failed");
+    }
+    return rc;
+}
+
+static int test_posix_io_completion_cancel_reorder(void) {
+    /*
+     * Exercise both possible orderings around a parked read: backend readiness
+     * can arrive before cancellation, or cancellation can detach the request
+     * before the ready byte is consumed.  Either a one-byte read or ECANCELED is
+     * a valid terminal result, but the request must complete exactly once.
+     */
+    for (unsigned i = 0U; i < 96U; ++i) {
+        unsigned mode = i % 3U;
+        unsigned writer_delay = mode == 0U ? 1U : (mode == 1U ? 8U : (i & 3U));
+        unsigned cancel_delay = mode == 0U ? 8U : (mode == 1U ? 1U : ((i + 1U) & 3U));
+
+        if (run_io_completion_cancel_reorder_round(i, writer_delay, cancel_delay) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
 
 static int test_runtime_stop_cancels_parked_channel_wait(void) {
     edge_state_t state;
@@ -1005,8 +1958,208 @@ cleanup_no_runtime:
     return rc;
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static int test_runtime_stop_cancels_posix_poll_handle_wait(void) {
+    edge_state_t state;
+    llam_task_t *waiter;
+    llam_task_t *stopper;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.io_fds[0] = -1;
+    state.io_fds[1] = -1;
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.canceled_waits, 0U);
+
+    if (pipe(state.io_fds) != 0) {
+        return fail_errno("runtime stop poll_handle pipe setup failed");
+    }
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+
+    waiter = llam_spawn(stop_poll_handle_waiter_task, &state, NULL);
+    stopper = llam_spawn(stop_request_task, &state, NULL);
+    if (waiter == NULL || stopper == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_task_failures(&state) != 0 ||
+        llam_join(waiter) != 0 ||
+        llam_join(stopper) != 0) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (state.io_fds[0] >= 0) {
+        (void)close(state.io_fds[0]);
+    }
+    if (state.io_fds[1] >= 0) {
+        (void)close(state.io_fds[1]);
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("runtime stop POSIX poll_handle edge failed");
+    }
+    return rc;
+}
+
+static int test_runtime_stop_cancels_direct_blocking_read(void) {
+    edge_state_t state;
+    llam_task_t *waiter;
+    llam_task_t *stopper;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.io_fds[0] = -1;
+    state.io_fds[1] = -1;
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.canceled_waits, 0U);
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, state.io_fds) != 0) {
+        return fail_errno("runtime stop direct blocking read socketpair setup failed");
+    }
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+
+    waiter = llam_spawn(stop_direct_read_waiter_task, &state, NULL);
+    stopper = llam_spawn(stop_request_task, &state, NULL);
+    if (waiter == NULL || stopper == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_task_failures(&state) != 0 ||
+        llam_join(waiter) != 0 ||
+        llam_join(stopper) != 0) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (state.io_fds[0] >= 0) {
+        (void)close(state.io_fds[0]);
+    }
+    if (state.io_fds[1] >= 0) {
+        (void)close(state.io_fds[1]);
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("runtime stop direct blocking read edge failed");
+    }
+    return rc;
+}
+
+static int test_runtime_stop_cancels_blocking_accept(void) {
+    edge_state_t state;
+    struct sockaddr_in addr;
+    llam_task_t *waiter;
+    llam_task_t *stopper;
+    int listener = -1;
+    int one = 1;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.io_fds[0] = -1;
+    state.io_fds[1] = -1;
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.canceled_waits, 0U);
+
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0) {
+        return fail_errno("runtime stop blocking accept socket setup failed");
+    }
+    (void)setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 16) != 0) {
+        goto cleanup_no_runtime;
+    }
+    state.io_fds[0] = listener;
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+
+    waiter = llam_spawn(stop_accept_waiter_task, &state, NULL);
+    stopper = llam_spawn(stop_request_task, &state, NULL);
+    if (waiter == NULL || stopper == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_task_failures(&state) != 0 ||
+        llam_join(waiter) != 0 ||
+        llam_join(stopper) != 0) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (listener >= 0) {
+        (void)close(listener);
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("runtime stop blocking accept edge failed");
+    }
+    return rc;
+}
+#endif
+
 int main(void) {
+#if !LLAM_PLATFORM_WINDOWS
+    /*
+     * Force the compensated direct-poll path before any poll policy is cached.
+     * Runtime stop must still cancel parked infinite waits; otherwise this mode
+     * can pin a scheduler thread inside poll(2).
+     */
+    if (setenv("LLAM_DIRECT_BLOCKING_POLL", "1", 1) != 0) {
+        return fail_errno("enable direct blocking poll edge mode failed");
+    }
+    if (setenv("LLAM_DIRECT_BLOCKING_IO", "1", 1) != 0) {
+        return fail_errno("enable direct blocking I/O edge mode failed");
+    }
+    if (setenv("LLAM_ACCEPT_DIRECT_BLOCKING", "1", 1) != 0) {
+        return fail_errno("enable blocking accept edge mode failed");
+    }
+#endif
+    if (test_cancel_token_destroy_race() != 0) {
+        return 1;
+    }
+    if (test_fault_boundary_contracts() != 0) {
+        return 1;
+    }
     if (test_unmanaged_boundary_contracts() != 0) {
+        return 1;
+    }
+    if (test_unmanaged_channel_try_drain_after_run() != 0) {
+        return 1;
+    }
+    if (test_unmanaged_channel_try_drain_after_shutdown() != 0) {
+        return 1;
+    }
+    if (test_unmanaged_try_send_wakes_parked_channel_waiter() != 0) {
         return 1;
     }
     if (test_repeated_run_clears_internal_drain_stop() != 0) {
@@ -1024,18 +2177,40 @@ int main(void) {
     if (test_channel_close_and_select_edges() != 0) {
         return 1;
     }
+    if (test_channel_destroy_rejects_close_woken_waiter() != 0) {
+        return 1;
+    }
     if (test_cond_mutex_deadline_edges() != 0) {
         return 1;
     }
     if (test_precancel_wait_edges() != 0) {
         return 1;
     }
+    if (test_tiny_deadline_sleep_race() != 0) {
+        return 1;
+    }
+#if !LLAM_PLATFORM_WINDOWS
+    if (test_posix_io_completion_cancel_reorder() != 0) {
+        return 1;
+    }
+#endif
     if (test_runtime_stop_cancels_parked_channel_wait() != 0) {
         return 1;
     }
     if (test_runtime_stop_cancels_late_channel_wait() != 0) {
         return 1;
     }
+#if !LLAM_PLATFORM_WINDOWS
+    if (test_runtime_stop_cancels_posix_poll_handle_wait() != 0) {
+        return 1;
+    }
+    if (test_runtime_stop_cancels_direct_blocking_read() != 0) {
+        return 1;
+    }
+    if (test_runtime_stop_cancels_blocking_accept() != 0) {
+        return 1;
+    }
+#endif
     puts("test_runtime_api_edges ok");
     return 0;
 }

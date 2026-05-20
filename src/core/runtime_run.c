@@ -43,18 +43,44 @@
  */
 int llam_run(void) {
     llam_runtime_t *rt = &g_llam_runtime;
+    bool expected_started = false;
+    int rc;
     unsigned i;
 
-    if (!rt->initialized || rt->exec_started) {
+    if (!atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
         errno = EINVAL;
         return -1;
     }
-
-    rt->exec_started = true;
+    /*
+     * The public contract allows only one active scheduler driver.  A load then
+     * store admits two unmanaged callers that cross the check at the same time,
+     * so claim the run token with CAS before touching shard worker state.
+     */
+    if (!atomic_compare_exchange_strong_explicit(&rt->exec_started,
+                                                 &expected_started,
+                                                 true,
+                                                 memory_order_acq_rel,
+                                                 memory_order_acquire)) {
+        errno = EINVAL;
+        return -1;
+    }
     for (i = 1; i < rt->active_shards; ++i) {
-        if (pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]) != 0) {
-            llam_record_fatal(rt, errno);
-            rt->exec_started = false;
+        rc = pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]);
+        if (rc != 0) {
+            // pthread_create returns the error code directly; errno may be
+            // stale.  Stop and join any shards already started in this run
+            // before exposing the failure to the caller.
+            llam_record_fatal(rt, rc);
+            llam_request_stop(rt);
+            while (i > 1U) {
+                --i;
+                if (rt->shards[i].thread_started) {
+                    pthread_join(rt->shards[i].thread, NULL);
+                    rt->shards[i].thread_started = false;
+                }
+            }
+            atomic_store_explicit(&rt->exec_started, false, memory_order_release);
+            errno = rc;
             return -1;
         }
         rt->shards[i].thread_started = true;
@@ -68,7 +94,7 @@ int llam_run(void) {
             rt->shards[i].thread_started = false;
         }
     }
-    rt->exec_started = false;
+    atomic_store_explicit(&rt->exec_started, false, memory_order_release);
 
     if (atomic_load(&rt->fatal_errno) != 0) {
         errno = atomic_load(&rt->fatal_errno);
@@ -93,7 +119,7 @@ int llam_run(void) {
 int llam_runtime_request_stop(void) {
     llam_runtime_t *rt = &g_llam_runtime;
 
-    if (!rt->initialized) {
+    if (!atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
         errno = EINVAL;
         return -1;
     }

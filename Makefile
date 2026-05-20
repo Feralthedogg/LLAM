@@ -7,10 +7,13 @@ OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 PICFLAGS ?= -fPIC
 LLAM_ABI_MAJOR ?= 1
-LLAM_VERSION ?= 1.0.2
+LLAM_VERSION ?= 1.1.0
+BUILD_SIGNATURE = $(OBJDIR)/.build-signature
+SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
 CLEAN_DIRS = \
 	$(OBJDIR) \
 	$(SHARED_OBJDIR) \
+	object-* \
 	build \
 	CMakeFiles \
 	cmake-build-* \
@@ -37,6 +40,7 @@ CLEAN_FILES = \
 	test_runtime_stress \
 	test_runtime_fuzz \
 	test_runtime_invariants \
+	test_runtime_shutdown_internal \
 	test_sync_primitives \
 	test_io_buffers \
 	test_windows_policy \
@@ -62,6 +66,7 @@ CLEAN_FILES = \
 	test_runtime_stress.exe \
 	test_runtime_fuzz.exe \
 	test_runtime_invariants.exe \
+	test_runtime_shutdown_internal.exe \
 	test_sync_primitives.exe \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
@@ -76,6 +81,8 @@ CLEAN_FILES = \
 	CMakeCache.txt \
 	cmake_install.cmake \
 	compile_commands.json \
+	*.link-signature \
+	*.plist \
 	perf.data \
 	perf.data.old \
 	test_nm_compat_runtime
@@ -319,6 +326,8 @@ TEST_RUNTIME_FUZZ_OBJS = \
 	$(OBJDIR)/tests/test_runtime_fuzz.o
 TEST_RUNTIME_INVARIANTS_OBJS = \
 	$(OBJDIR)/tests/test_runtime_invariants.o
+TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS = \
+	$(OBJDIR)/tests/test_runtime_shutdown_internal.o
 TEST_SYNC_OBJS = \
 	$(OBJDIR)/tests/test_sync_primitives.o
 TEST_IO_BUFFERS_OBJS = \
@@ -335,17 +344,135 @@ TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
+BUILD_OBJS = \
+	$(RUNTIME_OBJS) \
+	$(DEMO_OBJS) \
+	$(STRESS_OBJS) \
+	$(BENCH_OBJS) \
+	$(SERVER_OBJS) \
+	$(SERVER_LOSSLESS_OBJS) \
+	$(SERVER_FLOOD_OBJS) \
+	$(TEST_ABI_OBJS) \
+	$(TEST_ABI_COMPAT_OBJS) \
+	$(TEST_CONNECT_OBJS) \
+	$(TEST_RUNTIME_CORE_OBJS) \
+	$(TEST_RUNTIME_API_EDGES_OBJS) \
+	$(TEST_RUNTIME_SELECT_EDGES_OBJS) \
+	$(TEST_RUNTIME_IO_DUMP_OBJS) \
+	$(TEST_RUNTIME_GROUP_LOCAL_EDGES_OBJS) \
+	$(TEST_RUNTIME_UNMANAGED_JOIN_OBJS) \
+	$(TEST_RUNTIME_STRESS_OBJS) \
+	$(TEST_RUNTIME_FUZZ_OBJS) \
+	$(TEST_RUNTIME_INVARIANTS_OBJS) \
+	$(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) \
+	$(TEST_SYNC_OBJS) \
+	$(TEST_IO_BUFFERS_OBJS) \
+	$(TEST_WINDOWS_POLICY_OBJS) \
+	$(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) \
+	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
+	$(TEST_SHARED_LOAD_OBJS)
+LINK_TARGETS = \
+	demo \
+	stress \
+	bench \
+	server \
+	server_lossless \
+	server_flood \
+	test_abi_contract \
+	test_abi_compat \
+	test_connect_io \
+	test_runtime_core \
+	test_runtime_api_edges \
+	test_runtime_select_edges \
+	test_runtime_io_dump \
+	test_runtime_group_local_edges \
+	test_runtime_unmanaged_join \
+	test_runtime_stress \
+	test_runtime_fuzz \
+	test_runtime_invariants \
+	test_runtime_shutdown_internal \
+	test_sync_primitives \
+	test_io_buffers \
+	test_windows_policy \
+	test_windows_runtime_smoke \
+	test_windows_iocp_dump \
+	test_shared_load \
+	libllam_runtime.a
 
-.PHONY: all clean static shared test test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported
+.PHONY: all clean static shared test test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 
 ifeq ($(HOST_PLATFORM),windows)
 
-all demo stress bench server server_lossless server_flood static shared test check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
+WINDOWS_CMAKE_CONFIG ?= Release
+WINDOWS_CMAKE_ARGS ?=
+WINDOWS_CTEST_ARGS ?=
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io
+WINDOWS_CMAKE_TARGETS = \
+	demo \
+	stress \
+	bench \
+	server \
+	server_lossless \
+	server_flood \
+	test_abi_contract \
+	test_abi_compat \
+	test_connect_io \
+	test_runtime_core \
+	test_runtime_api_edges \
+	test_runtime_select_edges \
+	test_runtime_io_dump \
+	test_runtime_group_local_edges \
+	test_runtime_unmanaged_join \
+	test_runtime_stress \
+	test_runtime_fuzz \
+	test_runtime_invariants \
+	test_runtime_shutdown_internal \
+	test_sync_primitives \
+	test_io_buffers \
+	test_windows_policy \
+	test_windows_runtime_smoke \
+	test_windows_iocp_io \
+	test_windows_iocp_dump \
+	test_windows_handle_io \
+	test_shared_load
+
+.PHONY: windows-cmake-configure windows-cmake-build windows-cmake-test
+
+all: windows-cmake-build
+
+static: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target llam_runtime
+
+shared: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target llam_runtime_shared
+
+test check: windows-cmake-test
+
+$(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
+
+package: windows-cmake-build
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release_windows.ps1 -BuildDir "$(WINDOWS_CMAKE_BUILD_DIR)" -Configuration "$(WINDOWS_CMAKE_CONFIG)"
+
+bench-matrix: bench
+	python scripts/bench_matrix.py
+
+server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
-	@echo "Native Windows 10/11 backend is staged: scheduler/core builds through CMake with x86_64 asm context switching."
-	@echo "Use CMake for native Windows builds; Makefile Windows host targets remain guarded until full IOCP request support lands."
+	@echo "Native Windows 10/11 backend: IOCP request path, x86_64 asm context switching, and Windows policy tests are built through CMake."
+	@echo "Makefile Windows targets delegate to CMake. Override WINDOWS_CMAKE_ARGS to select a generator, for example WINDOWS_CMAKE_ARGS='-G Ninja'."
+
+windows-cmake-configure: platform-status
+	cmake -S . -B "$(WINDOWS_CMAKE_BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(WINDOWS_CMAKE_CONFIG)" -DLLAM_ENABLE_WINDOWS_BACKEND=ON $(WINDOWS_CMAKE_ARGS)
+
+windows-cmake-build: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)"
+
+windows-cmake-test: windows-cmake-build
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "$(WINDOWS_CTEST_REGEX)" $(WINDOWS_CTEST_ARGS)
 
 windows-unsupported: platform-status
 	@exit 2
@@ -355,9 +482,77 @@ clean:
 	rm -f $(CLEAN_FILES)
 
 verify-windows:
-	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_windows.ps1
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_windows.ps1 -Native
 
 else
+
+FORCE:
+
+$(BUILD_SIGNATURE): FORCE
+	@mkdir -p $(dir $@)
+	@tmp="$@.tmp"; \
+	{ \
+		printf 'CC=%s\n' '$(CC)'; \
+		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
+		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
+		printf 'OBJDIR=%s\n' '$(OBJDIR)'; \
+		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
+		printf 'UNAME_M=%s\n' '$(UNAME_M)'; \
+	} > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" "$@"; \
+	fi
+
+$(SHARED_BUILD_SIGNATURE): FORCE
+	@mkdir -p $(dir $@)
+	@tmp="$@.tmp"; \
+	{ \
+		printf 'CC=%s\n' '$(CC)'; \
+		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
+		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'PICFLAGS=%s\n' '$(PICFLAGS)'; \
+		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
+		printf 'SHARED_OBJDIR=%s\n' '$(SHARED_OBJDIR)'; \
+		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
+		printf 'UNAME_M=%s\n' '$(UNAME_M)'; \
+	} > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" "$@"; \
+	fi
+
+$(BUILD_OBJS): $(BUILD_SIGNATURE)
+
+$(SHARED_RUNTIME_OBJS): $(SHARED_BUILD_SIGNATURE)
+
+$(LINK_TARGETS): %: %.link-signature
+
+$(SHLIB_REAL): $(SHLIB_REAL).link-signature
+
+%.link-signature: FORCE
+	@tmp="$@.tmp"; \
+	{ \
+		printf 'target=%s\n' '$*'; \
+		printf 'CC=%s\n' '$(CC)'; \
+		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
+		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'PICFLAGS=%s\n' '$(PICFLAGS)'; \
+		printf 'SHLIB_LDFLAGS=%s\n' '$(SHLIB_LDFLAGS)'; \
+		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
+		printf 'OBJDIR=%s\n' '$(OBJDIR)'; \
+		printf 'SHARED_OBJDIR=%s\n' '$(SHARED_OBJDIR)'; \
+		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
+		printf 'UNAME_M=%s\n' '$(UNAME_M)'; \
+	} > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" "$@"; \
+	fi
 
 all: demo stress bench server server_lossless server_flood static shared
 
@@ -368,7 +563,7 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load server_flood shared
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load server_flood shared
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -381,6 +576,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_r
 	./test_runtime_stress
 	./test_runtime_fuzz
 	./test_runtime_invariants
+	./test_runtime_shutdown_internal
 	./test_sync_primitives
 	./test_io_buffers
 	./test_windows_policy
@@ -476,6 +672,9 @@ test_runtime_fuzz: $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
 
 test_runtime_invariants: $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS) $(LDLIBS)
+
+test_runtime_shutdown_internal: $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
 
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)
@@ -691,7 +890,7 @@ verify-linux: all
 	./scripts/verify_linux.sh
 
 verify-windows:
-	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_windows.ps1
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify_windows.ps1 -Native
 
 platform-status:
 	@echo "host platform: $(HOST_PLATFORM)"

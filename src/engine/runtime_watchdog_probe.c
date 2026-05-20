@@ -45,6 +45,35 @@ bool llam_dynamic_trace_enabled(void) {
 }
 
 /**
+ * @brief Return whether a running task is blocking useful local/global work.
+ *
+ * The watchdog uses this to avoid sending preemption nudges when a task is the
+ * only runnable work in the runtime.  Strict mode intentionally bypasses this
+ * pressure gate for diagnostics.
+ */
+static bool llam_watchdog_preempt_pressure_locked(llam_shard_t *shard) {
+    llam_runtime_t *rt;
+
+    if (shard == NULL || shard->runtime == NULL) {
+        return false;
+    }
+    rt = shard->runtime;
+    if (rt->preempt_mode == LLAM_PREEMPT_STRICT) {
+        return true;
+    }
+    if (atomic_load_explicit(&shard->inject_depth, memory_order_acquire) != 0U ||
+        shard->hot_q.depth != 0U ||
+        llam_norm_queue_depth(shard) != 0U ||
+        atomic_load_explicit(&shard->timer_count, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&shard->event_pending, memory_order_acquire) != 0U ||
+        llam_runtime_overflow_depth(rt) != 0U ||
+        atomic_load_explicit(&rt->block_pending, memory_order_acquire) != 0U) {
+        return true;
+    }
+    return false;
+}
+
+/**
  * @brief Inspect a running shard for missed safepoints.
  *
  * Opaque-blocking tasks are ignored because their compensation path is expected
@@ -57,29 +86,48 @@ bool llam_dynamic_trace_enabled(void) {
  */
 void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
     llam_task_t *current;
+    llam_runtime_t *rt = shard != NULL ? shard->runtime : NULL;
 
+    if (rt == NULL || rt->preempt_mode < LLAM_PREEMPT_AUTO) {
+        return;
+    }
     pthread_mutex_lock(&shard->lock);
     current = atomic_load_explicit(&shard->current, memory_order_acquire);
     if (current != NULL) {
         uint64_t last_safepoint = atomic_load_explicit(&shard->last_safepoint_ns, memory_order_relaxed);
-        uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&current->task_class, memory_order_acquire));
+        uint64_t slice_ns = rt->preempt_quantum_ns != 0U
+                                ? rt->preempt_quantum_ns
+                                : llam_slice_ns((llam_task_class_t)atomic_load_explicit(&current->task_class, memory_order_acquire));
 
-        if (current->opaque_blocking_depth > 0U || current->state == LLAM_TASK_STATE_BLOCKED_OPAQUE) {
+        if ((current->flags & LLAM_TASK_FLAG_NO_PREEMPT) != 0U ||
+            current->opaque_blocking_depth > 0U ||
+            current->state == LLAM_TASK_STATE_BLOCKED_OPAQUE) {
             pthread_mutex_unlock(&shard->lock);
             return;
         }
 
-        if (last_safepoint > 0U && now_ns > last_safepoint && now_ns - last_safepoint > slice_ns * 2U) {
+        if (rt->preempt_mode != LLAM_PREEMPT_STRICT && slice_ns <= UINT64_MAX / 2U) {
+            slice_ns *= 2U;
+        }
+        if (last_safepoint > 0U && now_ns > last_safepoint && now_ns - last_safepoint > slice_ns) {
+            if (!llam_watchdog_preempt_pressure_locked(shard)) {
+                shard->metrics.preempt_suppressed += 1U;
+                pthread_mutex_unlock(&shard->lock);
+                return;
+            }
             if (atomic_exchange(&current->preempt_requested, 1U) == 0U) {
                 shard->metrics.watchdog_hits += 1U;
                 shard->metrics.long_no_safepoint += 1U;
+                shard->metrics.preempt_requests += 1U;
                 llam_trace_shard(shard,
                                current,
                                LLAM_TRACE_WATCHDOG,
                                LLAM_TASK_STATE_RUNNING,
                                LLAM_TASK_STATE_RUNNING,
                                LLAM_WAIT_NONE);
-                (void)pthread_kill(shard->thread, LLAM_PREEMPT_SIGNAL);
+                if (pthread_kill(shard->thread, LLAM_PREEMPT_SIGNAL) == 0) {
+                    shard->metrics.preempt_signals += 1U;
+                }
             }
         }
     }
@@ -91,7 +139,7 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
  *
  * @param rt Runtime to inspect.
  *
- * @return @c true when at least one timer root is present.
+ * @return @c true when at least one timer root or unresolved expired timer is present.
  */
 bool llam_runtime_has_pending_timers(llam_runtime_t *rt) {
     unsigned i;
@@ -100,7 +148,8 @@ bool llam_runtime_has_pending_timers(llam_runtime_t *rt) {
         bool has_timer;
 
         pthread_mutex_lock(&rt->shards[i].lock);
-        has_timer = rt->shards[i].timers != NULL;
+        has_timer = rt->shards[i].timers != NULL ||
+                    atomic_load_explicit(&rt->shards[i].timer_callbacks_active, memory_order_acquire) != 0U;
         pthread_mutex_unlock(&rt->shards[i].lock);
         if (has_timer) {
             return true;

@@ -81,6 +81,30 @@ def request_runtime_dump(proc: subprocess.Popen[str], log, dump_path: Path | Non
         time.sleep(0.05)
 
 
+def signal_name(signum: int) -> str:
+    try:
+        return signal.Signals(signum).name
+    except (ValueError, AttributeError):
+        return f"SIG{signum}"
+
+
+def classify_exit(rc: int, timed_out: bool) -> tuple[str, str]:
+    if timed_out:
+        return "timeout", "deadline_exceeded"
+    if rc == 0:
+        return "ok", "completed"
+    if rc < 0:
+        signum = -rc
+        return "signal", f"terminated_by_{signal_name(signum)}"
+    return "nonzero_exit", f"exit_code_{rc}"
+
+
+def dump_state(dump_path: Path | None) -> str:
+    if dump_path is None:
+        return "none"
+    return "exists" if dump_path.exists() else "missing"
+
+
 def main() -> int:
     args = parse_args()
     args.log.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +142,7 @@ def main() -> int:
 
         deadline = time.monotonic() + args.timeout
         timed_out = False
+        timeout_action = "none"
         while proc.poll() is None:
             if time.monotonic() >= deadline:
                 timed_out = True
@@ -128,10 +153,12 @@ def main() -> int:
                 request_runtime_dump(proc, log, args.dump_on_timeout, args.dump_grace)
                 if proc.poll() is not None:
                     break
+                timeout_action = "interrupt"
                 interrupt_process(proc)
                 try:
                     proc.wait(timeout=args.kill_grace)
                 except subprocess.TimeoutExpired:
+                    timeout_action = "kill"
                     message = f"[run_with_timeout] process did not exit after {args.kill_grace:.3f}s; killing\n"
                     print(message, end="", file=sys.stderr)
                     log.write(message)
@@ -146,8 +173,18 @@ def main() -> int:
         if rc is None:
             rc = 124
 
+        class_name, reason = classify_exit(rc, timed_out)
+        wrapper_rc = 124 if timed_out else rc
+        diagnostic = (
+            f"[run_with_timeout] diagnosis class={class_name} reason={reason} "
+            f"child_exit_code={rc} wrapper_exit_code={wrapper_rc} "
+            f"timed_out={int(timed_out)} timeout_action={timeout_action} "
+            f"log={args.log} dump={dump_state(args.dump_on_timeout)}\n"
+        )
         log.write(f"[run_with_timeout] exit_code={rc} timed_out={int(timed_out)}\n")
+        log.write(diagnostic)
         log.flush()
+        print(diagnostic, end="", file=sys.stderr if rc != 0 or timed_out else sys.stdout)
         if timed_out:
             return 124
         return rc

@@ -64,18 +64,18 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
         if (io_op != NULL && io_op->magic == LLAM_WINDOWS_IO_OP_MAGIC) {
             DWORD error_code;
 
-            io_op->node->windows_cancel_controls += 1U;
+            atomic_fetch_add_explicit(&io_op->node->windows_cancel_controls, 1U, memory_order_relaxed);
             HANDLE cancel_handle = (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE) ?
                                        (HANDLE)req->handle :
                                        (HANDLE)(uintptr_t)req->fd;
 
             if (CancelIoEx(cancel_handle, &io_op->overlapped)) {
-                io_op->node->windows_cancel_success += 1U;
+                atomic_fetch_add_explicit(&io_op->node->windows_cancel_success, 1U, memory_order_relaxed);
             } else {
                 error_code = GetLastError();
-                io_op->node->windows_cancel_failures += 1U;
+                atomic_fetch_add_explicit(&io_op->node->windows_cancel_failures, 1U, memory_order_relaxed);
                 if (error_code == ERROR_NOT_FOUND) {
-                    io_op->node->windows_cancel_not_found += 1U;
+                    atomic_fetch_add_explicit(&io_op->node->windows_cancel_not_found, 1U, memory_order_relaxed);
                 }
             }
         }

@@ -15,9 +15,9 @@ public symbols.
 The current public ABI version is:
 
 ```text
-LLAM_VERSION         = 1.0.2
+LLAM_VERSION         = 1.1.0
 LLAM_ABI_VERSION_MAJOR = 1
-LLAM_ABI_VERSION_MINOR = 0
+LLAM_ABI_VERSION_MINOR = 1
 LLAM_ABI_VERSION       = (major << 16) | minor
 ```
 
@@ -53,7 +53,7 @@ with `errno` set on failure.
 | --- | --- | --- |
 | ABI/version | `llam_abi_version`, `llam_version_string`, `llam_abi_get_info` | Safe to call before runtime initialization. Returned strings are library-owned static storage. |
 | Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_shutdown` | Process-wide singleton runtime. Initialize before spawning tasks; shutdown invalidates runtime-owned handles. FFI bindings should prefer `_ex` and option initializers. |
-| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. FFI bindings should prefer `_ex` and option initializers. |
+| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. |
 | Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. |
 | Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners or waiters remain. |
@@ -166,6 +166,10 @@ for unknown class values and `-1/ENOTSUP` outside a managed task.
   for 1.x, but their handle is an alias for the process-global runtime. Passing
   a non-default handle to `llam_runtime_run_handle()` fails with `EINVAL`, and a
   second live runtime creation fails with `EBUSY`.
+- Calling `llam_runtime_shutdown()` from a managed LLAM task or scheduler frame
+  does not tear down the singleton underneath the active scheduler. It is
+  treated as a cooperative stop request; the host thread that owns `llam_run()`
+  remains responsible for final shutdown.
 - A process must not call `llam_runtime_shutdown()` while another thread is
   concurrently creating tasks or runtime-owned synchronization objects.
 - User pointers passed to tasks, channels, blocking callbacks, or I/O buffers
@@ -214,7 +218,7 @@ make shared
 Expected dynamic artifacts:
 
 ```text
-Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.0.2
+Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.1.0
 macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.
@@ -260,6 +264,10 @@ graceful task drain should call `llam_runtime_request_stop()`, drive
 mutex, condition, cancellation-token, and I/O-buffer handles are invalid unless
 a function explicitly documents otherwise.
 
+From a managed LLAM task or scheduler frame, shutdown performs only the
+stop-request portion. This avoids freeing scheduler, stack, or I/O state while
+it is still active on the current call stack.
+
 ## Task Semantics
 
 `llam_spawn_ex()` creates a stackful managed task with an explicit option size
@@ -285,11 +293,27 @@ with `errno = EBUSY` before the handle is consumed. `llam_detach()` fails with
 run to completion and remain counted as live runtime work until their entry
 function returns.
 
+Task groups own the child task handles spawned through the group. Group
+cancellation cancels only the group's automatically attached cancellation token;
+children spawned with an explicit caller-owned token remain controlled by that
+token. Destroying a task group with live children, active spawn/cancel
+operations, or an in-progress join fails with `EBUSY`. Calls racing with a
+completed group destroy fail with `EINVAL` instead of dereferencing reclaimed
+group storage.
+
 `llam_yield()` is cooperative. It never transfers ownership of user memory and
 does not imply a memory fence beyond the synchronization performed by the
 runtime scheduler. `llam_task_safepoint()` is the lower-overhead progress hook
 for CPU-bound loops; it is a no-op outside a managed task and may yield only
 when runtime policy or preemption requests require it.
+
+`LLAM_PREEMPT_POLL()` and `LLAM_PREEMPT_POLL_EVERY(counter, interval)` are the
+public hot-loop helpers for request-based automatic preemption. They do not let
+the runtime asynchronously switch stacks at arbitrary instruction boundaries;
+they provide explicit LLAM boundaries where an already requested preemption can
+be honored. `LLAM_PREEMPT_POLL_EVERY` evaluates its arguments once, treats
+`interval` values `0` and `1` as "poll every call", and is safe to use in tight
+loops where a full `llam_yield()` would be too expensive.
 
 ## Synchronization Semantics
 
@@ -309,6 +333,14 @@ Outside-runtime behavior is fixed as follows:
   are no-ops and return `0`.
 - Runtime mutex, condition, and channel blocking operations require a managed
   task context and fail with `ENOTSUP` outside one.
+- Nonblocking channel operations (`llam_channel_try_send()` and
+  `llam_channel_try_recv_result()`) may be called from unmanaged OS threads
+  after runtime initialization because they never park. This is the supported
+  host-thread cleanup path for draining buffered channel values before destroy.
+  `llam_channel_try_recv_result()` can also drain already-buffered values after
+  runtime shutdown; it never wakes parked senders without a live runtime. A
+  nonblocking operation that would park fails with `errno = EAGAIN`, not
+  `ETIMEDOUT`.
 - Runtime I/O helpers document their own direct syscall fallback below.
 
 Language runtimes should perform blocking coordination from LLAM tasks whenever
@@ -398,7 +430,9 @@ returned descriptors, especially from Windows bindings where `llam_fd_t` maps to
 `SOCKET`.
 
 Owned-buffer read APIs transfer buffer ownership to the caller on success. The
-caller must release the buffer with `llam_io_buffer_release()`.
+caller must release the buffer with `llam_io_buffer_release()`. The returned
+wrapper and payload remain valid until release even if the runtime that produced
+the buffer is shut down first.
 
 Owned-buffer result rules are fixed for FFI bindings:
 
@@ -441,6 +475,7 @@ Common public failures are fixed as follows:
 | errno | Meaning |
 | --- | --- |
 | `EINVAL` | Invalid argument, zero-sized inbound option struct, invalid enum/policy value, or invalid consumed handle use. |
+| `EAGAIN` | Nonblocking operation would need to park or wait. |
 | `EBUSY` | Runtime already initialized/running, concurrent second task join before handle consumption, detach while a join waiter owns completion, or destroy while observers remain. |
 | `ETIMEDOUT` | Absolute deadline or relative timeout expired. |
 | `ECANCELED` | Cancellation token or cooperative runtime stop was observed by a cancellable operation. |

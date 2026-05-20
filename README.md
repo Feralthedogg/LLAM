@@ -40,9 +40,15 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 | Linux aarch64 | Supported | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
 | macOS x86_64 | Supported | kqueue + x86_64 asm context switch | Apple Clang | `CC=clang make verify-darwin` |
-| Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx, overlapped HANDLE ReadFile/WriteFile, plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MinGW and MSVC/MASM via CMake | CMake Windows build plus `test_windows_policy`, `test_windows_runtime_smoke`, `test_windows_iocp_io`, and `test_windows_handle_io`; `scripts/verify_windows.ps1 -Native` |
+| Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx, overlapped HANDLE ReadFile/WriteFile, plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MSVC/MASM or MinGW through CMake; Makefile delegates to that CMake path on Windows | CMake Windows build plus `test_windows_policy`, `test_windows_runtime_smoke`, `test_windows_iocp_io`, and `test_windows_handle_io`; `scripts/verify_windows.ps1 -Native` |
 
 Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, IOCP-backed socket requests, and overlapped HANDLE I/O. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
+On Windows 11 policy, associated socket/HANDLE objects attempt
+`FILE_SKIP_COMPLETION_PORT_ON_SUCCESS`; synchronous overlapped successes on
+accepted handles are completed inline through the same finalizer used for queued
+IOCP packets. Runtime dumps include `windows_skip(...)` counters to show whether
+the host accepted that mode and how often it avoided a completion-port round
+trip.
 
 Production and stress-operation guidance is documented in `docs/operations.md`.
 
@@ -75,10 +81,23 @@ CC=clang make -j4
 Build native Windows with CMake:
 
 ```powershell
-cmake -S . -B build-windows -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build-windows -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DLLAM_ENABLE_WINDOWS_BACKEND=ON
 cmake --build build-windows
 ctest --test-dir build-windows --output-on-failure
 ```
+
+The top-level Makefile is also usable from a Windows shell with `make`
+available. On Windows it delegates to the same native CMake backend instead of
+trying to compile the MSVC/MASM path directly:
+
+```powershell
+make all
+make test
+make verify-windows
+```
+
+Use `WINDOWS_CMAKE_ARGS` to select a generator when needed, for example
+`make all WINDOWS_CMAKE_ARGS="-G Ninja"`.
 
 `.\scripts\verify_windows.ps1` still verifies the Linux backend through WSL. `.\scripts\verify_windows.ps1 -Native` builds the native Windows CMake targets and runs the Windows CTest suite.
 
@@ -178,6 +197,15 @@ GitHub Actions is split by cost and depth:
 - `Weekly Soak` runs the hour-long composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
 - `Runtime Benchmarks` runs scheduled LLAM/Go/Tokio benchmark comparisons and uploads graphs/results.
 
+Current reliability coverage is split between direct runtime tests and the
+example server. Direct runtime tests own LLAM correctness for lifecycle,
+task-handle ownership, cancellation, lost wakeups, channel close/select,
+blocking callbacks, managed/unmanaged API boundaries, owned I/O buffers, and
+runtime diagnostics. The chat server stress suite is an integration workload:
+lossless phases prove exact fanout under backpressure, while best-effort flood
+phases allow bounded outbox drops and require those drops to be fully explained
+by server-side accounting.
+
 Build outputs:
 
 - `demo`: runnable examples of the public runtime API.
@@ -198,6 +226,7 @@ Build outputs:
 - `test_runtime_select_edges`: focused `llam_channel_select()` send/close/cancel race coverage for lost-wakeup attribution outside the example server.
 - `test_runtime_io_dump`: focused live-I/O diagnostic coverage proving a parked fd-readiness wait appears in `llam_dump_runtime_state()` either as native request ownership or as an explicit blocking fallback job.
 - `test_runtime_group_local_edges`: focused task-local isolation and structured task-group join/cancel/destroy ownership coverage.
+- `test_runtime_shutdown_internal`: focused shutdown-internal coverage for partial initialization, stop-time wakeup, and internal resource cleanup.
 - `test_runtime_stress`: direct LLAM scheduler, cancel, channel, condvar, nested spawn, and I/O cancel stress.
 - `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
@@ -221,11 +250,11 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v1.0.2` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v1.1.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
 through `.github/workflows/release.yml`.
 
-The 1.0 release gate is intentionally platform-local: Linux must pass
+The 1.x release gate is intentionally platform-local: Linux must pass
 `make verify-linux` or Docker verification, macOS must pass the Darwin verify
 path, and Windows must pass native CMake/CTest plus Windows 2022/2025 stress
 smoke. The full operational checklist is in `docs/operations.md`.
@@ -248,19 +277,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.2/install.sh | sh -s -- --version 1.0.2 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.1.0/install.sh | sh -s -- --version 1.1.0 --prefix "$HOME/.local"
 ```
 
 Install a specific Linux/macOS target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/1.0.2/install.sh | sh -s -- --version 1.0.2 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.1.0/install.sh | sh -s -- --version 1.1.0 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/1.0.2/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.0.2 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v1.1.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.1.0 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
@@ -270,8 +299,8 @@ Include the canonical public API:
 ```
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer `llam_runtime_init_ex()` and `llam_spawn_ex()` so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
-Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.0 as one active runtime per process.
-True multi-runtime isolation is a post-1.0 migration item; do not create/destroy
+Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.x as one active runtime per process.
+True multi-runtime isolation is a future ABI-compatible migration item; do not create/destroy
 LLAM concurrently from multiple host runtime instances.
 macOS-specific performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
 Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
@@ -548,6 +577,8 @@ Task scheduling:
 | `llam_run` | Run the scheduler. |
 | `llam_yield` | Yield the current task. |
 | `llam_task_safepoint` | Mark progress in CPU-bound loops without forcing an immediate yield. |
+| `LLAM_PREEMPT_POLL` | Public hot-loop poll helper that expands to a safepoint. |
+| `LLAM_PREEMPT_POLL_EVERY` | Public counted poll helper for CPU-bound loops; macro arguments are evaluated once. |
 | `llam_join` | Wait for task completion. |
 | `llam_join_until` | Wait for task completion until a deadline. |
 | `llam_detach` | Consume a task handle without waiting for completion. |
@@ -613,8 +644,10 @@ Channels:
 | --- | --- |
 | `llam_channel_create` / `llam_channel_destroy` | Create or destroy a channel; destroy returns `EBUSY` while buffered values or waiters remain. |
 | `llam_channel_send` | Send a value. |
+| `llam_channel_try_send` | Try to send without parking; full channels fail with `EAGAIN`. |
 | `llam_channel_send_until` | Send a value until a deadline. |
 | `llam_channel_recv_result` | Receive a value through an unambiguous `int + out` API. |
+| `llam_channel_try_recv_result` | Try to receive without parking; empty open channels fail with `EAGAIN`. |
 | `llam_channel_recv_until_result` | Receive a value until a deadline through an unambiguous `int + out` API. |
 | `llam_channel_recv` | Convenience receive API; use result form if `NULL` is a valid payload. |
 | `llam_channel_recv_until` | Convenience timed receive API; use result form if `NULL` is a valid payload. |
@@ -735,6 +768,10 @@ Selected environment variables:
 | `LLAM_IO_WRITE_HANDOFF` | `0`, `1` | Yield after small socket writes so local readers can run; default is enabled on macOS and Linux. |
 | `LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF` | `0`, `1` | Prefer direct same-shard task handoff after eligible socket writes; default is enabled on macOS, Linux, and Windows. |
 | `LLAM_YIELD_DIRECT_HANDOFF` | `0`, `1`, unset | Allow ordinary yields to switch directly to same-shard runnable work when no timers or inject work are pending. |
+| `LLAM_PREEMPT_MODE` | `off`, `cooperative`, `auto`, `strict` | Select request-based cooperative preemption policy. `auto` requests preemption under budget pressure; `strict` is diagnostic and polls aggressively. |
+| `LLAM_PREEMPT_POLL_PERIOD` | `0`-`4096` | Override the task-local safepoint flag-poll period. `0` uses the profile default; strict mode forces frequent polling. |
+| `LLAM_PREEMPT_QUANTUM_NS` | nanoseconds | Override the global preemption slice. `0` uses task-class defaults. |
+| `LLAM_SAFEPOINT_CLOCK_PERIOD` | `0`-`4096` | Bound cheap-safepoint clock sampling. `0` samples every safepoint. |
 | `LLAM_OPAQUE_REDIRECT_FASTPATH` | `0`, `1` | Prefer redirect over helper handoff for opaque blocking; default is enabled on Linux. |
 | `LLAM_TIMER_HEAP_PREWARM` | timer slots | Preallocate shard timer heap slots to avoid growth during sleep/deadline fanout. |
 | `LLAM_STACK_CACHE_PREWARM` | stack count | Prewarm the default stack cache before high fanout workloads. |
@@ -864,22 +901,35 @@ Remove generated files:
 make clean
 ```
 
-`make clean` removes generated files such as `object/`, `build/`, CMake cache files, example and benchmark binaries, and `perf.data*`.
+`make clean` removes generated files such as `object/`, `object-*`, `object-pic/`, `build/`, CMake cache files, analyzer `.plist` files, link-signature files, example and benchmark binaries, shared/static libraries, and `perf.data*`.
 
-## Plan
+## Current Guarantees And Roadmap
 
-### 1. Core Runtime Completeness
+### 1. Current 1.x Guarantees
 
-The 1.0.x line treats the current public C ABI as stable and keeps the default
-model to one active LLAM runtime per process. The next core-runtime work is
-focused on tightening the runtime itself, not changing the user-facing contract:
+The 1.x line treats the current public C ABI as stable and keeps the default
+model to one active LLAM runtime per process. These items are part of the
+current maintained contract rather than future roadmap work:
 
-- Maintain focused direct API tests for lifecycle, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`; future regressions should add a minimal direct test before relying on example-server reproduction.
-- Keep promoting low-level stress cases out of examples when the failure belongs to LLAM itself. Example-server stress remains useful for integration and policy validation, but scheduler, cancellation, wakeup, select, and ownership failures should be reduced into focused runtime tests.
-- Treat the runtime handle API as the supported embedding boundary for 1.x. The public header, ABI guide, operations guide, and direct tests now pin the current contract: one active process runtime, `EBUSY` on a second live create, `EINVAL` on non-default run handles, and no promise of concurrent multi-runtime isolation until global singleton/TLS dependencies are migrated.
-- Keep rare-hang diagnostics actionable. `llam_dump_runtime_state()` now emits lifecycle/stop state, active I/O waiters, block-helper wake state, node submit/control/watch queues, shard wake/I/O ownership, and task-level wait ownership (`wait_owner`, cancellation registration, deadlines, active I/O requests, and blocking jobs) so shutdown, cancellation, wake handoff, and I/O ownership issues can be diagnosed from one dump. CI long-running stress jobs stream partial output through `scripts/run_with_timeout.py`, request a signal-driven runtime dump before timeout shutdown on POSIX stress binaries, and server composite runs can emit stop-time runtime dumps into the artifact directory.
+- Focused direct API tests cover lifecycle, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`.
+- Runtime-owned failures should be reduced into focused runtime tests before they rely on example-server reproduction. The example server remains an integration and policy workload, while scheduler, cancellation, wakeup, select, and ownership regressions belong in direct tests.
+- The runtime handle API is the supported embedding boundary for 1.x. The public header, ABI guide, operations guide, and direct tests pin the current contract: one active process runtime, `EBUSY` on a second live create, `EINVAL` on non-default run handles, and no promise of concurrent multi-runtime isolation until global singleton/TLS dependencies are migrated.
+- Rare-hang diagnostics are expected to be actionable. `llam_dump_runtime_state()` emits lifecycle/stop state, active I/O waiters, block-helper wake state, node submit/control/watch queues, shard wake/I/O ownership, and task-level wait ownership (`wait_owner`, cancellation registration, deadlines, active I/O requests, and blocking jobs). CI long-running stress jobs stream partial output through `scripts/run_with_timeout.py`, request a signal-driven runtime dump before timeout shutdown on POSIX stress binaries, and server composite runs can emit stop-time runtime dumps into the artifact directory.
+- Release archives are expected to stay self-contained: public headers, shared/static libraries, CMake config, pkg-config metadata, examples, install scripts, and operations docs.
+- The chat examples intentionally separate best-effort throughput behavior from lossless/backpressure behavior so benchmark logs are not misread as runtime message loss.
+- CI remains layered: quick PR gates, platform stress gates, nightly sanitizer/fuzz/benchmark runs, and weekly soak runs.
 
-### 2. Performance Roadmap
+### 2. Core Runtime Roadmap
+
+Future core-runtime work should tighten LLAM itself without changing the stable
+1.x user-facing contract:
+
+- Keep extending direct API coverage when new edge cases are found, especially around shutdown races, cancellation ownership, lost wakeups, select fanout, blocking helpers, and I/O request ownership.
+- Continue promoting low-level stress failures out of examples into minimal runtime tests when the bug belongs to LLAM rather than to sample-application policy.
+- Stage true concurrent multi-runtime isolation only after every global singleton, TLS dependency, queue, timer, allocator cache, and I/O backend owner has a migration path.
+- Keep improving diagnostic dumps so rare shutdown, cancellation, wake handoff, and I/O ownership hangs produce enough state to debug without reproducing under a debugger.
+
+### 3. Performance Roadmap
 
 Performance work stays platform-local and benchmark-gated. Each optimization
 needs before/after numbers against LLAM's own baseline plus Go and Tokio where
@@ -891,7 +941,7 @@ the comparison is meaningful.
 - Scheduler: measure shard lock contention, worker wake storms, task reclaim cost, and timer heap locality before replacing primitives.
 - Channels: preserve correctness first; optimize buffered channel modulo/bitmask paths, select fanout, and wake accounting only with regression tests that catch lost wakeups.
 
-### 3. Platform Expansion: BSD And RISC-V
+### 4. Platform Expansion: BSD And RISC-V
 
 New platform work should extend the existing backend model without weakening
 the Linux, Darwin, or Windows fast paths. The priority is correctness first,
@@ -905,14 +955,11 @@ then native I/O integration, then platform-specific context-switch tuning.
 - CI: add riscv64 cross-build and QEMU smoke first, then native runner stress if available; add FreeBSD CI through a VM/action runner before marking BSD as supported.
 - Release policy: do not publish BSD or RISC-V release artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
 
-### 4. C Ecosystem And Operations
+### 5. C Ecosystem And Operations
 
 The ecosystem target is a small, embeddable C runtime with reproducible builds,
 clear examples, and CI that catches platform regressions early.
 
-- Keep release archives self-contained: public headers, shared/static libraries, CMake config, pkg-config metadata, examples, install scripts, and operations docs.
-- Maintain separate examples for best-effort throughput behavior and lossless/backpressure behavior so benchmark logs are not misread as runtime message loss.
-- Keep CI layered: quick PR gates, platform stress gates, nightly sanitizer/fuzz/benchmark runs, and weekly soak runs.
 - Track benchmark artifacts as CSV/PNG outputs so performance claims can be tied to recorded runs instead of anecdotal local results.
 - Keep documentation focused on LLAM's C ABI, platform backends, operational limits, and verification commands.
 
@@ -961,7 +1008,7 @@ flowchart LR
 
 ### N:M Threading Model
 
-**Tasks** are the fundamental unit of execution. Each task is a `void (*)(void *)` function with its own fiber stack allocated via `mmap` with a guard page. Tasks are scheduled cooperatively onto OS worker threads; the runtime never preempts a task without its participation (safepoints, yields, or I/O waits).
+**Tasks** are the fundamental unit of execution. Each task is a `void (*)(void *)` function with its own fiber stack allocated via `mmap` with a guard page. Tasks are scheduled cooperatively onto OS worker threads. Automatic preemption is request-based: watchdog and runtime policy can mark an over-budget task, but the actual context switch still occurs only at LLAM boundaries such as safepoints, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, yields, waits, or I/O calls.
 
 **Shards** are per-worker scheduler partitions. Each shard owns:
 
@@ -1112,7 +1159,7 @@ All sync primitives are **runtime-aware**: when called from a managed task, bloc
 
 - **Mutex** (`llam_mutex_t`): atomic owner fast path + `llam_wait_queue_t` for contention. Non-recursive. `EDEADLK` on self-lock, `EPERM` on non-owner unlock.
 - **Condition variable** (`llam_cond_t`): FIFO waiter queue. Signal/broadcast can be called from outside managed tasks.
-- **Channel** (`llam_channel_t`): bounded pointer-valued ring buffer with separate send and receive wait queues. Supports close semantics (sends fail with `EPIPE`, buffered values remain drainable).
+- **Channel** (`llam_channel_t`): bounded pointer-valued ring buffer with separate send and receive wait queues. Supports close semantics (sends fail with `EPIPE`, buffered values remain drainable). Nonblocking try-send/try-receive are also valid from host threads after runtime initialization, and try-receive can drain buffered values after shutdown, so embedders can clean up without entering a managed task.
 - **Cancel token** (`llam_cancel_token_t`): explicit cancellation handle with a waiter list. Registered tasks and I/O operations observe cancellation through `ECANCELED`.
 
 

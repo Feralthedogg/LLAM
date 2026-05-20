@@ -267,7 +267,7 @@ int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
                           (int)node->recv_buf_mask,
                           0);
     io_uring_buf_ring_advance(node->recv_buf_ring, 1);
-    node->provided_buf_returns += 1U;
+    atomic_fetch_add_explicit(&node->provided_buf_returns, 1U, memory_order_relaxed);
     pthread_mutex_unlock(&node->recv_buf_lock);
     return 0;
 }

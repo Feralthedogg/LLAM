@@ -144,9 +144,7 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
     direct_local = (g_llam_tls_shard == target && g_llam_tls_task != NULL);
 
-    if (task->active_timer != NULL) {
-        llam_disarm_task_wait_deadline(task);
-    }
+    llam_disarm_task_wait_deadline(task);
     // Wake ownership transfers from the wait primitive/I/O request back to the
     // scheduler queue before the task becomes runnable.
     llam_task_clear_wait_tracking(task);
@@ -193,7 +191,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     }
 
     if (rt->run_timing_enabled != 0U || rt->wake_latency_metrics_enabled != 0U ||
-        task->active_timer != NULL) {
+        llam_task_wait_deadline_active(task)) {
         return false;
     }
 
@@ -202,8 +200,6 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
 #endif
 
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
-
-    llam_task_clear_wait_tracking(task);
 
 #if LLAM_REINJECT_DIRECT_OWNER_HANDOFF
     if (g_llam_tls_scheduler_ctx == &target->scheduler_ctx &&
@@ -214,11 +210,18 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         !target->opaque_redirect_active &&
         (rt->direct_handoff_allow_timers != 0U ||
          atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U)) {
-        current->forced_yield_budget = rt->forced_yield_every;
-        current->state = LLAM_TASK_STATE_RUNNABLE;
-        current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = 0U;
         if (llam_norm_queue_push_yield_unlocked(target, current)) {
+            /*
+             * This is the first point where direct handoff has committed.  The
+             * try path can still fail before this and must leave wait ownership
+             * untouched so the caller's normal reinject fallback sees a fully
+             * tracked parked task.
+             */
+            current->forced_yield_budget = rt->forced_yield_every;
+            current->state = LLAM_TASK_STATE_RUNNABLE;
+            current->wait_reason = LLAM_WAIT_NONE;
+            current->last_yield_ns = 0U;
+            llam_task_clear_wait_tracking(task);
             task_from = task->state;
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
@@ -248,15 +251,23 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         return false;
     }
 
+    effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, false);
+    // Put the yielding task on the normal FIFO side so the just-woken peer can
+    // run promptly without starving older normal work.
+    if (!llam_norm_queue_push_yield_locked(target, current)) {
+        pthread_mutex_unlock(&target->lock);
+        return false;
+    }
+    /*
+     * The locked path has committed once the current task is queued.  Keep both
+     * the current task state and the woken task's wait ownership untouched until
+     * that point so failed try paths remain invisible to the caller.
+     */
     current->forced_yield_budget = rt->forced_yield_every;
     current->state = LLAM_TASK_STATE_RUNNABLE;
     current->wait_reason = LLAM_WAIT_NONE;
     current->last_yield_ns = 0U;
-
-    effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, false);
-    // Put the yielding task on the normal FIFO side so the just-woken peer can
-    // run promptly without starving older normal work.
-    (void)llam_norm_queue_push_yield_locked(target, current);
+    llam_task_clear_wait_tracking(task);
     task_from = task->state;
     task->state = LLAM_TASK_STATE_RUNNING;
     task->wait_reason = LLAM_WAIT_NONE;

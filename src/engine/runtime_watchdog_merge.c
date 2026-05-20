@@ -217,6 +217,7 @@ bool llam_shard_wait_merge_pause_ack(llam_shard_t *shard, uint64_t deadline_ns) 
 bool llam_shard_can_offline_locked(const llam_shard_t *shard) {
     return shard != NULL &&
            atomic_load_explicit(&shard->current, memory_order_acquire) == NULL &&
+           atomic_load_explicit(&((llam_shard_t *)shard)->timer_callbacks_active, memory_order_acquire) == 0U &&
            shard->inject_q.depth == 0U &&
            shard->hot_q.depth == 0U &&
            llam_norm_queue_depth(shard) == 0U &&

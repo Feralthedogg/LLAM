@@ -243,7 +243,12 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     job->fn = fn;
     job->arg = arg;
     job->task = task;
-    atomic_init(&job->state, LLAM_BLOCK_JOB_QUEUED);
+    /*
+     * Allocation already initialized the atomic state object.  Publish QUEUED
+     * with an atomic store so the worker/cancel state machine never observes a
+     * byte-cleared or uninitialized atomic after job recycling.
+     */
+    atomic_store_explicit(&job->state, LLAM_BLOCK_JOB_QUEUED, memory_order_release);
 
     task->blocking_result = NULL;
     task->blocking_errno = 0;
@@ -313,9 +318,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     llam_task_sample_live_stack(task);
     llam_switch_task_to_scheduler(task,
                                 g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     wake_error = llam_consume_task_wake_error(task);
     if (wake_error != 0) {

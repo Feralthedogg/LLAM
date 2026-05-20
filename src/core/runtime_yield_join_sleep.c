@@ -40,6 +40,8 @@
 #define LLAM_DIRECT_OWNER_HANDOFF 0
 #endif
 
+#define LLAM_DIRECT_YIELD_HANDOFF_AUTO 3
+
 typedef enum llam_yield_direct_fail {
     LLAM_YIELD_DIRECT_FAIL_NONE = 0,
     LLAM_YIELD_DIRECT_FAIL_CONTEXT,
@@ -134,7 +136,6 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
-    (void)rt;
     if (value < 0) {
         const char *env = llam_env_get("LLAM_YIELD_DIRECT_HANDOFF");
 
@@ -147,20 +148,29 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
                 value = 1;
             }
         } else {
-#if LLAM_RUNTIME_BACKEND_WINDOWS
-            value = rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2 : 0;
-#elif defined(__linux__)
             /*
-             * Linux owner-lane exchange is cheap enough to use for ordinary
-             * yields as well. The runtime burst guard bounds long handoff
-             * chains so timer-heavy fanout can still return to the scheduler.
+             * Environment parsing is process-wide, but the automatic policy is
+             * runtime-profile dependent.  Cache only the "auto" decision here;
+             * otherwise a release-fast runtime could permanently enable direct
+             * handoff for a later debug-safe runtime in the same process.
              */
-            value = rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 2 : 0;
-#else
-            value = rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2 : 0;
-#endif
+            value = LLAM_DIRECT_YIELD_HANDOFF_AUTO;
         }
         atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    if (value == LLAM_DIRECT_YIELD_HANDOFF_AUTO) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        return rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2U : 0U;
+#elif defined(__linux__)
+        /*
+         * Linux owner-lane exchange is cheap enough to use for ordinary yields
+         * as well. The runtime burst guard bounds long handoff chains so
+         * timer-heavy fanout can still return to the scheduler.
+         */
+        return rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 2U : 0U;
+#else
+        return rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2U : 0U;
+#endif
     }
     return (unsigned)value;
 }
@@ -218,10 +228,6 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         }
         return false;
     }
-    current->forced_yield_budget = g_llam_runtime.forced_yield_every;
-    current->state = LLAM_TASK_STATE_RUNNABLE;
-    current->wait_reason = LLAM_WAIT_NONE;
-    current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     if (!llam_norm_queue_exchange_yield_unlocked(shard, current, &next, &push_failed)) {
         if (fail_reason != NULL) {
             *fail_reason = push_failed ? LLAM_YIELD_DIRECT_FAIL_PUSH : LLAM_YIELD_DIRECT_FAIL_NO_WORK;
@@ -235,6 +241,15 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         return false;
     }
 
+    /*
+     * The exchange helper queues @p current before returning true.  Mutate the
+     * running task only after that commit point so a failed try path cannot leak
+     * RUNNABLE state back to the normal yield fallback.
+     */
+    current->forced_yield_budget = g_llam_runtime.forced_yield_every;
+    current->state = LLAM_TASK_STATE_RUNNABLE;
+    current->wait_reason = LLAM_WAIT_NONE;
+    current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
     next->last_shard = shard->id;
@@ -396,10 +411,6 @@ bool llam_yield_to_local_runnable(void) {
         return false;
     }
 
-    current->forced_yield_budget = g_llam_runtime.forced_yield_every;
-    current->state = LLAM_TASK_STATE_RUNNABLE;
-    current->wait_reason = LLAM_WAIT_NONE;
-    current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     if (!llam_norm_queue_push_yield_locked(shard, current)) {
         (void)llam_norm_queue_push_owner_locked(shard, next);
         pthread_mutex_unlock(&shard->lock);
@@ -407,6 +418,14 @@ bool llam_yield_to_local_runnable(void) {
         return false;
     }
 
+    /*
+     * Queue insertion is the direct-handoff commit point.  Leave the currently
+     * executing task marked RUNNING on every false return above.
+     */
+    current->forced_yield_budget = g_llam_runtime.forced_yield_every;
+    current->state = LLAM_TASK_STATE_RUNNABLE;
+    current->wait_reason = LLAM_WAIT_NONE;
+    current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
     next->last_shard = shard->id;
@@ -746,9 +765,7 @@ int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
         // parks.  Remove any timer that the wake path could not disarm.
         llam_disarm_task_wait_deadline(self);
     }
-    if (self->cancel_registered) {
-        llam_cancel_token_unregister_task(self);
-    }
+    llam_cancel_token_unregister_task(self);
     llam_task_clear_wait_tracking(self);
     {
         int wake_error = llam_consume_task_wake_error(self);
@@ -862,6 +879,8 @@ int llam_sleep_until(uint64_t deadline_ns) {
     int caller_errno = errno;
     int rc;
     bool traced_sleep = false;
+    bool timer_inserted;
+    bool timer_completion_pending = false;
 
     llam_task_safepoint();
 
@@ -905,12 +924,18 @@ int llam_sleep_until(uint64_t deadline_ns) {
 
     pthread_mutex_lock(&shard->lock);
     llam_timer_insert_locked(shard, task);
-    if (task->active_timer != NULL && task->cancel_token == NULL) {
+    /*
+     * active_timer is also cleared by timer expiry.  Capture insert success
+     * under the heap lock so a concurrent watchdog wake is not misreported as
+     * ENOMEM after the lock is released.
+     */
+    timer_inserted = task->active_timer != NULL;
+    if (timer_inserted && task->cancel_token == NULL) {
         llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_SLEEP);
         traced_sleep = true;
     }
     pthread_mutex_unlock(&shard->lock);
-    if (task->active_timer == NULL) {
+    if (!timer_inserted) {
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         task->deadline_ns = 0U;
@@ -919,29 +944,42 @@ int llam_sleep_until(uint64_t deadline_ns) {
         return -1;
     }
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        bool removed;
+
         pthread_mutex_lock(&shard->lock);
-        (void)llam_timer_remove_locked(shard, task);
+        removed = llam_timer_remove_locked(shard, task);
         pthread_mutex_unlock(&shard->lock);
+        if (!removed) {
+            /*
+             * The deadline fired between timer insertion and cancellation
+             * registration.  The timer owner will requeue this task; returning
+             * cancellation here would leave the same task both executing and
+             * runnable.
+             */
+            timer_completion_pending = true;
+            goto sleep_wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         task->deadline_ns = 0U;
         llam_task_clear_wait_tracking(task);
         return -1;
     }
+sleep_wait_ready:
     shard->metrics.sleeps += 1U;
     shard->metrics.parks += 1U;
-    if (!traced_sleep) {
+    if (!traced_sleep && !timer_completion_pending) {
         pthread_mutex_lock(&shard->lock);
-        llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_SLEEP);
+        if (task->state == LLAM_TASK_STATE_PARKED && task->wait_reason == LLAM_WAIT_SLEEP) {
+            llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_SLEEP);
+        }
         pthread_mutex_unlock(&shard->lock);
     }
 
     llam_task_sample_live_stack(task);
     errno = caller_errno;
     llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     rc = llam_consume_task_wake_error(task);
     if (rc != 0) {
@@ -964,5 +1002,19 @@ int llam_sleep_until(uint64_t deadline_ns) {
  * @return 0 on success, or -1 with @c errno set by ::llam_sleep_until.
  */
 int llam_sleep_ns(uint64_t duration_ns) {
-    return llam_sleep_until(llam_now_ns() + duration_ns);
+    uint64_t now_ns = llam_now_ns();
+    uint64_t deadline_ns;
+
+    /*
+     * Relative sleeps are allowed to request durations larger than the
+     * monotonic clock range left in uint64_t.  Saturate instead of wrapping;
+     * otherwise a huge sleep becomes an already-expired absolute deadline and
+     * can incorrectly bypass cancellation.
+     */
+    if (duration_ns > UINT64_MAX - now_ns) {
+        deadline_ns = UINT64_MAX;
+    } else {
+        deadline_ns = now_ns + duration_ns;
+    }
+    return llam_sleep_until(deadline_ns);
 }

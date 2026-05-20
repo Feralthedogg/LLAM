@@ -73,6 +73,8 @@ const char *llam_io_abort_reason_name_diag(unsigned reason) {
         return "cancel";
     case LLAM_IO_ABORT_TIMEOUT:
         return "timeout";
+    case LLAM_IO_ABORT_ERROR:
+        return "error";
     default:
         return "unknown";
     }
@@ -115,7 +117,7 @@ const char *llam_task_wait_owner_name_diag(const llam_task_t *task) {
     if (task == NULL) {
         return "none";
     }
-    if (task->active_io_req != NULL) {
+    if (llam_task_active_io_req_load(task) != NULL) {
         return "io_req";
     }
     if (task->active_select_state != NULL) {
@@ -124,7 +126,7 @@ const char *llam_task_wait_owner_name_diag(const llam_task_t *task) {
     if (task->active_wait_node != NULL) {
         return "wait_node";
     }
-    if (task->active_block_job != NULL) {
+    if (llam_task_active_block_job_load(task) != NULL) {
         return "blocking_job";
     }
     if (task->join_target != NULL) {

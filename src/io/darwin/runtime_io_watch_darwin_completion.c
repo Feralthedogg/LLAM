@@ -56,6 +56,7 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
     llam_io_abort_reason_t abort_reason;
     llam_wait_reason_t wake_reason = LLAM_WAIT_IO;
     unsigned inflight_owner = UINT_MAX;
+    unsigned completion_owner = UINT_MAX;
     unsigned wait_mode;
 
     if (decrement_pending) {
@@ -63,13 +64,20 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
     }
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
     if (wait_mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
-        // Balance the in-flight owner counter established by submission.
+        /*
+         * Balance the in-flight owner counter established by submission.  The
+         * exchanged owner is also the authoritative completion target because
+         * dynamic shard rehome can update req->owner_shard concurrently after
+         * transferring this atomic owner.
+         */
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
         if (inflight_owner < node->runtime->active_shards) {
             llam_shard_note_inflight_io_waiter(inflight_owner, -1);
+            completion_owner = inflight_owner;
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+        completion_owner = req->owner_shard;
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
@@ -94,8 +102,8 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
         req->poll_revents = 0;
     }
 
-    if (req->owner_shard < node->runtime->active_shards) {
-        llam_shard_t *shard = &node->runtime->shards[req->owner_shard];
+    if (completion_owner < node->runtime->active_shards) {
+        llam_shard_t *shard = &node->runtime->shards[completion_owner];
         uint64_t now_ns = llam_now_ns();
 
         pthread_mutex_lock(&shard->lock);
@@ -113,7 +121,7 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
 
     llam_reinject_task_on_shard(node->runtime,
                               req->task,
-                              req->owner_shard,
+                              completion_owner,
                               true,
                               LLAM_TRACE_IO_COMPLETE,
                               wake_reason);

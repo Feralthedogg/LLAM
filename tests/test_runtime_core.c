@@ -19,6 +19,7 @@
  */
 
 #include "llam/runtime.h"
+#include "runtime_internal.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -28,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if LLAM_PLATFORM_POSIX
+#include <pthread.h>
 #include <unistd.h>
 #endif
 
@@ -54,6 +56,15 @@ typedef struct double_join_state {
     atomic_uint joined;
     atomic_uint busy;
 } double_join_state_t;
+
+#if LLAM_PLATFORM_POSIX
+typedef struct dump_blocking_state {
+    core_state_t core;
+    atomic_uint blocking_started;
+    atomic_uint release_blocking;
+    atomic_uint task_done;
+} dump_blocking_state_t;
+#endif
 
 #if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
 typedef struct aarch64_simd_state {
@@ -103,6 +114,39 @@ static void *blocking_null_callback(void *arg) {
     (void)arg;
     return NULL;
 }
+
+#if LLAM_PLATFORM_POSIX
+static void *dump_blocking_callback(void *arg) {
+    dump_blocking_state_t *state = arg;
+
+    atomic_store_explicit(&state->blocking_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_blocking, memory_order_acquire) == 0U) {
+        usleep(1000);
+    }
+    return arg;
+}
+
+static void dump_blocking_task(void *arg) {
+    dump_blocking_state_t *state = arg;
+    void *result = NULL;
+
+    if (llam_call_blocking_result(dump_blocking_callback, state, &result) != 0 ||
+        result != state) {
+        task_fail(&state->core, "blocking job for concurrent runtime dump failed", errno);
+        return;
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+static void *dump_run_thread(void *arg) {
+    dump_blocking_state_t *state = arg;
+
+    if (llam_run() != 0) {
+        task_fail(&state->core, "llam_run concurrent dump thread failed", errno);
+    }
+    return NULL;
+}
+#endif
 
 static void inspect_task(void *arg) {
     core_state_t *state = arg;
@@ -166,6 +210,30 @@ static void inspect_task(void *arg) {
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 
+static void direct_yield_no_work_task(void *arg) {
+    core_state_t *state = arg;
+    llam_task_t *self = llam_current_task();
+
+    if (self == NULL) {
+        task_fail(state, "direct yield current task missing", EINVAL);
+        return;
+    }
+    /*
+     * This exercises the internal try-handoff API used by I/O and channel fast
+     * paths.  With no local peer runnable, the call must fail without changing
+     * the still-executing task from RUNNING to RUNNABLE.
+     */
+    if (llam_yield_to_local_runnable()) {
+        task_fail(state, "direct yield unexpectedly found local work", EINVAL);
+        return;
+    }
+    if (strcmp(llam_task_state_name(self), "RUNNING") != 0) {
+        task_fail(state, "failed direct yield mutated current task state", EINVAL);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
 static void errno_isolation_task(void *arg) {
     errno_task_args_t *args = arg;
     core_state_t *state = args->state;
@@ -223,6 +291,24 @@ static void request_stop_task(void *arg) {
 
     if (llam_runtime_request_stop() != 0) {
         task_fail(state, "llam_runtime_request_stop in task", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void shutdown_from_task_task(void *arg) {
+    core_state_t *state = arg;
+    int saved_errno = E2BIG;
+
+    /*
+     * Managed tasks must never run full singleton teardown from their scheduler
+     * stack.  The public shutdown entry point should degrade to request_stop
+     * here, preserve errno, and let the host thread destroy resources later.
+     */
+    errno = saved_errno;
+    llam_runtime_shutdown();
+    if (errno != saved_errno) {
+        task_fail(state, "managed shutdown clobbered errno", errno);
         return;
     }
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
@@ -331,6 +417,13 @@ static int test_preinit_contracts(void) {
         errno = 0;
         if (llam_runtime_init_ex(&invalid_opts, sizeof(invalid_opts)) != -1 || errno != EINVAL) {
             return test_fail("llam_runtime_init_ex invalid profile did not fail with EINVAL");
+        }
+        memset(&invalid_opts, 0, sizeof(invalid_opts));
+        invalid_opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+        invalid_opts.preempt_mode = 999U;
+        errno = 0;
+        if (llam_runtime_init_ex(&invalid_opts, sizeof(invalid_opts)) != -1 || errno != EINVAL) {
+            return test_fail("llam_runtime_init_ex invalid preempt mode did not fail with EINVAL");
         }
     }
     errno = 0;
@@ -538,7 +631,7 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
 #if LLAM_PLATFORM_POSIX
     {
         int pipe_fds[2];
-        char json[1024];
+        char json[4096];
         ssize_t nread;
 
         if (pipe(pipe_fds) != 0) {
@@ -565,7 +658,9 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
         if (json[0] != '{' ||
             strstr(json, "\"ctx_switches\":") == NULL ||
             strstr(json, "\"active_workers\":") == NULL ||
-            strstr(json, "\"io_submit_syscalls\":") == NULL) {
+            strstr(json, "\"io_submit_syscalls\":") == NULL ||
+            strstr(json, "\"yield_direct_attempts\":") == NULL ||
+            strstr(json, "\"yield_direct_fail_push\":") == NULL) {
             llam_runtime_shutdown();
             return test_fail("stats json did not contain expected fields");
         }
@@ -669,6 +764,131 @@ static int test_request_stop_returns_success(void) {
     llam_runtime_shutdown();
     return 0;
 }
+
+static int test_shutdown_from_task_requests_stop(void) {
+    core_state_t state;
+    llam_runtime_opts_t runtime_opts;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init for task shutdown failed");
+    }
+    if (llam_spawn(shutdown_from_task_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_spawn task shutdown task failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_run did not complete after task shutdown");
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        llam_runtime_shutdown();
+        return test_fail("task shutdown did not degrade to stop cleanly");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+
+#if LLAM_PLATFORM_POSIX
+static int test_runtime_dump_while_blocking_job_active(void) {
+    dump_blocking_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    pthread_t runner;
+    bool runner_started = false;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    atomic_init(&state.blocking_started, 0U);
+    atomic_init(&state.release_blocking, 0U);
+    atomic_init(&state.task_done, 0U);
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
+
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init for concurrent dump failed");
+    }
+    if (llam_spawn(dump_blocking_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_spawn concurrent dump task failed");
+    }
+    if (pthread_create(&runner, NULL, dump_run_thread, &state) != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("pthread_create concurrent dump runner failed");
+    }
+    runner_started = true;
+
+    for (unsigned i = 0U; i < 5000U &&
+                          atomic_load_explicit(&state.blocking_started, memory_order_acquire) == 0U;
+         ++i) {
+        usleep(1000);
+    }
+    if (atomic_load_explicit(&state.blocking_started, memory_order_acquire) == 0U) {
+        atomic_store_explicit(&state.release_blocking, 1U, memory_order_release);
+        if (runner_started) {
+            (void)pthread_join(runner, NULL);
+        }
+        llam_runtime_shutdown();
+        return test_fail("blocking callback did not start before concurrent dump timeout");
+    }
+
+    /*
+     * Runtime dumps are diagnostic reads that can run from another OS thread
+     * while a blocking helper owns task wait state.  This loop keeps that
+     * cross-thread ownership visible under TSan and guards against regressing
+     * wait-owner fields back to plain data-racy pointers.
+     */
+    for (unsigned i = 0U; i < 64U; ++i) {
+        FILE *dump = tmpfile();
+
+        if (i == 32U) {
+            atomic_store_explicit(&state.release_blocking, 1U, memory_order_release);
+        }
+        if (dump == NULL) {
+            atomic_store_explicit(&state.release_blocking, 1U, memory_order_release);
+            if (runner_started) {
+                (void)pthread_join(runner, NULL);
+            }
+            llam_runtime_shutdown();
+            return test_fail_errno("tmpfile for concurrent runtime dump failed");
+        }
+        llam_dump_runtime_state(fileno(dump));
+        fclose(dump);
+    }
+
+    atomic_store_explicit(&state.release_blocking, 1U, memory_order_release);
+    if (runner_started && pthread_join(runner, NULL) != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("pthread_join concurrent dump runner failed");
+    }
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.task_done, memory_order_acquire) != 1U) {
+        fprintf(stderr,
+                "[test_runtime_core] concurrent dump task failed at %s errno=%d (%s)\n",
+                state.core.first_case,
+                state.core.first_errno,
+                strerror(state.core.first_errno));
+        llam_runtime_shutdown();
+        return 1;
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+#endif
 
 static int test_detach_contract(void) {
     core_state_t state;
@@ -825,6 +1045,49 @@ static int test_errno_is_task_local_across_switches(void) {
     return 0;
 }
 
+static int test_direct_yield_failure_keeps_task_running(void) {
+    core_state_t state;
+    llam_runtime_opts_t runtime_opts;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init for direct yield failure failed");
+    }
+    if (llam_spawn(direct_yield_no_work_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_spawn direct yield no-work task failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_run direct yield failure failed");
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] task failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        llam_runtime_shutdown();
+        return 1;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        llam_runtime_shutdown();
+        return test_fail("direct yield no-work task did not run exactly once");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+
 #if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
 static int test_aarch64_simd_is_preserved_across_switches(void) {
     core_state_t state;
@@ -931,14 +1194,716 @@ static int test_concurrent_join_contract(void) {
     return 0;
 }
 
+#if LLAM_PLATFORM_POSIX
+typedef struct init_race_barrier {
+    pthread_mutex_t lock;
+    pthread_cond_t cv;
+    unsigned count;
+    unsigned generation;
+} init_race_barrier_t;
+
+typedef struct init_race_state {
+    init_race_barrier_t *barrier;
+    atomic_uint successes;
+    atomic_uint busy_failures;
+    atomic_uint unexpected_failures;
+} init_race_state_t;
+
+static void init_race_barrier_wait(init_race_barrier_t *barrier) {
+    unsigned generation;
+
+    pthread_mutex_lock(&barrier->lock);
+    generation = barrier->generation;
+    barrier->count += 1U;
+    if (barrier->count == 2U) {
+        barrier->count = 0U;
+        barrier->generation += 1U;
+        pthread_cond_broadcast(&barrier->cv);
+    } else {
+        while (generation == barrier->generation) {
+            pthread_cond_wait(&barrier->cv, &barrier->lock);
+        }
+    }
+    pthread_mutex_unlock(&barrier->lock);
+}
+
+static void *init_race_thread(void *arg) {
+    init_race_state_t *state = arg;
+    llam_runtime_t *runtime = NULL;
+
+    init_race_barrier_wait(state->barrier);
+    if (llam_runtime_create(NULL, 0U, &runtime) == 0) {
+        atomic_fetch_add_explicit(&state->successes, 1U, memory_order_relaxed);
+    } else if (errno == EBUSY) {
+        atomic_fetch_add_explicit(&state->busy_failures, 1U, memory_order_relaxed);
+    } else {
+        atomic_fetch_add_explicit(&state->unexpected_failures, 1U, memory_order_relaxed);
+    }
+    return NULL;
+}
+
+typedef struct init_shutdown_race_state {
+    init_race_barrier_t *barrier;
+    atomic_uint init_done;
+    int init_rc;
+    int init_errno;
+} init_shutdown_race_state_t;
+
+typedef struct init_stats_race_state {
+    atomic_uint start;
+    atomic_uint stop;
+    atomic_uint failures;
+    atomic_uint snapshots;
+} init_stats_race_state_t;
+
+typedef struct trace_race_state {
+    llam_shard_t *shard;
+    atomic_uint start;
+} trace_race_state_t;
+
+typedef struct run_race_state {
+    init_race_barrier_t *barrier;
+    atomic_uint *attempting;
+    int rc;
+    int err;
+} run_race_state_t;
+
+typedef struct run_hold_state {
+    atomic_uint started;
+    atomic_uint release;
+} run_hold_state_t;
+
+typedef struct spawn_race_state {
+    atomic_uint ready;
+    atomic_uint start;
+    atomic_uint failures;
+} spawn_race_state_t;
+
+static char *test_dup_env_value(const char *name) {
+    const char *value = getenv(name);
+    size_t bytes;
+    char *copy;
+
+    if (value == NULL) {
+        return NULL;
+    }
+    bytes = strlen(value) + 1U;
+    copy = malloc(bytes);
+    if (copy != NULL) {
+        memcpy(copy, value, bytes);
+    }
+    return copy;
+}
+
+static void test_restore_env_value(const char *name, char *value) {
+    if (value != NULL) {
+        setenv(name, value, 1);
+        free(value);
+    } else {
+        unsetenv(name);
+    }
+}
+
+static void *init_stats_race_stats_thread(void *arg) {
+    init_stats_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+    }
+    while (atomic_load_explicit(&state->stop, memory_order_acquire) == 0U) {
+        llam_runtime_stats_t stats;
+
+        /*
+         * Stats are part of the embedding boundary.  A host monitoring thread
+         * may call this while another thread is still constructing the
+         * singleton; the call must either wait for a stable snapshot or return
+         * a valid pre-init snapshot, never walk partially published arrays.
+         */
+        if (llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        } else {
+            atomic_fetch_add_explicit(&state->snapshots, 1U, memory_order_relaxed);
+        }
+        usleep(100);
+    }
+    return NULL;
+}
+
+static int run_profile_yield_stats(uint32_t profile, llam_runtime_stats_t *stats) {
+    core_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *task;
+
+    if (stats == NULL) {
+        return test_fail("profile yield stats output was NULL");
+    }
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.profile = profile;
+
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("runtime init for profile yield stats failed");
+    }
+    task = llam_spawn(detached_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("spawn for profile yield stats failed");
+    }
+    if (llam_run() != 0 || llam_join(task) != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("run/join for profile yield stats failed");
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        llam_runtime_shutdown();
+        return test_fail("profile yield stats task did not run");
+    }
+    memset(stats, 0, sizeof(*stats));
+    if (llam_runtime_collect_stats_ex(stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("collect stats for profile yield stats failed");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static int test_direct_yield_auto_policy_is_profile_scoped(void) {
+    char *saved_stats = test_dup_env_value("LLAM_DIRECT_HANDOFF_STATS");
+    char *saved_handoff = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF");
+    llam_runtime_stats_t fast_stats;
+    llam_runtime_stats_t debug_stats;
+    int rc = 1;
+
+    /*
+     * The auto direct-yield policy depends on the current runtime profile.
+     * Running release-fast first must not cache direct handoff on for a later
+     * debug-safe runtime in the same host process.
+     */
+    if (setenv("LLAM_DIRECT_HANDOFF_STATS", "1", 1) != 0 ||
+        unsetenv("LLAM_YIELD_DIRECT_HANDOFF") != 0) {
+        rc = test_fail_errno("setenv for direct-yield profile policy failed");
+        goto cleanup_env;
+    }
+    if (run_profile_yield_stats(LLAM_RUNTIME_PROFILE_RELEASE_FAST, &fast_stats) != 0 ||
+        run_profile_yield_stats(LLAM_RUNTIME_PROFILE_DEBUG_SAFE, &debug_stats) != 0) {
+        goto cleanup_env;
+    }
+    if (fast_stats.yield_direct_attempts == 0U) {
+        rc = test_fail("release-fast runtime did not exercise direct-yield auto policy");
+        goto cleanup_env;
+    }
+    if (debug_stats.yield_direct_attempts != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] debug-safe direct-yield attempts leaked from previous profile: %llu\n",
+                (unsigned long long)debug_stats.yield_direct_attempts);
+        rc = 1;
+        goto cleanup_env;
+    }
+    rc = 0;
+
+cleanup_env:
+    test_restore_env_value("LLAM_DIRECT_HANDOFF_STATS", saved_stats);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF", saved_handoff);
+    return rc;
+}
+
+static void *init_shutdown_race_init_thread(void *arg) {
+    init_shutdown_race_state_t *state = arg;
+    llam_runtime_opts_t opts;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 0U;
+    opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+    init_race_barrier_wait(state->barrier);
+    errno = 0;
+    state->init_rc = llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+    state->init_errno = errno;
+    atomic_store_explicit(&state->init_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *init_shutdown_race_shutdown_thread(void *arg) {
+    init_shutdown_race_state_t *state = arg;
+
+    init_race_barrier_wait(state->barrier);
+    while (atomic_load_explicit(&state->init_done, memory_order_acquire) == 0U) {
+        llam_runtime_shutdown();
+    }
+    llam_runtime_shutdown();
+    return NULL;
+}
+
+static void *trace_race_thread(void *arg) {
+    trace_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+    }
+    for (unsigned i = 0U; i < 20000U; ++i) {
+        llam_trace_shard(state->shard,
+                         NULL,
+                         LLAM_TRACE_IDLE,
+                         LLAM_TASK_STATE_RUNNABLE,
+                         LLAM_TASK_STATE_PARKED,
+                         LLAM_WAIT_NONE);
+    }
+    return NULL;
+}
+
+static void *run_race_thread(void *arg) {
+    run_race_state_t *state = arg;
+
+    init_race_barrier_wait(state->barrier);
+    atomic_fetch_add_explicit(state->attempting, 1U, memory_order_release);
+    errno = 0;
+    state->rc = llam_run();
+    state->err = errno;
+    return NULL;
+}
+
+static void run_hold_task(void *arg) {
+    run_hold_state_t *state = arg;
+
+    atomic_store_explicit(&state->started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+}
+
+static void spawn_race_noop_task(void *arg) {
+    (void)arg;
+}
+
+static void *spawn_race_thread(void *arg) {
+    spawn_race_state_t *state = arg;
+
+    atomic_fetch_add_explicit(&state->ready, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+    }
+    for (unsigned i = 0U; i < 2000U; ++i) {
+        llam_task_t *task = llam_spawn(spawn_race_noop_task, NULL, NULL);
+
+        if (task == NULL) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            continue;
+        }
+        if (llam_detach(task) != 0) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        }
+    }
+    return NULL;
+}
+
+static int test_concurrent_runtime_init_contract(void) {
+    /*
+     * The singleton has a construction window before initialized is published.
+     * Two embedders racing to create it must produce exactly one success and
+     * one EBUSY failure, never two successful owners of the same global state.
+     */
+    for (unsigned round = 0U; round < 128U; ++round) {
+        init_race_barrier_t barrier = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0U, 0U};
+        init_race_state_t state;
+        pthread_t first;
+        pthread_t second;
+        int first_rc;
+        int second_rc;
+
+        memset(&state, 0, sizeof(state));
+        state.barrier = &barrier;
+        atomic_init(&state.successes, 0U);
+        atomic_init(&state.busy_failures, 0U);
+        atomic_init(&state.unexpected_failures, 0U);
+        first_rc = pthread_create(&first, NULL, init_race_thread, &state);
+        second_rc = first_rc == 0
+                        ? pthread_create(&second, NULL, init_race_thread, &state)
+                        : first_rc;
+        if (first_rc != 0 || second_rc != 0) {
+            if (first_rc == 0) {
+                pthread_join(first, NULL);
+            }
+            errno = first_rc != 0 ? first_rc : second_rc;
+            llam_runtime_shutdown();
+            return test_fail_errno("pthread_create for concurrent runtime init failed");
+        }
+        pthread_join(first, NULL);
+        pthread_join(second, NULL);
+        if (atomic_load_explicit(&state.successes, memory_order_relaxed) != 1U ||
+            atomic_load_explicit(&state.busy_failures, memory_order_relaxed) != 1U ||
+            atomic_load_explicit(&state.unexpected_failures, memory_order_relaxed) != 0U) {
+            fprintf(stderr,
+                    "[test_runtime_core] concurrent runtime init race round=%u successes=%u busy=%u unexpected=%u\n",
+                    round,
+                    atomic_load_explicit(&state.successes, memory_order_relaxed),
+                    atomic_load_explicit(&state.busy_failures, memory_order_relaxed),
+                    atomic_load_explicit(&state.unexpected_failures, memory_order_relaxed));
+            llam_runtime_shutdown();
+            return 1;
+        }
+        llam_runtime_shutdown();
+    }
+    return 0;
+}
+
+static int test_concurrent_init_shutdown_contract(void) {
+    /*
+     * Shutdown is public and idempotent, so a host thread must not be able to
+     * tear down partially published initialization storage while another host
+     * thread still consumes it.  The prewarm knobs make the init window wide
+     * enough to catch the race on unprotected builds.
+     */
+    char *saved_timer_prewarm = test_dup_env_value("LLAM_TIMER_HEAP_PREWARM");
+    char *saved_stack_prewarm = test_dup_env_value("LLAM_STACK_CACHE_PREWARM");
+
+    if (setenv("LLAM_TIMER_HEAP_PREWARM", "4096", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "64", 1) != 0) {
+        test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+        test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+        return test_fail_errno("setenv for init/shutdown race failed");
+    }
+
+    for (unsigned round = 0U; round < 64U; ++round) {
+        init_race_barrier_t barrier = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0U, 0U};
+        init_shutdown_race_state_t state;
+        pthread_t init_thread;
+        pthread_t shutdown_thread;
+        int init_thread_rc;
+        int shutdown_thread_rc;
+
+        memset(&state, 0, sizeof(state));
+        state.barrier = &barrier;
+        atomic_init(&state.init_done, 0U);
+        init_thread_rc = pthread_create(&init_thread, NULL, init_shutdown_race_init_thread, &state);
+        shutdown_thread_rc = init_thread_rc == 0
+                                 ? pthread_create(&shutdown_thread,
+                                                  NULL,
+                                                  init_shutdown_race_shutdown_thread,
+                                                  &state)
+                                 : init_thread_rc;
+        if (init_thread_rc != 0 || shutdown_thread_rc != 0) {
+            if (init_thread_rc == 0) {
+                pthread_join(init_thread, NULL);
+            }
+            errno = init_thread_rc != 0 ? init_thread_rc : shutdown_thread_rc;
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return test_fail_errno("pthread_create for init/shutdown race failed");
+        }
+        pthread_join(init_thread, NULL);
+        pthread_join(shutdown_thread, NULL);
+        if (state.init_rc != 0 && state.init_errno != EBUSY) {
+            fprintf(stderr,
+                    "[test_runtime_core] concurrent init/shutdown race round=%u rc=%d errno=%d (%s)\n",
+                    round,
+                    state.init_rc,
+                    state.init_errno,
+                    strerror(state.init_errno));
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return 1;
+        }
+        llam_runtime_shutdown();
+    }
+
+    test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+    test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+    return 0;
+}
+
+static int test_concurrent_init_stats_contract(void) {
+    /*
+     * Regression coverage for diagnostics racing the construction window.
+     * active_shards is configured before the shard array is allocated; stats
+     * must not trust that count unless lifecycle serialization and pointer
+     * availability both say the array is safe to walk.
+     */
+    char *saved_timer_prewarm = test_dup_env_value("LLAM_TIMER_HEAP_PREWARM");
+    char *saved_stack_prewarm = test_dup_env_value("LLAM_STACK_CACHE_PREWARM");
+
+    if (setenv("LLAM_TIMER_HEAP_PREWARM", "8192", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "128", 1) != 0) {
+        test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+        test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+        return test_fail_errno("setenv for init/stats race failed");
+    }
+
+    for (unsigned round = 0U; round < 64U; ++round) {
+        init_stats_race_state_t state;
+        llam_runtime_opts_t opts;
+        pthread_t stats_thread;
+        int thread_rc;
+
+        memset(&state, 0, sizeof(state));
+        memset(&opts, 0, sizeof(opts));
+        atomic_init(&state.start, 0U);
+        atomic_init(&state.stop, 0U);
+        atomic_init(&state.failures, 0U);
+        atomic_init(&state.snapshots, 0U);
+        opts.deterministic = 0U;
+        opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+
+        thread_rc = pthread_create(&stats_thread, NULL, init_stats_race_stats_thread, &state);
+        if (thread_rc != 0) {
+            errno = thread_rc;
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return test_fail_errno("pthread_create for init/stats race failed");
+        }
+        atomic_store_explicit(&state.start, 1U, memory_order_release);
+        if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            atomic_store_explicit(&state.stop, 1U, memory_order_release);
+            pthread_join(stats_thread, NULL);
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return test_fail_errno("llam_runtime_init for init/stats race failed");
+        }
+        atomic_store_explicit(&state.stop, 1U, memory_order_release);
+        pthread_join(stats_thread, NULL);
+        if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+            fprintf(stderr,
+                    "[test_runtime_core] init/stats race round=%u stats_failures=%u snapshots=%u\n",
+                    round,
+                    atomic_load_explicit(&state.failures, memory_order_relaxed),
+                    atomic_load_explicit(&state.snapshots, memory_order_relaxed));
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return 1;
+        }
+        llam_runtime_shutdown();
+    }
+
+    test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+    test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+    return 0;
+}
+
+static int test_concurrent_trace_ring_contract(void) {
+    /*
+     * Trace events can be emitted by peer wake paths, I/O completions,
+     * watchdogs, and shard owners.  Force concurrent producers onto one shard
+     * so TSan-backed runs catch the diagnostic ring regressing to plain writes.
+     */
+    enum { TRACE_RACE_THREADS = 4U, TRACE_RACE_ITERS = 20000U };
+    char *saved_trace = test_dup_env_value("LLAM_TRACE_EVENTS");
+    pthread_t threads[TRACE_RACE_THREADS];
+    bool joined[TRACE_RACE_THREADS];
+    trace_race_state_t state;
+    llam_runtime_opts_t opts;
+    unsigned started = 0U;
+
+    memset(joined, 0, sizeof(joined));
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    atomic_init(&state.start, 0U);
+    if (setenv("LLAM_TRACE_EVENTS", "1", 1) != 0) {
+        test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+        return test_fail_errno("setenv for trace race failed");
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_init(&opts) != 0) {
+        test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+        return test_fail_errno("llam_runtime_init for trace race failed");
+    }
+    state.shard = &g_llam_runtime.shards[0];
+    for (started = 0U; started < TRACE_RACE_THREADS; ++started) {
+        int rc = pthread_create(&threads[started], NULL, trace_race_thread, &state);
+
+        if (rc != 0) {
+            errno = rc;
+            atomic_store_explicit(&state.start, 1U, memory_order_release);
+            for (unsigned i = 0U; i < started; ++i) {
+                if (!joined[i]) {
+                    (void)pthread_join(threads[i], NULL);
+                    joined[i] = true;
+                }
+            }
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+            return test_fail_errno("pthread_create for trace race failed");
+        }
+    }
+    atomic_store_explicit(&state.start, 1U, memory_order_release);
+    for (unsigned i = 0U; i < started; ++i) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+            return test_fail_errno("pthread_join for trace race failed");
+        }
+        joined[i] = true;
+    }
+    if (atomic_load_explicit(&state.shard->trace_head, memory_order_acquire) <
+        TRACE_RACE_THREADS * TRACE_RACE_ITERS) {
+        llam_runtime_shutdown();
+        test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+        return test_fail("concurrent trace ring lost reservations");
+    }
+    llam_runtime_shutdown();
+    test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+    return 0;
+}
+
+static int test_concurrent_run_contract(void) {
+    /*
+     * llam_run() is the single scheduler driver for shard zero.  Concurrent
+     * unmanaged callers must produce one runner and one EINVAL failure; two
+     * successful callers would execute the same shard state at the same time.
+     */
+    for (unsigned round = 0U; round < 128U; ++round) {
+        init_race_barrier_t barrier = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0U, 0U};
+        atomic_uint attempting;
+        run_hold_state_t hold;
+        run_race_state_t first = {&barrier, &attempting, 123, 0};
+        run_race_state_t second = {&barrier, &attempting, 123, 0};
+        llam_runtime_opts_t opts;
+        pthread_t first_thread;
+        pthread_t second_thread;
+        int first_rc;
+        int second_rc;
+
+        atomic_init(&attempting, 0U);
+        atomic_init(&hold.started, 0U);
+        atomic_init(&hold.release, 0U);
+        memset(&opts, 0, sizeof(opts));
+        opts.deterministic = 1U;
+        opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+        if (llam_runtime_init(&opts) != 0) {
+            return test_fail_errno("llam_runtime_init for concurrent run failed");
+        }
+        if (llam_spawn(run_hold_task, &hold, NULL) == NULL) {
+            llam_runtime_shutdown();
+            return test_fail_errno("llam_spawn for concurrent run hold task failed");
+        }
+        first_rc = pthread_create(&first_thread, NULL, run_race_thread, &first);
+        second_rc = first_rc == 0
+                        ? pthread_create(&second_thread, NULL, run_race_thread, &second)
+                        : first_rc;
+        if (first_rc != 0 || second_rc != 0) {
+            if (first_rc == 0) {
+                pthread_join(first_thread, NULL);
+            }
+            errno = first_rc != 0 ? first_rc : second_rc;
+            llam_runtime_shutdown();
+            return test_fail_errno("pthread_create for concurrent run failed");
+        }
+        for (unsigned i = 0U; i < 10000U &&
+                              atomic_load_explicit(&hold.started, memory_order_acquire) == 0U;
+             ++i) {
+            usleep(100);
+        }
+        for (unsigned i = 0U; i < 10000U &&
+                              atomic_load_explicit(&attempting, memory_order_acquire) < 2U;
+             ++i) {
+            usleep(100);
+        }
+        atomic_store_explicit(&hold.release, 1U, memory_order_release);
+        pthread_join(first_thread, NULL);
+        pthread_join(second_thread, NULL);
+        if (first.rc == 0 && second.rc == 0) {
+            fprintf(stderr,
+                    "[test_runtime_core] concurrent run double-success round=%u\n",
+                    round);
+            llam_runtime_shutdown();
+            return 1;
+        }
+        if ((first.rc != 0 && first.err != EINVAL) ||
+            (second.rc != 0 && second.err != EINVAL)) {
+            fprintf(stderr,
+                    "[test_runtime_core] concurrent run unexpected result round=%u first=(%d,%d) second=(%d,%d)\n",
+                    round,
+                    first.rc,
+                    first.err,
+                    second.rc,
+                    second.err);
+            llam_runtime_shutdown();
+            return 1;
+        }
+        llam_runtime_shutdown();
+    }
+    return 0;
+}
+
+static int test_concurrent_spawn_contract(void) {
+    /*
+     * Unmanaged embedders can submit work from multiple OS threads before a
+     * scheduler driver starts.  Keep the placement cursor race-covered so TSan
+     * catches regressions in shard selection.
+     */
+    enum { SPAWN_RACE_THREADS = 8U };
+    pthread_t threads[SPAWN_RACE_THREADS];
+    spawn_race_state_t state;
+    llam_runtime_opts_t opts;
+    unsigned started = 0U;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    atomic_init(&state.ready, 0U);
+    atomic_init(&state.start, 0U);
+    atomic_init(&state.failures, 0U);
+    opts.deterministic = 0U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("llam_runtime_init for concurrent spawn failed");
+    }
+    for (started = 0U; started < SPAWN_RACE_THREADS; ++started) {
+        int rc = pthread_create(&threads[started], NULL, spawn_race_thread, &state);
+
+        if (rc != 0) {
+            errno = rc;
+            atomic_store_explicit(&state.start, 1U, memory_order_release);
+            for (unsigned i = 0U; i < started; ++i) {
+                pthread_join(threads[i], NULL);
+            }
+            llam_runtime_shutdown();
+            return test_fail_errno("pthread_create for concurrent spawn failed");
+        }
+    }
+    while (atomic_load_explicit(&state.ready, memory_order_acquire) != SPAWN_RACE_THREADS) {
+    }
+    atomic_store_explicit(&state.start, 1U, memory_order_release);
+    for (unsigned i = 0U; i < started; ++i) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            llam_runtime_shutdown();
+            return test_fail_errno("pthread_join for concurrent spawn failed");
+        }
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        llam_runtime_shutdown();
+        return test_fail("concurrent unmanaged spawn produced failures");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("llam_run for concurrent spawn failed");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+#endif
+
 int main(void) {
     if (test_preinit_contracts() != 0 ||
+        test_direct_yield_auto_policy_is_profile_scoped() != 0 ||
         test_runtime_handle_api() != 0 ||
         test_runtime_lifecycle_and_task_contracts() != 0 ||
         test_request_stop_returns_success() != 0 ||
+        test_shutdown_from_task_requests_stop() != 0 ||
+#if LLAM_PLATFORM_POSIX
+        test_runtime_dump_while_blocking_job_active() != 0 ||
+        test_concurrent_runtime_init_contract() != 0 ||
+        test_concurrent_init_shutdown_contract() != 0 ||
+        test_concurrent_init_stats_contract() != 0 ||
+        test_concurrent_trace_ring_contract() != 0 ||
+        test_concurrent_run_contract() != 0 ||
+        test_concurrent_spawn_contract() != 0 ||
+#endif
         test_detach_contract() != 0 ||
         test_ex_option_prefixes() != 0 ||
         test_errno_is_task_local_across_switches() != 0 ||
+        test_direct_yield_failure_keeps_task_running() != 0 ||
 #if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
         test_aarch64_simd_is_preserved_across_switches() != 0 ||
 #endif

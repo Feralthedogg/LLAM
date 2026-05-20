@@ -28,8 +28,9 @@
 /**
  * @brief Decide whether source shard timers can be merged.
  *
- * Timer heaps are not migrated yet; a shard with active timers must remain
- * online until the heap drains.
+ * Timer heaps are not migrated yet; a shard with active timers, or expired
+ * timers that have been popped but not fully resolved, must remain online until
+ * the timer path drains.
  *
  * @param source       Source shard.
  * @param target       Target shard.
@@ -45,7 +46,9 @@ bool llam_merge_shard_timers_locked(llam_shard_t *source, llam_shard_t *target, 
         return false;
     }
     // Timer nodes are heap-backed; do not migrate them with the old linked-list path.
-    return source->timer_heap_len == 0U && source->timers == NULL;
+    return source->timer_heap_len == 0U &&
+           source->timers == NULL &&
+           atomic_load_explicit(&source->timer_callbacks_active, memory_order_acquire) == 0U;
 }
 
 /**
@@ -67,13 +70,20 @@ static bool llam_task_can_rehome_parked_wait(const llam_shard_t *source, const l
     if (task->state != LLAM_TASK_STATE_PARKED || task->parked_shard != source->id) {
         return false;
     }
-    if (task->active_io_req != NULL || task->active_timer != NULL) {
-        // I/O and timer waits have backend-owned state and use separate paths.
+    if (llam_task_active_io_req_load(task) != NULL) {
+        // I/O waits have backend-owned state and use separate paths.
         return false;
     }
+    /*
+     * Do not inspect task->active_timer here.  Timer expiry mutates it under
+     * the source shard lock, while this scanner walks task lists under each
+     * task-owner shard lock.  The offlining path already proves source timers
+     * are quiescent via llam_merge_shard_timers_locked(), including popped but
+     * unresolved callbacks.
+     */
     return task->active_wait_node != NULL ||
            task->join_target != NULL ||
-           task->active_block_job != NULL;
+           llam_task_active_block_job_load(task) != NULL;
 }
 
 /**
@@ -156,7 +166,7 @@ static bool llam_task_can_rehome_io_wait(const llam_shard_t *source,
     if (task->state != LLAM_TASK_STATE_PARKED || task->wait_reason != LLAM_WAIT_IO || task->parked_shard != source->id) {
         return false;
     }
-    if (task->active_io_req != req || req->owner_shard != source->id) {
+    if (llam_task_active_io_req_load(task) != req || req->owner_shard != source->id) {
         return false;
     }
     // Wait mode guards against moving a request from the wrong backend list.
@@ -211,7 +221,7 @@ void llam_rehome_inflight_io_waiters(llam_runtime_t *rt, llam_shard_t *source, l
 
         pthread_mutex_lock(&owner->lock);
         for (task = owner->all_tasks; task != NULL; task = task->all_next) {
-            llam_io_req_t *req = task->active_io_req;
+            llam_io_req_t *req = llam_task_active_io_req_load(task);
 
             if (!llam_task_can_rehome_io_wait(source, target, task, req, LLAM_IO_WAIT_MODE_INFLIGHT)) {
                 continue;
@@ -410,7 +420,7 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
             continue;
         }
         if (task == NULL || task->state != LLAM_TASK_STATE_PARKED || task->wait_reason != LLAM_WAIT_IO ||
-            task->parked_shard != target_shard->id || task->active_io_req != cur ||
+            task->parked_shard != target_shard->id || llam_task_active_io_req_load(task) != cur ||
             atomic_load_explicit(&cur->wait_mode, memory_order_acquire) != (unsigned)LLAM_IO_WAIT_MODE_SUBMIT_QUEUE ||
             !llam_node_supports_submit_req(target_locked, cur)) {
             pthread_mutex_unlock(&second->submit_lock);

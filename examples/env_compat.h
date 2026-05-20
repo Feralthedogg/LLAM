@@ -2,6 +2,11 @@
  * @file examples/env_compat.h
  * @brief Environment-variable compatibility helper shared by examples and benchmarks.
  *
+ * @details
+ * Examples accept current LLAM_* names first, then old NM_* aliases. Keeping
+ * that fallback here avoids stale automation breakage without leaking the old
+ * prefix into new user-facing documentation.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

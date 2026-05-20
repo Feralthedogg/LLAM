@@ -176,11 +176,7 @@ static void llam_spawn_release_unpublished_cancel_token(llam_task_t *task) {
     }
 
     token = task->cancel_token;
-    pthread_mutex_lock(&token->lock);
-    if (token->refcount > 0U) {
-        token->refcount -= 1U;
-    }
-    pthread_mutex_unlock(&token->lock);
+    llam_cancel_token_release_task_ref(token);
     task->cancel_token = NULL;
 }
 
@@ -197,6 +193,17 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
            stack_class == (uint32_t)LLAM_STACK_CLASS_LARGE ||
            stack_class == (uint32_t)LLAM_STACK_CLASS_HUGE;
 }
+
+/**
+ * @brief Return true when an ABI prefix contains a complete spawn option field.
+ *
+ * Size-aware public structs are copied defensively because old or foreign
+ * bindings may provide a smaller prefix.  A partially present fixed-width field
+ * is not a value; treating it as one would let a byte-sized prefix clobber the
+ * default task class on little-endian targets.
+ */
+#define LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(prefix_size, field) \
+    ((prefix_size) >= offsetof(llam_spawn_opts_t, field) + sizeof(((llam_spawn_opts_t *)0)->field))
 
 /**
  * @brief Create a new runtime task and place it on a runnable queue.
@@ -228,6 +235,7 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
  */
 llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {
     llam_runtime_t *rt = &g_llam_runtime;
+    llam_spawn_opts_t raw_opts;
     llam_spawn_opts_t opts_storage;
     llam_task_t *task;
     unsigned shard_id;
@@ -243,9 +251,28 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
             errno = EINVAL;
             return NULL;
         }
+        memset(&raw_opts, 0, sizeof(raw_opts));
+        opts_copy_size = opts_size < sizeof(raw_opts) ? opts_size : sizeof(raw_opts);
+        memcpy(&raw_opts, opts, opts_copy_size);
+
         memset(&opts_storage, 0, sizeof(opts_storage));
-        opts_copy_size = opts_size < sizeof(opts_storage) ? opts_size : sizeof(opts_storage);
-        memcpy(&opts_storage, opts, opts_copy_size);
+        opts_storage.task_class = (uint32_t)LLAM_TASK_CLASS_DEFAULT;
+        opts_storage.stack_class = (uint32_t)LLAM_STACK_CLASS_DEFAULT;
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, task_class)) {
+            opts_storage.task_class = raw_opts.task_class;
+        }
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, stack_class)) {
+            opts_storage.stack_class = raw_opts.stack_class;
+        }
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, flags)) {
+            opts_storage.flags = raw_opts.flags;
+        }
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, deadline_ns)) {
+            opts_storage.deadline_ns = raw_opts.deadline_ns;
+        }
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, cancel_token)) {
+            opts_storage.cancel_token = raw_opts.cancel_token;
+        }
         opts = &opts_storage;
         if (!llam_public_task_class_valid(opts->task_class) ||
             !llam_public_stack_class_valid(opts->stack_class)) {
@@ -279,14 +306,14 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     if ((task->flags & LLAM_TASK_FLAG_LATENCY_CRITICAL) != 0U) {
         task_class = LLAM_TASK_CLASS_LATENCY;
     }
-    atomic_init(&task->task_class, (unsigned)task_class);
-    atomic_init(&task->base_task_class, (unsigned)task_class);
+    atomic_store_explicit(&task->task_class, (unsigned)task_class, memory_order_release);
+    atomic_store_explicit(&task->base_task_class, (unsigned)task_class, memory_order_release);
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
-    if (task->cancel_token != NULL) {
-        pthread_mutex_lock(&task->cancel_token->lock);
-        task->cancel_token->refcount += 1U;
-        pthread_mutex_unlock(&task->cancel_token->lock);
+    if (task->cancel_token != NULL && llam_cancel_token_retain_task_ref(task->cancel_token) != 0) {
+        task->cancel_token = NULL;
+        llam_task_allocator_free(task);
+        return NULL;
     }
     task->entry = fn;
     task->arg = arg;
@@ -294,15 +321,16 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     task->home_shard = shard_id;
     task->live_shard = shard_id;
     task->last_shard = shard_id;
-    atomic_init(&task->preempt_requested, 0U);
-    atomic_init(&task->completed, 0U);
-    atomic_init(&task->reclaim_ready, 0U);
-    atomic_init(&task->reclaim_claimed, 0U);
-    atomic_init(&task->join_claimed, 0U);
-    atomic_init(&task->detached, 0U);
-    atomic_init(&task->task_listed, 0U);
-    atomic_init(&task->scan_refs, 0U);
-    atomic_init(&task->join_waiter_hint, 0U);
+    atomic_store_explicit(&task->preempt_requested, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->completed, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->reclaim_ready, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->reclaim_claimed, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->join_claimed, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->detached, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->task_listed, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->scan_refs, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->join_waiter_hint, 0U, memory_order_relaxed);
+    atomic_store_explicit(&task->active_io_req, NULL, memory_order_relaxed);
     task->join_waiter_count_at_exit = 0U;
 
     if (llam_alloc_task_stack(task, stack_class) != 0) {

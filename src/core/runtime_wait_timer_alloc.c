@@ -47,8 +47,7 @@ llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard) {
             if (node != NULL) {
                 shard->allocator.wait_free = node->alloc_next;
                 shard->allocator.wait_reuses += 1U;
-                memset(node, 0, sizeof(*node));
-                node->owner_shard = shard->id;
+                llam_wait_node_reset(node, shard->id);
                 return node;
             }
         } else {
@@ -59,8 +58,7 @@ llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard) {
                 shard->allocator.wait_free = node->alloc_next;
                 shard->allocator.wait_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
-                memset(node, 0, sizeof(*node));
-                node->owner_shard = shard->id;
+                llam_wait_node_reset(node, shard->id);
                 return node;
             }
             llam_allocator_unlock(&shard->allocator);

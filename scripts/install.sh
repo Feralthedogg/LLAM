@@ -2,7 +2,7 @@
 set -eu
 
 prefix="/usr/local"
-version="${LLAM_INSTALL_VERSION:-1.0.2}"
+version="${LLAM_INSTALL_VERSION:-1.1.0}"
 target=""
 base_url=""
 dry_run=0
@@ -192,7 +192,11 @@ run_standalone_install() {
         echo "download $base_url/$archive.sha256"
         echo "verify $archive.sha256"
         echo "extract $archive"
-        echo "run $package/install.sh --prefix $prefix"
+        if [ "$force" -eq 1 ]; then
+            echo "run $package/install.sh --prefix $prefix --force"
+        else
+            echo "run $package/install.sh --prefix $prefix"
+        fi
         return 0
     fi
 

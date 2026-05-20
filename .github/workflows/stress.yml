@@ -110,6 +110,25 @@ jobs:
           mkdir -p "$OUT_DIR"
           ctest --test-dir build/stress --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
 
+      - name: Fault and completion-order edge repeat
+        run: |
+          set -o pipefail
+          mkdir -p "$OUT_DIR"
+          repeat=3
+          timeout=120
+          if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
+            repeat=1
+            timeout=90
+          fi
+          for i in $(seq 1 "$repeat"); do
+            echo "[test_runtime_api_edges repeat $i/$repeat]"
+            python3 scripts/run_with_timeout.py \
+              --timeout "$timeout" \
+              --dump-on-timeout "$OUT_DIR/test_runtime_api_edges_repeat_$i.timeout-dump.log" \
+              --log "$OUT_DIR/test_runtime_api_edges_repeat_$i.log" \
+              -- ./build/stress/test_runtime_api_edges
+          done 2>&1 | tee "$OUT_DIR/test_runtime_api_edges_repeat.log"
+
       - name: Direct runtime stress repeat
         run: |
           set -o pipefail
@@ -298,6 +317,27 @@ jobs:
               }
             }
           } *>&1 | Tee-Object -FilePath "$artifactDir\test_runtime_stress_repeat.log"
+
+      - name: Windows IOCP fault/reorder repeat
+        shell: pwsh
+        run: |
+          $artifactDir = ".artifacts\stress\${{ matrix.name }}"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $repeat = 3
+          $test = ".\build\windows\Release\test_windows_iocp_io.exe"
+          & {
+            foreach ($generation in @("10", "11")) {
+              $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
+              for ($i = 1; $i -le $repeat; $i++) {
+                "[test_windows_iocp_io generation=$generation repeat $i/$repeat]"
+                & $test
+                if ($LASTEXITCODE -ne 0) {
+                  exit $LASTEXITCODE
+                }
+              }
+            }
+            Remove-Item Env:\LLAM_WINDOWS_FORCE_GENERATION -ErrorAction SilentlyContinue
+          } *>&1 | Tee-Object -FilePath "$artifactDir\test_windows_iocp_io_repeat.log"
 
       - name: Seeded runtime invariant repeat
         shell: pwsh

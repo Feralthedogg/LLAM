@@ -39,25 +39,91 @@
  */
 static void llam_task_reset_reused(llam_task_t *task, unsigned shard_id) {
     bool lock_initialized;
+    unsigned i;
 
     if (task == NULL) {
         return;
     }
 
     lock_initialized = task->lock_initialized;
-    memset(task, 0, offsetof(llam_task_t, ctx));
+    task->id = 0U;
+    atomic_init(&task->state, (unsigned)LLAM_TASK_STATE_NEW);
+    task->wait_reason = LLAM_WAIT_NONE;
+    task->flags = 0U;
+    task->home_shard = 0U;
+    task->live_shard = 0U;
+    task->last_shard = 0U;
+    task->parked_shard = 0U;
+    atomic_init(&task->task_class, (unsigned)LLAM_TASK_CLASS_DEFAULT);
+    atomic_init(&task->base_task_class, (unsigned)LLAM_TASK_CLASS_DEFAULT);
+    memset((char *)task + offsetof(llam_task_t, deadline_ns),
+           0,
+           offsetof(llam_task_t, ctx) - offsetof(llam_task_t, deadline_ns));
     memset((char *)task + offsetof(llam_task_t, stack_mapping),
            0,
            offsetof(llam_task_t, lock) - offsetof(llam_task_t, stack_mapping));
-    memset((char *)task + offsetof(llam_task_t, task_listed),
-           0,
-           offsetof(llam_task_t, embedded_wait_node) - offsetof(llam_task_t, task_listed));
+    atomic_init(&task->task_listed, 0U);
+    atomic_init(&task->scan_refs, 0U);
+    task->all_next = NULL;
+    task->all_prev = NULL;
+    task->alloc_next = NULL;
+    task->queue_next = NULL;
+    task->queue_prev = NULL;
+    task->join_waiters = NULL;
+    task->join_waiter_count = 0U;
+    atomic_init(&task->join_waiter_hint, 0U);
+    task->join_target = NULL;
+    task->wait_next = NULL;
+    task->cancel_next = NULL;
+    task->cancel_prev = NULL;
+    llam_wait_node_reset(&task->embedded_wait_node, UINT_MAX);
+    for (i = 0U; i < LLAM_TASK_EMBEDDED_SELECT_NODES; ++i) {
+        llam_wait_node_reset(&task->embedded_select_nodes[i], UINT_MAX);
+    }
     memset((char *)task + offsetof(llam_task_t, active_wait_node),
            0,
            offsetof(llam_task_t, embedded_io_req) - offsetof(llam_task_t, active_wait_node));
-    memset((char *)task + offsetof(llam_task_t, active_io_req),
-           0,
-           sizeof(*task) - offsetof(llam_task_t, active_io_req));
+    llam_io_req_reset(&task->embedded_io_req, UINT_MAX, UINT_MAX);
+    /*
+     * active_io_req is an atomic ownership boundary between I/O completion and
+     * dynamic rehome. Reinitialize it explicitly instead of byte-clearing the
+     * tail of the task object, which also contains other atomics.
+     */
+    atomic_init(&task->active_io_req, NULL);
+    atomic_init(&task->active_block_job, NULL);
+    task->task_locals = NULL;
+    task->cancel_registered = false;
+    task->enqueue_hot = 0U;
+    task->last_runnable_ns = 0U;
+    task->last_yield_ns = 0U;
+    task->last_started_ns = 0U;
+    task->last_run_ns = 0U;
+    task->total_run_ns = 0U;
+    task->opaque_block_started_ns = 0U;
+    task->last_opaque_block_ns = 0U;
+    task->max_opaque_block_ns = 0U;
+    task->opaque_block_count = 0U;
+    task->blocking_result = NULL;
+    task->saved_errno = 0;
+    task->blocking_errno = 0;
+    task->wake_error_code = 0;
+    atomic_init(&task->opaque_blocking_depth, 0U);
+    task->opaque_uses_helper = false;
+    task->opaque_uses_redirect = false;
+    task->safepoint_tick = 0U;
+    task->preempt_poll_tick = 0U;
+    task->last_stack_used = 0U;
+    task->stack_high_water = 0U;
+    memset(&task->embedded_timer_node, 0, sizeof(task->embedded_timer_node));
+    task->active_timer = NULL;
+    atomic_init(&task->preempt_requested, 0U);
+    atomic_init(&task->completed, 0U);
+    atomic_init(&task->reclaim_ready, 0U);
+    atomic_init(&task->reclaim_claimed, 0U);
+    atomic_init(&task->join_claimed, 0U);
+    atomic_init(&task->detached, 0U);
+    task->join_waiter_count_at_exit = 0U;
+    task->forced_yield_budget = 0U;
     task->lock_initialized = lock_initialized;
     task->alloc_owner_shard = shard_id;
 }

@@ -33,14 +33,19 @@
  */
 llam_cond_t *llam_cond_create(void) {
     llam_cond_t *cond = calloc(1, sizeof(*cond));
+    int rc;
 
     if (cond == NULL) {
         return NULL;
     }
 
-    if (pthread_mutex_init(&cond->lock, NULL) != 0) {
+    atomic_init(&cond->inflight_waiters, 0U);
+    rc = pthread_mutex_init(&cond->lock, NULL);
+    if (rc != 0) {
         free(cond);
-        errno = ENOMEM;
+        // pthread_mutex_init returns its failure code directly and may leave
+        // errno unchanged.
+        errno = rc;
         return NULL;
     }
 
@@ -63,7 +68,9 @@ int llam_cond_destroy(llam_cond_t *cond) {
     }
 
     pthread_mutex_lock(&cond->lock);
-    if (cond->waiters.head != NULL || cond->waiters.depth != 0U) {
+    if (atomic_load_explicit(&cond->inflight_waiters, memory_order_acquire) != 0U ||
+        cond->waiters.head != NULL ||
+        cond->waiters.depth != 0U) {
         pthread_mutex_unlock(&cond->lock);
         errno = EBUSY;
         return -1;
@@ -88,6 +95,32 @@ static int llam_cond_reacquire_mutex(llam_mutex_t *mutex, llam_task_t *task) {
         return 0;
     }
     return llam_mutex_lock_impl(mutex, false, 0U, false);
+}
+
+/**
+ * @brief Mark that a condition waiter was popped but has not returned yet.
+ *
+ * Signal/broadcast removes a waiter from the cond queue before the waiter runs
+ * again.  The wait-node payload flag lets only those completed cond waits drop
+ * the cond's in-flight reference; timeout/cancel paths that remove their own
+ * node never increment this counter.
+ */
+static void llam_cond_waiter_popped(llam_cond_t *cond, llam_wait_node_t *node) {
+    if (node != NULL) {
+        node->scalar_value = 1;
+    }
+    if (cond != NULL) {
+        atomic_fetch_add_explicit(&cond->inflight_waiters, 1U, memory_order_acq_rel);
+    }
+}
+
+/**
+ * @brief Release a condition waiter's in-flight destroy reference.
+ */
+static void llam_cond_waiter_consumed(llam_cond_t *cond, llam_wait_node_t *node) {
+    if (cond != NULL && node != NULL && node->scalar_value != 0) {
+        atomic_fetch_sub_explicit(&cond->inflight_waiters, 1U, memory_order_acq_rel);
+    }
 }
 
 /**
@@ -173,9 +206,18 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_COND;
     if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         pthread_mutex_lock(&cond->lock);
-        (void)llam_wait_queue_remove(&cond->waiters, node);
+        removed = llam_wait_queue_remove(&cond->waiters, node);
         pthread_mutex_unlock(&cond->lock);
+        if (!removed) {
+            /* signal/broadcast already popped the node; reacquire below. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -184,10 +226,19 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         return -1;
     }
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
         llam_disarm_task_wait_deadline(task);
         pthread_mutex_lock(&cond->lock);
-        (void)llam_wait_queue_remove(&cond->waiters, node);
+        removed = llam_wait_queue_remove(&cond->waiters, node);
         pthread_mutex_unlock(&cond->lock);
+        if (!removed) {
+            /* signal/broadcast already popped the node; reacquire below. */
+            goto wait_ready;
+        }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         llam_task_clear_wait_tracking(task);
@@ -196,6 +247,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         return -1;
     }
 
+wait_ready:
     if (llam_wait_node_should_park(node)) {
         llam_park_current_task(LLAM_WAIT_COND, LLAM_TRACE_STATE);
     }
@@ -204,11 +256,10 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         // disarms any leftover deadline before reacquiring the user mutex.
         llam_disarm_task_wait_deadline(task);
     }
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     rc = node->error_code;
+    llam_cond_waiter_consumed(cond, node);
     llam_sync_wait_node_release(shard, node);
     if (llam_cond_reacquire_mutex(mutex, task) != 0) {
         return -1;
@@ -265,6 +316,9 @@ int llam_cond_signal(llam_cond_t *cond) {
 
     pthread_mutex_lock(&cond->lock);
     node = llam_wait_queue_pop_head(&cond->waiters);
+    if (node != NULL) {
+        llam_cond_waiter_popped(cond, node);
+    }
     pthread_mutex_unlock(&cond->lock);
 
     if (node != NULL) {
@@ -282,13 +336,19 @@ int llam_cond_signal(llam_cond_t *cond) {
  * @return 0 on success, or -1 with @c errno set to @c EINVAL.
  */
 int llam_cond_broadcast(llam_cond_t *cond) {
+    llam_wait_node_t *node;
+
     if (cond == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     pthread_mutex_lock(&cond->lock);
-    llam_wake_wait_queue_all(&cond->waiters, 0, LLAM_WAIT_COND);
+    while ((node = llam_wait_queue_pop_head(&cond->waiters)) != NULL) {
+        llam_cond_waiter_popped(cond, node);
+        node->error_code = 0;
+        llam_wake_wait_node(node, true, LLAM_WAIT_COND);
+    }
     pthread_mutex_unlock(&cond->lock);
     return 0;
 }

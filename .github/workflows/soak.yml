@@ -71,6 +71,21 @@ jobs:
           set -o pipefail
           mkdir -p "$OUT_DIR"
           ctest --test-dir build/soak --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
+          for i in $(seq 1 10); do
+            echo "[test_runtime_api_edges repeat $i/10]"
+            python3 scripts/run_with_timeout.py \
+              --timeout 180 \
+              --dump-on-timeout "$OUT_DIR/test_runtime_api_edges_repeat_$i.timeout-dump.log" \
+              --log "$OUT_DIR/test_runtime_api_edges_repeat_$i.log" \
+              -- ./build/soak/test_runtime_api_edges
+          done 2>&1 | tee "$OUT_DIR/test_runtime_api_edges_repeat.log"
+          for i in $(seq 1 10); do
+            seed=$((SOAK_SEED + i * 104729))
+            echo "[test_runtime_invariants repeat $i/10 seed=$seed]"
+            LLAM_RUNTIME_INVARIANT_SEED="$seed" \
+            LLAM_RUNTIME_INVARIANT_SCENARIOS=96 \
+              ./build/soak/test_runtime_invariants
+          done 2>&1 | tee "$OUT_DIR/test_runtime_invariants_repeat.log"
           for i in $(seq 1 50); do
             echo "[test_runtime_stress repeat $i/50]"
             ./build/soak/test_runtime_stress

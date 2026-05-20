@@ -35,7 +35,7 @@ int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_
         return -1;
     }
     *out = NULL;
-    if (g_llam_runtime.initialized) {
+    if (atomic_load_explicit(&g_llam_runtime.initialized, memory_order_acquire)) {
         errno = EBUSY;
         return -1;
     }

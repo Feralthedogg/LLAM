@@ -113,11 +113,17 @@ void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req
 /**
  * @brief Remove a poll waiter while watch_lock is held.
  *
- * @return true if removed.
+ * @return true if removed, false if already detached.
  */
 bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
     llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur = watch->wait_head;
+    llam_io_req_t *cur;
+
+    if (watch == NULL || req == NULL) {
+        return false;
+    }
+
+    cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -185,11 +191,17 @@ void llam_accept_watch_enqueue_waiter(llam_accept_watch_t *watch, llam_io_req_t 
 /**
  * @brief Remove an accept waiter while watch_lock is held.
  *
- * @return true if removed.
+ * @return true if removed, false if already detached.
  */
 bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
     llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur = watch->wait_head;
+    llam_io_req_t *cur;
+
+    if (watch == NULL || req == NULL) {
+        return false;
+    }
+
+    cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -224,11 +236,17 @@ void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req
 /**
  * @brief Remove a receive waiter while watch_lock is held.
  *
- * @return true if removed.
+ * @return true if removed, false if already detached.
  */
 bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
     llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur = watch->wait_head;
+    llam_io_req_t *cur;
+
+    if (watch == NULL || req == NULL) {
+        return false;
+    }
+
+    cur = watch->wait_head;
 
     while (cur != NULL) {
         if (cur == req) {
@@ -486,6 +504,9 @@ bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
         *copy_data_out = ready->copy_data;
         ready->copy_data = NULL;
     }
+    // No ownership transfer was requested, so the ready node must release the
+    // copied payload before the node itself is freed.
+    free(ready->copy_data);
     if (copy_capacity_out != NULL) {
         *copy_capacity_out = ready->copy_capacity;
     }

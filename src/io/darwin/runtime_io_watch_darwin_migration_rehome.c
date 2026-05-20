@@ -95,8 +95,9 @@ bool llam_io_rehome_watch_state_filtered(llam_node_t *source, llam_node_t *targe
                                                                        watch->migrate_target_node_index,
                                                                        watch->fd);
                 if (watch->wait_head != NULL) {
-                    // Active waiters keep the watch on source for now. Mark live
-                    // transfer so future events can be forwarded.
+                    // Active waiters keep source-node ownership until their
+                    // completions drain. Mark live transfer so future events
+                    // are forwarded without partially migrating the watch list.
                     if (watch->migrate_target_node_index != UINT_MAX) {
                         watch->migrate_target_node_index = desired_target_index;
                         watch->live_transferred = desired_target_index != source_locked->index;

@@ -39,6 +39,16 @@ static llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
     return head;
 }
 
+static bool llam_windows_req_skips_completion_on_success(llam_node_t *node, llam_io_req_t *req) {
+    if (req == NULL) {
+        return false;
+    }
+    if (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE) {
+        return llam_windows_handle_skips_completion_on_success(node, req->handle);
+    }
+    return llam_windows_fd_skips_completion_on_success(node, req->fd);
+}
+
 static int llam_windows_submit_rw(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op, bool write_op) {
     DWORD transferred = 0;
     DWORD flags = (DWORD)(write_op ? 0 : req->recv_flags);
@@ -57,7 +67,8 @@ static int llam_windows_submit_rw(llam_node_t *node, llam_io_req_t *req, llam_wi
         rc = WSARecv(req->fd, &op->wsabuf, 1, &transferred, &flags, &op->overlapped, NULL);
     }
     if (rc == 0) {
-        return 0;
+        op->immediate_bytes = transferred;
+        return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
     }
     {
         int err = WSAGetLastError();
@@ -85,7 +96,8 @@ static int llam_windows_submit_handle_rw(llam_node_t *node, llam_io_req_t *req, 
         ok = ReadFile((HANDLE)req->handle, req->buf, (DWORD)req->count, &transferred, &op->overlapped);
     }
     if (ok) {
-        return 0;
+        op->immediate_bytes = transferred;
+        return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
     }
     {
         DWORD err = GetLastError();
@@ -132,7 +144,8 @@ static int llam_windows_submit_accept(llam_node_t *node, llam_io_req_t *req, lla
         errno = llam_windows_wsa_error_to_errno(err);
         return -1;
     }
-    return 0;
+    op->immediate_bytes = bytes;
+    return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
 }
 
 static int llam_windows_submit_connect(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op) {
@@ -154,7 +167,8 @@ static int llam_windows_submit_connect(llam_node_t *node, llam_io_req_t *req, ll
         errno = llam_windows_wsa_error_to_errno(err);
         return -1;
     }
-    return 0;
+    op->immediate_bytes = bytes;
+    return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
 }
 
 static int llam_windows_submit_poll(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op) {
@@ -199,7 +213,8 @@ static int llam_windows_submit_poll(llam_node_t *node, llam_io_req_t *req, llam_
         rc = WSARecv(req->fd, &op->wsabuf, 1, &transferred, &op->poll_flags, &op->overlapped, NULL);
     }
     if (rc == 0) {
-        return 0;
+        op->immediate_bytes = transferred;
+        return llam_windows_req_skips_completion_on_success(node, req) ? 1 : 0;
     }
     {
         int err = WSAGetLastError();
@@ -261,9 +276,12 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
         break;
     }
 
-    if (rc == 0) {
-        node->submit_calls += 1U;
-        node->submit_syscalls += 1U;
+    if (rc >= 0) {
+        atomic_fetch_add_explicit(&node->submit_calls, 1U, memory_order_relaxed);
+        atomic_fetch_add_explicit(&node->submit_syscalls, 1U, memory_order_relaxed);
+        if (rc > 0) {
+            llam_windows_complete_immediate_op(op, op->immediate_bytes);
+        }
         return;
     }
 
@@ -286,10 +304,8 @@ void llam_windows_process_submissions(llam_node_t *node) {
         submitted += 1U;
     }
     if (submitted > 0U) {
-        node->submit_batches += 1U;
-        node->submit_entries += submitted;
-        if (submitted > node->max_submit_batch) {
-            node->max_submit_batch = submitted;
-        }
+        atomic_fetch_add_explicit(&node->submit_batches, 1U, memory_order_relaxed);
+        atomic_fetch_add_explicit(&node->submit_entries, submitted, memory_order_relaxed);
+        llam_atomic_update_peak(&node->max_submit_batch, submitted);
     }
 }

@@ -78,7 +78,7 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
         io_uring_prep_poll_add(sqe, req->fd, (unsigned)req->poll_events);
         break;
     default:
-        node->unsupported_ops += 1U;
+        atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
         llam_io_complete_req(node, req, -EINVAL, 0U, true);
         return;
     }
@@ -103,6 +103,10 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
             watch->deactivate_queued = true;
             if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch) == 0) {
                 kicked = true;
+            } else {
+                // Allocation failure must not leave the watch in a permanently
+                // queued-looking state; a later shutdown pass can retry.
+                watch->deactivate_queued = false;
             }
         }
     }
@@ -111,6 +115,8 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
             watch->deactivate_queued = true;
             if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch) == 0) {
                 kicked = true;
+            } else {
+                watch->deactivate_queued = false;
             }
         }
     }
@@ -119,6 +125,8 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
             watch->deactivate_queued = true;
             if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch) == 0) {
                 kicked = true;
+            } else {
+                watch->deactivate_queued = false;
             }
         }
     }
@@ -165,10 +173,8 @@ void llam_io_submit_batch(llam_node_t *node) {
         if (rc < 0) {
             llam_record_fatal(node->runtime, -rc);
         }
-        node->submit_batches += 1U;
-        node->submit_entries += submitted;
-        if (submitted > node->max_submit_batch) {
-            node->max_submit_batch = submitted;
-        }
+        atomic_fetch_add_explicit(&node->submit_batches, 1U, memory_order_relaxed);
+        atomic_fetch_add_explicit(&node->submit_entries, submitted, memory_order_relaxed);
+        llam_atomic_update_peak(&node->max_submit_batch, submitted);
     }
 }

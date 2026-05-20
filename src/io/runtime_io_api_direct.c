@@ -34,6 +34,22 @@
 #include <sys/uio.h>
 #endif
 
+/**
+ * @brief Return poll-compatible readiness for the public invalid-fd sentinel.
+ *
+ * Native poll(2) treats negative descriptors as ignored entries, which is
+ * useful for poll arrays but wrong for LLAM's single-descriptor public API.
+ * Normalize the sentinel to POLLNVAL before any direct poll fast path can turn
+ * it into a false timeout.
+ */
+static int llam_invalid_fd_poll_result(short *revents) {
+    if (revents != NULL) {
+        *revents = POLLNVAL;
+    }
+    errno = 0;
+    return 1;
+}
+
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 /** Number of Windows socket handles remembered as already set nonblocking. */
 #define LLAM_WINDOWS_NONBLOCK_CACHE_CAP 4096U
@@ -44,10 +60,9 @@ static _Atomic(uintptr_t) g_llam_windows_nonblock_cache[LLAM_WINDOWS_NONBLOCK_CA
 /**
  * @brief Return whether the Windows nonblocking socket cache is enabled.
  *
- * LLAM's Windows backend treats sockets used through managed I/O as
- * runtime-owned readiness objects, matching the usual event-loop model.  Once a
- * socket is promoted to nonblocking mode, this cache avoids per-read/write
- * FIONBIO churn on hot paths.
+ * LLAM cannot observe every user-side closesocket call, so handle-value reuse
+ * can make a cache entry stale.  Keep the optimization opt-in; the safe default
+ * repeats FIONBIO and therefore never trusts a recycled SOCKET value.
  */
 static bool llam_windows_nonblock_cache_enabled(void) {
     static atomic_int cached = -1;
@@ -56,7 +71,7 @@ static bool llam_windows_nonblock_cache_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_WINDOWS_NONBLOCK_CACHE");
 
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -117,14 +132,10 @@ llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard) {
     llam_task_t *task = g_llam_tls_task;
     llam_io_req_t *req;
 
-    if (task != NULL && task->active_io_req == NULL) {
+    if (task != NULL && llam_task_active_io_req_load(task) == NULL) {
         req = &task->embedded_io_req;
-        memset(req, 0, sizeof(*req));
+        llam_io_req_reset(req, shard != NULL ? shard->id : UINT_MAX, UINT_MAX);
         req->task = task;
-        req->owner_shard = shard != NULL ? shard->id : UINT_MAX;
-        req->alloc_owner_shard = UINT_MAX;
-        req->attached_node_index = UINT_MAX;
-        atomic_store(&req->inflight_owner_shard, UINT_MAX);
         return req;
     }
 
@@ -145,7 +156,7 @@ void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req) {
         return;
     }
     if (req->alloc_owner_shard == UINT_MAX) {
-        memset(req, 0, sizeof(*req));
+        llam_io_req_reset(req, UINT_MAX, UINT_MAX);
         return;
     }
     llam_io_req_free(shard, req);
@@ -165,6 +176,11 @@ void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req) {
  * @return Platform poll result.
  */
 int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
+    if (LLAM_FD_IS_INVALID(fd)) {
+        (void)events;
+        (void)timeout_ms;
+        return llam_invalid_fd_poll_result(revents);
+    }
 #if defined(__APPLE__)
     struct kevent changes[2];
     struct kevent fired[2];
@@ -201,9 +217,21 @@ int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
 
         for (i = 0; i < rc; ++i) {
             if (fired[i].flags & EV_ERROR) {
-                out |= POLLERR;
-                if (fired[i].data != 0) {
-                    errno = (int)fired[i].data;
+                int event_error = (int)fired[i].data;
+
+                /*
+                 * poll(2) reports per-descriptor failures through revents and
+                 * still returns a positive descriptor count. Darwin's kqueue
+                 * reports a closed fd as EV_ERROR, and the temporary kqueue fd
+                 * can even reuse the same integer value as the caller's stale
+                 * descriptor. Keep the public wrapper poll-compatible by
+                 * translating that registration failure into POLLNVAL instead
+                 * of leaking the kqueue errno as a syscall failure.
+                 */
+                if (event_error == EBADF || event_error == EINVAL) {
+                    out |= POLLNVAL;
+                } else {
+                    out |= POLLERR;
                 }
                 continue;
             }
@@ -219,7 +247,8 @@ int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
         if (revents != NULL) {
             *revents = out;
         }
-        if (rc > 0 && out == 0) {
+        if (rc > 0) {
+            /* poll returns the number of descriptors, not the number of events. */
             rc = 1;
         }
     }
@@ -289,6 +318,11 @@ int llam_platform_poll_handle(llam_handle_t handle, short events, int timeout_ms
 int llam_platform_poll_now(llam_fd_t fd, short events, short *revents) {
     struct pollfd pfd;
     int rc;
+
+    if (LLAM_FD_IS_INVALID(fd)) {
+        (void)events;
+        return llam_invalid_fd_poll_result(revents);
+    }
 
     pfd.fd = fd;
     pfd.events = events;
@@ -636,6 +670,25 @@ int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrl
         return -1;
     }
     if ((saved_flags & O_NONBLOCK) == 0) {
+        short revents = 0;
+        int poll_rc = llam_platform_poll_now(fd, POLLIN, &revents);
+
+        /*
+         * Never enter accept(2) on a blocking listener unless the kernel has
+         * already reported a queued connection.  Darwin stress found that the
+         * previous "temporarily flip O_NONBLOCK then accept" fast path could
+         * still strand a scheduler worker in __accept under heavy watcher churn.
+         */
+        if (poll_rc < 0) {
+            return -1;
+        }
+        if (poll_rc == 0 || (revents & POLLIN) == 0) {
+            if ((revents & POLLNVAL) != 0) {
+                errno = EBADF;
+                return -1;
+            }
+            return 0;
+        }
         if (fcntl(fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
             return -1;
         }

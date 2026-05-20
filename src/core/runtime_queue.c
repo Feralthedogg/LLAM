@@ -428,7 +428,8 @@ static unsigned llam_pick_opaque_redirect_target_id(llam_shard_t *blocked) {
  * @param task Runnable task to move away from @p blocked.
  * @param hot true to preserve/force hot-lane preference on the target.
  *
- * @return true if the task was queued on the redirect target, false otherwise.
+ * @return true if redirect handling accepted the task. This includes spill to
+ *         the runtime overflow queue when the target inject queue is full.
  *
  * @note Caller must hold @p blocked->lock.  This function tries the target
  *       lock without blocking to avoid deadlocking two shard locks.

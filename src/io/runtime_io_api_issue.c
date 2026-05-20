@@ -43,6 +43,33 @@
 #include "runtime_io_api_internal.h"
 
 /**
+ * @brief Normalize an I/O setup failure onto the request object.
+ *
+ * Public wrappers sometimes inspect the request result after an attempted
+ * multishot watch setup.  Request objects reset to result=0, so every hard
+ * setup failure must publish a negative result before returning or callers can
+ * mistake ENOMEM/setup failure for a clean timeout/no-readiness result.
+ *
+ * @param req        Request being prepared; may be NULL for defensive callers.
+ * @param error_code Concrete errno value to report.  Zero is normalized to
+ *                   EIO because zero is not a valid failure contract.
+ *
+ * @return Always -1 with @c errno set to the normalized error.
+ */
+static int llam_fail_io_setup_req(llam_io_req_t *req, int error_code) {
+    int saved_errno = error_code != 0 ? error_code : EIO;
+
+    if (req != NULL) {
+        req->result = -1;
+        req->fd_result = LLAM_INVALID_FD;
+        req->error_code = saved_errno;
+        req->poll_revents = 0;
+    }
+    errno = saved_errno;
+    return -1;
+}
+
+/**
  * @brief Finish the current task and switch back to the scheduler context.
  *
  * This is the terminal path for task fibers.  It marks the task dead, wakes
@@ -128,9 +155,7 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
         return;
     }
 
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_disarm_task_wait_deadline(task);
     node_index = llam_io_req_node_index(req);
     if (node_index >= 0) {
@@ -197,26 +222,144 @@ static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reaso
     atomic_store_explicit(&req->abort_reason, (unsigned)reason, memory_order_release);
     if (atomic_exchange_explicit(&req->cancel_queued, 1U, memory_order_acq_rel) == 0U &&
         llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req) != 0) {
+        /*
+         * The request is already backend-owned.  Returning false here would make
+         * setup cleanup release memory that the kernel/backend may still touch.
+         * Keep the task parked; a later abort attempt or the natural completion
+         * is the only safe owner transition after control allocation failure.
+         */
         atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
-        return false;
     }
     return true;
 }
 
 /**
- * @brief Prepare the current task before publishing it to a shared I/O watch.
+ * @brief Abort a request that has already been published during park setup.
  *
- * Watch completions can race with waiter insertion because an already-active
- * multishot watch may deliver data without a fresh backend kick.  Publish the
- * parked task state and initial request result before linking the waiter so an
- * early completion cannot be overwritten by the generic park path.
+ * Once a request is linked into a submit queue or watch, plain setup cleanup is
+ * no longer enough: the request must first be detached from that owner, or, if a
+ * backend worker already took it, the task must wait for backend completion.
  *
- * @param req       Request that will be linked to a watch.
- * @param wait_mode Watch wait mode to publish.
+ * @param req                 Published request.
+ * @param reason              Abort reason to report if the backend completes a cancel.
+ * @param wait_for_completion Set true when backend/completion ownership remains.
+ * @return true when the caller can safely either cleanup immediately or keep
+ *         parking for completion; false when ownership could not be established.
+ */
+static bool llam_abort_published_io_setup(llam_io_req_t *req,
+                                          llam_io_abort_reason_t reason,
+                                          bool *wait_for_completion) {
+    int node_index;
+    llam_node_t *node;
+    unsigned mode;
+    bool removed = false;
+
+    if (wait_for_completion != NULL) {
+        *wait_for_completion = false;
+    }
+    if (req == NULL) {
+        return false;
+    }
+
+    mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
+    if (mode == LLAM_IO_WAIT_MODE_NONE) {
+        if (wait_for_completion != NULL) {
+            *wait_for_completion = true;
+        }
+        return true;
+    }
+
+    node_index = llam_io_req_node_index(req);
+    if (node_index < 0) {
+        return false;
+    }
+    node = &g_llam_runtime.nodes[node_index];
+
+    if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
+        if (!llam_abort_inflight_io_setup(req, reason)) {
+            return false;
+        }
+        if (wait_for_completion != NULL) {
+            *wait_for_completion = true;
+        }
+        return true;
+    }
+
+    if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+        pthread_mutex_lock(&node->submit_lock);
+        removed = llam_remove_node_submit_locked(node, req);
+        if (removed) {
+            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
+            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+        }
+        pthread_mutex_unlock(&node->submit_lock);
+        if (removed) {
+            atomic_fetch_sub(&node->pending_ops, 1U);
+        }
+    } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
+        pthread_mutex_lock(&node->watch_lock);
+        removed = llam_poll_watch_remove_waiter(req->poll_watch, req);
+        if (removed) {
+            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
+            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+    } else if (mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH && req->accept_watch != NULL) {
+        pthread_mutex_lock(&node->watch_lock);
+        removed = llam_accept_watch_remove_waiter(req->accept_watch, req);
+        if (removed) {
+            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
+            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+    } else if (mode == LLAM_IO_WAIT_MODE_RECV_WATCH && req->recv_watch != NULL) {
+        pthread_mutex_lock(&node->watch_lock);
+        removed = llam_recv_watch_remove_waiter(req->recv_watch, req);
+        if (removed) {
+            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
+            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+    }
+
+    if (removed) {
+        llam_io_set_abort_result(req, reason);
+        return true;
+    }
+    mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
+    if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
+        if (!llam_abort_inflight_io_setup(req, reason)) {
+            return false;
+        }
+        if (wait_for_completion != NULL) {
+            *wait_for_completion = true;
+        }
+        return true;
+    }
+    if (mode == LLAM_IO_WAIT_MODE_NONE) {
+        if (wait_for_completion != NULL) {
+            *wait_for_completion = true;
+        }
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief Prepare the current task before publishing it to a backend wait owner.
+ *
+ * Backend completions can race with both shared watch insertion and one-shot
+ * submit-queue publication.  Publish the parked task state and initial request
+ * result before making @p req visible so an early completion cannot be
+ * overwritten by the generic park path.
+ *
+ * @param req         Request that will be linked to a backend owner.
+ * @param wait_mode   Wait mode to publish.
+ * @param deadline_ns Absolute deadline to store on the request, or 0.
  *
  * @return 0 on success, -1 with errno set for invalid context.
  */
-static int llam_prepare_watch_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wait_mode) {
+static int llam_prepare_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wait_mode, uint64_t deadline_ns) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
 
@@ -232,7 +375,7 @@ static int llam_prepare_watch_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wa
     req->error_code = 0;
     req->owner_shard = shard->id;
     req->submit_ts_ns = llam_now_ns();
-    req->deadline_ns = 0U;
+    req->deadline_ns = deadline_ns;
     atomic_store(&req->wait_mode, wait_mode);
     atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->cancel_queued, 0U);
@@ -272,12 +415,17 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     }
 
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
-    already_prepared = (task->active_io_req == req &&
-                        task->state == LLAM_TASK_STATE_PARKED &&
-                        task->wait_reason == LLAM_WAIT_IO &&
-                        (wait_mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
-                         wait_mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
-                         wait_mode == LLAM_IO_WAIT_MODE_RECV_WATCH));
+    /*
+     * One-shot submit and shared-watch paths prepare the task before exposing
+     * req to backend threads.  If an immediate backend completion wins before
+     * this function runs, wait_mode is already NONE and the completion path has
+     * queued this task; do not reinitialize the result or wait ownership.
+     */
+    already_prepared = (req->task == task &&
+                        ((llam_task_active_io_req_load(task) == req &&
+                          task->state == LLAM_TASK_STATE_PARKED &&
+                          task->wait_reason == LLAM_WAIT_IO) ||
+                         wait_mode == LLAM_IO_WAIT_MODE_NONE));
     if (!already_prepared) {
         llam_task_ensure_listed(task);
         llam_task_set_io_tracking(task, req, shard->id);
@@ -296,8 +444,18 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     }
     if (has_deadline && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
         if (llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
-            llam_cleanup_io_wait_setup(task, req);
-            return -1;
+            int saved_errno = errno;
+            bool wait_for_completion = false;
+
+            req->error_code = saved_errno != 0 ? saved_errno : ENOMEM;
+            if (llam_abort_published_io_setup(req, LLAM_IO_ABORT_ERROR, &wait_for_completion) &&
+                wait_for_completion) {
+                /* Backend completion now owns the final wake/result. */
+            } else {
+                llam_cleanup_io_wait_setup(task, req);
+                errno = saved_errno;
+                return -1;
+            }
         }
         if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE) {
             llam_disarm_task_wait_deadline(task);
@@ -306,16 +464,30 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     if (task->cancel_token != NULL && atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
         if (llam_cancel_token_register_task(task) != 0) {
             int saved_errno = errno;
+            bool wait_for_completion = false;
 
-            if (saved_errno == ECANCELED && llam_abort_inflight_io_setup(req, LLAM_IO_ABORT_CANCEL)) {
-                /* Backend completion will wake this task with ECANCELED. */
+            if (saved_errno == ECANCELED &&
+                llam_abort_published_io_setup(req, LLAM_IO_ABORT_CANCEL, &wait_for_completion)) {
+                if (wait_for_completion) {
+                    /* Backend completion will wake this task with ECANCELED. */
+                } else {
+                    if (has_deadline) {
+                        llam_disarm_task_wait_deadline(task);
+                    }
+                    llam_cleanup_io_wait_setup(task, req);
+                    errno = saved_errno;
+                    return -1;
+                }
             } else {
+                if (has_deadline) {
+                    llam_disarm_task_wait_deadline(task);
+                }
                 llam_cleanup_io_wait_setup(task, req);
                 errno = saved_errno;
                 return -1;
             }
         }
-        if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE && task->cancel_registered) {
+        if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) == LLAM_IO_WAIT_MODE_NONE) {
             llam_cancel_token_unregister_task(task);
         }
     }
@@ -329,9 +501,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
         // visible to the wake path.  Disarm defensively after the task resumes.
         llam_disarm_task_wait_deadline(task);
     }
-    if (task->cancel_registered) {
-        llam_cancel_token_unregister_task(task);
-    }
+    llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     shard->metrics.io_completions += 1U;
     errno = req->error_code;
@@ -383,8 +553,7 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
-        errno = saved_errno != 0 ? saved_errno : ENOMEM;
-        return -1;
+        return llam_fail_io_setup_req(req, saved_errno != 0 ? saved_errno : ENOMEM);
     }
     if (watch->migrate_target_node_index != UINT_MAX && watch->migrate_target_node_index != node->index) {
         watch->migrate_target_node_index = UINT_MAX;
@@ -439,8 +608,7 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
     if (!watch->active && !watch->activating) {
         if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch) != 0) {
             pthread_mutex_unlock(&node->watch_lock);
-            errno = ENOMEM;
-            return -1;
+            return llam_fail_io_setup_req(req, ENOMEM);
         }
         watch->activating = true;
         kick = true;
@@ -448,12 +616,11 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
     req->poll_watch = watch;
     req->accept_watch = NULL;
     req->recv_watch = NULL;
-    if (llam_prepare_watch_io_wait(req, LLAM_IO_WAIT_MODE_POLL_WATCH) != 0) {
+    if (llam_prepare_io_wait(req, LLAM_IO_WAIT_MODE_POLL_WATCH, 0U) != 0) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
-        errno = saved_errno;
-        return -1;
+        return llam_fail_io_setup_req(req, saved_errno);
     }
     llam_poll_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
@@ -497,8 +664,7 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
     watch = llam_get_or_create_accept_watch_locked(node, req->fd);
     if (watch == NULL) {
         pthread_mutex_unlock(&node->watch_lock);
-        errno = ENOMEM;
-        return -1;
+        return llam_fail_io_setup_req(req, ENOMEM);
     }
     if (watch->migrate_target_node_index != UINT_MAX && watch->migrate_target_node_index != node->index) {
         watch->migrate_target_node_index = UINT_MAX;
@@ -516,8 +682,7 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
     if (!watch->active && !watch->activating) {
         if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_ACCEPT_ACTIVATE, watch) != 0) {
             pthread_mutex_unlock(&node->watch_lock);
-            errno = ENOMEM;
-            return -1;
+            return llam_fail_io_setup_req(req, ENOMEM);
         }
         watch->activating = true;
         kick = true;
@@ -525,12 +690,11 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
     req->poll_watch = NULL;
     req->accept_watch = watch;
     req->recv_watch = NULL;
-    if (llam_prepare_watch_io_wait(req, LLAM_IO_WAIT_MODE_ACCEPT_WATCH) != 0) {
+    if (llam_prepare_io_wait(req, LLAM_IO_WAIT_MODE_ACCEPT_WATCH, 0U) != 0) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
-        errno = saved_errno;
-        return -1;
+        return llam_fail_io_setup_req(req, saved_errno);
     }
     llam_accept_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
@@ -584,8 +748,7 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
-        errno = saved_errno != 0 ? saved_errno : ENOMEM;
-        return -1;
+        return llam_fail_io_setup_req(req, saved_errno != 0 ? saved_errno : ENOMEM);
     }
     if (watch->migrate_target_node_index != UINT_MAX && watch->migrate_target_node_index != node->index) {
         watch->migrate_target_node_index = UINT_MAX;
@@ -650,8 +813,7 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
     if (!watch->active && !watch->activating) {
         if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_RECV_ACTIVATE, watch) != 0) {
             pthread_mutex_unlock(&node->watch_lock);
-            errno = ENOMEM;
-            return -1;
+            return llam_fail_io_setup_req(req, ENOMEM);
         }
         watch->activating = true;
         kick = true;
@@ -659,12 +821,11 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
     req->poll_watch = NULL;
     req->accept_watch = NULL;
     req->recv_watch = watch;
-    if (llam_prepare_watch_io_wait(req, LLAM_IO_WAIT_MODE_RECV_WATCH) != 0) {
+    if (llam_prepare_io_wait(req, LLAM_IO_WAIT_MODE_RECV_WATCH, 0U) != 0) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
-        errno = saved_errno;
-        return -1;
+        return llam_fail_io_setup_req(req, saved_errno);
     }
     llam_recv_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
@@ -703,7 +864,7 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     node = &rt->nodes[shard->io_node_index];
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     if (req->kind == LLAM_IO_KIND_POLL && !llam_windows_iocp_poll_supported(req->fd, req->poll_events)) {
-        node->unsupported_ops += 1U;
+        atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
         shard->metrics.io_fallbacks += 1U;
         errno = EAGAIN;
         return -1;
@@ -711,7 +872,7 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
 #endif
     if (!node->ring_ready ||
         (req->kind == LLAM_IO_KIND_READ && req->use_recv_op ? !node->supports_recv : !llam_node_supports_kind(node, req->kind))) {
-        node->unsupported_ops += 1U;
+        atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
         shard->metrics.io_fallbacks += 1U;
         errno = EAGAIN;
         return -1;
@@ -723,17 +884,19 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     req->owner_shard = shard->id;
     req->attached_node_index = node->index;
     req->submit_ts_ns = llam_now_ns();
-    atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_SUBMIT_QUEUE);
     atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->cancel_queued, 0U);
     req->poll_watch = NULL;
     req->accept_watch = NULL;
     req->recv_watch = NULL;
+    if (llam_prepare_io_wait(req, LLAM_IO_WAIT_MODE_SUBMIT_QUEUE, has_deadline ? deadline_ns : 0U) != 0) {
+        return -1;
+    }
 
     pthread_mutex_lock(&node->submit_lock);
+    atomic_fetch_add(&node->pending_ops, 1U);
     llam_queue_node_submit_locked(node, req);
     pthread_mutex_unlock(&node->submit_lock);
-    atomic_fetch_add(&node->pending_ops, 1U);
     if (llam_park_io_req(req, has_deadline, deadline_ns, node) != 0) {
         return -1;
     }
