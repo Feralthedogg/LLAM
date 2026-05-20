@@ -140,17 +140,41 @@ static const char *demo_fp_round_name(unsigned mode) {
     }
 }
 
+static void demo_runtime_sleep_ms(unsigned duration_ms) {
+    if (duration_ms == 0U) {
+        return;
+    }
+    (void)llam_sleep_ns((uint64_t)duration_ms * 1000ULL * 1000ULL);
+}
+
+static void demo_opaque_block_ms(unsigned duration_ms) {
+    uint64_t deadline_ns;
+
+    if (duration_ms == 0U) {
+        return;
+    }
+    /*
+     * Keep the opaque-blocking example independent of libc feature-test macros:
+     * the point here is to pin the current worker inside foreign-looking code
+     * after llam_enter_blocking(), not to demonstrate a particular POSIX sleep
+     * primitive.
+     */
+    deadline_ns = llam_now_ns() + (uint64_t)duration_ms * 1000ULL * 1000ULL;
+    while (llam_now_ns() < deadline_ns) {
+    }
+}
+
 static void *slow_square(void *arg) {
     struct slow_job *job = arg;
 
-    usleep((useconds_t)job->pause_ms * 1000U);
+    demo_runtime_sleep_ms(job->pause_ms);
     job->output = job->input * job->input;
     return job;
 }
 
 static void *blocking_pause(void *arg) {
     (void)arg;
-    usleep(20U * 1000U);
+    demo_runtime_sleep_ms(20U);
     return arg;
 }
 
@@ -570,14 +594,14 @@ void opaque_block_task(void *arg) {
 
     for (iteration = 0; iteration < 2U; ++iteration) {
         llam_spawn(counter_task,
-                 iteration == 0U ? "opaque-companion-a" : "opaque-companion-b",
-                 &(llam_spawn_opts_t){
-                     .task_class = LLAM_TASK_CLASS_DEFAULT,
-                     .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                 });
+                   iteration == 0U ? "opaque-companion-a" : "opaque-companion-b",
+                   &(llam_spawn_opts_t){
+                       .task_class = LLAM_TASK_CLASS_DEFAULT,
+                       .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                   });
         printf("[opaque-block] entering same-thread blocking scope=%u\n", iteration);
         llam_enter_blocking();
-        usleep(6U * 1000U);
+        demo_opaque_block_ms(6U);
         llam_leave_blocking();
         printf("[opaque-block] left same-thread blocking scope=%u\n", iteration);
         llam_sleep_ns(1ULL * 1000ULL * 1000ULL);
