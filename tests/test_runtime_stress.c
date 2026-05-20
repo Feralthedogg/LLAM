@@ -688,7 +688,12 @@ static int init_preempt_runtime(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
-    opts.profile = LLAM_RUNTIME_PROFILE_IO_LATENCY;
+    /*
+     * This case verifies cooperative preemption fairness, not the experimental
+     * ordinary-yield direct-handoff lane.  Use the debug-safe profile so every
+     * preemption yield returns through the scheduler on all hosted runners.
+     */
+    opts.profile = LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     opts.preempt_mode = LLAM_PREEMPT_STRICT;
     opts.preempt_poll_period = 1U;
