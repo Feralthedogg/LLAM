@@ -334,6 +334,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
     case LLAM_WAIT_SLEEP:
         if (task->parked_shard < g_llam_runtime.active_shards) {
             llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard];
+            llam_wait_node_t *node = task->active_wait_node;
 
             pthread_mutex_lock(&shard->lock);
             removed = llam_timer_remove_locked(shard, task);
@@ -343,8 +344,22 @@ void llam_cancel_task_wait(llam_task_t *task) {
             pthread_mutex_unlock(&shard->lock);
             if (removed) {
                 task->wake_error_code = ECANCELED;
-                // Generic reinject clears tracking after deadline cleanup.
-                llam_reinject_task(&g_llam_runtime, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
+                if (node != NULL) {
+                    node->error_code = ECANCELED;
+                }
+                /*
+                 * The sleep may not have switched to the scheduler yet.  Only
+                 * enqueue an already-parked task; otherwise the caller consumes
+                 * the cancellation inline through its wait node.
+                 */
+                if (node == NULL || llam_wait_node_prepare_wake(node)) {
+                    llam_reinject_task_on_shard(&g_llam_runtime,
+                                              task,
+                                              task->parked_shard,
+                                              true,
+                                              LLAM_TRACE_WAKE,
+                                              LLAM_WAIT_CANCEL);
+                }
             }
         }
         break;
@@ -555,10 +570,21 @@ void llam_timeout_task_wait(llam_task_t *task) {
     switch (wait_reason) {
     case LLAM_WAIT_SLEEP: {
         llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+        llam_wait_node_t *node = task->active_wait_node;
 
         shard->metrics.timeout_wakes += 1U;
         task->wake_error_code = 0;
-        llam_reinject_task(&g_llam_runtime, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_TIMEOUT);
+        if (node != NULL) {
+            node->error_code = 0;
+        }
+        if (node == NULL || llam_wait_node_prepare_wake(node)) {
+            llam_reinject_task_on_shard(&g_llam_runtime,
+                                      task,
+                                      task->parked_shard,
+                                      true,
+                                      LLAM_TRACE_WAKE,
+                                      LLAM_WAIT_TIMEOUT);
+        }
         break;
     }
     case LLAM_WAIT_JOIN:
@@ -748,11 +774,19 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
         task = sleep_head;
         while (task != NULL) {
             llam_task_t *next = task->wait_next;
+            llam_wait_node_t *node = task->active_wait_node;
             bool hot;
 
             task->wait_next = NULL;
             shard->metrics.timeout_wakes += 1U;
             task->wake_error_code = 0;
+            if (node != NULL) {
+                node->error_code = 0;
+            }
+            if (node != NULL && !llam_wait_node_prepare_wake(node)) {
+                task = next;
+                continue;
+            }
             llam_task_clear_wait_tracking(task);
             hot = llam_should_enqueue_hot_locked(shard, task, true, pressure);
             llam_mark_runnable_locked(shard, task, hot, LLAM_TRACE_WAKE, LLAM_WAIT_TIMEOUT, true);

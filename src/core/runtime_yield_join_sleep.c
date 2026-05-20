@@ -876,8 +876,10 @@ int llam_detach(llam_task_t *task) {
 int llam_sleep_until(uint64_t deadline_ns) {
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
+    llam_wait_node_t *node = NULL;
     int caller_errno = errno;
     int rc;
+    int node_error;
     bool traced_sleep = false;
     bool timer_inserted;
     bool timer_completion_pending = false;
@@ -916,8 +918,21 @@ int llam_sleep_until(uint64_t deadline_ns) {
         return 0;
     }
 
+    node = llam_sync_wait_node_acquire(shard);
+    if (node == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+
     llam_task_ensure_listed(task);
     llam_task_set_sleep_tracking(task, shard->id);
+    /*
+     * Sleep timers can expire on another worker before this task reaches the
+     * context switch below.  Reuse the wait-node arm/complete handshake so that
+     * early timer/cancel completion is consumed inline instead of enqueueing a
+     * still-running stack.
+     */
+    task->active_wait_node = node;
     task->deadline_ns = deadline_ns;
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_SLEEP;
@@ -940,6 +955,7 @@ int llam_sleep_until(uint64_t deadline_ns) {
         task->wait_reason = LLAM_WAIT_NONE;
         task->deadline_ns = 0U;
         llam_task_clear_wait_tracking(task);
+        llam_sync_wait_node_release(shard, node);
         errno = ENOMEM;
         return -1;
     }
@@ -964,6 +980,7 @@ int llam_sleep_until(uint64_t deadline_ns) {
         task->wait_reason = LLAM_WAIT_NONE;
         task->deadline_ns = 0U;
         llam_task_clear_wait_tracking(task);
+        llam_sync_wait_node_release(shard, node);
         errno = saved_errno;
         return -1;
     }
@@ -979,12 +996,19 @@ sleep_wait_ready:
         pthread_mutex_unlock(&shard->lock);
     }
 
-    llam_task_sample_live_stack(task);
-    errno = caller_errno;
-    llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
+    if (llam_wait_node_should_park(node)) {
+        llam_task_sample_live_stack(task);
+        errno = caller_errno;
+        llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
+    }
     llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
     rc = llam_consume_task_wake_error(task);
+    node_error = node->error_code;
+    llam_sync_wait_node_release(shard, node);
+    if (rc == 0) {
+        rc = node_error;
+    }
     if (rc != 0) {
         errno = rc;
         return -1;
