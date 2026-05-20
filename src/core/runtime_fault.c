@@ -184,7 +184,12 @@ void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
         off = llam_buf_append_str(buf, sizeof(buf), off, " state=");
         off = llam_buf_append_str(buf, sizeof(buf), off, llam_state_name_from_id(task->state));
         off = llam_buf_append_str(buf, sizeof(buf), off, " wait=");
-        off = llam_buf_append_str(buf, sizeof(buf), off, llam_wait_reason_name(task->wait_reason));
+        off = llam_buf_append_str(
+            buf,
+            sizeof(buf),
+            off,
+            llam_wait_reason_name(
+                (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire)));
         off = llam_buf_append_char(buf, sizeof(buf), off, '\n');
         off = llam_buf_append_str(buf, sizeof(buf), off, "  fault_addr=");
         off = llam_buf_append_hex_uintptr(buf, sizeof(buf), off, fault_addr);

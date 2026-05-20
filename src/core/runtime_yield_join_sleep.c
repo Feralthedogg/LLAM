@@ -944,6 +944,7 @@ int llam_sleep_until(uint64_t deadline_ns) {
         return -1;
     }
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
+        int saved_errno = errno != 0 ? errno : ECANCELED;
         bool removed;
 
         pthread_mutex_lock(&shard->lock);
@@ -963,6 +964,7 @@ int llam_sleep_until(uint64_t deadline_ns) {
         task->wait_reason = LLAM_WAIT_NONE;
         task->deadline_ns = 0U;
         llam_task_clear_wait_tracking(task);
+        errno = saved_errno;
         return -1;
     }
 sleep_wait_ready:
@@ -970,7 +972,8 @@ sleep_wait_ready:
     shard->metrics.parks += 1U;
     if (!traced_sleep && !timer_completion_pending) {
         pthread_mutex_lock(&shard->lock);
-        if (task->state == LLAM_TASK_STATE_PARKED && task->wait_reason == LLAM_WAIT_SLEEP) {
+        if (task->state == LLAM_TASK_STATE_PARKED &&
+            (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) == LLAM_WAIT_SLEEP) {
             llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_SLEEP);
         }
         pthread_mutex_unlock(&shard->lock);

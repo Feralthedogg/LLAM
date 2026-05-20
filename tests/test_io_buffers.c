@@ -368,11 +368,15 @@ static void io_reader_task(void *arg) {
         task_fail(state, "managed handle I/O POSIX alias semantics", errno);
         return;
     }
+    /*
+     * Use many moderate lengths, not one huge tail. Linux may legally validate
+     * each /dev/null slice lazily and report EFAULT for an oversized single
+     * buffer before the fallback aggregate-limit path is exercised.
+     */
     for (int i = 0; i < 17; ++i) {
         huge_tail_iov[i].iov_base = &one;
-        huge_tail_iov[i].iov_len = 1U;
+        huge_tail_iov[i].iov_len = ((size_t)SSIZE_MAX / 16U) + 1U;
     }
-    huge_tail_iov[16].iov_len = (size_t)SSIZE_MAX / 4U;
     errno = 0;
     /*
      * The managed writev fallback handles iovcnt > 16 by writing slices one at

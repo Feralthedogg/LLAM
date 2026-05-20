@@ -163,7 +163,9 @@ static bool llam_task_can_rehome_io_wait(const llam_shard_t *source,
     if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
         return false;
     }
-    if (task->state != LLAM_TASK_STATE_PARKED || task->wait_reason != LLAM_WAIT_IO || task->parked_shard != source->id) {
+    if (task->state != LLAM_TASK_STATE_PARKED ||
+        (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) != LLAM_WAIT_IO ||
+        task->parked_shard != source->id) {
         return false;
     }
     if (llam_task_active_io_req_load(task) != req || req->owner_shard != source->id) {
@@ -419,7 +421,8 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
         if (cur->owner_shard != target_shard->id || cur->attached_node_index != source_locked->index) {
             continue;
         }
-        if (task == NULL || task->state != LLAM_TASK_STATE_PARKED || task->wait_reason != LLAM_WAIT_IO ||
+        if (task == NULL || task->state != LLAM_TASK_STATE_PARKED ||
+            (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) != LLAM_WAIT_IO ||
             task->parked_shard != target_shard->id || llam_task_active_io_req_load(task) != cur ||
             atomic_load_explicit(&cur->wait_mode, memory_order_acquire) != (unsigned)LLAM_IO_WAIT_MODE_SUBMIT_QUEUE ||
             !llam_node_supports_submit_req(target_locked, cur)) {

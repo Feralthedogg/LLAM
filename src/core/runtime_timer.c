@@ -329,7 +329,8 @@ void llam_cancel_task_wait(llam_task_t *task) {
         return;
     }
 
-    switch (task->wait_reason) {
+    llam_wait_reason_t wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire);
+    switch (wait_reason) {
     case LLAM_WAIT_SLEEP:
         if (task->parked_shard < g_llam_runtime.active_shards) {
             llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard];
@@ -492,7 +493,8 @@ void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt) {
             }
             pthread_mutex_lock(&owner->lock);
             for (task = owner->all_tasks; task != NULL && count < capacity; task = task->all_next) {
-                if (task->state != LLAM_TASK_STATE_PARKED || task->wait_reason == LLAM_WAIT_NONE ||
+                llam_wait_reason_t wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire);
+                if (task->state != LLAM_TASK_STATE_PARKED || wait_reason == LLAM_WAIT_NONE ||
                     atomic_load_explicit(&task->reclaim_claimed, memory_order_acquire) != 0U) {
                     continue;
                 }
@@ -533,7 +535,8 @@ void llam_timeout_task_wait(llam_task_t *task) {
         return;
     }
 
-    switch (task->wait_reason) {
+    llam_wait_reason_t wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire);
+    switch (wait_reason) {
     case LLAM_WAIT_SLEEP: {
         llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
 
@@ -704,7 +707,8 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
         expired_head = timer->next;
         timer->next = NULL;
         if (timer->task != NULL &&
-            timer->task->wait_reason == LLAM_WAIT_SLEEP &&
+            (llam_wait_reason_t)atomic_load_explicit(&timer->task->wait_reason, memory_order_acquire) ==
+                LLAM_WAIT_SLEEP &&
             timer->task->parked_shard == shard->id) {
             timer->task->wait_next = NULL;
             if (sleep_tail != NULL) {

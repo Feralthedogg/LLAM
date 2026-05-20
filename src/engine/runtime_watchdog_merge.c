@@ -253,7 +253,8 @@ static bool llam_task_can_merge_runnable(const llam_shard_t *source, const llam_
     if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
         return false;
     }
-    if (task->state != LLAM_TASK_STATE_RUNNABLE || task->wait_reason != LLAM_WAIT_NONE) {
+    if (task->state != LLAM_TASK_STATE_RUNNABLE ||
+        (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) != LLAM_WAIT_NONE) {
         return false;
     }
     return true;

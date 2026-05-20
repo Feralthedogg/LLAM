@@ -424,7 +424,8 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     already_prepared = (req->task == task &&
                         ((llam_task_active_io_req_load(task) == req &&
                           task->state == LLAM_TASK_STATE_PARKED &&
-                          task->wait_reason == LLAM_WAIT_IO) ||
+                          (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) ==
+                              LLAM_WAIT_IO) ||
                          wait_mode == LLAM_IO_WAIT_MODE_NONE));
     if (!already_prepared) {
         llam_task_ensure_listed(task);
