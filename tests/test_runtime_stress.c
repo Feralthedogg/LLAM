@@ -814,17 +814,11 @@ static int test_automatic_preemption_fairness(void) {
         close(fds[1]);
         return fail_errno("runtime init for preempt fairness failed");
     }
-    for (unsigned i = 0U; i < PREEMPT_HOG_TASKS; ++i) {
-        if (spawn_detached(preempt_hog_task, &state, NULL) != 0) {
-            int saved_errno = errno;
-
-            llam_runtime_shutdown();
-            close(fds[0]);
-            close(fds[1]);
-            errno = saved_errno;
-            return fail_errno("spawn preempt hog failed");
-        }
-    }
+    /*
+     * Install timer/I/O waiters before the CPU hogs.  The stress target is
+     * wake fairness under hog load; if hogs are queued first, slow hosted ARM
+     * runners can spend the whole case just trying to start the setup tasks.
+     */
     if (spawn_detached(preempt_timer_task, &state, NULL) != 0 ||
         spawn_detached(preempt_io_reader_task, &state, NULL) != 0 ||
         spawn_detached(preempt_io_writer_task, &state, NULL) != 0 ||
@@ -836,6 +830,17 @@ static int test_automatic_preemption_fairness(void) {
         close(fds[1]);
         errno = saved_errno;
         return fail_errno("spawn preempt fairness tasks failed");
+    }
+    for (unsigned i = 0U; i < PREEMPT_HOG_TASKS; ++i) {
+        if (spawn_detached(preempt_hog_task, &state, NULL) != 0) {
+            int saved_errno = errno;
+
+            llam_runtime_shutdown();
+            close(fds[0]);
+            close(fds[1]);
+            errno = saved_errno;
+            return fail_errno("spawn preempt hog failed");
+        }
     }
     if (llam_run() != 0) {
         llam_runtime_shutdown();
