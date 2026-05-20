@@ -44,6 +44,8 @@
 #define COND_ROUNDS 12000U
 #define PREEMPT_HOG_TASKS 32U
 #define PREEMPT_POLL_INTERVAL 128U
+#define PREEMPT_TIMER_STARVE_NS (5ULL * 1000ULL * 1000ULL * 1000ULL)
+#define PREEMPT_MONITOR_TIMEOUT_NS (10ULL * 1000ULL * 1000ULL * 1000ULL)
 
 typedef int (*stress_case_fn)(void);
 
@@ -711,10 +713,12 @@ static void preempt_timer_task(void *arg) {
 
     if (llam_sleep_ns(5000000ULL) != 0) {
         task_fail(state, "preempt timer sleep", errno);
+        atomic_store_explicit(&state->preempt_timer_done, 1U, memory_order_release);
         return;
     }
-    if (llam_now_ns() - started_ns > 500000000ULL) {
+    if (llam_now_ns() - started_ns > PREEMPT_TIMER_STARVE_NS) {
         task_fail(state, "preempt timer starved", ETIMEDOUT);
+        atomic_store_explicit(&state->preempt_timer_done, 1U, memory_order_release);
         return;
     }
     atomic_store_explicit(&state->preempt_timer_done, 1U, memory_order_release);
@@ -729,6 +733,7 @@ static void preempt_io_reader_task(void *arg) {
     nread = llam_read((llam_fd_t)state->io_fd, &byte, 1U);
     if (nread != 1 || byte != 'p') {
         task_fail(state, "preempt io read", nread < 0 ? errno : EIO);
+        atomic_store_explicit(&state->preempt_io_done, 1U, memory_order_release);
         return;
     }
     atomic_store_explicit(&state->preempt_io_done, 1U, memory_order_release);
@@ -744,18 +749,36 @@ static void preempt_io_writer_task(void *arg) {
     }
     if (llam_sleep_ns(5000000ULL) != 0) {
         task_fail(state, "preempt io writer sleep", errno);
+        atomic_store_explicit(&state->preempt_io_done, 1U, memory_order_release);
+        (void)llam_runtime_request_stop();
         return;
     }
     if (llam_write((llam_fd_t)state->write_fd, &byte, 1U) != 1) {
         task_fail(state, "preempt io write", errno);
+        atomic_store_explicit(&state->preempt_io_done, 1U, memory_order_release);
+        (void)llam_runtime_request_stop();
     }
 }
 
 static void preempt_monitor_task(void *arg) {
     stress_state_t *state = arg;
+    uint64_t started_ns = llam_now_ns();
 
     while (atomic_load_explicit(&state->preempt_timer_done, memory_order_acquire) == 0U ||
            atomic_load_explicit(&state->preempt_io_done, memory_order_acquire) == 0U) {
+        if (llam_now_ns() - started_ns > PREEMPT_MONITOR_TIMEOUT_NS) {
+            /*
+             * A failed timer/I/O task must still let the infinite hog loop
+             * drain.  Without this guard, hosted slow runners report only a
+             * process timeout instead of the first recorded preemption error.
+             */
+            task_fail(state, "preempt monitor timeout", ETIMEDOUT);
+            atomic_store_explicit(&state->preempt_timer_done, 1U, memory_order_release);
+            atomic_store_explicit(&state->preempt_io_done, 1U, memory_order_release);
+            atomic_store_explicit(&state->preempt_stop, 1U, memory_order_release);
+            (void)llam_runtime_request_stop();
+            return;
+        }
         LLAM_PREEMPT_POLL();
         llam_yield();
     }
