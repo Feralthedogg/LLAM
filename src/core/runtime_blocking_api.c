@@ -219,6 +219,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     llam_task_t *task = g_llam_tls_task;
     llam_cancel_token_t *token;
     llam_block_job_t *job;
+    llam_wait_node_t *node;
     int wake_error;
 
     llam_task_safepoint();
@@ -239,10 +240,26 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     if (job == NULL) {
         return -1;
     }
+    node = llam_sync_wait_node_acquire(g_llam_tls_shard);
+    if (node == NULL) {
+        llam_block_job_release(rt, job);
+        errno = ENOMEM;
+        return -1;
+    }
 
     job->fn = fn;
     job->arg = arg;
     job->task = task;
+    job->wait_node = node;
+    /*
+     * Blocking workers complete on OS helper threads and write the callback
+     * result back into the parked task just before reinjection.  Hold the same
+     * short reclaim guard used by cancellation/timer scans so detached task
+     * reclamation cannot recycle the task object while a helper still owns this
+     * raw task pointer.
+     */
+    atomic_fetch_add_explicit(&task->scan_refs, 1U, memory_order_acq_rel);
+    job->holds_task_ref = true;
     /*
      * Allocation already initialized the atomic state object.  Publish QUEUED
      * with an atomic store so the worker/cancel state machine never observes a
@@ -265,6 +282,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
             llam_task_clear_wait_tracking(task);
+            llam_sync_wait_node_release(g_llam_tls_shard, node);
             llam_block_job_release(rt, job);
             errno = ECANCELED;
             return -1;
@@ -315,11 +333,14 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
                    LLAM_TASK_STATE_RUNNING,
                    LLAM_TASK_STATE_PARKED,
                    LLAM_WAIT_BLOCKING);
-    llam_task_sample_live_stack(task);
-    llam_switch_task_to_scheduler(task,
-                                g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
+    if (llam_wait_node_should_park(node)) {
+        llam_task_sample_live_stack(task);
+        llam_switch_task_to_scheduler(task,
+                                    g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
+    }
     llam_cancel_token_unregister_task(task);
     llam_task_clear_wait_tracking(task);
+    llam_sync_wait_node_release(g_llam_tls_shard, node);
     wake_error = llam_consume_task_wake_error(task);
     if (wake_error != 0) {
         errno = wake_error;

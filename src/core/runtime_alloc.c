@@ -273,7 +273,9 @@ static void llam_block_job_init(llam_block_job_t *job) {
     atomic_init(&job->result, NULL);
     atomic_init(&job->error_code, 0);
     job->task = NULL;
+    job->wait_node = NULL;
     atomic_init(&job->state, LLAM_BLOCK_JOB_ABORTED);
+    job->holds_task_ref = false;
     job->next = NULL;
 }
 
@@ -297,7 +299,9 @@ static void llam_block_job_reset(llam_block_job_t *job) {
     atomic_store_explicit(&job->result, NULL, memory_order_release);
     atomic_store_explicit(&job->error_code, 0, memory_order_release);
     job->task = NULL;
+    job->wait_node = NULL;
     atomic_store_explicit(&job->state, LLAM_BLOCK_JOB_ABORTED, memory_order_release);
+    job->holds_task_ref = false;
     job->next = NULL;
 }
 
@@ -396,9 +400,20 @@ llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt) {
  */
 void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
     llam_block_job_t *head;
+    llam_task_t *task;
+    bool release_task_ref;
 
     if (rt == NULL || job == NULL) {
         return;
+    }
+
+    task = job->task;
+    release_task_ref = job->holds_task_ref;
+    job->holds_task_ref = false;
+    job->task = NULL;
+    job->wait_node = NULL;
+    if (release_task_ref && task != NULL) {
+        atomic_fetch_sub_explicit(&task->scan_refs, 1U, memory_order_acq_rel);
     }
 
     pthread_mutex_lock(&rt->block_lock);

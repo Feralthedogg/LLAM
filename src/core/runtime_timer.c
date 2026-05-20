@@ -419,8 +419,24 @@ void llam_cancel_task_wait(llam_task_t *task) {
                     pthread_mutex_unlock(&shard->lock);
                 }
                 task->wake_error_code = ECANCELED;
-                // Generic reinject owns final wait-tracking cleanup.
-                llam_reinject_task(&g_llam_runtime, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
+                if (job->wait_node != NULL) {
+                    job->wait_node->error_code = ECANCELED;
+                }
+                /*
+                 * A blocking helper can finish before the caller has actually
+                 * switched to the scheduler.  Use the same wait-node arm/complete
+                 * handshake as channels and mutexes so a queued-job cancellation
+                 * can be consumed inline instead of reinjecting a still-running
+                 * task.
+                 */
+                if (job->wait_node == NULL || llam_wait_node_prepare_wake(job->wait_node)) {
+                    llam_reinject_task_on_shard(&g_llam_runtime,
+                                              task,
+                                              task->parked_shard,
+                                              true,
+                                              LLAM_TRACE_WAKE,
+                                              LLAM_WAIT_CANCEL);
+                }
                 break;
             }
 

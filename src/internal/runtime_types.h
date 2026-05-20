@@ -183,6 +183,8 @@ typedef struct llam_stack_cache_entry llam_stack_cache_entry_t;
 typedef struct llam_task_local_entry llam_task_local_entry_t;
 /** @brief Active multi-channel select wait owned by a parked task. */
 typedef struct llam_channel_select_state llam_channel_select_state_t;
+/** @brief Synchronization wait node shared by wait/wake handshakes. */
+typedef struct llam_wait_node llam_wait_node_t;
 
 /** @brief Simple FIFO task queue used for hot, inject, overflow, and blocking queues. */
 typedef struct llam_queue {
@@ -359,7 +361,9 @@ typedef struct llam_block_job {
     _Atomic(void *) result;
     atomic_int error_code;
     llam_task_t *task;
+    llam_wait_node_t *wait_node;
     atomic_uint state;
+    bool holds_task_ref;
     struct llam_block_job *next;
 } llam_block_job_t;
 

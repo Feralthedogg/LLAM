@@ -128,7 +128,17 @@ void *llam_block_worker_main(void *arg) {
                  */
                 if (expected == LLAM_BLOCK_JOB_ABORTED) {
                     job->task->wake_error_code = ECANCELED;
-                    llam_reinject_task(rt, job->task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
+                    if (job->wait_node != NULL) {
+                        job->wait_node->error_code = ECANCELED;
+                    }
+                    if (job->wait_node == NULL || llam_wait_node_prepare_wake(job->wait_node)) {
+                        llam_reinject_task_on_shard(rt,
+                                                  job->task,
+                                                  job->task->parked_shard,
+                                                  true,
+                                                  LLAM_TRACE_WAKE,
+                                                  LLAM_WAIT_CANCEL);
+                    }
                 }
                 llam_block_job_release(rt, job);
                 continue;
@@ -137,7 +147,17 @@ void *llam_block_worker_main(void *arg) {
 
         job->task->blocking_result = atomic_load_explicit(&job->result, memory_order_acquire);
         job->task->blocking_errno = atomic_load_explicit(&job->error_code, memory_order_acquire);
-        llam_reinject_task(rt, job->task, true, LLAM_TRACE_BLOCK_COMPLETE, LLAM_WAIT_BLOCKING);
+        if (job->wait_node != NULL) {
+            job->wait_node->error_code = 0;
+        }
+        if (job->wait_node == NULL || llam_wait_node_prepare_wake(job->wait_node)) {
+            llam_reinject_task_on_shard(rt,
+                                      job->task,
+                                      job->task->parked_shard,
+                                      true,
+                                      LLAM_TRACE_BLOCK_COMPLETE,
+                                      LLAM_WAIT_BLOCKING);
+        }
         llam_block_job_release(rt, job);
     }
 
