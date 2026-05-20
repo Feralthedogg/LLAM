@@ -884,11 +884,7 @@ static void bench_blocking_sleep_us(unsigned sleep_us) {
 
         tv.tv_sec = (time_t)(sleep_us / 1000000U);
         tv.tv_usec = (suseconds_t)(sleep_us % 1000000U);
-#if defined(__linux__) && defined(SYS_select)
-        rc = (int)syscall(SYS_select, 0, NULL, NULL, NULL, &tv);
-#else
         rc = select(0, NULL, NULL, NULL, &tv);
-#endif
         if (rc == 0) {
             return;
         }

@@ -2127,6 +2127,26 @@ cleanup_no_runtime:
 }
 #endif
 
+typedef int (*edge_case_fn)(void);
+
+static int run_edge_case(const char *name, edge_case_fn fn) {
+    /*
+     * CI repeats this binary as a race detector.  Emit case boundaries to stderr
+     * so timeout artifacts identify the stuck contract instead of only reporting
+     * a silent process-level timeout.
+     */
+    fprintf(stderr, "[test_runtime_api_edges] begin %s\n", name);
+    fflush(stderr);
+    if (fn() != 0) {
+        fprintf(stderr, "[test_runtime_api_edges] fail %s\n", name);
+        fflush(stderr);
+        return 1;
+    }
+    fprintf(stderr, "[test_runtime_api_edges] ok %s\n", name);
+    fflush(stderr);
+    return 0;
+}
+
 int main(void) {
 #if !LLAM_PLATFORM_WINDOWS
     /*
@@ -2144,70 +2164,82 @@ int main(void) {
         return fail_errno("enable blocking accept edge mode failed");
     }
 #endif
-    if (test_cancel_token_destroy_race() != 0) {
+    if (run_edge_case("cancel_token_destroy_race", test_cancel_token_destroy_race) != 0) {
         return 1;
     }
-    if (test_fault_boundary_contracts() != 0) {
+    if (run_edge_case("fault_boundary_contracts", test_fault_boundary_contracts) != 0) {
         return 1;
     }
-    if (test_unmanaged_boundary_contracts() != 0) {
+    if (run_edge_case("unmanaged_boundary_contracts", test_unmanaged_boundary_contracts) != 0) {
         return 1;
     }
-    if (test_unmanaged_channel_try_drain_after_run() != 0) {
+    if (run_edge_case("unmanaged_channel_try_drain_after_run",
+                      test_unmanaged_channel_try_drain_after_run) != 0) {
         return 1;
     }
-    if (test_unmanaged_channel_try_drain_after_shutdown() != 0) {
+    if (run_edge_case("unmanaged_channel_try_drain_after_shutdown",
+                      test_unmanaged_channel_try_drain_after_shutdown) != 0) {
         return 1;
     }
-    if (test_unmanaged_try_send_wakes_parked_channel_waiter() != 0) {
+    if (run_edge_case("unmanaged_try_send_wakes_parked_channel_waiter",
+                      test_unmanaged_try_send_wakes_parked_channel_waiter) != 0) {
         return 1;
     }
-    if (test_repeated_run_clears_internal_drain_stop() != 0) {
+    if (run_edge_case("repeated_run_clears_internal_drain_stop",
+                      test_repeated_run_clears_internal_drain_stop) != 0) {
         return 1;
     }
-    if (test_join_timeout_preserves_ownership() != 0) {
+    if (run_edge_case("join_timeout_preserves_ownership", test_join_timeout_preserves_ownership) != 0) {
         return 1;
     }
-    if (test_blocking_callback_edges() != 0) {
+    if (run_edge_case("blocking_callback_edges", test_blocking_callback_edges) != 0) {
         return 1;
     }
-    if (test_blocking_cancel_waits_for_running_callback() != 0) {
+    if (run_edge_case("blocking_cancel_waits_for_running_callback",
+                      test_blocking_cancel_waits_for_running_callback) != 0) {
         return 1;
     }
-    if (test_channel_close_and_select_edges() != 0) {
+    if (run_edge_case("channel_close_and_select_edges", test_channel_close_and_select_edges) != 0) {
         return 1;
     }
-    if (test_channel_destroy_rejects_close_woken_waiter() != 0) {
+    if (run_edge_case("channel_destroy_rejects_close_woken_waiter",
+                      test_channel_destroy_rejects_close_woken_waiter) != 0) {
         return 1;
     }
-    if (test_cond_mutex_deadline_edges() != 0) {
+    if (run_edge_case("cond_mutex_deadline_edges", test_cond_mutex_deadline_edges) != 0) {
         return 1;
     }
-    if (test_precancel_wait_edges() != 0) {
+    if (run_edge_case("precancel_wait_edges", test_precancel_wait_edges) != 0) {
         return 1;
     }
-    if (test_tiny_deadline_sleep_race() != 0) {
+    if (run_edge_case("tiny_deadline_sleep_race", test_tiny_deadline_sleep_race) != 0) {
         return 1;
     }
 #if !LLAM_PLATFORM_WINDOWS
-    if (test_posix_io_completion_cancel_reorder() != 0) {
+    if (run_edge_case("posix_io_completion_cancel_reorder",
+                      test_posix_io_completion_cancel_reorder) != 0) {
         return 1;
     }
 #endif
-    if (test_runtime_stop_cancels_parked_channel_wait() != 0) {
+    if (run_edge_case("runtime_stop_cancels_parked_channel_wait",
+                      test_runtime_stop_cancels_parked_channel_wait) != 0) {
         return 1;
     }
-    if (test_runtime_stop_cancels_late_channel_wait() != 0) {
+    if (run_edge_case("runtime_stop_cancels_late_channel_wait",
+                      test_runtime_stop_cancels_late_channel_wait) != 0) {
         return 1;
     }
 #if !LLAM_PLATFORM_WINDOWS
-    if (test_runtime_stop_cancels_posix_poll_handle_wait() != 0) {
+    if (run_edge_case("runtime_stop_cancels_posix_poll_handle_wait",
+                      test_runtime_stop_cancels_posix_poll_handle_wait) != 0) {
         return 1;
     }
-    if (test_runtime_stop_cancels_direct_blocking_read() != 0) {
+    if (run_edge_case("runtime_stop_cancels_direct_blocking_read",
+                      test_runtime_stop_cancels_direct_blocking_read) != 0) {
         return 1;
     }
-    if (test_runtime_stop_cancels_blocking_accept() != 0) {
+    if (run_edge_case("runtime_stop_cancels_blocking_accept",
+                      test_runtime_stop_cancels_blocking_accept) != 0) {
         return 1;
     }
 #endif

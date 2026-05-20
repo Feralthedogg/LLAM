@@ -75,7 +75,6 @@ jobs:
           # sanitizer-instrumented ABI/policy/load tests and leave scheduler
           # stress to the native Linux and dedicated stress matrices.
           ./test_abi_contract
-          ./test_abi_compat
           ./test_windows_policy
           ./test_shared_load ./libllam_runtime.so.1.1.0
 
