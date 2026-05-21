@@ -207,6 +207,17 @@ jobs:
       - name: Performance guardrail
         run: |
           set -o pipefail
+          min_ops=""
+          if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
+            # Hosted Intel macOS runners are the noisiest lane and are retained
+            # as a catastrophic-regression smoke test, not a marketing
+            # benchmark. Arm macOS, Linux, and scheduled benchmark workflows keep
+            # the stricter public performance signal.
+            min_ops="channel_pingpong=900000,select_recv_ready=5000000,select_timeout=5000000,poll_wake=120000"
+          fi
+          if [ -n "$min_ops" ]; then
+            export LLAM_BENCH_GUARD_MIN_OPS="$min_ops"
+          fi
           python3 scripts/bench_guard.py \
             --bench ./build/stress/bench \
             --out "$OUT_DIR/perf_guard.json" 2>&1 | tee "$OUT_DIR/perf_guard.log"
@@ -405,6 +416,11 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
+          # Windows poll wake is IOCP/handle driven and slower than the POSIX
+          # pipe/kqueue/epoll smoke path on hosted runners. Keep this as a
+          # catastrophic-regression gate; the scheduled benchmark workflow owns
+          # public comparison numbers.
+          $env:LLAM_BENCH_GUARD_MIN_OPS = "poll_wake=70000"
           python scripts\bench_guard.py --bench ".\build\windows\Release\bench.exe" --out "$artifactDir\perf_guard.json" *>&1 |
             Tee-Object -FilePath "$artifactDir\perf_guard.log"
           if ($LASTEXITCODE -ne 0) {
