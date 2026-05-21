@@ -476,7 +476,6 @@ int llam_channel_select(llam_select_op_t *ops,
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
 
-#if LLAM_RUNTIME_BACKEND_WINDOWS
     if (deadline_ns == 0U) {
         bool ready;
 
@@ -503,7 +502,6 @@ int llam_channel_select(llam_select_op_t *ops,
             return -1;
         }
     }
-#endif
 
     for (;;) {
         if (start == 0U) {

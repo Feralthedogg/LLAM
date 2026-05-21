@@ -535,6 +535,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     size_t altstack_size;
     const char *light_safepoint_env;
     const char *spawn_fanout_env;
+    const char *task_list_eager_env;
     size_t opts_copy_size;
     uint64_t experimental_flags;
     unsigned timer_heap_prewarm;
@@ -699,6 +700,12 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     rt->run_timing_enabled =
         llam_runtime_env_flag("LLAM_RUN_TIMING", 0U) ||
         rt->stack_sampling_enabled != 0U;
+    task_list_eager_env = llam_env_get("LLAM_TASK_LIST_EAGER");
+    if (task_list_eager_env != NULL && task_list_eager_env[0] != '\0') {
+        rt->task_list_eager = strcmp(task_list_eager_env, "0") != 0 ? 1U : 0U;
+    } else {
+        rt->task_list_eager = rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 1U : 0U;
+    }
     rt->direct_handoff_stats_enabled = llam_runtime_env_flag("LLAM_DIRECT_HANDOFF_STATS", 0U);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
@@ -766,7 +773,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     }
     timer_heap_prewarm = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
                              ? 1024U
-                             : (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ? 512U : 0U);
+                             : (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 512U);
     timer_heap_prewarm = llam_runtime_env_u32("LLAM_TIMER_HEAP_PREWARM", timer_heap_prewarm, 1048576U);
     /*
      * Some experimental policies are mutually exclusive because they assume a

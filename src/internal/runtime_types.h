@@ -1078,6 +1078,7 @@ struct llam_runtime {
     unsigned wake_latency_metrics_enabled;
     unsigned run_timing_enabled;
     unsigned stack_sampling_enabled;
+    unsigned task_list_eager;
     unsigned direct_handoff_stats_enabled;
     unsigned direct_handoff_burst;
     unsigned direct_handoff_live_limit;

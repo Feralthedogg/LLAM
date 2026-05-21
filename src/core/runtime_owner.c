@@ -81,17 +81,22 @@ llam_runtime_t *llam_runtime_owner_for_new_object(void) {
  * sampling TLS on every channel, select, mutex, or join operation.
  */
 int llam_runtime_check_object_owner(const llam_runtime_t *owner_runtime) {
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    if (LLAM_LIKELY(owner_runtime == &g_llam_runtime)) {
+        return 0;
+    }
+    /*
+     * Keep the valid singleton path to one predicted branch.  The cold error
+     * side still distinguishes null handles from future-runtime owner mismatch
+     * so embedders get stable diagnostics without another hot-path compare.
+     */
+    errno = owner_runtime == NULL ? EINVAL : EXDEV;
+    return -1;
+#else
     if (LLAM_UNLIKELY(owner_runtime == NULL)) {
         errno = EINVAL;
         return -1;
     }
-
-#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
-    if (LLAM_UNLIKELY(owner_runtime != &g_llam_runtime)) {
-        errno = EXDEV;
-        return -1;
-    }
-#else
     (void)owner_runtime;
 #endif
     return 0;

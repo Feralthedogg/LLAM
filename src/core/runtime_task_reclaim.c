@@ -80,23 +80,7 @@ void llam_add_task_to_list(llam_runtime_t *rt, llam_task_t *task) {
  * @return true when spawn should eagerly link the task.
  */
 bool llam_task_list_eager_enabled(const llam_runtime_t *rt) {
-    static atomic_int cached = -1;
-    int value = atomic_load_explicit(&cached, memory_order_acquire);
-
-    if (value < 0) {
-        const char *env = llam_env_get("LLAM_TASK_LIST_EAGER");
-
-        if (env != NULL && env[0] != '\0') {
-            value = strcmp(env, "0") != 0 ? 1 : 0;
-        } else {
-            value = 2;
-        }
-        atomic_store_explicit(&cached, value, memory_order_release);
-    }
-    if (value == 2) {
-        return rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE;
-    }
-    return value != 0;
+    return rt != NULL && rt->task_list_eager != 0U;
 }
 
 /**

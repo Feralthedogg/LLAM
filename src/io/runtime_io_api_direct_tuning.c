@@ -282,6 +282,15 @@ unsigned llam_io_poll_ready_yields(void) {
 
 #if LLAM_RUNTIME_BACKEND_WINDOWS
         value = 2;
+#elif defined(__APPLE__)
+        /*
+         * Darwin socketpair producer/consumer patterns often become ready
+         * after one scheduler handoff but before the kqueue backend is worth
+         * arming.  Two short probes keep poll_wake on the direct path without
+         * changing long-wait semantics; LLAM_IO_POLL_READY_YIELDS remains the
+         * escape hatch for latency-vs-throughput tuning.
+         */
+        value = 2;
 #else
         value = 1;
 #endif

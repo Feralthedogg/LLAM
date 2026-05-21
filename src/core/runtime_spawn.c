@@ -60,15 +60,15 @@ static bool llam_spawn_should_wake_fanout(llam_runtime_t *rt, llam_shard_t *targ
     unsigned interval;
     unsigned depth;
 
-    if (rt == NULL || target == NULL || rt->active_shards <= 1U) {
+    if (LLAM_UNLIKELY(rt == NULL || target == NULL || rt->active_shards <= 1U)) {
         return false;
     }
     interval = rt->spawn_fanout_wake_interval;
-    if (interval == 0U) {
+    if (LLAM_LIKELY(interval == 0U)) {
         return false;
     }
     depth = llam_norm_queue_depth(target);
-    if (depth < interval) {
+    if (LLAM_LIKELY(depth < interval)) {
         return false;
     }
 #if LLAM_RUNTIME_BACKEND_WINDOWS
@@ -116,15 +116,15 @@ static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
                                           llam_shard_t *target,
                                           llam_task_t *task,
                                           bool *wake_fanout) {
-    if (rt == NULL || target == NULL || task == NULL || wake_fanout == NULL) {
+    if (LLAM_UNLIKELY(rt == NULL || target == NULL || task == NULL || wake_fanout == NULL)) {
         return false;
     }
-    if (g_llam_tls_shard != target ||
-        g_llam_tls_task == NULL ||
-        g_llam_tls_scheduler_ctx != &target->scheduler_ctx ||
-        rt->trace_events_enabled != 0U ||
-        !llam_shard_accepts_new_work(target) ||
-        !llam_lockfree_normq_enabled(rt)) {
+    if (LLAM_UNLIKELY(g_llam_tls_shard != target ||
+                      g_llam_tls_task == NULL ||
+                      g_llam_tls_scheduler_ctx != &target->scheduler_ctx ||
+                      rt->trace_events_enabled != 0U ||
+                      !llam_shard_accepts_new_work(target) ||
+                      !llam_lockfree_normq_enabled(rt))) {
         return false;
     }
 
@@ -146,9 +146,9 @@ static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
  * runtime-wide atomic counter on every child spawn.
  */
 static uint64_t llam_spawn_next_task_id(llam_runtime_t *rt, llam_shard_t *target, bool local_spawn) {
-    if (target != NULL &&
-        local_spawn &&
-        g_llam_tls_scheduler_ctx == &target->scheduler_ctx) {
+    if (LLAM_LIKELY(target != NULL &&
+                    local_spawn &&
+                    g_llam_tls_scheduler_ctx == &target->scheduler_ctx)) {
         uint64_t seq = ++target->next_task_seq;
 
         return (((uint64_t)(target->id + 1U) & 0xffffULL) << 48U) |
@@ -171,7 +171,7 @@ static uint64_t llam_spawn_next_task_id(llam_runtime_t *rt, llam_shard_t *target
 static void llam_spawn_release_unpublished_cancel_token(llam_task_t *task) {
     llam_cancel_token_t *token;
 
-    if (task == NULL || task->cancel_token == NULL) {
+    if (LLAM_UNLIKELY(task == NULL || task->cancel_token == NULL)) {
         return;
     }
 
@@ -244,10 +244,11 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     llam_shard_t *target;
     size_t opts_copy_size;
     bool local_spawn;
+    bool task_list_eager;
     bool wake_fanout = false;
 
     if (opts != NULL) {
-        if (opts_size == 0U) {
+        if (LLAM_UNLIKELY(opts_size == 0U)) {
             errno = EINVAL;
             return NULL;
         }
@@ -274,14 +275,14 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
             opts_storage.cancel_token = raw_opts.cancel_token;
         }
         opts = &opts_storage;
-        if (!llam_public_task_class_valid(opts->task_class) ||
-            !llam_public_stack_class_valid(opts->stack_class)) {
+        if (LLAM_UNLIKELY(!llam_public_task_class_valid(opts->task_class) ||
+                          !llam_public_stack_class_valid(opts->stack_class))) {
             errno = EINVAL;
             return NULL;
         }
     }
 
-    if (!rt->initialized || fn == NULL) {
+    if (LLAM_UNLIKELY(!rt->initialized || fn == NULL)) {
         errno = EINVAL;
         return NULL;
     }
@@ -295,7 +296,7 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     target = &rt->shards[shard_id];
     local_spawn = g_llam_tls_shard == target && g_llam_tls_task != NULL;
     task = llam_task_alloc(target);
-    if (task == NULL) {
+    if (LLAM_UNLIKELY(task == NULL)) {
         return NULL;
     }
 
@@ -310,7 +311,8 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     atomic_store_explicit(&task->base_task_class, (unsigned)task_class, memory_order_release);
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
-    if (task->cancel_token != NULL && llam_cancel_token_retain_task_ref(task->cancel_token) != 0) {
+    if (LLAM_UNLIKELY(task->cancel_token != NULL &&
+                      llam_cancel_token_retain_task_ref(task->cancel_token) != 0)) {
         task->cancel_token = NULL;
         llam_task_allocator_free(task);
         return NULL;
@@ -333,7 +335,7 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     atomic_store_explicit(&task->active_io_req, NULL, memory_order_relaxed);
     task->join_waiter_count_at_exit = 0U;
 
-    if (llam_alloc_task_stack(task, stack_class) != 0) {
+    if (LLAM_UNLIKELY(llam_alloc_task_stack(task, stack_class) != 0)) {
         int saved_errno = errno;
 
         // Stack allocation is the only post-token failure point before the task
@@ -346,15 +348,16 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     }
 
     task->last_runnable_ns = rt->wake_latency_metrics_enabled != 0U ? llam_now_ns() : 0U;
+    task_list_eager = llam_task_list_eager_enabled(rt);
 
-    if (!llam_task_list_eager_enabled(rt) &&
+    if (!task_list_eager &&
         llam_spawn_try_local_unlocked(rt, target, task, &wake_fanout)) {
         if (wake_fanout) {
             llam_wake_all_shards(rt);
         }
     } else {
         pthread_mutex_lock(&target->lock);
-        if (llam_task_list_eager_enabled(rt)) {
+        if (task_list_eager) {
             llam_add_task_to_list_locked(target, task);
         }
         llam_runtime_note_task_live(rt, target);
