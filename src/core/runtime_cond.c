@@ -39,6 +39,7 @@ llam_cond_t *llam_cond_create(void) {
         return NULL;
     }
 
+    cond->owner_runtime = llam_runtime_owner_for_new_object();
     atomic_init(&cond->inflight_waiters, 0U);
     rc = pthread_mutex_init(&cond->lock, NULL);
     if (rc != 0) {
@@ -64,6 +65,9 @@ llam_cond_t *llam_cond_create(void) {
 int llam_cond_destroy(llam_cond_t *cond) {
     if (cond == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
         return -1;
     }
 
@@ -152,6 +156,10 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         return -1;
     }
     if (llam_require_task_context() != 0) {
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0 ||
+        llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
         return -1;
     }
     task = g_llam_tls_task;
@@ -313,6 +321,9 @@ int llam_cond_signal(llam_cond_t *cond) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
+        return -1;
+    }
 
     pthread_mutex_lock(&cond->lock);
     node = llam_wait_queue_pop_head(&cond->waiters);
@@ -340,6 +351,9 @@ int llam_cond_broadcast(llam_cond_t *cond) {
 
     if (cond == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
         return -1;
     }
 

@@ -374,6 +374,7 @@ typedef struct llam_block_job {
  * timeout, migration, and completion paths.
  */
 typedef struct llam_io_req {
+    llam_runtime_t *owner_runtime;
     llam_io_kind_t kind;
     llam_fd_t fd;
     llam_handle_t handle;
@@ -417,6 +418,7 @@ typedef struct llam_io_req {
  * small payload without allocating a separate completion object.
  */
 typedef struct llam_wait_node {
+    llam_runtime_t *owner_runtime;
     llam_task_t *task;
     struct llam_wait_node *next;
     struct llam_wait_node *alloc_next;
@@ -440,6 +442,7 @@ typedef struct llam_wait_queue {
 
 /** @brief Parked state for a task waiting on multiple channel operations. */
 struct llam_channel_select_state {
+    llam_runtime_t *owner_runtime;
     llam_select_op_t *ops;
     llam_wait_node_t **nodes;
     llam_channel_t **channels;
@@ -548,6 +551,7 @@ struct llam_recv_watch {
 
 /** @brief Timer heap node embedded in tasks when possible and allocated otherwise. */
 typedef struct llam_timer_node {
+    llam_runtime_t *owner_runtime;
     llam_task_t *task;
     uint64_t deadline_ns;
     struct llam_timer_node *next;
@@ -615,6 +619,7 @@ typedef struct llam_allocator {
 
 /** @brief Runtime-owned I/O buffer.  Small reads use inline_data; large/provided buffers can attach external storage. */
 struct llam_io_buffer {
+    llam_runtime_t *owner_runtime;
     struct llam_io_buffer *alloc_next;
     unsigned alloc_owner_shard;
     unsigned provided_node_index;
@@ -630,6 +635,7 @@ struct llam_io_buffer {
 
 /** @brief Shared cancellation state.  Waiters are task links protected by lock. */
 struct llam_cancel_token {
+    llam_runtime_t *owner_runtime;
     struct llam_cancel_token *registry_next;
     pthread_mutex_t lock;
     bool cancelled;
@@ -640,6 +646,7 @@ struct llam_cancel_token {
 
 /** @brief Runtime-aware mutex: owner is atomic for the fast path, waiters are lock protected. */
 struct llam_mutex {
+    llam_runtime_t *owner_runtime;
     atomic_uintptr_t owner;
     pthread_mutex_t lock;
     llam_wait_queue_t waiters;
@@ -647,6 +654,7 @@ struct llam_mutex {
 
 /** @brief Runtime-aware condition variable with a FIFO waiter queue. */
 struct llam_cond {
+    llam_runtime_t *owner_runtime;
     pthread_mutex_t lock;
     llam_wait_queue_t waiters;
     /*
@@ -659,6 +667,7 @@ struct llam_cond {
 
 /** @brief Bounded pointer channel with separate sender and receiver wait queues. */
 struct llam_channel {
+    llam_runtime_t *owner_runtime;
     pthread_mutex_t lock;
     void **buffer;
     struct llam_channel *cache_next;
@@ -680,6 +689,7 @@ struct llam_channel {
  * request, optional blocking job, and diagnostic timing counters.
  */
 struct llam_task {
+    llam_runtime_t *owner_runtime;
     uint64_t id;
     /*
      * The scheduler owns most task state transitions, but wake producers,
@@ -777,6 +787,7 @@ struct llam_task_local_entry {
 
 /** @brief Structured-concurrency group that owns a set of child task handles. */
 struct llam_task_group {
+    llam_runtime_t *owner_runtime;
     pthread_mutex_t lock;
     struct llam_task_group *registry_next;
     llam_cancel_token_t *cancel_token;

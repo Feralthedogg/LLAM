@@ -340,6 +340,11 @@ The cross-runtime script includes these cases for LLAM, Go, and Tokio:
 python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1
 ```
 
+By default the script runs three process-level samples per runtime and reports
+the median row for each benchmark case. This keeps short cases such as
+`spawn_join` from being dominated by a single OS scheduling outlier. Use
+`--samples 1` only for quick smoke checks.
+
 ## 10. Release Gate
 
 Before tagging a 1.x build, require:
@@ -351,7 +356,8 @@ Before tagging a 1.x build, require:
   opt-in TCP `POLLIN` IOCP smoke.
 - `Nightly Deep CI` on at least one recent `main` commit before a release
   candidate: POSIX standard composite, Windows 2022/2025 policy stress,
-  deterministic runtime fuzz, conservative benchmark guardrails, ASan/UBSan
+  deterministic runtime fuzz, conservative scheduler/channel/select/I/O
+  benchmark guardrails, ASan/UBSan
   quick gate, and experimental TSan diagnostics.
 - `Weekly Soak` hour-long server composite on Linux x86_64 and macOS arm64
   before claiming long-running server stability.
@@ -362,6 +368,7 @@ Before tagging a 1.x build, require:
   same churn/reset sequence can be replayed.
 - The hour-long server composite profile before claiming server stability.
 - `python3 scripts/bench_runtime_compare.py --runtime all` for the public
-  LLAM/Go/Tokio comparison graph.
+  LLAM/Go/Tokio comparison graph. Keep the default multi-sample median mode for
+  release numbers.
 - No unexplained `skipped=` phases. A skipped phase is acceptable only when the
   platform contract explicitly lacks that backend feature.

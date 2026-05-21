@@ -78,8 +78,19 @@ def parse_output(runtime: str, output: str) -> list[BenchRow]:
     return rows
 
 
-def run_command(root: pathlib.Path, runtime: str, command: list[str], env: dict[str, str], timeout: int) -> list[BenchRow]:
-    print(f"[bench-runtime-compare] running {runtime}", file=sys.stderr)
+def run_command(
+    root: pathlib.Path,
+    runtime: str,
+    command: list[str],
+    env: dict[str, str],
+    timeout: int,
+    sample: int,
+    samples: int,
+) -> list[BenchRow]:
+    if samples > 1:
+        print(f"[bench-runtime-compare] running {runtime} sample {sample}/{samples}", file=sys.stderr)
+    else:
+        print(f"[bench-runtime-compare] running {runtime}", file=sys.stderr)
     proc = subprocess.run(
         command,
         cwd=root,
@@ -94,6 +105,39 @@ def run_command(root: pathlib.Path, runtime: str, command: list[str], env: dict[
         sys.stderr.write(proc.stderr)
         raise SystemExit(proc.returncode)
     return parse_output(runtime, proc.stdout)
+
+
+def select_sample_rows(samples: list[list[BenchRow]], policy: str) -> list[BenchRow]:
+    grouped: dict[tuple[str, str], list[BenchRow]] = {}
+
+    for rows in samples:
+        for row in rows:
+            grouped.setdefault((row.runtime, row.case), []).append(row)
+
+    selected: list[BenchRow] = []
+    for key in sorted(grouped):
+        rows = sorted(grouped[key], key=lambda row: row.ops_per_sec)
+        if policy == "best":
+            selected.append(rows[-1])
+        else:
+            selected.append(rows[len(rows) // 2])
+    return selected
+
+
+def run_command_samples(
+    root: pathlib.Path,
+    runtime: str,
+    command: list[str],
+    env: dict[str, str],
+    timeout: int,
+    samples: int,
+    policy: str,
+) -> list[BenchRow]:
+    sample_rows = [
+        run_command(root, runtime, command, env, timeout, sample + 1, samples)
+        for sample in range(samples)
+    ]
+    return select_sample_rows(sample_rows, policy)
 
 
 def llam_bench_command(root: pathlib.Path, no_build: bool) -> list[str]:
@@ -124,7 +168,7 @@ def llam_bench_command(root: pathlib.Path, no_build: bool) -> list[str]:
         return [str(build_dir / "Release" / "bench.exe")]
 
     if not no_build:
-        subprocess.run(["make", "-j4"], cwd=root, check=True)
+        subprocess.run(["make", "-j4", "bench"], cwd=root, check=True)
     return ["./bench"]
 
 
@@ -245,7 +289,21 @@ def main() -> int:
     parser.add_argument("--out-dir", default="object/bench_compare")
     parser.add_argument("--runtime", choices=["all", "llam", "go", "tokio"], default="all")
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=int(os.environ.get("LLAM_BENCH_COMPARE_SAMPLES", "3")),
+        help="number of process-level samples per runtime; median is reported by default",
+    )
+    parser.add_argument(
+        "--sample-policy",
+        choices=["median", "best"],
+        default=os.environ.get("LLAM_BENCH_COMPARE_SAMPLE_POLICY", "median"),
+        help="how to select one row per runtime/case when --samples is greater than 1",
+    )
     args = parser.parse_args()
+    if args.samples < 1:
+        parser.error("--samples must be at least 1")
 
     root = pathlib.Path(__file__).resolve().parent.parent
     out_dir = root / args.out_dir
@@ -283,13 +341,33 @@ def main() -> int:
     rows: list[BenchRow] = []
     if "LLAM" in selected_runtimes:
         assert llam_command is not None
-        rows.extend(run_command(root, "LLAM", llam_command, env, args.timeout))
+        rows.extend(
+            run_command_samples(
+                root,
+                "LLAM",
+                llam_command,
+                env,
+                args.timeout,
+                args.samples,
+                args.sample_policy,
+            )
+        )
     if "Goroutine" in selected_runtimes:
         go_script = "scripts/bench_go_windows_compare.go" if os.name == "nt" else "scripts/bench_go_compare.go"
-        rows.extend(run_command(root, "Goroutine", ["go", "run", go_script], env, args.timeout))
+        rows.extend(
+            run_command_samples(
+                root,
+                "Goroutine",
+                ["go", "run", go_script],
+                env,
+                args.timeout,
+                args.samples,
+                args.sample_policy,
+            )
+        )
     if "Tokio" in selected_runtimes:
         rows.extend(
-            run_command(
+            run_command_samples(
                 root,
                 "Tokio",
                 [
@@ -304,6 +382,8 @@ def main() -> int:
                 ],
                 env,
                 args.timeout,
+                args.samples,
+                args.sample_policy,
             )
         )
 

@@ -134,7 +134,7 @@ llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard) {
 
     if (task != NULL && llam_task_active_io_req_load(task) == NULL) {
         req = &task->embedded_io_req;
-        llam_io_req_reset(req, shard != NULL ? shard->id : UINT_MAX, UINT_MAX);
+        llam_io_req_reset(req, task->owner_runtime, shard != NULL ? shard->id : UINT_MAX, UINT_MAX);
         req->task = task;
         return req;
     }
@@ -156,7 +156,7 @@ void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req) {
         return;
     }
     if (req->alloc_owner_shard == UINT_MAX) {
-        llam_io_req_reset(req, UINT_MAX, UINT_MAX);
+        llam_io_req_reset(req, req->owner_runtime, UINT_MAX, UINT_MAX);
         return;
     }
     llam_io_req_free(shard, req);

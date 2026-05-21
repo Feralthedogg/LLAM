@@ -47,15 +47,11 @@ int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_
 }
 
 int llam_runtime_run_handle(llam_runtime_t *runtime) {
-    if (runtime != &g_llam_runtime) {
-        errno = EINVAL;
-        return -1;
-    }
-    return llam_run();
+    return llam_runtime_run_rt(runtime);
 }
 
 void llam_runtime_destroy(llam_runtime_t *runtime) {
     if (runtime == NULL || runtime == &g_llam_runtime) {
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(runtime);
     }
 }

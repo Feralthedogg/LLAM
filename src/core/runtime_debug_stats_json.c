@@ -34,15 +34,18 @@ static int llam_stats_json_u64(int fd, const char *name, uint64_t value, unsigne
     return 0;
 }
 
-int llam_runtime_write_stats_json(int fd) {
+int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd) {
     llam_runtime_stats_t stats;
     unsigned fields = 0U;
 
+    if (llam_runtime_check_handle(rt) != 0) {
+        return -1;
+    }
     if (fd < 0) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_collect_stats(&stats) != 0) {
+    if (llam_runtime_collect_stats_ex_rt(rt, &stats, sizeof(stats)) != 0) {
         return -1;
     }
     if (dprintf(fd, "{") < 0 ||
@@ -110,4 +113,8 @@ int llam_runtime_write_stats_json(int fd) {
         return -1;
     }
     return 0;
+}
+
+int llam_runtime_write_stats_json(int fd) {
+    return llam_runtime_write_stats_json_rt(&g_llam_runtime, fd);
 }

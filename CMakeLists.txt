@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(llam C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 1)
-set(LLAM_ABI_VERSION_MINOR 1)
+set(LLAM_ABI_VERSION_MINOR 2)
 set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.0")
 
 include(GNUInstallDirs)
@@ -53,6 +53,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_channel_select.c
     src/core/runtime_cond.c
     src/core/runtime_handle.c
+    src/core/runtime_owner.c
     src/core/runtime_mutex.c
     src/core/runtime_names.c
     src/core/runtime_norm_queue.c

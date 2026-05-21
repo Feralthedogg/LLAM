@@ -5,7 +5,9 @@
  * @details
  * ::llam_run starts secondary shard workers, runs shard 0 on the calling thread,
  * joins the workers when the scheduler drains, and propagates any fatal runtime
- * error recorded by worker threads.
+ * error recorded by worker threads.  The public singleton API and explicit
+ * handle API both delegate to the runtime-owned internal entry point in this
+ * file.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -41,12 +43,14 @@
  * @see llam_runtime_init
  * @see llam_scheduler_loop
  */
-int llam_run(void) {
-    llam_runtime_t *rt = &g_llam_runtime;
+int llam_runtime_run_rt(llam_runtime_t *rt) {
     bool expected_started = false;
     int rc;
     unsigned i;
 
+    if (llam_runtime_check_handle(rt) != 0) {
+        return -1;
+    }
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
         errno = EINVAL;
         return -1;
@@ -111,18 +115,27 @@ int llam_run(void) {
     return 0;
 }
 
+int llam_run(void) {
+    return llam_runtime_run_rt(&g_llam_runtime);
+}
+
 /**
  * @brief Request cooperative runtime stop from any thread.
  *
  * @return 0 on success, or -1 with @c errno set when the runtime is not initialized.
  */
-int llam_runtime_request_stop(void) {
-    llam_runtime_t *rt = &g_llam_runtime;
-
+int llam_runtime_request_stop_rt(llam_runtime_t *rt) {
+    if (llam_runtime_check_handle(rt) != 0) {
+        return -1;
+    }
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
         errno = EINVAL;
         return -1;
     }
     llam_request_stop(rt);
     return 0;
+}
+
+int llam_runtime_request_stop(void) {
+    return llam_runtime_request_stop_rt(&g_llam_runtime);
 }

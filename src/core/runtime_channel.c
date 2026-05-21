@@ -91,6 +91,7 @@ llam_channel_t *llam_channel_create(size_t capacity) {
         return NULL;
     }
 
+    channel->owner_runtime = llam_runtime_owner_for_new_object();
     channel->buffer = calloc(ring_capacity, sizeof(*channel->buffer));
     if (channel->buffer == NULL) {
         free(channel);
@@ -381,6 +382,9 @@ int llam_channel_destroy(llam_channel_t *channel) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+        return -1;
+    }
 
     pthread_mutex_lock(&channel->lock);
     if (channel->count != 0U ||
@@ -430,8 +434,7 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
         errno = EINVAL;
         return -1;
     }
-    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
-        errno = ENOTSUP;
+    if (llam_runtime_require_object_owner(channel->owner_runtime) != 0) {
         return -1;
     }
     task = g_llam_tls_task;
@@ -597,6 +600,9 @@ int llam_channel_try_send(llam_channel_t *channel, void *value) {
         errno = ENOTSUP;
         return -1;
     }
+    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+        return -1;
+    }
 
     pthread_mutex_lock(&channel->lock);
     if (channel->closed) {
@@ -672,8 +678,7 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
         errno = EINVAL;
         return -1;
     }
-    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
-        errno = ENOTSUP;
+    if (llam_runtime_require_object_owner(channel->owner_runtime) != 0) {
         return -1;
     }
     task = g_llam_tls_task;
@@ -855,6 +860,9 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+        return -1;
+    }
     *out = NULL;
 
     pthread_mutex_lock(&channel->lock);
@@ -955,8 +963,7 @@ void *llam_channel_recv(llam_channel_t *channel) {
         errno = EINVAL;
         return NULL;
     }
-    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
-        errno = ENOTSUP;
+    if (llam_runtime_require_object_owner(channel->owner_runtime) != 0) {
         return NULL;
     }
     task = g_llam_tls_task;
@@ -1102,6 +1109,9 @@ void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns) {
 int llam_channel_close(llam_channel_t *channel) {
     if (channel == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
         return -1;
     }
 

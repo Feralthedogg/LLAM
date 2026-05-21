@@ -59,6 +59,10 @@ static int llam_cancel_token_begin_op_locked(llam_cancel_token_t *token) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(token->owner_runtime) != 0) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        return -1;
+    }
 
     /*
      * Destroy removes the token from the live registry only while holding this
@@ -155,6 +159,7 @@ llam_cancel_token_t *llam_cancel_token_create(void) {
         errno = rc;
         return NULL;
     }
+    token->owner_runtime = llam_runtime_owner_for_new_object();
     llam_cancel_token_register_live(token);
     return token;
 }
@@ -179,6 +184,10 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
     if (!llam_cancel_token_is_live_locked(token)) {
         pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(token->owner_runtime) != 0) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
         return -1;
     }
     pthread_mutex_lock(&token->lock);

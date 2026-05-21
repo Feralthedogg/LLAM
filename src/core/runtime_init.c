@@ -835,7 +835,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
          * Let shutdown consume it exactly once; freeing @c cpus directly here
          * leaves a dangling runtime pointer and makes caller cleanup double-free.
          */
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -897,7 +897,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
                 free(io_node_ids);
                 free(locality_node_ids);
                 errno = ENOMEM;
-                llam_runtime_shutdown();
+                llam_runtime_shutdown_rt(rt);
                 return -1;
             }
             rt->shards[i].timer_heap_cap = timer_heap_prewarm;
@@ -918,7 +918,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
         if (rt->shards[i].event_fd < 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rc = pthread_mutex_init(&rt->shards[i].lock, NULL);
@@ -926,7 +926,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->shards[i].lock_initialized = true;
@@ -935,7 +935,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->shards[i].stack_cache_lock_initialized = true;
@@ -944,7 +944,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->shards[i].opaque_lock_initialized = true;
@@ -953,14 +953,14 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
             free(io_node_ids);
             free(locality_node_ids);
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->shards[i].opaque_cv_initialized = true;
         if (llam_opaque_wake_init(&rt->shards[i]) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->shards[i].signal_stack = mmap(NULL,
@@ -973,7 +973,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
             rt->shards[i].signal_stack = NULL;
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->shards[i].signal_stack_size = altstack_size;
@@ -981,14 +981,14 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
         if (llam_allocator_init(&rt->shards[i].allocator) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         if (llam_ctx_init_fp_state(&rt->shards[i].scheduler_ctx) != 0 ||
             llam_ctx_init_fp_state(&rt->shards[i].opaque_scheduler_ctx) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
@@ -1027,7 +1027,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     if (rt->kernel_node_ids == NULL) {
         free(io_node_ids);
         free(locality_node_ids);
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -1035,7 +1035,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     if (rt->nodes == NULL) {
         free(io_node_ids);
         free(locality_node_ids);
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -1055,7 +1055,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
         if (node_ids == NULL) {
             free(io_node_ids);
             free(locality_node_ids);
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             errno = ENOMEM;
             return -1;
         }
@@ -1086,27 +1086,27 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
         atomic_init(&rt->nodes[i].provided_buf_returns, 0U);
         rt->nodes[i].event_fd = llam_wake_handle_create();
         if (rt->nodes[i].event_fd < 0) {
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rc = pthread_mutex_init(&rt->nodes[i].submit_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->nodes[i].submit_lock_initialized = true;
         rc = pthread_mutex_init(&rt->nodes[i].watch_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->nodes[i].watch_lock_initialized = true;
         rc = pthread_mutex_init(&rt->nodes[i].recv_buf_lock, NULL);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         rt->nodes[i].recv_buf_lock_initialized = true;
@@ -1131,14 +1131,14 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     rc = pthread_mutex_init(&rt->task_list_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         return -1;
     }
     rt->task_list_lock_initialized = true;
     rc = pthread_mutex_init(&rt->stack_cache_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         return -1;
     }
     rt->stack_cache_lock_initialized = true;
@@ -1147,14 +1147,14 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     rc = pthread_mutex_init(&rt->block_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         return -1;
     }
     rt->block_lock_initialized = true;
     rc = pthread_cond_init(&rt->block_cv, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         return -1;
     }
     rt->block_cv_initialized = true;
@@ -1164,7 +1164,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     rc = pthread_mutex_init(&rt->overflow_lock, NULL);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         return -1;
     }
     rt->overflow_lock_initialized = true;
@@ -1184,7 +1184,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
 #endif
     rt->block_threads = calloc(rt->block_worker_count, sizeof(*rt->block_threads));
     if (rt->block_threads == NULL) {
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -1193,7 +1193,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
         rc = pthread_create(&rt->block_threads[i], NULL, llam_block_worker_main, rt);
         if (rc != 0) {
             errno = rc;
-            llam_runtime_shutdown();
+            llam_runtime_shutdown_rt(rt);
             return -1;
         }
         // pthread_create does not promise to leave the output slot untouched on
@@ -1202,14 +1202,14 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     }
 
     if (llam_install_process_signal_handlers(rt) != 0) {
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         return -1;
     }
 
     rc = pthread_create(&rt->ctrl_thread, NULL, llam_ctrl_worker_main, rt);
     if (rc != 0) {
         errno = rc;
-        llam_runtime_shutdown();
+        llam_runtime_shutdown_rt(rt);
         return -1;
     }
     rt->ctrl_thread_started = true;

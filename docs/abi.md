@@ -15,9 +15,9 @@ public symbols.
 The current public ABI version is:
 
 ```text
-LLAM_VERSION         = 1.1.0
+LLAM_VERSION         = 1.2.0
 LLAM_ABI_VERSION_MAJOR = 1
-LLAM_ABI_VERSION_MINOR = 1
+LLAM_ABI_VERSION_MINOR = 2
 LLAM_ABI_VERSION       = (major << 16) | minor
 ```
 
@@ -165,7 +165,10 @@ for unknown class values and `-1/ENOTSUP` outside a managed task.
   `llam_runtime_destroy()` are the canonical embedding-facing lifecycle calls
   for 1.x, but their handle is an alias for the process-global runtime. Passing
   a non-default handle to `llam_runtime_run_handle()` fails with `EINVAL`, and a
-  second live runtime creation fails with `EBUSY`.
+  second live runtime creation fails with `EBUSY`. Internally, the 1.2.x line
+  already routes run, cooperative stop, shutdown, stats collection, and stats
+  JSON through runtime-owned entry points so later isolation work has a concrete
+  owner boundary to migrate.
 - Calling `llam_runtime_shutdown()` from a managed LLAM task or scheduler frame
   does not tear down the singleton underneath the active scheduler. It is
   treated as a cooperative stop request; the host thread that owns `llam_run()`
@@ -218,7 +221,7 @@ make shared
 Expected dynamic artifacts:
 
 ```text
-Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.1.0
+Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.2.0
 macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.
@@ -480,8 +483,15 @@ Common public failures are fixed as follows:
 | `ETIMEDOUT` | Absolute deadline or relative timeout expired. |
 | `ECANCELED` | Cancellation token or cooperative runtime stop was observed by a cancellable operation. |
 | `EPIPE` | Channel is closed or an operation reached an equivalent peer-closed state. |
+| `EXDEV` | Runtime-aware object was used from a different runtime owner. LLAM 1.x has one live process runtime, but objects are tagged now so future multi-runtime migration errors fail deterministically. |
 | `ENOMEM` | Allocation failure. |
 | `ENOTSUP` | Platform/backend feature is unsupported, or a runtime-aware operation requiring a managed task was called outside one. |
+
+Default 1.2.x source and release builds keep runtime-owner checks enabled so
+`EXDEV` remains observable. Projects that build LLAM from source can define
+`LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` only for explicit singleton-only profiling
+builds; those binaries intentionally give up cross-owner diagnostics and should
+not be used as ABI-conformance references.
 
 LLAM preserves syscall-style error values for I/O operations so language
 runtimes can map them into their own error domains without backend-specific

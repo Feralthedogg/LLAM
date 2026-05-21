@@ -82,6 +82,10 @@ static int llam_task_group_lock_live(llam_task_group_t *group) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(group->owner_runtime) != 0) {
+        pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+        return -1;
+    }
     pthread_mutex_lock(&group->lock);
     pthread_mutex_unlock(&g_llam_task_group_registry_lock);
     return 0;
@@ -143,6 +147,7 @@ llam_task_group_t *llam_task_group_create(void) {
         return NULL;
     }
     group->lock_initialized = true;
+    group->owner_runtime = llam_runtime_owner_for_new_object();
     group->cancel_token = llam_cancel_token_create();
     if (group->cancel_token == NULL) {
         pthread_mutex_destroy(&group->lock);
@@ -158,6 +163,10 @@ int llam_task_group_destroy(llam_task_group_t *group) {
     if (group == NULL || !llam_task_group_is_live_locked(group)) {
         pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(group->owner_runtime) != 0) {
+        pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         return -1;
     }
     pthread_mutex_lock(&group->lock);

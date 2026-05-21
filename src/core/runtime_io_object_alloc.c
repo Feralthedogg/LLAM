@@ -36,14 +36,16 @@
  * already initialized atomic object.
  *
  * @param req               Request object to reset.
+ * @param owner_runtime     Runtime that owns the request object.
  * @param owner_shard       Logical owner shard to publish.
  * @param alloc_owner_shard Allocation-owner shard for cache return.
  */
-void llam_io_req_reset(llam_io_req_t *req, unsigned owner_shard, unsigned alloc_owner_shard) {
+void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsigned owner_shard, unsigned alloc_owner_shard) {
     if (req == NULL) {
         return;
     }
 
+    req->owner_runtime = owner_runtime;
     req->kind = LLAM_IO_KIND_READ;
     req->fd = LLAM_INVALID_FD;
     req->handle = LLAM_INVALID_HANDLE;
@@ -103,7 +105,7 @@ llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
             if (req != NULL) {
                 shard->allocator.io_req_free = req->alloc_next;
                 shard->allocator.io_req_reuses += 1U;
-                llam_io_req_reset(req, shard->id, shard->id);
+                llam_io_req_reset(req, shard->runtime, shard->id, shard->id);
                 return req;
             }
         } else {
@@ -114,7 +116,7 @@ llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
                 shard->allocator.io_req_free = req->alloc_next;
                 shard->allocator.io_req_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
-                llam_io_req_reset(req, shard->id, shard->id);
+                llam_io_req_reset(req, shard->runtime, shard->id, shard->id);
                 return req;
             }
             llam_allocator_unlock(&shard->allocator);
@@ -134,7 +136,7 @@ llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard) {
  * @param req   Request object to recycle.
  */
 void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt = req != NULL && req->owner_runtime != NULL ? req->owner_runtime : &g_llam_runtime;
     llam_shard_t *owner;
     llam_io_req_t *head;
 
@@ -187,6 +189,7 @@ llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity)
                 shard->allocator.io_buffer_free = buffer->alloc_next;
                 shard->allocator.io_buffer_reuses += 1U;
                 memset(buffer, 0, sizeof(*buffer));
+                buffer->owner_runtime = shard->runtime;
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
                 buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
@@ -211,6 +214,7 @@ llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity)
                 shard->allocator.io_buffer_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
                 memset(buffer, 0, sizeof(*buffer));
+                buffer->owner_runtime = shard->runtime;
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
                 buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
@@ -241,7 +245,7 @@ llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity)
  * @param buffer Buffer wrapper to recycle.
  */
 void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt = buffer != NULL && buffer->owner_runtime != NULL ? buffer->owner_runtime : &g_llam_runtime;
     llam_shard_t *owner;
     llam_io_buffer_t *head;
 

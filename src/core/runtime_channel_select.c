@@ -48,6 +48,9 @@ static int llam_channel_select_validate_op(const llam_select_op_t *op) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(op->channel->owner_runtime) != 0) {
+        return -1;
+    }
     if (op->kind == LLAM_SELECT_OP_RECV) {
         if (op->recv_out == NULL) {
             errno = EINVAL;
@@ -229,13 +232,13 @@ static void llam_channel_select_release_nodes(llam_shard_t *shard,
             continue;
         }
         if (task != NULL && nodes[i] == &task->embedded_wait_node) {
-            llam_wait_node_reset(nodes[i], UINT_MAX);
+            llam_wait_node_reset(nodes[i], task->owner_runtime, UINT_MAX);
             continue;
         }
         if (task != NULL) {
             for (embedded_index = 0U; embedded_index < LLAM_TASK_EMBEDDED_SELECT_NODES; ++embedded_index) {
                 if (nodes[i] == &task->embedded_select_nodes[embedded_index]) {
-                    llam_wait_node_reset(nodes[i], UINT_MAX);
+                    llam_wait_node_reset(nodes[i], task->owner_runtime, UINT_MAX);
                     break;
                 }
             }
@@ -262,7 +265,7 @@ static int llam_channel_select_alloc_nodes(llam_shard_t *shard,
             task->active_select_state == NULL &&
             i < LLAM_TASK_EMBEDDED_SELECT_NODES) {
             node = &task->embedded_select_nodes[i];
-            llam_wait_node_reset(node, UINT_MAX);
+            llam_wait_node_reset(node, task->owner_runtime, UINT_MAX);
         } else {
             node = llam_wait_node_alloc(shard);
         }
@@ -550,6 +553,7 @@ int llam_channel_select(llam_select_op_t *ops,
         }
 
         memset(&state, 0, sizeof(state));
+        state.owner_runtime = task->owner_runtime;
         state.ops = ops;
         state.nodes = nodes;
         state.op_count = op_count;

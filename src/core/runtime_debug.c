@@ -70,9 +70,13 @@ llam_task_t *llam_current_task(void) {
 
 /**
  * @brief Fill the current library's full runtime statistics layout.
+ *
+ * @param rt Runtime whose counters should be sampled. 1.x accepts only the
+ *           default singleton, but taking the owner explicitly keeps this path
+ *           aligned with the handle API migration.
+ * @param stats Destination full-size statistics object.
  */
-static void llam_runtime_collect_stats_full(llam_runtime_stats_t *stats) {
-    llam_runtime_t *rt = &g_llam_runtime;
+static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_stats_t *stats) {
     llam_shard_t *shards = rt->shards;
     llam_node_t *nodes = rt->nodes;
     unsigned active_shards = rt->active_shards;
@@ -177,12 +181,14 @@ static void llam_runtime_collect_stats_full(llam_runtime_stats_t *stats) {
  * @param stats_size Size of the caller's stats struct.
  * @return 0 on success, -1 with @c errno set on invalid arguments.
  */
-int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size) {
-    llam_runtime_t *rt = &g_llam_runtime;
+int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size) {
     llam_runtime_stats_t full_stats;
     size_t copy_size;
     int saved_errno;
 
+    if (llam_runtime_check_handle(rt) != 0) {
+        return -1;
+    }
     if (stats == NULL || stats_size == 0U) {
         errno = EINVAL;
         return -1;
@@ -200,7 +206,7 @@ int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size
         !atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
         errno = saved_errno;
     } else if (llam_runtime_lifecycle_trylock() == 0) {
-        llam_runtime_collect_stats_full(&full_stats);
+        llam_runtime_collect_stats_full(rt, &full_stats);
         llam_runtime_lifecycle_unlock();
     } else {
         /*
@@ -214,6 +220,10 @@ int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size
     copy_size = stats_size < sizeof(full_stats) ? stats_size : sizeof(full_stats);
     memcpy(stats, &full_stats, copy_size);
     return 0;
+}
+
+int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size) {
+    return llam_runtime_collect_stats_ex_rt(&g_llam_runtime, stats, stats_size);
 }
 
 int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {

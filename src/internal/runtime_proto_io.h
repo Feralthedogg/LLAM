@@ -69,7 +69,7 @@ void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *
  * Request allocation, capability checks, and submission queues.
  */
 bool llam_io_capability_error(int error_code);
-void llam_io_req_reset(llam_io_req_t *req, unsigned owner_shard, unsigned alloc_owner_shard);
+void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsigned owner_shard, unsigned alloc_owner_shard);
 llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard);
 void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req);
 int llam_io_req_node_index(const llam_io_req_t *req);

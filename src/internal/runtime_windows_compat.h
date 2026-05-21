@@ -154,6 +154,10 @@ static inline int llam_windows_nanosleep(const struct timespec *req, struct time
 #ifndef ENOTSUP
 #define ENOTSUP EOPNOTSUPP
 #endif
+#ifndef EXDEV
+/* Keep the public owner-mismatch contract in errno-space. */
+#define EXDEV 18
+#endif
 #ifndef EAFNOSUPPORT
 #define EAFNOSUPPORT WSAEAFNOSUPPORT
 #endif

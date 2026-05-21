@@ -25,8 +25,17 @@
  *  - @c ECANCELED: cancellation token or cooperative runtime stop was observed.
  *  - @c EPIPE: channel closed or peer-closed equivalent.
  *  - @c EBUSY: object still has live users/waiters or incompatible concurrent use.
+ *  - @c EXDEV: runtime-aware object was used from a different runtime owner.
  *  - @c ENOTSUP: unsupported backend feature or invalid calling context.
  *  - @c ENOMEM: allocation failure.
+ *
+ * Runtime ownership:
+ *  - LLAM 1.x supports one live process runtime. Runtime-aware objects are
+ *    bound to the runtime that created them, and cross-owner use fails with
+ *    @c EXDEV.
+ *  - The explicit runtime handle API is the embedding boundary for this
+ *    contract. True concurrent multi-runtime isolation is staged for a later
+ *    major line after singleton and TLS-backed ownership have migration paths.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -59,14 +68,14 @@ extern "C" {
 /** @brief LLAM source/API version major component. */
 #define LLAM_VERSION_MAJOR 1U
 /** @brief LLAM source/API version minor component. */
-#define LLAM_VERSION_MINOR 1U
+#define LLAM_VERSION_MINOR 2U
 /** @brief LLAM source/API version patch component. */
 #define LLAM_VERSION_PATCH 0U
 
 /** @brief Public ABI major version; incompatible binary changes increment this value. */
 #define LLAM_ABI_VERSION_MAJOR 1U
 /** @brief Public ABI minor version; additive binary-compatible changes increment this value. */
-#define LLAM_ABI_VERSION_MINOR 1U
+#define LLAM_ABI_VERSION_MINOR 2U
 /** @brief Packed public ABI version used by dynamic loaders. */
 #define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
 

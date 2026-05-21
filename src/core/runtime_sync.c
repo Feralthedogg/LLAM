@@ -56,13 +56,15 @@ int llam_require_task_context(void) {
  * writes over an already initialized atomic object with a byte clear.
  *
  * @param node        Wait node to reset.
- * @param owner_shard Allocation-owner shard, or @c UINT_MAX for embedded nodes.
+ * @param owner_runtime Runtime that owns the wait node.
+ * @param owner_shard   Allocation-owner shard, or @c UINT_MAX for embedded nodes.
  */
-void llam_wait_node_reset(llam_wait_node_t *node, unsigned owner_shard) {
+void llam_wait_node_reset(llam_wait_node_t *node, llam_runtime_t *owner_runtime, unsigned owner_shard) {
     if (node == NULL) {
         return;
     }
 
+    node->owner_runtime = owner_runtime;
     node->task = NULL;
     node->next = NULL;
     node->alloc_next = NULL;
@@ -98,7 +100,7 @@ llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard) {
 
     if (task != NULL && task->active_wait_node == NULL) {
         node = &task->embedded_wait_node;
-        llam_wait_node_reset(node, UINT_MAX);
+        llam_wait_node_reset(node, task->owner_runtime, UINT_MAX);
         node->task = task;
         return node;
     }
@@ -125,7 +127,7 @@ void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node) {
         return;
     }
     if (node->task != NULL && node == &node->task->embedded_wait_node) {
-        llam_wait_node_reset(node, UINT_MAX);
+        llam_wait_node_reset(node, node->task->owner_runtime, UINT_MAX);
         return;
     }
     llam_wait_node_free(shard, node);

@@ -57,6 +57,18 @@ typedef struct double_join_state {
     atomic_uint busy;
 } double_join_state_t;
 
+typedef struct owner_diag_state {
+    core_state_t core;
+    llam_runtime_t fake_runtime;
+    llam_channel_t *channel;
+    llam_mutex_t *mutex;
+    llam_cond_t *cond;
+    llam_cancel_token_t *token;
+    llam_task_group_t *group;
+    llam_task_t *target;
+    int payload;
+} owner_diag_state_t;
+
 #if LLAM_PLATFORM_POSIX
 typedef struct dump_blocking_state {
     core_state_t core;
@@ -87,6 +99,12 @@ static void task_fail(core_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
         state->first_errno = err;
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static void expect_runtime_owner_mismatch(core_state_t *state, const char *where, int rc) {
+    if (rc != -1 || errno != EXDEV) {
+        task_fail(state, where, errno);
     }
 }
 
@@ -457,8 +475,10 @@ static int test_preinit_contracts(void) {
 static int test_runtime_handle_api(void) {
     core_state_t state;
     llam_runtime_opts_t runtime_opts;
+    llam_runtime_stats_t stats;
     llam_runtime_t *runtime = NULL;
     llam_runtime_t *second_runtime = NULL;
+    llam_runtime_t *fake_runtime = (llam_runtime_t *)(void *)&state;
     llam_task_t *task;
 
     memset(&state, 0, sizeof(state));
@@ -483,9 +503,28 @@ static int test_runtime_handle_api(void) {
         return test_fail("llam_runtime_run_handle(NULL) did not fail with EINVAL");
     }
     errno = 0;
-    if (llam_runtime_run_handle((llam_runtime_t *)(void *)&state) != -1 || errno != EINVAL) {
+    if (llam_runtime_run_handle(fake_runtime) != -1 || errno != EINVAL) {
         llam_runtime_destroy(runtime);
         return test_fail("llam_runtime_run_handle(non-default) did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_request_stop_rt(fake_runtime) != -1 || errno != EINVAL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_request_stop_rt(non-default) did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_collect_stats_ex_rt(fake_runtime, &stats, sizeof(stats)) != -1 || errno != EINVAL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_collect_stats_ex_rt(non-default) did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_write_stats_json_rt(fake_runtime, 1) != -1 || errno != EINVAL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_write_stats_json_rt(non-default) did not fail with EINVAL");
+    }
+    if (llam_runtime_collect_stats_ex_rt(runtime, &stats, sizeof(stats)) != 0) {
+        llam_runtime_destroy(runtime);
+        return test_fail_errno("llam_runtime_collect_stats_ex_rt(default) failed");
     }
     errno = 0;
     if (llam_runtime_create(&runtime_opts, sizeof(runtime_opts), &second_runtime) != -1 ||
@@ -933,6 +972,213 @@ static int test_detach_contract(void) {
 
     llam_runtime_shutdown();
     return 0;
+}
+
+static void owner_diag_target_task(void *arg) {
+    core_state_t *state = arg;
+
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void owner_diag_task(void *arg) {
+    owner_diag_state_t *state = arg;
+    llam_runtime_t *owner;
+    void *out = NULL;
+    llam_select_op_t op;
+    size_t selected = 0U;
+
+    owner = state->channel->owner_runtime;
+    state->channel->owner_runtime = &state->fake_runtime;
+    expect_runtime_owner_mismatch(&state->core,
+                                  "channel try send cross-runtime",
+                                  llam_channel_try_send(state->channel, &state->payload));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "channel try recv cross-runtime",
+                                  llam_channel_try_recv_result(state->channel, &out));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "channel close cross-runtime",
+                                  llam_channel_close(state->channel));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "channel destroy cross-runtime",
+                                  llam_channel_destroy(state->channel));
+    memset(&op, 0, sizeof(op));
+    op.kind = LLAM_SELECT_OP_RECV;
+    op.channel = state->channel;
+    op.recv_out = &out;
+    expect_runtime_owner_mismatch(&state->core,
+                                  "channel select cross-runtime",
+                                  llam_channel_select(&op, 1U, 0U, &selected));
+    state->channel->owner_runtime = owner;
+
+    owner = state->mutex->owner_runtime;
+    state->mutex->owner_runtime = &state->fake_runtime;
+    expect_runtime_owner_mismatch(&state->core,
+                                  "mutex trylock cross-runtime",
+                                  llam_mutex_trylock(state->mutex));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "mutex destroy cross-runtime",
+                                  llam_mutex_destroy(state->mutex));
+    state->mutex->owner_runtime = owner;
+
+    owner = state->cond->owner_runtime;
+    state->cond->owner_runtime = &state->fake_runtime;
+    expect_runtime_owner_mismatch(&state->core,
+                                  "cond signal cross-runtime",
+                                  llam_cond_signal(state->cond));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "cond broadcast cross-runtime",
+                                  llam_cond_broadcast(state->cond));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "cond destroy cross-runtime",
+                                  llam_cond_destroy(state->cond));
+    state->cond->owner_runtime = owner;
+
+    owner = state->token->owner_runtime;
+    state->token->owner_runtime = &state->fake_runtime;
+    expect_runtime_owner_mismatch(&state->core,
+                                  "cancel token query cross-runtime",
+                                  llam_cancel_token_is_cancelled(state->token));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "cancel token cancel cross-runtime",
+                                  llam_cancel_token_cancel(state->token));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "cancel token destroy cross-runtime",
+                                  llam_cancel_token_destroy(state->token));
+    state->token->owner_runtime = owner;
+
+    owner = state->group->owner_runtime;
+    state->group->owner_runtime = &state->fake_runtime;
+    expect_runtime_owner_mismatch(&state->core,
+                                  "task group cancel cross-runtime",
+                                  llam_task_group_cancel(state->group));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "task group join cross-runtime",
+                                  llam_task_group_join_until(state->group, 0U));
+    expect_runtime_owner_mismatch(&state->core,
+                                  "task group destroy cross-runtime",
+                                  llam_task_group_destroy(state->group));
+    state->group->owner_runtime = owner;
+
+}
+
+static int test_runtime_owner_mismatch_diagnostics(void) {
+    owner_diag_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    llam_runtime_t *owner;
+    llam_task_t *diag_task = NULL;
+    bool ran_runtime = false;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    state.payload = 42;
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return test_fail_errno("llam_runtime_init for owner diagnostics failed");
+    }
+    state.channel = llam_channel_create(1U);
+    state.mutex = llam_mutex_create();
+    state.cond = llam_cond_create();
+    state.token = llam_cancel_token_create();
+    state.group = llam_task_group_create();
+    if (state.channel == NULL ||
+        state.mutex == NULL ||
+        state.cond == NULL ||
+        state.token == NULL ||
+        state.group == NULL) {
+        rc = test_fail_errno("object create for owner diagnostics failed");
+        goto cleanup;
+    }
+    state.target = llam_spawn(owner_diag_target_task, &state.core, NULL);
+    if (state.target == NULL) {
+        rc = test_fail_errno("spawn for owner diagnostics failed");
+        goto cleanup;
+    }
+    owner = state.target->owner_runtime;
+    state.target->owner_runtime = &state.fake_runtime;
+    expect_runtime_owner_mismatch(&state.core,
+                                  "task join cross-runtime",
+                                  llam_join_until(state.target, 0U));
+    expect_runtime_owner_mismatch(&state.core,
+                                  "task detach cross-runtime",
+                                  llam_detach(state.target));
+    state.target->owner_runtime = owner;
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U) {
+        rc = test_fail("task owner diagnostics did not fail with EXDEV");
+        goto cleanup;
+    }
+    diag_task = llam_spawn(owner_diag_task, &state, NULL);
+    if (diag_task == NULL) {
+        rc = test_fail_errno("spawn for owner diagnostics failed");
+        goto cleanup;
+    }
+    if (llam_run() != 0) {
+        rc = test_fail_errno("llam_run for owner diagnostics failed");
+        goto cleanup;
+    }
+    ran_runtime = true;
+    if (llam_join(diag_task) != 0) {
+        rc = test_fail_errno("llam_join for owner diagnostics failed");
+        goto cleanup;
+    }
+    diag_task = NULL;
+    if (llam_join(state.target) != 0) {
+        rc = test_fail_errno("llam_join target for owner diagnostics failed");
+        goto cleanup;
+    }
+    state.target = NULL;
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] owner diagnostics failed at %s errno=%d (%s)\n",
+                state.core.first_case,
+                state.core.first_errno,
+                strerror(state.core.first_errno));
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&state.core.ran, memory_order_relaxed) != 1U) {
+        rc = test_fail("owner diagnostics target task did not run");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (diag_task != NULL) {
+        if (ran_runtime) {
+            (void)llam_join(diag_task);
+        } else {
+            (void)llam_detach(diag_task);
+        }
+    }
+    if (state.target != NULL) {
+        if (ran_runtime) {
+            (void)llam_join(state.target);
+        } else {
+            (void)llam_detach(state.target);
+        }
+    }
+    if (state.group != NULL) {
+        (void)llam_task_group_destroy(state.group);
+    }
+    if (state.token != NULL) {
+        (void)llam_cancel_token_destroy(state.token);
+    }
+    if (state.cond != NULL) {
+        (void)llam_cond_destroy(state.cond);
+    }
+    if (state.mutex != NULL) {
+        (void)llam_mutex_destroy(state.mutex);
+    }
+    if (state.channel != NULL) {
+        (void)llam_channel_destroy(state.channel);
+    }
+    llam_runtime_shutdown();
+    return rc;
 }
 
 static int test_ex_option_prefixes(void) {
@@ -1891,6 +2137,7 @@ int main(void) {
         test_runtime_lifecycle_and_task_contracts() != 0 ||
         test_request_stop_returns_success() != 0 ||
         test_shutdown_from_task_requests_stop() != 0 ||
+        test_runtime_owner_mismatch_diagnostics() != 0 ||
 #if LLAM_PLATFORM_POSIX
         test_runtime_dump_while_blocking_job_active() != 0 ||
         test_concurrent_runtime_init_contract() != 0 ||

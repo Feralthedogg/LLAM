@@ -123,10 +123,11 @@ static unsigned llam_channel_cache_cap(void) {
  *
  * @param channel Channel object to clear for reuse.
  */
-static void llam_channel_reset_for_reuse(llam_channel_t *channel) {
+static void llam_channel_reset_for_reuse(llam_channel_t *channel, llam_runtime_t *owner_runtime) {
     if (channel == NULL) {
         return;
     }
+    channel->owner_runtime = owner_runtime;
     if (channel->buffer != NULL && channel->ring_capacity > 0U) {
         // Keep the allocated buffer for reuse, but clear stale pointer payloads.
         memset(channel->buffer, 0, channel->ring_capacity * sizeof(*channel->buffer));
@@ -166,7 +167,7 @@ static llam_channel_t *llam_channel_tls_cache_acquire(void) {
     if (g_llam_tls_channel_cache_count > 0U) {
         g_llam_tls_channel_cache_count -= 1U;
     }
-    llam_channel_reset_for_reuse(channel);
+    llam_channel_reset_for_reuse(channel, llam_runtime_owner_for_new_object());
     return channel;
 }
 
@@ -191,7 +192,7 @@ static bool llam_channel_tls_cache_release(llam_channel_t *channel) {
         return false;
     }
 
-    llam_channel_reset_for_reuse(channel);
+    llam_channel_reset_for_reuse(channel, channel->owner_runtime);
     channel->cache_next = g_llam_tls_channel_cache_head;
     g_llam_tls_channel_cache_head = channel;
     g_llam_tls_channel_cache_count += 1U;
@@ -229,7 +230,7 @@ llam_channel_t *llam_channel_cache_acquire(void) {
     pthread_mutex_unlock(&g_llam_channel_cache_lock);
 
     if (channel != NULL) {
-        llam_channel_reset_for_reuse(channel);
+        llam_channel_reset_for_reuse(channel, llam_runtime_owner_for_new_object());
     }
     return channel;
 }
@@ -265,7 +266,7 @@ bool llam_channel_cache_release(llam_channel_t *channel) {
         return false;
     }
 
-    llam_channel_reset_for_reuse(channel);
+    llam_channel_reset_for_reuse(channel, channel->owner_runtime);
     pthread_mutex_lock(&g_llam_channel_cache_lock);
     if (g_llam_channel_cache_count >= cap) {
         pthread_mutex_unlock(&g_llam_channel_cache_lock);

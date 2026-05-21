@@ -1,5 +1,43 @@
 # LLAM ChangeLog
 
+## 1.2.0 - 2026-05-21
+
+### Core runtime
+
+* multi-runtime groundwork: tag tasks, wait nodes, timers, I/O requests,
+  runtime-owned buffers, channels, mutexes, condvars, cancellation tokens, and
+  task groups with the runtime owner that created them.
+
+* diagnostics: reject cross-owner use of runtime-aware public handles with
+  `EXDEV`. LLAM 1.x still permits only one live process runtime, but this gives
+  the 1.2.x line deterministic misuse detection before the 2.x isolation work
+  removes singleton/TLS ownership assumptions.
+
+* handle API: route run, cooperative stop, shutdown, stats collection, and stats
+  JSON through runtime-owned internal entry points. The public handle remains an
+  alias for the singleton in 1.x, but the implementation no longer hard-codes
+  those paths directly to global-only wrappers.
+
+* owner checks: mark cross-owner and invalid-handle branches as unlikely in hot
+  paths. Source builds may explicitly define
+  `LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` for unsafe singleton-only profiling, but
+  default builds keep the public `EXDEV` diagnostics enabled.
+
+### Tests and documentation
+
+* add direct owner-mismatch coverage for sync primitives, channels, select,
+  cancellation tokens, task groups, join, and detach.
+
+* tighten benchmark regression guardrails to cover scheduler, channel, select,
+  I/O echo, and poll-wake throughput with conservative hard-fail thresholds.
+
+* make the LLAM/Go/Tokio comparison script process-sample aware and report
+  median rows by default, reducing false regressions from one noisy benchmark
+  process.
+
+* document runtime-object ownership and the new `EXDEV` errno contract in the
+  public API and ABI guide.
+
 ## 1.1.0 - 2026-05-20
 
 This entry summarizes the source, test, CI, packaging, and documentation changes

@@ -3,10 +3,11 @@
  * @brief Runtime shutdown, worker teardown, and global state cleanup.
  *
  * @details
- * Shutdown is intentionally conservative: request global stop, join worker
+ * Shutdown is intentionally conservative: request runtime stop, join worker
  * threads, drain backend queues/watch state, destroy platform resources, release
  * cached stacks and allocator slabs, restore process-wide signal/affinity state,
- * and finally zero the global runtime object.
+ * and finally zero the runtime object.  The 1.x public singleton API and handle
+ * API both delegate to the runtime-owned shutdown helper in this file.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -52,8 +53,7 @@ static void llam_runtime_close_ready_fd(llam_fd_t fd) {
  * The function tolerates partial initialization so failed init paths can reuse
  * normal shutdown cleanup.
  */
-static void llam_runtime_shutdown_unlocked(void) {
-    llam_runtime_t *rt = &g_llam_runtime;
+static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     llam_task_t *task;
     unsigned i;
 
@@ -330,7 +330,13 @@ static void llam_runtime_shutdown_unlocked(void) {
     memset(rt, 0, sizeof(*rt));
 }
 
-void llam_runtime_shutdown(void) {
+void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
+    if (rt == NULL) {
+        rt = &g_llam_runtime;
+    }
+    if (llam_runtime_check_handle(rt) != 0) {
+        return;
+    }
     /*
      * A managed task runs on scheduler-owned stack/context state.  Tearing the
      * singleton down from that same execution frame can deadlock in worker joins
@@ -341,8 +347,8 @@ void llam_runtime_shutdown(void) {
     if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
         int saved_errno = errno;
 
-        if (atomic_load_explicit(&g_llam_runtime.initialized, memory_order_acquire)) {
-            llam_request_stop(&g_llam_runtime);
+        if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+            llam_request_stop(rt);
         }
         errno = saved_errno;
         return;
@@ -355,6 +361,10 @@ void llam_runtime_shutdown(void) {
      * init still consumes them can corrupt the singleton.
      */
     llam_runtime_lifecycle_lock();
-    llam_runtime_shutdown_unlocked();
+    llam_runtime_shutdown_unlocked(rt);
     llam_runtime_lifecycle_unlock();
+}
+
+void llam_runtime_shutdown(void) {
+    llam_runtime_shutdown_rt(&g_llam_runtime);
 }

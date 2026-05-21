@@ -47,7 +47,7 @@ llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard) {
             if (node != NULL) {
                 shard->allocator.wait_free = node->alloc_next;
                 shard->allocator.wait_reuses += 1U;
-                llam_wait_node_reset(node, shard->id);
+                llam_wait_node_reset(node, shard->runtime, shard->id);
                 return node;
             }
         } else {
@@ -58,7 +58,7 @@ llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard) {
                 shard->allocator.wait_free = node->alloc_next;
                 shard->allocator.wait_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
-                llam_wait_node_reset(node, shard->id);
+                llam_wait_node_reset(node, shard->runtime, shard->id);
                 return node;
             }
             llam_allocator_unlock(&shard->allocator);
@@ -77,7 +77,7 @@ llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard) {
  * @param node  Wait node to recycle.
  */
 void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt = node != NULL && node->owner_runtime != NULL ? node->owner_runtime : &g_llam_runtime;
     llam_shard_t *owner;
     llam_wait_node_t *head;
 
@@ -128,6 +128,7 @@ llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard) {
                 shard->allocator.timer_free = node->alloc_next;
                 shard->allocator.timer_reuses += 1U;
                 memset(node, 0, sizeof(*node));
+                node->owner_runtime = shard->runtime;
                 node->owner_shard = shard->id;
                 return node;
             }
@@ -140,6 +141,7 @@ llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard) {
                 shard->allocator.timer_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
                 memset(node, 0, sizeof(*node));
+                node->owner_runtime = shard->runtime;
                 node->owner_shard = shard->id;
                 return node;
             }
@@ -159,7 +161,7 @@ llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard) {
  * @param node  Timer node to recycle.
  */
 void llam_timer_node_free(llam_shard_t *shard, llam_timer_node_t *node) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt = node != NULL && node->owner_runtime != NULL ? node->owner_runtime : &g_llam_runtime;
     llam_shard_t *owner;
     llam_timer_node_t *head;
 

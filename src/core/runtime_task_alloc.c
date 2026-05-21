@@ -35,9 +35,10 @@
  * spawn-heavy workloads from repeatedly touching cold embedded request storage.
  *
  * @param task     Task object taken from a shard free list.
- * @param shard_id Allocation-owner shard id to publish after reset.
+ * @param owner_runtime Runtime that owns the task object.
+ * @param shard_id      Allocation-owner shard id to publish after reset.
  */
-static void llam_task_reset_reused(llam_task_t *task, unsigned shard_id) {
+static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runtime, unsigned shard_id) {
     bool lock_initialized;
     unsigned i;
 
@@ -46,6 +47,7 @@ static void llam_task_reset_reused(llam_task_t *task, unsigned shard_id) {
     }
 
     lock_initialized = task->lock_initialized;
+    task->owner_runtime = owner_runtime;
     task->id = 0U;
     atomic_init(&task->state, (unsigned)LLAM_TASK_STATE_NEW);
     task->wait_reason = LLAM_WAIT_NONE;
@@ -76,14 +78,14 @@ static void llam_task_reset_reused(llam_task_t *task, unsigned shard_id) {
     task->wait_next = NULL;
     task->cancel_next = NULL;
     task->cancel_prev = NULL;
-    llam_wait_node_reset(&task->embedded_wait_node, UINT_MAX);
+    llam_wait_node_reset(&task->embedded_wait_node, owner_runtime, UINT_MAX);
     for (i = 0U; i < LLAM_TASK_EMBEDDED_SELECT_NODES; ++i) {
-        llam_wait_node_reset(&task->embedded_select_nodes[i], UINT_MAX);
+        llam_wait_node_reset(&task->embedded_select_nodes[i], owner_runtime, UINT_MAX);
     }
     memset((char *)task + offsetof(llam_task_t, active_wait_node),
            0,
            offsetof(llam_task_t, embedded_io_req) - offsetof(llam_task_t, active_wait_node));
-    llam_io_req_reset(&task->embedded_io_req, UINT_MAX, UINT_MAX);
+    llam_io_req_reset(&task->embedded_io_req, owner_runtime, UINT_MAX, UINT_MAX);
     /*
      * active_io_req is an atomic ownership boundary between I/O completion and
      * dynamic rehome. Reinitialize it explicitly instead of byte-clearing the
@@ -115,6 +117,7 @@ static void llam_task_reset_reused(llam_task_t *task, unsigned shard_id) {
     task->last_stack_used = 0U;
     task->stack_high_water = 0U;
     memset(&task->embedded_timer_node, 0, sizeof(task->embedded_timer_node));
+    task->embedded_timer_node.owner_runtime = owner_runtime;
     task->active_timer = NULL;
     atomic_init(&task->preempt_requested, 0U);
     atomic_init(&task->completed, 0U);
@@ -153,7 +156,7 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
             if (task != NULL) {
                 shard->allocator.task_free = task->alloc_next;
                 shard->allocator.task_reuses += 1U;
-                llam_task_reset_reused(task, shard->id);
+                llam_task_reset_reused(task, shard->runtime, shard->id);
                 return task;
             }
         } else {
@@ -165,7 +168,7 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
                 shard->allocator.task_free = task->alloc_next;
                 shard->allocator.task_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
-                llam_task_reset_reused(task, shard->id);
+                llam_task_reset_reused(task, shard->runtime, shard->id);
                 return task;
             }
             llam_allocator_unlock(&shard->allocator);
@@ -184,7 +187,7 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
  * @param task Task object previously returned by ::llam_task_alloc.
  */
 void llam_task_allocator_free(llam_task_t *task) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt = task != NULL && task->owner_runtime != NULL ? task->owner_runtime : &g_llam_runtime;
     llam_shard_t *owner;
     llam_task_t *head;
 

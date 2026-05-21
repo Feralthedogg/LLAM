@@ -7,7 +7,7 @@ OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 PICFLAGS ?= -fPIC
 LLAM_ABI_MAJOR ?= 1
-LLAM_VERSION ?= 1.1.0
+LLAM_VERSION ?= 1.2.0
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
 CLEAN_DIRS = \
@@ -195,6 +195,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_channel.o \
 	$(OBJDIR)/src/core/runtime_channel_select.o \
 	$(OBJDIR)/src/core/runtime_handle.o \
+	$(OBJDIR)/src/core/runtime_owner.o \
 	$(OBJDIR)/src/core/runtime_task_group.o \
 	$(OBJDIR)/src/core/runtime_task_local.o \
 	$(OBJDIR)/src/io/runtime_io_api.o \
@@ -400,6 +401,7 @@ LINK_TARGETS = \
 	libllam_runtime.a
 
 .PHONY: all clean static shared test test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.DEFAULT_GOAL := all
 
 ifeq ($(HOST_PLATFORM),windows)
 

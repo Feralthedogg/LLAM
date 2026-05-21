@@ -65,6 +65,7 @@ llam_mutex_t *llam_mutex_create(void) {
         return NULL;
     }
 
+    mutex->owner_runtime = llam_runtime_owner_for_new_object();
     atomic_init(&mutex->owner, (uintptr_t)0);
     rc = pthread_mutex_init(&mutex->lock, NULL);
     if (rc != 0) {
@@ -90,6 +91,9 @@ llam_mutex_t *llam_mutex_create(void) {
 int llam_mutex_destroy(llam_mutex_t *mutex) {
     if (mutex == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
         return -1;
     }
 
@@ -124,6 +128,9 @@ int llam_mutex_trylock(llam_mutex_t *mutex) {
         return -1;
     }
     if (llam_require_task_context() != 0) {
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
         return -1;
     }
 
@@ -164,6 +171,9 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
         return -1;
     }
     if (llam_require_task_context() != 0) {
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
         return -1;
     }
     task = g_llam_tls_task;
@@ -316,6 +326,9 @@ int llam_mutex_unlock(llam_mutex_t *mutex) {
         return -1;
     }
     if (llam_require_task_context() != 0) {
+        return -1;
+    }
+    if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
         return -1;
     }
 

@@ -32,6 +32,26 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+/** @brief Mark a hot-path condition as expected true for branch layout. */
+#define LLAM_LIKELY(expr) (__builtin_expect(!!(expr), 1))
+/** @brief Mark a diagnostic/error condition as expected false. */
+#define LLAM_UNLIKELY(expr) (__builtin_expect(!!(expr), 0))
+#else
+#define LLAM_LIKELY(expr) (!!(expr))
+#define LLAM_UNLIKELY(expr) (!!(expr))
+#endif
+
+#ifndef LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+/*
+ * Keep owner checks enabled by default because EXDEV is part of the public
+ * 1.2.x diagnostic contract. Release-fast embedders that build their own LLAM
+ * binary may define this to 1 only when they intentionally trade cross-owner
+ * diagnostics for a zero-cost singleton assumption.
+ */
+#define LLAM_RUNTIME_DISABLE_OWNER_CHECKS 0
+#endif
+
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
 /** @brief Internal task states used by tracing, diagnostics, and assembly-visible code. */
 typedef enum llam_task_state_id {

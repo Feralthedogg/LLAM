@@ -572,7 +572,7 @@ int llam_allocator_grow_wait_slab(llam_shard_t *shard) {
     llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_WAIT_NODE_SLAB_COUNT; ++i) {
-        llam_wait_node_reset(&items[i], shard->id);
+        llam_wait_node_reset(&items[i], shard->runtime, shard->id);
         items[i].alloc_next = shard->allocator.wait_free;
         shard->allocator.wait_free = &items[i];
         shard->allocator.wait_allocs += 1U;
@@ -613,6 +613,7 @@ int llam_allocator_grow_timer_slab(llam_shard_t *shard) {
     llam_allocator_lock(&shard->allocator);
     shard->allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_TIMER_NODE_SLAB_COUNT; ++i) {
+        items[i].owner_runtime = shard->runtime;
         items[i].owner_shard = shard->id;
         items[i].alloc_next = shard->allocator.timer_free;
         shard->allocator.timer_free = &items[i];
@@ -657,7 +658,7 @@ int llam_allocator_grow_io_req_slab(llam_shard_t *shard) {
         // Requests track both logical owner and allocation owner because live
         // I/O can migrate/rehome while the backing object still returns to the
         // original slab owner.
-        llam_io_req_reset(&items[i], shard->id, shard->id);
+        llam_io_req_reset(&items[i], shard->runtime, shard->id, shard->id);
         items[i].alloc_next = shard->allocator.io_req_free;
         shard->allocator.io_req_free = &items[i];
         shard->allocator.io_req_allocs += 1U;
@@ -701,6 +702,7 @@ int llam_allocator_grow_io_buffer_slab(llam_shard_t *shard) {
     for (i = 0; i < slab_count; ++i) {
         // Buffer objects start with inline storage. Larger request payloads may
         // attach external storage later and release it before cache return.
+        items[i].owner_runtime = shard->runtime;
         items[i].alloc_owner_shard = shard->id;
         items[i].data = items[i].inline_data;
         items[i].capacity = LLAM_IO_BUFFER_INLINE_BYTES;

@@ -18,14 +18,18 @@ DEFAULT_CASES = [
     "select_recv_ready",
     "select_park_wake",
     "select_timeout",
+    "io_echo",
+    "poll_wake",
 ]
 
 DEFAULT_MIN_OPS = {
-    "spawn_join": 20_000.0,
-    "channel_pingpong": 20_000.0,
-    "select_recv_ready": 20_000.0,
-    "select_park_wake": 5_000.0,
-    "select_timeout": 500.0,
+    "spawn_join": 500_000.0,
+    "channel_pingpong": 1_500_000.0,
+    "select_recv_ready": 8_000_000.0,
+    "select_park_wake": 800_000.0,
+    "select_timeout": 8_000_000.0,
+    "io_echo": 150_000.0,
+    "poll_wake": 200_000.0,
 }
 
 BENCH_RE = re.compile(r"^\[bench\]\s+name=(?P<name>\S+).*?\sops_per_sec=(?P<ops>[0-9.]+)")
@@ -113,10 +117,11 @@ def main() -> int:
     results = {}
     failures = []
 
-    if not args.bench.exists():
+    bench_path = args.bench if args.bench.is_absolute() else Path.cwd() / args.bench
+    if not bench_path.exists():
         raise SystemExit(f"bench binary not found: {args.bench}")
     for case in cases:
-        ops, _output = run_case(args.bench, case, args)
+        ops, _output = run_case(bench_path, case, args)
         minimum = min_ops.get(case, 0.0)
         ok = ops >= minimum
         results[case] = {

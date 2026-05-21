@@ -214,7 +214,7 @@ Build outputs:
 - `server`: minimal LLAM-backed TCP chat backend for local best-effort testing.
 - `server_lossless`: the same chat backend built with lossless outbox backpressure enabled by default.
 - `server_flood`: native nonblocking throughput flood driver for the chat server.
-- `scripts/bench_guard.py`: conservative microbenchmark regression guard for CI.
+- `scripts/bench_guard.py`: conservative hard-fail regression guard for scheduler, channel, select, I/O echo, and poll-wake throughput.
 - `scripts/run_with_timeout.py`: CI-safe long-process runner that preserves partial logs before interrupting/killing hung stress jobs.
 - `scripts/stress_server.py`: TCP fanout stress test for the chat server.
 - `scripts/stress_server_composite.py`: long-running composite server stability suite.
@@ -250,7 +250,7 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v1.1.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v1.2.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
 through `.github/workflows/release.yml`.
 
@@ -277,19 +277,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.1.0/install.sh | sh -s -- --version 1.1.0 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.2.0/install.sh | sh -s -- --version 1.2.0 --prefix "$HOME/.local"
 ```
 
 Install a specific Linux/macOS target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.1.0/install.sh | sh -s -- --version 1.1.0 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.2.0/install.sh | sh -s -- --version 1.2.0 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v1.1.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.1.0 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v1.2.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.2.0 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
@@ -824,6 +824,11 @@ Compare LLAM, Go, and Tokio:
 python3 scripts/bench_runtime_compare.py --runtime all
 ```
 
+The comparison script runs three process-level samples per runtime by default
+and reports the median row for each case so one noisy scheduler outlier does
+not dominate the table. Use `--samples 1` for a quick smoke run or
+`--sample-policy best` when locally measuring peak tuning.
+
 Graph generation requires Python `matplotlib`. Without it, the script still writes CSV and prints tables.
 The scheduled `Runtime Benchmarks` workflow runs the same comparison on Linux
 x86_64, macOS arm64, macOS x86_64, Windows Server 2022, and Windows Server
@@ -913,7 +918,8 @@ current maintained contract rather than future roadmap work:
 
 - Focused direct API tests cover lifecycle, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`.
 - Runtime-owned failures should be reduced into focused runtime tests before they rely on example-server reproduction. The example server remains an integration and policy workload, while scheduler, cancellation, wakeup, select, and ownership regressions belong in direct tests.
-- The runtime handle API is the supported embedding boundary for 1.x. The public header, ABI guide, operations guide, and direct tests pin the current contract: one active process runtime, `EBUSY` on a second live create, `EINVAL` on non-default run handles, and no promise of concurrent multi-runtime isolation until global singleton/TLS dependencies are migrated.
+- The runtime handle API is the supported embedding boundary for 1.x. The public header, ABI guide, operations guide, and direct tests pin the current contract: one active process runtime, `EBUSY` on a second live create, `EINVAL` on non-default run handles, and owner-tagged runtime objects that fail cross-owner use with `EXDEV`. The 1.2.x implementation already routes run, cooperative stop, shutdown, stats, and stats JSON through runtime-owned internal entry points while keeping the public handle as a singleton alias.
+- Default release builds keep owner diagnostics enabled. `LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` is an explicit source-build profiling knob for unsafe singleton-only binaries, not the documented ABI-conformance mode.
 - Rare-hang diagnostics are expected to be actionable. `llam_dump_runtime_state()` emits lifecycle/stop state, active I/O waiters, block-helper wake state, node submit/control/watch queues, shard wake/I/O ownership, and task-level wait ownership (`wait_owner`, cancellation registration, deadlines, active I/O requests, and blocking jobs). CI long-running stress jobs stream partial output through `scripts/run_with_timeout.py`, request a signal-driven runtime dump before timeout shutdown on POSIX stress binaries, and server composite runs can emit stop-time runtime dumps into the artifact directory.
 - Release archives are expected to stay self-contained: public headers, shared/static libraries, CMake config, pkg-config metadata, examples, install scripts, and operations docs.
 - The chat examples intentionally separate best-effort throughput behavior from lossless/backpressure behavior so benchmark logs are not misread as runtime message loss.
@@ -926,7 +932,7 @@ Future core-runtime work should tighten LLAM itself without changing the stable
 
 - Keep extending direct API coverage when new edge cases are found, especially around shutdown races, cancellation ownership, lost wakeups, select fanout, blocking helpers, and I/O request ownership.
 - Continue promoting low-level stress failures out of examples into minimal runtime tests when the bug belongs to LLAM rather than to sample-application policy.
-- Stage true concurrent multi-runtime isolation only after every global singleton, TLS dependency, queue, timer, allocator cache, and I/O backend owner has a migration path.
+- Continue the staged multi-runtime isolation work. The 1.2.x foundation tags runtime-aware objects with their owner, diagnoses cross-owner use, and moves lifecycle/diagnostic handle plumbing onto runtime-owned internal entry points; true concurrent multi-runtime execution still requires migrating every remaining global singleton, TLS dependency, queue, timer, allocator cache, and I/O backend owner to explicit runtime ownership.
 - Keep improving diagnostic dumps so rare shutdown, cancellation, wake handoff, and I/O ownership hangs produce enough state to debug without reproducing under a debugger.
 
 ### 3. Performance Roadmap
@@ -961,6 +967,7 @@ The ecosystem target is a small, embeddable C runtime with reproducible builds,
 clear examples, and CI that catches platform regressions early.
 
 - Track benchmark artifacts as CSV/PNG outputs so performance claims can be tied to recorded runs instead of anecdotal local results.
+- Keep `scripts/bench_guard.py` as a catastrophic-regression gate, not a marketing benchmark; scheduled LLAM/Go/Tokio comparison jobs remain the source of public performance tables.
 - Keep documentation focused on LLAM's C ABI, platform backends, operational limits, and verification commands.
 
 ## Architecture

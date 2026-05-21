@@ -624,14 +624,18 @@ static void llam_task_release_join_claim(llam_task_t *task) {
  *         @c ECANCELED, or a fatal runtime error.
  */
 int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_task_t *self = g_llam_tls_task;
     int caller_errno = errno;
 
-    if (task == NULL || !rt->initialized) {
+    if (task == NULL || !g_llam_runtime.initialized) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(task->owner_runtime) != 0) {
+        return -1;
+    }
+    rt = task->owner_runtime;
 
     if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
         errno = EINVAL;
@@ -816,16 +820,20 @@ int llam_join_until(llam_task_t *task, uint64_t deadline_ns) {
  *         when another join/detach path already owns the public handle.
  */
 int llam_detach(llam_task_t *task) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     unsigned expected = 0U;
     bool reclaim_after_unlock = false;
 
     llam_task_safepoint();
 
-    if (task == NULL || !rt->initialized) {
+    if (task == NULL || !g_llam_runtime.initialized) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_check_object_owner(task->owner_runtime) != 0) {
+        return -1;
+    }
+    rt = task->owner_runtime;
 
     pthread_mutex_lock(&task->lock);
     if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
