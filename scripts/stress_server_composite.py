@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
 """Run a composite LLAM chat-server stress suite."""
 
 from __future__ import annotations

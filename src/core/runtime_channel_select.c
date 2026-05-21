@@ -140,6 +140,11 @@ static size_t llam_channel_select_collect_channels(llam_select_op_t *ops,
 static void llam_channel_select_lock_channels(llam_channel_t **channels, size_t count) {
     size_t i;
 
+    /*
+     * All participating channels are locked in address order.  Select may park
+     * one task on multiple channel queues, so stable lock ordering is required
+     * to avoid deadlocks when another select touches the same channel set.
+     */
     for (i = 0U; i < count; ++i) {
         pthread_mutex_lock(&channels[i]->lock);
     }

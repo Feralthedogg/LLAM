@@ -1,3 +1,6 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
 CC ?= cc
 AR ?= ar
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer

@@ -45,6 +45,14 @@ const char *llam_version_string(void) {
     return LLAM_VERSION_STRING_LITERAL;
 }
 
+/**
+ * @brief Initialize runtime options with the current library defaults.
+ *
+ * @details
+ * The caller provides its struct size so older bindings can pass a shorter
+ * prefix safely.  Any bytes beyond the current known prefix are zeroed first,
+ * then the compatible default prefix is copied into place.
+ */
 int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
     llam_runtime_opts_t defaults;
     size_t copy_size;
@@ -66,6 +74,14 @@ int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
     return 0;
 }
 
+/**
+ * @brief Initialize spawn options with the current library defaults.
+ *
+ * @details
+ * This mirrors ::llam_runtime_opts_init for task creation.  Zeroing the full
+ * caller-provided buffer keeps future tail fields deterministic even when the
+ * caller was compiled against an older header.
+ */
 int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size) {
     llam_spawn_opts_t defaults;
     size_t copy_size;
@@ -85,6 +101,14 @@ int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size) {
     return 0;
 }
 
+/**
+ * @brief Return the current ABI metadata through a prefix-safe copy.
+ *
+ * @details
+ * Dynamic loaders use this to verify major/minor ABI compatibility and discover
+ * struct sizes before calling the rest of the API.  The function never writes
+ * past @p info_size, so old bindings can query newer libraries safely.
+ */
 int llam_abi_get_info(llam_abi_info_t *info, size_t info_size) {
     llam_abi_info_t current;
     size_t copy_size;

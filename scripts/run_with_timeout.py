@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
 """Run a command with streamed logging and a diagnostic timeout.
 
 This wrapper is intentionally small: GitHub Actions should keep the partial

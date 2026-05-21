@@ -1,4 +1,7 @@
 #!/bin/sh
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
 set -eu
 
 DOCKERFILE="${DOCKERFILE:-docker/linux/Dockerfile.ubuntu24}"

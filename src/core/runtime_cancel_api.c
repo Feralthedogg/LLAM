@@ -29,6 +29,13 @@
 static pthread_mutex_t g_llam_cancel_token_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static llam_cancel_token_t *g_llam_cancel_token_registry;
 
+/*
+ * Cancellation tokens are public heap objects, so the runtime cannot trust a
+ * raw pointer passed back by the caller.  The live registry is intentionally
+ * small and cold-path: public token operations validate ownership/liveness here
+ * before taking token->lock, while hot wait registration still links directly
+ * through the task's current token.
+ */
 static void llam_cancel_token_register_live(llam_cancel_token_t *token) {
     pthread_mutex_lock(&g_llam_cancel_token_registry_lock);
     token->registry_next = g_llam_cancel_token_registry;
@@ -209,6 +216,11 @@ int llam_cancel_token_retain_task_ref(llam_cancel_token_t *token) {
     if (llam_cancel_token_begin_op_locked(token) != 0) {
         return -1;
     }
+    /*
+     * A spawned task keeps its cancel token alive independently of public
+     * operations.  Destroy checks this count under the same token lock and
+     * reports EBUSY until all task references are released.
+     */
     token->refcount += 1U;
     pthread_mutex_unlock(&token->lock);
     llam_cancel_token_end_op(token);

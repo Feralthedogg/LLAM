@@ -367,6 +367,11 @@ void llam_cancel_task_wait(llam_task_t *task) {
         {
             llam_task_t *join_target = task->join_target;
 
+            /*
+             * Join completion owns target->lock and may clear task->join_target
+             * while stop cancellation is scanning parked tasks.  Snapshot the
+             * target once so lock/unlock operate on the same object.
+             */
             if (join_target == NULL) {
                 break;
             }

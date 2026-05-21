@@ -548,6 +548,11 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     int rc;
 
     if (opts != NULL) {
+        /*
+         * Inbound options are ABI-prefix structs.  Copy only the caller's known
+         * prefix into a full local object, then read each field behind a
+         * prefix-size guard so old bindings can initialize a newer library.
+         */
         if (opts_size == 0U) {
             errno = EINVAL;
             return -1;
@@ -643,6 +648,11 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     }
     observed_total = observed;
 
+    /*
+     * From this point on, runtime policy is resolved once and stored on the
+     * singleton.  Hot paths read these plain fields instead of re-checking
+     * environment variables or caller option structs.
+     */
     experimental_flags = opts != NULL ? opts->experimental_flags : 0U;
     rt->deterministic = opts != NULL ? (opts->deterministic != 0U) : 1U;
     rt->forced_yield_every = opts != NULL ? opts->forced_yield_every : 0U;
@@ -758,6 +768,11 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
                              ? 1024U
                              : (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ? 512U : 0U);
     timer_heap_prewarm = llam_runtime_env_u32("LLAM_TIMER_HEAP_PREWARM", timer_heap_prewarm, 1048576U);
+    /*
+     * Some experimental policies are mutually exclusive because they assume a
+     * specific ownership model for workers or kernel submission threads.  Resolve
+     * those conflicts during init so backends see a single coherent policy.
+     */
     if (rt->experimental_shard_rings != 0U) {
         rt->experimental_sqpoll_requested = 0U;
     }

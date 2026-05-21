@@ -83,6 +83,12 @@ typedef struct chat_message {
 } chat_message_t;
 
 typedef struct chat_outbox {
+    /*
+     * The example deliberately uses LLAM mutex/channel primitives here instead
+     * of pthread mutex/cond so outbox contention parks only the managed task,
+     * not the scheduler worker.  Producers use the mutex for the tiny ring
+     * update; writers sleep on the one-slot wake channel.
+     */
     llam_mutex_t *lock;
     llam_channel_t *wake;
     atomic_uint_fast64_t *full_drop_counter;
@@ -131,7 +137,12 @@ struct chat_client {
     chat_outbox_t outbox;
     atomic_uint refs;
     atomic_uint closing;
-    atomic_uint enqueue_refs; /* In-flight broadcast snapshots allowed to enqueue. */
+    /*
+     * Broadcast snapshots retain clients outside clients_lock.  close waits for
+     * this counter before closing the outbox so a target cannot be removed from
+     * the list while another task is still about to enqueue into it.
+     */
+    atomic_uint enqueue_refs;
     chat_client_t *next;
 };
 
@@ -278,6 +289,11 @@ static void chat_client_close_fd(chat_client_t *client) {
 static void chat_client_shutdown_fd(chat_client_t *client) {
     int fd = chat_client_fd(client);
 
+    /*
+     * Shutdown wakes any blocked read/write without releasing the descriptor
+     * number yet.  The actual close is deferred to final client release so an
+     * in-flight writer cannot accidentally write to a recycled fd.
+     */
     if (fd >= 0) { (void)shutdown(fd, SHUT_RDWR); }
 }
 
@@ -594,6 +610,11 @@ static bool chat_outbox_push(chat_client_t *client, chat_message_t *message) {
             return true;
         }
         if (!outbox->lossless) {
+            /*
+             * Best-effort mode protects the server from slow receivers.  The
+             * flood harness accounts these drops explicitly, so high-rate
+             * benchmark loss is explainable rather than silent data loss.
+             */
             if (outbox->full_drop_counter != NULL) {
                 (void)atomic_fetch_add_explicit(outbox->full_drop_counter, 1U, memory_order_relaxed);
             }
@@ -817,6 +838,10 @@ static void chat_broadcast_message(chat_server_t *server, const chat_client_t *s
     if (message == NULL) {
         return;
     }
+    /*
+     * Shutdown needs the write side of clients_lock.  Use tryrdlock + yield so
+     * a flood of broadcasts cannot starve stop/cleanup behind fresh readers.
+     */
     for (;;) {
         if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) {
             return;

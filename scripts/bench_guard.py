@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
 """Run LLAM microbenchmarks and fail on catastrophic throughput regressions."""
 
 from __future__ import annotations

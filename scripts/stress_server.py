@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
 """Stress the LLAM chat server with real TCP clients."""
 
 from __future__ import annotations

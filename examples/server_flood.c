@@ -346,6 +346,11 @@ static pid_t flood_start_server(const char *server_path,
     if (dump_path != NULL && dump_path[0] != '\0') {
         (void)setenv("LLAM_CHAT_DUMP_ON_STOP", dump_path, 1);
     }
+    /*
+     * Pass the server mode explicitly.  "lossless" and "throughput" flood
+     * phases have different pass/fail semantics, so inheriting the example's
+     * default would make benchmark logs ambiguous.
+     */
     execl(server_path, server_path, mode_arg, port_arg, (char *)NULL);
     _exit(127);
 }
@@ -462,6 +467,12 @@ static intmax_t flood_print_accounting(const flood_server_stats_t *stats,
     double drop_explained_ratio =
         missing_deliveries > 0U ? (double)outbox_drops / (double)missing_deliveries : 0.0;
 
+    /*
+     * This is the core invariant that separates expected best-effort drops from
+     * mystery loss.  A near-zero gap means missing deliveries are explained by
+     * work the server had not attempted yet, bounded-outbox drops, or deliveries
+     * enqueued but not observed before client drain ended.
+     */
     printf("server flood accounting: expected_minus_attempted=%" PRIdMAX
            " outbox_drops=%" PRIu64
            " enqueued_minus_observed=%" PRIdMAX

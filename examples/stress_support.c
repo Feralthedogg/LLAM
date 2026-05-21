@@ -26,6 +26,7 @@
 
 atomic_uint g_failures;
 
+/* Stress helpers accumulate failures instead of aborting so one run reports all violated invariants. */
 void stress_fail_msg(const char *label) {
     fprintf(stderr, "[stress] fail: %s\n", label);
     atomic_fetch_add(&g_failures, 1U);
@@ -56,6 +57,11 @@ void stress_close_fd_pair(int sv[2]) {
 }
 
 #if LLAM_PLATFORM_WINDOWS
+/*
+ * Windows stress tests need a socketpair-like primitive for read/write/poll
+ * races.  A loopback TCP pair is close enough for runtime I/O semantics and can
+ * be driven through the same overlapped/IOCP path as normal sockets.
+ */
 int stress_socketpair_windows(int domain, int type, int protocol, int sv[2]) {
     SOCKET listener = INVALID_SOCKET;
     SOCKET client = INVALID_SOCKET;
@@ -148,6 +154,7 @@ int stress_socketpair_windows(int domain, int type, int protocol, int sv[2]) {
 }
 #endif
 
+/* Reset only the logical fields; allocation ownership is managed by cleanup. */
 void stress_reset_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_t *state) {
     if (state == NULL) {
         return;
@@ -165,6 +172,7 @@ void stress_reset_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_t 
     atomic_init(&state->owner_node, UINT_MAX);
 }
 
+/* Release dynamic waiter arrays and any sockets left by a partially run phase. */
 void stress_cleanup_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_t *state) {
     if (state == NULL) {
         return;
@@ -176,6 +184,11 @@ void stress_cleanup_dynamic_foreign_poll_state(dynamic_foreign_poll_watch_state_
     state->waiters = NULL;
 }
 
+/*
+ * Internal stress-only spawn primitive that pins a task to a specific shard.
+ * Public users should use llam_spawn*; this bypass exists to reproduce
+ * migration, foreign-owner poll, and wake handoff races deterministically.
+ */
 llam_task_t *stress_spawn_on_shard(unsigned shard_id, llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {
     llam_runtime_t *rt = &g_llam_runtime;
     llam_task_t *task;

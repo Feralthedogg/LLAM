@@ -24,6 +24,12 @@ static llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
     llam_io_req_t *head;
     llam_io_req_t *cursor;
 
+    /*
+     * Move the whole submit list out under the node lock, then mark requests
+     * inflight before issuing kernel calls.  Completion/cancel paths use this
+     * state to decide whether ownership still belongs to the parked task or has
+     * moved to the IOCP backend.
+     */
     pthread_mutex_lock(&node->submit_lock);
     head = node->submit_head;
     node->submit_head = NULL;
@@ -49,6 +55,12 @@ static bool llam_windows_req_skips_completion_on_success(llam_node_t *node, llam
     return llam_windows_fd_skips_completion_on_success(node, req->fd);
 }
 
+/*
+ * Submission helpers return:
+ *   1: operation completed synchronously and this handle suppresses IOCP posts
+ *   0: operation is pending or will still post a normal completion
+ *  -1: submission failed before the backend owns the request
+ */
 static int llam_windows_submit_rw(llam_node_t *node, llam_io_req_t *req, llam_windows_io_op_t *op, bool write_op) {
     DWORD transferred = 0;
     DWORD flags = (DWORD)(write_op ? 0 : req->recv_flags);
@@ -232,6 +244,11 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
     int rc = -1;
     int saved_errno;
 
+    /*
+     * Associate the descriptor/handle lazily on first use.  This keeps public
+     * direct paths cheap while still allowing backend submissions to complete on
+     * the node's IOCP once the request leaves the caller thread.
+     */
     if (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE) {
         if (llam_windows_associate_handle(node, req->handle) != 0) {
             llam_windows_complete_submit_error(node, req, errno);

@@ -25,6 +25,7 @@ static void bench_fail(atomic_uint *failures, const char *label) {
     atomic_fetch_add(failures, 1U);
 }
 
+/* Parse positive integer knobs used to scale benchmark duration/work size. */
 unsigned bench_env_u32(const char *name, unsigned default_value, unsigned max_value) {
     const char *value = llam_example_env_get(name);
     char *end = NULL;
@@ -45,6 +46,7 @@ unsigned bench_env_u32(const char *name, unsigned default_value, unsigned max_va
     return (unsigned)parsed;
 }
 
+/* Parse integer knobs where zero is a meaningful value, such as disabled waits. */
 unsigned bench_env_u32_allow_zero(const char *name, unsigned default_value, unsigned max_value) {
     const char *value = llam_example_env_get(name);
     char *end = NULL;
@@ -65,6 +67,7 @@ unsigned bench_env_u32_allow_zero(const char *name, unsigned default_value, unsi
     return (unsigned)parsed;
 }
 
+/* Parse boolean environment switches without rejecting future non-zero strings. */
 unsigned bench_env_flag_default(const char *name, unsigned default_value) {
     const char *value = llam_example_env_get(name);
 
@@ -74,6 +77,7 @@ unsigned bench_env_flag_default(const char *name, unsigned default_value) {
     return strcmp(value, "0") != 0 ? 1U : 0U;
 }
 
+/* Parse bounded signed knobs such as CPU ids and latency tuning values. */
 int bench_env_i32(const char *name, int default_value, int min_value, int max_value) {
     const char *value = llam_example_env_get(name);
     char *end = NULL;
@@ -204,6 +208,11 @@ static int bench_socketpair(llam_fd_t sv[2]) {
     sv[1] = LLAM_INVALID_FD;
 #endif
 
+    /*
+     * Windows has no portable socketpair.  Use a loopback TCP pair created with
+     * overlapped sockets so the LLAM IOCP backend sees the same descriptor kind
+     * as production network I/O.
+     */
     listener = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
     if (listener == INVALID_SOCKET) {
         errno = EIO;
