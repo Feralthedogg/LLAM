@@ -364,10 +364,15 @@ void llam_cancel_task_wait(llam_task_t *task) {
         }
         break;
     case LLAM_WAIT_JOIN:
-        if (task->join_target != NULL) {
-            pthread_mutex_lock(&task->join_target->lock);
-            removed = llam_join_waiter_remove_locked(task->join_target, task);
-            pthread_mutex_unlock(&task->join_target->lock);
+        {
+            llam_task_t *join_target = task->join_target;
+
+            if (join_target == NULL) {
+                break;
+            }
+            pthread_mutex_lock(&join_target->lock);
+            removed = llam_join_waiter_remove_locked(join_target, task);
+            pthread_mutex_unlock(&join_target->lock);
             if (removed) {
                 llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
 
@@ -394,15 +399,26 @@ void llam_cancel_task_wait(llam_task_t *task) {
             }
             break;
         }
-        if (task->active_wait_queue != NULL && task->active_wait_queue_lock != NULL && task->active_wait_node != NULL) {
+        {
+            llam_wait_queue_t *queue = task->active_wait_queue;
+            pthread_mutex_t *queue_lock = task->active_wait_queue_lock;
             llam_wait_node_t *node = task->active_wait_node;
 
-            pthread_mutex_lock(task->active_wait_queue_lock);
-            removed = llam_wait_queue_remove(task->active_wait_queue, node);
+            /*
+             * The normal producer wake path may clear task wait ownership while
+             * runtime-stop cancellation is scanning parked tasks.  Snapshot the
+             * queue, lock, and node once; otherwise an unlock can reload a NULL
+             * lock after a concurrent successful wake disarms the task fields.
+             */
+            if (queue == NULL || queue_lock == NULL || node == NULL) {
+                break;
+            }
+            pthread_mutex_lock(queue_lock);
+            removed = llam_wait_queue_remove(queue, node);
             if (removed) {
                 node->error_code = ECANCELED;
             }
-            pthread_mutex_unlock(task->active_wait_queue_lock);
+            pthread_mutex_unlock(queue_lock);
             if (removed) {
                 llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
 

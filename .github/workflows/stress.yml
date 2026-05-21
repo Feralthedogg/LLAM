@@ -221,6 +221,13 @@ jobs:
             # scheduled benchmarks own precise cross-platform performance.
             export LLAM_BENCH_GUARD_MIN_OPS="select_timeout=7000000"
           fi
+          if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then
+            # Hosted Apple Silicon runners can temporarily halve pipe/kqueue
+            # smoke throughput while runtime stress and server correctness stay
+            # clean. Keep I/O cases as catastrophic guards here; scheduled
+            # benchmark jobs own precise Darwin performance tracking.
+            export LLAM_BENCH_GUARD_MIN_OPS="io_echo=100000,poll_wake=100000"
+          fi
           python3 scripts/bench_guard.py \
             --bench ./build/stress/bench \
             --out "$OUT_DIR/perf_guard.json" 2>&1 | tee "$OUT_DIR/perf_guard.log"

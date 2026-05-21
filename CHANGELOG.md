@@ -23,6 +23,10 @@
   `LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` for unsafe singleton-only profiling, but
   default builds keep the public `EXDEV` diagnostics enabled.
 
+* wait cancellation: snapshot join and wait-queue ownership before taking
+  cancellation locks, preventing runtime-stop cancellation from unlocking a
+  cleared mutex when it races with a normal producer wake.
+
 ### Tests and documentation
 
 * add direct owner-mismatch coverage for sync primitives, channels, select,
