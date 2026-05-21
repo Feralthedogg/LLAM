@@ -243,6 +243,20 @@ jobs:
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS=0.040
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.050
           fi
+          if [ "${{ matrix.name }}" = "linux-aarch64-stress" ]; then
+            # The hosted Linux/arm64 runner is a runtime/ABI portability lane,
+            # not the primary example-server flood-capacity lane. Keep graceful
+            # shutdown and accounting checks enabled, but use a lighter quick
+            # flood so server cleanup is not dominated by runner jitter.
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_TARGET_MPS=0.005
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_MIN_DELIVERY_MPS=0.010
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_TARGET_MPS=0.005
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_MIN_DELIVERY_MPS=0.010
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS=0.040
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.050
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_64B_TARGET_MPS=0.025
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_64B_MIN_DELIVERY_MPS=0.040
+          fi
           if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
             # Hosted Intel macOS is kept as a runtime/bench/correctness/flood
             # smoke lane. Edge churn coverage remains on macOS arm64, Linux
