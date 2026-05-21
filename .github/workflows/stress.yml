@@ -219,10 +219,10 @@ jobs:
             exit 0
           fi
           if [ "${{ matrix.name }}" = "linux-aarch64-stress" ]; then
-            # Hosted arm64 can drift slightly below the generic select-timeout
-            # threshold under shared CI load. Keep this as a catastrophic gate;
-            # scheduled benchmarks own precise cross-platform performance.
-            export LLAM_BENCH_GUARD_MIN_OPS="select_timeout=7000000"
+            # Hosted arm64 can drift below generic select thresholds under
+            # shared CI load. Keep this as a catastrophic gate; scheduled
+            # benchmarks own precise cross-platform performance tracking.
+            export LLAM_BENCH_GUARD_MIN_OPS="select_recv_ready=3500000,select_timeout=7000000"
           fi
           if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then
             # Hosted Apple Silicon runners can temporarily halve pipe/kqueue
