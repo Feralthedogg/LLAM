@@ -528,7 +528,19 @@ static void chat_outbox_close(chat_outbox_t *outbox) {
 static void chat_outbox_destroy(chat_outbox_t *outbox) {
     if (outbox == NULL) { return; }
     chat_outbox_close(outbox);
-    chat_outbox_release_queued_locked(outbox);
+    /*
+     * Keep the final backlog drain under the same mutex used by producers and
+     * the writer.  Final release should own the outbox, but CI stress can hit
+     * shutdown edges where a task is still unwinding after wake channel close;
+     * preserving the normal ring-buffer lock discipline makes that path safe.
+     */
+    if (outbox->lock != NULL) {
+        chat_outbox_lock(outbox);
+        chat_outbox_release_queued_locked(outbox);
+        chat_outbox_unlock(outbox);
+    } else {
+        chat_outbox_release_queued_locked(outbox);
+    }
     if (outbox->wake != NULL) {
         void *ignored = NULL;
 
@@ -722,7 +734,9 @@ static bool chat_wait_clients_drained(const chat_server_t *server, unsigned time
 static void chat_request_stop(chat_server_t *server) {
     int fd;
 
-    atomic_store_explicit(&g_stop_requested, true, memory_order_release);
+    if (atomic_exchange_explicit(&g_stop_requested, true, memory_order_acq_rel)) {
+        return;
+    }
     if (!server->quiet) {
         fprintf(stdout, "shutdown requested\n");
         fflush(stdout);

@@ -91,7 +91,18 @@ llam_wait_node_t *llam_wait_queue_pop_head(llam_wait_queue_t *queue) {
  */
 bool llam_wait_queue_remove(llam_wait_queue_t *queue, llam_wait_node_t *node) {
     llam_wait_node_t *prev = NULL;
-    llam_wait_node_t *cur = queue->head;
+    llam_wait_node_t *cur;
+
+    /*
+     * Timeout/cancel handlers can race with the normal primitive wake path.
+     * When the normal wake already consumed ownership, wait tracking is cleared
+     * before the timer path reaches the primitive lock.  Treat that as "not in
+     * this queue" rather than dereferencing a stale NULL owner.
+     */
+    if (queue == NULL || node == NULL) {
+        return false;
+    }
+    cur = queue->head;
 
     while (cur != NULL) {
         if (cur == node) {
