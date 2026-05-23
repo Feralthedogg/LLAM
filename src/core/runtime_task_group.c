@@ -170,7 +170,7 @@ static void llam_task_group_unregister_live_locked(llam_task_group_t *group) {
 
 static int llam_task_group_reserve_locked(llam_task_group_t *group, size_t needed) {
     llam_task_t **items;
-    size_t max_items = SIZE_MAX / sizeof(*items);
+    size_t max_items = SIZE_MAX / sizeof(llam_task_t *);
     size_t new_capacity;
 
     if (needed > max_items) {
@@ -265,7 +265,7 @@ int llam_task_group_destroy(llam_task_group_t *group) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(group->owner_runtime) != 0) {
+    if (llam_runtime_check_object_owner_for_cleanup(group->owner_runtime) != 0) {
         pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         return -1;
     }
@@ -306,6 +306,7 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
     llam_spawn_opts_t effective_opts;
     size_t copy_size;
     llam_task_t *task;
+    llam_runtime_t *owner_runtime;
 
     if (group == NULL || fn == NULL) {
         errno = EINVAL;
@@ -361,12 +362,18 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
         return NULL;
     }
     group->active_spawns += 1U;
+    owner_runtime = group->owner_runtime;
     if (effective_opts.cancel_token == NULL) {
         effective_opts.cancel_token = group->cancel_token;
     }
     pthread_mutex_unlock(&group->lock);
 
-    task = llam_spawn_ex(fn, arg, &effective_opts, sizeof(effective_opts));
+    /*
+     * Children belong to the group's owner runtime, not whichever runtime or
+     * unmanaged host thread happens to call the group API.  This keeps the
+     * group token, task handles, and scheduler queues in one owner domain.
+     */
+    task = llam_runtime_spawn_ex(owner_runtime, fn, arg, &effective_opts, sizeof(effective_opts));
 
     pthread_mutex_lock(&group->lock);
     group->active_spawns -= 1U;

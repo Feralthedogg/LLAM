@@ -165,6 +165,9 @@ void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt);
 int llam_cancel_token_register_task(llam_task_t *task);
 void llam_cancel_token_unregister_task(llam_task_t *task);
 int llam_cancel_token_retain_task_ref(llam_cancel_token_t *token, llam_cancel_token_t **out_token);
+int llam_cancel_token_retain_task_ref_for_runtime(llam_cancel_token_t *token,
+                                                  llam_runtime_t *owner_runtime,
+                                                  llam_cancel_token_t **out_token);
 void llam_cancel_token_release_task_ref(llam_cancel_token_t *token);
 bool llam_deadline_passed(uint64_t deadline_ns);
 void llam_disarm_task_wait_deadline(llam_task_t *task);

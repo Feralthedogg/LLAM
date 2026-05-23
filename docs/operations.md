@@ -182,13 +182,25 @@ regress.
 `llam_runtime_create()`, `llam_runtime_run_handle()`, and
 `llam_runtime_destroy()` are the canonical embedding-facing lifecycle APIs.
 `llam_runtime_spawn_ex()` should be used to attach root tasks to a specific
-runtime handle. Legacy `llam_runtime_init()`, `llam_spawn()`, `llam_run()`, and
-`llam_runtime_shutdown()` calls remain wrappers for the process-default runtime.
+runtime handle. Legacy host-thread lifecycle calls remain wrappers for the
+process-default runtime, while managed task spawn/stop/shutdown wrappers use
+the current task's owner runtime.
 
-Explicit runtime handles own their scheduler state, public registries, caches,
-blocking helper pool, and platform backend routing. Runtime-aware objects are
-owner-tagged, and cross-runtime managed use fails with `EXDEV` instead of
-silently crossing queues or wait lists.
+Explicit runtime handles own their scheduler state, caches, blocking helper
+pool, and platform backend routing. Public handles are still backed by
+process-wide family-tagged slot tables; each object is owner-tagged so
+cross-runtime managed use fails with `EXDEV` instead of silently crossing queues
+or wait lists.
+
+Managed task lifecycle wrappers are constrained to the current owner runtime.
+If task code receives a foreign runtime handle and calls `llam_runtime_destroy()`,
+LLAM ignores it rather than converting that handle into a peer-runtime stop
+signal. Host threads should perform explicit cross-runtime orchestration.
+
+Spawn-time cancellation tokens follow the same owner boundary. A task can only
+retain a cancellation token owned by its target runtime, and task-group spawns
+publish children onto the group owner runtime rather than a caller's unrelated
+current/default runtime.
 
 The remaining hardening path is incremental:
 

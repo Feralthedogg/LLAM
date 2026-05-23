@@ -69,7 +69,7 @@ static size_t llam_owned_read_count_max(void) {
  * short slices, so they must observe both signals themselves; otherwise a
  * running block job can keep the runtime alive forever after stop is requested.
  */
-static bool llam_blocking_req_cancelled(const llam_io_req_t *req) {
+bool llam_blocking_req_cancelled(const llam_io_req_t *req) {
     llam_runtime_t *rt = req != NULL ? req->owner_runtime : NULL;
     llam_block_job_t *job = req != NULL && req->task != NULL ? llam_task_active_block_job_load(req->task) : NULL;
 
@@ -96,7 +96,7 @@ static bool llam_blocking_req_cancelled(const llam_io_req_t *req) {
 /**
  * @brief Mark a blocking fallback request as cooperatively cancelled.
  */
-static void llam_blocking_req_set_cancelled(llam_io_req_t *req) {
+void llam_blocking_req_set_cancelled(llam_io_req_t *req) {
     errno = ECANCELED;
     if (req != NULL) {
         req->result = -1;
@@ -182,46 +182,6 @@ void *llam_blocking_read_impl(void *arg) {
  */
 static void *llam_blocking_recv_impl(void *arg) {
     return llam_blocking_read_impl(arg);
-}
-
-/**
- * @brief Allocate an owned buffer outside a managed runtime task.
- *
- * Detached buffers are used by public owned-read APIs when the caller is not
- * running inside the scheduler and therefore cannot use shard-local allocators
- * or provided-buffer recycling.
- *
- * @param min_capacity Minimum buffer capacity required by the caller.
- *
- * @return Allocated buffer, or @c NULL on allocation failure.
- */
-static llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity) {
-    llam_io_buffer_t *buffer = calloc(1, sizeof(*buffer));
-
-    if (buffer == NULL) {
-        return NULL;
-    }
-
-    buffer->detached_wrapper = true;
-    buffer->data = buffer->inline_data;
-    buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
-    if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
-        buffer->data = calloc(1, min_capacity);
-        if (buffer->data == NULL) {
-            free(buffer);
-            return NULL;
-        }
-        buffer->capacity = min_capacity;
-        buffer->external_storage = true;
-    }
-    if (llam_io_buffer_public_register(buffer) != 0) {
-        if (buffer->external_storage && buffer->data != NULL) {
-            free(buffer->data);
-        }
-        free(buffer);
-        return NULL;
-    }
-    return buffer;
 }
 
 /**
@@ -331,7 +291,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
     }
 
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
-        buffer = llam_io_buffer_alloc_detached(max_count);
+        buffer = llam_io_buffer_alloc_detached(max_count, 0U, 0U);
         if (buffer == NULL) {
             errno = ENOMEM;
             return -1;
@@ -359,7 +319,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
      * otherwise valid buffer after runtime_shutdown() cannot read freed
      * allocator storage.
      */
-    buffer = llam_io_buffer_alloc_detached(max_count);
+    buffer = llam_io_buffer_alloc_detached(max_count, 0U, 0U);
     if (buffer == NULL) {
         errno = ENOMEM;
         return -1;
@@ -404,6 +364,8 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
             req->owned_buffer->data = req->owned_buffer->inline_data;
             req->owned_buffer->size = 0U;
             req->owned_buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+            req->owned_buffer->alignment = sizeof(void *);
+            req->owned_buffer->aligned_storage = false;
         } else {
             goto read_owned_done;
         }
@@ -516,36 +478,6 @@ void *llam_blocking_write_impl(void *arg) {
     }
 
     llam_restore_fd_flags_preserve_errno(req->fd, restore_flags, saved_flags);
-    return req;
-}
-
-/**
- * @brief Blocking-worker fallback for generic handle reads.
- */
-void *llam_blocking_handle_read_impl(void *arg) {
-    llam_io_req_t *req = arg;
-
-    if (req == NULL) {
-        return NULL;
-    }
-    do {
-        req->result = llam_platform_read_handle(req->handle, req->buf, req->count);
-    } while (req->result < 0 && errno == EINTR);
-    return req;
-}
-
-/**
- * @brief Blocking-worker fallback for generic handle writes.
- */
-void *llam_blocking_handle_write_impl(void *arg) {
-    llam_io_req_t *req = arg;
-
-    if (req == NULL) {
-        return NULL;
-    }
-    do {
-        req->result = llam_platform_write_handle(req->handle, req->buf, req->count);
-    } while (req->result < 0 && errno == EINTR);
     return req;
 }
 

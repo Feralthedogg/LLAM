@@ -41,6 +41,14 @@ const char *llam_io_kind_name_diag(llam_io_kind_t kind) {
         return "handle_read";
     case LLAM_IO_KIND_HANDLE_WRITE:
         return "handle_write";
+    case LLAM_IO_KIND_PREAD:
+        return "pread";
+    case LLAM_IO_KIND_PWRITE:
+        return "pwrite";
+    case LLAM_IO_KIND_HANDLE_PREAD:
+        return "handle_pread";
+    case LLAM_IO_KIND_HANDLE_PWRITE:
+        return "handle_pwrite";
     default:
         return "unknown";
     }

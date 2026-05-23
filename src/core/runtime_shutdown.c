@@ -123,6 +123,14 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 pthread_join(rt->nodes[i].thread, NULL);
                 rt->nodes[i].thread_started = false;
             }
+        }
+        /*
+         * Public owned buffers can outlive the runtime that produced them.
+         * Detach any wrappers that still point into backend provided-buffer
+         * rings before the node teardown below releases those rings.
+         */
+        llam_io_buffer_public_detach_runtime_storage(rt);
+        for (i = 0; i < rt->active_nodes; ++i) {
             if (rt->nodes[i].watch_lock_initialized) {
                 pthread_mutex_lock(&rt->nodes[i].watch_lock);
                 // Control operations are heap-allocated command nodes owned by the
@@ -346,6 +354,8 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 }
 
 void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
+    llam_runtime_t *current_runtime;
+
     if (rt == NULL) {
         rt = llam_runtime_default_storage();
     }
@@ -360,6 +370,16 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
     if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
         int saved_errno = errno;
 
+        current_runtime = llam_runtime_current_owner();
+        if (rt != current_runtime) {
+            /*
+             * Runtime handles are host control capabilities.  A task running
+             * inside runtime A must not be able to turn a shared runtime B
+             * pointer into a cross-runtime stop signal.
+             */
+            errno = saved_errno;
+            return;
+        }
         if (llam_runtime_check_handle(rt) != 0) {
             errno = saved_errno;
             return;
@@ -378,20 +398,30 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
      * init still consumes them can corrupt the runtime object.
      */
     llam_runtime_lifecycle_lock();
-    if (llam_runtime_check_handle(rt) == 0) {
-        if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
-            llam_request_stop(rt);
-            while (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
-                llam_pause_cpu();
+    {
+        bool heap_runtime = false;
+
+        if (llam_runtime_claim_destroy_handle(rt, &heap_runtime) == 0) {
+            (void)heap_runtime;
+            if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+                llam_request_stop(rt);
+                while (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+                    llam_pause_cpu();
+                }
             }
+            llam_runtime_shutdown_unlocked(rt);
         }
-        llam_runtime_shutdown_unlocked(rt);
     }
     llam_runtime_lifecycle_unlock();
 }
 
 void llam_runtime_shutdown(void) {
-    llam_runtime_shutdown_rt(llam_runtime_default_storage());
+    /*
+     * Match llam_runtime_request_stop(): unmanaged callers operate on the
+     * process-default runtime, while managed tasks request cooperative stop on
+     * their owner runtime instead of accidentally targeting the default.
+     */
+    llam_runtime_shutdown_rt(llam_runtime_current_owner());
 }
 
 void llam_runtime_destroy_rt(llam_runtime_t *rt) {

@@ -65,7 +65,10 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
             DWORD error_code;
 
             atomic_fetch_add_explicit(&io_op->node->windows_cancel_controls, 1U, memory_order_relaxed);
-            HANDLE cancel_handle = (req->kind == LLAM_IO_KIND_HANDLE_READ || req->kind == LLAM_IO_KIND_HANDLE_WRITE) ?
+            HANDLE cancel_handle = (req->kind == LLAM_IO_KIND_HANDLE_READ ||
+                                    req->kind == LLAM_IO_KIND_HANDLE_WRITE ||
+                                    req->kind == LLAM_IO_KIND_HANDLE_PREAD ||
+                                    req->kind == LLAM_IO_KIND_HANDLE_PWRITE) ?
                                        (HANDLE)req->handle :
                                        (HANDLE)(uintptr_t)req->fd;
 

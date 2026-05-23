@@ -38,9 +38,6 @@ int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd) {
     llam_runtime_stats_t stats;
     unsigned fields = 0U;
 
-    if (llam_runtime_check_handle(rt) != 0) {
-        return -1;
-    }
     if (fd < 0) {
         errno = EINVAL;
         return -1;

@@ -200,7 +200,7 @@ int llam_mutex_destroy(llam_mutex_t *mutex) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
+    if (llam_runtime_check_object_owner_for_cleanup(mutex->owner_runtime) != 0) {
         pthread_mutex_unlock(&g_llam_mutex_registry_lock);
         return -1;
     }

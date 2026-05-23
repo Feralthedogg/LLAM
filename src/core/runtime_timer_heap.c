@@ -43,7 +43,7 @@ static void llam_timer_heap_swap(llam_shard_t *shard, size_t lhs, size_t rhs) {
 
 static bool llam_timer_heap_reserve(llam_shard_t *shard, size_t needed) {
     llam_timer_node_t **items;
-    size_t max_items = SIZE_MAX / sizeof(*items);
+    size_t max_items = SIZE_MAX / sizeof(llam_timer_node_t *);
     size_t new_cap;
 
     if (needed > max_items || shard->timer_heap_cap > max_items) {

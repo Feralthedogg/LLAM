@@ -85,6 +85,8 @@ typedef struct aarch64_simd_state {
 } aarch64_simd_state_t;
 #endif
 
+typedef int (*runtime_core_test_fn)(void);
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_runtime_core] %s\n", message);
     return 1;
@@ -94,6 +96,23 @@ static int test_fail_errno(const char *message) {
     fprintf(stderr, "[test_runtime_core] %s: errno=%d (%s)\n", message, errno, strerror(errno));
     return 1;
 }
+
+static int run_named_test(const char *name, runtime_core_test_fn fn) {
+    fprintf(stderr, "[test_runtime_core] begin %s\n", name);
+    if (fn() != 0) {
+        fprintf(stderr, "[test_runtime_core] fail %s\n", name);
+        return 1;
+    }
+    fprintf(stderr, "[test_runtime_core] ok %s\n", name);
+    return 0;
+}
+
+#define RUN_RUNTIME_CORE_TEST(fn) \
+    do { \
+        if (run_named_test(#fn, fn) != 0) { \
+            return 1; \
+        } \
+    } while (0)
 
 static void task_fail(core_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
@@ -503,6 +522,11 @@ static int test_runtime_handle_api(void) {
         return test_fail("llam_runtime_run_handle(NULL) did not fail with EINVAL");
     }
     errno = 0;
+    if (llam_runtime_collect_stats_ex_handle(NULL, &stats, sizeof(stats)) != -1 || errno != EINVAL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("llam_runtime_collect_stats_ex_handle(NULL) did not fail with EINVAL");
+    }
+    errno = 0;
     if (llam_runtime_run_handle(fake_runtime) != -1 || errno != EINVAL) {
         llam_runtime_destroy(runtime);
         return test_fail("llam_runtime_run_handle(non-default) did not fail with EINVAL");
@@ -590,6 +614,15 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
     if (llam_spawn(NULL, NULL, NULL) != NULL || errno != EINVAL) {
         llam_runtime_shutdown();
         return test_fail("llam_spawn(NULL) after init did not fail with EINVAL");
+    }
+    errno = 0;
+    task = llam_runtime_spawn_ex(NULL, inspect_task, &state, NULL, 0U);
+    if (task != NULL || errno != EINVAL) {
+        if (task != NULL) {
+            (void)llam_detach(task);
+        }
+        llam_runtime_shutdown();
+        return test_fail("llam_runtime_spawn_ex(NULL) after init did not fail with EINVAL");
     }
     {
         llam_spawn_opts_t invalid_spawn_opts;
@@ -2180,32 +2213,30 @@ static int test_concurrent_spawn_contract(void) {
 #endif
 
 int main(void) {
-    if (test_preinit_contracts() != 0 ||
-        test_direct_yield_auto_policy_is_profile_scoped() != 0 ||
-        test_runtime_handle_api() != 0 ||
-        test_runtime_lifecycle_and_task_contracts() != 0 ||
-        test_request_stop_returns_success() != 0 ||
-        test_shutdown_from_task_requests_stop() != 0 ||
-        test_runtime_owner_mismatch_diagnostics() != 0 ||
+    RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
+    RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
+    RUN_RUNTIME_CORE_TEST(test_runtime_handle_api);
+    RUN_RUNTIME_CORE_TEST(test_runtime_lifecycle_and_task_contracts);
+    RUN_RUNTIME_CORE_TEST(test_request_stop_returns_success);
+    RUN_RUNTIME_CORE_TEST(test_shutdown_from_task_requests_stop);
+    RUN_RUNTIME_CORE_TEST(test_runtime_owner_mismatch_diagnostics);
 #if LLAM_PLATFORM_POSIX
-        test_runtime_dump_while_blocking_job_active() != 0 ||
-        test_concurrent_runtime_init_contract() != 0 ||
-        test_concurrent_init_shutdown_contract() != 0 ||
-        test_concurrent_init_stats_contract() != 0 ||
-        test_concurrent_trace_ring_contract() != 0 ||
-        test_concurrent_run_contract() != 0 ||
-        test_concurrent_spawn_contract() != 0 ||
+    RUN_RUNTIME_CORE_TEST(test_runtime_dump_while_blocking_job_active);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_runtime_init_contract);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_init_shutdown_contract);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_init_stats_contract);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_trace_ring_contract);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_run_contract);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_spawn_contract);
 #endif
-        test_detach_contract() != 0 ||
-        test_ex_option_prefixes() != 0 ||
-        test_errno_is_task_local_across_switches() != 0 ||
-        test_direct_yield_failure_keeps_task_running() != 0 ||
+    RUN_RUNTIME_CORE_TEST(test_detach_contract);
+    RUN_RUNTIME_CORE_TEST(test_ex_option_prefixes);
+    RUN_RUNTIME_CORE_TEST(test_errno_is_task_local_across_switches);
+    RUN_RUNTIME_CORE_TEST(test_direct_yield_failure_keeps_task_running);
 #if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
-        test_aarch64_simd_is_preserved_across_switches() != 0 ||
+    RUN_RUNTIME_CORE_TEST(test_aarch64_simd_is_preserved_across_switches);
 #endif
-        test_concurrent_join_contract() != 0) {
-        return 1;
-    }
+    RUN_RUNTIME_CORE_TEST(test_concurrent_join_contract);
     printf("[test_runtime_core] ok\n");
     return 0;
 }

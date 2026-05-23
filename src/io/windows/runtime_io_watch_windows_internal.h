@@ -68,6 +68,7 @@ typedef struct llam_windows_accept_socket_entry {
 
 int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd);
 int llam_windows_associate_handle(llam_node_t *node, llam_handle_t handle);
+void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd);
 bool llam_windows_fd_skips_completion_on_success(llam_node_t *node, llam_fd_t fd);
 bool llam_windows_handle_skips_completion_on_success(llam_node_t *node, llam_handle_t handle);
 int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTEX *fn_out);

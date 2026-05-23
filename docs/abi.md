@@ -52,15 +52,16 @@ with `errno` set on failure.
 | Group | Symbols | Stable contract |
 | --- | --- | --- |
 | ABI/version | `llam_abi_version`, `llam_version_string`, `llam_abi_get_info` | Safe to call before runtime initialization. Returned strings are library-owned static storage. |
-| Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_create`, `llam_runtime_default`, `llam_runtime_run_handle`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_destroy`, `llam_runtime_shutdown` | Explicit runtime handles are the canonical embedding boundary. Legacy init/spawn/run/shutdown calls operate on `llam_runtime_default()`. Shutdown releases backend resources while public cleanup handles keep their documented post-shutdown behavior. FFI bindings should prefer `_ex` and option initializers. |
+| Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_create`, `llam_runtime_default`, `llam_runtime_run_handle`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_destroy`, `llam_runtime_shutdown` | Explicit runtime handles are the canonical embedding boundary. Legacy host-thread lifecycle calls operate on `llam_runtime_default()`; managed task spawn/stop/shutdown wrappers target the current owner runtime and cannot cross-stop peer runtimes. Shutdown releases backend resources while public cleanup handles keep their documented post-shutdown behavior. FFI bindings should prefer `_ex` and option initializers. |
 | Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_runtime_spawn_ex`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. Embedders with explicit runtimes should spawn with `llam_runtime_spawn_ex()`. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. |
 | Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. |
 | Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners, waiters, in-flight wake returns, or public operations remain. |
 | Channels | `llam_channel_*` | Pointer-valued bounded channel. Capacity must be at least `1`; `llam_channel_create(0)` fails with `EINVAL`. Destroy returns `EBUSY` while buffered values, waiters, close-woken returns, or public operations remain. Use result-style receive APIs when `NULL` is a valid payload. |
 | Blocking | `llam_call_blocking_result`, `llam_call_blocking`, `llam_enter_blocking`, `llam_leave_blocking` | Prevents long blocking work from pinning scheduler workers. `llam_call_blocking_result` is the unambiguous FFI-safe form. Blocking callback return value is user-owned. |
-| I/O | `llam_read`, `llam_write`, `llam_read_handle`, `llam_write_handle`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd`, `llam_poll_handle` | Scheduler-safe descriptor/socket/HANDLE operations. File descriptor and handle ownership follows platform convention unless owned-buffer APIs say otherwise. |
-| Owned buffers | `llam_io_buffer_data`, `llam_io_buffer_size`, `llam_io_buffer_capacity`, `llam_io_buffer_release` | Buffers returned by owned-read APIs are runtime-allocated and caller-released through `llam_io_buffer_release()`. |
+| I/O | `llam_read`, `llam_write`, `llam_read_handle`, `llam_write_handle`, `llam_close`, `llam_close_handle`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd`, `llam_poll_handle` | Scheduler-safe descriptor/socket/HANDLE operations. File descriptor and handle ownership follows platform convention unless owned-buffer APIs say otherwise. Descriptors used with LLAM I/O should be closed with `llam_close()` or `llam_close_handle()` so runtime-local descriptor state observes the close boundary. |
+| Positional I/O | `llam_pread`, `llam_pwrite`, `llam_preadv`, `llam_pwritev`, `llam_pread_handle`, `llam_pwrite_handle`, `llam_preadv_handle`, `llam_pwritev_handle` | Explicit-offset file I/O that does not modify the current file offset. Windows fd/socket positional APIs fail with `ENOTSUP`; Windows file users should use the HANDLE APIs. |
+| Owned buffers | `llam_io_buffer_opts_init`, `llam_io_buffer_alloc_ex`, `llam_io_buffer_alloc`, `llam_io_buffer_alloc_aligned`, `llam_io_buffer_alignment`, `llam_io_buffer_data`, `llam_io_buffer_size`, `llam_io_buffer_capacity`, `llam_io_buffer_release`, `llam_pread_owned_aligned`, `llam_pread_handle_owned_aligned` | Buffers returned by owned-read APIs are runtime-allocated and caller-released through `llam_io_buffer_release()`. Aligned allocation supports direct-I/O callers that need sector/page-aligned storage. |
 | Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats_ex_handle`, `llam_runtime_collect_stats`, `llam_runtime_write_stats_json`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` or handle-scoped `_ex_handle` stats snapshots and JSON export for machine logs. |
 
 ## Inbound Option Structs
@@ -95,6 +96,7 @@ bindings:
 LLAM_RUNTIME_OPTS_CURRENT_SIZE
 LLAM_SPAWN_OPTS_CURRENT_SIZE
 LLAM_RUNTIME_STATS_CURRENT_SIZE
+LLAM_IO_BUFFER_OPTS_CURRENT_SIZE
 ```
 
 `llam_runtime_opts_init()` and `llam_spawn_opts_init()` write only the
@@ -107,6 +109,10 @@ Public option structs store enum-valued fields and flag words as `uint32_t`,
 not C enum or `unsigned` objects. The enum types and constants remain available
 for C source readability, but the struct layout does not depend on
 compiler-specific enum width choices or non-fixed integer aliases.
+`llam_spawn_opts_t::reserved0` explicitly occupies the former padding between
+`flags` and `deadline_ns`. Initializers zero it, the current library ignores it,
+and callers should leave it at zero so future tail-compatible bindings do not
+inherit indeterminate padding bits as semantic input.
 
 Experimental runtime toggles are grouped under
 `llam_runtime_opts_t::experimental_flags`, a `uint64_t` bitset of
@@ -164,12 +170,17 @@ for unknown class values and `-1/ENOTSUP` outside a managed task.
 - `llam_runtime_create()`, `llam_runtime_spawn_ex()`,
   `llam_runtime_run_handle()`, and `llam_runtime_destroy()` are the canonical
   embedding-facing lifecycle calls. They operate on independent runtime handles;
-  the legacy `llam_runtime_init()`, `llam_spawn()`, `llam_run()`, and
-  `llam_runtime_shutdown()` wrappers operate only on `llam_runtime_default()`.
+  legacy host-thread lifecycle wrappers operate on `llam_runtime_default()`.
+  Managed task calls to legacy spawn/stop/shutdown wrappers target the current
+  task's owner runtime so explicit-runtime tasks do not accidentally poke the
+  default runtime.
 - Calling `llam_runtime_shutdown()` from a managed LLAM task or scheduler frame
   does not tear down the owning runtime underneath the active scheduler. It is
   treated as a cooperative stop request; the host thread that owns the run call
   remains responsible for final shutdown.
+- Calling `llam_runtime_destroy(runtime)` from a managed task only affects that
+  task's owner runtime. A foreign runtime handle is ignored so one scheduler
+  cannot accidentally become a stop signal for a peer scheduler.
 - A runtime handle must not be destroyed while another host thread is
   concurrently creating tasks or runtime-owned synchronization objects for that
   same handle.
@@ -183,6 +194,10 @@ for unknown class values and `-1/ENOTSUP` outside a managed task.
 - Mutex, condition, and channel destroy functions require external
   synchronization: no task may own, wait on, or concurrently access the object
   being destroyed.
+- Host-side destroy/release calls for idle public objects may be performed after
+  the owner runtime has been destroyed.  Managed tasks still cannot use or
+  destroy objects owned by a different live runtime; those calls fail with
+  `EXDEV`.
 - LLAM may move managed tasks between workers unless the caller supplies a
   documented placement hint. Hints are not ABI guarantees.
 - Language runtimes should treat all undocumented exported symbols as private
@@ -231,8 +246,8 @@ platform supports it.
 Native Windows 10/11 support covers Windows x86_64 context switching, Windows
 event wake handles, IOCP policy primitives, and IOCP one-shot socket requests
 for `read`, `write`, `accept`, and `connect`, plus generic HANDLE `ReadFile`
-and `WriteFile` requests through `llam_read_handle()` and
-`llam_write_handle()`. TCP `POLLOUT` and UDP `POLLIN` readiness are also
+and `WriteFile` requests through `llam_read_handle()`, `llam_write_handle()`,
+`llam_pread_handle()`, and `llam_pwrite_handle()`. TCP `POLLOUT` and UDP `POLLIN` readiness are also
 IOCP-backed; TCP `POLLIN` remains fallback by default unless
 `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark
 runs. The release workflow publishes a native Windows x86_64 archive after the
@@ -255,6 +270,8 @@ irrelevant to the drained runtime. Backend or fatal runtime failures return
 `llam_runtime_request_stop()` requests cooperative stop and wakes scheduler,
 I/O, and blocking workers. It does not forcibly kill live tasks; `llam_run()`
 still waits for live tasks to exit or observe cancellation through user code.
+Unmanaged callers target the process-default runtime. Managed callers target
+their current task's owner runtime.
 
 `llam_runtime_shutdown()` is idempotent and may be called after a failed or
 partial initialization. It requests cooperative stop, joins runtime-owned OS
@@ -277,7 +294,10 @@ it is still active on the current call stack.
 `llam_spawn_ex()` creates a stackful managed task with an explicit option size
 and makes it runnable. `llam_spawn()` is a C convenience wrapper. The task entry
 receives the user pointer exactly once. Returning from the entry function
-completes the task and wakes join waiters.
+completes the task and wakes join waiters. If `llam_spawn_opts_t` supplies a
+cancellation token, that token must belong to the runtime that will own the new
+task. Cross-runtime tokens are rejected with `EXDEV` before the task is
+published.
 
 `llam_join()` waits for task completion. Managed LLAM task callers park
 cooperatively. Unmanaged OS-thread callers block the calling thread and do not
@@ -303,7 +323,8 @@ children spawned with an explicit caller-owned token remain controlled by that
 token. Destroying a task group with live children, active spawn/cancel
 operations, or an in-progress join fails with `EBUSY`. Calls racing with a
 completed group destroy fail with `EINVAL` instead of dereferencing reclaimed
-group storage.
+group storage. Child tasks are spawned on the group's owner runtime, including
+host-thread calls that are not currently running inside a managed task.
 
 `llam_yield()` is cooperative. It never transfers ownership of user memory and
 does not imply a memory fence beyond the synchronization performed by the
@@ -400,6 +421,7 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count);
 ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count);
 ssize_t llam_read_handle(llam_handle_t handle, void *buf, size_t count);
 ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count);
+int llam_close(llam_fd_t fd);
 llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen);
 int llam_connect(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
@@ -419,6 +441,12 @@ When called inside a managed task, LLAM uses this order:
 2. Submit to the platform backend when supported.
 3. Fall back to a blocking helper so the scheduler worker is not pinned.
 
+`llam_close()` is the fd/socket close boundary. It returns `0` on success and
+`-1` with `errno` set on failure; `LLAM_INVALID_FD` fails with `EBADF`. Managed
+callers invalidate runtime-local descriptor caches before the platform close.
+Raw platform close remains source-compatible, but it can hide fd reuse from
+runtime diagnostics until a later backend completion observes the stale handle.
+
 `llam_connect()` follows `connect(2)` result semantics:
 
 - Returns `0` when the socket is connected.
@@ -429,9 +457,10 @@ When called inside a managed task, LLAM uses this order:
 
 `llam_accept()` returns `LLAM_INVALID_FD` on failure with `errno` set. On
 success, it transfers ownership of the accepted descriptor to the caller. The
-caller is responsible for closing it. Use `LLAM_FD_IS_INVALID(fd)` when testing
-returned descriptors, especially from Windows bindings where `llam_fd_t` maps to
-`SOCKET`.
+caller is responsible for closing it, preferably with `llam_close()` after the
+descriptor has been used with LLAM I/O. Use `LLAM_FD_IS_INVALID(fd)` when
+testing returned descriptors, especially from Windows bindings where
+`llam_fd_t` maps to `SOCKET`.
 
 Owned-buffer read APIs transfer buffer ownership to the caller on success. The
 caller must release the buffer with `llam_io_buffer_release()`. The returned

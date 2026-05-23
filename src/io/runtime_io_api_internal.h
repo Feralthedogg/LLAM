@@ -33,6 +33,8 @@
 #include <sys/event.h>
 #endif
 
+#include <limits.h>
+
 /* Request ownership helpers used by public I/O entry points. */
 llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard);
 void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req);
@@ -102,6 +104,142 @@ static inline ssize_t llam_platform_write_handle(llam_handle_t handle, const voi
 #endif
 }
 
+#if LLAM_PLATFORM_POSIX
+static inline int llam_offset_to_off_t(uint64_t offset, off_t *out) {
+    if (out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (offset > (uint64_t)LLONG_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    *out = (off_t)offset;
+    if ((uint64_t)*out != offset) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    return 0;
+}
+#endif
+
+static inline ssize_t llam_platform_pread_fd(llam_fd_t fd, void *buf, size_t count, uint64_t offset) {
+#if LLAM_PLATFORM_POSIX
+    off_t native_offset;
+
+    if (buf == NULL && count != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_offset_to_off_t(offset, &native_offset) != 0) {
+        return -1;
+    }
+    return pread(fd, buf, count, native_offset);
+#else
+    (void)fd;
+    (void)buf;
+    (void)count;
+    (void)offset;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+static inline ssize_t llam_platform_pwrite_fd(llam_fd_t fd, const void *buf, size_t count, uint64_t offset) {
+#if LLAM_PLATFORM_POSIX
+    off_t native_offset;
+
+    if (buf == NULL && count != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_offset_to_off_t(offset, &native_offset) != 0) {
+        return -1;
+    }
+    return pwrite(fd, buf, count, native_offset);
+#else
+    (void)fd;
+    (void)buf;
+    (void)count;
+    (void)offset;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+static inline void llam_windows_set_overlapped_offset(OVERLAPPED *overlapped, uint64_t offset) {
+    if (overlapped != NULL) {
+        overlapped->Offset = (DWORD)(offset & UINT64_C(0xffffffff));
+        overlapped->OffsetHigh = (DWORD)(offset >> 32U);
+    }
+}
+#endif
+
+static inline ssize_t llam_platform_pread_handle(llam_handle_t handle, void *buf, size_t count, uint64_t offset) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    {
+        OVERLAPPED overlapped;
+        DWORD transferred = 0;
+
+        if (buf == NULL && count != 0U) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (LLAM_HANDLE_IS_INVALID(handle) || count > (size_t)ULONG_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+        memset(&overlapped, 0, sizeof(overlapped));
+        llam_windows_set_overlapped_offset(&overlapped, offset);
+        if (!ReadFile((HANDLE)handle, buf, (DWORD)count, &transferred, &overlapped)) {
+            DWORD err = GetLastError();
+
+            if (err != ERROR_IO_PENDING ||
+                !GetOverlappedResult((HANDLE)handle, &overlapped, &transferred, TRUE)) {
+                errno = llam_windows_system_error_to_errno(err != ERROR_IO_PENDING ? err : GetLastError());
+                return -1;
+            }
+        }
+        return (ssize_t)transferred;
+    }
+#else
+    return llam_platform_pread_fd((llam_fd_t)handle, buf, count, offset);
+#endif
+}
+
+static inline ssize_t llam_platform_pwrite_handle(llam_handle_t handle, const void *buf, size_t count, uint64_t offset) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    {
+        OVERLAPPED overlapped;
+        DWORD transferred = 0;
+
+        if (buf == NULL && count != 0U) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (LLAM_HANDLE_IS_INVALID(handle) || count > (size_t)ULONG_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+        memset(&overlapped, 0, sizeof(overlapped));
+        llam_windows_set_overlapped_offset(&overlapped, offset);
+        if (!WriteFile((HANDLE)handle, buf, (DWORD)count, &transferred, &overlapped)) {
+            DWORD err = GetLastError();
+
+            if (err != ERROR_IO_PENDING ||
+                !GetOverlappedResult((HANDLE)handle, &overlapped, &transferred, TRUE)) {
+                errno = llam_windows_system_error_to_errno(err != ERROR_IO_PENDING ? err : GetLastError());
+                return -1;
+            }
+        }
+        return (ssize_t)transferred;
+    }
+#else
+    return llam_platform_pwrite_fd((llam_fd_t)handle, buf, count, offset);
+#endif
+}
+
 static inline ssize_t llam_platform_recv_fd(llam_fd_t fd, void *buf, size_t count, int flags) {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     return llam_windows_socket_recv(fd, buf, count, flags);
@@ -134,10 +272,27 @@ static inline int llam_platform_connect_fd(llam_fd_t fd, const struct sockaddr *
 #endif
 }
 
+static inline int llam_platform_close_fd(llam_fd_t fd) {
+    if (LLAM_FD_IS_INVALID(fd)) {
+        errno = EBADF;
+        return -1;
+    }
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    if (closesocket(fd) != 0) {
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+        return -1;
+    }
+    return 0;
+#else
+    return close(fd);
+#endif
+}
+
 int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
 int llam_platform_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents);
 int llam_platform_poll_now(llam_fd_t fd, short events, short *revents);
 
+llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity, size_t alignment, uint32_t flags);
 int llam_io_buffer_public_register(llam_io_buffer_t *buffer);
 llam_io_buffer_t *llam_io_buffer_public_handle(llam_io_buffer_t *buffer);
 llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *buffer);
@@ -185,10 +340,14 @@ int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents);
 int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, short *revents);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 bool llam_windows_socket_nonblocking_cached(llam_fd_t fd);
+void llam_windows_socket_nonblocking_forget(llam_runtime_t *rt, llam_fd_t fd);
+void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd);
 bool llam_windows_iocp_poll_supported(llam_fd_t fd, short events);
 #endif
 
 /* Blocking fallback callbacks executed on the runtime blocking pool. */
+bool llam_blocking_req_cancelled(const llam_io_req_t *req);
+void llam_blocking_req_set_cancelled(llam_io_req_t *req);
 void *llam_blocking_read_impl(void *arg);
 void *llam_blocking_write_impl(void *arg);
 void *llam_blocking_accept_impl(void *arg);
@@ -196,12 +355,24 @@ void *llam_blocking_connect_impl(void *arg);
 void *llam_blocking_poll_impl(void *arg);
 void *llam_blocking_handle_read_impl(void *arg);
 void *llam_blocking_handle_write_impl(void *arg);
+void *llam_blocking_pread_impl(void *arg);
+void *llam_blocking_pwrite_impl(void *arg);
+void *llam_blocking_handle_pread_impl(void *arg);
+void *llam_blocking_handle_pwrite_impl(void *arg);
 void *llam_blocking_handle_poll_impl(void *arg);
 ssize_t llam_read_owned_impl(llam_fd_t fd,
                            size_t max_count,
                            int recv_flags,
                            bool socket_recv,
                            llam_io_buffer_t **out);
+
+/* Shared positional I/O validation and fallback helpers. */
+int llam_positional_iovcnt_max(void);
+int llam_positional_validate_async_rw_count(size_t count);
+int llam_positional_const_iov_validate(const llam_iovec_t *iov, int iovcnt);
+int llam_positional_mut_iov_validate(const llam_mut_iovec_t *iov, int iovcnt);
+int llam_positional_offset_advance(uint64_t *offset, ssize_t amount);
+int llam_positional_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req);
 
 /* Cooperative I/O parking and backend issue paths. */
 void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req);

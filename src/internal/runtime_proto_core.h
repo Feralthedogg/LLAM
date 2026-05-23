@@ -141,7 +141,7 @@ static inline llam_task_t *llam_task_public_handle(llam_task_t *task) {
 int llam_task_activate_public_handle(llam_task_t *task);
 void llam_task_invalidate_public_handle(llam_task_t *task);
 
-llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity);
+llam_io_buffer_t *llam_io_buffer_allocator_alloc(llam_shard_t *shard, size_t min_capacity);
 void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer);
 llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard);
 void llam_shard_drain_stack_cache(llam_shard_t *shard);
@@ -218,6 +218,8 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job);
 int llam_consume_task_wake_error(llam_task_t *task);
 llam_runtime_t *llam_runtime_default_storage(void);
 int llam_runtime_check_handle(const llam_runtime_t *runtime);
+int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_runtime);
+void llam_runtime_end_public_op(llam_runtime_t *runtime);
 int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,
                          size_t opts_size,
@@ -230,6 +232,13 @@ int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *s
 llam_runtime_t *llam_runtime_current_owner(void);
 llam_runtime_t *llam_runtime_owner_for_new_object(void);
 int llam_runtime_check_object_owner(const llam_runtime_t *owner_runtime);
+int llam_runtime_check_object_owner_for_cleanup(const llam_runtime_t *owner_runtime);
+bool llam_runtime_object_owner_is_live(const llam_runtime_t *owner_runtime);
+int llam_runtime_begin_live_object_owner_op(const llam_runtime_t *owner_runtime,
+                                            llam_runtime_t **out_runtime,
+                                            int dead_errno);
+bool llam_runtime_begin_object_owner_op_if_live(const llam_runtime_t *owner_runtime,
+                                                llam_runtime_t **out_runtime);
 int llam_runtime_require_object_owner(const llam_runtime_t *owner_runtime);
 llam_task_group_t *llam_task_group_resolve_public_handle(llam_task_group_t *handle);
 void llam_task_group_end_public_op(llam_task_group_t *group);

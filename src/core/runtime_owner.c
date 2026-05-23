@@ -74,6 +74,7 @@ int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
     }
     rt->heap_allocated = heap_allocated;
     atomic_store_explicit(&rt->destroy_claimed, false, memory_order_release);
+    atomic_store_explicit(&rt->active_ops, 0U, memory_order_release);
     rt->registry_next = g_llam_runtime_registry;
     g_llam_runtime_registry = rt;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
@@ -91,6 +92,7 @@ int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
  */
 int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated) {
     bool already_claimed;
+    size_t active_ops;
 
     if (rt == NULL || out_heap_allocated == NULL) {
         errno = EINVAL;
@@ -111,6 +113,18 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
     }
     *out_heap_allocated = rt->heap_allocated;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    /*
+     * Destroy/shutdown owns the handle after destroy_claimed is published.
+     * New public ops are rejected, but older ops may still be between handle
+     * validation and runtime-state access.  Wait for those short pins before
+     * freeing shard arrays, backend nodes, caches, or zeroing the runtime.
+     */
+    do {
+        active_ops = atomic_load_explicit(&rt->active_ops, memory_order_acquire);
+        if (active_ops != 0U) {
+            llam_pause_cpu();
+        }
+    } while (active_ops != 0U);
     return 0;
 }
 
@@ -182,6 +196,56 @@ int llam_runtime_check_handle(const llam_runtime_t *runtime) {
 }
 
 /**
+ * @brief Pin a public runtime handle across a short host-side operation.
+ *
+ * @details
+ * ::llam_runtime_check_handle validates the pointer, but it cannot protect the
+ * following dereference from a concurrent shutdown/destroy.  Use this helper
+ * for public entry points that read runtime-owned arrays or state before a run
+ * token, lifecycle lock, or object-specific active-op pin takes over.
+ */
+int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_runtime) {
+    llam_runtime_t *registered;
+
+    if (out_runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (runtime == NULL) {
+        runtime = llam_runtime_default_storage();
+    }
+
+    pthread_mutex_lock(&g_llam_runtime_registry_lock);
+    registered = llam_runtime_find_registered_locked(runtime);
+    if (registered == NULL ||
+        atomic_load_explicit(&registered->destroy_claimed, memory_order_acquire)) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
+    (void)atomic_fetch_add_explicit(&registered->active_ops, 1U, memory_order_acq_rel);
+    pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    *out_runtime = registered;
+    return 0;
+}
+
+void llam_runtime_end_public_op(llam_runtime_t *runtime) {
+    size_t previous;
+
+    if (runtime == NULL) {
+        return;
+    }
+    previous = atomic_fetch_sub_explicit(&runtime->active_ops, 1U, memory_order_acq_rel);
+    if (LLAM_UNLIKELY(previous == 0U)) {
+        /*
+         * This should be unreachable; repair the counter so a release build
+         * does not leave the runtime permanently unclaimable after a bad call.
+         */
+        (void)atomic_fetch_add_explicit(&runtime->active_ops, 1U, memory_order_release);
+    }
+}
+
+/**
  * @brief Return the runtime associated with the current managed context.
  *
  * The shard is the most reliable owner cursor while a worker is running.  The
@@ -250,6 +314,160 @@ int llam_runtime_check_object_owner(const llam_runtime_t *owner_runtime) {
     (void)owner_runtime;
 #endif
     return 0;
+}
+
+/**
+ * @brief Validate owner domains for host-side public cleanup calls.
+ *
+ * Destroy/release APIs consume already-validated public handles.  Managed tasks
+ * must still respect the current runtime owner, but unmanaged host cleanup must
+ * be able to release idle objects after their owner runtime has already been
+ * destroyed.  In that stale-owner case this helper deliberately avoids
+ * dereferencing @p owner_runtime; the public handle registry validated the
+ * object storage, and cleanup only needs to free that object.
+ */
+int llam_runtime_check_object_owner_for_cleanup(const llam_runtime_t *owner_runtime) {
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    llam_runtime_t *current;
+    int saved_errno = errno;
+
+    if (LLAM_UNLIKELY(owner_runtime == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    current = llam_runtime_current_owner();
+    if (LLAM_LIKELY(g_llam_tls_task != NULL || g_llam_tls_shard != NULL)) {
+        if (LLAM_LIKELY(owner_runtime == current)) {
+            return 0;
+        }
+        errno = EXDEV;
+        return -1;
+    }
+    /*
+     * Host cleanup has no current runtime context.  Registered owners are
+     * accepted by the normal path; unregistered owners are treated as already
+     * destroyed runtimes and accepted without touching their storage.
+     */
+    if (owner_runtime == llam_runtime_default_storage() || llam_runtime_check_handle(owner_runtime) == 0) {
+        return 0;
+    }
+    errno = saved_errno;
+#else
+    if (LLAM_UNLIKELY(owner_runtime == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    (void)owner_runtime;
+#endif
+    return 0;
+}
+
+/**
+ * @brief Test whether an owner runtime can still service scheduler operations.
+ *
+ * Host cleanup paths sometimes need to inspect objects after their explicit
+ * runtime handle has been destroyed.  This helper answers "can this owner still
+ * wake waiters or recycle backend resources?" without dereferencing unknown
+ * runtime pointers that are no longer in the live registry.
+ */
+bool llam_runtime_object_owner_is_live(const llam_runtime_t *owner_runtime) {
+    llam_runtime_t *runtime;
+    int saved_errno = errno;
+    bool live;
+
+    if (owner_runtime == NULL) {
+        errno = saved_errno;
+        return false;
+    }
+    if (llam_runtime_begin_public_op((llam_runtime_t *)owner_runtime, &runtime) != 0) {
+        errno = saved_errno;
+        return false;
+    }
+    live = atomic_load_explicit(&runtime->initialized, memory_order_acquire);
+    llam_runtime_end_public_op(runtime);
+    errno = saved_errno;
+    return live;
+}
+
+/**
+ * @brief Pin a live owner runtime for unmanaged host object operations.
+ *
+ * @details
+ * Object active-op counters protect the object storage, but they do not protect
+ * the runtime that owns scheduler state, wake handles, backend nodes, or tuning
+ * flags. Managed tasks already execute while their runtime is driven by
+ * llam_run(), and runtime destruction waits for that execution to quiesce. Host
+ * threads do not have that implicit protection, so non-cleanup operations that
+ * may wake waiters or read runtime-owned state must pin the owner runtime.
+ */
+int llam_runtime_begin_live_object_owner_op(const llam_runtime_t *owner_runtime,
+                                            llam_runtime_t **out_runtime,
+                                            int dead_errno) {
+    llam_runtime_t *runtime;
+
+    if (out_runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_runtime = NULL;
+    if (llam_runtime_check_object_owner(owner_runtime) != 0) {
+        return -1;
+    }
+    if (g_llam_tls_task != NULL || g_llam_tls_shard != NULL) {
+        return 0;
+    }
+    if (llam_runtime_begin_public_op((llam_runtime_t *)owner_runtime, &runtime) != 0) {
+        errno = owner_runtime == llam_runtime_default_storage() ? dead_errno : EXDEV;
+        return -1;
+    }
+    if (!atomic_load_explicit(&runtime->initialized, memory_order_acquire)) {
+        llam_runtime_end_public_op(runtime);
+        errno = dead_errno;
+        return -1;
+    }
+    *out_runtime = runtime;
+    return 0;
+}
+
+/**
+ * @brief Pin an owner runtime only when it is live.
+ *
+ * @details
+ * This is used by cleanup-compatible nonblocking reads: if the runtime is dead,
+ * callers may still drain purely buffered data without waking parked tasks. If
+ * it is live, host callers receive a runtime pin before taking the live path.
+ */
+bool llam_runtime_begin_object_owner_op_if_live(const llam_runtime_t *owner_runtime,
+                                                llam_runtime_t **out_runtime) {
+    llam_runtime_t *runtime;
+    int saved_errno = errno;
+    bool live;
+
+    if (out_runtime != NULL) {
+        *out_runtime = NULL;
+    }
+    if (owner_runtime == NULL || out_runtime == NULL) {
+        errno = saved_errno;
+        return false;
+    }
+    if (g_llam_tls_task != NULL || g_llam_tls_shard != NULL) {
+        live = llam_runtime_check_object_owner(owner_runtime) == 0;
+        errno = saved_errno;
+        return live;
+    }
+    if (llam_runtime_begin_public_op((llam_runtime_t *)owner_runtime, &runtime) != 0) {
+        errno = saved_errno;
+        return false;
+    }
+    live = atomic_load_explicit(&runtime->initialized, memory_order_acquire);
+    if (!live) {
+        llam_runtime_end_public_op(runtime);
+        errno = saved_errno;
+        return false;
+    }
+    *out_runtime = runtime;
+    errno = saved_errno;
+    return true;
 }
 
 /**

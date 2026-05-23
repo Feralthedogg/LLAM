@@ -44,14 +44,17 @@
  * @see llam_scheduler_loop
  */
 int llam_runtime_run_rt(llam_runtime_t *rt) {
+    llam_runtime_t *pinned_runtime = NULL;
     bool expected_started = false;
     int rc;
     unsigned i;
 
-    if (llam_runtime_check_handle(rt) != 0) {
+    if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
         return -1;
     }
+    rt = pinned_runtime;
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+        llam_runtime_end_public_op(pinned_runtime);
         errno = EINVAL;
         return -1;
     }
@@ -65,9 +68,16 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
                                                  true,
                                                  memory_order_acq_rel,
                                                  memory_order_acquire)) {
+        llam_runtime_end_public_op(pinned_runtime);
         errno = EINVAL;
         return -1;
     }
+    /*
+     * exec_started now protects runtime-owned scheduler state from teardown;
+     * release the public-op pin so shutdown can request stop and wait on the
+     * run token instead of being blocked for the full scheduler lifetime.
+     */
+    llam_runtime_end_public_op(pinned_runtime);
     for (i = 1; i < rt->active_shards; ++i) {
         rc = pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]);
         if (rc != 0) {
@@ -131,17 +141,29 @@ int llam_run(void) {
  * @return 0 on success, or -1 with @c errno set when the runtime is not initialized.
  */
 int llam_runtime_request_stop_rt(llam_runtime_t *rt) {
-    if (llam_runtime_check_handle(rt) != 0) {
+    llam_runtime_t *pinned_runtime = NULL;
+
+    if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
         return -1;
     }
+    rt = pinned_runtime;
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+        llam_runtime_end_public_op(pinned_runtime);
         errno = EINVAL;
         return -1;
     }
     llam_request_stop(rt);
+    llam_runtime_end_public_op(pinned_runtime);
     return 0;
 }
 
 int llam_runtime_request_stop(void) {
-    return llam_runtime_request_stop_rt(llam_runtime_default_storage());
+    /*
+     * The no-handle API remains the default-runtime entry point for unmanaged
+     * host threads, but from a managed task it must target that task's owner
+     * runtime. Otherwise explicit-runtime tasks that call the legacy stop
+     * wrapper accidentally poke the default runtime and leave their own
+     * scheduler running.
+     */
+    return llam_runtime_request_stop_rt(llam_runtime_current_owner());
 }

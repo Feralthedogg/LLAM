@@ -31,6 +31,8 @@ static bool llam_linux_io_req_kind_supported(llam_io_kind_t kind) {
     switch (kind) {
     case LLAM_IO_KIND_READ:
     case LLAM_IO_KIND_WRITE:
+    case LLAM_IO_KIND_PREAD:
+    case LLAM_IO_KIND_PWRITE:
     case LLAM_IO_KIND_ACCEPT:
     case LLAM_IO_KIND_CONNECT:
     case LLAM_IO_KIND_POLL:
@@ -65,7 +67,10 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
         return;
     }
 
-    if ((kind == LLAM_IO_KIND_READ || kind == LLAM_IO_KIND_WRITE) &&
+    if ((kind == LLAM_IO_KIND_READ ||
+         kind == LLAM_IO_KIND_WRITE ||
+         kind == LLAM_IO_KIND_PREAD ||
+         kind == LLAM_IO_KIND_PWRITE) &&
         req->count > (size_t)UINT_MAX) {
         /*
          * io_uring read/write SQEs carry length as unsigned int.  The public
@@ -118,6 +123,12 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
         break;
     case LLAM_IO_KIND_WRITE:
         io_uring_prep_write(sqe, req->fd, req->buf, (unsigned)req->count, (unsigned long long)-1);
+        break;
+    case LLAM_IO_KIND_PREAD:
+        io_uring_prep_read(sqe, req->fd, req->buf, (unsigned)req->count, req->offset);
+        break;
+    case LLAM_IO_KIND_PWRITE:
+        io_uring_prep_write(sqe, req->fd, req->buf, (unsigned)req->count, req->offset);
         break;
     case LLAM_IO_KIND_ACCEPT:
         io_uring_prep_accept(sqe, req->fd, req->addr, req->addrlen, 0);

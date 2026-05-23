@@ -105,7 +105,11 @@ set(LLAM_RUNTIME_SOURCES
     src/io/runtime_io_api_direct_tuning.c
     src/io/runtime_io_api_issue.c
     src/io/runtime_io_buffer_registry.c
+    src/io/runtime_io_api_blocking_file_ops.c
+    src/io/runtime_io_api_handle_positional.c
     src/io/runtime_io_api_owned.c
+    src/io/runtime_io_api_positional.c
+    src/io/runtime_io_api_positional_util.c
     src/io/runtime_io_api_public.c
     src/io/runtime_io_engine.c
     src/io/runtime_io_watch.c

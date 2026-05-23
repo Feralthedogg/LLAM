@@ -129,6 +129,33 @@ int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
     return 0;
 }
 
+void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
+    uintptr_t key = (uintptr_t)fd;
+
+    if (rt == NULL || rt->nodes == NULL) {
+        return;
+    }
+    for (unsigned i = 0U; i < rt->active_nodes; ++i) {
+        llam_node_t *node = &rt->nodes[i];
+        llam_windows_fd_assoc_t *prev = NULL;
+        llam_windows_fd_assoc_t *assoc = node->windows_fd_assoc_head;
+
+        while (assoc != NULL) {
+            if ((uintptr_t)assoc->fd == key) {
+                if (prev != NULL) {
+                    prev->next = assoc->next;
+                } else {
+                    node->windows_fd_assoc_head = assoc->next;
+                }
+                free(assoc);
+                break;
+            }
+            prev = assoc;
+            assoc = assoc->next;
+        }
+    }
+}
+
 bool llam_windows_fd_skips_completion_on_success(llam_node_t *node, llam_fd_t fd) {
     llam_windows_fd_assoc_t *assoc = llam_windows_find_assoc(node, (uintptr_t)fd);
 

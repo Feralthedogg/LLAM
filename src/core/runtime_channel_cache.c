@@ -284,7 +284,8 @@ bool llam_channel_cache_release(llam_channel_t *channel) {
     /*
      * Keep cached entries outside the public ownership domain. Acquisition
      * stamps the requesting runtime owner back onto the object before returning
-     * it, and TLS cache reuse rejects entries from other runtimes.
+     * it, so an idle cached channel never carries a stale runtime owner across
+     * runtime boundaries.
      */
     llam_channel_reset_for_reuse(channel, NULL);
     pthread_mutex_lock(&g_llam_channel_cache_lock);

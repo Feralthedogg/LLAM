@@ -258,3 +258,70 @@ void llam_io_buffer_public_end_op(const llam_io_buffer_t *buffer) {
 
     llam_public_active_op_end(&live->public_active_ops);
 }
+
+static void llam_io_buffer_detach_provided_storage_locked(llam_io_buffer_t *buffer) {
+    unsigned char *copy = NULL;
+
+    if (buffer == NULL || !buffer->provided_storage || buffer->data == NULL) {
+        return;
+    }
+    /*
+     * Backend provided-buffer rings are runtime-owned.  A public owned-buffer
+     * handle may outlive that runtime, so shutdown must sever the data pointer
+     * before node teardown releases the ring storage.  Provided buffers are
+     * normally LLAM_IO_BUFFER_INLINE_BYTES, but keep a heap fallback for future
+     * larger backend groups.
+     */
+    if (buffer->size <= sizeof(buffer->inline_data)) {
+        memcpy(buffer->inline_data, buffer->data, buffer->size);
+        buffer->data = buffer->inline_data;
+        buffer->capacity = sizeof(buffer->inline_data);
+        buffer->alignment = sizeof(void *);
+        buffer->external_storage = false;
+        buffer->aligned_storage = false;
+    } else {
+        copy = malloc(buffer->size);
+        if (copy == NULL) {
+            /*
+             * Do not leave a dangling backend pointer.  Preserve a valid empty
+             * buffer rather than risking a post-shutdown UAF on data access.
+             */
+            buffer->data = buffer->inline_data;
+            buffer->size = 0U;
+            buffer->capacity = sizeof(buffer->inline_data);
+            buffer->alignment = sizeof(void *);
+            buffer->external_storage = false;
+            buffer->aligned_storage = false;
+        } else {
+            memcpy(copy, buffer->data, buffer->size);
+            buffer->data = copy;
+            buffer->capacity = buffer->size;
+            buffer->alignment = sizeof(void *);
+            buffer->external_storage = true;
+            buffer->aligned_storage = false;
+        }
+    }
+    buffer->provided_storage = false;
+    buffer->provided_bid = 0U;
+    buffer->provided_node_index = UINT_MAX;
+}
+
+void llam_io_buffer_public_detach_runtime_storage(llam_runtime_t *rt) {
+    llam_io_buffer_t *buffer;
+
+    if (rt == NULL) {
+        return;
+    }
+    /*
+     * This is a shutdown-only cold path.  Holding the public-buffer registry
+     * lock keeps release/accessor calls from observing a half-detached wrapper
+     * while the runtime still owns the backing I/O ring storage.
+     */
+    (void)pthread_mutex_lock(&g_llam_io_buffer_public_registry_lock);
+    for (buffer = g_llam_io_buffer_public_registry; buffer != NULL; buffer = buffer->public_registry_next) {
+        if (buffer->owner_runtime == rt) {
+            llam_io_buffer_detach_provided_storage_locked(buffer);
+        }
+    }
+    (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
+}

@@ -89,8 +89,9 @@ void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node) {
     owner = &rt->shards[node->owner_shard];
     node->next = NULL;
     node->alloc_next = NULL;
-    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
-        // Owner-local free goes straight back to the shard cache.
+    if (g_llam_tls_shard == owner) {
+        // Owner-local free goes straight back to the shard cache.  Pointer
+        // identity is required because independent runtimes reuse shard ids.
         node->alloc_next = owner->allocator.wait_free;
         owner->allocator.wait_free = node;
         owner->allocator.wait_frees += 1U;
@@ -173,8 +174,9 @@ void llam_timer_node_free(llam_shard_t *shard, llam_timer_node_t *node) {
     owner = &rt->shards[node->owner_shard];
     node->next = NULL;
     node->alloc_next = NULL;
-    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
-        // Common path: timer fires/cancels on its owner shard.
+    if (g_llam_tls_shard == owner) {
+        // Common path: timer fires/cancels on its owner shard.  Pointer
+        // identity avoids cross-runtime local-cache corruption.
         node->alloc_next = owner->allocator.timer_free;
         owner->allocator.timer_free = node;
         owner->allocator.timer_frees += 1U;

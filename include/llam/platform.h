@@ -128,7 +128,12 @@ typedef int llam_handle_t;
 #endif
 
 /** @brief Non-zero when @p fd is the platform invalid descriptor/socket value. */
-#define LLAM_FD_IS_INVALID(fd) ((fd) == LLAM_INVALID_FD)
+static inline int llam_fd_is_invalid(llam_fd_t fd) {
+    return fd == LLAM_INVALID_FD;
+}
+
+/** @brief Non-zero when @p fd is the platform invalid descriptor/socket value. */
+#define LLAM_FD_IS_INVALID(fd) (llam_fd_is_invalid((fd)))
 
 /** @brief Invalid generic handle sentinel for ::llam_handle_t. */
 #if LLAM_PLATFORM_WINDOWS
@@ -139,10 +144,17 @@ typedef int llam_handle_t;
 
 /** @brief Non-zero when @p handle is the platform invalid generic handle value. */
 #if LLAM_PLATFORM_WINDOWS
-#define LLAM_HANDLE_IS_INVALID(handle) ((handle) == NULL || (handle) == LLAM_INVALID_HANDLE)
+static inline int llam_handle_is_invalid(llam_handle_t handle) {
+    return handle == NULL || handle == LLAM_INVALID_HANDLE;
+}
 #else
-#define LLAM_HANDLE_IS_INVALID(handle) ((handle) == LLAM_INVALID_HANDLE)
+static inline int llam_handle_is_invalid(llam_handle_t handle) {
+    return handle == LLAM_INVALID_HANDLE;
+}
 #endif
+
+/** @brief Non-zero when @p handle is the platform invalid generic handle value. */
+#define LLAM_HANDLE_IS_INVALID(handle) (llam_handle_is_invalid((handle)))
 
 /** @brief Human-readable platform name used by diagnostics and simple feature checks. */
 #if LLAM_PLATFORM_WINDOWS

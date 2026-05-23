@@ -207,9 +207,11 @@ void llam_task_allocator_free(llam_task_t *task) {
     llam_task_local_clear(task);
     owner = &rt->shards[task->alloc_owner_shard];
     task->alloc_next = NULL;
-    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
+    if (g_llam_tls_shard == owner) {
         // Owner shard can recycle directly; this is the common task cleanup path
-        // after joined tasks are reclaimed by their home scheduler.
+        // after joined tasks are reclaimed by their home scheduler.  Matching
+        // the shard pointer, not just the shard id, keeps concurrent runtimes
+        // from writing into another runtime's local free list.
         task->alloc_next = owner->allocator.task_free;
         owner->allocator.task_free = task;
         owner->allocator.task_frees += 1U;

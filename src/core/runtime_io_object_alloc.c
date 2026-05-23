@@ -51,6 +51,7 @@ void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsign
     req->handle = LLAM_INVALID_HANDLE;
     req->buf = NULL;
     req->count = 0U;
+    req->offset = 0U;
     req->addr = NULL;
     req->addrlen = NULL;
     req->addr_len = 0U;
@@ -148,8 +149,10 @@ void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req) {
     owner = &rt->shards[req->alloc_owner_shard];
     req->next = NULL;
     req->alloc_next = NULL;
-    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
+    if (g_llam_tls_shard == owner) {
         // Fast return when the completion path runs on the allocation owner.
+        // Shard ids are only runtime-local, so pointer identity is the safe
+        // concurrent-runtime ownership check.
         req->alloc_next = owner->allocator.io_req_free;
         owner->allocator.io_req_free = req;
         owner->allocator.io_req_frees += 1U;
@@ -172,7 +175,7 @@ void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req) {
  * @param min_capacity Minimum usable data capacity in bytes.
  * @return Buffer wrapper on success, or NULL on allocation failure.
  */
-llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity) {
+llam_io_buffer_t *llam_io_buffer_allocator_alloc(llam_shard_t *shard, size_t min_capacity) {
     llam_io_buffer_t *buffer = NULL;
 
     if (shard == NULL) {
@@ -193,6 +196,7 @@ llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity)
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
                 buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+                buffer->alignment = sizeof(void *);
                 if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
                     buffer->data = calloc(1, min_capacity);
                     if (buffer->data == NULL) {
@@ -218,6 +222,7 @@ llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity)
                 buffer->alloc_owner_shard = shard->id;
                 buffer->data = buffer->inline_data;
                 buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+                buffer->alignment = sizeof(void *);
                 if (min_capacity > LLAM_IO_BUFFER_INLINE_BYTES) {
                     buffer->data = calloc(1, min_capacity);
                     if (buffer->data == NULL) {
@@ -246,6 +251,7 @@ llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity)
  */
 void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer) {
     llam_runtime_t *rt = buffer != NULL ? buffer->owner_runtime : NULL;
+    llam_runtime_t *pinned_rt = NULL;
     llam_shard_t *owner;
     llam_io_buffer_t *head;
 
@@ -256,25 +262,45 @@ void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer) {
     if (buffer->external_storage && buffer->data != NULL) {
         // External payload storage is not part of the slab cache. Release it
         // before restoring the wrapper to its inline baseline state.
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        if (buffer->aligned_storage) {
+            _aligned_free(buffer->data);
+        } else
+#endif
         free(buffer->data);
     }
     buffer->external_storage = false;
+    buffer->aligned_storage = false;
     buffer->detached_wrapper = false;
     buffer->data = buffer->inline_data;
     buffer->size = 0U;
     buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+    buffer->alignment = sizeof(void *);
     buffer->alloc_next = NULL;
 
-    if (rt == NULL || buffer->alloc_owner_shard >= rt->active_shards) {
+    if (rt == NULL || llam_runtime_begin_public_op(rt, &pinned_rt) != 0) {
         return;
     }
 
-    owner = &rt->shards[buffer->alloc_owner_shard];
-    if (g_llam_tls_shard != NULL && g_llam_tls_shard->id == owner->id) {
-        // Owner-local recycle avoids allocator locking and malloc churn.
+    /*
+     * Public owned buffers can be released by host threads while their runtime is
+     * being destroyed.  Pin the runtime before consulting shard arrays; otherwise
+     * release could race backend/cache teardown after the buffer leaves the public
+     * registry.
+     */
+    if (buffer->alloc_owner_shard >= pinned_rt->active_shards) {
+        llam_runtime_end_public_op(pinned_rt);
+        return;
+    }
+
+    owner = &pinned_rt->shards[buffer->alloc_owner_shard];
+    if (g_llam_tls_shard == owner) {
+        // Owner-local recycle avoids allocator locking and malloc churn.  A
+        // different runtime may have the same shard id and must use remote-free.
         buffer->alloc_next = owner->allocator.io_buffer_free;
         owner->allocator.io_buffer_free = buffer;
         owner->allocator.io_buffer_frees += 1U;
+        llam_runtime_end_public_op(pinned_rt);
         return;
     }
 
@@ -284,4 +310,5 @@ void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer) {
         buffer->alloc_next = head;
     } while (!atomic_compare_exchange_weak(&owner->allocator.io_buffer_remote_free, &head, buffer));
     atomic_store_explicit(&owner->allocator.remote_free_pending, 1U, memory_order_release);
+    llam_runtime_end_public_op(pinned_rt);
 }

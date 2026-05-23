@@ -959,17 +959,26 @@ void llam_request_stop(llam_runtime_t *rt) {
         llam_runtime_cancel_parked_waiters(rt);
     }
     if (rt->block_lock_initialized) {
+        /*
+         * Keep the shutdown condition and the futex/WaitOnAddress sequence in
+         * one block-lock critical section.  Otherwise a worker can read the new
+         * sequence after the wake but still have entered the wait loop from an
+         * older shutdown_requested=false observation, losing the only shutdown
+         * wake and hanging runtime teardown.
+         */
+        pthread_mutex_lock(&rt->block_lock);
         atomic_fetch_add_explicit(&rt->block_wake_seq, 1U, memory_order_release);
 #if defined(__linux__)
+        pthread_mutex_unlock(&rt->block_lock);
         (void)llam_linux_futex_wake_private(&rt->block_wake_seq, INT_MAX);
 #elif LLAM_PLATFORM_WINDOWS
+        pthread_mutex_unlock(&rt->block_lock);
         WakeByAddressAll((PVOID)&rt->block_wake_seq);
 #else
         if (rt->block_cv_initialized) {
-            pthread_mutex_lock(&rt->block_lock);
             pthread_cond_broadcast(&rt->block_cv);
-            pthread_mutex_unlock(&rt->block_lock);
         }
+        pthread_mutex_unlock(&rt->block_lock);
 #endif
     }
     llam_wake_all_shards(rt);

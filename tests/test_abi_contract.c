@@ -40,6 +40,11 @@ typedef struct abi_prefix {
 ASSERT_FIELD_U32(llam_spawn_opts_t, task_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, stack_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, flags);
+ASSERT_FIELD_U32(llam_spawn_opts_t, reserved0);
+_Static_assert(offsetof(llam_spawn_opts_t, reserved0) == offsetof(llam_spawn_opts_t, flags) + sizeof(uint32_t),
+               "llam_spawn_opts_t.reserved0 must occupy the post-flags ABI padding");
+_Static_assert(offsetof(llam_spawn_opts_t, deadline_ns) == offsetof(llam_spawn_opts_t, reserved0) + sizeof(uint32_t),
+               "llam_spawn_opts_t.deadline_ns offset must not move after reserved0");
 ASSERT_FIELD_U32(llam_runtime_opts_t, deterministic);
 ASSERT_FIELD_U32(llam_runtime_opts_t, forced_yield_every);
 ASSERT_FIELD_U32(llam_runtime_opts_t, idle_spin_max_iters);
@@ -73,12 +78,22 @@ ASSERT_EXPR_TYPE(llam_task_flags((const llam_task_t *)0), uint32_t,
                  "llam_task_flags result must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_set_class(LLAM_TASK_CLASS_DEFAULT), int,
                  "llam_task_set_class result must be int");
+_Static_assert(sizeof(((llam_mut_iovec_t *)0)->iov_base) == sizeof(void *),
+               "llam_mut_iovec_t.iov_base must be pointer-sized");
+_Static_assert(sizeof(((llam_mut_iovec_t *)0)->iov_len) == sizeof(size_t),
+               "llam_mut_iovec_t.iov_len must be size_t");
+_Static_assert(offsetof(llam_io_buffer_opts_t, alignment) == sizeof(size_t),
+               "llam_io_buffer_opts_t.alignment offset must follow capacity");
+ASSERT_FIELD_U32(llam_io_buffer_opts_t, flags);
+ASSERT_FIELD_U32(llam_io_buffer_opts_t, reserved0);
 _Static_assert(LLAM_RUNTIME_OPTS_CURRENT_SIZE == sizeof(llam_runtime_opts_t),
                "LLAM_RUNTIME_OPTS_CURRENT_SIZE must match llam_runtime_opts_t");
 _Static_assert(LLAM_SPAWN_OPTS_CURRENT_SIZE == sizeof(llam_spawn_opts_t),
                "LLAM_SPAWN_OPTS_CURRENT_SIZE must match llam_spawn_opts_t");
 _Static_assert(LLAM_RUNTIME_STATS_CURRENT_SIZE == sizeof(llam_runtime_stats_t),
                "LLAM_RUNTIME_STATS_CURRENT_SIZE must match llam_runtime_stats_t");
+_Static_assert(LLAM_IO_BUFFER_OPTS_CURRENT_SIZE == sizeof(llam_io_buffer_opts_t),
+               "LLAM_IO_BUFFER_OPTS_CURRENT_SIZE must match llam_io_buffer_opts_t");
 
 #undef ASSERT_FIELD_U32
 
@@ -90,6 +105,16 @@ static int test_fail(const char *message) {
 static int test_fail_errno(const char *message) {
     fprintf(stderr, "[test_abi_contract] %s: errno=%d (%s)\n", message, errno, strerror(errno));
     return 1;
+}
+
+static llam_fd_t invalid_fd_with_side_effect(unsigned *calls) {
+    *calls += 1U;
+    return LLAM_INVALID_FD;
+}
+
+static llam_handle_t invalid_handle_with_side_effect(unsigned *calls) {
+    *calls += 1U;
+    return LLAM_INVALID_HANDLE;
 }
 
 static int test_llam_full_info(void) {
@@ -162,12 +187,17 @@ static int test_invalid_arguments(void) {
     if (llam_spawn_opts_init((llam_spawn_opts_t *)(void *)&errno, 0U) != -1 || errno != EINVAL) {
         return test_fail("llam_spawn_opts_init(size=0) did not fail with EINVAL");
     }
+    errno = 0;
+    if (llam_io_buffer_opts_init(NULL, LLAM_IO_BUFFER_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
+        return test_fail("llam_io_buffer_opts_init(NULL) did not fail with EINVAL");
+    }
     return 0;
 }
 
 static int test_platform_fd_contracts(void) {
     llam_fd_t llam_fd = LLAM_INVALID_FD;
     llam_handle_t llam_handle = LLAM_INVALID_HANDLE;
+    unsigned calls = 0U;
 
     if (!LLAM_FD_IS_INVALID(llam_fd)) {
         return test_fail("LLAM invalid fd predicate does not recognize LLAM_INVALID_FD");
@@ -175,12 +205,20 @@ static int test_platform_fd_contracts(void) {
     if (!LLAM_HANDLE_IS_INVALID(llam_handle)) {
         return test_fail("LLAM invalid handle predicate does not recognize LLAM_INVALID_HANDLE");
     }
+    if (!LLAM_FD_IS_INVALID(invalid_fd_with_side_effect(&calls)) || calls != 1U) {
+        return test_fail("LLAM fd invalid predicate evaluated its argument more than once");
+    }
+    calls = 0U;
+    if (!LLAM_HANDLE_IS_INVALID(invalid_handle_with_side_effect(&calls)) || calls != 1U) {
+        return test_fail("LLAM handle invalid predicate evaluated its argument more than once");
+    }
     return 0;
 }
 
 static int test_llam_option_initializers(void) {
     llam_runtime_opts_t runtime_opts;
     llam_spawn_opts_t spawn_opts;
+    llam_io_buffer_opts_t buffer_opts;
     uint32_t prefix_value;
 
     memset(&runtime_opts, 0xA5, sizeof(runtime_opts));
@@ -201,8 +239,20 @@ static int test_llam_option_initializers(void) {
     if (spawn_opts.task_class != LLAM_TASK_CLASS_DEFAULT ||
         spawn_opts.stack_class != LLAM_STACK_CLASS_DEFAULT ||
         spawn_opts.flags != 0U ||
+        spawn_opts.reserved0 != 0U ||
         spawn_opts.cancel_token != NULL) {
         return test_fail("llam spawn option defaults are inconsistent");
+    }
+
+    memset(&buffer_opts, 0xA5, sizeof(buffer_opts));
+    if (llam_io_buffer_opts_init(&buffer_opts, LLAM_IO_BUFFER_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("llam_io_buffer_opts_init full-size call failed");
+    }
+    if (buffer_opts.capacity != 0U ||
+        buffer_opts.alignment != 0U ||
+        buffer_opts.flags != 0U ||
+        buffer_opts.reserved0 != 0U) {
+        return test_fail("llam io buffer option defaults are inconsistent");
     }
 
     memset(&runtime_opts, 0xA5, sizeof(runtime_opts));

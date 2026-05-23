@@ -17,10 +17,47 @@
   edge coverage and `make test-tsan` as a shorter runtime core, shutdown, and
   multi-runtime race gate.
 
+* `llam_close()` as the fd/socket close boundary for descriptors used with LLAM
+  I/O. It validates `LLAM_INVALID_FD` as `EBADF`, invalidates runtime-local
+  descriptor state, and then delegates to the platform close primitive.
+
+* positional file I/O APIs for storage workloads: `llam_pread()`,
+  `llam_pwrite()`, `llam_preadv()`, and `llam_pwritev()` preserve the current
+  file offset while using scheduler-safe backends where available.
+
+* generic HANDLE positional I/O APIs: `llam_pread_handle()`,
+  `llam_pwrite_handle()`, `llam_preadv_handle()`, `llam_pwritev_handle()`, and
+  `llam_close_handle()` provide the Windows file I/O path without treating file
+  HANDLEs as Winsock sockets.
+
+* aligned owned-buffer allocation for direct-I/O callers:
+  `llam_io_buffer_opts_init()`, `llam_io_buffer_alloc_ex()`,
+  `llam_io_buffer_alloc()`, `llam_io_buffer_alloc_aligned()`,
+  `llam_io_buffer_alignment()`, `llam_pread_owned_aligned()`, and
+  `llam_pread_handle_owned_aligned()`.
+
+* `llam_mut_iovec_t`, `llam_io_buffer_opts_t`,
+  `LLAM_IO_BUFFER_OPTS_CURRENT_SIZE`, and `LLAM_IO_BUFFER_F_ZERO_FILL` as the
+  ABI-stable layout and initialization surface for mutable scatter/gather reads
+  and aligned DB/storage buffers.
+
 ### Changed
 
 * ABI metadata and shared-library soname/install-name move to ABI major `2`
   with version `2.0.0`.
+
+* `llam_spawn_opts_t` now names the former post-`flags` ABI padding as
+  `reserved0`. The field is zeroed by `llam_spawn_opts_init()`, ignored by the
+  current runtime, and keeps `deadline_ns` and later field offsets stable.
+
+* Linux positional fd I/O submits explicit-offset read/write requests through
+  the io_uring backend. POSIX fallback paths use `pread`/`pwrite` directly from
+  unmanaged threads and the blocking-helper path from managed tasks when no true
+  async file backend is available.
+
+* Windows positional file I/O is HANDLE-first: fd/socket positional APIs return
+  `ENOTSUP`, while HANDLE APIs use overlapped `ReadFile`/`WriteFile` with the
+  requested offset.
 
 * runtime-owned registries, caches, I/O buffers, blocking jobs, and scheduler
   paths are routed through explicit owner runtime state rather than implicit
@@ -57,10 +94,30 @@
 * allocator free paths now fail closed when an object's owner runtime is absent
   instead of falling back to the process-default runtime cache.
 
+* `LLAM_FD_IS_INVALID(x)` and `LLAM_HANDLE_IS_INVALID(x)` now wrap public static
+  inline helpers, preserving the macro names while evaluating `x` exactly once.
+
+* document the `NULL` ambiguity of `llam_call_blocking()` and
+  `llam_channel_recv()` more explicitly; production and FFI callers should use
+  the `_result` forms when `NULL` is a valid payload or callback result.
+
 ### Tests
 
 * add direct public-slot family collision and max-epoch regression coverage, plus
   multi-runtime sync handle confusion and null runtime handle checks.
+
+* add ABI layout and single-evaluation predicate checks for `reserved0`,
+  `LLAM_FD_IS_INVALID()`, and `LLAM_HANDLE_IS_INVALID()`.
+
+* add close-boundary coverage for invalid descriptors and unmanaged platform fd
+  closure, and export-check `llam_close` from the shared-library smoke test.
+
+* add ABI layout coverage for `llam_mut_iovec_t`, `llam_io_buffer_opts_t`, the
+  aligned-buffer size macro, and default option initialization.
+
+* add positional I/O coverage for fd and POSIX-HANDLE aliases, vector reads and
+  writes, EOF handling, file-offset preservation, aligned buffer allocation,
+  invalid alignment rejection, and aligned owned positional reads.
 
 * add owned-buffer raw-release collision coverage so internal setup/error
   cleanup remains reliable after the public buffer registry has grown.

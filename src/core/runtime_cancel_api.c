@@ -100,6 +100,50 @@ static int llam_cancel_token_begin_op_locked(llam_cancel_token_t *handle, llam_c
     return 0;
 }
 
+static int llam_cancel_token_begin_op_for_runtime_locked(llam_cancel_token_t *handle,
+                                                         llam_runtime_t *owner_runtime,
+                                                         llam_cancel_token_t **out_token) {
+    llam_cancel_token_t *token = NULL;
+
+    if (handle == NULL || owner_runtime == NULL || out_token == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_llam_cancel_token_registry_lock);
+    token = llam_public_slot_resolve_encoded(&g_llam_cancel_token_public_slots,
+                                             (uintptr_t)handle,
+                                             LLAM_CANCEL_TOKEN_PUBLIC_HANDLE_SHIFT,
+                                             NULL,
+                                             NULL);
+    if (token == NULL) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    if (token->owner_runtime != owner_runtime) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        errno = EXDEV;
+        return -1;
+    }
+#else
+    (void)owner_runtime;
+#endif
+
+    /*
+     * Spawn publishes the token into a task owned by owner_runtime.  Validate
+     * that owner relationship directly instead of using the current TLS owner:
+     * host threads can spawn explicit runtimes and managed tasks can target a
+     * different runtime through the handle API.
+     */
+    llam_public_active_op_begin(&token->active_ops);
+    pthread_mutex_lock(&token->lock);
+    pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+    *out_token = token;
+    return 0;
+}
+
 static void llam_cancel_token_end_op(llam_cancel_token_t *token) {
     llam_public_active_op_end(token != NULL ? &token->active_ops : NULL);
 }
@@ -161,14 +205,19 @@ int llam_task_set_class(uint32_t task_class) {
  *
  * @param task Task to inspect.
  *
- * @return Task flags, or 0 for @c NULL.
+ * @return Task flags, or 0 for invalid, foreign, or @c NULL handles.
  */
 uint32_t llam_task_flags(const llam_task_t *task) {
     uint32_t flags = 0U;
+    int saved_errno = errno;
 
     task = llam_task_resolve_public_handle(task);
     if (task != NULL) {
-        flags = (uint32_t)task->flags;
+        if (llam_runtime_check_object_owner(task->owner_runtime) == 0) {
+            flags = (uint32_t)task->flags;
+        } else {
+            errno = saved_errno;
+        }
         llam_task_end_public_op((llam_task_t *)task);
     }
     return flags;
@@ -231,7 +280,7 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(token->owner_runtime) != 0) {
+    if (llam_runtime_check_object_owner_for_cleanup(token->owner_runtime) != 0) {
         pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
         return -1;
     }
@@ -245,6 +294,12 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
         return -1;
     }
     llam_cancel_token_unregister_live_locked(token);
+    /*
+     * The token has been removed from the live handle table while the registry
+     * lock is still held, so no new public operation can acquire token->lock.
+     * Unlock before pthread_mutex_destroy: destroying a locked POSIX mutex is
+     * undefined even when no other waiter exists.
+     */
     pthread_mutex_unlock(&token->lock);
     pthread_mutex_destroy(&token->lock);
     free(token);
@@ -263,6 +318,23 @@ int llam_cancel_token_retain_task_ref(llam_cancel_token_t *token, llam_cancel_to
      * operations.  Destroy checks this count under the same token lock and
      * reports EBUSY until all task references are released.
      */
+    raw_token->refcount += 1U;
+    pthread_mutex_unlock(&raw_token->lock);
+    llam_cancel_token_end_op(raw_token);
+    if (out_token != NULL) {
+        *out_token = raw_token;
+    }
+    return 0;
+}
+
+int llam_cancel_token_retain_task_ref_for_runtime(llam_cancel_token_t *token,
+                                                  llam_runtime_t *owner_runtime,
+                                                  llam_cancel_token_t **out_token) {
+    llam_cancel_token_t *raw_token = NULL;
+
+    if (llam_cancel_token_begin_op_for_runtime_locked(token, owner_runtime, &raw_token) != 0) {
+        return -1;
+    }
     raw_token->refcount += 1U;
     pthread_mutex_unlock(&raw_token->lock);
     llam_cancel_token_end_op(raw_token);
@@ -304,6 +376,7 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
     llam_task_t *waiters;
     llam_task_t *iter;
     llam_cancel_token_t *raw_token = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
 
     if (token == NULL) {
         errno = EINVAL;
@@ -318,6 +391,12 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
         pthread_mutex_unlock(&token->lock);
         llam_cancel_token_end_op(token);
         return 0;
+    }
+    if (token->waiters != NULL &&
+        llam_runtime_begin_live_object_owner_op(token->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {
+        pthread_mutex_unlock(&token->lock);
+        llam_cancel_token_end_op(token);
+        return -1;
     }
     token->cancelled = true;
     waiters = token->waiters;
@@ -348,6 +427,7 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
         waiters = next;
     }
 
+    llam_runtime_end_public_op(pinned_runtime);
     llam_cancel_token_end_op(token);
     return 0;
 }

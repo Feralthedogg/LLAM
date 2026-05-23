@@ -725,64 +725,54 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
     return total;
 }
 
-/**
- * @brief Write bytes to a generic platform handle.
- */
-ssize_t llam_write_handle(llam_handle_t handle, const void *buf, size_t count) {
-#if LLAM_PLATFORM_POSIX
-    /*
-     * Public POSIX handles alias file descriptors. Keep the handle wrapper a
-     * thin fd-API delegate so device-specific native behavior is not filtered
-     * by the generic Windows HANDLE validation rules.
-     */
-    return llam_write((llam_fd_t)handle, buf, count);
+static void llam_forget_closed_fd_state(llam_fd_t fd) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_runtime_t *rt = NULL;
+
+    if (g_llam_tls_task != NULL && g_llam_tls_task->owner_runtime != NULL) {
+        rt = g_llam_tls_task->owner_runtime;
+    } else if (g_llam_tls_shard != NULL) {
+        rt = g_llam_tls_shard->runtime;
+    }
+    if (rt != NULL) {
+        /*
+         * These caches are keyed only by the kernel handle value. Drop the
+         * entries before closesocket so a later SOCKET reuse cannot inherit
+         * nonblocking or skip-completion assumptions from the previous object.
+         */
+        llam_windows_socket_nonblocking_forget(rt, fd);
+        llam_windows_forget_fd_assoc(rt, fd);
+    }
 #else
-    llam_io_req_t *req;
-    ssize_t result;
+    (void)fd;
+#endif
+}
 
-    if (buf == NULL && count != 0U) {
-        errno = EINVAL;
+int llam_close(llam_fd_t fd) {
+    if (LLAM_FD_IS_INVALID(fd)) {
+        errno = EBADF;
         return -1;
     }
-    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
-        return llam_platform_write_handle(handle, buf, count);
-    }
+    llam_forget_closed_fd_state(fd);
+    return llam_platform_close_fd(fd);
+}
 
-    req = llam_api_io_req_acquire(g_llam_tls_shard);
-    if (req == NULL) {
-        errno = ENOMEM;
+int llam_close_handle(llam_handle_t handle) {
+#if LLAM_PLATFORM_POSIX
+    return llam_close((llam_fd_t)handle);
+#else
+    if (LLAM_HANDLE_IS_INVALID(handle)) {
+        errno = EBADF;
         return -1;
     }
-
-    req->kind = LLAM_IO_KIND_HANDLE_WRITE;
-    req->handle = handle;
-    req->buf = (void *)buf;
-    req->count = count;
-    if (llam_issue_io(req, false, 0U) != 0) {
-        if (!llam_io_capability_error(errno)) {
-            llam_api_io_req_release(g_llam_tls_shard, req);
-            return -1;
-        }
-        req->kind = LLAM_IO_KIND_HANDLE_WRITE;
-        req->handle = handle;
-        req->buf = (void *)buf;
-        req->count = count;
-        req->task = g_llam_tls_task;
-        if (llam_call_blocking_io(llam_blocking_handle_write_impl, req) != 0) {
-            int saved_errno = errno;
-
-            llam_api_io_req_release(g_llam_tls_shard, req);
-            errno = saved_errno;
-            return -1;
-        }
-        result = req->result;
-        llam_api_io_req_release(g_llam_tls_shard, req);
-        return result;
+    if (g_llam_runtime != NULL) {
+        llam_windows_forget_fd_assoc(g_llam_runtime, (llam_fd_t)(uintptr_t)handle);
     }
-
-    result = req->result;
-    llam_api_io_req_release(g_llam_tls_shard, req);
-    return result;
+    if (!CloseHandle((HANDLE)handle)) {
+        errno = llam_windows_system_error_to_errno(GetLastError());
+        return -1;
+    }
+    return 0;
 #endif
 }
 

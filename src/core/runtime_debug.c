@@ -27,62 +27,58 @@
 #include "runtime_internal.h"
 #include "runtime_debug_dump_helpers.h"
 
-/**
- * @brief Return a task's runtime-assigned id.
- *
- * @param task Task handle, or NULL.
- * @return Task id, or 0 for NULL.
- */
+/** @brief Return a task's runtime-assigned id, or 0 for invalid/foreign handles. */
 uint64_t llam_task_id(const llam_task_t *task) {
     uint64_t id = 0U;
+    int saved_errno = errno;
 
     task = llam_task_resolve_public_handle(task);
     if (task != NULL) {
-        id = task->id;
+        if (llam_runtime_check_object_owner(task->owner_runtime) == 0) {
+            id = task->id;
+        } else {
+            errno = saved_errno;
+        }
         llam_task_end_public_op((llam_task_t *)task);
     }
     return id;
 }
 
-/**
- * @brief Return a stable diagnostic name for a task's current state.
- *
- * @param task Task handle, or NULL.
- * @return State name, or "UNKNOWN" for NULL.
- */
+/** @brief Return a stable task state name, or "UNKNOWN" for invalid/foreign handles. */
 const char *llam_task_state_name(const llam_task_t *task) {
     const char *state = "UNKNOWN";
+    int saved_errno = errno;
 
     task = llam_task_resolve_public_handle(task);
     if (task != NULL) {
-        state = llam_state_name_from_id(task->state);
+        if (llam_runtime_check_object_owner(task->owner_runtime) == 0) {
+            state = llam_state_name_from_id(task->state);
+        } else {
+            errno = saved_errno;
+        }
         llam_task_end_public_op((llam_task_t *)task);
     }
     return state;
 }
 
-/**
- * @brief Return a task's scheduler class.
- *
- * @param task Task handle, or NULL.
- * @return Task class, or default class for NULL.
- */
+/** @brief Return a task's scheduler class, or the default for invalid/foreign handles. */
 uint32_t llam_task_class(const llam_task_t *task) {
     uint32_t task_class = (uint32_t)LLAM_TASK_CLASS_DEFAULT;
+    int saved_errno = errno;
 
     task = llam_task_resolve_public_handle(task);
     if (task != NULL) {
-        task_class = atomic_load_explicit(&((llam_task_t *)task)->task_class, memory_order_acquire);
+        if (llam_runtime_check_object_owner(task->owner_runtime) == 0) {
+            task_class = atomic_load_explicit(&((llam_task_t *)task)->task_class, memory_order_acquire);
+        } else {
+            errno = saved_errno;
+        }
         llam_task_end_public_op((llam_task_t *)task);
     }
     return task_class;
 }
 
-/**
- * @brief Return the current managed task for this thread.
- *
- * @return Current task, or NULL outside a runtime-managed task.
- */
+/** @brief Return the current managed task for this thread, or NULL outside LLAM. */
 llam_task_t *llam_current_task(void) {
     return llam_task_public_handle(g_llam_tls_task);
 }
@@ -201,6 +197,7 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
  * @return 0 on success, -1 with @c errno set on invalid arguments.
  */
 int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size) {
+    llam_runtime_t *pinned_runtime = NULL;
     llam_runtime_stats_t full_stats;
     size_t copy_size;
     int saved_errno;
@@ -215,27 +212,23 @@ int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *s
 
     memset(&full_stats, 0, sizeof(full_stats));
     saved_errno = errno;
-    /*
-     * Default stats polling may run before init publishes the public handle.
-     * Return the documented empty pre-init snapshot before handle validation;
-     * explicit non-default handles still keep the stale/unknown EINVAL path.
-     */
+    /* Default pre-init stats return an empty snapshot before handle publication. */
     if (rt == llam_runtime_default_storage() &&
         !atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
         !atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
         errno = saved_errno;
-    } else if (llam_runtime_check_handle(rt) != 0) {
-        return -1;
-    } else if (llam_runtime_lifecycle_trylock() == 0) {
-        llam_runtime_collect_stats_full(rt, &full_stats);
-        llam_runtime_lifecycle_unlock();
     } else {
-        /*
-         * A monitoring thread can race construction or teardown.  Return a
-         * valid empty snapshot instead of blocking behind shutdown joins or
-         * walking partially published arrays.
-         */
-        errno = saved_errno;
+        if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
+            return -1;
+        }
+        if (llam_runtime_lifecycle_trylock() == 0) {
+            llam_runtime_collect_stats_full(pinned_runtime, &full_stats);
+            llam_runtime_lifecycle_unlock();
+        } else {
+            /* Race-safe monitoring returns an empty snapshot instead of walking teardown. */
+            errno = saved_errno;
+        }
+        llam_runtime_end_public_op(pinned_runtime);
     }
     memset(stats, 0, stats_size);
     copy_size = stats_size < sizeof(full_stats) ? stats_size : sizeof(full_stats);
@@ -248,6 +241,10 @@ int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size
 }
 
 int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime, llam_runtime_stats_t *stats, size_t stats_size) {
+    if (runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
     return llam_runtime_collect_stats_ex_rt(runtime, stats, stats_size);
 }
 

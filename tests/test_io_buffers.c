@@ -99,6 +99,21 @@ static void close_if_valid(int *fd) {
     }
 }
 
+static int make_temp_file(char *template_buf, size_t template_size) {
+    int fd;
+
+    if (template_size < sizeof("/tmp/llam-io-test-XXXXXX")) {
+        errno = EINVAL;
+        return -1;
+    }
+    (void)snprintf(template_buf, template_size, "/tmp/llam-io-test-XXXXXX");
+    fd = mkstemp(template_buf);
+    if (fd >= 0) {
+        (void)unlink(template_buf);
+    }
+    return fd;
+}
+
 static void task_fail(io_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
         state->first_errno = err;
@@ -218,6 +233,27 @@ static int test_direct_owned_read_and_poll(void) {
         errno != EINVAL) {
         return test_fail("llam_writev oversized iovcnt did not fail before reading iov");
     }
+    errno = 0;
+    if (llam_close(LLAM_INVALID_FD) != -1 || errno != EBADF) {
+        return test_fail("llam_close invalid fd did not fail with EBADF");
+    }
+    if (pipe(pipe_fds) != 0) {
+        return test_fail_errno("close pipe setup failed");
+    }
+    if (llam_close((llam_fd_t)pipe_fds[0]) != 0) {
+        close_if_valid(&pipe_fds[0]);
+        close_if_valid(&pipe_fds[1]);
+        return test_fail_errno("unmanaged llam_close pipe reader failed");
+    }
+    invalid_poll_fd = pipe_fds[0];
+    pipe_fds[0] = -1;
+    revents = 0;
+    if (llam_poll_fd((llam_fd_t)invalid_poll_fd, POLLIN, 0, &revents) != 1 ||
+        (revents & POLLNVAL) == 0) {
+        close_if_valid(&pipe_fds[1]);
+        return test_fail("llam_close did not close the platform fd");
+    }
+    close_if_valid(&pipe_fds[1]);
     null_tail_iov[0].iov_base = &one;
     null_tail_iov[0].iov_len = 1U;
     null_tail_iov[1].iov_base = NULL;
@@ -366,6 +402,140 @@ static int test_direct_owned_read_and_poll(void) {
     }
     close_if_valid(&poll_sv[0]);
     close_if_valid(&poll_sv[1]);
+    return 0;
+}
+
+static int test_positional_io_and_aligned_buffers(void) {
+    char path_template[64];
+    int fd = -1;
+    int dup_fd = -1;
+    const char initial[] = "abcdefghijklmnop";
+    const char patch[] = "XY";
+    const char vec_a[] = "12";
+    const char vec_b[] = "345";
+    char read_buf[16];
+    char vec_read_a[3] = {0};
+    char vec_read_b[4] = {0};
+    llam_mut_iovec_t read_iov[2];
+    llam_iovec_t write_iov[2];
+    llam_io_buffer_t *buffer = NULL;
+    void *buffer_data;
+    ssize_t bytes;
+    off_t offset_before;
+
+    fd = make_temp_file(path_template, sizeof(path_template));
+    if (fd < 0) {
+        return test_fail_errno("positional temp file setup failed");
+    }
+    if (write_all_native(fd, initial, sizeof(initial) - 1U) != 0) {
+        close_if_valid(&fd);
+        return test_fail_errno("positional initial write failed");
+    }
+    offset_before = lseek(fd, 0, SEEK_CUR);
+    if (offset_before < 0) {
+        close_if_valid(&fd);
+        return test_fail_errno("positional lseek before failed");
+    }
+    memset(read_buf, 0, sizeof(read_buf));
+    if (llam_pread(fd, read_buf, 4U, 4U) != 4 || memcmp(read_buf, "efgh", 4U) != 0) {
+        close_if_valid(&fd);
+        return test_fail("llam_pread did not read from the requested offset");
+    }
+    if (lseek(fd, 0, SEEK_CUR) != offset_before) {
+        close_if_valid(&fd);
+        return test_fail("llam_pread changed the file offset");
+    }
+    if (llam_pwrite(fd, patch, sizeof(patch) - 1U, 2U) != 2) {
+        close_if_valid(&fd);
+        return test_fail_errno("llam_pwrite failed");
+    }
+    if (lseek(fd, 0, SEEK_CUR) != offset_before) {
+        close_if_valid(&fd);
+        return test_fail("llam_pwrite changed the file offset");
+    }
+
+    read_iov[0].iov_base = vec_read_a;
+    read_iov[0].iov_len = 2U;
+    read_iov[1].iov_base = vec_read_b;
+    read_iov[1].iov_len = 3U;
+    if (llam_preadv(fd, read_iov, 2, 2U) != 5 ||
+        memcmp(vec_read_a, "XY", 2U) != 0 ||
+        memcmp(vec_read_b, "efg", 3U) != 0) {
+        close_if_valid(&fd);
+        return test_fail("llam_preadv did not preserve vector read semantics");
+    }
+
+    write_iov[0].iov_base = vec_a;
+    write_iov[0].iov_len = sizeof(vec_a) - 1U;
+    write_iov[1].iov_base = vec_b;
+    write_iov[1].iov_len = sizeof(vec_b) - 1U;
+    if (llam_pwritev(fd, write_iov, 2, 8U) != 5) {
+        close_if_valid(&fd);
+        return test_fail_errno("llam_pwritev failed");
+    }
+    memset(read_buf, 0, sizeof(read_buf));
+    if (llam_pread(fd, read_buf, 5U, 8U) != 5 || memcmp(read_buf, "12345", 5U) != 0) {
+        close_if_valid(&fd);
+        return test_fail("llam_pwritev data was not readable at the requested offset");
+    }
+    if (llam_pread(fd, read_buf, 1U, 4096U) != 0) {
+        close_if_valid(&fd);
+        return test_fail("llam_pread beyond EOF did not return zero");
+    }
+
+    errno = 0;
+    if (llam_io_buffer_alloc_aligned(128U, 3U, &buffer) != -1 || errno != EINVAL || buffer != NULL) {
+        close_if_valid(&fd);
+        llam_io_buffer_release(buffer);
+        return test_fail("invalid aligned buffer request did not fail with EINVAL");
+    }
+    if (llam_io_buffer_alloc_aligned(128U, 512U, &buffer) != 0 || buffer == NULL) {
+        close_if_valid(&fd);
+        return test_fail_errno("llam_io_buffer_alloc_aligned failed");
+    }
+    buffer_data = llam_io_buffer_data(buffer);
+    if (buffer_data == NULL ||
+        ((uintptr_t)buffer_data % 512U) != 0U ||
+        llam_io_buffer_capacity(buffer) < 128U ||
+        llam_io_buffer_alignment(buffer) != 512U) {
+        close_if_valid(&fd);
+        llam_io_buffer_release(buffer);
+        return test_fail("aligned owned buffer did not satisfy alignment/capacity contract");
+    }
+    llam_io_buffer_release(buffer);
+    buffer = NULL;
+
+    bytes = llam_pread_owned_aligned(fd, 5U, 8U, 512U, &buffer);
+    if (bytes != 5 ||
+        buffer == NULL ||
+        llam_io_buffer_alignment(buffer) != 512U ||
+        ((uintptr_t)llam_io_buffer_data(buffer) % 512U) != 0U ||
+        llam_io_buffer_size(buffer) != 5U ||
+        memcmp(llam_io_buffer_data(buffer), "12345", 5U) != 0) {
+        close_if_valid(&fd);
+        llam_io_buffer_release(buffer);
+        return test_fail("llam_pread_owned_aligned returned an unexpected buffer");
+    }
+    llam_io_buffer_release(buffer);
+    buffer = (llam_io_buffer_t *)&buffer;
+    if (llam_pread_owned_aligned(fd, 5U, 4096U, 512U, &buffer) != 0 || buffer != NULL) {
+        close_if_valid(&fd);
+        llam_io_buffer_release(buffer);
+        return test_fail("llam_pread_owned_aligned EOF did not return zero with NULL buffer");
+    }
+
+    dup_fd = dup(fd);
+    if (dup_fd < 0) {
+        close_if_valid(&fd);
+        return test_fail_errno("dup for close_handle failed");
+    }
+    if (llam_close_handle((llam_handle_t)dup_fd) != 0) {
+        close_if_valid(&dup_fd);
+        close_if_valid(&fd);
+        return test_fail_errno("llam_close_handle POSIX delegate failed");
+    }
+    dup_fd = -1;
+    close_if_valid(&fd);
     return 0;
 }
 
@@ -534,6 +704,8 @@ static void io_reader_task(void *arg) {
     llam_io_buffer_t *buffer = NULL;
     llam_iovec_t huge_tail_iov[17];
     llam_iovec_t null_tail_iov[2];
+    int close_pipe_fds[2] = {-1, -1};
+    int closed_poll_fd = -1;
     char hello[5];
     char one = 'x';
     short revents = 0;
@@ -556,6 +728,31 @@ static void io_reader_task(void *arg) {
         task_fail(state, "managed LLAM_INVALID_FD poll", errno);
         return;
     }
+    errno = 0;
+    if (llam_close(LLAM_INVALID_FD) != -1 || errno != EBADF) {
+        task_fail(state, "managed llam_close invalid fd", errno);
+        return;
+    }
+    if (pipe(close_pipe_fds) != 0) {
+        task_fail(state, "managed llam_close pipe setup", errno);
+        return;
+    }
+    if (llam_close((llam_fd_t)close_pipe_fds[0]) != 0) {
+        task_fail(state, "managed llam_close pipe reader", errno);
+        close_if_valid(&close_pipe_fds[0]);
+        close_if_valid(&close_pipe_fds[1]);
+        return;
+    }
+    closed_poll_fd = close_pipe_fds[0];
+    close_pipe_fds[0] = -1;
+    revents = 0;
+    if (llam_poll_fd((llam_fd_t)closed_poll_fd, POLLIN, 0, &revents) != 1 ||
+        (revents & POLLNVAL) == 0) {
+        task_fail(state, "managed llam_close did not close platform fd", errno);
+        close_if_valid(&close_pipe_fds[1]);
+        return;
+    }
+    close_if_valid(&close_pipe_fds[1]);
     /*
      * Owned-buffer zero-byte operations are API-level no-ops. They must not
      * allocate, inspect the descriptor, or fail inside managed task context.
@@ -1079,8 +1276,197 @@ cleanup:
     return rc;
 }
 
+static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *handle = NULL;
+    unsigned char *backend_storage = NULL;
+    const char payload[] = "provided";
+    size_t payload_len = strlen(payload);
+    int rc = 1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("provided-buffer detach opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("provided-buffer detach runtime create failed");
+    }
+    backend_storage = malloc(LLAM_IO_BUFFER_INLINE_BYTES);
+    buffer = calloc(1U, sizeof(*buffer));
+    if (backend_storage == NULL || buffer == NULL) {
+        rc = test_fail_errno("provided-buffer detach allocation failed");
+        goto cleanup;
+    }
+    memcpy(backend_storage, payload, payload_len);
+    buffer->owner_runtime = runtime;
+    buffer->detached_wrapper = true;
+    buffer->provided_storage = true;
+    buffer->provided_node_index = 0U;
+    buffer->provided_bid = 1U;
+    buffer->data = backend_storage;
+    buffer->size = payload_len;
+    buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+    if (llam_io_buffer_public_register(buffer) != 0) {
+        rc = test_fail_errno("provided-buffer detach public register failed");
+        goto cleanup;
+    }
+    handle = llam_io_buffer_public_handle(buffer);
+    if (handle == NULL) {
+        rc = test_fail("provided-buffer detach public handle missing");
+        goto cleanup;
+    }
+
+    /*
+     * Reproduces the shutdown edge for Linux provided-buffer rings without
+     * depending on a specific kernel feature: before the fix, runtime destroy
+     * left public owned buffers pointing at backend-owned storage.  The handle
+     * must be detached before backend_storage is released by node teardown.
+     */
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+    if (llam_io_buffer_data(handle) == backend_storage) {
+        rc = test_fail("provided owned buffer still points at runtime backend storage after destroy");
+        goto cleanup;
+    }
+    if (llam_io_buffer_size(handle) != payload_len ||
+        memcmp(llam_io_buffer_data(handle), payload, payload_len) != 0) {
+        rc = test_fail("provided owned buffer contents changed during destroy detach");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (handle != NULL) {
+        llam_io_buffer_release(handle);
+        handle = NULL;
+        buffer = NULL;
+    } else if (buffer != NULL) {
+        llam_io_buffer_release_raw(buffer);
+    }
+    if (runtime != NULL) {
+        llam_runtime_destroy(runtime);
+    }
+    free(backend_storage);
+    return rc;
+}
+
+static int test_public_owned_buffer_alloc_and_positional_io(void) {
+    llam_io_buffer_opts_t opts;
+    llam_io_buffer_t *buffer = NULL;
+#if LLAM_PLATFORM_POSIX
+    llam_io_buffer_t *owned = NULL;
+    char path[] = "/tmp/llam-io-buffer-XXXXXX";
+    const char payload[] = "abcdefghijklmnop";
+    llam_mut_iovec_t read_iov[2];
+    llam_iovec_t write_iov[2];
+    char read_buf[8];
+    char first[3] = {0};
+    char second[3] = {0};
+    int fd = -1;
+#endif
+    int rc = 1;
+
+    if (llam_io_buffer_opts_init(&opts, LLAM_IO_BUFFER_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("io buffer opts init failed");
+    }
+    opts.capacity = 32U;
+    opts.alignment = 64U;
+    if (llam_io_buffer_alloc_ex(&opts, LLAM_IO_BUFFER_OPTS_CURRENT_SIZE, &buffer) != 0 ||
+        buffer == NULL ||
+        llam_io_buffer_capacity(buffer) < 32U ||
+        llam_io_buffer_alignment(buffer) != 64U ||
+        ((uintptr_t)llam_io_buffer_data(buffer) & 63U) != 0U) {
+        rc = test_fail_errno("aligned owned-buffer allocation contract failed");
+        goto cleanup;
+    }
+    llam_io_buffer_release(buffer);
+    buffer = NULL;
+
+    errno = 0;
+    if (llam_io_buffer_alloc_aligned(16U, 3U, &buffer) != -1 || errno != EINVAL || buffer != NULL) {
+        rc = test_fail_errno("invalid owned-buffer alignment was accepted");
+        goto cleanup;
+    }
+
+#if LLAM_PLATFORM_POSIX
+    fd = mkstemp(path);
+    if (fd < 0) {
+        rc = test_fail_errno("mkstemp for positional io failed");
+        goto cleanup;
+    }
+    if (unlink(path) != 0 ||
+        write_all_native(fd, payload, sizeof(payload) - 1U) != 0) {
+        rc = test_fail_errno("positional io temp setup failed");
+        goto cleanup;
+    }
+
+    memset(read_buf, 0, sizeof(read_buf));
+    if (llam_pread((llam_fd_t)fd, read_buf, 4U, 2U) != 4 ||
+        memcmp(read_buf, "cdef", 4U) != 0) {
+        rc = test_fail_errno("llam_pread contract failed");
+        goto cleanup;
+    }
+
+    read_iov[0].iov_base = first;
+    read_iov[0].iov_len = 2U;
+    read_iov[1].iov_base = second;
+    read_iov[1].iov_len = 2U;
+    if (llam_preadv((llam_fd_t)fd, read_iov, 2, 4U) != 4 ||
+        memcmp(first, "ef", 2U) != 0 ||
+        memcmp(second, "gh", 2U) != 0) {
+        rc = test_fail_errno("llam_preadv contract failed");
+        goto cleanup;
+    }
+
+    if (llam_pwrite((llam_fd_t)fd, "ZZ", 2U, 6U) != 2) {
+        rc = test_fail_errno("llam_pwrite contract failed");
+        goto cleanup;
+    }
+    write_iov[0].iov_base = "12";
+    write_iov[0].iov_len = 2U;
+    write_iov[1].iov_base = "34";
+    write_iov[1].iov_len = 2U;
+    if (llam_pwritev((llam_fd_t)fd, write_iov, 2, 8U) != 4) {
+        rc = test_fail_errno("llam_pwritev contract failed");
+        goto cleanup;
+    }
+
+    memset(read_buf, 0, sizeof(read_buf));
+    if (llam_pread_handle((llam_handle_t)fd, read_buf, 6U, 4U) != 6 ||
+        memcmp(read_buf, "efZZ12", 6U) != 0) {
+        rc = test_fail_errno("llam_pread_handle delegate contract failed");
+        goto cleanup;
+    }
+
+    if (llam_pread_owned_aligned((llam_fd_t)fd, 4U, 8U, 64U, &owned) != 4 ||
+        owned == NULL ||
+        llam_io_buffer_size(owned) != 4U ||
+        llam_io_buffer_alignment(owned) != 64U ||
+        ((uintptr_t)llam_io_buffer_data(owned) & 63U) != 0U ||
+        memcmp(llam_io_buffer_data(owned), "1234", 4U) != 0) {
+        rc = test_fail_errno("llam_pread_owned_aligned contract failed");
+        goto cleanup;
+    }
+#endif
+    rc = 0;
+
+cleanup:
+#if LLAM_PLATFORM_POSIX
+    if (owned != NULL) {
+        llam_io_buffer_release(owned);
+    }
+    close_if_valid(&fd);
+#endif
+    if (buffer != NULL) {
+        llam_io_buffer_release(buffer);
+    }
+    return rc;
+}
+
 int main(void) {
     if (test_direct_owned_read_and_poll() != 0 ||
+        test_positional_io_and_aligned_buffers() != 0 ||
 #if defined(__linux__)
         test_read_owned_invalid_fd_before_allocation() != 0 ||
 #endif
@@ -1088,7 +1474,9 @@ int main(void) {
         test_owned_buffer_release_after_shutdown() != 0 ||
         test_owned_buffer_accessor_release_race() != 0 ||
         test_owned_buffer_stale_release_reuse_guard() != 0 ||
-        test_owned_buffer_raw_release_decodable_pointer_guard() != 0) {
+        test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
+        test_public_owned_buffer_alloc_and_positional_io() != 0 ||
+        test_provided_owned_buffer_detaches_on_runtime_destroy() != 0) {
         return 1;
     }
     printf("[test_io_buffers] ok\n");

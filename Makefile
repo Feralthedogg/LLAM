@@ -49,7 +49,9 @@ CLEAN_FILES = \
 	test_io_buffers \
 	test_windows_policy \
 	test_windows_runtime_smoke \
+	test_windows_iocp_io \
 	test_windows_iocp_dump \
+	test_windows_handle_io \
 	test_shared_load \
 	libllam_runtime.a \
 	demo.exe \
@@ -76,7 +78,9 @@ CLEAN_FILES = \
 	test_io_buffers.exe \
 	test_windows_policy.exe \
 	test_windows_runtime_smoke.exe \
+	test_windows_iocp_io.exe \
 	test_windows_iocp_dump.exe \
+	test_windows_handle_io.exe \
 	test_shared_load.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
@@ -120,9 +124,13 @@ SHLIB_LDFLAGS = -shared -Wl,-soname,$(SHLIB_SONAME)
 DL_LIBS = -ldl
 endif
 
-RUNTIME_PRIV_HDRS = \
+LLAM_PUBLIC_HDRS = \
+	include/llam/io.h \
 	include/llam/platform.h \
-	include/llam/runtime.h \
+	include/llam/runtime.h
+
+RUNTIME_PRIV_HDRS = \
+	$(LLAM_PUBLIC_HDRS) \
 	src/internal/runtime_platform.h \
 	src/internal/runtime_windows_compat.h \
 	src/internal/runtime_windows.h \
@@ -214,8 +222,12 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/runtime_io_api_direct_tuning.o \
 	$(OBJDIR)/src/io/runtime_io_api_issue.o \
 	$(OBJDIR)/src/io/runtime_io_api_blocking_ops.o \
+	$(OBJDIR)/src/io/runtime_io_api_blocking_file_ops.o \
 	$(OBJDIR)/src/io/runtime_io_buffer_registry.o \
 	$(OBJDIR)/src/io/runtime_io_api_owned.o \
+	$(OBJDIR)/src/io/runtime_io_api_handle_positional.o \
+	$(OBJDIR)/src/io/runtime_io_api_positional.o \
+	$(OBJDIR)/src/io/runtime_io_api_positional_util.o \
 	$(OBJDIR)/src/io/runtime_io_api_public.o \
 	$(OBJDIR)/src/io/windows/runtime_windows_iocp.o \
 	$(OBJDIR)/src/core/runtime_debug_dump_helpers.o \
@@ -354,8 +366,12 @@ TEST_WINDOWS_POLICY_OBJS = \
 # builds everywhere and skips at runtime on non-Windows hosts.
 TEST_WINDOWS_RUNTIME_SMOKE_OBJS = \
 	$(OBJDIR)/tests/test_windows_runtime_smoke.o
+TEST_WINDOWS_IOCP_IO_OBJS = \
+	$(OBJDIR)/tests/test_windows_iocp_io.o
 TEST_WINDOWS_IOCP_DUMP_OBJS = \
 	$(OBJDIR)/tests/test_windows_iocp_dump.o
+TEST_WINDOWS_HANDLE_IO_OBJS = \
+	$(OBJDIR)/tests/test_windows_handle_io.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
@@ -413,7 +429,9 @@ LINK_TARGETS = \
 	test_io_buffers \
 	test_windows_policy \
 	test_windows_runtime_smoke \
+	test_windows_iocp_io \
 	test_windows_iocp_dump \
+	test_windows_handle_io \
 	test_shared_load \
 	libllam_runtime.a
 
@@ -510,7 +528,7 @@ FORCE:
 
 $(BUILD_SIGNATURE): FORCE
 	@mkdir -p $(dir $@)
-	@tmp="$@.tmp"; \
+	@tmp="$@.$$$$.tmp"; \
 	{ \
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
@@ -528,7 +546,7 @@ $(BUILD_SIGNATURE): FORCE
 
 $(SHARED_BUILD_SIGNATURE): FORCE
 	@mkdir -p $(dir $@)
-	@tmp="$@.tmp"; \
+	@tmp="$@.$$$$.tmp"; \
 	{ \
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
@@ -554,7 +572,7 @@ $(LINK_TARGETS): %: %.link-signature
 $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 
 %.link-signature: FORCE
-	@tmp="$@.tmp"; \
+	@tmp="$@.$$$$.tmp"; \
 	{ \
 		printf 'target=%s\n' '$*'; \
 		printf 'CC=%s\n' '$(CC)'; \
@@ -583,7 +601,7 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load server_flood shared
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_shared_load server_flood shared
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -602,7 +620,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	./test_io_buffers
 	./test_windows_policy
 	./test_windows_runtime_smoke
+	./test_windows_iocp_io
 	./test_windows_iocp_dump
+	./test_windows_handle_io
 	./test_shared_load ./$(SHLIB_REAL)
 	@if ./server_flood --clients 8x >/tmp/llam-server-flood-invalid.out 2>&1; then \
 		echo "server_flood accepted invalid --clients value" >&2; \
@@ -630,23 +650,31 @@ TSAN_TEST_TARGETS = \
 	test_multi_runtime_core
 
 test-asan:
+	@set -e; \
+	cleanup() { rm -f $(SANITIZER_TEST_TARGETS); }; \
+	trap cleanup EXIT; \
+	cleanup; \
 	$(MAKE) $(SANITIZER_TEST_TARGETS) \
 		OBJDIR=object-asan \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
-		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_api_edges
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_core
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_io_buffers
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal
+		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_api_edges; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_core; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_io_buffers; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
 
 test-tsan:
+	@set -e; \
+	cleanup() { rm -f $(TSAN_TEST_TARGETS); }; \
+	trap cleanup EXIT; \
+	cleanup; \
 	$(MAKE) $(TSAN_TEST_TARGETS) \
 		OBJDIR=object-tsan \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
-		LDLIBS="$(LDLIBS) -fsanitize=thread"
-	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_core
-	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal
+		LDLIBS="$(LDLIBS) -fsanitize=thread"; \
+	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_core; \
+	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
 
 analyze-cppcheck:
@@ -753,8 +781,14 @@ test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 test_windows_runtime_smoke: $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) $(LDLIBS)
 
+test_windows_iocp_io: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS) $(LDLIBS)
+
 test_windows_iocp_dump: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS) $(LDLIBS)
+
+test_windows_handle_io: $(RUNTIME_OBJS) $(TEST_WINDOWS_HANDLE_IO_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_HANDLE_IO_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
@@ -835,71 +869,71 @@ $(SHARED_OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/inte
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/demo.o: examples/demo.c include/llam/runtime.h examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/demo.o: examples/demo.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/demo_tasks.o: examples/demo_tasks.c include/llam/runtime.h examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/demo_tasks.o: examples/demo_tasks.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/demo_entry.o: examples/demo_entry.c include/llam/runtime.h examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/demo_entry.o: examples/demo_entry.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress.o: examples/stress.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress.o: examples/stress.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_support.o: examples/stress_support.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_support.o: examples/stress_support.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_tasks.o: examples/stress_tasks.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_tasks.o: examples/stress_tasks.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_core_cases.o: examples/stress_core_cases.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_core_cases.o: examples/stress_core_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_timeout_cases.o: examples/stress_timeout_cases.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_timeout_cases.o: examples/stress_timeout_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_dynamic_cases.o: examples/stress_dynamic_cases.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_dynamic_cases.o: examples/stress_dynamic_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_suite.o: examples/stress_suite.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_suite.o: examples/stress_suite.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_entry.o: examples/stress_entry.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_entry.o: examples/stress_entry.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/stress_signal_dump.o: examples/stress_signal_dump.c include/llam/runtime.h examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/stress_signal_dump.o: examples/stress_signal_dump.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/bench.o: examples/bench.c include/llam/runtime.h examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/bench.o: examples/bench.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/bench_support.o: examples/bench_support.c include/llam/runtime.h examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/bench_support.o: examples/bench_support.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c include/llam/runtime.h examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/server.o: examples/server.c examples/server_support.h include/llam/runtime.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/server.o: examples/server.c examples/server_support.h $(LLAM_PUBLIC_HDRS) $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/server_lossless.o: examples/server.c examples/server_support.h include/llam/runtime.h $(EXAMPLE_SHARED_HDRS)
+$(OBJDIR)/examples/server_lossless.o: examples/server.c examples/server_support.h $(LLAM_PUBLIC_HDRS) $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_CHAT_LOSSLESS_DEFAULT=1 $(CFLAGS) -c -o $@ $<
 
@@ -911,7 +945,7 @@ $(OBJDIR)/examples/server_flood.o: examples/server_flood.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/%.o: tests/%.c include/llam/runtime.h
+$(OBJDIR)/tests/%.o: tests/%.c $(LLAM_PUBLIC_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

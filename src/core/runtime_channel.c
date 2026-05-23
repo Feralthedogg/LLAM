@@ -58,7 +58,7 @@ static bool llam_channel_should_handoff_to_waiter(const llam_wait_node_t *node, 
      * before enqueue, rather than racing on task->parked_shard/last_shard for
      * this optimization-only decision.
      */
-    if (node->owner_shard != g_llam_tls_shard->id) {
+    if (g_llam_tls_shard->runtime != rt || node->owner_shard != g_llam_tls_shard->id) {
         return false;
     }
     return true;
@@ -511,25 +511,22 @@ int llam_channel_send(llam_channel_t *channel, void *value) {
  */
 int llam_channel_try_send(llam_channel_t *channel, void *value) {
     llam_wait_node_t *receiver;
+    llam_runtime_t *pinned_runtime = NULL;
 
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+    if (llam_runtime_begin_live_object_owner_op(channel->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {
         llam_channel_end_public_op(channel);
-        return -1;
-    }
-    if (!atomic_load_explicit(&channel->owner_runtime->initialized, memory_order_acquire)) {
-        llam_channel_end_public_op(channel);
-        errno = ENOTSUP;
         return -1;
     }
 
     pthread_mutex_lock(&channel->lock);
     if (channel->closed) {
         pthread_mutex_unlock(&channel->lock);
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         errno = EPIPE;
         return -1;
@@ -539,6 +536,7 @@ int llam_channel_try_send(llam_channel_t *channel, void *value) {
     if (receiver != NULL) {
         pthread_mutex_unlock(&channel->lock);
         llam_channel_wake_waiter(receiver, LLAM_WAIT_CHANNEL_RECV);
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         return 0;
     }
@@ -553,11 +551,13 @@ int llam_channel_try_send(llam_channel_t *channel, void *value) {
         channel->count += 1U;
         pthread_mutex_unlock(&channel->lock);
         llam_channel_hot_safepoint();
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         return 0;
     }
 
     pthread_mutex_unlock(&channel->lock);
+    llam_runtime_end_public_op(pinned_runtime);
     llam_channel_end_public_op(channel);
     errno = EAGAIN;
     return -1;
@@ -794,6 +794,8 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
     llam_wait_node_t *sender;
     void *value;
     void *refill_value;
+    bool owner_live;
+    llam_runtime_t *pinned_runtime = NULL;
 
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL || out == NULL) {
@@ -801,15 +803,15 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+    if (llam_runtime_check_object_owner_for_cleanup(channel->owner_runtime) != 0) {
         llam_channel_end_public_op(channel);
         return -1;
     }
+    owner_live = llam_runtime_begin_object_owner_op_if_live(channel->owner_runtime, &pinned_runtime);
     *out = NULL;
 
     pthread_mutex_lock(&channel->lock);
-    if (channel->owner_runtime == NULL ||
-        !atomic_load_explicit(&channel->owner_runtime->initialized, memory_order_acquire)) {
+    if (!owner_live) {
         /*
          * Channels can outlive their scheduler runtime. Host cleanup code may
          * still need to drain already-buffered values before destroy; do that
@@ -825,16 +827,19 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
             channel->count -= 1U;
             pthread_mutex_unlock(&channel->lock);
             *out = value;
+            llam_runtime_end_public_op(pinned_runtime);
             llam_channel_end_public_op(channel);
             return 0;
         }
         if (channel->closed) {
             pthread_mutex_unlock(&channel->lock);
+            llam_runtime_end_public_op(pinned_runtime);
             llam_channel_end_public_op(channel);
             errno = EPIPE;
             return -1;
         }
         pthread_mutex_unlock(&channel->lock);
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         errno = ENOTSUP;
         return -1;
@@ -867,6 +872,7 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
             llam_channel_hot_safepoint();
         }
         *out = value;
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         return 0;
     }
@@ -876,18 +882,21 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
         pthread_mutex_unlock(&channel->lock);
         llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
         *out = value;
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         return 0;
     }
 
     if (channel->closed) {
         pthread_mutex_unlock(&channel->lock);
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         errno = EPIPE;
         return -1;
     }
 
     pthread_mutex_unlock(&channel->lock);
+    llam_runtime_end_public_op(pinned_runtime);
     llam_channel_end_public_op(channel);
     errno = EAGAIN;
     return -1;
@@ -1063,29 +1072,54 @@ void *llam_channel_recv_until(llam_channel_t *channel, uint64_t deadline_ns) {
  *
  * @param channel Channel to close.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL.
+ * @return 0 on success, or -1 with @c errno set. Invalid or consumed handles
+ *         fail with @c EINVAL; cross-runtime managed close fails with @c EXDEV;
+ *         host close of a waiter-bearing channel whose owner runtime is no
+ *         longer live fails with @c ENOTSUP.
  */
 int llam_channel_close(llam_channel_t *channel) {
+    llam_runtime_t *pinned_runtime = NULL;
+    bool waiter_runtime_ready = false;
+
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+    if (llam_runtime_check_object_owner_for_cleanup(channel->owner_runtime) != 0) {
         llam_channel_end_public_op(channel);
         return -1;
     }
 
+retry:
     pthread_mutex_lock(&channel->lock);
     if (channel->closed) {
         pthread_mutex_unlock(&channel->lock);
+        llam_runtime_end_public_op(pinned_runtime);
         llam_channel_end_public_op(channel);
         return 0;
+    }
+    if (!waiter_runtime_ready &&
+        (channel->send_waiters.head != NULL || channel->recv_waiters.head != NULL)) {
+        pthread_mutex_unlock(&channel->lock);
+        /*
+         * Closing an idle channel is a host-side cleanup operation and may happen
+         * after its explicit runtime has been destroyed.  Waking waiters is not
+         * cleanup-only: it touches runtime queues and wake handles, so host callers
+         * must pin a live owner runtime before detaching waiter nodes.
+         */
+        if (llam_runtime_begin_live_object_owner_op(channel->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {
+            llam_channel_end_public_op(channel);
+            return -1;
+        }
+        waiter_runtime_ready = true;
+        goto retry;
     }
     channel->closed = true;
     llam_channel_wake_all_waiters(channel, &channel->send_waiters, EPIPE, LLAM_WAIT_CHANNEL_SEND);
     llam_channel_wake_all_waiters(channel, &channel->recv_waiters, EPIPE, LLAM_WAIT_CHANNEL_RECV);
     pthread_mutex_unlock(&channel->lock);
+    llam_runtime_end_public_op(pinned_runtime);
     llam_channel_end_public_op(channel);
     return 0;
 }

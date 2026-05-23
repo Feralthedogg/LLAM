@@ -95,18 +95,28 @@ static int exercise_recv_ready_copy_payload_shutdown(void) {
     watch->ready_tail = ready;
     watch->ready_depth = 1U;
 
-    if (pthread_mutex_lock(&g_llam_runtime.nodes[0].watch_lock) != 0) {
-        free(payload);
-        free(ready);
-        free(watch);
-        llam_runtime_shutdown();
-        return fail_errno("watch lock failed");
+    {
+        int lock_rc = pthread_mutex_lock(&g_llam_runtime.nodes[0].watch_lock);
+
+        if (lock_rc != 0) {
+            errno = lock_rc;
+            free(payload);
+            free(ready);
+            free(watch);
+            llam_runtime_shutdown();
+            return fail_errno("watch lock failed");
+        }
     }
     watch->next = g_llam_runtime.nodes[0].recv_watches;
     g_llam_runtime.nodes[0].recv_watches = watch;
-    if (pthread_mutex_unlock(&g_llam_runtime.nodes[0].watch_lock) != 0) {
-        llam_runtime_shutdown();
-        return fail_errno("watch unlock failed");
+    {
+        int unlock_rc = pthread_mutex_unlock(&g_llam_runtime.nodes[0].watch_lock);
+
+        if (unlock_rc != 0) {
+            errno = unlock_rc;
+            llam_runtime_shutdown();
+            return fail_errno("watch unlock failed");
+        }
     }
 
     llam_runtime_shutdown();
@@ -152,7 +162,6 @@ static int exercise_recv_ready_pop_without_transfer(void) {
 #endif
     return 0;
 }
-
 #if LLAM_RUNTIME_BACKEND_LINUX
 static bool io_uring_unavailable_for_direct_internal_test(int rc) {
     int err = -rc;

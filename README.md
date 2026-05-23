@@ -300,7 +300,7 @@ Include the canonical public API:
 ```
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer size-aware `_ex` entry points so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
-Embedding code that needs independent scheduler instances should use `llam_runtime_create()`, `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`. The older `llam_runtime_init()` / `llam_spawn()` / `llam_run()` / `llam_runtime_shutdown()` calls remain convenience wrappers for the process-default runtime.
+Embedding code that needs independent scheduler instances should use `llam_runtime_create()`, `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`. The older host-thread lifecycle calls remain convenience wrappers for the process-default runtime; managed task spawn/stop/shutdown wrappers target the task's owner runtime and do not stop foreign runtimes.
 macOS-specific performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
 Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
 
@@ -442,7 +442,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers `read`, `read_when_ready`, `write`, HANDLE read/write, `accept`, `connect`, fd polling, HANDLE polling, and owned-buffer reads on supported native backends. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, and owned-buffer reads on supported native backends. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
 
 ```c
 #include "llam/runtime.h"
@@ -497,8 +497,8 @@ static void root(void *arg) {
         (void)llam_join(writer);
     }
 
-    close(sv[0]);
-    close(sv[1]);
+    (void)llam_close(sv[0]);
+    (void)llam_close(sv[1]);
 }
 ```
 
@@ -514,6 +514,21 @@ if (n > 0 && buffer != NULL) {
     size_t size = llam_io_buffer_size(buffer);
     (void)data;
     (void)size;
+}
+llam_io_buffer_release(buffer);
+```
+
+For DB/storage workloads, use positional I/O so the current file offset is not
+shared between tasks. Direct-I/O callers can request sector/page-aligned owned
+buffers and pass externally opened `O_DIRECT` files or Windows overlapped file
+HANDLEs.
+
+```c
+llam_io_buffer_t *buffer = NULL;
+ssize_t n = llam_pread_owned_aligned(fd, 4096, 8192, 4096, &buffer);
+
+if (n > 0) {
+    /* llam_io_buffer_data(buffer) is aligned to at least 4096 bytes. */
 }
 llam_io_buffer_release(buffer);
 ```
@@ -660,12 +675,22 @@ I/O:
 | `llam_write` | Write to an fd. |
 | `llam_read_handle` | Read from a platform handle; Windows uses overlapped `ReadFile` through IOCP when possible, POSIX aliases to fd read. |
 | `llam_write_handle` | Write to a platform handle; Windows uses overlapped `WriteFile` through IOCP when possible, POSIX aliases to fd write. |
+| `llam_close` | Close an fd/socket after invalidating runtime-local descriptor state. |
+| `llam_close_handle` | Close a generic platform handle; Windows uses `CloseHandle`, POSIX aliases to fd close. |
+| `llam_pread` / `llam_pwrite` | Positional fd read/write without changing the current file offset; Windows fd/socket variants return `ENOTSUP`. |
+| `llam_preadv` / `llam_pwritev` | Positional scatter/gather fd read/write. |
+| `llam_pread_handle` / `llam_pwrite_handle` | Positional HANDLE read/write; Windows uses overlapped file I/O and POSIX aliases to fd positional I/O. |
+| `llam_preadv_handle` / `llam_pwritev_handle` | Positional scatter/gather HANDLE read/write. |
 | `llam_read_owned` | Read into a runtime-owned buffer. |
 | `llam_recv_owned` | Receive with flags into a runtime-owned buffer. |
+| `llam_io_buffer_opts_init` / `llam_io_buffer_alloc_ex` | Initialize and allocate owned I/O buffers with explicit capacity, alignment, and flags. |
+| `llam_io_buffer_alloc` / `llam_io_buffer_alloc_aligned` | Allocate default or explicitly aligned owned I/O buffers. |
 | `llam_io_buffer_release` | Release an owned buffer. |
 | `llam_io_buffer_data` | Return the owned buffer data pointer. |
 | `llam_io_buffer_size` | Return the number of bytes read. |
 | `llam_io_buffer_capacity` | Return owned buffer capacity. |
+| `llam_io_buffer_alignment` | Return owned buffer alignment. |
+| `llam_pread_owned_aligned` / `llam_pread_handle_owned_aligned` | Positional owned-buffer reads with explicit alignment for direct-I/O workloads. |
 | `llam_accept` | Accept a connection from a listener fd; returns `LLAM_INVALID_FD` on failure. |
 | `llam_connect` | Connect a socket without blocking the scheduler worker. |
 | `llam_poll_fd` | Wait for fd readiness. |
@@ -917,7 +942,7 @@ current maintained contract rather than future roadmap work:
 
 - Focused direct API tests cover lifecycle, public handle stale/reuse guards, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`.
 - Runtime-owned failures should be reduced into focused runtime tests before they rely on example-server reproduction. The example server remains an integration and policy workload, while scheduler, cancellation, wakeup, select, and ownership regressions belong in direct tests.
-- The runtime handle API is the supported embedding boundary. The public header, ABI guide, operations guide, and direct tests pin the current contract: explicit heap-backed runtimes can be created, spawned into, driven, and destroyed independently; legacy singleton wrappers target only `llam_runtime_default()`; and owner-tagged runtime objects fail cross-owner managed use with `EXDEV`.
+- The runtime handle API is the supported embedding boundary. The public header, ABI guide, operations guide, and direct tests pin the current contract: explicit heap-backed runtimes can be created, spawned into, driven, and destroyed independently; legacy host-thread lifecycle wrappers target `llam_runtime_default()`, while managed task spawn/stop/shutdown wrappers use the task's owner runtime; spawn-time cancellation tokens and task-group children stay in their target owner runtime; and owner-tagged runtime objects fail cross-owner managed use with `EXDEV`.
 - Default release builds keep owner diagnostics enabled. `LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` is an explicit source-build profiling knob for unsafe singleton-only binaries, not the documented ABI-conformance mode.
 - Rare-hang diagnostics are expected to be actionable. `llam_dump_runtime_state()` emits lifecycle/stop state, active I/O waiters, block-helper wake state, node submit/control/watch queues, shard wake/I/O ownership, and task-level wait ownership (`wait_owner`, cancellation registration, deadlines, active I/O requests, and blocking jobs). CI long-running stress jobs stream partial output through `scripts/run_with_timeout.py`, request a signal-driven runtime dump before timeout shutdown on POSIX stress binaries, and server composite runs can emit stop-time runtime dumps into the artifact directory.
 - Release archives are expected to stay self-contained: public headers, shared/static libraries, CMake config, pkg-config metadata, examples, install scripts, and operations docs.
@@ -931,7 +956,7 @@ Future core-runtime work should tighten LLAM itself without changing the stable
 
 - Keep extending direct API coverage when new edge cases are found, especially around shutdown races, cancellation ownership, lost wakeups, select fanout, blocking helpers, and I/O request ownership.
 - Continue promoting low-level stress failures out of examples into minimal runtime tests when the bug belongs to LLAM rather than to sample-application policy.
-- Continue hardening true concurrent multi-runtime execution. Explicit runtime handles now own scheduler state, public registries, caches, blocking workers, and backend routing; remaining work should broaden platform I/O owner tests, keep signal/fault hooks reference-counted across concurrent runtime lifecycles, and preserve single-runtime benchmark guardrails.
+- Continue hardening true concurrent multi-runtime execution. Explicit runtime handles now own scheduler state, caches, blocking workers, and backend routing; public handles still use process-wide family-tagged slot tables, with each object carrying an owner runtime and failing cross-owner managed use with `EXDEV`. Remaining work should broaden platform I/O owner tests, keep signal/fault hooks reference-counted across concurrent runtime lifecycles, and preserve single-runtime benchmark guardrails.
 - Keep improving diagnostic dumps so rare shutdown, cancellation, wake handoff, and I/O ownership hangs produce enough state to debug without reproducing under a debugger.
 
 ### 3. Performance Roadmap
@@ -1084,6 +1109,11 @@ LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each 
 4. Async backend submission (io_uring SQE or kqueue kevent)
 5. Blocking-worker fallback if the backend cannot handle the fd
 ```
+
+`llam_close()` is the matching fd/socket ownership boundary for descriptors
+that have been used with LLAM I/O. It closes with the platform primitive and
+invalidates runtime-local descriptor state first; raw `close()`/`closesocket()`
+is still legal but gives the runtime less diagnostic context around fd reuse.
 
 **Linux backend** (`src/io/linux/`): each `llam_node_t` owns an `io_uring` instance with a ring depth of 256. Features include:
 

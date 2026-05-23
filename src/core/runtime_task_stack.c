@@ -833,7 +833,9 @@ unsigned llam_pick_spawn_shard(llam_runtime_t *rt) {
     unsigned ticket;
     unsigned i;
 
-    if (g_llam_tls_shard != NULL) {
+    if (g_llam_tls_shard != NULL &&
+        g_llam_tls_shard->runtime == rt &&
+        g_llam_tls_shard->id < rt->active_shards) {
         return g_llam_tls_shard->id;
     }
 

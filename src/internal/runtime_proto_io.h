@@ -104,6 +104,7 @@ int llam_node_queue_control(llam_node_t *node, llam_io_control_kind_t kind, void
 int llam_node_queue_control_locked(llam_node_t *node, llam_io_control_kind_t kind, void *target);
 bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind);
 void llam_probe_ring_support(llam_node_t *node);
+void llam_io_buffer_public_detach_runtime_storage(llam_runtime_t *rt);
 
 /*
  * io_uring/kqueue user-data tagging. Pointers are encoded with small type tags

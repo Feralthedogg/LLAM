@@ -317,7 +317,7 @@ static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
     if (LLAM_UNLIKELY(task->cancel_token != NULL &&
-                      llam_cancel_token_retain_task_ref(task->cancel_token, &task->cancel_token) != 0)) {
+                      llam_cancel_token_retain_task_ref_for_runtime(task->cancel_token, rt, &task->cancel_token) != 0)) {
         task->cancel_token = NULL;
         llam_task_allocator_free(task);
         return NULL;
@@ -406,13 +406,19 @@ llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
                                    void *arg,
                                    const llam_spawn_opts_t *opts,
                                    size_t opts_size) {
+    llam_runtime_t *pinned_runtime = NULL;
+    llam_task_t *task;
+
     if (runtime == NULL) {
-        runtime = llam_runtime_default_storage();
-    }
-    if (llam_runtime_check_handle(runtime) != 0) {
+        errno = EINVAL;
         return NULL;
     }
-    return llam_spawn_on_runtime(runtime, fn, arg, opts, opts_size);
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
+        return NULL;
+    }
+    task = llam_spawn_on_runtime(pinned_runtime, fn, arg, opts, opts_size);
+    llam_runtime_end_public_op(pinned_runtime);
+    return task;
 }
 
 llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {

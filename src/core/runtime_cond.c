@@ -288,6 +288,7 @@ int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64_t deadli
  */
 int llam_cond_signal(llam_cond_t *cond) {
     llam_wait_node_t *node;
+    llam_runtime_t *pinned_runtime = NULL;
 
     llam_task_safepoint();
 
@@ -296,7 +297,7 @@ int llam_cond_signal(llam_cond_t *cond) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
+    if (llam_runtime_begin_live_object_owner_op(cond->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {
         llam_cond_end_public_op(cond);
         return -1;
     }
@@ -312,6 +313,7 @@ int llam_cond_signal(llam_cond_t *cond) {
         node->error_code = 0;
         llam_wake_wait_node(node, true, LLAM_WAIT_COND);
     }
+    llam_runtime_end_public_op(pinned_runtime);
     llam_cond_end_public_op(cond);
     return 0;
 }
@@ -325,13 +327,14 @@ int llam_cond_signal(llam_cond_t *cond) {
  */
 int llam_cond_broadcast(llam_cond_t *cond) {
     llam_wait_node_t *node;
+    llam_runtime_t *pinned_runtime = NULL;
 
     cond = llam_cond_resolve_public_handle(cond);
     if (cond == NULL) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
+    if (llam_runtime_begin_live_object_owner_op(cond->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {
         llam_cond_end_public_op(cond);
         return -1;
     }
@@ -343,6 +346,7 @@ int llam_cond_broadcast(llam_cond_t *cond) {
         llam_wake_wait_node(node, true, LLAM_WAIT_COND);
     }
     pthread_mutex_unlock(&cond->lock);
+    llam_runtime_end_public_op(pinned_runtime);
     llam_cond_end_public_op(cond);
     return 0;
 }

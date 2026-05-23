@@ -153,7 +153,7 @@ int llam_cond_destroy(llam_cond_t *cond) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
+    if (llam_runtime_check_object_owner_for_cleanup(cond->owner_runtime) != 0) {
         pthread_mutex_unlock(&g_llam_cond_registry_lock);
         return -1;
     }

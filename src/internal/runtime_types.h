@@ -61,6 +61,18 @@
 
 #include "runtime_public_slot.h"
 
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+/**
+ * @brief Runtime-local Windows socket nonblocking cache capacity.
+ *
+ * @details
+ * The cache is intentionally scoped to a runtime object, not process-global,
+ * because true multi-runtime execution must not let one runtime's direct-I/O
+ * fast path trust socket state observed by another runtime.
+ */
+#define LLAM_WINDOWS_NONBLOCK_CACHE_CAP 4096U
+#endif
+
 #ifdef __linux__
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
@@ -325,6 +337,10 @@ typedef enum llam_io_kind {
     LLAM_IO_KIND_CONNECT = 4,
     LLAM_IO_KIND_HANDLE_READ = 5,
     LLAM_IO_KIND_HANDLE_WRITE = 6,
+    LLAM_IO_KIND_PREAD = 7,
+    LLAM_IO_KIND_PWRITE = 8,
+    LLAM_IO_KIND_HANDLE_PREAD = 9,
+    LLAM_IO_KIND_HANDLE_PWRITE = 10,
 } llam_io_kind_t;
 
 /** @brief Current ownership/wait state for an I/O request. */
@@ -383,6 +399,7 @@ typedef struct llam_io_req {
     llam_handle_t handle;
     void *buf;
     size_t count;
+    uint64_t offset;
     struct sockaddr *addr;
     socklen_t *addrlen;
     socklen_t addr_len;
@@ -634,11 +651,13 @@ struct llam_io_buffer {
     size_t size;
     size_t capacity;
     unsigned char *data;
+    size_t alignment;
     bool external_storage;
+    bool aligned_storage;
     bool detached_wrapper;
     bool provided_storage;
     unsigned short provided_bid;
-    unsigned char inline_data[LLAM_IO_BUFFER_INLINE_BYTES];
+    _Alignas(16) unsigned char inline_data[LLAM_IO_BUFFER_INLINE_BYTES];
 };
 
 /** @brief Shared cancellation state.  Waiters are task links protected by lock. */
@@ -1018,6 +1037,7 @@ struct llam_runtime {
     uint64_t runtime_id;
     bool heap_allocated;
     atomic_bool destroy_claimed;
+    _Atomic size_t active_ops;
     atomic_bool initialized;
     atomic_bool exec_started;
     unsigned observed_shards;
@@ -1043,6 +1063,9 @@ struct llam_runtime {
     bool xsave_enabled;
     bool winsock_started;
     unsigned windows_unsafe_skip_task_simd;
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    _Atomic(uintptr_t) windows_nonblock_cache[LLAM_WINDOWS_NONBLOCK_CACHE_CAP];
+#endif
     uint64_t xsave_mask;
     size_t xsave_area_size;
     size_t xsave_area_alloc_size;

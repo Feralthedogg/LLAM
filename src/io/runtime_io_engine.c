@@ -181,6 +181,14 @@ bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
     case LLAM_IO_KIND_HANDLE_WRITE:
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
+    case LLAM_IO_KIND_PREAD:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
+    case LLAM_IO_KIND_PWRITE:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
+    case LLAM_IO_KIND_HANDLE_PREAD:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
+    case LLAM_IO_KIND_HANDLE_PWRITE:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
     default:
         return false;
     }
@@ -523,6 +531,14 @@ bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
     case LLAM_IO_KIND_HANDLE_WRITE:
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
+    case LLAM_IO_KIND_PREAD:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
+    case LLAM_IO_KIND_PWRITE:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
+    case LLAM_IO_KIND_HANDLE_PREAD:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
+    case LLAM_IO_KIND_HANDLE_PWRITE:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
     default:
         return false;
     }
@@ -693,6 +709,14 @@ bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
     case LLAM_IO_KIND_HANDLE_WRITE:
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
+    case LLAM_IO_KIND_PREAD:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
+    case LLAM_IO_KIND_PWRITE:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
+    case LLAM_IO_KIND_HANDLE_PREAD:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
+    case LLAM_IO_KIND_HANDLE_PWRITE:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
     default:
         return false;
     }
@@ -798,6 +822,14 @@ bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
     case LLAM_IO_KIND_HANDLE_READ:
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
     case LLAM_IO_KIND_HANDLE_WRITE:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
+    case LLAM_IO_KIND_PREAD:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
+    case LLAM_IO_KIND_PWRITE:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
+    case LLAM_IO_KIND_HANDLE_PREAD:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
+    case LLAM_IO_KIND_HANDLE_PWRITE:
         return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
     default:
         return false;

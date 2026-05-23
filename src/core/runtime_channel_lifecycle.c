@@ -260,7 +260,7 @@ int llam_channel_destroy(llam_channel_t *channel) {
         errno = EINVAL;
         return -1;
     }
-    if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+    if (llam_runtime_check_object_owner_for_cleanup(channel->owner_runtime) != 0) {
         pthread_mutex_unlock(&g_llam_channel_registry_lock);
         return -1;
     }

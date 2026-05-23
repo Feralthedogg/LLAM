@@ -51,12 +51,6 @@ static int llam_invalid_fd_poll_result(short *revents) {
 }
 
 #if LLAM_RUNTIME_BACKEND_WINDOWS
-/** Number of Windows socket handles remembered as already set nonblocking. */
-#define LLAM_WINDOWS_NONBLOCK_CACHE_CAP 4096U
-
-/** Small direct-mapped cache that avoids repeating FIONBIO on every operation. */
-static _Atomic(uintptr_t) g_llam_windows_nonblock_cache[LLAM_WINDOWS_NONBLOCK_CACHE_CAP];
-
 /**
  * @brief Return whether the Windows nonblocking socket cache is enabled.
  *
@@ -77,13 +71,48 @@ static bool llam_windows_nonblock_cache_enabled(void) {
     return value != 0;
 }
 
+/**
+ * @brief Return the runtime that may own the direct-I/O socket cache.
+ *
+ * @details
+ * Direct I/O is entered from managed LLAM tasks.  Use pointer identity rather
+ * than shard ids here: shard ids are runtime-local and runtime A shard 0 must
+ * never share cached socket state with runtime B shard 0.
+ */
+static llam_runtime_t *llam_windows_nonblock_cache_runtime(void) {
+    if (g_llam_tls_task != NULL && g_llam_tls_task->owner_runtime != NULL) {
+        return g_llam_tls_task->owner_runtime;
+    }
+    if (g_llam_tls_shard != NULL) {
+        return g_llam_tls_shard->runtime;
+    }
+    return NULL;
+}
+
 /** @brief Return true when @p fd is remembered as already nonblocking. */
 bool llam_windows_socket_nonblocking_cached(llam_fd_t fd) {
+    llam_runtime_t *rt = llam_windows_nonblock_cache_runtime();
     uintptr_t key = (uintptr_t)fd + 1U;
     uintptr_t slot = ((uintptr_t)fd ^ ((uintptr_t)fd >> 7U)) & (LLAM_WINDOWS_NONBLOCK_CACHE_CAP - 1U);
 
-    return llam_windows_nonblock_cache_enabled() &&
-           atomic_load_explicit(&g_llam_windows_nonblock_cache[slot], memory_order_acquire) == key;
+    return rt != NULL && llam_windows_nonblock_cache_enabled() &&
+           atomic_load_explicit(&rt->windows_nonblock_cache[slot], memory_order_acquire) == key;
+}
+
+void llam_windows_socket_nonblocking_forget(llam_runtime_t *rt, llam_fd_t fd) {
+    uintptr_t key;
+    uintptr_t slot;
+
+    if (rt == NULL || !llam_windows_nonblock_cache_enabled()) {
+        return;
+    }
+    key = (uintptr_t)fd + 1U;
+    slot = ((uintptr_t)fd ^ ((uintptr_t)fd >> 7U)) & (LLAM_WINDOWS_NONBLOCK_CACHE_CAP - 1U);
+    (void)atomic_compare_exchange_strong_explicit(&rt->windows_nonblock_cache[slot],
+                                                  &key,
+                                                  0U,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire);
 }
 
 /**
@@ -93,9 +122,10 @@ bool llam_windows_socket_nonblocking_cached(llam_fd_t fd) {
  *         -1 for a hard socket error with errno set.
  */
 static int llam_windows_ensure_socket_nonblocking(llam_fd_t fd) {
+    llam_runtime_t *rt = llam_windows_nonblock_cache_runtime();
     uintptr_t key = (uintptr_t)fd + 1U;
     uintptr_t slot = ((uintptr_t)fd ^ ((uintptr_t)fd >> 7U)) & (LLAM_WINDOWS_NONBLOCK_CACHE_CAP - 1U);
-    bool cache_enabled = llam_windows_nonblock_cache_enabled();
+    bool cache_enabled = (rt != NULL) && llam_windows_nonblock_cache_enabled();
     u_long nonblocking = 1UL;
 
     if (cache_enabled && llam_windows_socket_nonblocking_cached(fd)) {
@@ -111,7 +141,7 @@ static int llam_windows_ensure_socket_nonblocking(llam_fd_t fd) {
         return -1;
     }
     if (cache_enabled) {
-        atomic_store_explicit(&g_llam_windows_nonblock_cache[slot], key, memory_order_release);
+        atomic_store_explicit(&rt->windows_nonblock_cache[slot], key, memory_order_release);
     }
     return 1;
 }
