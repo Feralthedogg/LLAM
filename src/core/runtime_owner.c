@@ -35,15 +35,19 @@ llam_runtime_t *llam_runtime_default_storage(void) {
     return &g_llam_runtime;
 }
 
-static bool llam_runtime_is_registered_locked(const llam_runtime_t *runtime) {
-    const llam_runtime_t *iter;
+static llam_runtime_t *llam_runtime_find_registered_locked(const llam_runtime_t *runtime) {
+    llam_runtime_t *iter;
 
     for (iter = g_llam_runtime_registry; iter != NULL; iter = iter->registry_next) {
         if (iter == runtime) {
-            return true;
+            return iter;
         }
     }
-    return false;
+    return NULL;
+}
+
+static bool llam_runtime_is_registered_locked(const llam_runtime_t *runtime) {
+    return llam_runtime_find_registered_locked(runtime) != NULL;
 }
 
 int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
@@ -68,8 +72,43 @@ int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
         }
     }
     rt->heap_allocated = heap_allocated;
+    atomic_store_explicit(&rt->destroy_claimed, false, memory_order_release);
     rt->registry_next = g_llam_runtime_registry;
     g_llam_runtime_registry = rt;
+    pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    return 0;
+}
+
+/**
+ * @brief Atomically claim responsibility for explicit runtime destruction.
+ *
+ * @details
+ * Runtime handles are raw pointers for source compatibility, so destruction
+ * must be claimed while the pointer is still known to the live registry.  This
+ * prevents two host threads from both passing validation and freeing the same
+ * heap-backed runtime after one of them has already unregistered it.
+ */
+int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated) {
+    bool already_claimed;
+
+    if (rt == NULL || out_heap_allocated == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_llam_runtime_registry_lock);
+    if (!llam_runtime_is_registered_locked(rt)) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
+    already_claimed = atomic_exchange_explicit(&rt->destroy_claimed, true, memory_order_acq_rel);
+    if (already_claimed) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
+    *out_heap_allocated = rt->heap_allocated;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
     return 0;
 }
@@ -99,13 +138,18 @@ void llam_runtime_unregister_handle(llam_runtime_t *rt) {
  * centralized so unknown runtime handles fail consistently.
  */
 int llam_runtime_check_handle(const llam_runtime_t *runtime) {
+    llam_runtime_t *registered;
     bool ok;
 
     if (runtime == NULL) {
         runtime = llam_runtime_default_storage();
     }
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
-    ok = llam_runtime_is_registered_locked(runtime);
+    registered = llam_runtime_find_registered_locked(runtime);
+    ok = registered != NULL;
+    if (ok && atomic_load_explicit(&registered->destroy_claimed, memory_order_acquire)) {
+        ok = false;
+    }
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
     if (LLAM_UNLIKELY(!ok)) {
         errno = EINVAL;

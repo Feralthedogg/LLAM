@@ -91,19 +91,5 @@ int llam_runtime_run_handle(llam_runtime_t *runtime) {
  * reject them before touching runtime-owned state.
  */
 void llam_runtime_destroy(llam_runtime_t *runtime) {
-    bool heap_runtime;
-
-    if (runtime == NULL) {
-        llam_runtime_shutdown_rt(llam_runtime_default_storage());
-        return;
-    }
-    if (llam_runtime_check_handle(runtime) != 0) {
-        return;
-    }
-
-    heap_runtime = runtime != llam_runtime_default_storage();
-    llam_runtime_shutdown_rt(runtime);
-    if (heap_runtime) {
-        free(runtime);
-    }
+    llam_runtime_destroy_rt(runtime);
 }

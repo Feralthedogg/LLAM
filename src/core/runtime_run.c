@@ -98,10 +98,10 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
             rt->shards[i].thread_started = false;
         }
     }
-    atomic_store_explicit(&rt->exec_started, false, memory_order_release);
 
     if (atomic_load(&rt->fatal_errno) != 0) {
         errno = atomic_load(&rt->fatal_errno);
+        atomic_store_explicit(&rt->exec_started, false, memory_order_release);
         return -1;
     }
 
@@ -112,6 +112,12 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
      * spawn more work and call llam_run() again on the same initialized runtime.
      */
     atomic_store_explicit(&rt->stop_requested, false, memory_order_release);
+    /*
+     * Publish run completion only after the final runtime-state access above.
+     * Host-side destroy waits on this flag before freeing explicit runtime
+     * storage, so clearing it earlier would expose a small UAF window.
+     */
+    atomic_store_explicit(&rt->exec_started, false, memory_order_release);
     return 0;
 }
 

@@ -223,6 +223,7 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
                          size_t opts_size,
                          bool heap_allocated);
 int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated);
+int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated);
 void llam_runtime_unregister_handle(llam_runtime_t *rt);
 int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size);
 llam_runtime_t *llam_runtime_current_owner(void);
@@ -237,6 +238,7 @@ void llam_runtime_lifecycle_unlock(void);
 int llam_runtime_request_stop_rt(llam_runtime_t *rt);
 int llam_runtime_run_rt(llam_runtime_t *rt);
 void llam_runtime_shutdown_rt(llam_runtime_t *rt);
+void llam_runtime_destroy_rt(llam_runtime_t *rt);
 int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd);
 void llam_record_fatal(llam_runtime_t *rt, int err);
 void llam_request_stop(llam_runtime_t *rt);

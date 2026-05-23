@@ -1017,6 +1017,7 @@ struct llam_runtime {
     llam_runtime_t *registry_next;
     uint64_t runtime_id;
     bool heap_allocated;
+    atomic_bool destroy_claimed;
     atomic_bool initialized;
     atomic_bool exec_started;
     unsigned observed_shards;

@@ -73,6 +73,20 @@ typedef struct multi_io_state {
     atomic_uint failures;
 } multi_io_state_t;
 
+#if LLAM_PLATFORM_POSIX
+typedef struct runtime_destroy_race_state {
+    llam_runtime_t *runtime;
+    pthread_mutex_t lock;
+    pthread_cond_t cv;
+    unsigned ready;
+    bool go;
+} runtime_destroy_race_state_t;
+
+typedef struct runtime_destroy_running_state {
+    atomic_uint entered;
+} runtime_destroy_running_state_t;
+#endif
+
 static int test_fail(const char *message);
 static int test_fail_errno(const char *message);
 static int init_runtime_opts(llam_runtime_opts_t *opts);
@@ -331,12 +345,38 @@ static void io_peer_task(void *arg) {
 }
 
 #if LLAM_PLATFORM_POSIX
+static void stop_wait_task(void *arg) {
+    runtime_destroy_running_state_t *state = arg;
+
+    atomic_store_explicit(&state->entered, 1U, memory_order_release);
+    while (llam_sleep_ns(1000000000ULL) == 0) {
+        /* Wait until external runtime destruction requests cooperative stop. */
+    }
+}
+#endif
+
+#if LLAM_PLATFORM_POSIX
 static void *run_runtime_thread(void *arg) {
     runtime_runner_t *runner = arg;
 
     errno = 0;
     runner->rc = llam_runtime_run_handle(runner->runtime);
     runner->err = errno;
+    return NULL;
+}
+
+static void *destroy_runtime_thread(void *arg) {
+    runtime_destroy_race_state_t *state = arg;
+
+    pthread_mutex_lock(&state->lock);
+    state->ready += 1U;
+    pthread_cond_broadcast(&state->cv);
+    while (!state->go) {
+        pthread_cond_wait(&state->cv, &state->lock);
+    }
+    pthread_mutex_unlock(&state->lock);
+
+    llam_runtime_destroy(state->runtime);
     return NULL;
 }
 #endif
@@ -766,6 +806,140 @@ cleanup:
 #endif
 }
 
+static int test_concurrent_runtime_destroy_is_single_owner(void) {
+#if LLAM_PLATFORM_POSIX
+    llam_runtime_opts_t opts;
+    runtime_destroy_race_state_t state;
+    pthread_t thread_a;
+    pthread_t thread_b;
+    int rc = 1;
+    int err;
+
+    memset(&state, 0, sizeof(state));
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+        return test_fail_errno("runtime create for destroy race failed");
+    }
+    err = pthread_mutex_init(&state.lock, NULL);
+    if (err != 0) {
+        errno = err;
+        goto cleanup_runtime;
+    }
+    err = pthread_cond_init(&state.cv, NULL);
+    if (err != 0) {
+        errno = err;
+        goto cleanup_lock;
+    }
+
+    err = pthread_create(&thread_a, NULL, destroy_runtime_thread, &state);
+    if (err != 0) {
+        errno = err;
+        goto cleanup_cv;
+    }
+    err = pthread_create(&thread_b, NULL, destroy_runtime_thread, &state);
+    if (err != 0) {
+        errno = err;
+        pthread_mutex_lock(&state.lock);
+        state.go = true;
+        pthread_cond_broadcast(&state.cv);
+        pthread_mutex_unlock(&state.lock);
+        pthread_join(thread_a, NULL);
+        goto cleanup_cv;
+    }
+
+    pthread_mutex_lock(&state.lock);
+    while (state.ready < 2U) {
+        pthread_cond_wait(&state.cv, &state.lock);
+    }
+    state.go = true;
+    pthread_cond_broadcast(&state.cv);
+    pthread_mutex_unlock(&state.lock);
+
+    pthread_join(thread_a, NULL);
+    pthread_join(thread_b, NULL);
+    rc = 0;
+
+cleanup_cv:
+    pthread_cond_destroy(&state.cv);
+cleanup_lock:
+    pthread_mutex_destroy(&state.lock);
+cleanup_runtime:
+    if (rc != 0) {
+        llam_runtime_destroy(state.runtime);
+    }
+    return rc;
+#else
+    return 0;
+#endif
+}
+
+static int test_runtime_destroy_waits_for_active_run(void) {
+#if LLAM_PLATFORM_POSIX
+    llam_runtime_opts_t opts;
+    runtime_runner_t runner;
+    runtime_destroy_running_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    pthread_t thread;
+    int rc = 1;
+    int err;
+
+    memset(&runner, 0, sizeof(runner));
+    atomic_init(&state.entered, 0U);
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("runtime create for active destroy failed");
+    }
+    task = llam_runtime_spawn_ex(runtime, stop_wait_task, &state, NULL, 0U);
+    if (task == NULL) {
+        rc = test_fail_errno("spawn for active destroy failed");
+        goto cleanup;
+    }
+    runner.runtime = runtime;
+    err = pthread_create(&thread, NULL, run_runtime_thread, &runner);
+    if (err != 0) {
+        errno = err;
+        rc = test_fail_errno("run thread for active destroy failed");
+        goto cleanup;
+    }
+    while (atomic_load_explicit(&state.entered, memory_order_acquire) == 0U) {
+        llam_pause_cpu();
+    }
+
+    /*
+     * Destroy from a host thread while another host is still inside
+     * llam_runtime_run_handle().  This must request stop, wait until the run
+     * function has finished all runtime-state reads, and only then free the
+     * heap-backed handle.
+     */
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+    task = NULL;
+    pthread_join(thread, NULL);
+    if (runner.rc != 0) {
+        errno = runner.err;
+        rc = test_fail_errno("active runtime destroy made run fail");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    if (runtime != NULL) {
+        llam_runtime_destroy(runtime);
+    }
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 int main(void) {
     if (test_sync_handle_family_confusion() != 0) {
         return 1;
@@ -786,6 +960,12 @@ int main(void) {
         return 1;
     }
     if (test_concurrent_runtime_io() != 0) {
+        return 1;
+    }
+    if (test_concurrent_runtime_destroy_is_single_owner() != 0) {
+        return 1;
+    }
+    if (test_runtime_destroy_waits_for_active_run() != 0) {
         return 1;
     }
     printf("[test_multi_runtime_core] ok\n");

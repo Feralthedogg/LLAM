@@ -349,9 +349,6 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
     if (rt == NULL) {
         rt = llam_runtime_default_storage();
     }
-    if (llam_runtime_check_handle(rt) != 0) {
-        return;
-    }
     /*
      * A managed task runs on scheduler-owned stack/context state.  Tearing the
      * owning runtime down from that same execution frame can deadlock in worker
@@ -363,6 +360,10 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
     if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
         int saved_errno = errno;
 
+        if (llam_runtime_check_handle(rt) != 0) {
+            errno = saved_errno;
+            return;
+        }
         if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
             llam_request_stop(rt);
         }
@@ -377,10 +378,52 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
      * init still consumes them can corrupt the runtime object.
      */
     llam_runtime_lifecycle_lock();
-    llam_runtime_shutdown_unlocked(rt);
+    if (llam_runtime_check_handle(rt) == 0) {
+        if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+            llam_request_stop(rt);
+            while (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+                llam_pause_cpu();
+            }
+        }
+        llam_runtime_shutdown_unlocked(rt);
+    }
     llam_runtime_lifecycle_unlock();
 }
 
 void llam_runtime_shutdown(void) {
     llam_runtime_shutdown_rt(llam_runtime_default_storage());
+}
+
+void llam_runtime_destroy_rt(llam_runtime_t *rt) {
+    bool heap_runtime = false;
+
+    if (rt == NULL) {
+        llam_runtime_shutdown_rt(llam_runtime_default_storage());
+        return;
+    }
+    /*
+     * In-runtime destroy requests can only be cooperative stop requests.  The
+     * task is still executing on runtime-owned stack/context state, so claiming
+     * and freeing the handle here would turn a benign stop call into UAF.
+     */
+    if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
+        llam_runtime_shutdown_rt(rt);
+        return;
+    }
+
+    llam_runtime_lifecycle_lock();
+    if (llam_runtime_claim_destroy_handle(rt, &heap_runtime) == 0) {
+        if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+            llam_request_stop(rt);
+            while (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+                llam_pause_cpu();
+            }
+        }
+        llam_runtime_shutdown_unlocked(rt);
+    }
+    llam_runtime_lifecycle_unlock();
+
+    if (heap_runtime) {
+        free(rt);
+    }
 }
