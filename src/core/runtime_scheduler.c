@@ -265,6 +265,9 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     llam_tune_scheduler_thread(shard, false);
     if (llam_install_thread_signal_stack(shard) != 0) {
         llam_record_fatal(rt, errno);
+        g_llam_tls_shard = NULL;
+        g_llam_tls_task = NULL;
+        g_llam_tls_scheduler_ctx = NULL;
         return;
     }
 
@@ -344,6 +347,14 @@ void llam_scheduler_loop(llam_shard_t *shard) {
 
     llam_uninstall_thread_signal_stack(shard);
     llam_channel_tls_cache_drain();
+    /*
+     * The caller returns to unmanaged host code after driving shard 0. Leaving
+     * the shard cursor installed makes later host-side cleanup look like a
+     * managed task from the last runtime, which can falsely reject explicit
+     * handles from another runtime with EXDEV.
+     */
+    g_llam_tls_shard = NULL;
+    g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
 }
 

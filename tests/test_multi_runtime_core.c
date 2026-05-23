@@ -464,6 +464,70 @@ cleanup:
     return rc;
 }
 
+static int test_sequential_runtime_host_join_owner_cleanup(void) {
+    llam_runtime_opts_t opts;
+    multi_counter_state_t state;
+    llam_runtime_t *runtime_a = NULL;
+    llam_runtime_t *runtime_b = NULL;
+    llam_task_t *task_a = NULL;
+    llam_task_t *task_b = NULL;
+    int rc = 1;
+
+    atomic_init(&state.ran_a, 0U);
+    atomic_init(&state.ran_b, 0U);
+    atomic_init(&state.failures, 0U);
+
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        rc = test_fail_errno("runtime create for sequential run failed");
+        goto cleanup;
+    }
+    task_a = llam_runtime_spawn_ex(runtime_a, counter_task_a, &state, NULL, 0U);
+    task_b = llam_runtime_spawn_ex(runtime_b, counter_task_b, &state, NULL, 0U);
+    if (task_a == NULL || task_b == NULL) {
+        rc = test_fail_errno("runtime spawn for sequential run failed");
+        goto cleanup;
+    }
+
+    /*
+     * Windows drives this test path without pthread worker wrappers. A finished
+     * scheduler run must clear TLS shard/task cursors so unmanaged host cleanup
+     * can join handles from either explicit runtime without seeing a false
+     * cross-runtime EXDEV.
+     */
+    if (llam_runtime_run_handle(runtime_a) != 0 || llam_runtime_run_handle(runtime_b) != 0) {
+        rc = test_fail_errno("sequential runtime run failed");
+        goto cleanup;
+    }
+    if (llam_join(task_a) != 0 || llam_join(task_b) != 0) {
+        rc = test_fail_errno("host join after sequential explicit runs failed");
+        goto cleanup;
+    }
+    task_a = NULL;
+    task_b = NULL;
+    if (atomic_load_explicit(&state.ran_a, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.ran_b, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        rc = test_fail("sequential explicit-runtime tasks did not finish cleanly");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task_a != NULL) {
+        (void)llam_detach(task_a);
+    }
+    if (task_b != NULL) {
+        (void)llam_detach(task_b);
+    }
+    llam_runtime_destroy(runtime_b);
+    llam_runtime_destroy(runtime_a);
+    return rc;
+}
+
 static int test_cross_runtime_task_owner(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime_a = NULL;
@@ -710,6 +774,9 @@ int main(void) {
         return 1;
     }
     if (test_concurrent_spawn_join() != 0) {
+        return 1;
+    }
+    if (test_sequential_runtime_host_join_owner_cleanup() != 0) {
         return 1;
     }
     if (test_cross_runtime_task_owner() != 0) {
