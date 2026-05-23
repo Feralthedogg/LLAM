@@ -447,7 +447,7 @@ jobs:
           # pipe/kqueue/epoll smoke path on hosted runners. Keep this as a
           # catastrophic-regression gate; the scheduled benchmark workflow owns
           # public comparison numbers.
-          $env:LLAM_BENCH_GUARD_MIN_OPS = "select_recv_ready=5000000,select_park_wake=500000,select_timeout=5000000,poll_wake=40000"
+          $env:LLAM_BENCH_GUARD_MIN_OPS = "select_recv_ready=5000000,select_park_wake=500000,select_timeout=5000000,io_echo=100000,poll_wake=40000"
           python scripts\bench_guard.py --bench ".\build\windows\Release\bench.exe" --out "$artifactDir\perf_guard.json" *>&1 |
             Tee-Object -FilePath "$artifactDir\perf_guard.log"
           if ($LASTEXITCODE -ne 0) {
