@@ -112,9 +112,20 @@ void llam_channel_end_public_op(llam_channel_t *channel) {
     llam_public_active_op_end(&channel->active_ops);
 }
 
+static void llam_channel_end_partial_public_select_ops(llam_channel_t **channels, size_t count) {
+    while (count > 0U) {
+        --count;
+        llam_public_active_op_end(&channels[count]->active_ops);
+        channels[count] = NULL;
+    }
+}
+
 int llam_channel_resolve_public_handles_for_select(llam_select_op_t *ops,
                                                    size_t op_count,
                                                    llam_channel_t **out_channels) {
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    llam_runtime_t *current_owner;
+#endif
     size_t i;
 
     if (ops == NULL || out_channels == NULL || op_count == 0U) {
@@ -122,6 +133,9 @@ int llam_channel_resolve_public_handles_for_select(llam_select_op_t *ops,
         return -1;
     }
 
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    current_owner = llam_runtime_current_owner();
+#endif
     pthread_mutex_lock(&g_llam_channel_registry_lock);
     for (i = 0U; i < op_count; ++i) {
         llam_channel_t *channel = llam_public_slot_resolve_encoded(&g_llam_channel_public_slots,
@@ -131,24 +145,33 @@ int llam_channel_resolve_public_handles_for_select(llam_select_op_t *ops,
                                                                    NULL);
 
         if (channel == NULL) {
-            while (i > 0U) {
-                --i;
-                llam_public_active_op_end(&out_channels[i]->active_ops);
-                out_channels[i] = NULL;
-            }
+            llam_channel_end_partial_public_select_ops(out_channels, i);
             pthread_mutex_unlock(&g_llam_channel_registry_lock);
             errno = EINVAL;
             return -1;
         }
-        if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
-            while (i > 0U) {
-                --i;
-                llam_public_active_op_end(&out_channels[i]->active_ops);
-                out_channels[i] = NULL;
-            }
+        /*
+         * Select is only reachable from a managed task.  Check the cached
+         * current owner directly instead of recomputing it for every operation
+         * while the registry lock is held.  Unsafe owner-check-disabled builds
+         * keep the old profiling contract: they still reject corrupted NULL
+         * owners but intentionally skip cross-runtime diagnostics.
+         */
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+        if (LLAM_UNLIKELY(channel->owner_runtime == NULL || channel->owner_runtime != current_owner)) {
+            llam_channel_end_partial_public_select_ops(out_channels, i);
             pthread_mutex_unlock(&g_llam_channel_registry_lock);
+            errno = channel->owner_runtime == NULL ? EINVAL : EXDEV;
             return -1;
         }
+#else
+        if (LLAM_UNLIKELY(channel->owner_runtime == NULL)) {
+            llam_channel_end_partial_public_select_ops(out_channels, i);
+            pthread_mutex_unlock(&g_llam_channel_registry_lock);
+            errno = EINVAL;
+            return -1;
+        }
+#endif
         llam_public_active_op_begin(&channel->active_ops);
         out_channels[i] = channel;
     }
