@@ -38,6 +38,10 @@
 #include <unistd.h>
 #endif
 
+#if LLAM_PLATFORM_WINDOWS
+#include <windows.h>
+#endif
+
 #define MULTI_RUNTIME_TASKS 64U
 
 typedef struct multi_counter_state {
@@ -885,7 +889,18 @@ static void *run_runtime_thread(void *arg) {
     runner->err = errno;
     return NULL;
 }
+#elif LLAM_PLATFORM_WINDOWS
+static DWORD WINAPI run_runtime_thread(LPVOID arg) {
+    runtime_runner_t *runner = arg;
 
+    errno = 0;
+    runner->rc = llam_runtime_run_handle(runner->runtime);
+    runner->err = errno;
+    return 0;
+}
+#endif
+
+#if LLAM_PLATFORM_POSIX
 static void *destroy_runtime_thread(void *arg) {
     runtime_destroy_race_state_t *state = arg;
 
@@ -1129,6 +1144,48 @@ static int run_two_runtimes(llam_runtime_t *runtime_a, llam_runtime_t *runtime_b
     }
     pthread_join(thread_a, NULL);
     pthread_join(thread_b, NULL);
+    if (runner_a.rc != 0) {
+        errno = runner_a.err;
+        return -1;
+    }
+    if (runner_b.rc != 0) {
+        errno = runner_b.err;
+        return -1;
+    }
+    return 0;
+#elif LLAM_PLATFORM_WINDOWS
+    runtime_runner_t runner_a;
+    runtime_runner_t runner_b;
+    HANDLE thread_a;
+    HANDLE thread_b;
+
+    memset(&runner_a, 0, sizeof(runner_a));
+    memset(&runner_b, 0, sizeof(runner_b));
+    runner_a.runtime = runtime_a;
+    runner_b.runtime = runtime_b;
+
+    /*
+     * Cross-runtime isolation tests require both runtimes to make scheduler
+     * progress at the same time. Sequentially driving runtime A before runtime
+     * B can deadlock tests where A waits for a task that only B can run.
+     */
+    thread_a = CreateThread(NULL, 0U, run_runtime_thread, &runner_a, 0U, NULL);
+    if (thread_a == NULL) {
+        errno = EAGAIN;
+        return -1;
+    }
+    thread_b = CreateThread(NULL, 0U, run_runtime_thread, &runner_b, 0U, NULL);
+    if (thread_b == NULL) {
+        (void)llam_runtime_request_stop_rt(runtime_a);
+        (void)WaitForSingleObject(thread_a, INFINITE);
+        (void)CloseHandle(thread_a);
+        errno = EAGAIN;
+        return -1;
+    }
+    (void)WaitForSingleObject(thread_a, INFINITE);
+    (void)WaitForSingleObject(thread_b, INFINITE);
+    (void)CloseHandle(thread_a);
+    (void)CloseHandle(thread_b);
     if (runner_a.rc != 0) {
         errno = runner_a.err;
         return -1;
