@@ -243,7 +243,7 @@ static void timeout_and_close_task(void *arg) {
 
 static void null_channel_task(void *arg) {
     sync_state_t *state = arg;
-    void *value = (void *)state;
+    void *value = (void *)(uintptr_t)1U;
 
     if (llam_channel_try_send(state->null_channel, NULL) != 0) {
         task_fail(state, "null channel try send", errno);
