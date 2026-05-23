@@ -74,6 +74,8 @@ typedef struct multi_io_state {
 } multi_io_state_t;
 
 #if LLAM_PLATFORM_POSIX
+#define HOST_TRY_RACE_ITERS 4000U
+
 typedef struct runtime_destroy_race_state {
     llam_runtime_t *runtime;
     pthread_mutex_t lock;
@@ -85,6 +87,13 @@ typedef struct runtime_destroy_race_state {
 typedef struct runtime_destroy_running_state {
     atomic_uint entered;
 } runtime_destroy_running_state_t;
+
+typedef struct host_try_default_race_state {
+    llam_runtime_t *runtime;
+    llam_channel_t *channel;
+    llam_runtime_opts_t opts;
+    atomic_uint failures;
+} host_try_default_race_state_t;
 #endif
 
 static int test_fail(const char *message);
@@ -377,6 +386,94 @@ static void *destroy_runtime_thread(void *arg) {
     pthread_mutex_unlock(&state->lock);
 
     llam_runtime_destroy(state->runtime);
+    return NULL;
+}
+
+static void explicit_channel_creator_task(void *arg) {
+    host_try_default_race_state_t *state = arg;
+
+    state->channel = llam_channel_create(1U);
+    if (state->channel == NULL) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    }
+}
+
+static void *default_runtime_toggle_thread(void *arg) {
+    host_try_default_race_state_t *state = arg;
+
+    for (unsigned i = 0U;
+         i < HOST_TRY_RACE_ITERS && atomic_load_explicit(&state->failures, memory_order_acquire) == 0U;
+         ++i) {
+        if (llam_runtime_init_ex(&state->opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            break;
+        }
+        llam_runtime_shutdown();
+    }
+    return NULL;
+}
+
+static void *explicit_channel_host_try_thread(void *arg) {
+    host_try_default_race_state_t *state = arg;
+    int payload = 23;
+
+    for (unsigned i = 0U;
+         i < HOST_TRY_RACE_ITERS && atomic_load_explicit(&state->failures, memory_order_acquire) == 0U;
+         ++i) {
+        void *out = NULL;
+
+        /*
+         * This is intentionally unmanaged host code.  The channel belongs to an
+         * explicit runtime, so its nonblocking public operations must not sample
+         * or race with the legacy default runtime's mutable tuning fields.
+         */
+        if (llam_channel_try_send(state->channel, &payload) != 0 ||
+            llam_channel_try_recv_result(state->channel, &out) != 0 ||
+            out != &payload) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            break;
+        }
+    }
+    return NULL;
+}
+
+static void *default_channel_host_try_thread(void *arg) {
+    host_try_default_race_state_t *state = arg;
+    int payload = 41;
+    bool pending = false;
+
+    for (unsigned i = 0U;
+         i < HOST_TRY_RACE_ITERS && atomic_load_explicit(&state->failures, memory_order_acquire) == 0U;
+         ++i) {
+        void *out = NULL;
+
+        /*
+         * The default runtime can be initialized and shut down around a
+         * default-owned channel that is still being drained from host code.
+         * Host nonblocking operations must not read mutable managed-runtime
+         * tuning fields while that default storage is being rebuilt.
+         */
+        if (!pending) {
+            if (llam_channel_try_send(state->channel, &payload) == 0) {
+                pending = true;
+            } else if (errno != ENOTSUP && errno != EAGAIN) {
+                atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+                break;
+            }
+        }
+        if (pending) {
+            if (llam_channel_try_recv_result(state->channel, &out) == 0) {
+                if (out != &payload) {
+                    atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+                    break;
+                }
+                pending = false;
+            } else if (errno != ENOTSUP && errno != EAGAIN) {
+                atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+                break;
+            }
+        }
+    }
     return NULL;
 }
 #endif
@@ -806,6 +903,128 @@ cleanup:
 #endif
 }
 
+static int test_host_try_ops_ignore_default_runtime_race(void) {
+#if LLAM_PLATFORM_POSIX
+    host_try_default_race_state_t state;
+    llam_task_t *creator = NULL;
+    pthread_t toggle_thread;
+    pthread_t try_thread;
+    int rc = 1;
+    int err;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    if (init_runtime_opts(&state.opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&state.opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+        return test_fail_errno("runtime create for host try/default race failed");
+    }
+
+    creator = llam_runtime_spawn_ex(state.runtime, explicit_channel_creator_task, &state, NULL, 0U);
+    if (creator == NULL ||
+        llam_runtime_run_handle(state.runtime) != 0 ||
+        llam_join(creator) != 0 ||
+        state.channel == NULL ||
+        atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        creator = NULL;
+        rc = test_fail_errno("explicit runtime channel setup failed");
+        goto cleanup;
+    }
+    creator = NULL;
+
+    err = pthread_create(&toggle_thread, NULL, default_runtime_toggle_thread, &state);
+    if (err != 0) {
+        errno = err;
+        rc = test_fail_errno("default toggle thread create failed");
+        goto cleanup;
+    }
+    err = pthread_create(&try_thread, NULL, explicit_channel_host_try_thread, &state);
+    if (err != 0) {
+        errno = err;
+        atomic_fetch_add_explicit(&state.failures, 1U, memory_order_relaxed);
+        pthread_join(toggle_thread, NULL);
+        rc = test_fail_errno("explicit channel try thread create failed");
+        goto cleanup;
+    }
+    pthread_join(toggle_thread, NULL);
+    pthread_join(try_thread, NULL);
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        rc = test_fail("host try/default runtime race observed an API failure");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (creator != NULL) {
+        (void)llam_detach(creator);
+    }
+    if (state.channel != NULL) {
+        (void)llam_channel_destroy(state.channel);
+    }
+    llam_runtime_destroy(state.runtime);
+    llam_runtime_shutdown();
+    return rc;
+#else
+    return 0;
+#endif
+}
+
+static int test_default_channel_host_try_ops_ignore_default_runtime_reinit(void) {
+#if LLAM_PLATFORM_POSIX
+    host_try_default_race_state_t state;
+    pthread_t toggle_thread;
+    pthread_t try_thread;
+    void *out;
+    int rc = 1;
+    int err;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    if (init_runtime_opts(&state.opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+
+    state.channel = llam_channel_create(1U);
+    if (state.channel == NULL) {
+        return test_fail_errno("default-owned channel create failed");
+    }
+
+    err = pthread_create(&toggle_thread, NULL, default_runtime_toggle_thread, &state);
+    if (err != 0) {
+        errno = err;
+        rc = test_fail_errno("default toggle thread create failed");
+        goto cleanup;
+    }
+    err = pthread_create(&try_thread, NULL, default_channel_host_try_thread, &state);
+    if (err != 0) {
+        errno = err;
+        atomic_fetch_add_explicit(&state.failures, 1U, memory_order_relaxed);
+        pthread_join(toggle_thread, NULL);
+        rc = test_fail_errno("default channel try thread create failed");
+        goto cleanup;
+    }
+    pthread_join(toggle_thread, NULL);
+    pthread_join(try_thread, NULL);
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        rc = test_fail("default channel host try/default runtime reinit race observed an API failure");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (state.channel != NULL) {
+        while (llam_channel_try_recv_result(state.channel, &out) == 0) {
+        }
+        (void)llam_channel_destroy(state.channel);
+    }
+    llam_runtime_shutdown();
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 static int test_concurrent_runtime_destroy_is_single_owner(void) {
 #if LLAM_PLATFORM_POSIX
     llam_runtime_opts_t opts;
@@ -987,6 +1206,12 @@ int main(void) {
         return 1;
     }
     if (test_concurrent_runtime_io() != 0) {
+        return 1;
+    }
+    if (test_host_try_ops_ignore_default_runtime_race() != 0) {
+        return 1;
+    }
+    if (test_default_channel_host_try_ops_ignore_default_runtime_reinit() != 0) {
         return 1;
     }
     if (test_concurrent_runtime_destroy_is_single_owner() != 0) {

@@ -82,8 +82,21 @@ static void llam_channel_handoff_yield(void) {
  * batch those safepoints while forced-yield diagnostics keep exact behavior.
  */
 static void llam_channel_hot_safepoint(void) {
-    llam_runtime_t *rt = llam_runtime_current_owner();
-    unsigned interval = rt->channel_safepoint_interval;
+    llam_runtime_t *rt;
+    unsigned interval;
+
+    if (g_llam_tls_task == NULL) {
+        /*
+         * Nonblocking channel APIs are valid from unmanaged host threads, but
+         * safepoints only have meaning for managed tasks. Avoid sampling the
+         * legacy default runtime here; explicit-runtime host try ops can run
+         * concurrently with default-runtime init/shutdown.
+         */
+        return;
+    }
+
+    rt = llam_runtime_current_owner();
+    interval = rt->channel_safepoint_interval;
 
     if (interval <= 1U || rt->forced_yield_every != 0U) {
         llam_task_safepoint();
