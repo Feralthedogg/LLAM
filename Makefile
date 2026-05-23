@@ -53,6 +53,14 @@ CLEAN_FILES = \
 	test_windows_iocp_dump \
 	test_windows_handle_io \
 	test_shared_load \
+	asan-test_runtime_api_edges \
+	asan-test_runtime_core \
+	asan-test_io_buffers \
+	asan-test_runtime_shutdown_internal \
+	asan-test_multi_runtime_core \
+	tsan-test_runtime_core \
+	tsan-test_runtime_shutdown_internal \
+	tsan-test_multi_runtime_core \
 	libllam_runtime.a \
 	demo.exe \
 	stress.exe \
@@ -637,32 +645,32 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 
 check: test
 
-SANITIZER_TEST_TARGETS = \
-	test_runtime_api_edges \
-	test_runtime_core \
-	test_io_buffers \
-	test_runtime_shutdown_internal \
-	test_multi_runtime_core
+ASAN_TEST_TARGETS = \
+	asan-test_runtime_api_edges \
+	asan-test_runtime_core \
+	asan-test_io_buffers \
+	asan-test_runtime_shutdown_internal \
+	asan-test_multi_runtime_core
 
 TSAN_TEST_TARGETS = \
-	test_runtime_core \
-	test_runtime_shutdown_internal \
-	test_multi_runtime_core
+	tsan-test_runtime_core \
+	tsan-test_runtime_shutdown_internal \
+	tsan-test_multi_runtime_core
 
 test-asan:
 	@set -e; \
-	cleanup() { rm -f $(SANITIZER_TEST_TARGETS); }; \
+	cleanup() { rm -f $(ASAN_TEST_TARGETS); }; \
 	trap cleanup EXIT; \
 	cleanup; \
-	$(MAKE) $(SANITIZER_TEST_TARGETS) \
+	$(MAKE) $(ASAN_TEST_TARGETS) \
 		OBJDIR=object-asan \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
 		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_api_edges; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_core; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_io_buffers; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_api_edges; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_core; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core
 
 test-tsan:
 	@set -e; \
@@ -673,9 +681,9 @@ test-tsan:
 		OBJDIR=object-tsan \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
 		LDLIBS="$(LDLIBS) -fsanitize=thread"; \
-	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_core; \
-	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal; \
-	TSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core
 
 analyze-cppcheck:
 	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
@@ -774,6 +782,21 @@ test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 
 test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS) $(LDLIBS)
+
+asan-test_runtime_api_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS) $(LDLIBS)
+
+asan-test_runtime_core tsan-test_runtime_core: $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
+
+asan-test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS) $(LDLIBS)
+
+asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
+
+asan-test_multi_runtime_core tsan-test_multi_runtime_core: $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
 
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)
