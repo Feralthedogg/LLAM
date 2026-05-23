@@ -732,7 +732,9 @@ static void chat_server_close_all(chat_server_t *server) {
         if (atomic_exchange_explicit(&client->closing, 1U, memory_order_acq_rel) == 0U) {
             chat_client_wait_enqueues_drained(client);
             chat_outbox_close(&client->outbox);
-            chat_client_shutdown_fd(client);
+            // Global stop has closed the listener, so immediate close cannot hit a new client fd.
+            if (atomic_load_explicit(&g_stop_requested, memory_order_acquire)) { chat_client_close_fd(client); }
+            else { chat_client_shutdown_fd(client); }
         }
         // Drop the list reference removed above.
         chat_client_release(client);
