@@ -59,7 +59,7 @@ jobs:
       - name: Build and test POSIX
         if: runner.os != 'Windows'
         run: |
-          version="1.2.0"
+          version="2.0.0"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
@@ -80,7 +80,7 @@ jobs:
       - name: Package POSIX release archive
         if: runner.os != 'Windows'
         run: |
-          version="1.2.0"
+          version="2.0.0"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
@@ -120,10 +120,10 @@ jobs:
         shell: pwsh
         run: |
           $dryRun = (& .\scripts\install.ps1 -DryRun -Target "${{ matrix.target }}" 6>&1 | Out-String)
-          if ($dryRun -notmatch "/releases/download/v1\.2\.0/") {
-            throw "standalone Windows installer default URL did not use the v1.2.0 release tag"
+          if ($dryRun -notmatch "/releases/download/v2\.0\.0/") {
+            throw "standalone Windows installer default URL did not use the v2.0.0 release tag"
           }
-          $version = "1.2.0"
+          $version = "2.0.0"
           $releaseVersion = "dev"
           if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
             $tagName = $env:GITHUB_REF_NAME

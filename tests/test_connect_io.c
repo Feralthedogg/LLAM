@@ -42,6 +42,12 @@ typedef struct invalid_connect_state {
     int observed_errno;
 } invalid_connect_state_t;
 
+typedef struct invalid_accept_state {
+    int listener_fd;
+    atomic_uint failures;
+    int observed_errno;
+} invalid_accept_state_t;
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_connect_io] %s\n", message);
     return 1;
@@ -221,6 +227,27 @@ static void invalid_connect_task(void *arg) {
     close_if_valid(&fd);
 }
 
+static void invalid_accept_task(void *arg) {
+    invalid_accept_state_t *state = arg;
+    struct sockaddr_storage addr;
+    socklen_t addrlen = (socklen_t)sizeof(addr);
+
+    errno = 0;
+    if (!LLAM_FD_IS_INVALID(llam_accept(state->listener_fd, NULL, &addrlen)) ||
+        errno != EINVAL) {
+        state->observed_errno = errno;
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        return;
+    }
+
+    errno = 0;
+    if (!LLAM_FD_IS_INVALID(llam_accept(state->listener_fd, (struct sockaddr *)(void *)&addr, NULL)) ||
+        errno != EINVAL) {
+        state->observed_errno = errno;
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    }
+}
+
 static int test_invalid_direct_connect(void) {
     struct sockaddr_in addr;
     int fd;
@@ -244,6 +271,61 @@ static int test_invalid_direct_connect(void) {
         return test_fail("llam_connect invalid addrlen unexpectedly succeeded");
     }
     close_if_valid(&fd);
+    return 0;
+}
+
+static int test_invalid_direct_accept_address_pair(void) {
+    struct sockaddr_storage addr;
+    socklen_t addrlen = 0U;
+    socklen_t peer_len = (socklen_t)sizeof(addr);
+    int listener = -1;
+    int client = -1;
+    int accepted = -1;
+
+    if (make_loopback_listener(&listener, &addr, &addrlen) != 0) {
+        return test_fail_errno("invalid-direct accept listener setup failed");
+    }
+    client = socket(AF_INET, SOCK_STREAM, 0);
+    if (client < 0) {
+        close_if_valid(&listener);
+        return test_fail_errno("invalid-direct accept client socket failed");
+    }
+    if (connect(client, (const struct sockaddr *)(const void *)&addr, addrlen) != 0) {
+        close_if_valid(&client);
+        close_if_valid(&listener);
+        return test_fail_errno("invalid-direct accept client connect failed");
+    }
+
+    errno = 0;
+    if (!LLAM_FD_IS_INVALID(llam_accept(listener, NULL, &peer_len)) ||
+        errno != EINVAL) {
+        close_if_valid(&client);
+        close_if_valid(&listener);
+        return test_fail("llam_accept(NULL, addrlen) did not fail with EINVAL");
+    }
+
+    errno = 0;
+    if (!LLAM_FD_IS_INVALID(llam_accept(listener, (struct sockaddr *)(void *)&addr, NULL)) ||
+        errno != EINVAL) {
+        close_if_valid(&client);
+        close_if_valid(&listener);
+        return test_fail("llam_accept(addr, NULL) did not fail with EINVAL");
+    }
+
+    /*
+     * The invalid calls must be rejected before accept(2), otherwise a malformed
+     * FFI call can consume a pending connection while reporting success.
+     */
+    accepted = accept(listener, NULL, NULL);
+    if (accepted < 0) {
+        close_if_valid(&client);
+        close_if_valid(&listener);
+        return test_fail_errno("invalid-direct accept guard consumed pending connection");
+    }
+
+    close_if_valid(&accepted);
+    close_if_valid(&client);
+    close_if_valid(&listener);
     return 0;
 }
 
@@ -282,21 +364,27 @@ static int test_direct_connect_success(void) {
 static int test_managed_connect_success_and_invalid(void) {
     connect_state_t state;
     invalid_connect_state_t invalid_state;
+    invalid_accept_state_t invalid_accept;
     llam_runtime_opts_t opts;
     llam_task_t *accept_task;
     llam_task_t *connect_task;
     llam_task_t *invalid_task;
+    llam_task_t *invalid_accept_task_handle;
     int rc = 0;
 
     memset(&state, 0, sizeof(state));
     memset(&invalid_state, 0, sizeof(invalid_state));
+    memset(&invalid_accept, 0, sizeof(invalid_accept));
     state.listener_fd = -1;
+    invalid_accept.listener_fd = -1;
     atomic_init(&state.failures, 0U);
     atomic_init(&invalid_state.failures, 0U);
+    atomic_init(&invalid_accept.failures, 0U);
 
     if (make_loopback_listener(&state.listener_fd, &state.addr, &state.addrlen) != 0) {
         return test_fail_errno("managed listener setup failed");
     }
+    invalid_accept.listener_fd = state.listener_fd;
 
     memset(&opts, 0, sizeof(opts));
     opts.deterministic = 1U;
@@ -310,7 +398,9 @@ static int test_managed_connect_success_and_invalid(void) {
     accept_task = llam_spawn(accept_echo_task, &state, NULL);
     connect_task = llam_spawn(connect_echo_task, &state, NULL);
     invalid_task = llam_spawn(invalid_connect_task, &invalid_state, NULL);
-    if (accept_task == NULL || connect_task == NULL || invalid_task == NULL) {
+    invalid_accept_task_handle = llam_spawn(invalid_accept_task, &invalid_accept, NULL);
+    if (accept_task == NULL || connect_task == NULL || invalid_task == NULL ||
+        invalid_accept_task_handle == NULL) {
         rc = test_fail_errno("llam_spawn failed");
     } else if (llam_run() != 0) {
         rc = test_fail_errno("llam_run failed");
@@ -337,11 +427,19 @@ static int test_managed_connect_success_and_invalid(void) {
                 strerror(invalid_state.observed_errno));
         return 1;
     }
+    if (atomic_load_explicit(&invalid_accept.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_connect_io] managed invalid accept expectation failed errno=%d (%s)\n",
+                invalid_accept.observed_errno,
+                strerror(invalid_accept.observed_errno));
+        return 1;
+    }
     return 0;
 }
 
 int main(void) {
     if (test_invalid_direct_connect() != 0 ||
+        test_invalid_direct_accept_address_pair() != 0 ||
         test_direct_connect_success() != 0 ||
         test_managed_connect_success_and_invalid() != 0) {
         return 1;

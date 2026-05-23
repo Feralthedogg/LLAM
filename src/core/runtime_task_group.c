@@ -25,6 +25,13 @@
 
 #include "runtime_internal.h"
 
+#if UINTPTR_MAX <= UINT32_MAX
+#error "LLAM task-group public handles require uintptr_t wider than 32 bits"
+#define LLAM_TASK_GROUP_PUBLIC_HANDLE_SHIFT 0U
+#else
+#define LLAM_TASK_GROUP_PUBLIC_HANDLE_SHIFT 32U
+#endif
+
 /**
  * @brief Return true when an ABI prefix contains a complete spawn option field.
  *
@@ -38,46 +45,65 @@
 static pthread_mutex_t g_llam_task_group_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static llam_task_group_t *g_llam_task_group_registry;
 
-/**
- * @brief Register a newly-created task group in the live-handle set.
- */
-static void llam_task_group_register_live(llam_task_group_t *group) {
-    pthread_mutex_lock(&g_llam_task_group_registry_lock);
-    group->registry_next = g_llam_task_group_registry;
-    g_llam_task_group_registry = group;
-    pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+static llam_public_slot_table_t g_llam_task_group_public_slots;
+
+static llam_task_group_t *llam_task_group_public_handle(llam_task_group_t *group) {
+    if (group == NULL) {
+        return NULL;
+    }
+    return (llam_task_group_t *)llam_public_slot_encode_handle(group->public_handle_slot,
+                                                               group->public_handle_generation,
+                                                               LLAM_TASK_GROUP_PUBLIC_HANDLE_SHIFT);
 }
 
 /**
- * @brief Return true when @p group is still a live task-group handle.
+ * @brief Register a newly-created task group in the live-handle set.
  */
-static bool llam_task_group_is_live_locked(const llam_task_group_t *group) {
-    const llam_task_group_t *iter;
+static int llam_task_group_reserve_public_slot_locked(llam_task_group_t *group, size_t *out_slot) {
+    uint32_t generation = 0U;
 
-    for (iter = g_llam_task_group_registry; iter != NULL; iter = iter->registry_next) {
-        if (iter == group) {
-            return true;
-        }
+    return llam_public_slot_reserve(&g_llam_task_group_public_slots, group, 64U, out_slot, &generation);
+}
+
+static int llam_task_group_register_live(llam_task_group_t *group) {
+    size_t slot = 0U;
+
+    pthread_mutex_lock(&g_llam_task_group_registry_lock);
+    if (llam_task_group_reserve_public_slot_locked(group, &slot) != 0) {
+        pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+        return -1;
     }
-    return false;
+    group->public_handle_slot = slot;
+    group->public_handle_generation = llam_public_slot_generation(&g_llam_task_group_public_slots, slot);
+    group->registry_next = g_llam_task_group_registry;
+    g_llam_task_group_registry = group;
+    pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+    return 0;
 }
 
 /**
  * @brief Lock a group only after validating it against the live registry.
  *
  * The registry prevents a destroy/spawn race from turning a stale task-group
- * pointer into a mutex lock on freed memory. Once the per-group lock is held,
+ * handle into a mutex lock on freed memory. Once the per-group lock is held,
  * destroy cannot remove the handle until the caller drops that lock or records
  * an active operation.
  */
-static int llam_task_group_lock_live(llam_task_group_t *group) {
-    if (group == NULL) {
+static int llam_task_group_lock_live(llam_task_group_t *handle, llam_task_group_t **out_group) {
+    llam_task_group_t *group = NULL;
+
+    if (handle == NULL || out_group == NULL) {
         errno = EINVAL;
         return -1;
     }
 
     pthread_mutex_lock(&g_llam_task_group_registry_lock);
-    if (!llam_task_group_is_live_locked(group)) {
+    group = llam_public_slot_resolve_encoded(&g_llam_task_group_public_slots,
+                                             (uintptr_t)handle,
+                                             LLAM_TASK_GROUP_PUBLIC_HANDLE_SHIFT,
+                                             NULL,
+                                             NULL);
+    if (group == NULL) {
         pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         errno = EINVAL;
         return -1;
@@ -88,7 +114,26 @@ static int llam_task_group_lock_live(llam_task_group_t *group) {
     }
     pthread_mutex_lock(&group->lock);
     pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+    *out_group = group;
     return 0;
+}
+
+llam_task_group_t *llam_task_group_resolve_public_handle(llam_task_group_t *handle) {
+    llam_task_group_t *group = NULL;
+
+    if (llam_task_group_lock_live(handle, &group) != 0) {
+        return NULL;
+    }
+    llam_public_active_op_begin(&group->active_ops);
+    pthread_mutex_unlock(&group->lock);
+    return group;
+}
+
+void llam_task_group_end_public_op(llam_task_group_t *group) {
+    if (group == NULL) {
+        return;
+    }
+    llam_public_active_op_end(&group->active_ops);
 }
 
 /**
@@ -96,6 +141,13 @@ static int llam_task_group_lock_live(llam_task_group_t *group) {
  */
 static void llam_task_group_unregister_live_locked(llam_task_group_t *group) {
     llam_task_group_t **link = &g_llam_task_group_registry;
+
+    if (group->public_handle_slot < g_llam_task_group_public_slots.count) {
+        llam_public_slot_release(&g_llam_task_group_public_slots,
+                                 group->public_handle_slot,
+                                 group,
+                                 group->public_handle_generation);
+    }
 
     while (*link != NULL) {
         if (*link == group) {
@@ -109,18 +161,37 @@ static void llam_task_group_unregister_live_locked(llam_task_group_t *group) {
 
 static int llam_task_group_reserve_locked(llam_task_group_t *group, size_t needed) {
     llam_task_t **items;
+    size_t max_items = SIZE_MAX / sizeof(*items);
     size_t new_capacity;
 
+    if (needed > max_items) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (group->capacity > max_items) {
+        errno = ENOMEM;
+        return -1;
+    }
     if (needed <= group->capacity) {
         return 0;
     }
-    new_capacity = group->capacity != 0U ? group->capacity * 2U : 16U;
+    if (group->capacity == 0U) {
+        new_capacity = 16U;
+    } else if (group->capacity > max_items / 2U) {
+        new_capacity = needed;
+    } else {
+        new_capacity = group->capacity * 2U;
+    }
     while (new_capacity < needed) {
-        if (new_capacity > SIZE_MAX / 2U) {
-            errno = ENOMEM;
-            return -1;
+        if (new_capacity > max_items / 2U) {
+            new_capacity = needed;
+            break;
         }
         new_capacity *= 2U;
+    }
+    if (new_capacity > max_items) {
+        errno = ENOMEM;
+        return -1;
     }
     items = realloc(group->tasks, new_capacity * sizeof(*items));
     if (items == NULL) {
@@ -148,19 +219,39 @@ llam_task_group_t *llam_task_group_create(void) {
     }
     group->lock_initialized = true;
     group->owner_runtime = llam_runtime_owner_for_new_object();
+    llam_public_active_op_init(&group->active_ops);
     group->cancel_token = llam_cancel_token_create();
     if (group->cancel_token == NULL) {
         pthread_mutex_destroy(&group->lock);
         free(group);
         return NULL;
     }
-    llam_task_group_register_live(group);
-    return group;
+    if (llam_task_group_register_live(group) != 0) {
+        int saved_errno = errno;
+
+        (void)llam_cancel_token_destroy(group->cancel_token);
+        pthread_mutex_destroy(&group->lock);
+        free(group);
+        errno = saved_errno;
+        return NULL;
+    }
+    return llam_task_group_public_handle(group);
 }
 
 int llam_task_group_destroy(llam_task_group_t *group) {
+    uintptr_t raw = (uintptr_t)group;
+    size_t slot;
+    uint32_t generation;
+
     pthread_mutex_lock(&g_llam_task_group_registry_lock);
-    if (group == NULL || !llam_task_group_is_live_locked(group)) {
+    group = llam_public_slot_resolve_encoded(&g_llam_task_group_public_slots,
+                                             raw,
+                                             LLAM_TASK_GROUP_PUBLIC_HANDLE_SHIFT,
+                                             &slot,
+                                             &generation);
+    if (group == NULL ||
+        group->public_handle_slot != slot ||
+        group->public_handle_generation != generation) {
         pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         errno = EINVAL;
         return -1;
@@ -170,7 +261,10 @@ int llam_task_group_destroy(llam_task_group_t *group) {
         return -1;
     }
     pthread_mutex_lock(&group->lock);
-    if (group->count != 0U || group->active_spawns != 0U || group->active_ops != 0U || group->joining) {
+    if (group->count != 0U ||
+        group->active_spawns != 0U ||
+        llam_public_active_op_count(&group->active_ops) != 0U ||
+        group->joining) {
         pthread_mutex_unlock(&group->lock);
         pthread_mutex_unlock(&g_llam_task_group_registry_lock);
         errno = EBUSY;
@@ -235,12 +329,22 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
             effective_opts.cancel_token = raw_opts.cancel_token;
         }
     }
-    if (llam_task_group_lock_live(group) != 0) {
+    if (llam_task_group_lock_live(group, &group) != 0) {
         return NULL;
     }
     if (group->joining) {
         pthread_mutex_unlock(&group->lock);
         errno = EBUSY;
+        return NULL;
+    }
+    if (group->count >= SIZE_MAX / sizeof(*group->tasks)) {
+        /*
+         * Keep corrupted or future-imported group state from wrapping
+         * group->count + 1 to zero and then writing a spawned child through a
+         * bogus tasks[SIZE_MAX] slot.
+         */
+        pthread_mutex_unlock(&group->lock);
+        errno = ENOMEM;
         return NULL;
     }
     if (llam_task_group_reserve_locked(group, group->count + 1U) != 0) {
@@ -274,7 +378,7 @@ llam_task_t *llam_task_group_spawn(llam_task_group_t *group,
 int llam_task_group_cancel(llam_task_group_t *group) {
     llam_cancel_token_t *token;
 
-    if (llam_task_group_lock_live(group) != 0) {
+    if (llam_task_group_lock_live(group, &group) != 0) {
         return -1;
     }
     if (group->cancel_token == NULL) {
@@ -283,22 +387,18 @@ int llam_task_group_cancel(llam_task_group_t *group) {
         return -1;
     }
     token = group->cancel_token;
-    group->active_ops += 1U;
+    llam_public_active_op_begin(&group->active_ops);
     pthread_mutex_unlock(&group->lock);
 
     if (llam_cancel_token_cancel(token) != 0) {
         int saved_errno = errno;
 
-        pthread_mutex_lock(&group->lock);
-        group->active_ops -= 1U;
-        pthread_mutex_unlock(&group->lock);
+        llam_public_active_op_end(&group->active_ops);
         errno = saved_errno;
         return -1;
     }
 
-    pthread_mutex_lock(&group->lock);
-    group->active_ops -= 1U;
-    pthread_mutex_unlock(&group->lock);
+    llam_public_active_op_end(&group->active_ops);
     return 0;
 }
 
@@ -307,11 +407,13 @@ static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline
     size_t count;
     size_t i;
 
-    if (llam_task_group_lock_live(group) != 0) {
+    if (llam_task_group_lock_live(group, &group) != 0) {
         return -1;
     }
 
-    if (group->active_spawns != 0U || group->active_ops != 0U || group->joining) {
+    if (group->active_spawns != 0U ||
+        llam_public_active_op_count(&group->active_ops) != 0U ||
+        group->joining) {
         pthread_mutex_unlock(&group->lock);
         errno = EBUSY;
         return -1;

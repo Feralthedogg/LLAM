@@ -128,8 +128,10 @@ static void llam_channel_reset_for_reuse(llam_channel_t *channel, llam_runtime_t
         return;
     }
     channel->owner_runtime = owner_runtime;
+    channel->registry_next = NULL;
+    llam_public_active_op_init(&channel->active_ops);
     if (channel->buffer != NULL && channel->ring_capacity > 0U) {
-        // Keep the allocated buffer for reuse, but clear stale pointer payloads.
+        // Keep the allocated buffer for reuse, but clear old payload slots.
         memset(channel->buffer, 0, channel->ring_capacity * sizeof(*channel->buffer));
     }
     channel->cache_next = NULL;
@@ -168,7 +170,11 @@ static llam_channel_t *llam_channel_tls_cache_acquire(void) {
         g_llam_tls_channel_cache_count -= 1U;
     }
     llam_channel_reset_for_reuse(channel, llam_runtime_owner_for_new_object());
-    return channel;
+    if (llam_channel_register_live(channel) != 0) {
+        llam_channel_cache_free_entry(channel);
+        return NULL;
+    }
+    return llam_channel_public_handle(channel);
 }
 
 /**
@@ -192,7 +198,12 @@ static bool llam_channel_tls_cache_release(llam_channel_t *channel) {
         return false;
     }
 
-    llam_channel_reset_for_reuse(channel, channel->owner_runtime);
+    /*
+     * A cached channel is no longer a live public handle. Poison the owner so
+     * an accidental second destroy through a consumed handle fails before the
+     * same object can be inserted into the cache twice.
+     */
+    llam_channel_reset_for_reuse(channel, NULL);
     channel->cache_next = g_llam_tls_channel_cache_head;
     g_llam_tls_channel_cache_head = channel;
     g_llam_tls_channel_cache_count += 1U;
@@ -231,8 +242,12 @@ llam_channel_t *llam_channel_cache_acquire(void) {
 
     if (channel != NULL) {
         llam_channel_reset_for_reuse(channel, llam_runtime_owner_for_new_object());
+        if (llam_channel_register_live(channel) != 0) {
+            llam_channel_cache_free_entry(channel);
+            return NULL;
+        }
     }
-    return channel;
+    return llam_channel_public_handle(channel);
 }
 
 /**
@@ -266,7 +281,12 @@ bool llam_channel_cache_release(llam_channel_t *channel) {
         return false;
     }
 
-    llam_channel_reset_for_reuse(channel, channel->owner_runtime);
+    /*
+     * Keep cached entries outside the public ownership domain. Acquisition
+     * stamps the requesting runtime owner back onto the object before returning
+     * it, and TLS cache reuse rejects entries from other runtimes.
+     */
+    llam_channel_reset_for_reuse(channel, NULL);
     pthread_mutex_lock(&g_llam_channel_cache_lock);
     if (g_llam_channel_cache_count >= cap) {
         pthread_mutex_unlock(&g_llam_channel_cache_lock);

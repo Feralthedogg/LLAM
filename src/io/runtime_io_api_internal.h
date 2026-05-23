@@ -137,6 +137,12 @@ static inline int llam_platform_connect_fd(llam_fd_t fd, const struct sockaddr *
 int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents);
 int llam_platform_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents);
 int llam_platform_poll_now(llam_fd_t fd, short events, short *revents);
+
+int llam_io_buffer_public_register(llam_io_buffer_t *buffer);
+llam_io_buffer_t *llam_io_buffer_public_handle(llam_io_buffer_t *buffer);
+llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *buffer);
+llam_io_buffer_t *llam_io_buffer_public_begin_op(const llam_io_buffer_t *buffer);
+void llam_io_buffer_public_end_op(const llam_io_buffer_t *buffer);
 int llam_try_direct_rw(llam_fd_t fd,
                      void *buf,
                      size_t count,

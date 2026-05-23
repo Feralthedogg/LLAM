@@ -15,9 +15,9 @@ public symbols.
 The current public ABI version is:
 
 ```text
-LLAM_VERSION         = 1.2.0
-LLAM_ABI_VERSION_MAJOR = 1
-LLAM_ABI_VERSION_MINOR = 2
+LLAM_VERSION         = 2.0.0
+LLAM_ABI_VERSION_MAJOR = 2
+LLAM_ABI_VERSION_MINOR = 0
 LLAM_ABI_VERSION       = (major << 16) | minor
 ```
 
@@ -52,16 +52,16 @@ with `errno` set on failure.
 | Group | Symbols | Stable contract |
 | --- | --- | --- |
 | ABI/version | `llam_abi_version`, `llam_version_string`, `llam_abi_get_info` | Safe to call before runtime initialization. Returned strings are library-owned static storage. |
-| Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_shutdown` | Process-wide singleton runtime. Initialize before spawning tasks; shutdown invalidates runtime-owned handles. FFI bindings should prefer `_ex` and option initializers. |
-| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. FFI bindings should prefer `_ex` and option initializers. |
+| Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_create`, `llam_runtime_default`, `llam_runtime_run_handle`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_destroy`, `llam_runtime_shutdown` | Explicit runtime handles are the canonical embedding boundary. Legacy init/spawn/run/shutdown calls operate on `llam_runtime_default()`. Shutdown releases backend resources while public cleanup handles keep their documented post-shutdown behavior. FFI bindings should prefer `_ex` and option initializers. |
+| Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_runtime_spawn_ex`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. Embedders with explicit runtimes should spawn with `llam_runtime_spawn_ex()`. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. |
 | Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. |
-| Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners or waiters remain. |
-| Channels | `llam_channel_*` | Pointer-valued bounded channel. Capacity must be at least `1`; `llam_channel_create(0)` fails with `EINVAL`. Destroy returns `EBUSY` while buffered values or waiters remain. Use result-style receive APIs when `NULL` is a valid payload. |
+| Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners, waiters, in-flight wake returns, or public operations remain. |
+| Channels | `llam_channel_*` | Pointer-valued bounded channel. Capacity must be at least `1`; `llam_channel_create(0)` fails with `EINVAL`. Destroy returns `EBUSY` while buffered values, waiters, close-woken returns, or public operations remain. Use result-style receive APIs when `NULL` is a valid payload. |
 | Blocking | `llam_call_blocking_result`, `llam_call_blocking`, `llam_enter_blocking`, `llam_leave_blocking` | Prevents long blocking work from pinning scheduler workers. `llam_call_blocking_result` is the unambiguous FFI-safe form. Blocking callback return value is user-owned. |
 | I/O | `llam_read`, `llam_write`, `llam_read_handle`, `llam_write_handle`, `llam_read_owned`, `llam_recv_owned`, `llam_accept`, `llam_connect`, `llam_poll_fd`, `llam_poll_handle` | Scheduler-safe descriptor/socket/HANDLE operations. File descriptor and handle ownership follows platform convention unless owned-buffer APIs say otherwise. |
 | Owned buffers | `llam_io_buffer_data`, `llam_io_buffer_size`, `llam_io_buffer_capacity`, `llam_io_buffer_release` | Buffers returned by owned-read APIs are runtime-allocated and caller-released through `llam_io_buffer_release()`. |
-| Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats`, `llam_runtime_write_stats_json`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` for stats snapshots and JSON export for machine logs. |
+| Stats/debug | `llam_runtime_collect_stats_ex`, `llam_runtime_collect_stats_ex_handle`, `llam_runtime_collect_stats`, `llam_runtime_write_stats_json`, `llam_dump_runtime_state`, task name/class helpers | Observability surface. FFI bindings should prefer `_ex` or handle-scoped `_ex_handle` stats snapshots and JSON export for machine logs. |
 
 ## Inbound Option Structs
 
@@ -161,20 +161,18 @@ for unknown class values and `-1/ENOTSUP` outside a managed task.
 
 - `llam_runtime_init_ex()`, `llam_runtime_init()`, and
   `llam_runtime_shutdown()` are not reentrant.
-- `llam_runtime_create()`, `llam_runtime_run_handle()`, and
-  `llam_runtime_destroy()` are the canonical embedding-facing lifecycle calls
-  for 1.x, but their handle is an alias for the process-global runtime. Passing
-  a non-default handle to `llam_runtime_run_handle()` fails with `EINVAL`, and a
-  second live runtime creation fails with `EBUSY`. Internally, the 1.2.x line
-  already routes run, cooperative stop, shutdown, stats collection, and stats
-  JSON through runtime-owned entry points so later isolation work has a concrete
-  owner boundary to migrate.
+- `llam_runtime_create()`, `llam_runtime_spawn_ex()`,
+  `llam_runtime_run_handle()`, and `llam_runtime_destroy()` are the canonical
+  embedding-facing lifecycle calls. They operate on independent runtime handles;
+  the legacy `llam_runtime_init()`, `llam_spawn()`, `llam_run()`, and
+  `llam_runtime_shutdown()` wrappers operate only on `llam_runtime_default()`.
 - Calling `llam_runtime_shutdown()` from a managed LLAM task or scheduler frame
-  does not tear down the singleton underneath the active scheduler. It is
-  treated as a cooperative stop request; the host thread that owns `llam_run()`
+  does not tear down the owning runtime underneath the active scheduler. It is
+  treated as a cooperative stop request; the host thread that owns the run call
   remains responsible for final shutdown.
-- A process must not call `llam_runtime_shutdown()` while another thread is
-  concurrently creating tasks or runtime-owned synchronization objects.
+- A runtime handle must not be destroyed while another host thread is
+  concurrently creating tasks or runtime-owned synchronization objects for that
+  same handle.
 - User pointers passed to tasks, channels, blocking callbacks, or I/O buffers
   remain owned by the caller unless a specific API states otherwise.
 - Task, channel, mutex, condition, cancellation, and buffer handles must not be
@@ -221,8 +219,8 @@ make shared
 Expected dynamic artifacts:
 
 ```text
-Linux:  libllam_runtime.so -> libllam_runtime.so.1 -> libllam_runtime.so.1.2.0
-macOS:  libllam_runtime.dylib -> libllam_runtime.1.dylib
+Linux:  libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.2.0.0
+macOS:  libllam_runtime.dylib -> libllam_runtime.2.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.
 ```
@@ -260,12 +258,15 @@ still waits for live tasks to exit or observe cancellation through user code.
 
 `llam_runtime_shutdown()` is idempotent and may be called after a failed or
 partial initialization. It requests cooperative stop, joins runtime-owned OS
-threads that were started, releases backend resources, and invalidates all
-remaining runtime-owned handles. It is not a task-join API: callers that need a
-graceful task drain should call `llam_runtime_request_stop()`, drive
-`llam_run()`, and then call shutdown. After shutdown, existing task, channel,
-mutex, condition, cancellation-token, and I/O-buffer handles are invalid unless
-a function explicitly documents otherwise.
+threads that were started, and releases backend resources. It is not a task-join
+API: callers that need a graceful task drain should call
+`llam_runtime_request_stop()`, drive `llam_run()`, and then call shutdown. After
+shutdown, task handles are no longer joinable, blocking runtime-aware operations
+that require a managed task fail by contract, and backend I/O ownership is gone.
+Public cleanup handles keep the exceptions documented by their APIs: owned
+buffers remain valid until `llam_io_buffer_release()`, and already-buffered
+channel values may be drained with `llam_channel_try_recv_result()` before
+destroy.
 
 From a managed LLAM task or scheduler frame, shutdown performs only the
 stop-request portion. This avoids freeing scheduler, stack, or I/O state while
@@ -483,11 +484,11 @@ Common public failures are fixed as follows:
 | `ETIMEDOUT` | Absolute deadline or relative timeout expired. |
 | `ECANCELED` | Cancellation token or cooperative runtime stop was observed by a cancellable operation. |
 | `EPIPE` | Channel is closed or an operation reached an equivalent peer-closed state. |
-| `EXDEV` | Runtime-aware object was used from a different runtime owner. LLAM 1.x has one live process runtime, but objects are tagged now so future multi-runtime migration errors fail deterministically. |
+| `EXDEV` | Runtime-aware object was used from a different runtime owner. Explicit runtimes are isolated owner domains; cross-runtime managed use fails deterministically. |
 | `ENOMEM` | Allocation failure. |
 | `ENOTSUP` | Platform/backend feature is unsupported, or a runtime-aware operation requiring a managed task was called outside one. |
 
-Default 1.2.x source and release builds keep runtime-owner checks enabled so
+Default 2.x source and release builds keep runtime-owner checks enabled so
 `EXDEV` remains observable. Projects that build LLAM from source can define
 `LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` only for explicit singleton-only profiling
 builds; those binaries intentionally give up cross-owner diagnostics and should

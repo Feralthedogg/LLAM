@@ -246,7 +246,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
      * running task only after that commit point so a failed try path cannot leak
      * RUNNABLE state back to the normal yield fallback.
      */
-    current->forced_yield_budget = g_llam_runtime.forced_yield_every;
+    current->forced_yield_budget = rt->forced_yield_every;
     current->state = LLAM_TASK_STATE_RUNNABLE;
     current->wait_reason = LLAM_WAIT_NONE;
     current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
@@ -312,20 +312,25 @@ static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
 void llam_yield(void) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
+    llam_runtime_t *rt;
     unsigned direct_mode;
     int caller_errno = errno;
 
     if (shard == NULL || task == NULL) {
         return;
     }
-    direct_mode = llam_direct_yield_handoff_mode(shard->runtime);
+    rt = shard->runtime;
+    if (rt == NULL) {
+        return;
+    }
+    direct_mode = llam_direct_yield_handoff_mode(rt);
     if (direct_mode != 0U &&
         (direct_mode >= 2U || g_llam_tls_io_handoff_yield != 0U) &&
         llam_yield_try_direct_handoff(shard)) {
         return;
     }
 
-    task->forced_yield_budget = g_llam_runtime.forced_yield_every;
+    task->forced_yield_budget = rt->forced_yield_every;
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->wait_reason = LLAM_WAIT_NONE;
     task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
@@ -422,7 +427,7 @@ bool llam_yield_to_local_runnable(void) {
      * Queue insertion is the direct-handoff commit point.  Leave the currently
      * executing task marked RUNNING on every false return above.
      */
-    current->forced_yield_budget = g_llam_runtime.forced_yield_every;
+    current->forced_yield_budget = shard->runtime->forced_yield_every;
     current->state = LLAM_TASK_STATE_RUNNABLE;
     current->wait_reason = LLAM_WAIT_NONE;
     current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
@@ -579,27 +584,6 @@ static bool llam_join_try_completed_fast(llam_runtime_t *rt, llam_task_t *task) 
     return true;
 }
 
-/**
- * @brief Claim exclusive ownership of a public task handle for join.
- *
- * @details
- * Managed tasks already serialize parked join waiters through the target task
- * lock, but unmanaged OS threads poll completion without entering that waiter
- * list.  This claim is the API-level handle owner bit: exactly one joiner may
- * consume the task, and timed/cancelled joins release the claim before they
- * return so the handle remains joinable.
- */
-static bool llam_task_try_claim_join(llam_task_t *task) {
-    unsigned expected = 0U;
-
-    return task != NULL &&
-           atomic_compare_exchange_strong_explicit(&task->join_claimed,
-                                                   &expected,
-                                                   1U,
-                                                   memory_order_acq_rel,
-                                                   memory_order_acquire);
-}
-
 /** @brief Release a timed-out or cancelled join claim without consuming the task handle. */
 static void llam_task_release_join_claim(llam_task_t *task) {
     if (task != NULL) {
@@ -623,49 +607,15 @@ static void llam_task_release_join_claim(llam_task_t *task) {
  * @return -1 with @c errno set to @c EINVAL, @c EDEADLK, @c ETIMEDOUT,
  *         @c ECANCELED, or a fatal runtime error.
  */
-int llam_join_impl(llam_task_t *task, bool has_deadline, uint64_t deadline_ns) {
-    llam_runtime_t *rt;
+int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadline_ns) {
     llam_task_t *self = g_llam_tls_task;
+    llam_task_t *task = NULL;
+    llam_runtime_t *rt = NULL;
     int caller_errno = errno;
 
-    if (task == NULL || !g_llam_runtime.initialized) {
-        errno = EINVAL;
+    if (llam_task_claim_join_public_handle(task_handle, self, &task, &rt) != 0) {
         return -1;
     }
-    if (llam_runtime_check_object_owner(task->owner_runtime) != 0) {
-        return -1;
-    }
-    rt = task->owner_runtime;
-
-    if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    if (self == task) {
-        errno = EDEADLK;
-        return -1;
-    }
-
-    if (!llam_task_try_claim_join(task)) {
-        errno = EBUSY;
-        return -1;
-    }
-
-    /*
-     * Detach also owns task->lock while it turns a public handle into a
-     * detached handle.  Rechecking under the same lock prevents this join claim
-     * from racing a detach that observed join_claimed==0 just before we claimed
-     * it.
-     */
-    pthread_mutex_lock(&task->lock);
-    if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
-        pthread_mutex_unlock(&task->lock);
-        llam_task_release_join_claim(task);
-        errno = EINVAL;
-        return -1;
-    }
-    pthread_mutex_unlock(&task->lock);
 
     if (self == NULL) {
         while (atomic_load_explicit(&task->completed, memory_order_acquire) == 0U &&
@@ -819,48 +769,16 @@ int llam_join_until(llam_task_t *task, uint64_t deadline_ns) {
  * @return -1 with @c errno set to @c EINVAL for invalid input or @c EBUSY
  *         when another join/detach path already owns the public handle.
  */
-int llam_detach(llam_task_t *task) {
-    llam_runtime_t *rt;
-    unsigned expected = 0U;
+int llam_detach(llam_task_t *task_handle) {
+    llam_task_t *task = NULL;
+    llam_runtime_t *rt = NULL;
     bool reclaim_after_unlock = false;
 
     llam_task_safepoint();
 
-    if (task == NULL || !g_llam_runtime.initialized) {
-        errno = EINVAL;
+    if (llam_task_claim_detach_public_handle(task_handle, &task, &rt, &reclaim_after_unlock) != 0) {
         return -1;
     }
-    if (llam_runtime_check_object_owner(task->owner_runtime) != 0) {
-        return -1;
-    }
-    rt = task->owner_runtime;
-
-    pthread_mutex_lock(&task->lock);
-    if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
-        pthread_mutex_unlock(&task->lock);
-        errno = EINVAL;
-        return -1;
-    }
-    if (task->join_waiter_count > 0U) {
-        pthread_mutex_unlock(&task->lock);
-        errno = EBUSY;
-        return -1;
-    }
-    if (atomic_load_explicit(&task->join_claimed, memory_order_acquire) != 0U) {
-        pthread_mutex_unlock(&task->lock);
-        errno = EBUSY;
-        return -1;
-    }
-    atomic_store_explicit(&task->detached, 1U, memory_order_release);
-    if (atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) != 0U &&
-        atomic_compare_exchange_strong_explicit(&task->reclaim_claimed,
-                                                &expected,
-                                                1U,
-                                                memory_order_acq_rel,
-                                                memory_order_acquire)) {
-        reclaim_after_unlock = true;
-    }
-    pthread_mutex_unlock(&task->lock);
 
     if (reclaim_after_unlock) {
         llam_reclaim_claimed_task(rt, task);
@@ -894,12 +812,11 @@ int llam_sleep_until(uint64_t deadline_ns) {
 
     llam_task_safepoint();
 
-    if (!g_llam_runtime.initialized) {
-        errno = EINVAL;
-        return -1;
-    }
-
     if (task == NULL || shard == NULL) {
+        if (!atomic_load_explicit(&llam_runtime_default_storage()->initialized, memory_order_acquire)) {
+            errno = EINVAL;
+            return -1;
+        }
         for (;;) {
             uint64_t now_ns = llam_now_ns();
             struct timespec ts;
@@ -919,6 +836,11 @@ int llam_sleep_until(uint64_t deadline_ns) {
                 return -1;
             }
         }
+    }
+    if (shard->runtime == NULL ||
+        !atomic_load_explicit(&shard->runtime->initialized, memory_order_acquire)) {
+        errno = EINVAL;
+        return -1;
     }
 
     if (deadline_ns <= llam_now_ns()) {

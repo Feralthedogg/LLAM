@@ -1,11 +1,12 @@
 /**
  * @file src/core/runtime_handle.c
- * @brief Explicit runtime-handle compatibility API.
+ * @brief Explicit runtime-handle lifecycle API.
  *
  * @details
- * LLAM 1.x continues to use one process-wide runtime singleton. These wrappers
- * expose a handle-shaped API for embedders and reserve ABI space for true
- * multi-runtime isolation in a later major version.
+ * LLAM 2.x treats explicit handles as the canonical embedding boundary.  The
+ * legacy singleton APIs remain wrappers around ::llam_runtime_default, while
+ * embedders can create independent heap-backed runtime objects through this
+ * translation unit.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -26,40 +27,43 @@
 #include "runtime_internal.h"
 
 /**
- * @brief Return the singleton handle accepted by 1.x handle-shaped APIs.
+ * @brief Return the legacy default runtime handle.
  *
  * @details
- * This intentionally does not allocate or retain anything.  The explicit handle
- * API is a stable embedding boundary for future migration work, while the
- * concrete 1.x implementation still aliases the process-global runtime object.
+ * This intentionally does not allocate or retain anything.  It is a stable
+ * alias for the process-default runtime used by the legacy convenience APIs.
  */
 llam_runtime_t *llam_runtime_default(void) {
-    return &g_llam_runtime;
+    return llam_runtime_default_storage();
 }
 
 /**
- * @brief Initialize the process runtime and return its 1.x handle alias.
+ * @brief Allocate and initialize an explicit runtime handle.
  *
  * @details
  * Keep the "out is NULL until fully initialized" contract explicit here: FFI
- * callers can retry or clean up safely after any validation/init failure.  The
- * EBUSY branch is the public guard that prevents embedders from accidentally
- * assuming concurrent multi-runtime isolation before the 2.x migration exists.
+ * callers can retry or clean up safely after any validation/init failure.
  */
 int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_runtime_t **out) {
+    llam_runtime_t *runtime;
+
     if (out == NULL) {
         errno = EINVAL;
         return -1;
     }
     *out = NULL;
-    if (atomic_load_explicit(&g_llam_runtime.initialized, memory_order_acquire)) {
-        errno = EBUSY;
+
+    runtime = calloc(1U, sizeof(*runtime));
+    if (runtime == NULL) {
+        errno = ENOMEM;
         return -1;
     }
-    if (llam_runtime_init_ex(opts, opts_size) != 0) {
+
+    if (llam_runtime_init_rt(runtime, opts, opts_size, true) != 0) {
+        free(runtime);
         return -1;
     }
-    *out = &g_llam_runtime;
+    *out = runtime;
     return 0;
 }
 
@@ -75,15 +79,27 @@ int llam_runtime_run_handle(llam_runtime_t *runtime) {
 }
 
 /**
- * @brief Tear down the singleton when called with the accepted 1.x handle.
+ * @brief Tear down an explicit runtime handle.
  *
  * @details
- * NULL is kept as a convenience alias for legacy shutdown.  Unknown non-default
- * handles are ignored because this function has no errno channel; rejecting
- * those handles is enforced by the fallible handle APIs.
+ * NULL is kept as a convenience alias for legacy shutdown.  Unknown handles are
+ * ignored because this function has no errno channel; fallible handle APIs
+ * reject them before touching runtime-owned state.
  */
 void llam_runtime_destroy(llam_runtime_t *runtime) {
-    if (runtime == NULL || runtime == &g_llam_runtime) {
-        llam_runtime_shutdown_rt(runtime);
+    bool heap_runtime;
+
+    if (runtime == NULL) {
+        llam_runtime_shutdown_rt(llam_runtime_default_storage());
+        return;
+    }
+    if (llam_runtime_check_handle(runtime) != 0) {
+        return;
+    }
+
+    heap_runtime = runtime != llam_runtime_default_storage();
+    llam_runtime_shutdown_rt(runtime);
+    if (heap_runtime) {
+        free(runtime);
     }
 }

@@ -25,6 +25,13 @@
 
 #include "runtime_internal.h"
 
+_Static_assert(LLAM_IO_UDATA_CONTROL <= 7U, "LLAM I/O user-data tags must fit in three low bits");
+_Static_assert(_Alignof(llam_io_req_t) >= 8U, "LLAM I/O requests must keep three tag bits clear");
+_Static_assert(_Alignof(llam_poll_watch_t) >= 8U, "LLAM poll watches must keep three tag bits clear");
+_Static_assert(_Alignof(llam_accept_watch_t) >= 8U, "LLAM accept watches must keep three tag bits clear");
+_Static_assert(_Alignof(llam_recv_watch_t) >= 8U, "LLAM recv watches must keep three tag bits clear");
+_Static_assert(_Alignof(llam_io_control_op_t) >= 8U, "LLAM I/O control ops must keep three tag bits clear");
+
 /**
  * @brief Encode a pointer and low-bit tag for backend completion user data.
  *

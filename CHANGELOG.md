@@ -1,5 +1,52 @@
 # LLAM ChangeLog
 
+## 2.0.0 - 2026-05-23
+
+### Added
+
+* explicit multi-runtime lifecycle surface: `llam_runtime_create()`,
+  `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and
+  `llam_runtime_destroy()` are the canonical embedding boundary. Legacy
+  singleton APIs remain source-compatible wrappers around the process-default
+  runtime.
+
+* multi-runtime regression coverage: add `test_multi_runtime_core` and connect
+  it to Make, CMake, CI, Docker verification, and sanitizer target suites.
+
+* sanitizer entry points: add `make test-asan` and `make test-tsan` focused on
+  public handle, runtime core, owned I/O buffer, shutdown, and multi-runtime
+  edge tests.
+
+### Changed
+
+* ABI metadata and shared-library soname/install-name move to ABI major `2`
+  with version `2.0.0`.
+
+* runtime-owned registries, caches, I/O buffers, blocking jobs, and scheduler
+  paths are routed through explicit owner runtime state rather than implicit
+  singleton state where an object owner is known.
+
+* channel lifecycle, public slot helpers, owned I/O buffer accessors, and
+  lifecycle locking were split out of oversized translation units without
+  changing public behavior.
+
+### Fixed
+
+* explicit runtime creation no longer reports singleton-style `EBUSY` when two
+  heap-backed runtime handles are created concurrently; construction remains
+  serialized internally while both handles can initialize successfully.
+
+* allocator free paths now fail closed when an object's owner runtime is absent
+  instead of falling back to the process-default runtime cache.
+
+### Tests
+
+* extend Linux/macOS packaging and shared-library checks to the `2.0.0` ABI
+  names.
+
+* keep Windows release packaging and installer defaults aligned with the new
+  `v2.0.0` release tag.
+
 ## 1.2.0 - 2026-05-21
 
 ### Core runtime

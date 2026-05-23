@@ -79,7 +79,7 @@ jobs:
           # stress to the native Linux and dedicated stress matrices.
           ./test_abi_contract
           ./test_windows_policy
-          ./test_shared_load ./libllam_runtime.so.1.2.0
+          ./test_shared_load ./libllam_runtime.so.2.0.0
 
       - name: CMake build
         if: ${{ !contains(matrix.name, 'sanitizer') }}
@@ -101,8 +101,8 @@ jobs:
       - name: Package smoke
         if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: |
-          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v1.2.0/'
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=1.2.0 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.0/'
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 ./scripts/package_release.sh "${{ matrix.package_target }}"
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
           grep '/CHANGELOG.md$' package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt

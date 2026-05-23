@@ -5,8 +5,8 @@ cmake_minimum_required(VERSION 3.20)
 
 project(llam C ASM)
 
-set(LLAM_ABI_VERSION_MAJOR 1)
-set(LLAM_ABI_VERSION_MINOR 2)
+set(LLAM_ABI_VERSION_MAJOR 2)
+set(LLAM_ABI_VERSION_MINOR 0)
 set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.0")
 
 include(GNUInstallDirs)
@@ -52,8 +52,11 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_init.c
     src/core/runtime_lifecycle.c
     src/core/runtime_channel_cache.c
+    src/core/runtime_channel_lifecycle.c
     src/core/runtime_channel.c
+    src/core/runtime_channel_select_fast.c
     src/core/runtime_channel_select.c
+    src/core/runtime_cond_lifecycle.c
     src/core/runtime_cond.c
     src/core/runtime_handle.c
     src/core/runtime_owner.c
@@ -72,10 +75,12 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_sync.c
     src/core/runtime_spawn.c
     src/core/runtime_task_alloc.c
+    src/core/runtime_task_handle_registry.c
     src/core/runtime_task_group.c
     src/core/runtime_task_local.c
     src/core/runtime_task_reclaim.c
     src/core/runtime_task_stack.c
+    src/core/runtime_timer_heap.c
     src/core/runtime_timer.c
     src/core/runtime_time.c
     src/core/runtime_trace.c
@@ -99,6 +104,8 @@ set(LLAM_RUNTIME_SOURCES
     src/io/runtime_io_api_direct.c
     src/io/runtime_io_api_direct_tuning.c
     src/io/runtime_io_api_issue.c
+    src/io/runtime_io_buffer_registry.c
+    src/io/runtime_io_api_owned.c
     src/io/runtime_io_api_public.c
     src/io/runtime_io_engine.c
     src/io/runtime_io_watch.c
@@ -364,6 +371,11 @@ add_executable(test_runtime_core
 )
 target_link_libraries(test_runtime_core PRIVATE llam_runtime)
 
+add_executable(test_multi_runtime_core
+    tests/test_multi_runtime_core.c
+)
+target_link_libraries(test_multi_runtime_core PRIVATE llam_runtime)
+
 add_executable(test_runtime_api_edges
     tests/test_runtime_api_edges.c
 )
@@ -475,6 +487,7 @@ foreach(LLAM_TEST_TARGET
         test_abi_compat
         test_connect_io
         test_runtime_core
+        test_multi_runtime_core
         test_runtime_api_edges
         test_runtime_select_edges
         test_runtime_io_dump
@@ -504,6 +517,7 @@ endforeach()
 add_test(NAME test_abi_contract COMMAND test_abi_contract)
 add_test(NAME test_abi_compat COMMAND test_abi_compat)
 add_test(NAME test_runtime_core COMMAND test_runtime_core)
+add_test(NAME test_multi_runtime_core COMMAND test_multi_runtime_core)
 add_test(NAME test_runtime_api_edges COMMAND test_runtime_api_edges)
 add_test(NAME test_runtime_select_edges COMMAND test_runtime_select_edges)
 add_test(NAME test_runtime_group_local_edges COMMAND test_runtime_group_local_edges)

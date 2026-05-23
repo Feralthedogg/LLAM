@@ -11,8 +11,8 @@ fi
 
 stage="$1"
 target="${2:-}"
-version="${LLAM_VERSION:-1.2.0}"
-abi_major="${LLAM_ABI_MAJOR:-1}"
+version="${LLAM_VERSION:-2.0.0}"
+abi_major="${LLAM_ABI_MAJOR:-2}"
 
 if [ -z "$target" ]; then
     case "$(uname -s)" in

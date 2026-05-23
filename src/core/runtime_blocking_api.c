@@ -215,7 +215,7 @@ static void llam_opaque_spin_until_helper_hint(llam_shard_t *shard, unsigned exp
  *         returns @c NULL. @c errno carries the disambiguating status.
  */
 int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_task_t *task = g_llam_tls_task;
     llam_cancel_token_t *token;
     llam_block_job_t *job;
@@ -224,16 +224,30 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
 
     llam_task_safepoint();
 
-    if (fn == NULL || out == NULL) {
+    if (out == NULL) {
         errno = EINVAL;
         return -1;
     }
+    /*
+     * Result-style APIs must leave no stale callback result behind on any
+     * submission failure.  NULL is also a valid successful callback value, so
+     * callers distinguish success solely through the integer return code.
+     */
     *out = NULL;
+    if (fn == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
 
     if (task == NULL || g_llam_tls_shard == NULL) {
         errno = 0;
         *out = fn(arg);
         return 0;
+    }
+    rt = task->owner_runtime != NULL ? task->owner_runtime : g_llam_tls_shard->runtime;
+    if (rt == NULL) {
+        errno = EINVAL;
+        return -1;
     }
 
     job = llam_block_job_alloc(rt);

@@ -58,6 +58,9 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
+
+#include "runtime_public_slot.h"
+
 #ifdef __linux__
 #if defined(__x86_64__) || defined(__i386__)
 #include <cpuid.h>
@@ -171,7 +174,7 @@ typedef struct llam_cpu_set {
 
 _Static_assert((LLAM_NORM_QUEUE_CAP & (LLAM_NORM_QUEUE_CAP - 1U)) == 0U, "LLAM_NORM_QUEUE_CAP must be a power of two");
 
-/** @brief Private runtime singleton type. */
+/** @brief Private runtime object type. */
 typedef struct llam_runtime llam_runtime_t;
 /** @brief Scheduler worker/shard state type. */
 typedef struct llam_shard llam_shard_t;
@@ -446,6 +449,7 @@ struct llam_channel_select_state {
     llam_select_op_t *ops;
     llam_wait_node_t **nodes;
     llam_channel_t **channels;
+    llam_channel_t **op_channels;
     size_t op_count;
     size_t channel_count;
     size_t selected_index;
@@ -621,6 +625,10 @@ typedef struct llam_allocator {
 struct llam_io_buffer {
     llam_runtime_t *owner_runtime;
     struct llam_io_buffer *alloc_next;
+    struct llam_io_buffer *public_registry_next;
+    size_t public_handle_slot;
+    uint32_t public_handle_generation;
+    _Atomic size_t public_active_ops;
     unsigned alloc_owner_shard;
     unsigned provided_node_index;
     size_t size;
@@ -637,16 +645,22 @@ struct llam_io_buffer {
 struct llam_cancel_token {
     llam_runtime_t *owner_runtime;
     struct llam_cancel_token *registry_next;
+    size_t public_handle_slot;
+    uint32_t public_handle_generation;
     pthread_mutex_t lock;
     bool cancelled;
     unsigned refcount;
-    size_t active_ops;
+    _Atomic size_t active_ops;
     llam_task_t *waiters;
 };
 
 /** @brief Runtime-aware mutex: owner is atomic for the fast path, waiters are lock protected. */
 struct llam_mutex {
     llam_runtime_t *owner_runtime;
+    struct llam_mutex *registry_next;
+    size_t public_handle_slot;
+    uint32_t public_handle_generation;
+    _Atomic size_t active_ops;
     atomic_uintptr_t owner;
     pthread_mutex_t lock;
     llam_wait_queue_t waiters;
@@ -655,6 +669,10 @@ struct llam_mutex {
 /** @brief Runtime-aware condition variable with a FIFO waiter queue. */
 struct llam_cond {
     llam_runtime_t *owner_runtime;
+    struct llam_cond *registry_next;
+    size_t public_handle_slot;
+    uint32_t public_handle_generation;
+    _Atomic size_t active_ops;
     pthread_mutex_t lock;
     llam_wait_queue_t waiters;
     /*
@@ -668,6 +686,10 @@ struct llam_cond {
 /** @brief Bounded pointer channel with separate sender and receiver wait queues. */
 struct llam_channel {
     llam_runtime_t *owner_runtime;
+    struct llam_channel *registry_next;
+    size_t public_handle_slot;
+    uint32_t public_handle_generation;
+    _Atomic size_t active_ops;
     pthread_mutex_t lock;
     void **buffer;
     struct llam_channel *cache_next;
@@ -690,7 +712,11 @@ struct llam_channel {
  */
 struct llam_task {
     llam_runtime_t *owner_runtime;
+    struct llam_task *registry_next;
     uint64_t id;
+    size_t public_handle_slot;
+    atomic_uint public_handle_generation;
+    _Atomic size_t active_ops;
     /*
      * The scheduler owns most task state transitions, but wake producers,
      * watchdog/debug, timeout, and dynamic-rehome paths can sample or rewrite
@@ -795,7 +821,9 @@ struct llam_task_group {
     size_t count;
     size_t capacity;
     size_t active_spawns;
-    size_t active_ops;
+    _Atomic size_t active_ops;
+    size_t public_handle_slot;
+    uint32_t public_handle_generation;
     bool joining;
     bool lock_initialized;
 };
@@ -986,6 +1014,9 @@ struct llam_node {
  * process-wide signal/affinity state until shutdown.
  */
 struct llam_runtime {
+    llam_runtime_t *registry_next;
+    uint64_t runtime_id;
+    bool heap_allocated;
     atomic_bool initialized;
     atomic_bool exec_started;
     unsigned observed_shards;

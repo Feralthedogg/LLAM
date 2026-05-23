@@ -3,10 +3,11 @@
  * @brief Defines global runtime storage and core runtime invariants shared by subsystems.
  *
  * @details
- * The runtime uses one process-wide singleton plus thread-local cursors for the
- * currently executing shard/task/scheduler context. Keeping definitions in one
- * translation unit avoids duplicate storage and makes initialization/shutdown
- * ownership explicit.
+ * The runtime keeps a process-default instance for legacy convenience APIs and
+ * thread-local cursors for the currently executing shard/task/scheduler
+ * context. Explicit runtime handles allocate their own state; keeping the
+ * default storage in one translation unit avoids duplicate definitions and
+ * makes legacy ownership explicit.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -26,7 +27,7 @@
 
 #include "runtime_internal.h"
 
-/** @brief Runtime-wide singleton state; behavior lives in subsystem modules. */
+/** @brief Legacy process-default runtime state; behavior lives in subsystem modules. */
 llam_runtime_t g_llam_runtime;
 /** @brief Low 32 bits of the enabled x86 XSAVE mask. */
 uint32_t g_llam_xsave_mask_lo;

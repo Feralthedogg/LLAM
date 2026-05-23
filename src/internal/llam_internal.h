@@ -47,7 +47,7 @@
  * Keep owner checks enabled by default because EXDEV is part of the public
  * 1.2.x diagnostic contract. Release-fast embedders that build their own LLAM
  * binary may define this to 1 only when they intentionally trade cross-owner
- * diagnostics for a zero-cost singleton assumption.
+ * diagnostics for a zero-cost single-runtime assumption.
  */
 #define LLAM_RUNTIME_DISABLE_OWNER_CHECKS 0
 #endif

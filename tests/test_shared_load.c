@@ -32,9 +32,9 @@ typedef int (*abi_info_fn)(llam_abi_info_t *info, size_t info_size);
 typedef int (*connect_fn)(llam_fd_t fd, const struct sockaddr *addr, socklen_t addrlen);
 
 #if defined(__APPLE__) && defined(__MACH__)
-#define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.1.dylib"
+#define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.2.dylib"
 #elif defined(__linux__)
-#define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.so.1.2.0"
+#define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.so.2.0.0"
 #else
 #define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.so"
 #endif

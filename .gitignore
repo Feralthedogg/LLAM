@@ -20,6 +20,7 @@ test_abi_contract
 test_abi_compat
 test_connect_io
 test_io_buffers
+test_multi_runtime_core
 test_nm_compat_runtime
 test_runtime_api_edges
 test_runtime_core

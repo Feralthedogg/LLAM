@@ -72,7 +72,7 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
          */
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
         if (inflight_owner < node->runtime->active_shards) {
-            llam_shard_note_inflight_io_waiter(inflight_owner, -1);
+            llam_shard_note_inflight_io_waiter(req->owner_runtime, inflight_owner, -1);
             completion_owner = inflight_owner;
         }
     } else {

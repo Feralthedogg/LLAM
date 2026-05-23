@@ -40,7 +40,15 @@ enum {
  * @return -1 with @c errno set to @c ENOTSUP otherwise.
  */
 int llam_require_task_context(void) {
-    if (!g_llam_runtime.initialized || g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+    llam_runtime_t *rt;
+
+    if (g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    rt = g_llam_tls_task->owner_runtime;
+    if (rt == NULL || g_llam_tls_shard->runtime != rt ||
+        !atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
         errno = ENOTSUP;
         return -1;
     }

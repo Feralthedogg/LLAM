@@ -10,14 +10,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.2.0" }
+    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v2.0.0" }
 }
 $Version = $Version.TrimStart("v").Replace("/", "-")
 if ([string]::IsNullOrWhiteSpace($LibraryVersion)) {
-    $LibraryVersion = "1.2.0"
+    $LibraryVersion = "2.0.0"
 }
 if ([string]::IsNullOrWhiteSpace($AbiMajor)) {
-    $AbiMajor = "1"
+    $AbiMajor = "2"
 }
 
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")

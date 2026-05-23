@@ -34,7 +34,14 @@
  * @return Task id, or 0 for NULL.
  */
 uint64_t llam_task_id(const llam_task_t *task) {
-    return task != NULL ? task->id : 0U;
+    uint64_t id = 0U;
+
+    task = llam_task_resolve_public_handle(task);
+    if (task != NULL) {
+        id = task->id;
+        llam_task_end_public_op((llam_task_t *)task);
+    }
+    return id;
 }
 
 /**
@@ -44,7 +51,14 @@ uint64_t llam_task_id(const llam_task_t *task) {
  * @return State name, or "UNKNOWN" for NULL.
  */
 const char *llam_task_state_name(const llam_task_t *task) {
-    return task != NULL ? llam_state_name_from_id(task->state) : "UNKNOWN";
+    const char *state = "UNKNOWN";
+
+    task = llam_task_resolve_public_handle(task);
+    if (task != NULL) {
+        state = llam_state_name_from_id(task->state);
+        llam_task_end_public_op((llam_task_t *)task);
+    }
+    return state;
 }
 
 /**
@@ -54,9 +68,14 @@ const char *llam_task_state_name(const llam_task_t *task) {
  * @return Task class, or default class for NULL.
  */
 uint32_t llam_task_class(const llam_task_t *task) {
-    return task != NULL
-               ? atomic_load_explicit(&((llam_task_t *)task)->task_class, memory_order_acquire)
-               : (uint32_t)LLAM_TASK_CLASS_DEFAULT;
+    uint32_t task_class = (uint32_t)LLAM_TASK_CLASS_DEFAULT;
+
+    task = llam_task_resolve_public_handle(task);
+    if (task != NULL) {
+        task_class = atomic_load_explicit(&((llam_task_t *)task)->task_class, memory_order_acquire);
+        llam_task_end_public_op((llam_task_t *)task);
+    }
+    return task_class;
 }
 
 /**
@@ -65,15 +84,15 @@ uint32_t llam_task_class(const llam_task_t *task) {
  * @return Current task, or NULL outside a runtime-managed task.
  */
 llam_task_t *llam_current_task(void) {
-    return g_llam_tls_task;
+    return llam_task_public_handle(g_llam_tls_task);
 }
 
 /**
  * @brief Fill the current library's full runtime statistics layout.
  *
- * @param rt Runtime whose counters should be sampled. 1.x accepts only the
- *           default singleton, but taking the owner explicitly keeps this path
- *           aligned with the handle API migration.
+ * @param rt Runtime whose counters should be sampled. Legacy stats wrappers
+ *           pass the default runtime; handle-scoped APIs pass their explicit
+ *           owner.
  * @param stats Destination full-size statistics object.
  */
 static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_stats_t *stats) {
@@ -223,7 +242,11 @@ int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *s
 }
 
 int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size) {
-    return llam_runtime_collect_stats_ex_rt(&g_llam_runtime, stats, stats_size);
+    return llam_runtime_collect_stats_ex_rt(llam_runtime_default_storage(), stats, stats_size);
+}
+
+int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime, llam_runtime_stats_t *stats, size_t stats_size) {
+    return llam_runtime_collect_stats_ex_rt(runtime, stats, stats_size);
 }
 
 int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
@@ -232,7 +255,7 @@ int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
 
 /** @brief Write a human-readable runtime dump to an fd. */
 void llam_dump_runtime_state(int fd) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt = llam_runtime_default_storage();
     llam_shard_t *shards;
     llam_node_t *nodes;
     unsigned i;

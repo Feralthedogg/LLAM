@@ -56,7 +56,7 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     bool run_timing = shard->runtime->run_timing_enabled != 0U;
     bool wake_timing = task->last_runnable_ns > 0U && shard->runtime->wake_latency_metrics_enabled != 0U;
     bool preempt_timing = shard->runtime->preempt_mode >= LLAM_PREEMPT_AUTO;
-    bool sample_safepoint = g_llam_runtime.profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ||
+    bool sample_safepoint = shard->runtime->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ||
                             (shard->metrics.ctx_switches & 63ULL) == 0U;
     uint64_t now_ns = (run_timing || wake_timing || preempt_timing || sample_safepoint) ? llam_now_ns() : 0U;
 

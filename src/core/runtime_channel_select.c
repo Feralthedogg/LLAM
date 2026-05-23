@@ -27,12 +27,6 @@
 
 #include "runtime_internal.h"
 
-#define LLAM_CHANNEL_SELECT_INLINE_OPS 8U
-#define LLAM_SELECT_PENDING 0U
-#define LLAM_SELECT_COMPLETING 1U
-#define LLAM_SELECT_COMPLETED_INLINE 2U
-#define LLAM_SELECT_COMPLETED_QUEUED 3U
-
 static unsigned llam_channel_select_completed_state(llam_channel_select_state_t *state) {
     unsigned completed;
 
@@ -41,61 +35,6 @@ static unsigned llam_channel_select_completed_state(llam_channel_select_state_t 
     } while (completed == LLAM_SELECT_COMPLETING);
 
     return completed;
-}
-
-static int llam_channel_select_validate_op(const llam_select_op_t *op) {
-    if (op == NULL || op->channel == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (llam_runtime_check_object_owner(op->channel->owner_runtime) != 0) {
-        return -1;
-    }
-    if (op->kind == LLAM_SELECT_OP_RECV) {
-        if (op->recv_out == NULL) {
-            errno = EINVAL;
-            return -1;
-        }
-        return 0;
-    }
-    if (op->kind == LLAM_SELECT_OP_SEND) {
-        return 0;
-    }
-    errno = EINVAL;
-    return -1;
-}
-
-static int llam_channel_select_try_one(llam_select_op_t *op) {
-    int rc;
-
-    op->result_errno = 0;
-    switch (op->kind) {
-    case LLAM_SELECT_OP_RECV:
-        rc = llam_channel_try_recv_result(op->channel, op->recv_out);
-        break;
-    case LLAM_SELECT_OP_SEND:
-        rc = llam_channel_try_send(op->channel, op->send_value);
-        break;
-    default:
-        errno = EINVAL;
-        return -1;
-    }
-    if (rc == 0) {
-        return 1;
-    }
-    /*
-     * Select probes use nonblocking channel APIs.  EAGAIN means this
-     * operation is not ready yet; keep scanning or park the select waiter.
-     * ETIMEDOUT is accepted for compatibility with older internal probes.
-     */
-    if (errno == EAGAIN || errno == ETIMEDOUT) {
-        return 0;
-    }
-    if (errno == EPIPE || errno == ECANCELED) {
-        op->result_errno = errno;
-        return 1;
-    }
-    return -1;
 }
 
 static void llam_channel_select_sort_channels(llam_channel_t **channels, size_t count) {
@@ -113,28 +52,53 @@ static void llam_channel_select_sort_channels(llam_channel_t **channels, size_t 
     }
 }
 
-static size_t llam_channel_select_collect_channels(llam_select_op_t *ops,
-                                                   size_t op_count,
-                                                   llam_channel_t **channels) {
+static void llam_channel_select_release_channels(llam_channel_t **channels, size_t count) {
+    while (count > 0U) {
+        --count;
+        llam_channel_end_public_op(channels[count]);
+    }
+}
+
+static int llam_channel_select_collect_channels(llam_select_op_t *ops,
+                                                size_t op_count,
+                                                llam_channel_t **channels,
+                                                llam_channel_t **op_channels,
+                                                size_t *out_count) {
     size_t count = 0U;
     size_t i;
 
     for (i = 0U; i < op_count; ++i) {
+        llam_channel_t *channel = llam_channel_resolve_public_handle(ops[i].channel);
         size_t j;
         bool found = false;
 
+        if (channel == NULL) {
+            llam_channel_select_release_channels(channels, count);
+            errno = EINVAL;
+            return -1;
+        }
+        if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {
+            llam_channel_end_public_op(channel);
+            llam_channel_select_release_channels(channels, count);
+            return -1;
+        }
         for (j = 0U; j < count; ++j) {
-            if (channels[j] == ops[i].channel) {
+            if (channels[j] == channel) {
                 found = true;
                 break;
             }
         }
         if (!found) {
-            channels[count++] = ops[i].channel;
+            channels[count++] = channel;
+            op_channels[i] = channel;
+        } else {
+            op_channels[i] = channels[j];
+            llam_channel_end_public_op(channel);
         }
     }
     llam_channel_select_sort_channels(channels, count);
-    return count;
+    *out_count = count;
+    return 0;
 }
 
 static void llam_channel_select_lock_channels(llam_channel_t **channels, size_t count) {
@@ -157,8 +121,15 @@ static void llam_channel_select_unlock_channels(llam_channel_t **channels, size_
     }
 }
 
-static bool llam_channel_select_op_may_run_locked(const llam_select_op_t *op) {
-    llam_channel_t *channel = op->channel;
+static bool llam_channel_select_op_may_run_locked(const llam_channel_select_state_t *state, size_t op_index) {
+    const llam_select_op_t *op;
+    llam_channel_t *channel;
+
+    if (state == NULL || state->op_channels == NULL || op_index >= state->op_count) {
+        return false;
+    }
+    op = &state->ops[op_index];
+    channel = state->op_channels[op_index];
 
     if (op->kind == LLAM_SELECT_OP_RECV) {
         return channel->count > 0U || channel->send_waiters.head != NULL || channel->closed;
@@ -169,11 +140,11 @@ static bool llam_channel_select_op_may_run_locked(const llam_select_op_t *op) {
     return false;
 }
 
-static bool llam_channel_select_any_ready_locked(llam_select_op_t *ops, size_t op_count) {
+static bool llam_channel_select_any_ready_locked(const llam_channel_select_state_t *state) {
     size_t i;
 
-    for (i = 0U; i < op_count; ++i) {
-        if (llam_channel_select_op_may_run_locked(&ops[i])) {
+    for (i = 0U; i < state->op_count; ++i) {
+        if (llam_channel_select_op_may_run_locked(state, i)) {
             return true;
         }
     }
@@ -190,7 +161,7 @@ static void llam_channel_select_cleanup_nodes(llam_channel_select_state_t *state
         llam_channel_select_lock_channels(state->channels, state->channel_count);
         for (i = 0U; i < state->op_count; ++i) {
             llam_wait_node_t *node = state->nodes[i];
-            llam_channel_t *channel = state->ops[i].channel;
+            llam_channel_t *channel = state->op_channels != NULL ? state->op_channels[i] : NULL;
 
             if (node == NULL || channel == NULL) {
                 continue;
@@ -206,7 +177,7 @@ static void llam_channel_select_cleanup_nodes(llam_channel_select_state_t *state
     }
     for (i = 0U; i < state->op_count; ++i) {
         llam_wait_node_t *node = state->nodes[i];
-        llam_channel_t *channel = state->ops[i].channel;
+        llam_channel_t *channel = state->op_channels != NULL ? state->op_channels[i] : NULL;
 
         if (node == NULL || channel == NULL) {
             continue;
@@ -296,7 +267,7 @@ static void llam_channel_select_enqueue_nodes_locked(llam_channel_select_state_t
 
     for (i = 0U; i < state->op_count; ++i) {
         llam_wait_node_t *node = state->nodes[i];
-        llam_channel_t *channel = state->ops[i].channel;
+        llam_channel_t *channel = state->op_channels[i];
 
         if (state->ops[i].kind == LLAM_SELECT_OP_RECV) {
             llam_wait_queue_push_tail(&channel->recv_waiters, node);
@@ -432,12 +403,16 @@ bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam
                           should_queue ? LLAM_SELECT_COMPLETED_QUEUED : LLAM_SELECT_COMPLETED_INLINE,
                           memory_order_release);
     if (should_queue) {
-        llam_reinject_task_on_shard(&g_llam_runtime,
-                                  task,
-                                  task->parked_shard,
-                                  true,
-                                  LLAM_TRACE_WAKE,
-                                  reason);
+        llam_runtime_t *rt = task->owner_runtime;
+
+        if (rt != NULL) {
+            llam_reinject_task_on_shard(rt,
+                                      task,
+                                      task->parked_shard,
+                                      true,
+                                      LLAM_TRACE_WAKE,
+                                      reason);
+        }
     }
     return true;
 }
@@ -450,7 +425,9 @@ int llam_channel_select(llam_select_op_t *ops,
     llam_channel_t **channels;
     llam_wait_node_t **nodes;
     llam_channel_t *inline_channels[LLAM_CHANNEL_SELECT_INLINE_OPS];
+    llam_channel_t *inline_op_channels[LLAM_CHANNEL_SELECT_INLINE_OPS];
     llam_wait_node_t *inline_nodes[LLAM_CHANNEL_SELECT_INLINE_OPS];
+    llam_channel_t **op_channels;
     llam_task_t *task;
     llam_shard_t *shard;
     size_t channel_count;
@@ -459,7 +436,7 @@ int llam_channel_select(llam_select_op_t *ops,
     bool heap_arrays;
     int rc;
 
-    if (ops == NULL || op_count == 0U || selected_index == NULL) {
+    if (ops == NULL || op_count == 0U || op_count > (size_t)LLAM_CHANNEL_SELECT_MAX_OPS || selected_index == NULL) {
         errno = EINVAL;
         return -1;
     }
@@ -476,40 +453,36 @@ int llam_channel_select(llam_select_op_t *ops,
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
 
-    if (deadline_ns == 0U) {
-        bool ready;
+    for (;;) {
+        if (op_count <= LLAM_CHANNEL_SELECT_INLINE_OPS) {
+            int selected = llam_channel_select_try_ready_batch(ops, op_count, start, selected_index);
 
-        heap_arrays = op_count > LLAM_CHANNEL_SELECT_INLINE_OPS;
-        if (heap_arrays) {
-            channels = calloc(op_count, sizeof(*channels));
-            if (channels == NULL) {
-                errno = ENOMEM;
+            if (selected < 0) {
                 return -1;
             }
-        } else {
-            channels = inline_channels;
+            if (selected == LLAM_SELECT_TRY_SELECTED) {
+                return 0;
+            }
+            if (selected == LLAM_SELECT_TRY_NOT_READY) {
+                goto select_not_ready;
+            }
+            /*
+             * Fallback means a queued peer waiter is involved.  Preserve the
+             * existing public-operation path for that uncommon case.
+             */
         }
-
-        channel_count = llam_channel_select_collect_channels(ops, op_count, channels);
-        llam_channel_select_lock_channels(channels, channel_count);
-        ready = llam_channel_select_any_ready_locked(ops, op_count);
-        llam_channel_select_unlock_channels(channels, channel_count);
-        if (heap_arrays) {
-            free(channels);
-        }
-        if (!ready) {
-            errno = ETIMEDOUT;
-            return -1;
-        }
-    }
-
-    for (;;) {
         if (start == 0U) {
             for (i = 0U; i < op_count; ++i) {
-                int selected = llam_channel_select_try_one(&ops[i]);
+                int selected = llam_channel_select_try_one_fast(&ops[i]);
 
                 if (selected < 0) {
                     return -1;
+                }
+                if (selected == LLAM_SELECT_TRY_FALLBACK) {
+                    selected = llam_channel_select_try_one(&ops[i]);
+                    if (selected < 0) {
+                        return -1;
+                    }
                 }
                 if (selected > 0) {
                     *selected_index = i;
@@ -524,9 +497,15 @@ int llam_channel_select(llam_select_op_t *ops,
                 if (index >= op_count) {
                     index -= op_count;
                 }
-                selected = llam_channel_select_try_one(&ops[index]);
+                selected = llam_channel_select_try_one_fast(&ops[index]);
                 if (selected < 0) {
                     return -1;
+                }
+                if (selected == LLAM_SELECT_TRY_FALLBACK) {
+                    selected = llam_channel_select_try_one(&ops[index]);
+                    if (selected < 0) {
+                        return -1;
+                    }
                 }
                 if (selected > 0) {
                     *selected_index = index;
@@ -534,6 +513,7 @@ int llam_channel_select(llam_select_op_t *ops,
                 }
             }
         }
+select_not_ready:
         if (deadline_ns == 0U || llam_deadline_passed(deadline_ns)) {
             errno = ETIMEDOUT;
             return -1;
@@ -543,9 +523,11 @@ int llam_channel_select(llam_select_op_t *ops,
         if (heap_arrays) {
             nodes = calloc(op_count, sizeof(*nodes));
             channels = calloc(op_count, sizeof(*channels));
-            if (nodes == NULL || channels == NULL) {
+            op_channels = calloc(op_count, sizeof(*op_channels));
+            if (nodes == NULL || channels == NULL || op_channels == NULL) {
                 free(nodes);
                 free(channels);
+                free(op_channels);
                 errno = ENOMEM;
                 return -1;
             }
@@ -553,36 +535,49 @@ int llam_channel_select(llam_select_op_t *ops,
             memset(inline_nodes, 0, sizeof(inline_nodes));
             nodes = inline_nodes;
             channels = inline_channels;
+            op_channels = inline_op_channels;
         }
 
         memset(&state, 0, sizeof(state));
         state.owner_runtime = task->owner_runtime;
         state.ops = ops;
         state.nodes = nodes;
+        state.op_channels = op_channels;
         state.op_count = op_count;
         state.selected_index = SIZE_MAX;
         atomic_init(&state.completed, LLAM_SELECT_PENDING);
         atomic_init(&state.wake_armed, 0U);
         atomic_init(&state.wake_queued, 0U);
 
-        channel_count = llam_channel_select_collect_channels(ops, op_count, channels);
-        state.channels = channels;
-        state.channel_count = channel_count;
-        if (llam_channel_select_alloc_nodes(shard, task, ops, op_count, &state) != 0) {
+        if (llam_channel_select_collect_channels(ops, op_count, channels, op_channels, &channel_count) != 0) {
             if (heap_arrays) {
                 free(nodes);
                 free(channels);
+                free(op_channels);
+            }
+            return -1;
+        }
+        state.channels = channels;
+        state.channel_count = channel_count;
+        if (llam_channel_select_alloc_nodes(shard, task, ops, op_count, &state) != 0) {
+            llam_channel_select_release_channels(channels, channel_count);
+            if (heap_arrays) {
+                free(nodes);
+                free(channels);
+                free(op_channels);
             }
             return -1;
         }
 
         llam_channel_select_lock_channels(channels, channel_count);
-        if (llam_channel_select_any_ready_locked(ops, op_count)) {
+        if (llam_channel_select_any_ready_locked(&state)) {
             llam_channel_select_unlock_channels(channels, channel_count);
             llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
                 free(channels);
+                free(op_channels);
             }
             start = (start + 1U) % op_count;
             continue;
@@ -613,9 +608,11 @@ int llam_channel_select(llam_select_op_t *ops,
             task->wait_reason = LLAM_WAIT_NONE;
             llam_task_clear_wait_tracking(task);
             llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
                 free(channels);
+                free(op_channels);
             }
             return -1;
         }
@@ -637,9 +634,11 @@ int llam_channel_select(llam_select_op_t *ops,
             task->wait_reason = LLAM_WAIT_NONE;
             llam_task_clear_wait_tracking(task);
             llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
                 free(channels);
+                free(op_channels);
             }
             errno = ECANCELED;
             return -1;
@@ -670,12 +669,14 @@ select_ready:
         llam_channel_select_cleanup_nodes(&state);
         rc = llam_channel_select_finish(&state, selected_index);
         if (state.selected_index != SIZE_MAX && state.selected_index < op_count) {
-            llam_channel_waiter_consumed(ops[state.selected_index].channel);
+            llam_channel_waiter_consumed(state.op_channels[state.selected_index]);
         }
         llam_channel_select_release_nodes(shard, task, nodes, op_count);
+        llam_channel_select_release_channels(channels, channel_count);
         if (heap_arrays) {
             free(nodes);
             free(channels);
+            free(op_channels);
         }
         return rc;
     }

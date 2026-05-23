@@ -59,6 +59,32 @@ static int fail_errno(const char *message) {
     return 1;
 }
 
+static int test_invalid_owned_fd_errors(void) {
+    llam_io_buffer_t *owned = (llam_io_buffer_t *)(uintptr_t)1U;
+
+    /*
+     * Windows reports invalid socket probes through WSAGetLastError().  These
+     * calls verify that LLAM normalizes the public invalid-fd sentinel to
+     * EBADF before the owned-buffer path can allocate or downgrade the error
+     * to ENOTSOCK.
+     */
+    errno = 0;
+    if (llam_recv_owned(LLAM_INVALID_FD, 1U, 0, &owned) != -1 ||
+        errno != EBADF ||
+        owned != NULL) {
+        return fail_errno("llam_recv_owned invalid fd did not preserve EBADF");
+    }
+
+    owned = (llam_io_buffer_t *)(uintptr_t)1U;
+    errno = 0;
+    if (llam_read_owned(LLAM_INVALID_FD, 1U, &owned) != -1 ||
+        errno != EBADF ||
+        owned != NULL) {
+        return fail_errno("llam_read_owned invalid fd did not preserve EBADF");
+    }
+    return 0;
+}
+
 static void task_fail(windows_iocp_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
         state->first_errno = err;
@@ -400,6 +426,10 @@ int main(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return fail_errno("llam_runtime_init_ex failed");
+    }
+    if (test_invalid_owned_fd_errors() != 0) {
+        llam_runtime_shutdown();
+        return 1;
     }
     if (setup_listener(&state) != 0) {
         llam_runtime_shutdown();

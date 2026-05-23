@@ -26,6 +26,90 @@
 
 #include "runtime_internal.h"
 
+static pthread_mutex_t g_llam_mutex_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+static llam_mutex_t *g_llam_mutex_registry;
+
+static llam_public_slot_table_t g_llam_mutex_public_slots;
+
+/*
+ * Public mutex handles are slot+generation values.  The live registry and slot
+ * table let every public entry point reject stale handles without reading a
+ * mutex object that has already been freed or reallocated.
+ */
+static int llam_mutex_reserve_public_slot_locked(llam_mutex_t *mutex, size_t *out_slot) {
+    uint32_t generation = 0U;
+
+    return llam_public_slot_reserve(&g_llam_mutex_public_slots, mutex, 64U, out_slot, &generation);
+}
+
+static int llam_mutex_register_live(llam_mutex_t *mutex) {
+    size_t slot = 0U;
+
+    pthread_mutex_lock(&g_llam_mutex_registry_lock);
+    if (llam_mutex_reserve_public_slot_locked(mutex, &slot) != 0) {
+        pthread_mutex_unlock(&g_llam_mutex_registry_lock);
+        return -1;
+    }
+    mutex->public_handle_slot = slot;
+    mutex->public_handle_generation = llam_public_slot_generation(&g_llam_mutex_public_slots, slot);
+    mutex->registry_next = g_llam_mutex_registry;
+    g_llam_mutex_registry = mutex;
+    pthread_mutex_unlock(&g_llam_mutex_registry_lock);
+    return 0;
+}
+
+static void llam_mutex_unregister_live_locked(llam_mutex_t *mutex) {
+    llam_mutex_t **link = &g_llam_mutex_registry;
+
+    if (mutex->public_handle_slot < g_llam_mutex_public_slots.count) {
+        llam_public_slot_release(&g_llam_mutex_public_slots,
+                                 mutex->public_handle_slot,
+                                 mutex,
+                                 mutex->public_handle_generation);
+    }
+
+    while (*link != NULL) {
+        if (*link == mutex) {
+            *link = mutex->registry_next;
+            mutex->registry_next = NULL;
+            return;
+        }
+        link = &(*link)->registry_next;
+    }
+}
+
+llam_mutex_t *llam_mutex_resolve_public_handle(const llam_mutex_t *handle) {
+    llam_mutex_t *mutex = NULL;
+
+    if (handle == NULL) {
+        return NULL;
+    }
+
+    /*
+     * Do not cast the incoming public handle into an object address. A consumed
+     * handle may name a slot whose storage was reused, but it cannot match the
+     * replacement mutex generation.
+     */
+    pthread_mutex_lock(&g_llam_mutex_registry_lock);
+    mutex = llam_public_slot_resolve_encoded(&g_llam_mutex_public_slots,
+                                             (uintptr_t)handle,
+                                             LLAM_SYNC_PUBLIC_HANDLE_SHIFT,
+                                             NULL,
+                                             NULL);
+    if (mutex != NULL) {
+        llam_public_active_op_begin(&mutex->active_ops);
+    }
+    pthread_mutex_unlock(&g_llam_mutex_registry_lock);
+    return mutex;
+}
+
+void llam_mutex_end_public_op(llam_mutex_t *mutex) {
+    if (mutex == NULL) {
+        return;
+    }
+    llam_public_active_op_end(&mutex->active_ops);
+}
+
 /**
  * @brief Donate waiter priority to a current mutex owner.
  *
@@ -66,6 +150,7 @@ llam_mutex_t *llam_mutex_create(void) {
     }
 
     mutex->owner_runtime = llam_runtime_owner_for_new_object();
+    llam_public_active_op_init(&mutex->active_ops);
     atomic_init(&mutex->owner, (uintptr_t)0);
     rc = pthread_mutex_init(&mutex->lock, NULL);
     if (rc != 0) {
@@ -75,37 +160,61 @@ llam_mutex_t *llam_mutex_create(void) {
         errno = rc;
         return NULL;
     }
+    if (llam_mutex_register_live(mutex) != 0) {
+        pthread_mutex_destroy(&mutex->lock);
+        free(mutex);
+        return NULL;
+    }
 
-    return mutex;
+    return llam_mutex_public_handle(mutex);
 }
 
 /**
  * @brief Destroy a runtime-aware mutex.
  *
- * The caller must ensure no task owns or waits on the mutex.
+ * The caller must ensure no task owns or waits on the mutex and no public
+ * operation is currently pinned in the handle registry.
  *
  * @param mutex Mutex to destroy.
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
  */
 int llam_mutex_destroy(llam_mutex_t *mutex) {
-    if (mutex == NULL) {
+    uintptr_t handle = (uintptr_t)mutex;
+    size_t slot;
+    uint32_t generation;
+
+    pthread_mutex_lock(&g_llam_mutex_registry_lock);
+    mutex = llam_public_slot_resolve_encoded(&g_llam_mutex_public_slots,
+                                             handle,
+                                             LLAM_SYNC_PUBLIC_HANDLE_SHIFT,
+                                             &slot,
+                                             &generation);
+    if (mutex == NULL ||
+        mutex->public_handle_slot != slot ||
+        mutex->public_handle_generation != generation) {
+        pthread_mutex_unlock(&g_llam_mutex_registry_lock);
         errno = EINVAL;
         return -1;
     }
     if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
+        pthread_mutex_unlock(&g_llam_mutex_registry_lock);
         return -1;
     }
 
     pthread_mutex_lock(&mutex->lock);
     if (atomic_load(&mutex->owner) != (uintptr_t)0 ||
         mutex->waiters.head != NULL ||
-        mutex->waiters.depth != 0U) {
+        mutex->waiters.depth != 0U ||
+        llam_public_active_op_count(&mutex->active_ops) != 0U) {
         pthread_mutex_unlock(&mutex->lock);
+        pthread_mutex_unlock(&g_llam_mutex_registry_lock);
         errno = EBUSY;
         return -1;
     }
+    llam_mutex_unregister_live_locked(mutex);
     pthread_mutex_unlock(&mutex->lock);
+    pthread_mutex_unlock(&g_llam_mutex_registry_lock);
     pthread_mutex_destroy(&mutex->lock);
     free(mutex);
     return 0;
@@ -123,21 +232,26 @@ int llam_mutex_trylock(llam_mutex_t *mutex) {
 
     llam_task_safepoint();
 
+    mutex = llam_mutex_resolve_public_handle(mutex);
     if (mutex == NULL) {
         errno = EINVAL;
         return -1;
     }
     if (llam_require_task_context() != 0) {
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
     if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
 
     if (atomic_compare_exchange_strong(&mutex->owner, &expected, (uintptr_t)g_llam_tls_task)) {
+        llam_mutex_end_public_op(mutex);
         return 0;
     }
 
+    llam_mutex_end_public_op(mutex);
     errno = EBUSY;
     return -1;
 }
@@ -156,7 +270,10 @@ int llam_mutex_trylock(llam_mutex_t *mutex) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool register_cancel) {
+int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
+                                  bool has_deadline,
+                                  uint64_t deadline_ns,
+                                  bool register_cancel) {
     llam_shard_t *shard;
     llam_task_t *task;
     llam_wait_node_t *node;
@@ -281,6 +398,22 @@ wait_ready:
     return 0;
 }
 
+int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadline_ns, bool register_cancel) {
+    int rc;
+    int saved_errno;
+
+    mutex = llam_mutex_resolve_public_handle(mutex);
+    if (mutex == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    rc = llam_mutex_lock_resolved_impl(mutex, has_deadline, deadline_ns, register_cancel);
+    saved_errno = errno;
+    llam_mutex_end_public_op(mutex);
+    errno = saved_errno;
+    return rc;
+}
+
 /**
  * @brief Acquire a mutex, parking the current task if necessary.
  *
@@ -321,19 +454,23 @@ int llam_mutex_unlock(llam_mutex_t *mutex) {
 
     llam_task_safepoint();
 
+    mutex = llam_mutex_resolve_public_handle(mutex);
     if (mutex == NULL) {
         errno = EINVAL;
         return -1;
     }
     if (llam_require_task_context() != 0) {
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
     if (llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
 
     owner = atomic_load(&mutex->owner);
     if (owner != (uintptr_t)g_llam_tls_task) {
+        llam_mutex_end_public_op(mutex);
         errno = EPERM;
         return -1;
     }
@@ -354,5 +491,6 @@ int llam_mutex_unlock(llam_mutex_t *mutex) {
         node->error_code = 0;
         llam_wake_wait_node(node, true, LLAM_WAIT_MUTEX);
     }
+    llam_mutex_end_public_op(mutex);
     return 0;
 }

@@ -676,21 +676,27 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     size_t mapping_size = stack_size + (size_t)page_size;
     void *mapping;
     llam_shard_t *cache_shard = g_llam_tls_shard;
+    llam_runtime_t *rt;
 
     if (task == NULL) {
         errno = EINVAL;
         return -1;
     }
+    rt = task->owner_runtime;
+    if (rt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
 
-    if (cache_shard == NULL && task->home_shard < g_llam_runtime.active_shards) {
-        cache_shard = &g_llam_runtime.shards[task->home_shard];
+    if (cache_shard == NULL && task->home_shard < rt->active_shards) {
+        cache_shard = &rt->shards[task->home_shard];
     }
 
     // Lookup order is local shard cache, then runtime fallback cache, then a
     // fresh guarded mmap. This preserves locality without failing if the owner
     // shard has no warm stack available.
     if (!llam_shard_stack_cache_pop(cache_shard, stack_size, &mapping, &mapping_size, &task->stack_base) &&
-        !llam_runtime_stack_cache_pop(&g_llam_runtime, stack_size, &mapping, &mapping_size, &task->stack_base)) {
+        !llam_runtime_stack_cache_pop(rt, stack_size, &mapping, &mapping_size, &task->stack_base)) {
         mapping = mmap(NULL,
                        mapping_size,
                        PROT_READ | PROT_WRITE,
@@ -712,7 +718,7 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     task->stack_mapping = mapping;
     task->mapping_size = mapping_size;
     task->stack_size = stack_size;
-    if (llam_ctx_init_fp_state(&task->ctx) != 0) {
+    if (llam_ctx_init_fp_state(&task->ctx, task->owner_runtime) != 0) {
         int saved_errno = errno;
 
         munmap(task->stack_mapping, task->mapping_size);
@@ -724,7 +730,7 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         return -1;
     }
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
-    if (g_llam_runtime.windows_unsafe_skip_task_simd != 0U) {
+    if (rt->windows_unsafe_skip_task_simd != 0U) {
         /*
          * Opt-in ceiling mode for benchmark/runtime profiles that guarantee
          * managed tasks do not depend on ABI-preserved XMM6-XMM15 state across
@@ -788,6 +794,7 @@ void llam_task_release_stack(llam_task_t *task) {
     void *stack_base;
     size_t stack_size;
     llam_shard_t *cache_shard = NULL;
+    llam_runtime_t *rt;
 
     if (task == NULL || task->stack_mapping == NULL || task->mapping_size == 0U || task->stack_base == NULL || task->stack_size == 0U) {
         return;
@@ -797,19 +804,20 @@ void llam_task_release_stack(llam_task_t *task) {
     mapping_size = task->mapping_size;
     stack_base = task->stack_base;
     stack_size = task->stack_size;
+    rt = task->owner_runtime;
     task->stack_mapping = NULL;
     task->mapping_size = 0U;
     task->stack_base = NULL;
     task->stack_size = 0U;
-    if (task->home_shard < g_llam_runtime.active_shards) {
-        cache_shard = &g_llam_runtime.shards[task->home_shard];
+    if (rt != NULL && task->home_shard < rt->active_shards) {
+        cache_shard = &rt->shards[task->home_shard];
     } else {
         cache_shard = g_llam_tls_shard;
     }
     // Try to preserve home-shard locality first; overflow falls back to the
     // runtime cache, which may finally munmap if all limits are reached.
     if (!llam_shard_stack_cache_push(cache_shard, mapping, mapping_size, stack_base, stack_size)) {
-        llam_runtime_stack_cache_push(&g_llam_runtime, mapping, mapping_size, stack_base, stack_size, NULL);
+        llam_runtime_stack_cache_push(rt, mapping, mapping_size, stack_base, stack_size, NULL);
     }
 }
 
@@ -830,9 +838,9 @@ unsigned llam_pick_spawn_shard(llam_runtime_t *rt) {
     }
 
     /*
-     * Unmanaged host threads may call llam_spawn() concurrently.  The ticket is
-     * only a placement hint, but it still must be atomic to avoid corrupting
-     * the singleton runtime state under multi-threaded embedders.
+     * Unmanaged host threads may call spawn entry points concurrently. The
+     * ticket is only a placement hint, but it still must be atomic to avoid
+     * corrupting runtime-local placement state under multi-threaded embedders.
      */
     ticket = atomic_fetch_add_explicit(&rt->next_spawn_shard, 1U, memory_order_relaxed);
     start_id = ticket % rt->active_shards;

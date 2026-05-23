@@ -120,8 +120,10 @@ static size_t llam_task_stack_used_from_rsp(const llam_task_t *task, uintptr_t r
  *
  * @return true if sampling should record high-water data.
  */
-static bool llam_stack_sampling_enabled(void) {
-    return g_llam_runtime.stack_sampling_enabled != 0U;
+static bool llam_stack_sampling_enabled(const llam_task_t *task) {
+    const llam_runtime_t *rt = task != NULL ? task->owner_runtime : NULL;
+
+    return rt != NULL && rt->stack_sampling_enabled != 0U;
 }
 
 /**
@@ -133,7 +135,7 @@ static bool llam_stack_sampling_enabled(void) {
 void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp) {
     size_t used;
 
-    if (task == NULL || !llam_stack_sampling_enabled()) {
+    if (task == NULL || !llam_stack_sampling_enabled(task)) {
         return;
     }
 
@@ -150,7 +152,7 @@ void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp) {
  * @param task Task whose stack statistics should be updated.
  */
 void llam_task_sample_live_stack(llam_task_t *task) {
-    if (!llam_stack_sampling_enabled()) {
+    if (!llam_stack_sampling_enabled(task)) {
         return;
     }
     llam_task_sample_stack_rsp(task, llam_current_rsp());

@@ -86,10 +86,14 @@ static bool llam_safepoint_should_auto_preempt(llam_runtime_t *rt,
 void llam_task_safepoint(void) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     uint64_t now_ns = 0U;
 
     if (shard == NULL || task == NULL) {
+        return;
+    }
+    rt = shard->runtime;
+    if (rt == NULL) {
         return;
     }
 
@@ -116,15 +120,15 @@ void llam_task_safepoint(void) {
         return;
     }
 
-    if (g_llam_runtime.forced_yield_every > 0U) {
+    if (rt->forced_yield_every > 0U) {
         // Test/diagnostic knob: make cooperative scheduling deterministic by
         // forcing periodic yields even without explicit user yields.
         if (task->forced_yield_budget == 0U) {
-            task->forced_yield_budget = g_llam_runtime.forced_yield_every;
+            task->forced_yield_budget = rt->forced_yield_every;
         }
         task->forced_yield_budget -= 1U;
         if (task->forced_yield_budget == 0U) {
-            task->forced_yield_budget = g_llam_runtime.forced_yield_every;
+            task->forced_yield_budget = rt->forced_yield_every;
             llam_yield();
             return;
         }

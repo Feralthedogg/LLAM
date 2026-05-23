@@ -9,8 +9,8 @@ LDLIBS ?= -pthread -luring
 OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 PICFLAGS ?= -fPIC
-LLAM_ABI_MAJOR ?= 1
-LLAM_VERSION ?= 1.2.0
+LLAM_ABI_MAJOR ?= 2
+LLAM_VERSION ?= 2.0.0
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
 CLEAN_DIRS = \
@@ -35,6 +35,7 @@ CLEAN_FILES = \
 	test_abi_compat \
 	test_connect_io \
 	test_runtime_core \
+	test_multi_runtime_core \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -61,6 +62,7 @@ CLEAN_FILES = \
 	test_abi_compat.exe \
 	test_connect_io.exe \
 	test_runtime_core.exe \
+	test_multi_runtime_core.exe \
 	test_runtime_api_edges.exe \
 	test_runtime_select_edges.exe \
 	test_runtime_io_dump.exe \
@@ -129,6 +131,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/llam_internal.h \
 	src/internal/runtime_internal.h \
 	src/internal/runtime_types.h \
+	src/internal/runtime_public_slot.h \
 	src/internal/runtime_state.h \
 	src/internal/runtime_protos.h \
 	src/internal/runtime_proto_core.h \
@@ -159,6 +162,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_alloc.o \
 	$(OBJDIR)/src/core/runtime_allocator_quiescent.o \
 	$(OBJDIR)/src/core/runtime_task_alloc.o \
+	$(OBJDIR)/src/core/runtime_task_handle_registry.o \
 	$(OBJDIR)/src/core/runtime_io_object_alloc.o \
 	$(OBJDIR)/src/core/runtime_wait_timer_alloc.o \
 	$(OBJDIR)/src/core/runtime_trace.o \
@@ -171,6 +175,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_task_stack.o \
 	$(OBJDIR)/src/core/runtime_reinject.o \
 	$(OBJDIR)/src/core/runtime_wait_tracking.o \
+	$(OBJDIR)/src/core/runtime_timer_heap.o \
 	$(OBJDIR)/src/core/runtime_timer.o \
 	$(OBJDIR)/src/engine/runtime_engine.o \
 	$(OBJDIR)/src/engine/runtime_block.o \
@@ -193,9 +198,12 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_run.o \
 	$(OBJDIR)/src/core/runtime_sync.o \
 	$(OBJDIR)/src/core/runtime_mutex.o \
+	$(OBJDIR)/src/core/runtime_cond_lifecycle.o \
 	$(OBJDIR)/src/core/runtime_cond.o \
 	$(OBJDIR)/src/core/runtime_channel_cache.o \
+	$(OBJDIR)/src/core/runtime_channel_lifecycle.o \
 	$(OBJDIR)/src/core/runtime_channel.o \
+	$(OBJDIR)/src/core/runtime_channel_select_fast.o \
 	$(OBJDIR)/src/core/runtime_channel_select.o \
 	$(OBJDIR)/src/core/runtime_handle.o \
 	$(OBJDIR)/src/core/runtime_owner.o \
@@ -206,6 +214,8 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/runtime_io_api_direct_tuning.o \
 	$(OBJDIR)/src/io/runtime_io_api_issue.o \
 	$(OBJDIR)/src/io/runtime_io_api_blocking_ops.o \
+	$(OBJDIR)/src/io/runtime_io_buffer_registry.o \
+	$(OBJDIR)/src/io/runtime_io_api_owned.o \
 	$(OBJDIR)/src/io/runtime_io_api_public.o \
 	$(OBJDIR)/src/io/windows/runtime_windows_iocp.o \
 	$(OBJDIR)/src/core/runtime_debug_dump_helpers.o \
@@ -314,6 +324,8 @@ TEST_CONNECT_OBJS = \
 	$(OBJDIR)/tests/test_connect_io.o
 TEST_RUNTIME_CORE_OBJS = \
 	$(OBJDIR)/tests/test_runtime_core.o
+TEST_MULTI_RUNTIME_CORE_OBJS = \
+	$(OBJDIR)/tests/test_multi_runtime_core.o
 TEST_RUNTIME_API_EDGES_OBJS = \
 	$(OBJDIR)/tests/test_runtime_api_edges.o
 TEST_RUNTIME_SELECT_EDGES_OBJS = \
@@ -360,6 +372,7 @@ BUILD_OBJS = \
 	$(TEST_ABI_COMPAT_OBJS) \
 	$(TEST_CONNECT_OBJS) \
 	$(TEST_RUNTIME_CORE_OBJS) \
+	$(TEST_MULTI_RUNTIME_CORE_OBJS) \
 	$(TEST_RUNTIME_API_EDGES_OBJS) \
 	$(TEST_RUNTIME_SELECT_EDGES_OBJS) \
 	$(TEST_RUNTIME_IO_DUMP_OBJS) \
@@ -386,6 +399,7 @@ LINK_TARGETS = \
 	test_abi_compat \
 	test_connect_io \
 	test_runtime_core \
+	test_multi_runtime_core \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -403,7 +417,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared test test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared test test-asan test-tsan test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 ifeq ($(HOST_PLATFORM),windows)
@@ -412,7 +426,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?=
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -424,6 +438,7 @@ WINDOWS_CMAKE_TARGETS = \
 	test_abi_compat \
 	test_connect_io \
 	test_runtime_core \
+	test_multi_runtime_core \
 	test_runtime_api_edges \
 	test_runtime_select_edges \
 	test_runtime_io_dump \
@@ -568,11 +583,12 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load server_flood shared
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_dump test_shared_load server_flood shared
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
 	./test_runtime_core
+	./test_multi_runtime_core
 	./test_runtime_api_edges
 	./test_runtime_select_edges
 	./test_runtime_io_dump
@@ -600,6 +616,33 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_r
 	fi
 
 check: test
+
+SANITIZER_TEST_TARGETS = \
+	test_runtime_api_edges \
+	test_runtime_core \
+	test_io_buffers \
+	test_runtime_shutdown_internal \
+	test_multi_runtime_core
+
+test-asan:
+	$(MAKE) $(SANITIZER_TEST_TARGETS) \
+		OBJDIR=object-asan \
+		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
+		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_api_edges
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_core
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_io_buffers
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
+
+test-tsan:
+	$(MAKE) test_runtime_api_edges test_runtime_shutdown_internal test_multi_runtime_core \
+		OBJDIR=object-tsan \
+		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
+		LDLIBS="$(LDLIBS) -fsanitize=thread"
+	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_api_edges
+	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal
+	TSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
 
 test-quick: test server-stress-composite-quick
 
@@ -653,6 +696,9 @@ test_connect_io: $(RUNTIME_OBJS) $(TEST_CONNECT_OBJS)
 
 test_runtime_core: $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
+
+test_multi_runtime_core: $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
 
 test_runtime_api_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS) $(LDLIBS)

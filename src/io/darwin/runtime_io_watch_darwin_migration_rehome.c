@@ -746,7 +746,10 @@ bool llam_io_rehome_marked_watch_state(llam_node_t *source, llam_node_t *target)
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard) {
     unsigned expected;
 
-    if (req == NULL || from_shard == to_shard || from_shard >= g_llam_runtime.active_shards || to_shard >= g_llam_runtime.active_shards) {
+    llam_runtime_t *rt = req != NULL ? req->owner_runtime : NULL;
+
+    if (req == NULL || rt == NULL || from_shard == to_shard ||
+        from_shard >= rt->active_shards || to_shard >= rt->active_shards) {
         return false;
     }
     expected = from_shard;
@@ -757,7 +760,7 @@ bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard
                                                  memory_order_acquire)) {
         return false;
     }
-    llam_shard_note_inflight_io_waiter(from_shard, -1);
-    llam_shard_note_inflight_io_waiter(to_shard, 1);
+    llam_shard_note_inflight_io_waiter(rt, from_shard, -1);
+    llam_shard_note_inflight_io_waiter(rt, to_shard, 1);
     return true;
 }

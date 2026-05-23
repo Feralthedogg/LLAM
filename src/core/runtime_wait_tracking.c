@@ -26,20 +26,26 @@
 
 #include "runtime_internal.h"
 
+/** @brief Return the runtime that owns a task's wait/I/O bookkeeping. */
+static llam_runtime_t *llam_wait_task_runtime(const llam_task_t *task) {
+    return task != NULL ? task->owner_runtime : NULL;
+}
+
 static llam_io_req_t *llam_task_swap_active_io_req(llam_task_t *task, llam_io_req_t *req) {
     llam_io_req_t *old_req;
+    llam_runtime_t *rt = llam_wait_task_runtime(task);
 
     if (task == NULL) {
         return NULL;
     }
 
     old_req = atomic_exchange_explicit(&task->active_io_req, req, memory_order_acq_rel);
-    if (g_llam_runtime.initialized) {
+    if (rt != NULL && atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
         if (old_req == NULL && req != NULL) {
             // active_io_waiters tracks tasks, not request objects.
-            atomic_fetch_add_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
+            atomic_fetch_add_explicit(&rt->active_io_waiters, 1U, memory_order_acq_rel);
         } else if (old_req != NULL && req == NULL) {
-            atomic_fetch_sub_explicit(&g_llam_runtime.active_io_waiters, 1U, memory_order_acq_rel);
+            atomic_fetch_sub_explicit(&rt->active_io_waiters, 1U, memory_order_acq_rel);
         }
     }
     return old_req;
@@ -203,12 +209,14 @@ bool llam_deadline_passed(uint64_t deadline_ns) {
 }
 
 static llam_shard_t *llam_task_deadline_shard(llam_task_t *task) {
-    if (task == NULL || g_llam_runtime.active_shards == 0U) {
+    llam_runtime_t *rt = llam_wait_task_runtime(task);
+
+    if (task == NULL || rt == NULL || rt->active_shards == 0U) {
         return NULL;
     }
 
-    if (task->parked_shard < g_llam_runtime.active_shards) {
-        return &g_llam_runtime.shards[task->parked_shard];
+    if (task->parked_shard < rt->active_shards) {
+        return &rt->shards[task->parked_shard];
     }
 
     /*
@@ -216,7 +224,7 @@ static llam_shard_t *llam_task_deadline_shard(llam_task_t *task) {
      * defensive rather than authoritative.  last_shard still maps the task to a
      * valid shard for timer cleanup.
      */
-    return &g_llam_runtime.shards[task->last_shard % g_llam_runtime.active_shards];
+    return &rt->shards[task->last_shard % rt->active_shards];
 }
 
 /**
@@ -469,19 +477,21 @@ void llam_account_io_abort_wake(llam_shard_t *shard, llam_io_abort_reason_t reas
  * @return Node index on success, -1 if no node can be resolved.
  */
 int llam_io_req_node_index(const llam_io_req_t *req) {
+    llam_runtime_t *rt;
     unsigned shard_id;
 
-    if (req == NULL || g_llam_runtime.active_shards == 0U || g_llam_runtime.active_nodes == 0U) {
+    rt = req != NULL ? req->owner_runtime : NULL;
+    if (req == NULL || rt == NULL || rt->active_shards == 0U || rt->active_nodes == 0U) {
         return -1;
     }
-    if (req->attached_node_index < g_llam_runtime.active_nodes) {
+    if (req->attached_node_index < rt->active_nodes) {
         return (int)req->attached_node_index;
     }
 
     // Requests that have not attached to a node yet route through their owner
     // shard's assigned I/O node.
-    shard_id = req->owner_shard < g_llam_runtime.active_shards ? req->owner_shard : (req->owner_shard % g_llam_runtime.active_shards);
-    return (int)g_llam_runtime.shards[shard_id].io_node_index;
+    shard_id = req->owner_shard < rt->active_shards ? req->owner_shard : (req->owner_shard % rt->active_shards);
+    return (int)rt->shards[shard_id].io_node_index;
 }
 
 /**
@@ -492,6 +502,7 @@ int llam_io_req_node_index(const llam_io_req_t *req) {
  * @return true if the task was detached and reinjected immediately.
  */
 bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
+    llam_runtime_t *rt = llam_wait_task_runtime(task);
     llam_io_req_t *req;
     int node_index;
     llam_node_t *node;
@@ -500,7 +511,7 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
     bool removed = false;
     unsigned parked_shard;
 
-    if (task == NULL || g_llam_runtime.active_shards == 0U) {
+    if (task == NULL || rt == NULL || rt->active_shards == 0U) {
         return false;
     }
 
@@ -512,8 +523,8 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
     if (node_index < 0) {
         return false;
     }
-    node = &g_llam_runtime.nodes[node_index];
-    shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+    node = &rt->nodes[node_index];
+    shard = &rt->shards[task->parked_shard % rt->active_shards];
     mode = atomic_load(&req->wait_mode);
 
     if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
@@ -581,7 +592,7 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
      * It still needs the original parked_shard to remove any active deadline
      * timer from the correct shard before clearing task tracking.
      */
-    llam_reinject_task_on_shard(&g_llam_runtime,
+    llam_reinject_task_on_shard(rt,
                               task,
                               parked_shard,
                               true,
@@ -598,7 +609,13 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
  * @param reason Wait reason being resolved.
  */
 void llam_wake_wait_node(llam_wait_node_t *node, bool hot, llam_wait_reason_t reason) {
+    llam_runtime_t *rt;
+
     if (node == NULL || node->task == NULL) {
+        return;
+    }
+    rt = llam_wait_task_runtime(node->task);
+    if (rt == NULL) {
         return;
     }
     if (node->select_state != NULL) {
@@ -608,7 +625,7 @@ void llam_wake_wait_node(llam_wait_node_t *node, bool hot, llam_wait_reason_t re
     } else if (!llam_wait_node_prepare_wake(node)) {
         return;
     }
-    llam_reinject_task(&g_llam_runtime, node->task, hot, LLAM_TRACE_WAKE, reason);
+    llam_reinject_task(rt, node->task, hot, LLAM_TRACE_WAKE, reason);
 }
 
 /**

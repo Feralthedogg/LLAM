@@ -79,6 +79,41 @@ static size_t llam_writev_byte_count_max(void) {
 }
 
 /**
+ * @brief Return the largest byte count supported by the async rw backend.
+ *
+ * Direct syscalls may accept platform-specific larger counts, but once LLAM
+ * has to park the task and submit to a backend, the request count must fit the
+ * backend ABI. Linux io_uring read/write SQEs store length in a 32-bit field;
+ * validating before submission prevents silent truncation into a zero/short op.
+ */
+static size_t llam_async_rw_count_max(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+    return (size_t)UINT_MAX;
+#elif LLAM_PLATFORM_DARWIN
+    return (size_t)INT_MAX;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
+    return (size_t)ULONG_MAX;
+#else
+#ifdef SSIZE_MAX
+    return (size_t)SSIZE_MAX;
+#else
+    return SIZE_MAX >> 1U;
+#endif
+#endif
+}
+
+/**
+ * @brief Reject counts that cannot be represented by the parked I/O backend.
+ */
+static int llam_validate_async_rw_count(size_t count) {
+    if (count > llam_async_rw_count_max()) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+/**
  * @brief Validate scatter/gather slices before per-slice fallback writes.
  *
  * Native writev rejects an iovec whose total byte length cannot be represented
@@ -293,6 +328,9 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
             return -1;
         }
     }
+    if (llam_validate_async_rw_count(count) != 0) {
+        return -1;
+    }
 
     req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
@@ -498,104 +536,6 @@ ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_
 }
 
 /**
- * @brief Read into a runtime-owned buffer.
- *
- * @param fd        File descriptor to read from.
- * @param max_count Maximum bytes to read.
- * @param out       Receives the allocated buffer on success.
- *
- * @return Number of bytes read, or -1 with @c errno set.
- *
- * @see llam_io_buffer_release
- */
-ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_t **out) {
-    return llam_read_owned_impl(fd, max_count, 0, false, out);
-}
-
-/**
- * @brief Receive socket data into a runtime-owned buffer.
- *
- * @param fd        Socket descriptor.
- * @param max_count Maximum bytes to receive.
- * @param flags     Flags passed to @c recv when the fallback/direct path is used.
- * @param out       Receives the allocated buffer on success.
- *
- * @return Number of bytes received, or -1 with @c errno set.
- *
- * @see llam_io_buffer_release
- */
-ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out) {
-    return llam_read_owned_impl(fd, max_count, flags, true, out);
-}
-
-/**
- * @brief Release an owned I/O buffer.
- *
- * Buffers backed by io_uring provided-buffer storage are recycled to their node
- * before the wrapper is returned to the runtime allocator.
- *
- * @param buffer Buffer returned by ::llam_read_owned or ::llam_recv_owned.
- */
-void llam_io_buffer_release(llam_io_buffer_t *buffer) {
-    if (buffer == NULL) {
-        return;
-    }
-
-    if (buffer->detached_wrapper) {
-        if (buffer->external_storage && buffer->data != NULL) {
-            free(buffer->data);
-        }
-        free(buffer);
-        return;
-    }
-
-    if (buffer->provided_storage && g_llam_runtime.initialized &&
-        buffer->provided_node_index < g_llam_runtime.active_nodes) {
-        (void)llam_node_recycle_recv_buffer(&g_llam_runtime.nodes[buffer->provided_node_index], buffer->provided_bid);
-        buffer->provided_storage = false;
-        buffer->provided_bid = 0U;
-    }
-
-    llam_io_buffer_allocator_free(buffer);
-}
-
-/**
- * @brief Return the data pointer for an owned I/O buffer.
- *
- * @param buffer Buffer object.
- *
- * @return Data pointer, or @c NULL for @c NULL input.
- */
-void *llam_io_buffer_data(llam_io_buffer_t *buffer) {
-    if (buffer == NULL) {
-        return NULL;
-    }
-    return buffer->data;
-}
-
-/**
- * @brief Return the number of valid bytes in an owned I/O buffer.
- *
- * @param buffer Buffer object.
- *
- * @return Valid byte count, or 0 for @c NULL input.
- */
-size_t llam_io_buffer_size(const llam_io_buffer_t *buffer) {
-    return buffer != NULL ? buffer->size : 0U;
-}
-
-/**
- * @brief Return the total storage capacity of an owned I/O buffer.
- *
- * @param buffer Buffer object.
- *
- * @return Capacity in bytes, or 0 for @c NULL input.
- */
-size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer) {
-    return buffer != NULL ? buffer->capacity : 0U;
-}
-
-/**
  * @brief Write bytes to a descriptor without blocking the scheduler worker.
  *
  * Managed tasks attempt direct non-blocking completion before async submission.
@@ -636,6 +576,9 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
         if (direct_rc < 0) {
             return -1;
         }
+    }
+    if (llam_validate_async_rw_count(count) != 0) {
+        return -1;
     }
 
     req = llam_api_io_req_acquire(g_llam_tls_shard);
@@ -859,6 +802,11 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
     llam_io_req_t *req;
     llam_fd_t result;
     bool allow_multishot = addr == NULL && addrlen == NULL;
+
+    if ((addr == NULL) != (addrlen == NULL)) {
+        errno = EINVAL;
+        return LLAM_INVALID_FD;
+    }
 
 #if defined(__linux__)
     allow_multishot = false;

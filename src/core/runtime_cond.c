@@ -27,65 +27,6 @@
 #include "runtime_internal.h"
 
 /**
- * @brief Allocate a runtime-aware condition variable.
- *
- * @return New condition variable on success, or @c NULL with @c errno set.
- */
-llam_cond_t *llam_cond_create(void) {
-    llam_cond_t *cond = calloc(1, sizeof(*cond));
-    int rc;
-
-    if (cond == NULL) {
-        return NULL;
-    }
-
-    cond->owner_runtime = llam_runtime_owner_for_new_object();
-    atomic_init(&cond->inflight_waiters, 0U);
-    rc = pthread_mutex_init(&cond->lock, NULL);
-    if (rc != 0) {
-        free(cond);
-        // pthread_mutex_init returns its failure code directly and may leave
-        // errno unchanged.
-        errno = rc;
-        return NULL;
-    }
-
-    return cond;
-}
-
-/**
- * @brief Destroy a condition variable.
- *
- * The caller must ensure no tasks remain parked on the condition wait queue.
- *
- * @param cond Condition variable to destroy.
- *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
- */
-int llam_cond_destroy(llam_cond_t *cond) {
-    if (cond == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
-        return -1;
-    }
-
-    pthread_mutex_lock(&cond->lock);
-    if (atomic_load_explicit(&cond->inflight_waiters, memory_order_acquire) != 0U ||
-        cond->waiters.head != NULL ||
-        cond->waiters.depth != 0U) {
-        pthread_mutex_unlock(&cond->lock);
-        errno = EBUSY;
-        return -1;
-    }
-    pthread_mutex_unlock(&cond->lock);
-    pthread_mutex_destroy(&cond->lock);
-    free(cond);
-    return 0;
-}
-
-/**
  * @brief Reacquire a condition wait mutex after a signal/broadcast wake.
  *
  * @details
@@ -98,7 +39,7 @@ static int llam_cond_reacquire_mutex(llam_mutex_t *mutex, llam_task_t *task) {
     if (atomic_load(&mutex->owner) == (uintptr_t)task) {
         return 0;
     }
-    return llam_mutex_lock_impl(mutex, false, 0U, false);
+    return llam_mutex_lock_resolved_impl(mutex, false, 0U, false);
 }
 
 /**
@@ -151,31 +92,45 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
 
     llam_task_safepoint();
 
+    cond = llam_cond_resolve_public_handle(cond);
+    mutex = llam_mutex_resolve_public_handle(mutex);
     if (cond == NULL || mutex == NULL) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         errno = EINVAL;
         return -1;
     }
     if (llam_require_task_context() != 0) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
     if (llam_runtime_check_object_owner(cond->owner_runtime) != 0 ||
         llam_runtime_check_object_owner(mutex->owner_runtime) != 0) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
 
     if (atomic_load(&mutex->owner) != (uintptr_t)task) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         errno = EPERM;
         return -1;
     }
     if (has_deadline && llam_deadline_passed(deadline_ns)) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         errno = ETIMEDOUT;
         return -1;
     }
 
     node = llam_sync_wait_node_acquire(shard);
     if (node == NULL) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         errno = ENOMEM;
         return -1;
     }
@@ -187,8 +142,17 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
     llam_wait_queue_push_tail(&cond->waiters, node);
     owner = atomic_load(&mutex->owner);
     if (owner != (uintptr_t)task) {
+        /*
+         * This is a defensive recheck after the node is already visible on the
+         * cond queue.  If ownership changed unexpectedly, unlink before
+         * releasing the node; otherwise signal/broadcast/destroy would later see
+         * a stale waiter that has already returned to the shard cache.
+         */
+        (void)llam_wait_queue_remove(&cond->waiters, node);
         pthread_mutex_unlock(&cond->lock);
         llam_sync_wait_node_release(shard, node);
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         errno = EPERM;
         return -1;
     }
@@ -231,6 +195,8 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         llam_task_clear_wait_tracking(task);
         llam_sync_wait_node_release(shard, node);
         (void)llam_cond_reacquire_mutex(mutex, task);
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
@@ -252,6 +218,8 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         llam_task_clear_wait_tracking(task);
         llam_sync_wait_node_release(shard, node);
         (void)llam_cond_reacquire_mutex(mutex, task);
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
 
@@ -270,12 +238,18 @@ wait_ready:
     llam_cond_waiter_consumed(cond, node);
     llam_sync_wait_node_release(shard, node);
     if (llam_cond_reacquire_mutex(mutex, task) != 0) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         return -1;
     }
     if (rc != 0) {
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
         errno = rc;
         return -1;
     }
+    llam_cond_end_public_op(cond);
+    llam_mutex_end_public_op(mutex);
     return 0;
 }
 
@@ -317,11 +291,13 @@ int llam_cond_signal(llam_cond_t *cond) {
 
     llam_task_safepoint();
 
+    cond = llam_cond_resolve_public_handle(cond);
     if (cond == NULL) {
         errno = EINVAL;
         return -1;
     }
     if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
+        llam_cond_end_public_op(cond);
         return -1;
     }
 
@@ -336,6 +312,7 @@ int llam_cond_signal(llam_cond_t *cond) {
         node->error_code = 0;
         llam_wake_wait_node(node, true, LLAM_WAIT_COND);
     }
+    llam_cond_end_public_op(cond);
     return 0;
 }
 
@@ -349,11 +326,13 @@ int llam_cond_signal(llam_cond_t *cond) {
 int llam_cond_broadcast(llam_cond_t *cond) {
     llam_wait_node_t *node;
 
+    cond = llam_cond_resolve_public_handle(cond);
     if (cond == NULL) {
         errno = EINVAL;
         return -1;
     }
     if (llam_runtime_check_object_owner(cond->owner_runtime) != 0) {
+        llam_cond_end_public_op(cond);
         return -1;
     }
 
@@ -364,5 +343,6 @@ int llam_cond_broadcast(llam_cond_t *cond) {
         llam_wake_wait_node(node, true, LLAM_WAIT_COND);
     }
     pthread_mutex_unlock(&cond->lock);
+    llam_cond_end_public_op(cond);
     return 0;
 }

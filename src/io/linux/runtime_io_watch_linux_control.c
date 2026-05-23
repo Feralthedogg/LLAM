@@ -119,7 +119,7 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
          */
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
         if (inflight_owner < node->runtime->active_shards) {
-            llam_shard_note_inflight_io_waiter(inflight_owner, -1);
+            llam_shard_note_inflight_io_waiter(req->owner_runtime, inflight_owner, -1);
             completion_owner = inflight_owner;
         }
     } else {
@@ -302,6 +302,32 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
 }
 
 /**
+ * @brief Validate a queued control op before consuming an SQE for it.
+ *
+ * All current Linux control operations require a concrete target object.  Drop
+ * malformed control records locally so a defensive failure path cannot leave an
+ * uninitialized SQE pending in the ring.
+ */
+static bool llam_io_control_op_ready(const llam_io_control_op_t *op) {
+    if (op == NULL || op->target == NULL) {
+        return false;
+    }
+
+    switch (op->kind) {
+    case LLAM_IO_CONTROL_POLL_ACTIVATE:
+    case LLAM_IO_CONTROL_POLL_DEACTIVATE:
+    case LLAM_IO_CONTROL_ACCEPT_ACTIVATE:
+    case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE:
+    case LLAM_IO_CONTROL_RECV_ACTIVATE:
+    case LLAM_IO_CONTROL_RECV_DEACTIVATE:
+    case LLAM_IO_CONTROL_REQ_CANCEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/**
  * @brief Prepare one queued Linux control operation as an io_uring SQE.
  *
  * @param node Node whose ring receives the SQE.
@@ -309,7 +335,14 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
  *             the resulting control completion.
  */
 void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&node->ring);
+    struct io_uring_sqe *sqe;
+
+    if (!llam_io_control_op_ready(op)) {
+        llam_io_fail_control_op(node, op);
+        return;
+    }
+
+    sqe = io_uring_get_sqe(&node->ring);
 
     if (sqe == NULL) {
         int rc = llam_node_submit_ring(node);

@@ -26,6 +26,20 @@
 
 #include "runtime_io_watch_linux_internal.h"
 
+/** @brief Return true for request kinds this backend can encode as an SQE. */
+static bool llam_linux_io_req_kind_supported(llam_io_kind_t kind) {
+    switch (kind) {
+    case LLAM_IO_KIND_READ:
+    case LLAM_IO_KIND_WRITE:
+    case LLAM_IO_KIND_ACCEPT:
+    case LLAM_IO_KIND_CONNECT:
+    case LLAM_IO_KIND_POLL:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /**
  * @brief Prepare one io_uring SQE for a runtime I/O request.
  *
@@ -37,7 +51,35 @@
  * @param req  Request to submit.
  */
 void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&node->ring);
+    llam_io_kind_t kind = req->kind;
+    struct io_uring_sqe *sqe;
+
+    if (!llam_linux_io_req_kind_supported(kind)) {
+        /*
+         * Unsupported requests complete locally.  Reject before SQE acquisition
+         * so the ring tail never advances for an entry that will not be
+         * initialized below.
+         */
+        atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
+        llam_io_complete_req(node, req, -EINVAL, 0U, true);
+        return;
+    }
+
+    if ((kind == LLAM_IO_KIND_READ || kind == LLAM_IO_KIND_WRITE) &&
+        req->count > (size_t)UINT_MAX) {
+        /*
+         * io_uring read/write SQEs carry length as unsigned int.  The public
+         * API normally rejects this before parking, but keep the backend guard
+         * so internal or future request paths cannot silently truncate.  This
+         * must run before io_uring_get_sqe(): consuming an SQE and then
+         * completing locally leaves an uninitialized entry visible to the next
+         * ring submission.
+         */
+        llam_io_complete_req(node, req, -EINVAL, 0U, true);
+        return;
+    }
+
+    sqe = io_uring_get_sqe(&node->ring);
 
     if (sqe == NULL) {
         int rc = llam_node_submit_ring(node);
@@ -53,7 +95,7 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
         return;
     }
 
-    switch (req->kind) {
+    switch (kind) {
     case LLAM_IO_KIND_READ:
         if (req->use_provided_buffer && node->supports_provided_buffers && req->count <= LLAM_IO_BUFFER_INLINE_BYTES) {
             io_uring_prep_recv(sqe, req->fd, NULL, (unsigned)req->count, req->recv_flags);
@@ -78,8 +120,6 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
         io_uring_prep_poll_add(sqe, req->fd, (unsigned)req->poll_events);
         break;
     default:
-        atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
-        llam_io_complete_req(node, req, -EINVAL, 0U, true);
         return;
     }
 

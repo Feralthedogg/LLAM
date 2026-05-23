@@ -116,5 +116,5 @@ int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd) {
 }
 
 int llam_runtime_write_stats_json(int fd) {
-    return llam_runtime_write_stats_json_rt(&g_llam_runtime, fd);
+    return llam_runtime_write_stats_json_rt(llam_runtime_default_storage(), fd);
 }

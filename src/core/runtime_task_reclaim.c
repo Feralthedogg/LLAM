@@ -95,10 +95,12 @@ bool llam_task_list_eager_enabled(const llam_runtime_t *rt) {
  * @param task Task to make visible to rehome/diagnostic scans.
  */
 void llam_task_ensure_listed(llam_task_t *task) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_shard_t *owner;
 
+    rt = task != NULL ? task->owner_runtime : NULL;
     if (task == NULL ||
+        rt == NULL ||
         atomic_load_explicit(&task->task_listed, memory_order_acquire) != 0U ||
         task->alloc_owner_shard >= rt->active_shards) {
         return;
@@ -170,6 +172,7 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
     if (rt == NULL || task == NULL) {
         return;
     }
+    llam_task_invalidate_public_handle(task);
     (void)llam_remove_task_from_list(rt, task);
     /*
      * Stop/fatal scans take short references while they cancel parked waiters
@@ -188,6 +191,7 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
             nanosleep(&ts, NULL);
         }
     }
+    llam_task_wait_public_ops_quiescent(task);
     llam_free_task(task);
 }
 
@@ -290,5 +294,6 @@ void llam_free_task(llam_task_t *task) {
     if (task->stack_mapping != NULL && task->mapping_size != 0U) {
         (void)munmap(task->stack_mapping, task->mapping_size);
     }
+    llam_task_wait_public_ops_quiescent(task);
     llam_task_allocator_free(task);
 }

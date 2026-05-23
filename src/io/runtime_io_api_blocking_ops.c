@@ -37,6 +37,30 @@ static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
 }
 
 /**
+ * @brief Return the largest owned-read allocation request LLAM will accept.
+ *
+ * Owned reads allocate the destination before issuing the operation.  Reject
+ * counts that the platform cannot report through @c ssize_t before allocation
+ * so a hostile or malformed max_count cannot force a giant allocation attempt
+ * before the descriptor error path has a chance to run.
+ */
+static size_t llam_owned_read_count_max(void) {
+#if LLAM_PLATFORM_DARWIN
+    return (size_t)INT_MAX;
+#elif LLAM_RUNTIME_BACKEND_LINUX
+    return (size_t)UINT_MAX;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
+    return (size_t)ULONG_MAX;
+#else
+#ifdef SSIZE_MAX
+    return (size_t)SSIZE_MAX;
+#else
+    return SIZE_MAX >> 1U;
+#endif
+#endif
+}
+
+/**
  * @brief Check whether a blocking-worker I/O fallback should abort.
  *
  * Blocking fallback callbacks run after the submitting task has parked.  Task
@@ -46,7 +70,9 @@ static int llam_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req) {
  * running block job can keep the runtime alive forever after stop is requested.
  */
 static bool llam_blocking_req_cancelled(const llam_io_req_t *req) {
-    if (atomic_load_explicit(&g_llam_runtime.stop_requested, memory_order_acquire)) {
+    llam_runtime_t *rt = req != NULL ? req->owner_runtime : NULL;
+
+    if (rt != NULL && atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
         return true;
     }
     return req != NULL &&
@@ -176,6 +202,13 @@ static llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity) {
         buffer->capacity = min_capacity;
         buffer->external_storage = true;
     }
+    if (llam_io_buffer_public_register(buffer) != 0) {
+        if (buffer->external_storage && buffer->data != NULL) {
+            free(buffer->data);
+        }
+        free(buffer);
+        return NULL;
+    }
     return buffer;
 }
 
@@ -191,7 +224,20 @@ static bool llam_fd_get_socket_type(llam_fd_t fd, int *so_type_out) {
     int so_type = 0;
     socklen_t so_type_len = sizeof(so_type);
 
+    if (LLAM_FD_IS_INVALID(fd)) {
+        errno = EBADF;
+        return false;
+    }
     if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &so_type, &so_type_len) != 0) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        /*
+         * Winsock reports errors through WSAGetLastError(), not errno.  The
+         * owned-buffer path relies on errno to decide whether it can safely
+         * allocate before issuing the read, so normalize the probe failure at
+         * the platform boundary.
+         */
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+#endif
         return false;
     }
     if (so_type_out != NULL) {
@@ -224,6 +270,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
     llam_io_req_t *req;
     ssize_t result;
     int saved_errno = 0;
+    int socket_probe_errno = 0;
     int socket_type = 0;
     bool is_socket;
     bool socket_recv;
@@ -234,6 +281,10 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
         return -1;
     }
     *out = NULL;
+    if (max_count > llam_owned_read_count_max()) {
+        errno = EINVAL;
+        return -1;
+    }
     if (max_count == 0U) {
         /*
          * Match the public owned-buffer contract and ordinary read(2)
@@ -246,14 +297,24 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
 
     errno = 0;
     is_socket = llam_fd_get_socket_type(fd, &socket_type);
+    socket_probe_errno = errno;
     socket_recv = force_recv || is_socket;
+    if (!is_socket && socket_probe_errno == EBADF) {
+        /*
+         * Owned reads allocate before issuing the operation. Preserve the
+         * native invalid-descriptor error before allocation so hostile
+         * max_count values cannot convert EBADF into ENOMEM.
+         */
+        errno = EBADF;
+        return -1;
+    }
     if (force_recv && !is_socket) {
         /*
          * recv-owned requires socket semantics, but an invalid descriptor must
          * still surface as EBADF just like recv(2).  Only a valid non-socket
          * descriptor is normalized to ENOTSOCK.
          */
-        errno = errno == EBADF ? EBADF : ENOTSOCK;
+        errno = socket_probe_errno == EBADF ? EBADF : ENOTSOCK;
         return -1;
     }
 
@@ -276,7 +337,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
             return 0;
         }
         buffer->size = (size_t)result;
-        *out = buffer;
+        *out = llam_io_buffer_public_handle(buffer);
         return result;
     }
 
@@ -294,7 +355,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
 
     if (socket_recv && recv_flags == 0 && max_count <= LLAM_IO_BUFFER_INLINE_BYTES &&
         (socket_type == SOCK_DGRAM || socket_type == SOCK_SEQPACKET)) {
-        llam_node_t *node = &g_llam_runtime.nodes[g_llam_tls_shard->io_node_index];
+        llam_node_t *node = &g_llam_tls_shard->runtime->nodes[g_llam_tls_shard->io_node_index];
 
         prefer_multishot = !node->supports_provided_buffers && node->supports_multishot_recv;
     }
@@ -389,7 +450,7 @@ read_owned_done:
 
     buffer->size = (size_t)result;
     llam_api_io_req_release(g_llam_tls_shard, req);
-    *out = buffer;
+    *out = llam_io_buffer_public_handle(buffer);
     return result;
 }
 
@@ -706,10 +767,16 @@ void *llam_blocking_handle_poll_impl(void *arg) {
                                                 req->poll_events,
                                                 req->timeout_ms < 0 ? 10 : slice_ms,
                                                 &req->poll_revents);
-        if (req->result >= 0) {
-            if (req->result > 0 || req->timeout_ms >= 0) {
-                return req;
-            }
+        if (req->result > 0) {
+            return req;
+        }
+        if (req->result == 0) {
+            /*
+             * A zero result means only the current cancellation slice expired.
+             * Keep waiting until the absolute deadline above expires; otherwise
+             * finite HANDLE polls can return after ~10 ms instead of the caller
+             * supplied timeout.
+             */
             continue;
         }
         if (errno != EINTR) {

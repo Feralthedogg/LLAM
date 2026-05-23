@@ -250,14 +250,15 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v1.2.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v2.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
 through `.github/workflows/release.yml`.
 
-The 1.x release gate is intentionally platform-local: Linux must pass
+The 2.x release gate is platform-local plus sanitizer-backed: Linux must pass
 `make verify-linux` or Docker verification, macOS must pass the Darwin verify
-path, and Windows must pass native CMake/CTest plus Windows 2022/2025 stress
-smoke. The full operational checklist is in `docs/operations.md`.
+path, Windows must pass native CMake/CTest plus Windows stress smoke, and the
+focused ASan/UBSan suite must pass for public handle, I/O buffer, shutdown, and
+multi-runtime edge coverage. The full checklist is in `docs/operations.md`.
 
 Use an installed SDK with CMake:
 
@@ -277,19 +278,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.2.0/install.sh | sh -s -- --version 1.2.0 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --prefix "$HOME/.local"
 ```
 
 Install a specific Linux/macOS target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v1.2.0/install.sh | sh -s -- --version 1.2.0 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v1.2.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 1.2.0 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 2.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
@@ -298,10 +299,8 @@ Include the canonical public API:
 #include "llam/runtime.h"
 ```
 
-Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer `llam_runtime_init_ex()` and `llam_spawn_ex()` so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
-Embedding code should use `llam_runtime_create()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`, while treating LLAM 1.x as one active runtime per process.
-True multi-runtime isolation is a future ABI-compatible migration item; do not create/destroy
-LLAM concurrently from multiple host runtime instances.
+Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer size-aware `_ex` entry points so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
+Embedding code that needs independent scheduler instances should use `llam_runtime_create()`, `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`. The older `llam_runtime_init()` / `llam_spawn()` / `llam_run()` / `llam_runtime_shutdown()` calls remain convenience wrappers for the process-default runtime.
 macOS-specific performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
 Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
 
@@ -910,15 +909,15 @@ make clean
 
 ## Current Guarantees And Roadmap
 
-### 1. Current 1.x Guarantees
+### 1. Current Runtime Guarantees
 
-The 1.x line treats the current public C ABI as stable and keeps the default
-model to one active LLAM runtime per process. These items are part of the
+The current line treats the public C ABI as stable while moving the canonical
+embedding boundary to explicit runtime handles. These items are part of the
 current maintained contract rather than future roadmap work:
 
-- Focused direct API tests cover lifecycle, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`.
+- Focused direct API tests cover lifecycle, public handle stale/reuse guards, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`.
 - Runtime-owned failures should be reduced into focused runtime tests before they rely on example-server reproduction. The example server remains an integration and policy workload, while scheduler, cancellation, wakeup, select, and ownership regressions belong in direct tests.
-- The runtime handle API is the supported embedding boundary for 1.x. The public header, ABI guide, operations guide, and direct tests pin the current contract: one active process runtime, `EBUSY` on a second live create, `EINVAL` on non-default run handles, and owner-tagged runtime objects that fail cross-owner use with `EXDEV`. The 1.2.x implementation already routes run, cooperative stop, shutdown, stats, and stats JSON through runtime-owned internal entry points while keeping the public handle as a singleton alias.
+- The runtime handle API is the supported embedding boundary. The public header, ABI guide, operations guide, and direct tests pin the current contract: explicit heap-backed runtimes can be created, spawned into, driven, and destroyed independently; legacy singleton wrappers target only `llam_runtime_default()`; and owner-tagged runtime objects fail cross-owner managed use with `EXDEV`.
 - Default release builds keep owner diagnostics enabled. `LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` is an explicit source-build profiling knob for unsafe singleton-only binaries, not the documented ABI-conformance mode.
 - Rare-hang diagnostics are expected to be actionable. `llam_dump_runtime_state()` emits lifecycle/stop state, active I/O waiters, block-helper wake state, node submit/control/watch queues, shard wake/I/O ownership, and task-level wait ownership (`wait_owner`, cancellation registration, deadlines, active I/O requests, and blocking jobs). CI long-running stress jobs stream partial output through `scripts/run_with_timeout.py`, request a signal-driven runtime dump before timeout shutdown on POSIX stress binaries, and server composite runs can emit stop-time runtime dumps into the artifact directory.
 - Release archives are expected to stay self-contained: public headers, shared/static libraries, CMake config, pkg-config metadata, examples, install scripts, and operations docs.
@@ -928,11 +927,11 @@ current maintained contract rather than future roadmap work:
 ### 2. Core Runtime Roadmap
 
 Future core-runtime work should tighten LLAM itself without changing the stable
-1.x user-facing contract:
+2.x source-compatible public contract:
 
 - Keep extending direct API coverage when new edge cases are found, especially around shutdown races, cancellation ownership, lost wakeups, select fanout, blocking helpers, and I/O request ownership.
 - Continue promoting low-level stress failures out of examples into minimal runtime tests when the bug belongs to LLAM rather than to sample-application policy.
-- Continue the staged multi-runtime isolation work. The 1.2.x foundation tags runtime-aware objects with their owner, diagnoses cross-owner use, and moves lifecycle/diagnostic handle plumbing onto runtime-owned internal entry points; true concurrent multi-runtime execution still requires migrating every remaining global singleton, TLS dependency, queue, timer, allocator cache, and I/O backend owner to explicit runtime ownership.
+- Continue hardening true concurrent multi-runtime execution. Explicit runtime handles now own scheduler state, public registries, caches, blocking workers, and backend routing; remaining work should broaden platform I/O owner tests, keep signal/fault hooks reference-counted across concurrent runtime lifecycles, and preserve single-runtime benchmark guardrails.
 - Keep improving diagnostic dumps so rare shutdown, cancellation, wake handoff, and I/O ownership hangs produce enough state to debug without reproducing under a debugger.
 
 ### 3. Performance Roadmap
@@ -1164,9 +1163,9 @@ Rehome validates the entire waiter list before any migration. If a single entry 
 
 All sync primitives are **runtime-aware**: when called from a managed task, blocking waits park the task (freeing the worker thread) instead of blocking the OS thread.
 
-- **Mutex** (`llam_mutex_t`): atomic owner fast path + `llam_wait_queue_t` for contention. Non-recursive. `EDEADLK` on self-lock, `EPERM` on non-owner unlock.
-- **Condition variable** (`llam_cond_t`): FIFO waiter queue. Signal/broadcast can be called from outside managed tasks.
-- **Channel** (`llam_channel_t`): bounded pointer-valued ring buffer with separate send and receive wait queues. Supports close semantics (sends fail with `EPIPE`, buffered values remain drainable). Nonblocking try-send/try-receive are also valid from host threads after runtime initialization, and try-receive can drain buffered values after shutdown, so embedders can clean up without entering a managed task.
+- **Mutex** (`llam_mutex_t`): atomic owner fast path + `llam_wait_queue_t` for contention. Non-recursive. `EDEADLK` on self-lock, `EPERM` on non-owner unlock. Destroy also rejects in-flight public operations with `EBUSY` so stale handles cannot race object reclamation.
+- **Condition variable** (`llam_cond_t`): FIFO waiter queue. Signal/broadcast can be called from outside managed tasks. Destroy rejects queued waiters, signal/broadcast-selected waiters that have not returned, and in-flight public operations with `EBUSY`.
+- **Channel** (`llam_channel_t`): bounded pointer-valued ring buffer with separate send and receive wait queues. Supports close semantics (sends fail with `EPIPE`, buffered values remain drainable). Nonblocking try-send/try-receive are also valid from host threads after runtime initialization, and try-receive can drain buffered values after shutdown, so embedders can clean up without entering a managed task. Destroy rejects buffered values, parked or close-woken waiters, and in-flight public operations with `EBUSY`.
 - **Cancel token** (`llam_cancel_token_t`): explicit cancellation handle with a waiter list. Registered tasks and I/O operations observe cancellation through `ECANCELED`.
 
 

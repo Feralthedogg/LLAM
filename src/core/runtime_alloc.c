@@ -234,6 +234,7 @@ void llam_allocator_destroy(llam_allocator_t *allocator) {
         if (chunk->item_kind == LLAM_ALLOC_CHUNK_TASK && chunk->storage != NULL) {
             llam_task_t *tasks = chunk->storage;
 
+            llam_task_unregister_public_slab(tasks, chunk->item_count);
             // Task locks are initialized when the slab is grown; they must be
             // destroyed even for task objects that never reached user code.
             for (unsigned i = 0U; i < chunk->item_count; ++i) {
@@ -479,6 +480,8 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
         llam_allocator_unlock(&shard->allocator);
         return -1;
     }
+
+    llam_task_register_public_slab(items, LLAM_TASK_SLAB_COUNT);
 
     // Publish all items only after bookkeeping succeeds; otherwise teardown
     // would not know how to release this backing allocation.

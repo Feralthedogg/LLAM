@@ -36,10 +36,8 @@ uint64_t llam_hash_watch_identity_u64(uint64_t value) {
 }
 
 /** @brief Update per-shard in-flight I/O waiter accounting. */
-void llam_shard_note_inflight_io_waiter(unsigned owner_shard, int delta) {
-    llam_runtime_t *rt = &g_llam_runtime;
-
-    if (delta == 0 || owner_shard >= rt->active_shards) {
+void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta) {
+    if (rt == NULL || delta == 0 || owner_shard >= rt->active_shards) {
         return;
     }
     if (delta > 0) {
@@ -102,7 +100,7 @@ llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
          */
         atomic_store_explicit(&cursor->inflight_owner_shard, cursor->owner_shard, memory_order_release);
         atomic_store(&cursor->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
-        llam_shard_note_inflight_io_waiter(cursor->owner_shard, 1);
+        llam_shard_note_inflight_io_waiter(cursor->owner_runtime, cursor->owner_shard, 1);
         cursor = cursor->next;
     }
     pthread_mutex_unlock(&node->submit_lock);

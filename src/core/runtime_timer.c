@@ -29,210 +29,9 @@
 
 #include "runtime_internal.h"
 
-/** Timer heap fanout. A 4-ary heap reduces sift depth and improves cache locality. */
-#define LLAM_TIMER_HEAP_ARITY 4U
-
-/** @brief Return the parent index for a non-root heap entry. */
-static size_t llam_timer_heap_parent(size_t index) {
-    return (index - 1U) / LLAM_TIMER_HEAP_ARITY;
-}
-
-/**
- * @brief Compare two timer heap nodes.
- *
- * Deadlines are primary keys. Task ids are used as a stable tie-breaker for
- * task-backed timers, and pointer order is the final fallback for sentinel or
- * non-task nodes.
- *
- * @param lhs Left timer node.
- * @param rhs Right timer node.
- *
- * @return @c true when @p lhs should appear before @p rhs in the min-heap.
- */
-static bool llam_timer_heap_less(const llam_timer_node_t *lhs, const llam_timer_node_t *rhs) {
-    if (lhs->deadline_ns != rhs->deadline_ns) {
-        return lhs->deadline_ns < rhs->deadline_ns;
-    }
-    if (lhs->task == NULL || rhs->task == NULL) {
-        return lhs < rhs;
-    }
-    return lhs->task->id < rhs->task->id;
-}
-
-/**
- * @brief Refresh the legacy root pointer from the heap array.
- *
- * @param shard Shard whose timer root is updated.
- */
-static void llam_timer_heap_refresh_root(llam_shard_t *shard) {
-    shard->timers = shard->timer_heap_len > 0U ? shard->timer_heap[0] : NULL;
-}
-
-/**
- * @brief Swap two heap positions and update their back-pointers.
- *
- * @param shard Shard owning the heap.
- * @param lhs   First heap index.
- * @param rhs   Second heap index.
- */
-static void llam_timer_heap_swap(llam_shard_t *shard, size_t lhs, size_t rhs) {
-    llam_timer_node_t *tmp = shard->timer_heap[lhs];
-
-    shard->timer_heap[lhs] = shard->timer_heap[rhs];
-    shard->timer_heap[rhs] = tmp;
-    shard->timer_heap[lhs]->heap_index = lhs;
-    shard->timer_heap[rhs]->heap_index = rhs;
-}
-
-/**
- * @brief Ensure the shard timer heap can hold at least @p needed nodes.
- *
- * @param shard  Shard owning the heap.
- * @param needed Required capacity.
- *
- * @return @c true on success, or @c false with @c errno set to @c ENOMEM.
- */
-static bool llam_timer_heap_reserve(llam_shard_t *shard, size_t needed) {
-    llam_timer_node_t **items;
-    size_t new_cap;
-
-    if (needed <= shard->timer_heap_cap) {
-        return true;
-    }
-    new_cap = shard->timer_heap_cap != 0U ? shard->timer_heap_cap * 2U : 64U;
-    while (new_cap < needed) {
-        if (new_cap > (SIZE_MAX / 2U)) {
-            errno = ENOMEM;
-            return false;
-        }
-        new_cap *= 2U;
-    }
-    items = realloc(shard->timer_heap, new_cap * sizeof(*items));
-    if (items == NULL) {
-        errno = ENOMEM;
-        return false;
-    }
-    shard->timer_heap = items;
-    shard->timer_heap_cap = new_cap;
-    return true;
-}
-
-/**
- * @brief Restore heap ordering by moving a node toward the root.
- *
- * @param shard Shard owning the heap.
- * @param index Initial node index.
- */
-static void llam_timer_heap_sift_up(llam_shard_t *shard, size_t index) {
-    while (index > 0U) {
-        size_t parent = llam_timer_heap_parent(index);
-
-        if (!llam_timer_heap_less(shard->timer_heap[index], shard->timer_heap[parent])) {
-            break;
-        }
-        llam_timer_heap_swap(shard, index, parent);
-        index = parent;
-    }
-}
-
-/**
- * @brief Restore heap ordering by moving a node toward the leaves.
- *
- * @param shard Shard owning the heap.
- * @param index Initial node index.
- */
-static void llam_timer_heap_sift_down(llam_shard_t *shard, size_t index) {
-    for (;;) {
-        size_t first_child = index * LLAM_TIMER_HEAP_ARITY + 1U;
-        size_t best = index;
-        size_t child;
-
-        for (child = first_child;
-             child < shard->timer_heap_len && child < first_child + LLAM_TIMER_HEAP_ARITY;
-             ++child) {
-            if (llam_timer_heap_less(shard->timer_heap[child], shard->timer_heap[best])) {
-                best = child;
-            }
-        }
-        if (best == index) {
-            break;
-        }
-        llam_timer_heap_swap(shard, index, best);
-        index = best;
-    }
-}
-
-/**
- * @brief Push a timer node into the shard heap.
- *
- * @param shard Shard owning the heap. The shard lock must already be held.
- * @param node  Timer node to insert.
- *
- * @return @c true on success, or @c false when heap growth fails.
- */
-static bool llam_timer_heap_push_locked(llam_shard_t *shard, llam_timer_node_t *node) {
-    size_t index;
-
-    if (!llam_timer_heap_reserve(shard, shard->timer_heap_len + 1U)) {
-        return false;
-    }
-    index = shard->timer_heap_len++;
-    shard->timer_heap[index] = node;
-    node->heap_index = index;
-    llam_timer_heap_sift_up(shard, index);
-    llam_timer_heap_refresh_root(shard);
-    atomic_fetch_add_explicit(&shard->timer_count, 1U, memory_order_release);
-    return true;
-}
-
-/**
- * @brief Remove a timer node at a specific heap index.
- *
- * The last heap node is moved into the removed slot and sifted in the direction
- * required to restore min-heap ordering.
- *
- * @param shard Shard owning the heap. The shard lock must already be held.
- * @param index Heap index to remove.
- *
- * @return Removed timer node, or @c NULL if @p index is out of range.
- */
-static llam_timer_node_t *llam_timer_heap_remove_at_locked(llam_shard_t *shard, size_t index) {
-    llam_timer_node_t *node;
-    llam_timer_node_t *last;
-
-    if (index >= shard->timer_heap_len) {
-        return NULL;
-    }
-
-    node = shard->timer_heap[index];
-    shard->timer_heap_len -= 1U;
-    if (index != shard->timer_heap_len) {
-        last = shard->timer_heap[shard->timer_heap_len];
-        shard->timer_heap[index] = last;
-        last->heap_index = index;
-        if (index > 0U &&
-            llam_timer_heap_less(last, shard->timer_heap[llam_timer_heap_parent(index)])) {
-            llam_timer_heap_sift_up(shard, index);
-        } else {
-            llam_timer_heap_sift_down(shard, index);
-        }
-    }
-    shard->timer_heap[shard->timer_heap_len] = NULL;
-    node->heap_index = 0U;
-    llam_timer_heap_refresh_root(shard);
-    atomic_fetch_sub_explicit(&shard->timer_count, 1U, memory_order_release);
-    return node;
-}
-
-/**
- * @brief Pop the earliest timer node from the heap.
- *
- * @param shard Shard owning the heap. The shard lock must already be held.
- *
- * @return Earliest timer node, or @c NULL if the heap is empty.
- */
-static llam_timer_node_t *llam_timer_heap_pop_min_locked(llam_shard_t *shard) {
-    return llam_timer_heap_remove_at_locked(shard, 0U);
+/** @brief Return the runtime that owns a parked task's timer/wait state. */
+static llam_runtime_t *llam_timer_task_runtime(const llam_task_t *task) {
+    return task != NULL ? task->owner_runtime : NULL;
 }
 
 /**
@@ -323,17 +122,19 @@ bool llam_timer_remove_locked(llam_shard_t *shard, llam_task_t *task) {
  * @param task Parked task to cancel.
  */
 void llam_cancel_task_wait(llam_task_t *task) {
+    llam_runtime_t *rt = llam_timer_task_runtime(task);
     bool removed = false;
 
-    if (task == NULL || task->state != LLAM_TASK_STATE_PARKED) {
+    if (task == NULL || task->state != LLAM_TASK_STATE_PARKED ||
+        rt == NULL || rt->active_shards == 0U) {
         return;
     }
 
     llam_wait_reason_t wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire);
     switch (wait_reason) {
     case LLAM_WAIT_SLEEP:
-        if (task->parked_shard < g_llam_runtime.active_shards) {
-            llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard];
+        if (task->parked_shard < rt->active_shards) {
+            llam_shard_t *shard = &rt->shards[task->parked_shard];
             llam_wait_node_t *node = task->active_wait_node;
 
             pthread_mutex_lock(&shard->lock);
@@ -353,7 +154,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
                  * the cancellation inline through its wait node.
                  */
                 if (node == NULL || llam_wait_node_prepare_wake(node)) {
-                    llam_reinject_task_on_shard(&g_llam_runtime,
+                    llam_reinject_task_on_shard(rt,
                                               task,
                                               task->parked_shard,
                                               true,
@@ -379,14 +180,14 @@ void llam_cancel_task_wait(llam_task_t *task) {
             removed = llam_join_waiter_remove_locked(join_target, task);
             pthread_mutex_unlock(&join_target->lock);
             if (removed) {
-                llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+                llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
                 pthread_mutex_lock(&shard->lock);
                 shard->metrics.cancel_wakes += 1U;
                 pthread_mutex_unlock(&shard->lock);
                 task->wake_error_code = ECANCELED;
                 // Preserve join/deadline ownership until generic reinject disarms it.
-                llam_reinject_task(&g_llam_runtime, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
+                llam_reinject_task(rt, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
             }
         }
         break;
@@ -396,7 +197,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
     case LLAM_WAIT_CHANNEL_RECV:
         if (task->active_select_state != NULL) {
             if (llam_channel_select_abort_task_wait(task, ECANCELED, LLAM_WAIT_CANCEL)) {
-                llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+                llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
                 pthread_mutex_lock(&shard->lock);
                 shard->metrics.cancel_wakes += 1U;
@@ -425,7 +226,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
             }
             pthread_mutex_unlock(queue_lock);
             if (removed) {
-                llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+                llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
                 pthread_mutex_lock(&shard->lock);
                 shard->metrics.cancel_wakes += 1U;
@@ -447,8 +248,8 @@ void llam_cancel_task_wait(llam_task_t *task) {
                 break;
             }
             if (atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_ABORTED)) {
-                if (task->parked_shard < g_llam_runtime.active_shards) {
-                    llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard];
+                if (task->parked_shard < rt->active_shards) {
+                    llam_shard_t *shard = &rt->shards[task->parked_shard];
 
                     pthread_mutex_lock(&shard->lock);
                     shard->metrics.cancel_wakes += 1U;
@@ -466,7 +267,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
                  * task.
                  */
                 if (job->wait_node == NULL || llam_wait_node_prepare_wake(job->wait_node)) {
-                    llam_reinject_task_on_shard(&g_llam_runtime,
+                    llam_reinject_task_on_shard(rt,
                                               task,
                                               task->parked_shard,
                                               true,
@@ -581,16 +382,18 @@ void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt) {
  * @param task Parked task whose deadline expired.
  */
 void llam_timeout_task_wait(llam_task_t *task) {
+    llam_runtime_t *rt = llam_timer_task_runtime(task);
     bool removed = false;
 
-    if (task == NULL || task->state != LLAM_TASK_STATE_PARKED || g_llam_runtime.active_shards == 0U) {
+    if (task == NULL || task->state != LLAM_TASK_STATE_PARKED ||
+        rt == NULL || rt->active_shards == 0U) {
         return;
     }
 
     llam_wait_reason_t wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire);
     switch (wait_reason) {
     case LLAM_WAIT_SLEEP: {
-        llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+        llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
         llam_wait_node_t *node = task->active_wait_node;
 
         shard->metrics.timeout_wakes += 1U;
@@ -599,7 +402,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
             node->error_code = 0;
         }
         if (node == NULL || llam_wait_node_prepare_wake(node)) {
-            llam_reinject_task_on_shard(&g_llam_runtime,
+            llam_reinject_task_on_shard(rt,
                                       task,
                                       task->parked_shard,
                                       true,
@@ -610,7 +413,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
     }
     case LLAM_WAIT_JOIN:
         if (task->join_target != NULL) {
-            llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+            llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
             pthread_mutex_lock(&task->join_target->lock);
             removed = llam_join_waiter_remove_locked(task->join_target, task);
@@ -618,7 +421,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
             if (removed) {
                 shard->metrics.timeout_wakes += 1U;
                 task->wake_error_code = ETIMEDOUT;
-                llam_reinject_task(&g_llam_runtime, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_TIMEOUT);
+                llam_reinject_task(rt, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_TIMEOUT);
             }
         }
         break;
@@ -628,7 +431,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
     case LLAM_WAIT_CHANNEL_RECV:
         if (task->active_select_state != NULL) {
             if (llam_channel_select_abort_task_wait(task, ETIMEDOUT, LLAM_WAIT_TIMEOUT)) {
-                llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+                llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
                 shard->metrics.timeout_wakes += 1U;
             }
@@ -636,7 +439,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
         }
         if (task->active_wait_queue != NULL && task->active_wait_queue_lock != NULL && task->active_wait_node != NULL) {
             llam_wait_node_t *node = task->active_wait_node;
-            llam_shard_t *shard = &g_llam_runtime.shards[task->parked_shard % g_llam_runtime.active_shards];
+            llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
             pthread_mutex_lock(task->active_wait_queue_lock);
             removed = llam_wait_queue_remove(task->active_wait_queue, node);

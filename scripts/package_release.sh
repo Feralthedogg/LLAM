@@ -5,11 +5,11 @@
 set -eu
 
 target="${1:-}"
-version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v1.2.0}}"
+version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.0.0}}"
 version="${version#v}"
 version="$(printf '%s' "$version" | tr '/' '-')"
-abi_major="${LLAM_ABI_MAJOR:-1}"
-library_version="${LLAM_VERSION:-1.2.0}"
+abi_major="${LLAM_ABI_MAJOR:-2}"
+library_version="${LLAM_VERSION:-2.0.0}"
 root_dir="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 out_dir="$root_dir/target/dist"
 host_os="$(uname -s)"

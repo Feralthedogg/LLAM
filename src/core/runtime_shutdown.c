@@ -6,8 +6,8 @@
  * Shutdown is intentionally conservative: request runtime stop, join worker
  * threads, drain backend queues/watch state, destroy platform resources, release
  * cached stacks and allocator slabs, restore process-wide signal/affinity state,
- * and finally zero the runtime object.  The 1.x public singleton API and handle
- * API both delegate to the runtime-owned shutdown helper in this file.
+ * and finally zero the runtime object.  Legacy default-runtime wrappers and
+ * explicit handles both delegate to the runtime-owned shutdown helper here.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -64,8 +64,17 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
         && !rt->winsock_started
 #endif
     ) {
+        llam_runtime_unregister_handle(rt);
         return;
     }
+
+    /*
+     * Public task handles point into allocator-owned task slabs.  Disable
+     * public task-handle unwrapping before those slabs are walked and released,
+     * so stale post-shutdown inspection fails without reading reclaimed task
+     * storage.
+     */
+    atomic_store_explicit(&rt->initialized, false, memory_order_release);
 
     // The calling thread is no longer considered a runtime worker while
     // teardown is in progress.
@@ -326,23 +335,30 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     }
 #endif
     llam_clear_xsave_globals();
-    // Clear the singleton last so accidental post-shutdown reads fail closed.
+    /*
+     * Remove the runtime from the public handle registry before zeroing it.
+     * Otherwise an old pointer can pass handle validation and race into freed
+     * scheduler/backend state.
+     */
+    llam_runtime_unregister_handle(rt);
+    // Clear the runtime last so accidental post-shutdown reads fail closed.
     memset(rt, 0, sizeof(*rt));
 }
 
 void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
     if (rt == NULL) {
-        rt = &g_llam_runtime;
+        rt = llam_runtime_default_storage();
     }
     if (llam_runtime_check_handle(rt) != 0) {
         return;
     }
     /*
      * A managed task runs on scheduler-owned stack/context state.  Tearing the
-     * singleton down from that same execution frame can deadlock in worker joins
-     * or free the task currently returning from this function.  Treat in-runtime
-     * calls as a cooperative stop request; the host thread that owns llam_run()
-     * must perform the actual resource teardown after the scheduler exits.
+     * owning runtime down from that same execution frame can deadlock in worker
+     * joins or free the task currently returning from this function. Treat
+     * in-runtime calls as a cooperative stop request; the host thread that owns
+     * the run call must perform actual resource teardown after the scheduler
+     * exits.
      */
     if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
         int saved_errno = errno;
@@ -358,7 +374,7 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
      * Shutdown must be serialized with runtime construction.  The initialized
      * flag is published late, but partial-init resources are published earlier
      * for failure cleanup; tearing those down from another host thread while
-     * init still consumes them can corrupt the singleton.
+     * init still consumes them can corrupt the runtime object.
      */
     llam_runtime_lifecycle_lock();
     llam_runtime_shutdown_unlocked(rt);
@@ -366,5 +382,5 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
 }
 
 void llam_runtime_shutdown(void) {
-    llam_runtime_shutdown_rt(&g_llam_runtime);
+    llam_runtime_shutdown_rt(llam_runtime_default_storage());
 }

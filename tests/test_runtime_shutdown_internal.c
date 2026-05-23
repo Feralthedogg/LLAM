@@ -153,11 +153,177 @@ static int exercise_recv_ready_pop_without_transfer(void) {
     return 0;
 }
 
+#if LLAM_RUNTIME_BACKEND_LINUX
+static bool io_uring_unavailable_for_direct_internal_test(int rc) {
+    int err = -rc;
+
+    return err == EPERM || err == EACCES || err == ENOSYS || err == EOPNOTSUPP;
+}
+#endif
+
+static int exercise_linux_oversized_submit_preserves_sq_tail(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_req_t req;
+    int rc;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&req, 0, sizeof(req));
+
+    rc = io_uring_queue_init(4U, &node.ring, 0U);
+    if (rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(rc)) {
+            return 0;
+        }
+        errno = -rc;
+        return fail_errno("io_uring init for oversized submit test failed");
+    }
+
+    node.runtime = &runtime;
+    atomic_init(&node.pending_ops, 1U);
+    req.kind = LLAM_IO_KIND_WRITE;
+    req.count = (size_t)UINT_MAX + 1U;
+    req.owner_shard = UINT_MAX;
+    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_NONE);
+    atomic_init(&req.inflight_owner_shard, UINT_MAX);
+    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req.cancel_queued, 0U);
+
+    /*
+     * Oversized backend requests are rejected before SQE acquisition.  If the
+     * guard consumes an SQE and then completes the request locally, a later
+     * ring submit can observe an uninitialized SQE.
+     */
+    llam_io_submit_one(&node, &req);
+    if (req.result != -1 || req.error_code != EINVAL) {
+        io_uring_queue_exit(&node.ring);
+        return fail_msg("oversized Linux I/O submit did not report EINVAL");
+    }
+    if (io_uring_sq_ready(&node.ring) != 0U) {
+        io_uring_queue_exit(&node.ring);
+        return fail_msg("oversized Linux I/O submit consumed an SQE");
+    }
+
+    io_uring_queue_exit(&node.ring);
+#endif
+    return 0;
+}
+
+static int exercise_linux_invalid_request_preserves_sq_tail(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_req_t req;
+    int rc;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&req, 0, sizeof(req));
+
+    rc = io_uring_queue_init(4U, &node.ring, 0U);
+    if (rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(rc)) {
+            return 0;
+        }
+        errno = -rc;
+        return fail_errno("io_uring init for invalid request test failed");
+    }
+
+    node.runtime = &runtime;
+    atomic_init(&node.pending_ops, 1U);
+    req.kind = (llam_io_kind_t)UINT_MAX;
+    req.owner_shard = UINT_MAX;
+    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_NONE);
+    atomic_init(&req.inflight_owner_shard, UINT_MAX);
+    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req.cancel_queued, 0U);
+
+    /*
+     * Unsupported request kinds complete locally.  They must be rejected before
+     * SQE acquisition, otherwise the ring can later submit a stale entry.
+     */
+    llam_io_submit_one(&node, &req);
+    if (req.result != -1 || req.error_code != EINVAL) {
+        io_uring_queue_exit(&node.ring);
+        return fail_msg("invalid Linux I/O request did not report EINVAL");
+    }
+    if (io_uring_sq_ready(&node.ring) != 0U) {
+        io_uring_queue_exit(&node.ring);
+        return fail_msg("invalid Linux I/O request consumed an SQE");
+    }
+
+    io_uring_queue_exit(&node.ring);
+#endif
+    return 0;
+}
+
+static int exercise_linux_invalid_control_preserves_sq_tail(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_control_op_t *op;
+    int rc;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+
+    rc = pthread_mutex_init(&node.watch_lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        return fail_errno("watch lock init for invalid control test failed");
+    }
+    rc = io_uring_queue_init(4U, &node.ring, 0U);
+    if (rc != 0) {
+        pthread_mutex_destroy(&node.watch_lock);
+        if (io_uring_unavailable_for_direct_internal_test(rc)) {
+            return 0;
+        }
+        errno = -rc;
+        return fail_errno("io_uring init for invalid control test failed");
+    }
+
+    op = calloc(1U, sizeof(*op));
+    if (op == NULL) {
+        io_uring_queue_exit(&node.ring);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_errno("control op allocation failed");
+    }
+
+    node.runtime = &runtime;
+    op->kind = (llam_io_control_kind_t)UINT_MAX;
+    /*
+     * Invalid or malformed control operations are a defensive path, but they
+     * still must not burn an SQE before being dropped locally.
+     */
+    llam_io_submit_control_op(&node, op);
+    if (io_uring_sq_ready(&node.ring) != 0U) {
+        io_uring_queue_exit(&node.ring);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("invalid Linux control submit consumed an SQE");
+    }
+
+    io_uring_queue_exit(&node.ring);
+    pthread_mutex_destroy(&node.watch_lock);
+#endif
+    return 0;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
     }
     if (exercise_recv_ready_pop_without_transfer() != 0) {
+        return 1;
+    }
+    if (exercise_linux_oversized_submit_preserves_sq_tail() != 0) {
+        return 1;
+    }
+    if (exercise_linux_invalid_request_preserves_sq_tail() != 0) {
+        return 1;
+    }
+    if (exercise_linux_invalid_control_preserves_sq_tail() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");

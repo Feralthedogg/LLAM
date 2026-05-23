@@ -3,12 +3,10 @@
  * @brief Native high-throughput stress driver for the LLAM chat server.
  *
  * @details
- * The Python stress script validates exact fanout delivery. This tool is a
- * different workload: it pushes nonblocking TCP clients as hard as possible and
- * reports inbound message rate plus observed broadcast delivery rate. For a
- * chat server, "requests/sec" and "deliveries/sec" are different numbers:
- * every inbound client line can fan out to N-1 peer deliveries.
- * 
+ * Pushes nonblocking TCP clients as hard as possible and reports both inbound
+ * message rate and observed fanout delivery rate.  The Python stress script
+ * covers exact delivery checks; this tool focuses on throughput/accounting.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License
@@ -1025,19 +1023,9 @@ int main(int argc, char **argv) {
            " inbound_mps=%.3f inbound_total_mps=%.3f expected_deliveries=%" PRIu64
            " observed_deliveries=%" PRIu64 " missing_deliveries=%" PRIu64
            " delivery_mps=%.3f delivery_ratio=%.9f recv_bytes=%" PRIu64 "\n",
-           opts.server_lossless ? "lossless" : "best-effort",
-           opts.clients,
-           active_sec,
-           measured_sec,
-           total_sent,
-           sent_mps,
-           sent_total_mps,
-           expected_deliveries,
-           total_recv_lines,
-           missing_deliveries,
-           delivery_mps,
-           delivery_ratio,
-           total_recv_bytes);
+           opts.server_lossless ? "lossless" : "best-effort", opts.clients, active_sec, measured_sec,
+           total_sent, sent_mps, sent_total_mps, expected_deliveries, total_recv_lines, missing_deliveries,
+           delivery_mps, delivery_ratio, total_recv_bytes);
 
     if (total_sent == 0U || total_recv_lines == 0U) {
         fprintf(stderr, "flood produced no measurable traffic\n");

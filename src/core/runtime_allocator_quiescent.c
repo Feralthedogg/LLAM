@@ -59,7 +59,7 @@ void llam_allocator_quiescent(llam_shard_t *shard) {
     // Publish a local epoch for diagnostics/reclamation accounting before
     // stealing the remote lists. Object safety is handled by ownership and the
     // atomic list exchange, not by waiting on this epoch.
-    epoch = atomic_fetch_add(&g_llam_runtime.global_epoch, 1U) + 1U;
+    epoch = atomic_fetch_add(&shard->runtime->global_epoch, 1U) + 1U;
     atomic_store(&allocator->local_epoch, epoch);
     task_head = atomic_exchange(&allocator->task_remote_free, NULL);
     wait_head = atomic_exchange(&allocator->wait_remote_free, NULL);

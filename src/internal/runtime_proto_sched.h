@@ -140,12 +140,28 @@ bool llam_shard_is_online(const llam_shard_t *shard);
 /*
  * Wait deadline, cancellation, join, and timer dispatch.
  */
+#if UINTPTR_MAX <= UINT32_MAX
+#error "LLAM cancellation-token public handles require uintptr_t wider than 32 bits"
+#define LLAM_CANCEL_TOKEN_PUBLIC_HANDLE_SHIFT 0U
+#else
+#define LLAM_CANCEL_TOKEN_PUBLIC_HANDLE_SHIFT 32U
+#endif
+
+static inline llam_cancel_token_t *llam_cancel_token_public_handle(llam_cancel_token_t *token) {
+    if (token == NULL) {
+        return NULL;
+    }
+    return (llam_cancel_token_t *)llam_public_slot_encode_handle(token->public_handle_slot,
+                                                                 token->public_handle_generation,
+                                                                 LLAM_CANCEL_TOKEN_PUBLIC_HANDLE_SHIFT);
+}
+
 int llam_arm_task_wait_deadline(llam_task_t *task, llam_shard_t *shard, uint64_t deadline_ns);
 void llam_cancel_task_wait(llam_task_t *task);
 void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt);
 int llam_cancel_token_register_task(llam_task_t *task);
 void llam_cancel_token_unregister_task(llam_task_t *task);
-int llam_cancel_token_retain_task_ref(llam_cancel_token_t *token);
+int llam_cancel_token_retain_task_ref(llam_cancel_token_t *token, llam_cancel_token_t **out_token);
 void llam_cancel_token_release_task_ref(llam_cancel_token_t *token);
 bool llam_deadline_passed(uint64_t deadline_ns);
 void llam_disarm_task_wait_deadline(llam_task_t *task);

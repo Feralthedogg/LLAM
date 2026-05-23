@@ -19,6 +19,7 @@
  */
 
 #include "llam/runtime.h"
+#include "runtime_internal.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -63,6 +64,21 @@ typedef struct edge_state {
 #endif
 } edge_state_t;
 
+typedef struct task_handle_race_state {
+    atomic_uint failures;
+    atomic_uint ran;
+    atomic_uint target_release;
+    atomic_uint join_successes;
+    atomic_uint join_busy;
+    atomic_uint join_unexpected;
+    atomic_uint detach_busy;
+    atomic_uint detach_successes;
+    int first_errno;
+    char first_case[160];
+    llam_task_t *target;
+    llam_task_t *raw_target;
+} task_handle_race_state_t;
+
 typedef struct cancel_destroy_race_state {
     llam_cancel_token_t *token;
     atomic_uint ready;
@@ -72,6 +88,28 @@ typedef struct cancel_destroy_race_state {
     int destroy_rc;
     int destroy_errno;
 } cancel_destroy_race_state_t;
+
+typedef struct cond_owner_recheck_state {
+    edge_state_t edge;
+    llam_mutex_t *mutex;
+    llam_cond_t *cond;
+    llam_mutex_t *raw_mutex;
+    llam_cond_t *raw_cond;
+    atomic_uint mutex_owned;
+    int wait_rc;
+    int wait_errno;
+} cond_owner_recheck_state_t;
+
+typedef struct timer_heap_overflow_state {
+    edge_state_t edge;
+    size_t saved_len;
+    size_t saved_cap;
+    llam_timer_node_t **saved_heap;
+    llam_timer_node_t *saved_root;
+    unsigned saved_timer_count;
+    int sleep_rc;
+    int sleep_errno;
+} timer_heap_overflow_state_t;
 
 static void ownership_task(void *arg);
 
@@ -129,6 +167,12 @@ static void task_fail(edge_state_t *state, const char *where, int err) {
         state->first_errno = err;
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
     }
+}
+
+static uintptr_t public_handle_slot(const void *handle) {
+    uintptr_t raw = (uintptr_t)handle;
+
+    return (raw >> 32U) != 0U ? (raw >> 32U) - 1U : UINTPTR_MAX;
 }
 
 static int check_task_failures(edge_state_t *state) {
@@ -251,6 +295,183 @@ static int test_cancel_token_destroy_race(void) {
         if (state.destroy_rc == -1 && llam_cancel_token_destroy(state.token) != 0) {
             return fail_errno("cancel token race cleanup destroy failed");
         }
+    }
+    return 0;
+}
+
+static int test_consumed_cancel_token_handle_reuse_guard(void) {
+    llam_cancel_token_t *old_token;
+    uintptr_t old_slot;
+    unsigned attempt;
+
+    old_token = llam_cancel_token_create();
+    if (old_token == NULL) {
+        return fail_errno("stale cancel token create old failed");
+    }
+    old_slot = public_handle_slot(old_token);
+    if (llam_cancel_token_destroy(old_token) != 0) {
+        return fail_errno("stale cancel token destroy old failed");
+    }
+
+    for (attempt = 0U; attempt < 64U; ++attempt) {
+        llam_cancel_token_t *new_token = llam_cancel_token_create();
+
+        if (new_token == NULL) {
+            return fail_errno("stale cancel token create new failed");
+        }
+        if (public_handle_slot(new_token) == old_slot) {
+            int cancelled;
+
+            /*
+             * Public cancellation-token handles are consumed by destroy.  A
+             * stale handle must stay invalid across many slot generations so it
+             * cannot cancel unrelated child tasks after allocator reuse.
+             */
+            errno = 0;
+            if (llam_cancel_token_cancel(old_token) != -1 || errno != EINVAL) {
+                (void)llam_cancel_token_destroy(new_token);
+                return fail_msg("consumed cancel token handle cancelled a reused token");
+            }
+            errno = 0;
+            cancelled = llam_cancel_token_is_cancelled(new_token);
+            if (cancelled != 0 || errno != 0) {
+                (void)llam_cancel_token_destroy(new_token);
+                return fail_msg("reused cancel token observed stale cancellation");
+            }
+            if (llam_cancel_token_destroy(new_token) != 0) {
+                return fail_errno("stale cancel token destroy new failed");
+            }
+            continue;
+        }
+        if (llam_cancel_token_destroy(new_token) != 0) {
+            return fail_errno("stale cancel token destroy unused new failed");
+        }
+    }
+
+    return 0;
+}
+
+static int test_consumed_task_group_handle_reuse_guard(void) {
+    llam_task_group_t *old_group;
+    uintptr_t old_slot;
+    unsigned attempt;
+
+    old_group = llam_task_group_create();
+    if (old_group == NULL) {
+        return fail_errno("stale task group create old failed");
+    }
+    old_slot = public_handle_slot(old_group);
+    if (llam_task_group_destroy(old_group) != 0) {
+        return fail_errno("stale task group destroy old failed");
+    }
+
+    for (attempt = 0U; attempt < 64U; ++attempt) {
+        llam_task_group_t *new_group = llam_task_group_create();
+
+        if (new_group == NULL) {
+            return fail_errno("stale task group create new failed");
+        }
+        if (public_handle_slot(new_group) == old_slot) {
+            /*
+             * Public task-group handles are consumed by destroy.  A stale
+             * handle must stay invalid across repeated slot reuse so it cannot
+             * free an unrelated group still owned by the caller.
+             */
+            errno = 0;
+            if (llam_task_group_destroy(old_group) != -1 || errno != EINVAL) {
+                return fail_msg("consumed task group handle destroyed a reused group");
+            }
+            if (llam_task_group_destroy(new_group) != 0) {
+                return fail_errno("stale task group destroy new failed");
+            }
+            continue;
+        }
+        if (llam_task_group_destroy(new_group) != 0) {
+            return fail_errno("stale task group destroy unused new failed");
+        }
+    }
+
+    return 0;
+}
+
+static int test_task_group_capacity_overflow_guard(void) {
+    edge_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    llam_task_group_t *group;
+    llam_task_group_t *raw_group;
+    size_t saved_count;
+    size_t saved_capacity;
+    llam_task_t **saved_tasks;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+
+    if (llam_runtime_opts_init(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("task group overflow runtime opts init failed");
+    }
+    runtime_opts.deterministic = 1U;
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return fail_errno("task group overflow runtime init failed");
+    }
+
+    group = llam_task_group_create();
+    if (group == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("task group overflow create failed");
+    }
+
+    raw_group = llam_task_group_resolve_public_handle(group);
+    if (raw_group == NULL) {
+        (void)llam_task_group_destroy(group);
+        llam_runtime_shutdown();
+        return fail_errno("task group overflow resolve failed");
+    }
+
+    saved_count = raw_group->count;
+    saved_capacity = raw_group->capacity;
+    saved_tasks = raw_group->tasks;
+    /*
+     * The public API cannot practically allocate SIZE_MAX child handles, but a
+     * corrupted or future-imported group state must still fail closed. Before the
+     * overflow guard, group->count + 1 wrapped to zero, reserve was skipped, and
+     * spawn completion wrote through group->tasks[SIZE_MAX].
+     */
+    raw_group->count = SIZE_MAX;
+    raw_group->capacity = 0U;
+    raw_group->tasks = NULL;
+    llam_task_group_end_public_op(raw_group);
+
+    errno = 0;
+    if (llam_task_group_spawn(group, ownership_task, &state, NULL) != NULL || errno != ENOMEM) {
+        raw_group = llam_task_group_resolve_public_handle(group);
+        if (raw_group != NULL) {
+            raw_group->count = saved_count;
+            raw_group->capacity = saved_capacity;
+            raw_group->tasks = saved_tasks;
+            llam_task_group_end_public_op(raw_group);
+        }
+        (void)llam_task_group_destroy(group);
+        llam_runtime_shutdown();
+        return fail_msg("task group count overflow did not fail with ENOMEM");
+    }
+
+    raw_group = llam_task_group_resolve_public_handle(group);
+    if (raw_group == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("task group overflow restore resolve failed");
+    }
+    raw_group->count = saved_count;
+    raw_group->capacity = saved_capacity;
+    raw_group->tasks = saved_tasks;
+    llam_task_group_end_public_op(raw_group);
+
+    if (llam_task_group_destroy(group) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("task group overflow destroy failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 0U) {
+        return fail_msg("task group overflow unexpectedly spawned task");
     }
     return 0;
 }
@@ -397,12 +618,269 @@ static void ownership_task(void *arg) {
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 
+static void task_handle_race_fail(task_handle_race_state_t *state, const char *where, int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err;
+        (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static int check_task_handle_race_failures(task_handle_race_state_t *state) {
+    if (atomic_load_explicit(&state->failures, memory_order_relaxed) == 0U) {
+        return 0;
+    }
+    fprintf(stderr,
+            "[test_runtime_api_edges] task handle race failed at %s errno=%d (%s)\n",
+            state->first_case,
+            state->first_errno,
+            strerror(state->first_errno));
+    return 1;
+}
+
+static void task_handle_race_target_task(void *arg) {
+    task_handle_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->target_release, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void task_handle_race_joiner_task(void *arg) {
+    task_handle_race_state_t *state = arg;
+
+    errno = 0;
+    if (llam_join(state->target) == 0) {
+        atomic_fetch_add_explicit(&state->join_successes, 1U, memory_order_relaxed);
+        return;
+    }
+    if (errno == EBUSY) {
+        atomic_fetch_add_explicit(&state->join_busy, 1U, memory_order_relaxed);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->join_unexpected, 1U, memory_order_relaxed);
+    task_handle_race_fail(state, "duplicate join returned unexpected errno", errno);
+}
+
+static void task_handle_race_detacher_task(void *arg) {
+    task_handle_race_state_t *state = arg;
+
+    /*
+     * Wait until the joiner is parked on the raw target's join waiter list.
+     * That makes this a deterministic join-vs-detach ownership test rather
+     * than a scheduler-order lottery where detach may legitimately win first.
+     */
+    while (state->raw_target != NULL) {
+        bool waiter_ready;
+
+        pthread_mutex_lock(&state->raw_target->lock);
+        waiter_ready = state->raw_target->join_waiter_count > 0U;
+        pthread_mutex_unlock(&state->raw_target->lock);
+        if (waiter_ready) {
+            break;
+        }
+        llam_yield();
+    }
+    errno = 0;
+    if (llam_detach(state->target) == 0) {
+        atomic_fetch_add_explicit(&state->detach_successes, 1U, memory_order_relaxed);
+        return;
+    }
+    if (errno == EBUSY) {
+        atomic_fetch_add_explicit(&state->detach_busy, 1U, memory_order_relaxed);
+        return;
+    }
+    task_handle_race_fail(state, "detach versus join returned unexpected errno", errno);
+}
+
+static void task_handle_race_release_after_busy_task(void *arg) {
+    task_handle_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->join_busy, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&state->detach_busy, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&state->detach_successes, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&state->failures, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    atomic_store_explicit(&state->target_release, 1U, memory_order_release);
+}
+
+static void stale_channel_handle_task(void *arg) {
+    edge_state_t *state = arg;
+    int value = 7;
+    void *out = NULL;
+    uintptr_t old_slot;
+    unsigned attempt;
+
+    state->primary = llam_channel_create(1U);
+    if (state->primary == NULL) {
+        task_fail(state, "stale channel create old", errno);
+        return;
+    }
+    if (llam_channel_destroy(state->primary) != 0) {
+        task_fail(state, "stale channel destroy old", errno);
+        return;
+    }
+    old_slot = public_handle_slot(state->primary);
+    state->secondary = llam_channel_create(1U);
+    if (state->secondary == NULL) {
+        task_fail(state, "stale channel create new", errno);
+        return;
+    }
+
+    /*
+     * Capacity-one channels are cache-reused inside managed tasks.  The old
+     * consumed handle must not send into the newly acquired channel object.
+     */
+    errno = 0;
+    if (llam_channel_try_send(state->primary, &value) != -1 || errno != EINVAL) {
+        task_fail(state, "stale channel send accepted", errno);
+        return;
+    }
+    errno = 0;
+    if (llam_channel_try_recv_result(state->secondary, &out) != -1 || errno != EAGAIN || out != NULL) {
+        task_fail(state, "stale channel polluted new channel", errno);
+        return;
+    }
+    {
+        size_t selected = SIZE_MAX;
+        llam_select_op_t ops[2] = {
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->secondary,
+                .recv_out = &out,
+            },
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->primary,
+                .recv_out = &out,
+            },
+        };
+
+        /*
+         * The select fast path batch-resolves public channel handles.  If a
+         * later operand is stale, any earlier operand that was already pinned
+         * must be unpinned before returning EINVAL; otherwise destroying the
+         * valid channel below would fail with a false EBUSY.
+         */
+        errno = 0;
+        out = NULL;
+        if (llam_channel_select(ops, 2U, 0U, &selected) != -1 || errno != EINVAL) {
+            task_fail(state, "stale channel select accepted", errno);
+            return;
+        }
+    }
+    if (llam_channel_destroy(state->secondary) != 0) {
+        task_fail(state, "stale channel destroy first new", errno);
+        return;
+    }
+
+    /*
+     * The previous low-bit channel tag wrapped after a small number of cache
+     * reuses. Recycle the same public slot repeatedly and verify the original
+     * consumed handle stays invalid across many generations.
+     */
+    state->secondary = NULL;
+    for (attempt = 0U; attempt < 64U; ++attempt) {
+        llam_channel_t *next = llam_channel_create(1U);
+
+        if (next == NULL) {
+            task_fail(state, "stale channel create wrap candidate", errno);
+            return;
+        }
+        if (public_handle_slot(next) == old_slot) {
+            errno = 0;
+            if (llam_channel_try_send(state->primary, &value) != -1 || errno != EINVAL) {
+                task_fail(state, "stale channel wrap send accepted", errno);
+                return;
+            }
+        }
+        if (llam_channel_destroy(next) != 0) {
+            task_fail(state, "stale channel destroy wrap candidate", errno);
+            return;
+        }
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void stale_sync_handle_task(void *arg) {
+    edge_state_t *state = arg;
+    llam_mutex_t *old_mutex = NULL;
+    llam_cond_t *old_cond = NULL;
+    uintptr_t old_slot;
+    unsigned attempt;
+
+    old_mutex = llam_mutex_create();
+    if (old_mutex == NULL) {
+        task_fail(state, "stale mutex create old", errno);
+        return;
+    }
+    old_slot = public_handle_slot(old_mutex);
+    if (llam_mutex_destroy(old_mutex) != 0) {
+        task_fail(state, "stale mutex destroy old", errno);
+        return;
+    }
+    for (attempt = 0U; attempt < 64U; ++attempt) {
+        llam_mutex_t *new_mutex = llam_mutex_create();
+
+        if (new_mutex == NULL) {
+            task_fail(state, "stale mutex create new", errno);
+            return;
+        }
+        if (public_handle_slot(new_mutex) == old_slot) {
+            errno = 0;
+            if (llam_mutex_trylock(old_mutex) != -1 || errno != EINVAL) {
+                task_fail(state, "stale mutex trylock accepted", errno);
+                return;
+            }
+        }
+        if (llam_mutex_destroy(new_mutex) != 0) {
+            task_fail(state, "stale mutex destroy new", errno);
+            return;
+        }
+    }
+
+    old_cond = llam_cond_create();
+    if (old_cond == NULL) {
+        task_fail(state, "stale cond create old", errno);
+        return;
+    }
+    old_slot = public_handle_slot(old_cond);
+    if (llam_cond_destroy(old_cond) != 0) {
+        task_fail(state, "stale cond destroy old", errno);
+        return;
+    }
+    for (attempt = 0U; attempt < 64U; ++attempt) {
+        llam_cond_t *new_cond = llam_cond_create();
+
+        if (new_cond == NULL) {
+            task_fail(state, "stale cond create new", errno);
+            return;
+        }
+        if (public_handle_slot(new_cond) == old_slot) {
+            errno = 0;
+            if (llam_cond_signal(old_cond) != -1 || errno != EINVAL) {
+                task_fail(state, "stale cond signal accepted", errno);
+                return;
+            }
+        }
+        if (llam_cond_destroy(new_cond) != 0) {
+            task_fail(state, "stale cond destroy new", errno);
+            return;
+        }
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
 static void blocking_task(void *arg) {
     edge_state_t *state = arg;
     void *result = NULL;
 
+    result = state;
     errno = 0;
-    if (llam_call_blocking_result(NULL, state, &result) != -1 || errno != EINVAL) {
+    if (llam_call_blocking_result(NULL, state, &result) != -1 ||
+        errno != EINVAL ||
+        result != NULL) {
         task_fail(state, "managed blocking NULL fn", errno);
         return;
     }
@@ -578,7 +1056,7 @@ static void channel_close_select_task(void *arg) {
         task_fail(state, "channel select close fixture", errno);
         return;
     }
-    received = NULL;
+    received = (void *)(uintptr_t)0xBAD0BAD0U;
     selected = SIZE_MAX;
     memset(ops, 0, sizeof(ops));
     ops[0].kind = LLAM_SELECT_OP_RECV;
@@ -589,8 +1067,28 @@ static void channel_close_select_task(void *arg) {
     ops[1].recv_out = &received;
     if (llam_channel_select(ops, 2U, UINT64_MAX, &selected) != 0 ||
         selected != 1U ||
-        ops[1].result_errno != EPIPE) {
+        ops[1].result_errno != EPIPE ||
+        received != NULL) {
         task_fail(state, "channel select closed recv", errno);
+        return;
+    }
+
+    if (llam_channel_try_send(state->primary, &state) != 0) {
+        task_fail(state, "channel select result errno fixture send", errno);
+        return;
+    }
+    received = NULL;
+    selected = SIZE_MAX;
+    memset(ops, 0, sizeof(ops));
+    ops[0].kind = LLAM_SELECT_OP_RECV;
+    ops[0].channel = state->primary;
+    ops[0].recv_out = &received;
+    ops[0].result_errno = EPIPE;
+    if (llam_channel_select(ops, 1U, UINT64_MAX, &selected) != 0 ||
+        selected != 0U ||
+        received != &state ||
+        ops[0].result_errno != 0) {
+        task_fail(state, "channel select ready recv kept stale result errno", errno);
         return;
     }
 
@@ -670,6 +1168,99 @@ static void cond_mutex_task(void *arg) {
         return;
     }
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void cond_owner_recheck_task(void *arg) {
+    cond_owner_recheck_state_t *state = arg;
+
+    if (llam_mutex_lock(state->mutex) != 0) {
+        task_fail(&state->edge, "cond owner recheck lock", errno);
+        return;
+    }
+    atomic_store_explicit(&state->mutex_owned, 1U, memory_order_release);
+    errno = 0;
+    state->wait_rc = llam_cond_wait(state->cond, state->mutex);
+    state->wait_errno = errno;
+    if (state->wait_rc != -1 || state->wait_errno != EPERM) {
+        task_fail(&state->edge, "cond owner recheck wait", state->wait_errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->edge.ran, 1U, memory_order_relaxed);
+}
+
+static void *cond_owner_recheck_corrupt_thread(void *arg) {
+    cond_owner_recheck_state_t *state = arg;
+    struct timespec delay = {
+        .tv_sec = 0,
+        .tv_nsec = 50000000L,
+    };
+
+    while (atomic_load_explicit(&state->mutex_owned, memory_order_acquire) == 0U) {
+        struct timespec spin_delay = {
+            .tv_sec = 0,
+            .tv_nsec = 1000000L,
+        };
+
+        nanosleep(&spin_delay, NULL);
+    }
+    /*
+     * The test holds raw_cond->lock before the task enters cond_wait().  This
+     * delay gives the waiter time to pass the first mutex-owner check and block
+     * on the cond lock.  Corrupting owner then exercises the second defensive
+     * recheck path after the wait node has been queued.
+     */
+    nanosleep(&delay, NULL);
+    atomic_store_explicit(&state->raw_mutex->owner, (uintptr_t)0, memory_order_release);
+    pthread_mutex_unlock(&state->raw_cond->lock);
+    return NULL;
+}
+
+static void timer_heap_overflow_task(void *arg) {
+    timer_heap_overflow_state_t *state = arg;
+    llam_shard_t *shard = g_llam_tls_shard;
+    uint64_t deadline_ns;
+
+    if (shard == NULL) {
+        task_fail(&state->edge, "timer heap overflow missing shard", EINVAL);
+        return;
+    }
+
+    pthread_mutex_lock(&shard->lock);
+    state->saved_len = shard->timer_heap_len;
+    state->saved_cap = shard->timer_heap_cap;
+    state->saved_heap = shard->timer_heap;
+    state->saved_root = shard->timers;
+    state->saved_timer_count = atomic_load_explicit(&shard->timer_count, memory_order_acquire);
+    /*
+     * Simulate a corrupted or future-imported heap at the overflow boundary.
+     * Before the guard, timer_heap_len + 1 wrapped to zero, reserve succeeded,
+     * and insertion wrote through timer_heap[SIZE_MAX].
+     */
+    shard->timer_heap_len = SIZE_MAX;
+    shard->timer_heap_cap = 0U;
+    shard->timer_heap = NULL;
+    shard->timers = NULL;
+    atomic_store_explicit(&shard->timer_count, 0U, memory_order_release);
+    pthread_mutex_unlock(&shard->lock);
+
+    deadline_ns = llam_now_ns() + 1000000000ULL;
+    errno = 0;
+    state->sleep_rc = llam_sleep_until(deadline_ns);
+    state->sleep_errno = errno;
+
+    pthread_mutex_lock(&shard->lock);
+    shard->timer_heap_len = state->saved_len;
+    shard->timer_heap_cap = state->saved_cap;
+    shard->timer_heap = state->saved_heap;
+    shard->timers = state->saved_root;
+    atomic_store_explicit(&shard->timer_count, state->saved_timer_count, memory_order_release);
+    pthread_mutex_unlock(&shard->lock);
+
+    if (state->sleep_rc != -1 || state->sleep_errno != ENOMEM) {
+        task_fail(&state->edge, "timer heap overflow sleep", state->sleep_errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->edge.ran, 1U, memory_order_relaxed);
 }
 
 static void precancel_wait_task(void *arg) {
@@ -1396,6 +1987,469 @@ static int test_join_timeout_preserves_ownership(void) {
     return 0;
 }
 
+static int test_duplicate_join_claim_race(void) {
+    task_handle_race_state_t state;
+    llam_task_t *joiner_a = NULL;
+    llam_task_t *joiner_b = NULL;
+    llam_task_t *releaser = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.target_release, 0U);
+    atomic_init(&state.join_successes, 0U);
+    atomic_init(&state.join_busy, 0U);
+    atomic_init(&state.join_unexpected, 0U);
+    atomic_init(&state.detach_busy, 0U);
+    atomic_init(&state.detach_successes, 0U);
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for duplicate join claim race failed");
+    }
+    state.target = llam_spawn(task_handle_race_target_task, &state, NULL);
+    joiner_a = llam_spawn(task_handle_race_joiner_task, &state, NULL);
+    joiner_b = llam_spawn(task_handle_race_joiner_task, &state, NULL);
+    releaser = llam_spawn(task_handle_race_release_after_busy_task, &state, NULL);
+    if (state.target == NULL || joiner_a == NULL || joiner_b == NULL || releaser == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_task_handle_race_failures(&state) != 0 ||
+        llam_join(joiner_a) != 0 ||
+        llam_join(joiner_b) != 0 ||
+        llam_join(releaser) != 0) {
+        goto cleanup_runtime;
+    }
+    joiner_a = NULL;
+    joiner_b = NULL;
+    releaser = NULL;
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.join_successes, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.join_busy, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.join_unexpected, memory_order_relaxed) != 0U) {
+        goto cleanup_runtime;
+    }
+    /*
+     * The successful join consumes the target handle.  A stale duplicate handle
+     * must not remain inspectable after the racing joiner completed.
+     */
+    if (llam_task_id(state.target) != 0U ||
+        strcmp(llam_task_state_name(state.target), "UNKNOWN") != 0) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    atomic_store_explicit(&state.target_release, 1U, memory_order_release);
+    if (joiner_a != NULL) {
+        (void)llam_join(joiner_a);
+    }
+    if (joiner_b != NULL) {
+        (void)llam_join(joiner_b);
+    }
+    if (releaser != NULL) {
+        (void)llam_join(releaser);
+    }
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("duplicate join claim race failed");
+    }
+    return rc;
+}
+
+static int test_join_detach_claim_race(void) {
+    task_handle_race_state_t state;
+    llam_task_t *joiner = NULL;
+    llam_task_t *detacher = NULL;
+    llam_task_t *releaser = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.target_release, 0U);
+    atomic_init(&state.join_successes, 0U);
+    atomic_init(&state.join_busy, 0U);
+    atomic_init(&state.join_unexpected, 0U);
+    atomic_init(&state.detach_busy, 0U);
+    atomic_init(&state.detach_successes, 0U);
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for join/detach claim race failed");
+    }
+    state.target = llam_spawn(task_handle_race_target_task, &state, NULL);
+    state.raw_target = llam_task_resolve_public_handle(state.target);
+    llam_task_end_public_op(state.raw_target);
+    joiner = llam_spawn(task_handle_race_joiner_task, &state, NULL);
+    detacher = llam_spawn(task_handle_race_detacher_task, &state, NULL);
+    releaser = llam_spawn(task_handle_race_release_after_busy_task, &state, NULL);
+    if (state.target == NULL || state.raw_target == NULL || joiner == NULL || detacher == NULL || releaser == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_task_handle_race_failures(&state) != 0 ||
+        llam_join(joiner) != 0 ||
+        llam_join(detacher) != 0 ||
+        llam_join(releaser) != 0) {
+        goto cleanup_runtime;
+    }
+    joiner = NULL;
+    detacher = NULL;
+    releaser = NULL;
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.join_successes, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.detach_busy, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.detach_successes, memory_order_relaxed) != 0U) {
+        goto cleanup_runtime;
+    }
+    if (llam_task_id(state.target) != 0U ||
+        strcmp(llam_task_state_name(state.target), "UNKNOWN") != 0) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    atomic_store_explicit(&state.target_release, 1U, memory_order_release);
+    if (joiner != NULL) {
+        (void)llam_join(joiner);
+    }
+    if (detacher != NULL) {
+        (void)llam_join(detacher);
+    }
+    if (releaser != NULL) {
+        (void)llam_join(releaser);
+    }
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("join/detach claim race failed");
+    }
+    return rc;
+}
+
+static int test_consumed_task_handle_reuse_guard(void) {
+    edge_state_t state;
+    llam_task_t *old_task;
+    llam_task_t *new_task;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for consumed task handle guard failed");
+    }
+
+    old_task = llam_spawn(ownership_task, &state, NULL);
+    if (old_task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn old task for consumed handle guard failed");
+    }
+    if (llam_run() != 0 || llam_join(old_task) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("old task join for consumed handle guard failed");
+    }
+
+    /*
+     * Successful join consumes the public handle immediately.  The handle must
+     * not remain inspectable while the reclaimed task object is waiting in the
+     * allocator cache, because that makes stale aliases look valid until the
+     * next spawn happens to reuse the same storage.
+     */
+    errno = 0;
+    if (llam_task_id(old_task) != 0U ||
+        strcmp(llam_task_state_name(old_task), "UNKNOWN") != 0) {
+        llam_runtime_shutdown();
+        return fail_msg("consumed joined task handle remained inspectable");
+    }
+    if (llam_join(old_task) != -1 || errno != EINVAL) {
+        llam_runtime_shutdown();
+        return fail_msg("consumed joined task handle did not fail with EINVAL");
+    }
+
+    new_task = llam_spawn(ownership_task, &state, NULL);
+    if (new_task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn new task for consumed handle guard failed");
+    }
+
+    /*
+     * The allocator aggressively reuses task objects.  A consumed public handle
+     * must not alias the next task recycled into the same storage, or an
+     * unmanaged stale join can block forever waiting for unrelated work.
+     */
+    errno = 0;
+    if (llam_task_id(old_task) != 0U) {
+        (void)llam_detach(new_task);
+        llam_runtime_shutdown();
+        return fail_msg("consumed task handle still inspected a recycled task");
+    }
+    if (llam_join(old_task) != -1 || errno != EINVAL) {
+        (void)llam_detach(new_task);
+        llam_runtime_shutdown();
+        return fail_msg("consumed task handle did not fail with EINVAL");
+    }
+
+    if (llam_run() != 0 || check_task_failures(&state) != 0 || llam_join(new_task) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("new task join after consumed handle guard failed");
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 2U) {
+        llam_runtime_shutdown();
+        return fail_msg("consumed handle guard tasks did not both run");
+    }
+    llam_runtime_shutdown();
+    /*
+     * Shutdown releases task slabs.  Stale public task inspection must short
+     * circuit on the inactive runtime before reading the freed task object's
+     * generation tag.
+     */
+    if (llam_task_id(old_task) != 0U ||
+        strcmp(llam_task_state_name(old_task), "UNKNOWN") != 0 ||
+        llam_task_flags(old_task) != 0U) {
+        return fail_msg("consumed task handle inspected freed shutdown storage");
+    }
+    if (init_runtime() != 0) {
+        return fail_errno("runtime reinit for consumed task handle guard failed");
+    }
+    /*
+     * A later init republishes the singleton runtime.  The old task handle must
+     * still be rejected through the live task registry rather than reading the
+     * task slab freed by the previous shutdown.
+     */
+    if (llam_task_id(old_task) != 0U ||
+        strcmp(llam_task_state_name(old_task), "UNKNOWN") != 0 ||
+        llam_task_flags(old_task) != 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("consumed task handle inspected previous runtime storage after reinit");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static int test_detached_task_handle_consumed_immediately(void) {
+    edge_state_t state;
+    llam_task_t *task;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for detached task handle guard failed");
+    }
+
+    task = llam_spawn(ownership_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn detached task handle guard failed");
+    }
+    if (llam_detach(task) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("detach task handle guard failed");
+    }
+
+    /*
+     * Detach consumes the handle before the target necessarily completes.  A
+     * stale detached handle must therefore be rejected even while the task is
+     * still queued/running and has not reached the reclaim path yet.
+     */
+    errno = 0;
+    if (llam_task_id(task) != 0U ||
+        strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
+        llam_runtime_shutdown();
+        return fail_msg("detached task handle remained inspectable");
+    }
+    if (llam_join(task) != -1 || errno != EINVAL) {
+        llam_runtime_shutdown();
+        return fail_msg("detached task handle did not fail with EINVAL");
+    }
+
+    if (llam_run() != 0 || check_task_failures(&state) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("run detached task handle guard failed");
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        llam_runtime_shutdown();
+        return fail_msg("detached task did not run exactly once");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static int test_destroyed_sync_handles_reject_public_ops(void) {
+    llam_mutex_t *mutex = llam_mutex_create();
+    llam_cond_t *cond = llam_cond_create();
+    llam_channel_t *channel = llam_channel_create(1U);
+    void *value = (void *)1;
+
+    if (mutex == NULL || cond == NULL || channel == NULL) {
+        (void)llam_mutex_destroy(mutex);
+        (void)llam_cond_destroy(cond);
+        (void)llam_channel_destroy(channel);
+        return fail_errno("create destroyed sync handle guard objects failed");
+    }
+    if (llam_mutex_destroy(mutex) != 0 ||
+        llam_cond_destroy(cond) != 0 ||
+        llam_channel_destroy(channel) != 0) {
+        return fail_errno("destroy sync handle guard objects failed");
+    }
+
+    /*
+     * Destroyed public handles are consumed handles.  Hot-path operations used
+     * to unwrap the tag by reading freed object storage; these calls must now
+     * fail before touching the reclaimed mutex/cond/channel allocation.
+     */
+    errno = 0;
+    if (llam_mutex_trylock(mutex) != -1 || errno != EINVAL) {
+        return fail_msg("destroyed mutex trylock did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_cond_signal(cond) != -1 || errno != EINVAL) {
+        return fail_msg("destroyed cond signal did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_cond_broadcast(cond) != -1 || errno != EINVAL) {
+        return fail_msg("destroyed cond broadcast did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_channel_try_send(channel, value) != -1 || errno != EINVAL) {
+        return fail_msg("destroyed channel try_send did not fail with EINVAL");
+    }
+    errno = 0;
+    value = (void *)1;
+    if (llam_channel_try_recv_result(channel, &value) != -1 || errno != EINVAL || value != (void *)1) {
+        return fail_msg("destroyed channel try_recv did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_channel_close(channel) != -1 || errno != EINVAL) {
+        return fail_msg("destroyed channel close did not fail with EINVAL");
+    }
+    return 0;
+}
+
+static int test_active_public_ops_block_destroy(void) {
+    llam_mutex_t *mutex = llam_mutex_create();
+    llam_cond_t *cond = llam_cond_create();
+    llam_channel_t *channel = llam_channel_create(1U);
+    llam_mutex_t *raw_mutex;
+    llam_cond_t *raw_cond;
+    llam_channel_t *raw_channel;
+
+    if (mutex == NULL || cond == NULL || channel == NULL) {
+        (void)llam_mutex_destroy(mutex);
+        (void)llam_cond_destroy(cond);
+        (void)llam_channel_destroy(channel);
+        return fail_errno("create active public op guard objects failed");
+    }
+
+    raw_mutex = llam_mutex_resolve_public_handle(mutex);
+    raw_cond = llam_cond_resolve_public_handle(cond);
+    raw_channel = llam_channel_resolve_public_handle(channel);
+    if (raw_mutex == NULL || raw_cond == NULL || raw_channel == NULL) {
+        llam_mutex_end_public_op(raw_mutex);
+        llam_cond_end_public_op(raw_cond);
+        llam_channel_end_public_op(raw_channel);
+        (void)llam_mutex_destroy(mutex);
+        (void)llam_cond_destroy(cond);
+        (void)llam_channel_destroy(channel);
+        return fail_msg("resolve active public op guard objects failed");
+    }
+
+    /*
+     * Public entry points validate stale handles through the live registry.
+     * Once validation succeeds, destroy must not free the object until the
+     * operation drops its active reference; otherwise a preempted operation can
+     * resume on reclaimed storage.
+     */
+    errno = 0;
+    if (llam_mutex_destroy(mutex) != -1 || errno != EBUSY) {
+        return fail_msg("mutex destroy did not reject active public op");
+    }
+    errno = 0;
+    if (llam_cond_destroy(cond) != -1 || errno != EBUSY) {
+        return fail_msg("cond destroy did not reject active public op");
+    }
+    errno = 0;
+    if (llam_channel_destroy(channel) != -1 || errno != EBUSY) {
+        return fail_msg("channel destroy did not reject active public op");
+    }
+
+    llam_mutex_end_public_op(raw_mutex);
+    llam_cond_end_public_op(raw_cond);
+    llam_channel_end_public_op(raw_channel);
+
+    if (llam_mutex_destroy(mutex) != 0 ||
+        llam_cond_destroy(cond) != 0 ||
+        llam_channel_destroy(channel) != 0) {
+        return fail_errno("destroy active public op guard objects after release failed");
+    }
+    return 0;
+}
+
+static int test_consumed_channel_handle_reuse_guard(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for consumed channel handle guard failed");
+    }
+
+    task = llam_spawn(stale_channel_handle_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn consumed channel handle guard failed");
+    }
+    if (llam_run() == 0 &&
+        llam_join(task) == 0 &&
+        check_task_failures(&state) == 0 &&
+        atomic_load_explicit(&state.ran, memory_order_relaxed) == 1U) {
+        rc = 0;
+    }
+
+    if (state.secondary != NULL && llam_channel_destroy(state.secondary) != 0) {
+        rc = 1;
+    }
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("consumed channel handle guard failed");
+    }
+    return rc;
+}
+
+static int test_consumed_sync_handle_reuse_guard(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for consumed sync handle guard failed");
+    }
+
+    task = llam_spawn(stale_sync_handle_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn consumed sync handle guard failed");
+    }
+    if (llam_run() == 0 &&
+        llam_join(task) == 0 &&
+        check_task_failures(&state) == 0 &&
+        atomic_load_explicit(&state.ran, memory_order_relaxed) == 1U) {
+        rc = 0;
+    }
+
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("consumed sync handle guard failed");
+    }
+    return rc;
+}
+
 static int test_blocking_callback_edges(void) {
     edge_state_t state;
     llam_task_t *task;
@@ -1628,6 +2682,388 @@ cleanup_no_runtime:
     if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
         return fail_errno("cond/mutex edge failed");
     }
+    return rc;
+}
+
+static int test_cond_owner_recheck_unlinks_waiter(void) {
+    cond_owner_recheck_state_t state;
+    pthread_t corrupter;
+    llam_task_t *task = NULL;
+    bool raw_cond_locked = false;
+    bool corrupter_started = false;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.edge.failures, 0U);
+    atomic_init(&state.edge.ran, 0U);
+    atomic_init(&state.mutex_owned, 0U);
+    state.wait_rc = -2;
+    state.wait_errno = 0;
+
+    state.mutex = llam_mutex_create();
+    state.cond = llam_cond_create();
+    if (state.mutex == NULL || state.cond == NULL) {
+        goto cleanup_no_runtime;
+    }
+    state.raw_mutex = llam_mutex_resolve_public_handle(state.mutex);
+    state.raw_cond = llam_cond_resolve_public_handle(state.cond);
+    if (state.raw_mutex == NULL || state.raw_cond == NULL) {
+        goto cleanup_no_runtime;
+    }
+    /*
+     * Hold the internal cond lock so the managed waiter reaches the owner
+     * recheck after a controlled external state change.  The failure path must
+     * remove the just-enqueued wait node before returning EPERM.
+     */
+    pthread_mutex_lock(&state.raw_cond->lock);
+    raw_cond_locked = true;
+
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+    task = llam_spawn(cond_owner_recheck_task, &state, NULL);
+    if (task == NULL) {
+        goto cleanup_runtime;
+    }
+    if (pthread_create(&corrupter, NULL, cond_owner_recheck_corrupt_thread, &state) != 0) {
+        goto cleanup_runtime;
+    }
+    corrupter_started = true;
+    raw_cond_locked = false;
+
+    if (llam_run() != 0 || llam_join(task) != 0 || check_task_failures(&state.edge) != 0) {
+        goto cleanup_runtime;
+    }
+    task = NULL;
+    if (corrupter_started) {
+        pthread_join(corrupter, NULL);
+        corrupter_started = false;
+    }
+    if (state.raw_cond->waiters.head != NULL || state.raw_cond->waiters.depth != 0U) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.edge.ran, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (raw_cond_locked && state.raw_cond != NULL) {
+        pthread_mutex_unlock(&state.raw_cond->lock);
+        raw_cond_locked = false;
+    }
+    if (corrupter_started) {
+        pthread_join(corrupter, NULL);
+    }
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (raw_cond_locked && state.raw_cond != NULL) {
+        pthread_mutex_unlock(&state.raw_cond->lock);
+    }
+    llam_mutex_end_public_op(state.raw_mutex);
+    llam_cond_end_public_op(state.raw_cond);
+    if (state.cond != NULL && llam_cond_destroy(state.cond) != 0) {
+        rc = 1;
+    }
+    if (state.mutex != NULL && llam_mutex_destroy(state.mutex) != 0) {
+        rc = 1;
+    }
+    if (rc != 0 && atomic_load_explicit(&state.edge.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("cond owner recheck did not unlink waiter");
+    }
+    return rc;
+}
+
+static int test_timer_heap_capacity_overflow_guard(void) {
+    timer_heap_overflow_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *task;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.edge.failures, 0U);
+    atomic_init(&state.edge.ran, 0U);
+    state.sleep_rc = -2;
+    state.sleep_errno = 0;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("timer heap overflow opts init failed");
+    }
+    opts.deterministic = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        return fail_errno("timer heap overflow runtime init failed");
+    }
+    task = llam_spawn(timer_heap_overflow_task, &state, NULL);
+    if (task == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 || llam_join(task) != 0 || check_task_failures(&state.edge) != 0) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.edge.ran, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.edge.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("timer heap overflow guard failed");
+    }
+    return rc;
+}
+
+static void channel_select_excessive_op_count_task(void *arg) {
+    edge_state_t *state = arg;
+    llam_select_op_t op;
+    const size_t excessive_counts[] = {
+        (size_t)LLAM_CHANNEL_SELECT_MAX_OPS + 1U,
+        SIZE_MAX,
+    };
+    void *out = NULL;
+    size_t selected = 0U;
+    size_t i;
+
+    memset(&op, 0, sizeof(op));
+    op.kind = LLAM_SELECT_OP_RECV;
+    op.channel = state->primary;
+    op.recv_out = &out;
+
+    for (i = 0U; i < sizeof(excessive_counts) / sizeof(excessive_counts[0]); ++i) {
+        errno = 0;
+        /*
+         * Reject excessive op_count values before walking the caller's array.
+         * This catches malformed FFI calls as EINVAL instead of reading beyond
+         * the single operation supplied here.
+         */
+        if (llam_channel_select(&op, excessive_counts[i], UINT64_MAX, &selected) != -1 ||
+            errno != EINVAL) {
+            task_fail(state, "select excessive op_count was not rejected", errno);
+            return;
+        }
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static int test_channel_select_excessive_op_count(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+
+    if (init_runtime() != 0) {
+        return fail_errno("select excessive op_count runtime init failed");
+    }
+    state.primary = llam_channel_create(1U);
+    if (state.primary == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("select excessive op_count channel create failed");
+    }
+
+    task = llam_spawn(channel_select_excessive_op_count_task, &state, NULL);
+    if (task == NULL) {
+        rc = fail_errno("select excessive op_count task spawn failed");
+    } else if (llam_run() != 0) {
+        rc = fail_errno("select excessive op_count runtime run failed");
+    } else if (llam_join(task) != 0) {
+        rc = fail_errno("select excessive op_count task join failed");
+    } else if (check_task_failures(&state) != 0) {
+        rc = 1;
+    } else if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        rc = fail_msg("select excessive op_count task did not run");
+    }
+
+    if (state.primary != NULL && llam_channel_destroy(state.primary) != 0 && rc == 0) {
+        rc = fail_errno("select excessive op_count channel destroy failed");
+    }
+    llam_runtime_shutdown();
+    return rc;
+}
+
+static void channel_cached_double_destroy_task(void *arg) {
+    edge_state_t *state = arg;
+    llam_channel_t *channel;
+    llam_channel_t *first;
+    llam_channel_t *second;
+    const size_t uncached_caps[] = {
+        1024U,
+        8192U,
+    };
+    size_t i;
+
+    channel = llam_channel_create(1U);
+    if (channel == NULL) {
+        task_fail(state, "cached double destroy channel create", errno);
+        return;
+    }
+    if (llam_channel_destroy(channel) != 0) {
+        task_fail(state, "cached double destroy first destroy", errno);
+        return;
+    }
+
+    errno = 0;
+    /*
+     * Capacity-one channels are cached inside managed tasks. This used to allow
+     * a second destroy through the consumed public handle to insert the same
+     * object into the cache twice, making two later creates return one aliased
+     * channel.
+     */
+    if (llam_channel_destroy(channel) != -1 || errno != EINVAL) {
+        task_fail(state, "cached double destroy was not rejected", errno);
+        return;
+    }
+
+    first = llam_channel_create(1U);
+    second = llam_channel_create(1U);
+    if (first == NULL || second == NULL) {
+        if (first != NULL) {
+            (void)llam_channel_destroy(first);
+        }
+        if (second != NULL) {
+            (void)llam_channel_destroy(second);
+        }
+        task_fail(state, "cached double destroy recreate", errno);
+        return;
+    }
+    if (first == second) {
+        (void)llam_channel_destroy(first);
+        task_fail(state, "cached double destroy produced aliased channels", EFAULT);
+        return;
+    }
+    if (llam_channel_destroy(first) != 0 || llam_channel_destroy(second) != 0) {
+        task_fail(state, "cached double destroy cleanup", errno);
+        return;
+    }
+
+    for (i = 0U; i < sizeof(uncached_caps) / sizeof(uncached_caps[0]); ++i) {
+        channel = llam_channel_create(uncached_caps[i]);
+        if (channel == NULL) {
+            task_fail(state, "uncached double destroy channel create", errno);
+            return;
+        }
+        if (llam_channel_destroy(channel) != 0) {
+            task_fail(state, "uncached double destroy first destroy", errno);
+            return;
+        }
+        errno = 0;
+        /*
+         * Larger channels bypass the capacity-one cache and are freed on the
+         * first destroy.  The live registry must reject the stale handle before
+         * destroy reads freed owner/lock fields.
+         */
+        if (llam_channel_destroy(channel) != -1 || errno != EINVAL) {
+            task_fail(state, "uncached double destroy was not rejected", errno);
+            return;
+        }
+    }
+
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static int test_channel_cached_double_destroy_guard(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+
+    if (init_runtime() != 0) {
+        return fail_errno("cached double destroy runtime init failed");
+    }
+    task = llam_spawn(channel_cached_double_destroy_task, &state, NULL);
+    if (task == NULL) {
+        rc = fail_errno("cached double destroy task spawn failed");
+    } else if (llam_run() != 0) {
+        rc = fail_errno("cached double destroy runtime run failed");
+    } else if (llam_join(task) != 0) {
+        rc = fail_errno("cached double destroy task join failed");
+    } else if (check_task_failures(&state) != 0) {
+        rc = 1;
+    } else if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        rc = fail_msg("cached double destroy task did not run");
+    }
+    llam_runtime_shutdown();
+    return rc;
+}
+
+static void sync_double_destroy_task(void *arg) {
+    edge_state_t *state = arg;
+    llam_mutex_t *mutex;
+    llam_cond_t *cond;
+
+    mutex = llam_mutex_create();
+    cond = llam_cond_create();
+    if (mutex == NULL || cond == NULL) {
+        if (mutex != NULL) {
+            (void)llam_mutex_destroy(mutex);
+        }
+        if (cond != NULL) {
+            (void)llam_cond_destroy(cond);
+        }
+        task_fail(state, "sync double destroy create", errno);
+        return;
+    }
+
+    if (llam_mutex_destroy(mutex) != 0) {
+        (void)llam_cond_destroy(cond);
+        task_fail(state, "sync double destroy first mutex destroy", errno);
+        return;
+    }
+    errno = 0;
+    /*
+     * Destroy consumes public sync handles.  Repeating it used to reach freed
+     * mutex storage before returning an error; the live registry must reject it
+     * as an invalid stale handle first.
+     */
+    if (llam_mutex_destroy(mutex) != -1 || errno != EINVAL) {
+        (void)llam_cond_destroy(cond);
+        task_fail(state, "sync double destroy stale mutex accepted", errno);
+        return;
+    }
+
+    if (llam_cond_destroy(cond) != 0) {
+        task_fail(state, "sync double destroy first cond destroy", errno);
+        return;
+    }
+    errno = 0;
+    if (llam_cond_destroy(cond) != -1 || errno != EINVAL) {
+        task_fail(state, "sync double destroy stale cond accepted", errno);
+        return;
+    }
+
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static int test_sync_double_destroy_guards(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+
+    if (init_runtime() != 0) {
+        return fail_errno("sync double destroy runtime init failed");
+    }
+    task = llam_spawn(sync_double_destroy_task, &state, NULL);
+    if (task == NULL) {
+        rc = fail_errno("sync double destroy task spawn failed");
+    } else if (llam_run() != 0) {
+        rc = fail_errno("sync double destroy runtime run failed");
+    } else if (llam_join(task) != 0) {
+        rc = fail_errno("sync double destroy task join failed");
+    } else if (check_task_failures(&state) != 0) {
+        rc = 1;
+    } else if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        rc = fail_msg("sync double destroy task did not run");
+    }
+    llam_runtime_shutdown();
     return rc;
 }
 
@@ -2129,6 +3565,80 @@ cleanup_no_runtime:
 
 typedef int (*edge_case_fn)(void);
 
+static int test_public_slot_generation_wrap_guard(void) {
+    llam_public_slot_table_t table;
+    int first_object = 1;
+    int second_object = 2;
+    size_t slot = 0U;
+    size_t reused_slot = 0U;
+    uint32_t generation = 0U;
+    uint32_t reused_generation = 0U;
+    int rc = 1;
+
+    memset(&table, 0, sizeof(table));
+    if (llam_public_slot_reserve(&table, &first_object, 1U, &slot, &generation) != 0) {
+        return fail_errno("public slot initial reserve failed");
+    }
+    if (slot != 0U || generation != 1U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] unexpected initial slot=%zu generation=%u\n",
+                      slot,
+                      generation);
+        goto cleanup;
+    }
+
+    /*
+     * A registry slot that has reached UINT32_MAX must not wrap to generation
+     * 1 on reuse. Otherwise a very old handle from the first generation can
+     * alias a later object after enough churn in a long-lived process.
+     */
+    table.slots[slot].generation = UINT32_MAX;
+    llam_public_slot_release(&table, slot, &first_object, UINT32_MAX);
+    if (llam_public_slot_resolve(&table, slot, UINT32_MAX) != NULL) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] released max-generation slot resolved live\n");
+        goto cleanup;
+    }
+    if (llam_public_slot_reserve(&table, &second_object, 1U, &reused_slot, &reused_generation) != 0) {
+        return fail_errno("public slot reserve after max generation failed");
+    }
+    if (reused_slot == slot) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] max-generation slot reused slot=%zu generation=%u\n",
+                      reused_slot,
+                      reused_generation);
+        goto cleanup;
+    }
+    if (llam_public_slot_resolve(&table, slot, 1U) != NULL ||
+        llam_public_slot_resolve(&table, slot, UINT32_MAX) != NULL) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] retired slot accepted a stale generation\n");
+        goto cleanup;
+    }
+
+    /*
+     * Live-slot reactivation is the task-handle reuse path. It must report
+     * overflow instead of wrapping the same live slot back to generation one.
+     */
+    table.slots[reused_slot].generation = UINT32_MAX;
+    errno = 0;
+    if (llam_public_slot_reactivate(&table, reused_slot, &second_object, &reused_generation) != -1 ||
+        errno != EOVERFLOW) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] max-generation live slot reactivated errno=%d generation=%u\n",
+                      errno,
+                      reused_generation);
+        goto cleanup;
+    }
+    if (llam_public_slot_resolve(&table, reused_slot, 1U) != NULL) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] live slot reactivation wrapped to stale generation\n");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    free(table.slots);
+    return rc;
+}
+
 static int run_edge_case(const char *name, edge_case_fn fn) {
     /*
      * CI repeats this binary as a race detector.  Emit case boundaries to stderr
@@ -2164,7 +3674,23 @@ int main(void) {
         return fail_errno("enable blocking accept edge mode failed");
     }
 #endif
+    if (run_edge_case("public_slot_generation_wrap_guard",
+                      test_public_slot_generation_wrap_guard) != 0) {
+        return 1;
+    }
     if (run_edge_case("cancel_token_destroy_race", test_cancel_token_destroy_race) != 0) {
+        return 1;
+    }
+    if (run_edge_case("consumed_cancel_token_handle_reuse_guard",
+                      test_consumed_cancel_token_handle_reuse_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("consumed_task_group_handle_reuse_guard",
+                      test_consumed_task_group_handle_reuse_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("task_group_capacity_overflow_guard",
+                      test_task_group_capacity_overflow_guard) != 0) {
         return 1;
     }
     if (run_edge_case("fault_boundary_contracts", test_fault_boundary_contracts) != 0) {
@@ -2192,6 +3718,36 @@ int main(void) {
     if (run_edge_case("join_timeout_preserves_ownership", test_join_timeout_preserves_ownership) != 0) {
         return 1;
     }
+    if (run_edge_case("duplicate_join_claim_race", test_duplicate_join_claim_race) != 0) {
+        return 1;
+    }
+    if (run_edge_case("join_detach_claim_race", test_join_detach_claim_race) != 0) {
+        return 1;
+    }
+    if (run_edge_case("consumed_task_handle_reuse_guard",
+                      test_consumed_task_handle_reuse_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("detached_task_handle_consumed_immediately",
+                      test_detached_task_handle_consumed_immediately) != 0) {
+        return 1;
+    }
+    if (run_edge_case("destroyed_sync_handles_reject_public_ops",
+                      test_destroyed_sync_handles_reject_public_ops) != 0) {
+        return 1;
+    }
+    if (run_edge_case("active_public_ops_block_destroy",
+                      test_active_public_ops_block_destroy) != 0) {
+        return 1;
+    }
+    if (run_edge_case("consumed_channel_handle_reuse_guard",
+                      test_consumed_channel_handle_reuse_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("consumed_sync_handle_reuse_guard",
+                      test_consumed_sync_handle_reuse_guard) != 0) {
+        return 1;
+    }
     if (run_edge_case("blocking_callback_edges", test_blocking_callback_edges) != 0) {
         return 1;
     }
@@ -2207,6 +3763,25 @@ int main(void) {
         return 1;
     }
     if (run_edge_case("cond_mutex_deadline_edges", test_cond_mutex_deadline_edges) != 0) {
+        return 1;
+    }
+    if (run_edge_case("cond_owner_recheck_unlinks_waiter",
+                      test_cond_owner_recheck_unlinks_waiter) != 0) {
+        return 1;
+    }
+    if (run_edge_case("timer_heap_capacity_overflow_guard",
+                      test_timer_heap_capacity_overflow_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("channel_select_excessive_op_count",
+                      test_channel_select_excessive_op_count) != 0) {
+        return 1;
+    }
+    if (run_edge_case("channel_cached_double_destroy_guard",
+                      test_channel_cached_double_destroy_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("sync_double_destroy_guards", test_sync_double_destroy_guards) != 0) {
         return 1;
     }
     if (run_edge_case("precancel_wait_edges", test_precancel_wait_edges) != 0) {

@@ -468,7 +468,7 @@ void llam_darwin_submit_req(llam_node_t *node, llam_io_req_t *req) {
     if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_INFLIGHT) {
         atomic_store_explicit(&req->inflight_owner_shard, req->owner_shard, memory_order_release);
         atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
-        llam_shard_note_inflight_io_waiter(req->owner_shard, 1);
+        llam_shard_note_inflight_io_waiter(req->owner_runtime, req->owner_shard, 1);
     }
 
     if (req->kind != LLAM_IO_KIND_POLL) {

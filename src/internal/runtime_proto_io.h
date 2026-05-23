@@ -73,7 +73,7 @@ void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsign
 llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard);
 void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req);
 int llam_io_req_node_index(const llam_io_req_t *req);
-void llam_shard_note_inflight_io_waiter(unsigned owner_shard, int delta);
+void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta);
 void llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 

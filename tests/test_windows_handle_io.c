@@ -148,7 +148,16 @@ static void poller_task(void *arg) {
 static void signaler_task(void *arg) {
     windows_handle_state_t *state = arg;
 
-    llam_yield();
+    /*
+     * Keep the signal later than the 10 ms cancellation slice used by the
+     * blocking HANDLE fallback.  This catches regressions where a finite
+     * llam_poll_handle timeout reports the first slice timeout as the whole
+     * caller timeout.
+     */
+    if (llam_sleep_ns(100000000ULL) != 0) {
+        task_fail(state, "llam_sleep_ns before SetEvent", errno != 0 ? errno : EIO);
+        return;
+    }
     if (!SetEvent((HANDLE)state->event_handle)) {
         task_fail(state, "SetEvent", winerr_to_errno(GetLastError()));
         return;

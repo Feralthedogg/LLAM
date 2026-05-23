@@ -179,31 +179,28 @@ regress.
 ## 6.2 Runtime Handle Boundary
 
 `llam_runtime_create()`, `llam_runtime_run_handle()`, and
-`llam_runtime_destroy()` are the canonical embedding-facing lifecycle APIs, but
-LLAM 1.x still has one active runtime per process. The handle currently names
-that active runtime and makes future ABI expansion explicit; it does not yet
-allow two independent schedulers in one address space.
+`llam_runtime_destroy()` are the canonical embedding-facing lifecycle APIs.
+`llam_runtime_spawn_ex()` should be used to attach root tasks to a specific
+runtime handle. Legacy `llam_runtime_init()`, `llam_spawn()`, `llam_run()`, and
+`llam_runtime_shutdown()` calls remain wrappers for the process-default runtime.
 
-This is intentional for the 1.x line because global task context, TLS shard/task
-state, signal/fault hooks, and platform I/O ownership are still process-scoped.
-Embedders should treat a second `llam_runtime_create()` returning `EBUSY` as the
-defined behavior, not as a transient initialization failure.
+Explicit runtime handles own their scheduler state, public registries, caches,
+blocking helper pool, and platform backend routing. Runtime-aware objects are
+owner-tagged, and cross-runtime managed use fails with `EXDEV` instead of
+silently crossing queues or wait lists.
 
-The path to true multi-runtime support is intentionally staged:
+The remaining hardening path is incremental:
 
-- Move task/shard TLS lookup behind an active-runtime cursor instead of direct
-  `g_llam_runtime` access.
-- Make process signal/fault hooks reference-counted and shared between runtime
-  instances.
-- Allocate I/O nodes, block helpers, stack caches, and debug task lists from the
-  `llam_runtime_t` handle only.
-- Add tests that create two isolated runtimes in one process and verify that
-  task IDs, channels, timers, cancellation tokens, and I/O completions never
-  cross runtime boundaries.
+- Keep process signal/fault hooks reference-counted and safe across concurrent
+  runtime lifecycles.
+- Expand platform I/O tests for completion-after-cancel, fd/socket reuse, and
+  runtime-destroy ordering on Linux, macOS, and Windows.
+- Keep two-runtime tests in CI so task IDs, channels, timers, cancellation
+  tokens, caches, and I/O completions stay isolated.
 
-Until those are complete, do not emulate multiple runtimes by repeatedly
-initializing and shutting LLAM down from concurrent embedding threads. Serialize
-runtime lifecycle calls at the host application boundary.
+Host applications should not repeatedly initialize and shut down the legacy
+default runtime from concurrent embedding threads. Use explicit runtime handles
+for concurrent embedding.
 
 ## 7. Experimental Options
 
@@ -347,7 +344,7 @@ the median row for each benchmark case. This keeps short cases such as
 
 ## 10. Release Gate
 
-Before tagging a 1.x build, require:
+Before tagging a release build, require:
 
 - `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
 - `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.

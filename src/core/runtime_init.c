@@ -34,113 +34,12 @@
 
 #include "runtime_internal.h"
 
-/*
- * The runtime singleton is byte-cleared during shutdown, so the lifecycle gate
- * must live outside g_llam_runtime.  It protects the construction window before
- * the public initialized flag is published and serializes shutdown against
- * partial-init cleanup.  The mutex is recursive because init failure paths call
- * the public shutdown routine while the initializing thread already owns it.
- */
-#if LLAM_PLATFORM_WINDOWS
-static INIT_ONCE g_llam_runtime_lifecycle_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_llam_runtime_lifecycle_lock;
-
-static BOOL CALLBACK llam_runtime_lifecycle_lock_init_once(PINIT_ONCE once, PVOID parameter, PVOID *context) {
-    (void)once;
-    (void)parameter;
-    (void)context;
-    InitializeCriticalSection(&g_llam_runtime_lifecycle_lock);
-    return TRUE;
-}
-
-static void llam_runtime_lifecycle_init(void) {
-    if (!InitOnceExecuteOnce(&g_llam_runtime_lifecycle_once, llam_runtime_lifecycle_lock_init_once, NULL, NULL)) {
-        abort();
-    }
-}
-#else
-static pthread_once_t g_llam_runtime_lifecycle_once = PTHREAD_ONCE_INIT;
-static pthread_mutex_t g_llam_runtime_lifecycle_lock;
-
-static void llam_runtime_lifecycle_lock_init_once(void) {
-    pthread_mutexattr_t attr;
-    int rc;
-
-    rc = pthread_mutexattr_init(&attr);
-    if (rc != 0) {
-        abort();
-    }
-    rc = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    if (rc != 0) {
-        pthread_mutexattr_destroy(&attr);
-        abort();
-    }
-    rc = pthread_mutex_init(&g_llam_runtime_lifecycle_lock, &attr);
-    pthread_mutexattr_destroy(&attr);
-    if (rc != 0) {
-        abort();
-    }
-}
-
-static void llam_runtime_lifecycle_init(void) {
-    pthread_once(&g_llam_runtime_lifecycle_once, llam_runtime_lifecycle_lock_init_once);
-}
-#endif
-
-void llam_runtime_lifecycle_lock(void) {
-#if LLAM_PLATFORM_WINDOWS
-    llam_runtime_lifecycle_init();
-    EnterCriticalSection(&g_llam_runtime_lifecycle_lock);
-#else
-    int rc;
-
-    llam_runtime_lifecycle_init();
-    rc = pthread_mutex_lock(&g_llam_runtime_lifecycle_lock);
-    if (rc != 0) {
-        abort();
-    }
-#endif
-}
-
-int llam_runtime_lifecycle_trylock(void) {
-#if LLAM_PLATFORM_WINDOWS
-    llam_runtime_lifecycle_init();
-    if (!TryEnterCriticalSection(&g_llam_runtime_lifecycle_lock)) {
-        errno = EBUSY;
-        return -1;
-    }
-    return 0;
-#else
-    int rc;
-
-    llam_runtime_lifecycle_init();
-    rc = pthread_mutex_trylock(&g_llam_runtime_lifecycle_lock);
-    if (rc != 0) {
-        errno = rc == EBUSY ? EBUSY : rc;
-        return -1;
-    }
-    return 0;
-#endif
-}
-
-void llam_runtime_lifecycle_unlock(void) {
-#if LLAM_PLATFORM_WINDOWS
-    LeaveCriticalSection(&g_llam_runtime_lifecycle_lock);
-#else
-    int rc = pthread_mutex_unlock(&g_llam_runtime_lifecycle_lock);
-
-    if (rc != 0) {
-        abort();
-    }
-#endif
-}
-
 /**
  * @brief Initialize per-shard diagnostic counters after runtime storage reset.
  *
  * Metrics are updated by scheduler, I/O, watchdog, and user-facing diagnostic
  * paths.  Keep them atomic so live stats/dumps are race-free, but initialize
- * every field explicitly because runtime startup byte-clears the singleton.
+ * every field explicitly because runtime startup byte-clears the object.
  *
  * @param metrics Metrics block embedded in a shard.
  */
@@ -520,8 +419,10 @@ static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_i
  * @see llam_runtime_shutdown
  * @see llam_run
  */
-static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t opts_size) {
-    llam_runtime_t *rt = &g_llam_runtime;
+static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
+                                            const llam_runtime_opts_t *opts,
+                                            size_t opts_size,
+                                            bool heap_allocated) {
     llam_runtime_opts_t raw_opts;
     llam_runtime_opts_t opts_storage;
     unsigned i;
@@ -547,6 +448,11 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     unsigned aarch64_unsafe_skip_scheduler_simd;
 #endif
     int rc;
+
+    if (rt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
 
     if (opts != NULL) {
         /*
@@ -617,6 +523,9 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     }
 
     memset(rt, 0, sizeof(*rt));
+    if (llam_runtime_register_handle(rt, heap_allocated) != 0) {
+        return -1;
+    }
     g_llam_tls_shard = NULL;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
@@ -633,6 +542,8 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
 
         if (wsa_rc != 0) {
             errno = llam_windows_wsa_error_to_errno(wsa_rc);
+            llam_runtime_unregister_handle(rt);
+            memset(rt, 0, sizeof(*rt));
             return -1;
         }
         rt->winsock_started = true;
@@ -645,13 +556,15 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
         if (errno == 0) {
             errno = ENODEV;
         }
+        llam_runtime_unregister_handle(rt);
+        memset(rt, 0, sizeof(*rt));
         return -1;
     }
     observed_total = observed;
 
     /*
      * From this point on, runtime policy is resolved once and stored on the
-     * singleton.  Hot paths read these plain fields instead of re-checking
+     * runtime object. Hot paths read these plain fields instead of re-checking
      * environment variables or caller option structs.
      */
     experimental_flags = opts != NULL ? opts->experimental_flags : 0U;
@@ -788,6 +701,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     }
     if (llam_runtime_reserve_sqpoll_cpu(rt, &cpus, &observed) != 0) {
         free(cpus);
+        llam_runtime_unregister_handle(rt);
         memset(rt, 0, sizeof(*rt));
         return -1;
     }
@@ -873,9 +787,12 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
 
     locality_node_ids = calloc(rt->active_shards, sizeof(*locality_node_ids));
     if (locality_node_ids == NULL) {
-        free(rt->shards);
-        free(cpus);
-        memset(rt, 0, sizeof(*rt));
+        /*
+         * The runtime is already registered and owns rt->allowed_cpus/shards.
+         * Reuse normal partial-init teardown so the live handle registry cannot
+         * retain a pointer to zeroed storage.
+         */
+        llam_runtime_shutdown_rt(rt);
         errno = ENOMEM;
         return -1;
     }
@@ -883,9 +800,7 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
         io_node_ids = calloc(rt->active_shards, sizeof(*io_node_ids));
         if (io_node_ids == NULL) {
             free(locality_node_ids);
-            free(rt->shards);
-            free(cpus);
-            memset(rt, 0, sizeof(*rt));
+            llam_runtime_shutdown_rt(rt);
             errno = ENOMEM;
             return -1;
         }
@@ -1006,8 +921,8 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
             llam_runtime_shutdown_rt(rt);
             return -1;
         }
-        if (llam_ctx_init_fp_state(&rt->shards[i].scheduler_ctx) != 0 ||
-            llam_ctx_init_fp_state(&rt->shards[i].opaque_scheduler_ctx) != 0) {
+        if (llam_ctx_init_fp_state(&rt->shards[i].scheduler_ctx, rt) != 0 ||
+            llam_ctx_init_fp_state(&rt->shards[i].opaque_scheduler_ctx, rt) != 0) {
             free(io_node_ids);
             free(locality_node_ids);
             llam_runtime_shutdown_rt(rt);
@@ -1239,21 +1154,30 @@ static int llam_runtime_init_ex_unlocked(const llam_runtime_opts_t *opts, size_t
     return 0;
 }
 
-int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
+int llam_runtime_init_rt(llam_runtime_t *rt,
+                         const llam_runtime_opts_t *opts,
+                         size_t opts_size,
+                         bool heap_allocated) {
     int rc;
 
     /*
-     * initialized is only published after every subsystem is ready.  Without a
-     * separate construction gate, two host threads can both see "not
-     * initialized" and race through the singleton setup.  Shutdown also uses
-     * this gate so it cannot tear down partially published init resources.
+     * initialized is only published after every subsystem is ready.  The
+     * process-default wrapper preserves the historical non-reentrant EBUSY
+     * contract, while heap-backed explicit runtimes wait for the short global
+     * construction gate so two independent handles can both be created safely.
      */
-    if (llam_runtime_lifecycle_trylock() != 0) {
+    if (heap_allocated) {
+        llam_runtime_lifecycle_lock();
+    } else if (llam_runtime_lifecycle_trylock() != 0) {
         return -1;
     }
-    rc = llam_runtime_init_ex_unlocked(opts, opts_size);
+    rc = llam_runtime_init_ex_rt_unlocked(rt, opts, opts_size, heap_allocated);
     llam_runtime_lifecycle_unlock();
     return rc;
+}
+
+int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
+    return llam_runtime_init_rt(llam_runtime_default_storage(), opts, opts_size, false);
 }
 
 int llam_runtime_init(const llam_runtime_opts_t *opts) {

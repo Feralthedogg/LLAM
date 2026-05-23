@@ -222,6 +222,7 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
  *  6) Wake the target shard or fan out wakeups when local spawn pressure
  *     warrants it.
  *
+ * @param rt Runtime instance that will own the new task.
  * @param fn Task entry point. Must be non-NULL.
  * @param arg Opaque argument passed to @p fn when the task starts.
  * @param opts Optional spawn options. NULL selects default task/stack classes.
@@ -229,12 +230,14 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
  * @return Newly allocated task handle on success, or NULL with errno set on
  *         failure.
  *
- * @note This is the ABI-stable implementation used by the canonical
- *       `llam_spawn` convenience wrapper.  It assumes the runtime global has
- *       already been initialized.
+ * @note This is the shared implementation used by both explicit runtime
+ *       handles and the legacy current/default runtime wrapper.
  */
-llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {
-    llam_runtime_t *rt = &g_llam_runtime;
+static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,
+                                          llam_task_fn fn,
+                                          void *arg,
+                                          const llam_spawn_opts_t *opts,
+                                          size_t opts_size) {
     llam_spawn_opts_t raw_opts;
     llam_spawn_opts_t opts_storage;
     llam_task_t *task;
@@ -282,7 +285,9 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
         }
     }
 
-    if (LLAM_UNLIKELY(!rt->initialized || fn == NULL)) {
+    if (LLAM_UNLIKELY(rt == NULL ||
+                      !atomic_load_explicit(&rt->initialized, memory_order_acquire) ||
+                      fn == NULL)) {
         errno = EINVAL;
         return NULL;
     }
@@ -312,7 +317,7 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
     if (LLAM_UNLIKELY(task->cancel_token != NULL &&
-                      llam_cancel_token_retain_task_ref(task->cancel_token) != 0)) {
+                      llam_cancel_token_retain_task_ref(task->cancel_token, &task->cancel_token) != 0)) {
         task->cancel_token = NULL;
         llam_task_allocator_free(task);
         return NULL;
@@ -393,7 +398,25 @@ llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *
             llam_wake_all_shards(rt);
         }
     }
-    return task;
+    return llam_task_public_handle(task);
+}
+
+llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
+                                   llam_task_fn fn,
+                                   void *arg,
+                                   const llam_spawn_opts_t *opts,
+                                   size_t opts_size) {
+    if (runtime == NULL) {
+        runtime = llam_runtime_default_storage();
+    }
+    if (llam_runtime_check_handle(runtime) != 0) {
+        return NULL;
+    }
+    return llam_spawn_on_runtime(runtime, fn, arg, opts, opts_size);
+}
+
+llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {
+    return llam_spawn_on_runtime(llam_runtime_current_owner(), fn, arg, opts, opts_size);
 }
 
 llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {

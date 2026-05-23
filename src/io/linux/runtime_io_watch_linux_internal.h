@@ -66,7 +66,7 @@ bool llam_node_submit_needs_syscall(llam_node_t *node);
 int llam_node_submit_ring(llam_node_t *node);
 bool llam_node_wait_eventfd(llam_node_t *node, int timeout_ms);
 bool llam_node_spin_for_cqe(llam_node_t *node);
-void llam_shard_note_inflight_io_waiter(unsigned owner_shard, int delta);
+void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta);
 
 /* Shared watch-list mutation helpers. */
 llam_io_req_t *llam_take_node_submissions(llam_node_t *node);

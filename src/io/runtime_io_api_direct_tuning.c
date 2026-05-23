@@ -26,11 +26,19 @@
 
 #include "runtime_io_api_internal.h"
 
-/**
- * @brief Check whether direct blocking read/write fallback is enabled.
- *
- * @return true when @c LLAM_DIRECT_BLOCKING_IO is set to a non-zero value.
- */
+#if LLAM_PLATFORM_POSIX
+#include <sys/ioctl.h>
+#endif
+
+/** @brief Runtime that owns the currently executing managed task, if any. */
+static llam_runtime_t *llam_direct_current_runtime(void) {
+    if (g_llam_tls_task != NULL && g_llam_tls_task->owner_runtime != NULL) {
+        return g_llam_tls_task->owner_runtime;
+    }
+    return g_llam_tls_shard != NULL ? g_llam_tls_shard->runtime : NULL;
+}
+
+/** @brief Return true when @c LLAM_DIRECT_BLOCKING_IO enables direct blocking read/write fallback. */
 static bool llam_direct_blocking_io_enabled(void) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
@@ -45,12 +53,7 @@ static bool llam_direct_blocking_io_enabled(void) {
     return value != 0;
 }
 
-/**
- * @brief Check whether direct blocking poll fallback is enabled.
- *
- * @param timeout_ms Requested poll timeout.
- * @return true when direct blocking poll should be attempted.
- */
+/** @brief Return true when direct blocking poll should be attempted. */
 static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
@@ -76,7 +79,7 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
          */
         return false;
 #elif defined(__linux__)
-        llam_runtime_t *rt = &g_llam_runtime;
+        llam_runtime_t *rt;
         llam_shard_t *shard = g_llam_tls_shard;
         llam_node_t *node;
 
@@ -85,18 +88,19 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
         if (timeout_ms > 0) {
             return true;
         }
+        rt = llam_direct_current_runtime();
         if (shard == NULL || rt == NULL || shard->io_node_index >= rt->active_nodes) {
             return false;
         }
         node = &rt->nodes[shard->io_node_index];
         return timeout_ms < 0 && (!node->ring_ready || !node->supports_poll);
 #elif defined(__APPLE__)
-        const llam_runtime_t *rt = &g_llam_runtime;
+        const llam_runtime_t *rt = llam_direct_current_runtime();
 
         // Darwin keeps infinite waits on the kqueue backend so one parked task
         // cannot pin a scheduler worker.  Finite waits are safe to redirect
         // through compensated direct poll in the latency-oriented profiles.
-        return timeout_ms > 0 &&
+        return rt != NULL && timeout_ms > 0 &&
                (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ||
                 rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST);
 #else
@@ -108,11 +112,7 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
     return value != 0;
 }
 
-/**
- * @brief Return timeout threshold for opaque redirect around direct poll.
- *
- * @return Millisecond threshold; 0 disables redirect hinting.
- */
+/** @brief Return direct-poll opaque redirect threshold in milliseconds; 0 disables it. */
 static unsigned llam_direct_poll_redirect_timeout_ms(void) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
@@ -145,11 +145,7 @@ static unsigned llam_direct_poll_redirect_timeout_ms(void) {
     return (unsigned)value;
 }
 
-/**
- * @brief Check whether socket-write handoff is enabled.
- *
- * @return true if small blocking socket writes may yield after completion.
- */
+/** @brief Return true when small blocking socket writes may yield after completion. */
 static bool llam_write_handoff_enabled(void) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
@@ -171,11 +167,7 @@ static bool llam_write_handoff_enabled(void) {
     return value != 0;
 }
 
-/**
- * @brief Check whether direct I/O operations should cooperatively yield.
- *
- * @return true if enabled by platform default or environment override.
- */
+/** @brief Return true when direct I/O operations should cooperatively yield. */
 bool llam_io_coop_yield_enabled(void) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
@@ -557,6 +549,7 @@ static int llam_try_direct_blocking_rw_impl(llam_fd_t fd,
                                             bool force_enabled) {
     struct pollfd pfd;
     ssize_t direct_result;
+    llam_runtime_t *rt;
     int saved_errno = 0;
 
     if (result_out != NULL) {
@@ -570,6 +563,7 @@ static int llam_try_direct_blocking_rw_impl(llam_fd_t fd,
     if (llam_enter_blocking() != 0) {
         return -1;
     }
+    rt = llam_direct_current_runtime();
     if (!g_llam_tls_task->opaque_uses_helper && !g_llam_tls_task->opaque_uses_redirect) {
         // Runtime policy refused helper/redirect compensation, so do not block
         // the scheduler thread directly.
@@ -590,7 +584,7 @@ static int llam_try_direct_blocking_rw_impl(llam_fd_t fd,
         int poll_rc;
         int direct_rc;
 
-        if (atomic_load_explicit(&g_llam_runtime.stop_requested, memory_order_acquire)) {
+        if (rt != NULL && atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
             saved_errno = ECANCELED;
             break;
         }
@@ -685,6 +679,26 @@ int llam_try_socket_pollin_now(llam_fd_t fd, short events, short *revents) {
     if (!llam_poll_socket_peek_enabled() || (events & POLLIN) == 0 || (events & POLLOUT) != 0) {
         return INT_MIN;
     }
+#if defined(FIONREAD)
+    {
+        int available = 0;
+
+        /*
+         * Socketpair poll_wake is dominated by tiny readable probes.  FIONREAD
+         * answers the hot "bytes are queued" case without copying even one byte
+         * through MSG_PEEK; EOF and unsupported descriptors still fall through
+         * to the exact peek/poll behavior below.
+         */
+        if (ioctl(fd, FIONREAD, &available) == 0 && available > 0) {
+            if (revents != NULL) {
+                *revents = POLLIN;
+            }
+            errno = saved_errno;
+            return 1;
+        }
+        errno = saved_errno;
+    }
+#endif
     for (;;) {
         rc = llam_platform_recv_fd(fd, &byte, 1U, MSG_PEEK | MSG_DONTWAIT);
         if (rc > 0) {
@@ -730,6 +744,7 @@ int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, sh
     int rc;
     int saved_errno = 0;
     uint64_t deadline_ns = 0U;
+    llam_runtime_t *rt;
     unsigned redirect_threshold_ms;
     bool redirect_hint = false;
 
@@ -753,6 +768,7 @@ int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, sh
         }
         return -1;
     }
+    rt = llam_direct_current_runtime();
     if (redirect_hint && g_llam_tls_opaque_redirect_hint > 0U) {
         g_llam_tls_opaque_redirect_hint -= 1U;
     }
@@ -776,7 +792,7 @@ int llam_try_direct_blocking_poll(llam_fd_t fd, short events, int timeout_ms, sh
     for (;;) {
         int slice_ms = 10;
 
-        if (atomic_load_explicit(&g_llam_runtime.stop_requested, memory_order_acquire)) {
+        if (rt != NULL && atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
             rc = -1;
             saved_errno = ECANCELED;
             break;

@@ -27,7 +27,7 @@
 
 #include "runtime_types.h"
 
-// Process-wide runtime singleton. Public init/shutdown owns its lifetime.
+// Process-default runtime used by legacy init/spawn/run/shutdown wrappers.
 extern llam_runtime_t g_llam_runtime;
 
 // Cached XSAVE/FPU capability bits discovered at runtime initialization.

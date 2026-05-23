@@ -49,6 +49,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     lock_initialized = task->lock_initialized;
     task->owner_runtime = owner_runtime;
     task->id = 0U;
+    atomic_store_explicit(&task->active_ops, 0U, memory_order_release);
     atomic_init(&task->state, (unsigned)LLAM_TASK_STATE_NEW);
     task->wait_reason = LLAM_WAIT_NONE;
     task->flags = 0U;
@@ -157,6 +158,10 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
                 shard->allocator.task_free = task->alloc_next;
                 shard->allocator.task_reuses += 1U;
                 llam_task_reset_reused(task, shard->runtime, shard->id);
+                if (llam_task_activate_public_handle(task) != 0) {
+                    llam_task_allocator_free(task);
+                    return NULL;
+                }
                 return task;
             }
         } else {
@@ -169,6 +174,10 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
                 shard->allocator.task_reuses += 1U;
                 llam_allocator_unlock(&shard->allocator);
                 llam_task_reset_reused(task, shard->runtime, shard->id);
+                if (llam_task_activate_public_handle(task) != 0) {
+                    llam_task_allocator_free(task);
+                    return NULL;
+                }
                 return task;
             }
             llam_allocator_unlock(&shard->allocator);
@@ -187,11 +196,11 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
  * @param task Task object previously returned by ::llam_task_alloc.
  */
 void llam_task_allocator_free(llam_task_t *task) {
-    llam_runtime_t *rt = task != NULL && task->owner_runtime != NULL ? task->owner_runtime : &g_llam_runtime;
+    llam_runtime_t *rt = task != NULL ? task->owner_runtime : NULL;
     llam_shard_t *owner;
     llam_task_t *head;
 
-    if (task == NULL || task->alloc_owner_shard >= rt->active_shards) {
+    if (task == NULL || rt == NULL || task->alloc_owner_shard >= rt->active_shards) {
         return;
     }
 

@@ -7,35 +7,23 @@
  * integrate blocking callbacks, runtime-aware synchronization primitives, and
  * platform I/O backends. This header is the canonical public API.
  *
- * Typical lifecycle:
- *  - call ::llam_runtime_init once,
- *  - create work with ::llam_spawn,
- *  - drive workers with ::llam_run,
- *  - and release global runtime resources with ::llam_runtime_shutdown.
+ * Typical lifecycle: initialize a runtime, spawn work, drive it, then shut it
+ * down. Legacy wrappers target ::llam_runtime_default; embedders should prefer
+ * explicit runtime handles.
  *
  * All absolute deadlines use ::llam_now_ns units. Unless explicitly documented,
  * functions returning @c -1 set @c errno to the failure reason. Managed task
  * context switches preserve @c errno as task-local state so a task does not
  * inherit another worker thread's TLS error value when it resumes.
  *
- * Common errno values:
- *  - @c EINVAL: invalid argument, invalid enum/policy value, or invalid handle use.
- *  - @c EAGAIN: nonblocking operation would block.
- *  - @c ETIMEDOUT: absolute deadline or relative timeout expired.
- *  - @c ECANCELED: cancellation token or cooperative runtime stop was observed.
- *  - @c EPIPE: channel closed or peer-closed equivalent.
- *  - @c EBUSY: object still has live users/waiters or incompatible concurrent use.
- *  - @c EXDEV: runtime-aware object was used from a different runtime owner.
- *  - @c ENOTSUP: unsupported backend feature or invalid calling context.
- *  - @c ENOMEM: allocation failure.
+ * Common errno values: @c EINVAL invalid input/handle, @c EAGAIN would block,
+ * @c ETIMEDOUT deadline expired, @c ECANCELED cancellation/runtime stop,
+ * @c EPIPE closed channel/peer, @c EBUSY live users or incompatible concurrent
+ * use, @c EXDEV wrong runtime owner, @c ENOTSUP unsupported context/backend,
+ * and @c ENOMEM allocation failure.
  *
- * Runtime ownership:
- *  - LLAM 1.x supports one live process runtime. Runtime-aware objects are
- *    bound to the runtime that created them, and cross-owner use fails with
- *    @c EXDEV.
- *  - The explicit runtime handle API is the embedding boundary for this
- *    contract. True concurrent multi-runtime isolation is staged for a later
- *    major line after singleton and TLS-backed ownership have migration paths.
+ * Runtime-aware objects are bound to the runtime that created them; using an
+ * object from another managed runtime fails with @c EXDEV.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -65,17 +53,12 @@
 extern "C" {
 #endif
 
-/** @brief LLAM source/API version major component. */
-#define LLAM_VERSION_MAJOR 1U
-/** @brief LLAM source/API version minor component. */
-#define LLAM_VERSION_MINOR 2U
-/** @brief LLAM source/API version patch component. */
+#define LLAM_VERSION_MAJOR 2U
+#define LLAM_VERSION_MINOR 0U
 #define LLAM_VERSION_PATCH 0U
 
-/** @brief Public ABI major version; incompatible binary changes increment this value. */
-#define LLAM_ABI_VERSION_MAJOR 1U
-/** @brief Public ABI minor version; additive binary-compatible changes increment this value. */
-#define LLAM_ABI_VERSION_MINOR 2U
+#define LLAM_ABI_VERSION_MAJOR 2U
+#define LLAM_ABI_VERSION_MINOR 0U
 /** @brief Packed public ABI version used by dynamic loaders. */
 #define LLAM_ABI_VERSION ((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)
 
@@ -106,28 +89,14 @@ typedef struct llam_abi_info {
 /** @brief Current size to pass to ::llam_abi_get_info. */
 #define LLAM_ABI_INFO_CURRENT_SIZE ((size_t)sizeof(llam_abi_info_t))
 
-/** @brief Opaque handle for a stackful LLAM task. */
+/* Public opaque handles. */
 typedef struct llam_task llam_task_t;
-
-/** @brief Opaque handle for a runtime-aware mutex. */
 typedef struct llam_mutex llam_mutex_t;
-
-/** @brief Opaque handle for a runtime-aware condition variable. */
 typedef struct llam_cond llam_cond_t;
-
-/** @brief Opaque handle for a pointer-valued runtime channel. */
 typedef struct llam_channel llam_channel_t;
-
-/** @brief Opaque handle for a shared cancellation token. */
 typedef struct llam_cancel_token llam_cancel_token_t;
-
-/** @brief Opaque handle for a runtime-owned I/O buffer. */
 typedef struct llam_io_buffer llam_io_buffer_t;
-
-/** @brief Opaque handle for an explicit runtime instance. */
 typedef struct llam_runtime llam_runtime_t;
-
-/** @brief Opaque handle for structured task groups. */
 typedef struct llam_task_group llam_task_group_t;
 
 /** @brief Portable scatter/gather I/O slice used by ::llam_writev. */
@@ -402,13 +371,16 @@ LLAM_API int llam_runtime_request_stop(void);
  * @details
  * Shutdown is idempotent and is also valid after a failed or partial
  * initialization. It requests cooperative stop, joins runtime-owned OS threads
- * that were started, releases backend resources, and invalidates all remaining
- * runtime-owned handles. It is not a task-join API: callers that need graceful
- * task completion should request stop and drive ::llam_run before shutdown.
+ * that were started, and releases backend resources. It is not a task-join API:
+ * callers that need graceful task completion should request stop and drive
+ * ::llam_run before shutdown. Public cleanup handles remain governed by their
+ * own contracts after shutdown: task handles are no longer joinable, owned I/O
+ * buffers remain valid until release, and channels may still be drained with
+ * ::llam_channel_try_recv_result before destroy.
  *
- * Calls from a managed LLAM task or scheduler frame do not tear the singleton
- * down directly. They are treated as ::llam_runtime_request_stop; the host
- * thread that owns ::llam_run remains responsible for final shutdown.
+ * Calls from a managed LLAM task or scheduler frame do not tear the owning
+ * runtime down directly. They are treated as ::llam_runtime_request_stop; the
+ * host thread that owns the run call remains responsible for final shutdown.
  */
 LLAM_API void llam_runtime_shutdown(void);
 
@@ -427,6 +399,23 @@ LLAM_API void llam_runtime_shutdown(void);
 LLAM_API int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size);
 
 /**
+ * @brief Collect a best-effort snapshot from an explicit runtime handle.
+ *
+ * @details
+ * This is the handle-scoped form for embedders that use
+ * ::llam_runtime_create/::llam_runtime_run_handle instead of the legacy default
+ * runtime wrappers.  Unknown runtime handles fail with @c EINVAL.
+ *
+ * @param runtime Runtime returned by ::llam_runtime_create, or ::llam_runtime_default.
+ * @param stats Destination statistics object. Must not be NULL.
+ * @param stats_size Size of the caller's ::llam_runtime_stats_t definition.
+ * @return 0 on success, -1 on failure with errno set.
+ */
+LLAM_API int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime,
+                                                  llam_runtime_stats_t *stats,
+                                                  size_t stats_size);
+
+/**
  * @brief Collect a best-effort snapshot of runtime counters.
  * @param stats Destination statistics object. Must not be NULL.
  * @details Convenience wrapper around ::llam_runtime_collect_stats_ex.
@@ -438,10 +427,11 @@ LLAM_API int llam_runtime_collect_stats(llam_runtime_stats_t *stats);
  * @brief Return the process-global runtime handle.
  *
  * @details
- * LLAM 1.x still uses one runtime singleton internally. The handle API is the
- * embedding boundary, not a second-runtime facility; the returned pointer is
- * accepted by handle-shaped calls and remains tied to the process-wide
- * singleton until ::llam_runtime_shutdown.
+ * This handle names the legacy process-default runtime used by
+ * ::llam_runtime_init, ::llam_spawn, ::llam_run, and
+ * ::llam_runtime_shutdown. It is also accepted by explicit-handle APIs when an
+ * embedder wants to drive the default runtime through the canonical handle
+ * surface.
  *
  * @return The default runtime handle.
  */
@@ -451,12 +441,11 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
  * @brief Create an explicit runtime handle.
  *
  * @details
- * Current LLAM builds support only one live runtime per process. This function
- * initializes the singleton and returns its handle. A second live runtime fails
- * with @c EBUSY. Embedders should use this as the canonical lifecycle entry
- * point while treating the handle as an alias for ::llam_runtime_default.
- * True concurrent multi-runtime isolation is deferred until every global
- * singleton and TLS dependency has a migration path.
+ * Allocates and initializes an independent runtime instance. The returned
+ * handle owns its scheduler state, public handle registries, caches, blocking
+ * pool, and platform backend resources. Multiple explicit runtimes may be run
+ * concurrently on different host threads. Runtime-aware objects remain scoped
+ * to their owner runtime and cross-runtime use fails with @c EXDEV.
  *
  * @param opts Optional runtime options; pass NULL for defaults.
  * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
@@ -466,12 +455,34 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
 LLAM_API int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_runtime_t **out);
 
 /**
+ * @brief Spawn a task on an explicit runtime handle.
+ *
+ * @details
+ * This is the canonical 2.x embedding entry point for host threads managing
+ * more than one runtime. The legacy ::llam_spawn and ::llam_spawn_ex wrappers
+ * still target the current managed runtime when called from a task, otherwise
+ * the default runtime.
+ *
+ * @param runtime Runtime returned by ::llam_runtime_create, or ::llam_runtime_default.
+ * @param fn Task entry point. Must not be NULL.
+ * @param arg User pointer passed to @p fn.
+ * @param opts Optional spawn policy.
+ * @param opts_size Size of @p opts when non-NULL.
+ * @return Task handle on success, NULL on failure with @c errno set.
+ */
+LLAM_API llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
+                                            llam_task_fn fn,
+                                            void *arg,
+                                            const llam_spawn_opts_t *opts,
+                                            size_t opts_size);
+
+/**
  * @brief Run a runtime handle.
  *
  * @details
- * Current builds accept only ::llam_runtime_default(). Passing NULL or any
- * non-default handle fails with @c EINVAL; it never creates or drives a second
- * scheduler instance.
+ * Drives the scheduler associated with @p runtime until all work drains,
+ * cooperative stop is requested, or a backend/runtime error is recorded.
+ * Passing NULL fails with @c EINVAL.
  */
 LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
 
@@ -479,9 +490,12 @@ LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
  * @brief Destroy a runtime handle.
  *
  * @details
- * Current builds accept only NULL or ::llam_runtime_default() and delegate to
- * ::llam_runtime_shutdown. The call is idempotent for the singleton. 1.x
- * embedders must not assume independent runtime ownership from this handle.
+ * Requests cooperative stop, tears down runtime-owned resources, invalidates
+ * the handle, and frees heap-backed runtimes returned by
+ * ::llam_runtime_create. Passing NULL is a legacy alias for
+ * ::llam_runtime_shutdown on the default runtime. Unknown handles are ignored
+ * because this function has no errno channel; fallible handle APIs reject them
+ * with @c EINVAL.
  */
 LLAM_API void llam_runtime_destroy(llam_runtime_t *runtime);
 
@@ -746,7 +760,8 @@ LLAM_API int llam_sleep_ns(uint64_t duration_ns);
  * reaches a queued callback before a worker starts it, the callback is skipped.
  * If cancellation reaches a callback that is already running, LLAM reports
  * @c ECANCELED only after the callback returns, so @p arg remains owned by the
- * callback for its full execution.
+ * callback for its full execution. @p out is cleared to @c NULL before
+ * validation/submission so failure paths never expose a stale callback result.
  *
  * @param fn Blocking callback. Must not be NULL.
  * @param arg User pointer passed to fn.
@@ -891,7 +906,8 @@ LLAM_API llam_mutex_t *llam_mutex_create(void);
  * @brief Destroy a runtime-aware mutex.
  *
  * @details
- * Destroy fails with @c EBUSY while a task owns or waits on the mutex.
+ * Destroy fails with @c EBUSY while a task owns or waits on the mutex, or while
+ * another public mutex operation is still pinned inside the handle registry.
  */
 LLAM_API int llam_mutex_destroy(llam_mutex_t *mutex);
 
@@ -945,7 +961,8 @@ LLAM_API llam_cond_t *llam_cond_create(void);
  * @details
  * Destroy fails with @c EBUSY while a task is currently waiting on the
  * condition, including the interval after signal/broadcast has selected the
- * waiter but before that task has returned from llam_cond_wait().
+ * waiter but before that task has returned from llam_cond_wait(), or while
+ * another public condition operation is still pinned inside the handle registry.
  */
 LLAM_API int llam_cond_destroy(llam_cond_t *cond);
 
@@ -1010,9 +1027,10 @@ LLAM_API llam_channel_t *llam_channel_create(size_t capacity);
 /**
  * @brief Destroy a channel after all users have stopped accessing it.
  *
- * @details Destroy fails with @c EBUSY while buffered values or parked
- * senders/receivers remain. Close the channel and drain buffered values before
- * destroying when producers may have sent data.
+ * @details Destroy fails with @c EBUSY while buffered values, parked
+ * senders/receivers, close-woken waiters, or another public channel operation
+ * remain. Close the channel and drain buffered values before destroying when
+ * producers may have sent data.
  */
 LLAM_API int llam_channel_destroy(llam_channel_t *channel);
 
@@ -1125,6 +1143,14 @@ typedef enum llam_select_op_kind {
 } llam_select_op_kind_t;
 
 /**
+ * @brief Maximum operation count accepted by ::llam_channel_select.
+ *
+ * @details The bound keeps malformed FFI calls from forcing unbounded array
+ * walks or allocation attempts before LLAM can validate each operation.
+ */
+#define LLAM_CHANNEL_SELECT_MAX_OPS 4096U
+
+/**
  * @brief One channel operation passed to ::llam_channel_select.
  */
 typedef struct llam_select_op {
@@ -1143,8 +1169,11 @@ typedef struct llam_select_op {
  * The current managed task is parked on all requested channel queues when no
  * operation is immediately ready. The first channel operation to complete wins;
  * the selected operation index is returned and remaining queued wait nodes are
- * removed before this call returns. @p deadline_ns is an absolute ::llam_now_ns
- * deadline; @c 0 performs a single non-blocking scan.
+ * removed before this call returns. A selected receive on a closed, drained
+ * channel sets the operation's @c result_errno to @c EPIPE and stores @c NULL
+ * in @c recv_out. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
+ * performs a single non-blocking scan. @p op_count must be in the range
+ * @c 1..LLAM_CHANNEL_SELECT_MAX_OPS.
  *
  * @param ops Operation array.
  * @param op_count Number of operations.
@@ -1291,7 +1320,9 @@ LLAM_API size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer);
  * @details Managed tasks submit to the platform backend where possible and
  * otherwise use a blocking helper so the scheduler worker is not pinned. Calls
  * outside a managed LLAM task delegate to the platform accept primitive directly
- * and may block the calling OS thread.
+ * and may block the calling OS thread. @p addr and @p addrlen must either both
+ * be NULL or both be non-NULL; mismatched peer-address outputs fail with
+ * @c EINVAL before any connection is consumed.
  *
  * @return Accepted descriptor on success, or @c LLAM_INVALID_FD on failure with
  * @c errno set.

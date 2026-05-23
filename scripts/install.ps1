@@ -17,7 +17,7 @@ if ([string]::IsNullOrWhiteSpace($Prefix)) {
     }
 }
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = "1.2.0"
+    $Version = "2.0.0"
 }
 
 $SourceDir = Split-Path -Parent $MyInvocation.MyCommand.Path

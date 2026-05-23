@@ -52,6 +52,19 @@ void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task);
 llam_task_t *llam_task_alloc(llam_shard_t *shard);
 void llam_task_allocator_free(llam_task_t *task);
 void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt);
+void llam_task_register_public_slab(llam_task_t *items, unsigned count);
+void llam_task_unregister_public_slab(llam_task_t *items, unsigned count);
+llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle);
+void llam_task_end_public_op(llam_task_t *task);
+void llam_task_wait_public_ops_quiescent(llam_task_t *task);
+int llam_task_claim_join_public_handle(const llam_task_t *handle,
+                                       llam_task_t *self,
+                                       llam_task_t **out_task,
+                                       llam_runtime_t **out_rt);
+int llam_task_claim_detach_public_handle(const llam_task_t *handle,
+                                         llam_task_t **out_task,
+                                         llam_runtime_t **out_rt,
+                                         bool *out_reclaim_after_unlock);
 
 /*
  * Task-local errno and fiber context-switch boundaries.
@@ -98,6 +111,36 @@ int llam_allocator_grow_timer_slab(llam_shard_t *shard);
 int llam_allocator_grow_wait_slab(llam_shard_t *shard);
 void llam_allocator_lock(llam_allocator_t *allocator);
 void llam_allocator_unlock(llam_allocator_t *allocator);
+
+/*
+ * Public task-handle tagging.
+ *
+ * Task objects are recycled aggressively by the shard allocator. Public task
+ * handles are slot+generation values so consumed handles cannot alias a newly
+ * spawned task that reused the same task object address.
+ */
+#if UINTPTR_MAX <= UINT32_MAX
+#error "LLAM task public handles require uintptr_t wider than 32 bits"
+#define LLAM_TASK_PUBLIC_HANDLE_SHIFT 0U
+#else
+#define LLAM_TASK_PUBLIC_HANDLE_SHIFT 32U
+#endif
+
+static inline llam_task_t *llam_task_public_handle(llam_task_t *task) {
+    unsigned generation;
+
+    if (task == NULL) {
+        return NULL;
+    }
+    generation = atomic_load_explicit(&task->public_handle_generation, memory_order_acquire);
+    return (llam_task_t *)llam_public_slot_encode_handle(task->public_handle_slot,
+                                                         generation,
+                                                         LLAM_TASK_PUBLIC_HANDLE_SHIFT);
+}
+
+int llam_task_activate_public_handle(llam_task_t *task);
+void llam_task_invalidate_public_handle(llam_task_t *task);
+
 llam_io_buffer_t *llam_io_buffer_alloc(llam_shard_t *shard, size_t min_capacity);
 void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer);
 llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard);
@@ -138,7 +181,7 @@ void llam_tune_scheduler_thread(llam_shard_t *shard, bool opaque_helper);
  */
 void llam_clear_xsave_globals(void);
 void llam_ctx_destroy_fp_state(llam_ctx_t *ctx);
-int llam_ctx_init_fp_state(llam_ctx_t *ctx);
+int llam_ctx_init_fp_state(llam_ctx_t *ctx, llam_runtime_t *rt);
 int llam_detect_xsave_support(llam_runtime_t *rt);
 void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext);
 int llam_install_process_signal_handlers(llam_runtime_t *rt);
@@ -173,12 +216,21 @@ int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns);
 llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt);
 void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job);
 int llam_consume_task_wake_error(llam_task_t *task);
+llam_runtime_t *llam_runtime_default_storage(void);
 int llam_runtime_check_handle(const llam_runtime_t *runtime);
+int llam_runtime_init_rt(llam_runtime_t *rt,
+                         const llam_runtime_opts_t *opts,
+                         size_t opts_size,
+                         bool heap_allocated);
+int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated);
+void llam_runtime_unregister_handle(llam_runtime_t *rt);
 int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size);
 llam_runtime_t *llam_runtime_current_owner(void);
 llam_runtime_t *llam_runtime_owner_for_new_object(void);
 int llam_runtime_check_object_owner(const llam_runtime_t *owner_runtime);
 int llam_runtime_require_object_owner(const llam_runtime_t *owner_runtime);
+llam_task_group_t *llam_task_group_resolve_public_handle(llam_task_group_t *handle);
+void llam_task_group_end_public_op(llam_task_group_t *group);
 void llam_runtime_lifecycle_lock(void);
 int llam_runtime_lifecycle_trylock(void);
 void llam_runtime_lifecycle_unlock(void);
@@ -195,6 +247,9 @@ bool llam_runtime_note_task_dead(llam_runtime_t *rt, llam_task_t *task);
 void llam_task_safepoint(void);
 void llam_task_sample_live_stack(llam_task_t *task);
 void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp);
+bool llam_timer_heap_push_locked(llam_shard_t *shard, llam_timer_node_t *node);
+llam_timer_node_t *llam_timer_heap_remove_at_locked(llam_shard_t *shard, size_t index);
+llam_timer_node_t *llam_timer_heap_pop_min_locked(llam_shard_t *shard);
 const char *llam_trace_kind_name(llam_trace_kind_t kind);
 void llam_trace_shard(llam_shard_t *shard,
                     llam_task_t *task,

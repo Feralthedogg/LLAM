@@ -38,7 +38,7 @@ static llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
     while (cursor != NULL) {
         atomic_store_explicit(&cursor->inflight_owner_shard, cursor->owner_shard, memory_order_release);
         atomic_store(&cursor->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
-        llam_shard_note_inflight_io_waiter(cursor->owner_shard, 1);
+        llam_shard_note_inflight_io_waiter(cursor->owner_runtime, cursor->owner_shard, 1);
         cursor = cursor->next;
     }
     pthread_mutex_unlock(&node->submit_lock);

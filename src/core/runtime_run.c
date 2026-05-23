@@ -5,9 +5,9 @@
  * @details
  * ::llam_run starts secondary shard workers, runs shard 0 on the calling thread,
  * joins the workers when the scheduler drains, and propagates any fatal runtime
- * error recorded by worker threads.  The public singleton API and explicit
- * handle API both delegate to the runtime-owned internal entry point in this
- * file.
+ * error recorded by worker threads. Legacy default-runtime wrappers and
+ * explicit handle APIs both delegate to the runtime-owned internal entry point
+ * in this file.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -56,9 +56,9 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
         return -1;
     }
     /*
-     * The public contract allows only one active scheduler driver.  A load then
-     * store admits two unmanaged callers that cross the check at the same time,
-     * so claim the run token with CAS before touching shard worker state.
+     * Each runtime may have only one active scheduler driver. A load then store
+     * admits two unmanaged callers that cross the check at the same time, so
+     * claim the run token with CAS before touching shard worker state.
      */
     if (!atomic_compare_exchange_strong_explicit(&rt->exec_started,
                                                  &expected_started,
@@ -116,7 +116,7 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
 }
 
 int llam_run(void) {
-    return llam_runtime_run_rt(&g_llam_runtime);
+    return llam_runtime_run_rt(llam_runtime_default_storage());
 }
 
 /**
@@ -137,5 +137,5 @@ int llam_runtime_request_stop_rt(llam_runtime_t *rt) {
 }
 
 int llam_runtime_request_stop(void) {
-    return llam_runtime_request_stop_rt(&g_llam_runtime);
+    return llam_runtime_request_stop_rt(llam_runtime_default_storage());
 }

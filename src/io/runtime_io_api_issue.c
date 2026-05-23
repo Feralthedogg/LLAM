@@ -3,26 +3,11 @@
  * @brief I/O request issue path, watch lookup, and readiness submission logic.
  *
  * @details
- * This translation unit is the handoff point between task-facing I/O APIs and
- * the platform I/O backend:
- *  - task bootstrap/exit helpers used by fiber entry code,
- *  - common I/O wait setup and cleanup,
- *  - indefinite multishot poll/accept/recv watch paths,
- *  - one-shot backend submit queue issue path.
- *
- * I/O wait lifecycle:
- *  1) Fill an embedded or allocated ::llam_io_req_t.
- *  2) Attach it to a node submit queue or a shared watch.
- *  3) Park the current task with deadline/cancellation tracking.
- *  4) Resume when the backend completion, cancellation, or timeout wakes it.
- *  5) Clear wait tracking and report the request result/error.
- *
- * Race-handling notes:
- *  - Watch operations recheck immediate readiness before parking so level
- *    triggered readiness cannot be missed between CQE delivery and waiter
- *    insertion.
- *  - Cleanup removes requests from whichever wait mode was successfully
- *    published before the task parked.
+ * This is the handoff point between task-facing I/O APIs and the backend:
+ * task bootstrap/exit, wait setup/cleanup, shared watch paths, and one-shot
+ * submit-queue issue. Watch operations recheck readiness before parking so
+ * level-triggered readiness cannot be missed between CQE delivery and waiter
+ * insertion.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -41,6 +26,25 @@
  */
 
 #include "runtime_io_api_internal.h"
+
+/**
+ * @brief Resolve the runtime that owns an I/O request.
+ *
+ * @details
+ * Request objects are stamped with an owner runtime when they are allocated from
+ * a task/shard cache.  Setup and abort paths must use that owner instead of the
+ * default runtime so explicit runtime handles can run concurrently without
+ * routing completions or cache returns to the wrong backend.
+ */
+static llam_runtime_t *llam_io_request_runtime(const llam_io_req_t *req) {
+    if (req != NULL && req->owner_runtime != NULL) {
+        return req->owner_runtime;
+    }
+    if (g_llam_tls_task != NULL && g_llam_tls_task->owner_runtime != NULL) {
+        return g_llam_tls_task->owner_runtime;
+    }
+    return g_llam_tls_shard != NULL ? g_llam_tls_shard->runtime : NULL;
+}
 
 /**
  * @brief Normalize an I/O setup failure onto the request object.
@@ -80,10 +84,14 @@ static int llam_fail_io_setup_req(llam_io_req_t *req, int error_code) {
  *       g_llam_tls_shard identify the running task and owner shard.
  */
 void llam_task_exit_internal(void) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_task_t *task = g_llam_tls_task;
 
     if (task == NULL || g_llam_tls_shard == NULL) {
+        abort();
+    }
+    rt = task->owner_runtime != NULL ? task->owner_runtime : g_llam_tls_shard->runtime;
+    if (rt == NULL) {
         abort();
     }
 
@@ -113,9 +121,12 @@ void llam_task_exit_internal(void) {
  * @note Called from the architecture-specific fiber bootstrap path.
  */
 void llam_task_bootstrap(llam_task_t *task) {
+    llam_runtime_t *rt;
+
     g_llam_tls_task = task;
+    rt = task != NULL && task->owner_runtime != NULL ? task->owner_runtime : llam_runtime_current_owner();
     llam_task_restore_errno(task);
-    if (g_llam_runtime.run_timing_enabled != 0U || g_llam_runtime.profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE) {
+    if (rt->run_timing_enabled != 0U || rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE) {
         atomic_store_explicit(&g_llam_tls_shard->last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
     }
     task->entry(task->arg);
@@ -149,17 +160,19 @@ void llam_fiber_alignment_violation(uint64_t rsp) {
  * @note Safe to call with NULL arguments; in that case it does nothing.
  */
 void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
+    llam_runtime_t *rt;
     int node_index;
 
     if (task == NULL || req == NULL) {
         return;
     }
 
+    rt = llam_io_request_runtime(req);
     llam_cancel_token_unregister_task(task);
     llam_disarm_task_wait_deadline(task);
     node_index = llam_io_req_node_index(req);
-    if (node_index >= 0) {
-        llam_node_t *node = &g_llam_runtime.nodes[node_index];
+    if (node_index >= 0 && rt != NULL && (unsigned)node_index < rt->active_nodes) {
+        llam_node_t *node = &rt->nodes[node_index];
         unsigned mode = atomic_load(&req->wait_mode);
 
         if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
@@ -207,6 +220,7 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
  * until its cancellation completion arrives.
  */
 static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reason_t reason) {
+    llam_runtime_t *rt;
     int node_index;
     llam_node_t *node;
 
@@ -215,10 +229,11 @@ static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reaso
         return false;
     }
     node_index = llam_io_req_node_index(req);
-    if (node_index < 0) {
+    rt = llam_io_request_runtime(req);
+    if (node_index < 0 || rt == NULL || (unsigned)node_index >= rt->active_nodes) {
         return false;
     }
-    node = &g_llam_runtime.nodes[node_index];
+    node = &rt->nodes[node_index];
     atomic_store_explicit(&req->abort_reason, (unsigned)reason, memory_order_release);
     if (atomic_exchange_explicit(&req->cancel_queued, 1U, memory_order_acq_rel) == 0U &&
         llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req) != 0) {
@@ -249,6 +264,7 @@ static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reaso
 static bool llam_abort_published_io_setup(llam_io_req_t *req,
                                           llam_io_abort_reason_t reason,
                                           bool *wait_for_completion) {
+    llam_runtime_t *rt;
     int node_index;
     llam_node_t *node;
     unsigned mode;
@@ -270,10 +286,11 @@ static bool llam_abort_published_io_setup(llam_io_req_t *req,
     }
 
     node_index = llam_io_req_node_index(req);
-    if (node_index < 0) {
+    rt = llam_io_request_runtime(req);
+    if (node_index < 0 || rt == NULL || (unsigned)node_index >= rt->active_nodes) {
         return false;
     }
-    node = &g_llam_runtime.nodes[node_index];
+    node = &rt->nodes[node_index];
 
     if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
         if (!llam_abort_inflight_io_setup(req, reason)) {
@@ -527,7 +544,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
  *         back to another path or fails with errno set.
  */
 int llam_issue_multishot_poll(llam_io_req_t *req) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_node_t *node;
     llam_poll_watch_t *watch;
@@ -537,6 +554,11 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
 
     if (req == NULL || shard == NULL || g_llam_tls_task == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    rt = llam_io_request_runtime(req);
+    if (rt == NULL || shard->runtime != rt) {
+        errno = EXDEV;
         return -1;
     }
 
@@ -641,7 +663,7 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
  *         available or setup fails.
  */
 int llam_issue_multishot_accept(llam_io_req_t *req) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_node_t *node;
     llam_accept_watch_t *watch;
@@ -650,6 +672,11 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
 
     if (req == NULL || shard == NULL || g_llam_tls_task == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    rt = llam_io_request_runtime(req);
+    if (rt == NULL || shard->runtime != rt) {
+        errno = EXDEV;
         return -1;
     }
 
@@ -719,7 +746,7 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
  *         available or setup fails.
  */
 int llam_issue_multishot_recv(llam_io_req_t *req) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_node_t *node;
     llam_recv_watch_t *watch;
@@ -733,6 +760,11 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
 
     if (req == NULL || shard == NULL || g_llam_tls_task == NULL || req->owned_buffer == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    rt = llam_io_request_runtime(req);
+    if (rt == NULL || shard->runtime != rt) {
+        errno = EXDEV;
         return -1;
     }
 
@@ -853,13 +885,18 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
  *         completion reports an error.
  */
 int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
-    llam_runtime_t *rt = &g_llam_runtime;
+    llam_runtime_t *rt;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
     llam_node_t *node;
 
     if (task == NULL || shard == NULL) {
         return 0;
+    }
+    rt = llam_io_request_runtime(req);
+    if (rt == NULL || shard->runtime != rt) {
+        errno = EXDEV;
+        return -1;
     }
 
     node = &rt->nodes[shard->io_node_index];

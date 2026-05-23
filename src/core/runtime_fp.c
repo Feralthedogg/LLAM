@@ -188,7 +188,7 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
  *
  * @return 0 on success, or -1 with @c errno set.
  */
-int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
+int llam_ctx_init_fp_state(llam_ctx_t *ctx, llam_runtime_t *rt) {
     void *area = NULL;
 
     if (ctx == NULL) {
@@ -216,24 +216,24 @@ int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
     ctx->x87_cw = llam_current_x87_cw();
     ctx->pad = 0U;
     ctx->xsave_area = NULL;
-    if (!g_llam_runtime.xsave_enabled) {
+    if (rt == NULL || !rt->xsave_enabled) {
         return 0;
     }
 
 #if defined(_MSC_VER)
-    area = _aligned_malloc(g_llam_runtime.xsave_area_alloc_size, 64U);
+    area = _aligned_malloc(rt->xsave_area_alloc_size, 64U);
     if (area == NULL) {
         errno = ENOMEM;
         return -1;
     }
 #else
-    if (posix_memalign(&area, 64U, g_llam_runtime.xsave_area_alloc_size) != 0) {
+    if (posix_memalign(&area, 64U, rt->xsave_area_alloc_size) != 0) {
         errno = ENOMEM;
         return -1;
     }
 #endif
-    memset(area, 0, g_llam_runtime.xsave_area_alloc_size);
-    llam_save_xsave_area(area, g_llam_runtime.xsave_mask);
+    memset(area, 0, rt->xsave_area_alloc_size);
+    llam_save_xsave_area(area, rt->xsave_mask);
     ctx->xsave_area = area;
     return 0;
 }
@@ -289,7 +289,9 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
 /**
  * @brief Initialize AArch64 floating-point control/status state.
  */
-int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
+int llam_ctx_init_fp_state(llam_ctx_t *ctx, llam_runtime_t *rt) {
+    (void)rt;
+
     if (ctx == NULL) {
         errno = EINVAL;
         return -1;
@@ -325,7 +327,9 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
 /**
  * @brief Initialize portable floating-point environment state.
  */
-int llam_ctx_init_fp_state(llam_ctx_t *ctx) {
+int llam_ctx_init_fp_state(llam_ctx_t *ctx, llam_runtime_t *rt) {
+    (void)rt;
+
     if (ctx == NULL) {
         errno = EINVAL;
         return -1;

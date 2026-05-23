@@ -24,16 +24,31 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #ifndef IOV_MAX
 #define TEST_IOV_MAX 1024
 #else
 #define TEST_IOV_MAX IOV_MAX
+#endif
+
+#define OWNED_BUFFER_RACE_THREADS 4
+#define OWNED_BUFFER_RACE_ITERS 4096
+
+#if defined(__linux__) && !defined(MAP_NORESERVE)
+#define MAP_NORESERVE 0
 #endif
 
 typedef struct io_state {
@@ -53,6 +68,16 @@ typedef struct escaped_owned_state {
     llam_io_buffer_t *buffer;
     atomic_uint failures;
 } escaped_owned_state_t;
+
+typedef struct owned_buffer_race_state {
+    atomic_uintptr_t current;
+    atomic_uint ready;
+    atomic_uint stop;
+} owned_buffer_race_state_t;
+
+static uintptr_t owned_buffer_slot_handle(const llam_io_buffer_t *buffer) {
+    return ((uintptr_t)buffer) >> 32U;
+}
 
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_io_buffers] %s\n", message);
@@ -80,6 +105,31 @@ static void task_fail(io_state_t *state, const char *where, int err) {
 
 static void escaped_owned_task_fail(escaped_owned_state_t *state) {
     atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+}
+
+static void *owned_buffer_accessor_race_thread(void *arg) {
+    owned_buffer_race_state_t *state = arg;
+    uintptr_t checksum = 0U;
+
+    atomic_fetch_add_explicit(&state->ready, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->stop, memory_order_acquire) == 0U) {
+        llam_io_buffer_t *buffer =
+            (llam_io_buffer_t *)atomic_load_explicit(&state->current, memory_order_acquire);
+
+        if (buffer != NULL) {
+            /*
+             * These accessors are allowed to race with release from another
+             * unmanaged thread. The test intentionally does not dereference the
+             * returned data pointer because ownership can be consumed
+             * immediately after the accessor returns; the bug being guarded is
+             * a UAF inside the accessor itself.
+             */
+            checksum += (uintptr_t)llam_io_buffer_data(buffer);
+            checksum += llam_io_buffer_size(buffer);
+            checksum += llam_io_buffer_capacity(buffer);
+        }
+    }
+    return (void *)checksum;
 }
 
 static int write_all_native(int fd, const char *data, size_t len) {
@@ -131,6 +181,20 @@ static int test_direct_owned_read_and_poll(void) {
     errno = 0;
     if (llam_recv_owned(LLAM_INVALID_FD, 0U, 0, &buffer) != 0 || buffer != NULL) {
         return test_fail("llam_recv_owned zero size did not return zero with NULL buffer");
+    }
+    buffer = (llam_io_buffer_t *)&buffer;
+    errno = 0;
+    if (llam_read_owned(LLAM_INVALID_FD, SIZE_MAX, &buffer) != -1 ||
+        errno != EINVAL ||
+        buffer != NULL) {
+        return test_fail("llam_read_owned oversized count did not fail before allocation");
+    }
+    buffer = (llam_io_buffer_t *)&buffer;
+    errno = 0;
+    if (llam_recv_owned(LLAM_INVALID_FD, SIZE_MAX, 0, &buffer) != -1 ||
+        errno != EINVAL ||
+        buffer != NULL) {
+        return test_fail("llam_recv_owned oversized count did not fail before allocation");
     }
     buffer = (llam_io_buffer_t *)&buffer;
     errno = 0;
@@ -208,6 +272,14 @@ static int test_direct_owned_read_and_poll(void) {
         close_if_valid(&pipe_fds[1]);
         llam_io_buffer_release(buffer);
         return test_fail("direct llam_read_owned returned unexpected buffer");
+    }
+    llam_io_buffer_release(buffer);
+    if (llam_io_buffer_data(buffer) != NULL ||
+        llam_io_buffer_size(buffer) != 0U ||
+        llam_io_buffer_capacity(buffer) != 0U) {
+        close_if_valid(&pipe_fds[0]);
+        close_if_valid(&pipe_fds[1]);
+        return test_fail("released owned buffer handle remained observable");
     }
     llam_io_buffer_release(buffer);
     buffer = NULL;
@@ -294,6 +366,61 @@ static int test_direct_owned_read_and_poll(void) {
     return 0;
 }
 
+#if defined(__linux__)
+static int test_read_owned_invalid_fd_before_allocation(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("invalid-fd owned-read fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        struct rlimit limit;
+        ssize_t bytes;
+
+        /*
+         * This child proves the invalid descriptor path does not try to reserve
+         * the caller-requested owned buffer first. Before the fix,
+         * llam_read_owned(LLAM_INVALID_FD, 256MiB, ...) returned ENOMEM under
+         * this limit instead of the native EBADF descriptor error.
+         */
+        limit.rlim_cur = 128U * 1024U * 1024U;
+        limit.rlim_max = 128U * 1024U * 1024U;
+        if (setrlimit(RLIMIT_AS, &limit) != 0) {
+            _exit(10);
+        }
+        errno = 0;
+        bytes = llam_read_owned(LLAM_INVALID_FD, 256U * 1024U * 1024U, &buffer);
+        if (bytes == -1 && errno == EBADF && buffer == NULL) {
+            _exit(0);
+        }
+        if (bytes == -1 && errno == ENOMEM) {
+            _exit(2);
+        }
+        _exit(3);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("invalid-fd owned-read waitpid failed");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("invalid-fd owned-read child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 2:
+        return test_fail("llam_read_owned invalid fd allocated before returning EBADF");
+    case 10:
+        return test_fail("invalid-fd owned-read RLIMIT_AS setup failed");
+    default:
+        return test_fail("llam_read_owned invalid fd returned an unexpected result");
+    }
+}
+#endif
+
 static void io_writer_task(void *arg) {
     io_state_t *state = arg;
 
@@ -305,6 +432,100 @@ static void io_writer_task(void *arg) {
     atomic_fetch_add_explicit(&state->writer_done, 1U, memory_order_relaxed);
 }
 
+#if defined(__linux__)
+static int fill_pipe_until_eagain(int fd) {
+    char bytes[4096];
+    int saved_flags;
+
+    memset(bytes, 'w', sizeof(bytes));
+    saved_flags = fcntl(fd, F_GETFL, 0);
+    if (saved_flags < 0 || fcntl(fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
+        return -1;
+    }
+    for (;;) {
+        ssize_t written = write(fd, bytes, sizeof(bytes));
+
+        if (written > 0) {
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            errno = 0;
+            return 0;
+        }
+        return -1;
+    }
+}
+
+static int managed_linux_oversized_rw_edges(io_state_t *state) {
+    int pipe_fds[2] = {-1, -1};
+    void *huge_buf;
+    size_t huge_count = ((size_t)UINT_MAX) + 1U;
+    int saved_errno = 0;
+
+    huge_buf = mmap(NULL,
+                    huge_count,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+                    -1,
+                    0);
+    if (huge_buf == MAP_FAILED) {
+        task_fail(state, "linux oversized rw mmap", errno);
+        return -1;
+    }
+
+    if (pipe(pipe_fds) != 0) {
+        saved_errno = errno;
+        (void)munmap(huge_buf, huge_count);
+        errno = saved_errno;
+        task_fail(state, "linux oversized read pipe", errno);
+        return -1;
+    }
+    errno = 0;
+    if (llam_read(pipe_fds[0], huge_buf, huge_count) != -1 || errno != EINVAL) {
+        saved_errno = errno;
+        close_if_valid(&pipe_fds[0]);
+        close_if_valid(&pipe_fds[1]);
+        (void)munmap(huge_buf, huge_count);
+        task_fail(state, "linux oversized read async count", saved_errno);
+        return -1;
+    }
+    close_if_valid(&pipe_fds[0]);
+    close_if_valid(&pipe_fds[1]);
+
+    if (pipe(pipe_fds) != 0) {
+        saved_errno = errno;
+        (void)munmap(huge_buf, huge_count);
+        errno = saved_errno;
+        task_fail(state, "linux oversized write pipe", errno);
+        return -1;
+    }
+    if (fill_pipe_until_eagain(pipe_fds[1]) != 0) {
+        saved_errno = errno;
+        close_if_valid(&pipe_fds[0]);
+        close_if_valid(&pipe_fds[1]);
+        (void)munmap(huge_buf, huge_count);
+        task_fail(state, "linux oversized write pipe fill", saved_errno);
+        return -1;
+    }
+    errno = 0;
+    if (llam_write(pipe_fds[1], huge_buf, huge_count) != -1 || errno != EINVAL) {
+        saved_errno = errno;
+        close_if_valid(&pipe_fds[0]);
+        close_if_valid(&pipe_fds[1]);
+        (void)munmap(huge_buf, huge_count);
+        task_fail(state, "linux oversized write async count", saved_errno);
+        return -1;
+    }
+    close_if_valid(&pipe_fds[0]);
+    close_if_valid(&pipe_fds[1]);
+    (void)munmap(huge_buf, huge_count);
+    return 0;
+}
+#endif
+
 static void io_reader_task(void *arg) {
     io_state_t *state = arg;
     llam_io_buffer_t *buffer = NULL;
@@ -314,6 +535,12 @@ static void io_reader_task(void *arg) {
     char one = 'x';
     short revents = 0;
     ssize_t bytes;
+
+#if defined(__linux__)
+    if (managed_linux_oversized_rw_edges(state) != 0) {
+        return;
+    }
+#endif
 
     /*
      * LLAM_INVALID_FD is a public sentinel, not an ignored poll-array slot.
@@ -601,13 +828,169 @@ static int test_owned_buffer_release_after_shutdown(void) {
         return test_fail("escaped owned buffer payload changed after shutdown");
     }
     llam_io_buffer_release(state.buffer);
+    if (llam_io_buffer_data(state.buffer) != NULL ||
+        llam_io_buffer_size(state.buffer) != 0U ||
+        llam_io_buffer_capacity(state.buffer) != 0U) {
+        return test_fail("released escaped owned buffer handle remained observable");
+    }
+    llam_io_buffer_release(state.buffer);
+    return 0;
+}
+
+static int test_owned_buffer_accessor_release_race(void) {
+    owned_buffer_race_state_t state;
+    pthread_t threads[OWNED_BUFFER_RACE_THREADS];
+    unsigned started = 0U;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.current, (uintptr_t)NULL);
+    atomic_init(&state.ready, 0U);
+    atomic_init(&state.stop, 0U);
+
+    for (unsigned i = 0U; i < OWNED_BUFFER_RACE_THREADS; ++i) {
+        if (pthread_create(&threads[i], NULL, owned_buffer_accessor_race_thread, &state) != 0) {
+            atomic_store_explicit(&state.stop, 1U, memory_order_release);
+            for (unsigned j = 0U; j < started; ++j) {
+                (void)pthread_join(threads[j], NULL);
+            }
+            return test_fail_errno("owned-buffer race pthread_create failed");
+        }
+        started += 1U;
+    }
+    while (atomic_load_explicit(&state.ready, memory_order_acquire) != OWNED_BUFFER_RACE_THREADS) {
+        (void)sched_yield();
+    }
+
+    for (unsigned i = 0U; i < OWNED_BUFFER_RACE_ITERS; ++i) {
+        llam_io_buffer_t *buffer = NULL;
+        int pipe_fds[2] = {-1, -1};
+        ssize_t bytes;
+
+        if (pipe(pipe_fds) != 0) {
+            atomic_store_explicit(&state.stop, 1U, memory_order_release);
+            for (unsigned j = 0U; j < started; ++j) {
+                (void)pthread_join(threads[j], NULL);
+            }
+            return test_fail_errno("owned-buffer race pipe setup failed");
+        }
+        if (write_all_native(pipe_fds[1], "race", 4U) != 0) {
+            close_if_valid(&pipe_fds[0]);
+            close_if_valid(&pipe_fds[1]);
+            atomic_store_explicit(&state.stop, 1U, memory_order_release);
+            for (unsigned j = 0U; j < started; ++j) {
+                (void)pthread_join(threads[j], NULL);
+            }
+            return test_fail_errno("owned-buffer race pipe write failed");
+        }
+        close_if_valid(&pipe_fds[1]);
+        bytes = llam_read_owned(pipe_fds[0], 8U, &buffer);
+        close_if_valid(&pipe_fds[0]);
+        if (bytes != 4 || buffer == NULL) {
+            llam_io_buffer_release(buffer);
+            atomic_store_explicit(&state.stop, 1U, memory_order_release);
+            for (unsigned j = 0U; j < started; ++j) {
+                (void)pthread_join(threads[j], NULL);
+            }
+            return test_fail("owned-buffer race read_owned failed");
+        }
+
+        atomic_store_explicit(&state.current, (uintptr_t)buffer, memory_order_release);
+        for (unsigned spin = 0U; spin < 16U; ++spin) {
+            (void)sched_yield();
+        }
+        llam_io_buffer_release(buffer);
+        atomic_store_explicit(&state.current, (uintptr_t)NULL, memory_order_release);
+    }
+
+    atomic_store_explicit(&state.stop, 1U, memory_order_release);
+    for (unsigned i = 0U; i < started; ++i) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            return test_fail_errno("owned-buffer race pthread_join failed");
+        }
+    }
+    return 0;
+}
+
+static int make_native_owned_buffer(const char *payload, llam_io_buffer_t **out) {
+    int pipe_fds[2] = {-1, -1};
+    ssize_t bytes;
+
+    *out = NULL;
+    if (pipe(pipe_fds) != 0) {
+        return -1;
+    }
+    if (write_all_native(pipe_fds[1], payload, strlen(payload)) != 0) {
+        close_if_valid(&pipe_fds[0]);
+        close_if_valid(&pipe_fds[1]);
+        return -1;
+    }
+    close_if_valid(&pipe_fds[1]);
+    bytes = llam_read_owned(pipe_fds[0], 32U, out);
+    close_if_valid(&pipe_fds[0]);
+    if (bytes != (ssize_t)strlen(payload) || *out == NULL) {
+        llam_io_buffer_release(*out);
+        *out = NULL;
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
+static int test_owned_buffer_stale_release_reuse_guard(void) {
+    llam_io_buffer_t *old_buffer = NULL;
+    llam_io_buffer_t *new_buffer = NULL;
+    uintptr_t old_slot;
+
+    for (unsigned i = 0U; i < 20U; ++i) {
+        llam_io_buffer_t *warm_buffer = NULL;
+
+        if (make_native_owned_buffer("warm", &warm_buffer) != 0) {
+            return test_fail_errno("owned-buffer stale-release warmup failed");
+        }
+        llam_io_buffer_release(warm_buffer);
+    }
+
+    if (make_native_owned_buffer("old", &old_buffer) != 0) {
+        return test_fail_errno("owned-buffer stale-release old allocation failed");
+    }
+    old_slot = owned_buffer_slot_handle(old_buffer);
+    llam_io_buffer_release(old_buffer);
+
+    for (unsigned i = 0U; i < 256U; ++i) {
+        if (make_native_owned_buffer("new", &new_buffer) != 0) {
+            return test_fail_errno("owned-buffer stale-release new allocation failed");
+        }
+        if (owned_buffer_slot_handle(new_buffer) == old_slot) {
+            /*
+             * Release consumes the public buffer handle.  If the allocator
+             * immediately reuses the same public handle slot for a new buffer,
+             * the stale handle generation must not release or hide it.
+             */
+            llam_io_buffer_release(old_buffer);
+            if (llam_io_buffer_size(new_buffer) != 3U ||
+                memcmp(llam_io_buffer_data(new_buffer), "new", 3U) != 0) {
+                llam_io_buffer_release(new_buffer);
+                return test_fail("stale owned-buffer release consumed a reused buffer");
+            }
+            llam_io_buffer_release(new_buffer);
+            return 0;
+        }
+        llam_io_buffer_release(new_buffer);
+        new_buffer = NULL;
+    }
+
     return 0;
 }
 
 int main(void) {
     if (test_direct_owned_read_and_poll() != 0 ||
+#if defined(__linux__)
+        test_read_owned_invalid_fd_before_allocation() != 0 ||
+#endif
         test_managed_io_paths() != 0 ||
-        test_owned_buffer_release_after_shutdown() != 0) {
+        test_owned_buffer_release_after_shutdown() != 0 ||
+        test_owned_buffer_accessor_release_race() != 0 ||
+        test_owned_buffer_stale_release_reuse_guard() != 0) {
         return 1;
     }
     printf("[test_io_buffers] ok\n");

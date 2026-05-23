@@ -35,14 +35,16 @@ static int bench_run_case(const char *name,
         perror("llam_runtime_create");
         return -1;
     }
-    if (llam_spawn(entry,
-                 state,
-                 &(llam_spawn_opts_t){
-                     .task_class = LLAM_TASK_CLASS_DEFAULT,
-                     .stack_class = LLAM_STACK_CLASS_DEFAULT,
-                     .flags = LLAM_SPAWN_F_PINNED,
-                 }) == NULL) {
-        perror("llam_spawn");
+    if (llam_runtime_spawn_ex(runtime,
+                              entry,
+                              state,
+                              &(llam_spawn_opts_t){
+                                  .task_class = LLAM_TASK_CLASS_DEFAULT,
+                                  .stack_class = LLAM_STACK_CLASS_DEFAULT,
+                                  .flags = LLAM_SPAWN_F_PINNED,
+                              },
+                              LLAM_SPAWN_OPTS_CURRENT_SIZE) == NULL) {
+        perror("llam_runtime_spawn_ex");
         llam_runtime_destroy(runtime);
         return -1;
     }
@@ -56,8 +58,8 @@ static int bench_run_case(const char *name,
         llam_runtime_destroy(runtime);
         return -1;
     }
-    if (llam_runtime_collect_stats(&stats) != 0) {
-        perror("llam_runtime_collect_stats");
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0) {
+        perror("llam_runtime_collect_stats_ex_handle");
         llam_runtime_destroy(runtime);
         return -1;
     }
