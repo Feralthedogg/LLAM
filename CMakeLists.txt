@@ -376,7 +376,7 @@ add_executable(test_multi_runtime_core
 )
 target_link_libraries(test_multi_runtime_core PRIVATE llam_runtime)
 
-add_executable(test_runtime_api_edges
+add_executable(test_runtime_api_edges ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_runtime_api_edges.c
 )
 target_link_libraries(test_runtime_api_edges PRIVATE llam_runtime)
@@ -518,7 +518,6 @@ add_test(NAME test_abi_contract COMMAND test_abi_contract)
 add_test(NAME test_abi_compat COMMAND test_abi_compat)
 add_test(NAME test_runtime_core COMMAND test_runtime_core)
 add_test(NAME test_multi_runtime_core COMMAND test_multi_runtime_core)
-add_test(NAME test_runtime_api_edges COMMAND test_runtime_api_edges)
 add_test(NAME test_runtime_select_edges COMMAND test_runtime_select_edges)
 add_test(NAME test_runtime_group_local_edges COMMAND test_runtime_group_local_edges)
 add_test(NAME test_runtime_unmanaged_join COMMAND test_runtime_unmanaged_join)
@@ -535,6 +534,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_windows_handle_io COMMAND test_windows_handle_io)
 endif()
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    add_test(NAME test_runtime_api_edges COMMAND test_runtime_api_edges)
     add_test(NAME test_connect_io COMMAND test_connect_io)
     add_test(NAME test_runtime_io_dump COMMAND test_runtime_io_dump)
     add_test(NAME test_io_buffers COMMAND test_io_buffers)

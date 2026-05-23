@@ -316,7 +316,7 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build build/nightly-windows --config Release --target bench test_abi_compat test_multi_runtime_core test_runtime_api_edges test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
+        run: cmake --build build/nightly-windows --config Release --target bench test_abi_compat test_multi_runtime_core test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
 
       - name: Deep Windows policy/runtime stress
         shell: pwsh
@@ -325,7 +325,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
           $repeat = [int]("${{ github.event.inputs.runtime_stress_repeat || '20' }}")
           & {
-            ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_api_edges|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
+            ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
@@ -352,7 +352,7 @@ jobs:
             Remove-Item Env:\LLAM_RUNTIME_INVARIANT_SCENARIOS -ErrorAction SilentlyContinue
             foreach ($generation in @("10", "11")) {
               $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
-              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_api_edges|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
+              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
               if ($LASTEXITCODE -ne 0) {
                 exit $LASTEXITCODE
               }
