@@ -86,7 +86,10 @@ jobs:
         run: |
           cmake -S . -B build/linux -DCMAKE_C_COMPILER=gcc -DCMAKE_ASM_COMPILER=gcc
           cmake --build build/linux
-          ctest --test-dir build/linux --output-on-failure
+          # The Make-based Verify Linux step above owns the full runtime suite.
+          # Keep CMake here as a build/package smoke so a single ctest hang does
+          # not mask the already-completed full native verification.
+          ctest --test-dir build/linux --output-on-failure --timeout 120 -R "test_abi_contract|test_abi_compat|test_connect_io|test_runtime_core|test_multi_runtime_core|test_shared_load"
 
       - name: Benchmark smoke
         if: ${{ !contains(matrix.name, 'sanitizer') }}
