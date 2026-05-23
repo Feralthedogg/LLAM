@@ -34,6 +34,8 @@ typedef struct abi_prefix {
 
 #define ASSERT_FIELD_U32(type, field) \
     _Static_assert(sizeof(((type *)0)->field) == sizeof(uint32_t), #type "." #field " must be fixed-width")
+#define ASSERT_EXPR_TYPE(expr, type, message) \
+    _Static_assert(_Generic((expr), type: 1, default: 0), message)
 
 ASSERT_FIELD_U32(llam_spawn_opts_t, task_class);
 ASSERT_FIELD_U32(llam_spawn_opts_t, stack_class);
@@ -65,12 +67,12 @@ ASSERT_FIELD_U32(llam_runtime_stats_t, huge_alloc);
 ASSERT_FIELD_U32(llam_runtime_stats_t, sqpoll);
 ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_mode);
 ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_poll_period);
-_Static_assert(sizeof(llam_task_class((const llam_task_t *)0)) == sizeof(uint32_t),
-               "llam_task_class result must be fixed-width");
-_Static_assert(sizeof(llam_task_flags((const llam_task_t *)0)) == sizeof(uint32_t),
-               "llam_task_flags result must be fixed-width");
-_Static_assert(sizeof(llam_task_set_class(LLAM_TASK_CLASS_DEFAULT)) == sizeof(int),
-               "llam_task_set_class result must be int");
+ASSERT_EXPR_TYPE(llam_task_class((const llam_task_t *)0), uint32_t,
+                 "llam_task_class result must be fixed-width");
+ASSERT_EXPR_TYPE(llam_task_flags((const llam_task_t *)0), uint32_t,
+                 "llam_task_flags result must be fixed-width");
+ASSERT_EXPR_TYPE(llam_task_set_class(LLAM_TASK_CLASS_DEFAULT), int,
+                 "llam_task_set_class result must be int");
 _Static_assert(LLAM_RUNTIME_OPTS_CURRENT_SIZE == sizeof(llam_runtime_opts_t),
                "LLAM_RUNTIME_OPTS_CURRENT_SIZE must match llam_runtime_opts_t");
 _Static_assert(LLAM_SPAWN_OPTS_CURRENT_SIZE == sizeof(llam_spawn_opts_t),

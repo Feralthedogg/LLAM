@@ -250,7 +250,7 @@ release_pause:
             fprintf(stderr,
                     "[dynamic] offline blocked shard=%u target=%u reason=%s online=%u live=%u active_io=%u norm=%u hot=%u inject=%u current=%u timers=%u\n",
                     shard->id,
-                    target != NULL ? target->id : UINT_MAX,
+                    (unsigned)(target != NULL ? target->id : UINT_MAX),
                     blocked_reason,
                     llam_runtime_online_shards(rt),
                     llam_runtime_live_tasks(rt),

@@ -812,7 +812,7 @@ int llam_sleep_until(uint64_t deadline_ns) {
 
     llam_task_safepoint();
 
-    if (task == NULL || shard == NULL) {
+    if (task == NULL) {
         if (!atomic_load_explicit(&llam_runtime_default_storage()->initialized, memory_order_acquire)) {
             errno = EINVAL;
             return -1;
@@ -836,6 +836,10 @@ int llam_sleep_until(uint64_t deadline_ns) {
                 return -1;
             }
         }
+    }
+    if (shard == NULL) {
+        errno = EINVAL;
+        return -1;
     }
     if (shard->runtime == NULL ||
         !atomic_load_explicit(&shard->runtime->initialized, memory_order_acquire)) {

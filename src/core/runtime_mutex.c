@@ -25,10 +25,8 @@
  */
 
 #include "runtime_internal.h"
-
 static pthread_mutex_t g_llam_mutex_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static llam_mutex_t *g_llam_mutex_registry;
-
 static llam_public_slot_table_t g_llam_mutex_public_slots;
 
 /*
@@ -39,7 +37,12 @@ static llam_public_slot_table_t g_llam_mutex_public_slots;
 static int llam_mutex_reserve_public_slot_locked(llam_mutex_t *mutex, size_t *out_slot) {
     uint32_t generation = 0U;
 
-    return llam_public_slot_reserve(&g_llam_mutex_public_slots, mutex, 64U, out_slot, &generation);
+    return llam_public_slot_reserve_family(&g_llam_mutex_public_slots,
+                                           mutex,
+                                           64U,
+                                           LLAM_PUBLIC_HANDLE_FAMILY_MUTEX,
+                                           out_slot,
+                                           &generation);
 }
 
 static int llam_mutex_register_live(llam_mutex_t *mutex) {

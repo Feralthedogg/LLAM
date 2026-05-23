@@ -37,8 +37,8 @@ int llam_require_task_context(void);
  * Public mutex/cond handle encoding.
  *
  * These objects can be cached or reallocated after destroy. Public handles use
- * a registry slot plus generation so consumed stale handles cannot alias a
- * replacement object that reuses the same slot or backing storage.
+ * a registry slot plus family-tagged generation so stale handles cannot alias a
+ * replacement object or a different sync object family using the same slot.
  */
 #if UINTPTR_MAX <= UINT32_MAX
 #error "LLAM sync public handles require uintptr_t wider than 32 bits"
@@ -93,9 +93,9 @@ void llam_channel_global_cache_drain(void);
  * Public channel-handle encoding.
  *
  * Capacity-one channels are intentionally recycled through TLS/global caches.
- * Public handles therefore use a registry slot plus generation instead of a raw
- * pointer. That rejects stale consumed handles even after many cache reuses of
- * the same channel object address.
+ * Public handles therefore use a registry slot plus family-tagged generation
+ * instead of a raw pointer. That rejects stale consumed handles and wrong-family
+ * sync handles even after many cache reuses of the same channel object address.
  */
 llam_channel_t *llam_channel_resolve_public_handle(const llam_channel_t *handle);
 void llam_channel_end_public_op(llam_channel_t *channel);

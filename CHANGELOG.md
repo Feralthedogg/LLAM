@@ -32,6 +32,24 @@
 
 ### Fixed
 
+* harden public opaque handles with family-tagged generations so a forged or
+  mistyped FFI handle from one object family cannot be accepted by another
+  registry that happens to hold the same slot and generation.
+
+* reject `llam_runtime_run_handle(NULL)` with `EINVAL` instead of allowing the
+  explicit runtime handle path to dereference a null handle.
+
+* split internal raw owned-buffer cleanup from the public encoded-handle release
+  path so public buffer accessors cannot consume a guessed raw wrapper address.
+
+* make internal raw owned-buffer cleanup prefer live wrapper membership before
+  public-handle decoding, preventing a large public slot table from hiding raw
+  cleanup behind a decodable but unrelated slot number.
+
+* clarify the managed-sleep TLS boundary, dynamic-watchdog diagnostic printf
+  type, and ABI/sentinel tests so static analysis no longer masks real findings
+  behind tool-noise warnings.
+
 * explicit runtime creation no longer reports singleton-style `EBUSY` when two
   heap-backed runtime handles are created concurrently; construction remains
   serialized internally while both handles can initialize successfully.
@@ -40,6 +58,18 @@
   instead of falling back to the process-default runtime cache.
 
 ### Tests
+
+* add direct public-slot family collision and max-epoch regression coverage, plus
+  multi-runtime sync handle confusion and null runtime handle checks.
+
+* add owned-buffer raw-release collision coverage so internal setup/error
+  cleanup remains reliable after the public buffer registry has grown.
+
+* add `make analyze-cppcheck` and `make audit-deps` security gates and wire them
+  into Linux CI.
+
+* extend Windows stress, nightly, release, and native verification coverage to
+  include multi-runtime, public API edge, shutdown, and owned-buffer tests.
 
 * extend Linux/macOS packaging and shared-library checks to the `2.0.0` ABI
   names.

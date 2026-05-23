@@ -21,19 +21,7 @@ ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffe
     return llam_read_owned_impl(fd, max_count, flags, true, out);
 }
 
-void llam_io_buffer_release(llam_io_buffer_t *buffer) {
-    llam_io_buffer_t *raw_buffer;
-
-    if (buffer == NULL) {
-        return;
-    }
-
-    raw_buffer = llam_io_buffer_public_unregister(buffer);
-    if (raw_buffer == NULL) {
-        return;
-    }
-    buffer = raw_buffer;
-
+static void llam_io_buffer_release_unregistered(llam_io_buffer_t *buffer) {
     if (buffer->detached_wrapper) {
         if (buffer->external_storage && buffer->data != NULL) {
             free(buffer->data);
@@ -53,6 +41,39 @@ void llam_io_buffer_release(llam_io_buffer_t *buffer) {
     }
 
     llam_io_buffer_allocator_free(buffer);
+}
+
+void llam_io_buffer_release(llam_io_buffer_t *buffer) {
+    llam_io_buffer_t *raw_buffer;
+
+    if (buffer == NULL) {
+        return;
+    }
+
+    raw_buffer = llam_io_buffer_public_unregister(buffer);
+    if (raw_buffer == NULL) {
+        return;
+    }
+    llam_io_buffer_release_unregistered(raw_buffer);
+}
+
+void llam_io_buffer_release_raw(llam_io_buffer_t *buffer) {
+    llam_io_buffer_t *raw_buffer;
+
+    if (buffer == NULL) {
+        return;
+    }
+
+    /*
+     * Only runtime-owned setup/error paths use raw wrappers before exposing the
+     * encoded public handle. The public release API intentionally does not take
+     * this path, so guessed raw addresses cannot consume live owned buffers.
+     */
+    raw_buffer = llam_io_buffer_public_unregister_raw(buffer);
+    if (raw_buffer == NULL) {
+        return;
+    }
+    llam_io_buffer_release_unregistered(raw_buffer);
 }
 
 void *llam_io_buffer_data(llam_io_buffer_t *buffer) {

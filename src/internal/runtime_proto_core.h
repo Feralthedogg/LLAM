@@ -116,8 +116,8 @@ void llam_allocator_unlock(llam_allocator_t *allocator);
  * Public task-handle tagging.
  *
  * Task objects are recycled aggressively by the shard allocator. Public task
- * handles are slot+generation values so consumed handles cannot alias a newly
- * spawned task that reused the same task object address.
+ * handles are slot+family-tagged-generation values so consumed or wrong-family
+ * handles cannot alias a newly spawned task that reused the same task object.
  */
 #if UINTPTR_MAX <= UINT32_MAX
 #error "LLAM task public handles require uintptr_t wider than 32 bits"

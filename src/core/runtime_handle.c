@@ -75,6 +75,10 @@ int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_
  * share the same non-default-handle errno contract.
  */
 int llam_runtime_run_handle(llam_runtime_t *runtime) {
+    if (runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
     return llam_runtime_run_rt(runtime);
 }
 

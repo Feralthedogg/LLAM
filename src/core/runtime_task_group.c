@@ -58,11 +58,20 @@ static llam_task_group_t *llam_task_group_public_handle(llam_task_group_t *group
 
 /**
  * @brief Register a newly-created task group in the live-handle set.
+ *
+ * Task-group handles use their own family tag because groups contain task and
+ * cancellation-token handles internally; accepting one of those as a group
+ * handle would corrupt ownership and cancellation boundaries.
  */
 static int llam_task_group_reserve_public_slot_locked(llam_task_group_t *group, size_t *out_slot) {
     uint32_t generation = 0U;
 
-    return llam_public_slot_reserve(&g_llam_task_group_public_slots, group, 64U, out_slot, &generation);
+    return llam_public_slot_reserve_family(&g_llam_task_group_public_slots,
+                                           group,
+                                           64U,
+                                           LLAM_PUBLIC_HANDLE_FAMILY_TASK_GROUP,
+                                           out_slot,
+                                           &generation);
 }
 
 static int llam_task_group_register_live(llam_task_group_t *group) {

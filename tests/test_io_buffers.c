@@ -19,6 +19,7 @@
  */
 
 #include "llam/runtime.h"
+#include "../src/io/runtime_io_api_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -29,6 +30,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #if defined(__linux__)
@@ -46,6 +48,7 @@
 
 #define OWNED_BUFFER_RACE_THREADS 4
 #define OWNED_BUFFER_RACE_ITERS 4096
+#define OWNED_BUFFER_RAW_RELEASE_MAX_COLLISION_SLOTS 131072U
 
 #if defined(__linux__) && !defined(MAP_NORESERVE)
 #define MAP_NORESERVE 0
@@ -982,6 +985,100 @@ static int test_owned_buffer_stale_release_reuse_guard(void) {
     return 0;
 }
 
+static llam_io_buffer_t *allocate_internal_test_buffer(const char *payload, llam_io_buffer_t **out_handle) {
+    llam_io_buffer_t *buffer;
+    size_t len = strlen(payload);
+
+    *out_handle = NULL;
+    buffer = calloc(1U, sizeof(*buffer));
+    if (buffer == NULL) {
+        return NULL;
+    }
+    buffer->detached_wrapper = true;
+    buffer->capacity = sizeof(buffer->inline_data);
+    buffer->size = len <= buffer->capacity ? len : buffer->capacity;
+    buffer->data = buffer->inline_data;
+    memcpy(buffer->inline_data, payload, buffer->size);
+    if (llam_io_buffer_public_register(buffer) != 0) {
+        free(buffer);
+        return NULL;
+    }
+    *out_handle = llam_io_buffer_public_handle(buffer);
+    if (*out_handle == NULL) {
+        llam_io_buffer_release_raw(buffer);
+        errno = EINVAL;
+        return NULL;
+    }
+    return buffer;
+}
+
+static int test_owned_buffer_raw_release_decodable_pointer_guard(void) {
+    llam_io_buffer_t *target = NULL;
+    llam_io_buffer_t *target_handle = NULL;
+    llam_io_buffer_t **dummy_handles = NULL;
+    size_t raw_decoded_slot;
+    size_t dummy_count;
+    int rc = 0;
+
+    target = allocate_internal_test_buffer("raw!", &target_handle);
+    if (target == NULL) {
+        return test_fail_errno("owned-buffer raw-release target allocation failed");
+    }
+
+    raw_decoded_slot = owned_buffer_slot_handle(target);
+    if (raw_decoded_slot >= OWNED_BUFFER_RAW_RELEASE_MAX_COLLISION_SLOTS) {
+        /*
+         * Some allocators map heap objects high enough that reproducing the old
+         * collision would make the test too expensive. The production guard is
+         * still exercised on common compact mappings where raw pointer high bits
+         * fall into the public slot table range.
+         */
+        llam_io_buffer_release(target_handle);
+        return 0;
+    }
+
+    dummy_count = raw_decoded_slot + 1U;
+    dummy_handles = calloc(dummy_count, sizeof(*dummy_handles));
+    if (dummy_handles == NULL) {
+        llam_io_buffer_release(target_handle);
+        return test_fail_errno("owned-buffer raw-release dummy handle allocation failed");
+    }
+
+    for (size_t i = 0U; i < dummy_count; ++i) {
+        llam_io_buffer_t *dummy = allocate_internal_test_buffer("x", &dummy_handles[i]);
+
+        if (dummy == NULL) {
+            rc = test_fail_errno("owned-buffer raw-release dummy allocation failed");
+            dummy_count = i;
+            goto cleanup;
+        }
+        (void)dummy;
+    }
+
+    /*
+     * The raw wrapper address now decodes to an in-range public slot. Internal
+     * raw release must still prefer live-list membership; otherwise setup/error
+     * cleanup can silently leak a live wrapper when the registry has grown.
+     */
+    llam_io_buffer_release_raw(target);
+    if (llam_io_buffer_size(target_handle) != 0U) {
+        rc = test_fail("raw owned-buffer release was hidden by public-handle decode");
+        llam_io_buffer_release(target_handle);
+    }
+    target = NULL;
+    target_handle = NULL;
+
+cleanup:
+    for (size_t i = 0U; i < dummy_count; ++i) {
+        llam_io_buffer_release(dummy_handles[i]);
+    }
+    free(dummy_handles);
+    if (target_handle != NULL) {
+        llam_io_buffer_release(target_handle);
+    }
+    return rc;
+}
+
 int main(void) {
     if (test_direct_owned_read_and_poll() != 0 ||
 #if defined(__linux__)
@@ -990,7 +1087,8 @@ int main(void) {
         test_managed_io_paths() != 0 ||
         test_owned_buffer_release_after_shutdown() != 0 ||
         test_owned_buffer_accessor_release_race() != 0 ||
-        test_owned_buffer_stale_release_reuse_guard() != 0) {
+        test_owned_buffer_stale_release_reuse_guard() != 0 ||
+        test_owned_buffer_raw_release_decodable_pointer_guard() != 0) {
         return 1;
     }
     printf("[test_io_buffers] ok\n");

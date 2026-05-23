@@ -340,12 +340,12 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
                                llam_platform_read_fd(fd, buffer->data, max_count);
         if (result < 0) {
             saved_errno = errno;
-            llam_io_buffer_release(buffer);
+            llam_io_buffer_release_raw(buffer);
             errno = saved_errno;
             return -1;
         }
         if (result == 0) {
-            llam_io_buffer_release(buffer);
+            llam_io_buffer_release_raw(buffer);
             return 0;
         }
         buffer->size = (size_t)result;
@@ -375,7 +375,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
     req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
         saved_errno = errno != 0 ? errno : ENOMEM;
-        llam_io_buffer_release(buffer);
+        llam_io_buffer_release_raw(buffer);
         errno = saved_errno;
         return -1;
     }
@@ -410,7 +410,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
     } else if (prefer_multishot && !llam_io_capability_error(errno)) {
         saved_errno = errno;
         llam_api_io_req_release(g_llam_tls_shard, req);
-        llam_io_buffer_release(buffer);
+        llam_io_buffer_release_raw(buffer);
         errno = saved_errno;
         return -1;
     }
@@ -422,7 +422,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
         if (!llam_io_capability_error(errno)) {
             saved_errno = errno;
             llam_api_io_req_release(g_llam_tls_shard, req);
-            llam_io_buffer_release(buffer);
+            llam_io_buffer_release_raw(buffer);
             errno = saved_errno;
             return -1;
         }
@@ -437,7 +437,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
         if (llam_call_blocking_io(socket_recv ? llam_blocking_recv_impl : llam_blocking_read_impl, req) != 0) {
             saved_errno = errno;
             llam_api_io_req_release(g_llam_tls_shard, req);
-            llam_io_buffer_release(buffer);
+            llam_io_buffer_release_raw(buffer);
             errno = saved_errno;
             return -1;
         }
@@ -450,13 +450,13 @@ read_owned_done:
     if (result < 0) {
         saved_errno = req->error_code != 0 ? req->error_code : errno;
         llam_api_io_req_release(g_llam_tls_shard, req);
-        llam_io_buffer_release(buffer);
+        llam_io_buffer_release_raw(buffer);
         errno = saved_errno;
         return -1;
     }
     if (result == 0) {
         llam_api_io_req_release(g_llam_tls_shard, req);
-        llam_io_buffer_release(buffer);
+        llam_io_buffer_release_raw(buffer);
         return 0;
     }
 

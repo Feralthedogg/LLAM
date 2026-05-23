@@ -16,6 +16,29 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  security-gates:
+    name: linux-security-gates
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cppcheck
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: C static analysis
+        run: make analyze-cppcheck
+
+      - name: Rust dependency audit
+        run: make audit-deps
+
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}

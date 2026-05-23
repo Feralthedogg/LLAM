@@ -238,15 +238,15 @@ jobs:
       - name: Server composite stress
         run: |
           set -o pipefail
-          args=""
+          args=()
           if [ "$SERVER_MODE" = "quick" ]; then
-            args="--quick"
+            args+=("--quick")
           fi
           if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then
             # Hosted macOS quick runs are stability smoke tests for the
             # example server. Linux, Windows, and the scheduled soak profile
             # carry the heavier adversarial churn/slow-client coverage.
-            args="$args --skip-edge"
+            args+=("--skip-edge")
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
             export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
             export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
@@ -272,7 +272,7 @@ jobs:
             # smoke lane. Edge churn coverage remains on macOS arm64, Linux
             # x86_64/aarch64, and Windows 2022/2025, where crash diagnostics are
             # more reliable and the runners are less noisy.
-            args="$args --skip-edge"
+            args+=("--skip-edge")
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
             export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
             export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
@@ -289,7 +289,7 @@ jobs:
             --server ./build/stress/server \
             --server-flood ./build/stress/server_flood \
             --seed "$SERVER_SEED" \
-            $args 2>&1 | tee "$OUT_DIR/server_composite.log"
+            "${args[@]}" 2>&1 | tee "$OUT_DIR/server_composite.log"
 
       - name: Upload stress diagnostics
         if: always()
@@ -326,14 +326,14 @@ jobs:
 
       - name: Build native Windows backend
         shell: pwsh
-        run: cmake --build build/windows --config Release --target bench test_abi_compat test_runtime_stress test_runtime_fuzz test_runtime_invariants test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
+        run: cmake --build build/windows --config Release --target bench test_abi_compat test_multi_runtime_core test_runtime_api_edges test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_io_buffers test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
 
       - name: CTest Windows backend
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
+          ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_api_edges|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_io_buffers|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
             Tee-Object -FilePath "$artifactDir\ctest.log"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
@@ -406,7 +406,7 @@ jobs:
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
           foreach ($generation in @("10", "11")) {
             $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
-            ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
+            ctest --test-dir build/windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_api_edges|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_io_buffers|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
               Tee-Object -FilePath "$artifactDir\forced-windows-$generation.log"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE

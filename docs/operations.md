@@ -134,7 +134,8 @@ checked per host.
 
 Production rollout is gated by native Windows CMake/CTest, Windows 2022/2025
 stress, forced Windows 10/11 policy checks, IOCP smoke coverage, HANDLE I/O
-coverage, shared-library export checks, and benchmark smoke coverage.
+coverage, public handle/lifetime edge tests, shutdown and owned-buffer tests,
+shared-library export checks, and benchmark smoke coverage.
 The top-level Makefile does not maintain a separate Windows compiler pipeline:
 when `HOST_PLATFORM=windows` it delegates build, test, shared/static, package,
 and explicit executable/test targets to the native CMake backend. This keeps the
@@ -305,6 +306,19 @@ Treat a finding as actionable only after it is reproduced by one of the above
 tests, a deterministic seed, or a small targeted reproducer. Static review
 findings should become tests first unless the failure is an obvious compile-time
 or contract violation.
+
+Run the static-analysis and dependency-audit gates before release candidates or
+security hardening merges:
+
+```bash
+make analyze-cppcheck
+make audit-deps
+```
+
+`make analyze-cppcheck` pins cppcheck to a 64-bit platform model because the
+public handle ABI intentionally rejects 32-bit `uintptr_t` builds at
+preprocessor time. `make audit-deps` audits the locked Rust comparison-harness
+dependencies; LLAM's C runtime does not vendor those crates.
 
 The current direct runtime tests are intended to catch bugs independent of the
 example chat server policy: lifecycle races, task handle ownership, cancellation

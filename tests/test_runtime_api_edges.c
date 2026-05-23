@@ -2318,7 +2318,8 @@ static int test_destroyed_sync_handles_reject_public_ops(void) {
     llam_mutex_t *mutex = llam_mutex_create();
     llam_cond_t *cond = llam_cond_create();
     llam_channel_t *channel = llam_channel_create(1U);
-    void *value = (void *)1;
+    static int sentinel;
+    void *value = &sentinel;
 
     if (mutex == NULL || cond == NULL || channel == NULL) {
         (void)llam_mutex_destroy(mutex);
@@ -2354,8 +2355,8 @@ static int test_destroyed_sync_handles_reject_public_ops(void) {
         return fail_msg("destroyed channel try_send did not fail with EINVAL");
     }
     errno = 0;
-    value = (void *)1;
-    if (llam_channel_try_recv_result(channel, &value) != -1 || errno != EINVAL || value != (void *)1) {
+    value = &sentinel;
+    if (llam_channel_try_recv_result(channel, &value) != -1 || errno != EINVAL || value != &sentinel) {
         return fail_msg("destroyed channel try_recv did not fail with EINVAL");
     }
     errno = 0;
@@ -3354,14 +3355,28 @@ static int test_runtime_stop_cancels_parked_channel_wait(void) {
     if (waiter == NULL || stopper == NULL) {
         goto cleanup_runtime;
     }
-    if (llam_run() != 0 ||
-        check_task_failures(&state) != 0 ||
-        llam_join(waiter) != 0 ||
-        llam_join(stopper) != 0) {
+    if (llam_run() != 0) {
+        (void)fail_errno("runtime stop channel wait run failed");
+        goto cleanup_runtime;
+    }
+    if (check_task_failures(&state) != 0) {
+        goto cleanup_runtime;
+    }
+    if (llam_join(waiter) != 0) {
+        (void)fail_errno("runtime stop channel waiter join failed");
+        goto cleanup_runtime;
+    }
+    if (llam_join(stopper) != 0) {
+        (void)fail_errno("runtime stop channel stopper join failed");
         goto cleanup_runtime;
     }
     if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 1U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] channel stop counters ran=%u canceled=%u failures=%u\n",
+                      atomic_load_explicit(&state.ran, memory_order_relaxed),
+                      atomic_load_explicit(&state.canceled_waits, memory_order_relaxed),
+                      atomic_load_explicit(&state.failures, memory_order_relaxed));
         goto cleanup_runtime;
     }
     rc = 0;
@@ -3409,14 +3424,28 @@ static int test_runtime_stop_cancels_late_channel_wait(void) {
     if (waiter == NULL || stopper == NULL) {
         goto cleanup_runtime;
     }
-    if (llam_run() != 0 ||
-        check_task_failures(&state) != 0 ||
-        llam_join(waiter) != 0 ||
-        llam_join(stopper) != 0) {
+    if (llam_run() != 0) {
+        (void)fail_errno("runtime stop late channel run failed");
+        goto cleanup_runtime;
+    }
+    if (check_task_failures(&state) != 0) {
+        goto cleanup_runtime;
+    }
+    if (llam_join(waiter) != 0) {
+        (void)fail_errno("runtime stop late channel waiter join failed");
+        goto cleanup_runtime;
+    }
+    if (llam_join(stopper) != 0) {
+        (void)fail_errno("runtime stop late channel stopper join failed");
         goto cleanup_runtime;
     }
     if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 1U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] late channel counters ran=%u canceled=%u failures=%u\n",
+                      atomic_load_explicit(&state.ran, memory_order_relaxed),
+                      atomic_load_explicit(&state.canceled_waits, memory_order_relaxed),
+                      atomic_load_explicit(&state.failures, memory_order_relaxed));
         goto cleanup_runtime;
     }
     rc = 0;
@@ -3636,26 +3665,43 @@ static int test_runtime_stop_cancels_blocking_accept(void) {
     addr.sin_port = 0;
     if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
         listen(listener, 16) != 0) {
+        (void)fail_errno("runtime stop blocking accept listener bind/listen failed");
         goto cleanup_no_runtime;
     }
     state.io_fds[0] = listener;
     if (init_runtime() != 0) {
+        (void)fail_errno("runtime stop blocking accept runtime init failed");
         goto cleanup_no_runtime;
     }
 
     waiter = llam_spawn(stop_accept_waiter_task, &state, NULL);
     stopper = llam_spawn(stop_request_task, &state, NULL);
     if (waiter == NULL || stopper == NULL) {
+        (void)fail_errno("runtime stop blocking accept spawn failed");
         goto cleanup_runtime;
     }
-    if (llam_run() != 0 ||
-        check_task_failures(&state) != 0 ||
-        llam_join(waiter) != 0 ||
-        llam_join(stopper) != 0) {
+    if (llam_run() != 0) {
+        (void)fail_errno("runtime stop blocking accept run failed");
+        goto cleanup_runtime;
+    }
+    if (check_task_failures(&state) != 0) {
+        goto cleanup_runtime;
+    }
+    if (llam_join(waiter) != 0) {
+        (void)fail_errno("runtime stop blocking accept waiter join failed");
+        goto cleanup_runtime;
+    }
+    if (llam_join(stopper) != 0) {
+        (void)fail_errno("runtime stop blocking accept stopper join failed");
         goto cleanup_runtime;
     }
     if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 1U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] blocking accept counters ran=%u canceled=%u failures=%u\n",
+                      atomic_load_explicit(&state.ran, memory_order_relaxed),
+                      atomic_load_explicit(&state.canceled_waits, memory_order_relaxed),
+                      atomic_load_explicit(&state.failures, memory_order_relaxed));
         goto cleanup_runtime;
     }
     rc = 0;
@@ -3749,6 +3795,92 @@ cleanup:
     return rc;
 }
 
+static int test_public_slot_family_tags_reject_wrong_family(void) {
+    llam_public_slot_table_t channel_table;
+    llam_public_slot_table_t mutex_table;
+    int channel_object = 1;
+    int mutex_object = 2;
+    size_t channel_slot = 0U;
+    size_t mutex_slot = 0U;
+    uint32_t channel_generation = 0U;
+    uint32_t mutex_generation = 0U;
+    uint32_t reused_generation = 0U;
+    size_t reused_slot = 0U;
+    int rc = 1;
+
+    memset(&channel_table, 0, sizeof(channel_table));
+    memset(&mutex_table, 0, sizeof(mutex_table));
+    if (llam_public_slot_reserve_family(&channel_table,
+                                        &channel_object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                        &channel_slot,
+                                        &channel_generation) != 0) {
+        rc = fail_errno("family slot channel reserve failed");
+        goto cleanup;
+    }
+    if (llam_public_slot_reserve_family(&mutex_table,
+                                        &mutex_object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_MUTEX,
+                                        &mutex_slot,
+                                        &mutex_generation) != 0) {
+        rc = fail_errno("family slot mutex reserve failed");
+        goto cleanup;
+    }
+    if (channel_slot != 0U || mutex_slot != 0U || channel_generation == mutex_generation) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] family initial handles did not split: "
+                      "channel=(%zu,%u) mutex=(%zu,%u)\n",
+                      channel_slot,
+                      channel_generation,
+                      mutex_slot,
+                      mutex_generation);
+        goto cleanup;
+    }
+    if (llam_public_slot_resolve(&channel_table, channel_slot, mutex_generation) != NULL ||
+        llam_public_slot_resolve(&mutex_table, mutex_slot, channel_generation) != NULL) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] wrong-family generation resolved live\n");
+        goto cleanup;
+    }
+
+    /*
+     * Family-tagged generations also need the same ABA wrap guard as the
+     * original untagged helper.  A retired max-epoch slot must not wrap back to
+     * the initial family generation.
+     */
+    channel_table.slots[channel_slot].generation =
+        llam_public_slot_family_generation(LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH,
+                                           LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL);
+    llam_public_slot_release(&channel_table,
+                             channel_slot,
+                             &channel_object,
+                             channel_table.slots[channel_slot].generation);
+    if (llam_public_slot_reserve_family(&channel_table,
+                                        &mutex_object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                        &reused_slot,
+                                        &reused_generation) != 0) {
+        rc = fail_errno("family slot reserve after max epoch failed");
+        goto cleanup;
+    }
+    if (reused_slot == channel_slot ||
+        llam_public_slot_resolve(&channel_table, channel_slot, channel_generation) != NULL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] max-epoch family slot reused slot=%zu generation=%u\n",
+                      reused_slot,
+                      reused_generation);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    free(channel_table.slots);
+    free(mutex_table.slots);
+    return rc;
+}
+
 static int run_edge_case(const char *name, edge_case_fn fn) {
     /*
      * CI repeats this binary as a race detector.  Emit case boundaries to stderr
@@ -3786,6 +3918,10 @@ int main(void) {
 #endif
     if (run_edge_case("public_slot_generation_wrap_guard",
                       test_public_slot_generation_wrap_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_slot_family_tags_reject_wrong_family",
+                      test_public_slot_family_tags_reject_wrong_family) != 0) {
         return 1;
     }
     if (run_edge_case("cancel_token_destroy_race", test_cancel_token_destroy_race) != 0) {

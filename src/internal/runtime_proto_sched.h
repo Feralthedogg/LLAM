@@ -139,6 +139,9 @@ bool llam_shard_is_online(const llam_shard_t *shard);
 
 /*
  * Wait deadline, cancellation, join, and timer dispatch.
+ *
+ * Cancellation-token public handles use the shared slot+family generation
+ * scheme so sync/task handles cannot be mistaken for a token by FFI callers.
  */
 #if UINTPTR_MAX <= UINT32_MAX
 #error "LLAM cancellation-token public handles require uintptr_t wider than 32 bits"

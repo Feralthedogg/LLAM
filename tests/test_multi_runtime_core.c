@@ -73,6 +73,129 @@ typedef struct multi_io_state {
     atomic_uint failures;
 } multi_io_state_t;
 
+static int test_fail(const char *message);
+static int test_fail_errno(const char *message);
+static int init_runtime_opts(llam_runtime_opts_t *opts);
+
+static int test_sync_handle_family_confusion(void) {
+    llam_channel_t *channel;
+    llam_mutex_t *mutex;
+    llam_cond_t *cond;
+    llam_cancel_token_t *token;
+    llam_task_group_t *group;
+    uintptr_t handles[5];
+    int rc = 1;
+
+    channel = llam_channel_create(1U);
+    mutex = llam_mutex_create();
+    cond = llam_cond_create();
+    token = llam_cancel_token_create();
+    group = llam_task_group_create();
+    if (channel == NULL || mutex == NULL || cond == NULL || token == NULL || group == NULL) {
+        rc = test_fail_errno("sync handle family-confusion setup failed");
+        goto cleanup;
+    }
+    handles[0] = (uintptr_t)channel;
+    handles[1] = (uintptr_t)mutex;
+    handles[2] = (uintptr_t)cond;
+    handles[3] = (uintptr_t)token;
+    handles[4] = (uintptr_t)group;
+    for (size_t i = 0U; i < sizeof(handles) / sizeof(handles[0]); ++i) {
+        for (size_t j = i + 1U; j < sizeof(handles) / sizeof(handles[0]); ++j) {
+            if (handles[i] == handles[j]) {
+                rc = test_fail("public handle families produced colliding encoded values");
+                goto cleanup;
+            }
+        }
+    }
+
+    /*
+     * Encoded public handles must carry enough family information that an FFI
+     * caller cannot pass a channel handle to the mutex API and accidentally
+     * operate on a live object occupying the same slot/generation in another
+     * registry table.  Exercise several destructive APIs so a regression cannot
+     * hide behind one correctly-hardened family.
+     */
+    errno = 0;
+    if (llam_mutex_destroy((llam_mutex_t *)channel) != -1 || errno != EINVAL) {
+        rc = test_fail_errno("channel handle was accepted by mutex destroy");
+        mutex = NULL;
+        goto cleanup;
+    }
+    errno = 0;
+    if (llam_channel_destroy((llam_channel_t *)mutex) != -1 || errno != EINVAL) {
+        rc = test_fail_errno("mutex handle was accepted by channel destroy");
+        channel = NULL;
+        goto cleanup;
+    }
+    errno = 0;
+    if (llam_cond_destroy((llam_cond_t *)token) != -1 || errno != EINVAL) {
+        rc = test_fail_errno("cancel token handle was accepted by cond destroy");
+        cond = NULL;
+        goto cleanup;
+    }
+    errno = 0;
+    if (llam_cancel_token_destroy((llam_cancel_token_t *)cond) != -1 || errno != EINVAL) {
+        rc = test_fail_errno("cond handle was accepted by cancel token destroy");
+        token = NULL;
+        goto cleanup;
+    }
+    errno = 0;
+    if (llam_task_group_destroy((llam_task_group_t *)token) != -1 || errno != EINVAL) {
+        rc = test_fail_errno("cancel token handle was accepted by task group destroy");
+        group = NULL;
+        goto cleanup;
+    }
+    errno = 0;
+    if (llam_cancel_token_cancel((llam_cancel_token_t *)group) != -1 || errno != EINVAL) {
+        rc = test_fail_errno("task group handle was accepted by cancel token cancel");
+        goto cleanup;
+    }
+
+    rc = 0;
+
+cleanup:
+    if (group != NULL) {
+        (void)llam_task_group_destroy(group);
+    }
+    if (token != NULL) {
+        (void)llam_cancel_token_destroy(token);
+    }
+    if (cond != NULL) {
+        (void)llam_cond_destroy(cond);
+    }
+    if (mutex != NULL) {
+        (void)llam_mutex_destroy(mutex);
+    }
+    if (channel != NULL) {
+        (void)llam_channel_destroy(channel);
+    }
+    return rc;
+}
+
+static int test_runtime_run_handle_rejects_null(void) {
+    llam_runtime_opts_t opts;
+    int rc = 1;
+
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("default runtime init failed for NULL handle check");
+    }
+
+    errno = 0;
+    if (llam_runtime_run_handle(NULL) != -1 || errno != EINVAL) {
+        rc = test_fail_errno("llam_runtime_run_handle(NULL) did not fail with EINVAL");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_shutdown();
+    return rc;
+}
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_multi_runtime_core] %s\n", message);
     return 1;
@@ -580,6 +703,12 @@ cleanup:
 }
 
 int main(void) {
+    if (test_sync_handle_family_confusion() != 0) {
+        return 1;
+    }
+    if (test_runtime_run_handle_rejects_null() != 0) {
+        return 1;
+    }
     if (test_concurrent_spawn_join() != 0) {
         return 1;
     }

@@ -57,11 +57,21 @@ static bool llam_io_buffer_public_is_live_locked(const llam_io_buffer_t *buffer)
 static int llam_io_buffer_public_reserve_slot_locked(llam_io_buffer_t *buffer, size_t *out_slot) {
     uint32_t generation = 0U;
 
-    return llam_public_slot_reserve(&g_llam_io_buffer_public_slots, buffer, 64U, out_slot, &generation);
+    /*
+     * Owned buffers can cross FFI boundaries and outlive the producing task, so
+     * their public handle must not collide with task/sync registry handles.
+     */
+    return llam_public_slot_reserve_family(&g_llam_io_buffer_public_slots,
+                                           buffer,
+                                           64U,
+                                           LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER,
+                                           out_slot,
+                                           &generation);
 }
 
 static bool llam_io_buffer_public_decode_handle_locked(const llam_io_buffer_t *handle,
-                                                      llam_io_buffer_t **out_buffer) {
+                                                       bool allow_raw_internal,
+                                                       llam_io_buffer_t **out_buffer) {
     llam_io_buffer_t *buffer = NULL;
     size_t decoded_slot = 0U;
     uint32_t decoded_generation = 0U;
@@ -71,6 +81,23 @@ static bool llam_io_buffer_public_decode_handle_locked(const llam_io_buffer_t *h
     }
     if (handle == NULL) {
         return false;
+    }
+
+    if (allow_raw_internal) {
+        /*
+         * Internal setup/error paths pass the real wrapper address before the
+         * encoded public handle escapes. Check that live-list membership first:
+         * a large long-running slot table can make a normal heap pointer decode
+         * to an in-range slot number, and that must not turn raw cleanup into a
+         * silent leak. Public callers never set allow_raw_internal.
+         */
+        buffer = (llam_io_buffer_t *)handle;
+        if (llam_io_buffer_public_is_live_locked(buffer)) {
+            if (out_buffer != NULL) {
+                *out_buffer = buffer;
+            }
+            return true;
+        }
     }
 
     buffer = llam_public_slot_resolve_encoded(&g_llam_io_buffer_public_slots,
@@ -102,20 +129,7 @@ static bool llam_io_buffer_public_decode_handle_locked(const llam_io_buffer_t *h
     (void)decoded_slot;
     (void)decoded_generation;
 
-    /*
-     * Internal setup/error paths may still pass the raw wrapper before it has
-     * escaped through the public ABI.  Public callers receive slot handles, so
-     * this fallback does not reintroduce the stale-release ABA for user-owned
-     * handles.
-     */
-    buffer = (llam_io_buffer_t *)handle;
-    if (!llam_io_buffer_public_is_live_locked(buffer)) {
-        return false;
-    }
-    if (out_buffer != NULL) {
-        *out_buffer = buffer;
-    }
-    return true;
+    return false;
 }
 
 int llam_io_buffer_public_register(llam_io_buffer_t *buffer) {
@@ -162,7 +176,7 @@ llam_io_buffer_t *llam_io_buffer_public_handle(llam_io_buffer_t *buffer) {
     return encoded != 0U ? (llam_io_buffer_t *)encoded : NULL;
 }
 
-llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *handle) {
+static llam_io_buffer_t *llam_io_buffer_public_unregister_impl(llam_io_buffer_t *handle, bool allow_raw_internal) {
     llam_io_buffer_t *buffer = NULL;
     llam_io_buffer_t **link;
     struct timespec ts;
@@ -172,7 +186,7 @@ llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *handle) {
     }
 
     (void)pthread_mutex_lock(&g_llam_io_buffer_public_registry_lock);
-    if (!llam_io_buffer_public_decode_handle_locked(handle, &buffer)) {
+    if (!llam_io_buffer_public_decode_handle_locked(handle, allow_raw_internal, &buffer)) {
         (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
         return NULL;
     }
@@ -207,6 +221,14 @@ llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *handle) {
     return NULL;
 }
 
+llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *handle) {
+    return llam_io_buffer_public_unregister_impl(handle, false);
+}
+
+llam_io_buffer_t *llam_io_buffer_public_unregister_raw(llam_io_buffer_t *handle) {
+    return llam_io_buffer_public_unregister_impl(handle, true);
+}
+
 llam_io_buffer_t *llam_io_buffer_public_begin_op(const llam_io_buffer_t *buffer) {
     llam_io_buffer_t *live = NULL;
 
@@ -215,7 +237,7 @@ llam_io_buffer_t *llam_io_buffer_public_begin_op(const llam_io_buffer_t *buffer)
     }
 
     (void)pthread_mutex_lock(&g_llam_io_buffer_public_registry_lock);
-    if (llam_io_buffer_public_decode_handle_locked(buffer, &live)) {
+    if (llam_io_buffer_public_decode_handle_locked(buffer, false, &live)) {
         /*
          * Public accessors may race with release from another unmanaged thread.
          * Pin under the same registry lock used by unregister so release cannot

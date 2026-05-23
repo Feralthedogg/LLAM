@@ -417,7 +417,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared test test-asan test-tsan test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared test test-asan test-tsan analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 ifeq ($(HOST_PLATFORM),windows)
@@ -648,6 +648,15 @@ test-tsan:
 	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_core
 	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal
 	TSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
+
+analyze-cppcheck:
+	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
+		--error-exitcode=1 --inline-suppr \
+		-DUINTPTR_MAX=18446744073709551615ULL -DUINT32_MAX=4294967295U \
+		-Iinclude -Isrc/internal -Isrc src include tests examples
+
+audit-deps:
+	cd scripts/bench_tokio_compare && cargo audit
 
 test-quick: test server-stress-composite-quick
 
