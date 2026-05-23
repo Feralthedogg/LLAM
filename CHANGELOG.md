@@ -13,9 +13,9 @@
 * multi-runtime regression coverage: add `test_multi_runtime_core` and connect
   it to Make, CMake, CI, Docker verification, and sanitizer target suites.
 
-* sanitizer entry points: add `make test-asan` and `make test-tsan` focused on
-  public handle, runtime core, owned I/O buffer, shutdown, and multi-runtime
-  edge tests.
+* sanitizer entry points: add `make test-asan` for public handle/runtime/I/O
+  edge coverage and `make test-tsan` as a shorter runtime core, shutdown, and
+  multi-runtime race gate.
 
 ### Changed
 

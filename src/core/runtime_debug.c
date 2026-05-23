@@ -205,25 +205,27 @@ int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *s
     size_t copy_size;
     int saved_errno;
 
-    if (llam_runtime_check_handle(rt) != 0) {
-        return -1;
-    }
     if (stats == NULL || stats_size == 0U) {
         errno = EINVAL;
         return -1;
+    }
+    if (rt == NULL) {
+        rt = llam_runtime_default_storage();
     }
 
     memset(&full_stats, 0, sizeof(full_stats));
     saved_errno = errno;
     /*
-     * Before initialization is published, diagnostics must not take the
-     * lifecycle gate.  Otherwise a polling monitor can win the gate briefly and
-     * make the real runtime initializer report EBUSY.  Returning an empty
-     * prefix-safe snapshot is the only useful pre-init contract anyway.
+     * Default stats polling may run before init publishes the public handle.
+     * Return the documented empty pre-init snapshot before handle validation;
+     * explicit non-default handles still keep the stale/unknown EINVAL path.
      */
-    if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
+    if (rt == llam_runtime_default_storage() &&
+        !atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
         !atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
         errno = saved_errno;
+    } else if (llam_runtime_check_handle(rt) != 0) {
+        return -1;
     } else if (llam_runtime_lifecycle_trylock() == 0) {
         llam_runtime_collect_stats_full(rt, &full_stats);
         llam_runtime_lifecycle_unlock();

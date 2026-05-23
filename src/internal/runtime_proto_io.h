@@ -39,6 +39,12 @@ bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
 void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
 
+static inline bool llam_io_req_abort_requested(const llam_io_req_t *req) {
+    return req != NULL &&
+           (atomic_load_explicit(&req->cancel_queued, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&req->abort_reason, memory_order_acquire) != LLAM_IO_ABORT_NONE);
+}
+
 /*
  * Watch-list waiter queues. The watch lock protects these lists.
  */

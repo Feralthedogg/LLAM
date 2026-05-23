@@ -470,6 +470,11 @@ void llam_darwin_submit_req(llam_node_t *node, llam_io_req_t *req) {
         atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
         llam_shard_note_inflight_io_waiter(req->owner_runtime, req->owner_shard, 1);
     }
+    if (llam_io_req_abort_requested(req)) {
+        // Cancel can arrive before a kqueue filter exists, so finish locally.
+        llam_io_complete_req(node, req, -ECANCELED, true);
+        return;
+    }
 
     if (req->kind != LLAM_IO_KIND_POLL) {
         // Try immediate nonblocking completion before registering with kqueue.

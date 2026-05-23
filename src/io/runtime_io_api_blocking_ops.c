@@ -71,8 +71,20 @@ static size_t llam_owned_read_count_max(void) {
  */
 static bool llam_blocking_req_cancelled(const llam_io_req_t *req) {
     llam_runtime_t *rt = req != NULL ? req->owner_runtime : NULL;
+    llam_block_job_t *job = req != NULL && req->task != NULL ? llam_task_active_block_job_load(req->task) : NULL;
 
     if (rt != NULL && atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
+        return true;
+    }
+    if (job != NULL &&
+        atomic_load_explicit(&job->state, memory_order_acquire) == LLAM_BLOCK_JOB_ABORTED) {
+        /*
+         * A cancel token can abort a running blocking job before the callback's
+         * next token poll observes the token state.  Treat the job state as the
+         * authoritative runtime-owned cancellation latch so blocking I/O
+         * fallbacks cannot spin in short polls after the scheduler has already
+         * detached the waiter.
+         */
         return true;
     }
     return req != NULL &&

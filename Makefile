@@ -624,6 +624,11 @@ SANITIZER_TEST_TARGETS = \
 	test_runtime_shutdown_internal \
 	test_multi_runtime_core
 
+TSAN_TEST_TARGETS = \
+	test_runtime_core \
+	test_runtime_shutdown_internal \
+	test_multi_runtime_core
+
 test-asan:
 	$(MAKE) $(SANITIZER_TEST_TARGETS) \
 		OBJDIR=object-asan \
@@ -636,11 +641,11 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
 
 test-tsan:
-	$(MAKE) test_runtime_api_edges test_runtime_shutdown_internal test_multi_runtime_core \
+	$(MAKE) $(TSAN_TEST_TARGETS) \
 		OBJDIR=object-tsan \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
 		LDLIBS="$(LDLIBS) -fsanitize=thread"
-	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_api_edges
+	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_core
 	TSAN_OPTIONS=halt_on_error=1 ./test_runtime_shutdown_internal
 	TSAN_OPTIONS=halt_on_error=1 ./test_multi_runtime_core
 

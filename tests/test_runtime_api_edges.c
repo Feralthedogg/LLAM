@@ -1435,6 +1435,45 @@ static void stop_direct_read_waiter_task(void *arg) {
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
 
+static void token_cancel_read_waiter_task(void *arg) {
+    edge_state_t *state = arg;
+    char byte = 0;
+
+    atomic_store_explicit(&state->external_waiter_started, 1U, memory_order_release);
+    errno = 0;
+    /*
+     * Keep this descriptor in its default blocking mode.  A task cancel token
+     * must still abort the async kqueue/epoll request instead of relying on the
+     * runtime-stop sweep or a user-visible fd close.
+     */
+    if (llam_read(state->io_fds[0], &byte, 1U) != -1 || errno != ECANCELED) {
+        task_fail(state, "cancel token blocking socket read waiter", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void token_cancel_read_trigger_task(void *arg) {
+    edge_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->external_waiter_started, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    /*
+     * Give the waiter a scheduler turn to publish its I/O request.  The
+     * regression this protects was a Darwin node-control wake race after the
+     * request had already moved into the backend.
+     */
+    if (llam_sleep_ns(1000000ULL) != 0) {
+        task_fail(state, "cancel token read trigger sleep", errno);
+        return;
+    }
+    if (llam_cancel_token_cancel(state->token) != 0) {
+        task_fail(state, "cancel token read trigger cancel", errno);
+    }
+}
+
 static void stop_accept_waiter_task(void *arg) {
     edge_state_t *state = arg;
     struct sockaddr_storage addr;
@@ -3499,6 +3538,77 @@ cleanup_no_runtime:
     return rc;
 }
 
+static int test_cancel_token_cancels_blocking_socket_read(void) {
+    edge_state_t state;
+    llam_spawn_opts_t opts;
+    llam_task_t *waiter = NULL;
+    llam_task_t *canceller = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.io_fds[0] = -1;
+    state.io_fds[1] = -1;
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.canceled_waits, 0U);
+    atomic_init(&state.external_waiter_started, 0U);
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, state.io_fds) != 0) {
+        return fail_errno("cancel token read socketpair setup failed");
+    }
+    state.token = llam_cancel_token_create();
+    if (state.token == NULL ||
+        llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        goto cleanup_no_runtime;
+    }
+    opts.cancel_token = state.token;
+    if (init_runtime() != 0) {
+        goto cleanup_no_runtime;
+    }
+
+    waiter = llam_spawn(token_cancel_read_waiter_task, &state, &opts);
+    canceller = llam_spawn(token_cancel_read_trigger_task, &state, NULL);
+    if (waiter == NULL || canceller == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        check_task_failures(&state) != 0 ||
+        llam_join(waiter) != 0 ||
+        llam_join(canceller) != 0) {
+        goto cleanup_runtime;
+    }
+    waiter = NULL;
+    canceller = NULL;
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.canceled_waits, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (waiter != NULL) {
+        (void)llam_join(waiter);
+    }
+    if (canceller != NULL) {
+        (void)llam_join(canceller);
+    }
+    llam_runtime_shutdown();
+cleanup_no_runtime:
+    if (state.token != NULL && llam_cancel_token_destroy(state.token) != 0) {
+        rc = 1;
+    }
+    if (state.io_fds[0] >= 0) {
+        (void)close(state.io_fds[0]);
+    }
+    if (state.io_fds[1] >= 0) {
+        (void)close(state.io_fds[1]);
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("cancel token blocking socket read edge failed");
+    }
+    return rc;
+}
+
 static int test_runtime_stop_cancels_blocking_accept(void) {
     edge_state_t state;
     struct sockaddr_in addr;
@@ -3807,6 +3917,10 @@ int main(void) {
 #if !LLAM_PLATFORM_WINDOWS
     if (run_edge_case("runtime_stop_cancels_posix_poll_handle_wait",
                       test_runtime_stop_cancels_posix_poll_handle_wait) != 0) {
+        return 1;
+    }
+    if (run_edge_case("cancel_token_cancels_blocking_socket_read",
+                      test_cancel_token_cancels_blocking_socket_read) != 0) {
         return 1;
     }
     if (run_edge_case("runtime_stop_cancels_direct_blocking_read",

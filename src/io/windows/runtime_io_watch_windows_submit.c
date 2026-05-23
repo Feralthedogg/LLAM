@@ -244,6 +244,16 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
     int rc = -1;
     int saved_errno;
 
+    if (llam_io_req_abort_requested(req)) {
+        /*
+         * The worker owns the request but no OVERLAPPED operation has been
+         * submitted yet, so cancellation can complete synchronously without
+         * calling CancelIoEx or waiting for an IOCP packet.
+         */
+        llam_windows_complete_req(node, req, -ECANCELED, true);
+        return;
+    }
+
     /*
      * Associate the descriptor/handle lazily on first use.  This keeps public
      * direct paths cheap while still allowing backend submissions to complete on

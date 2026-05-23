@@ -78,6 +78,15 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
         llam_io_complete_req(node, req, -EINVAL, 0U, true);
         return;
     }
+    if (llam_io_req_abort_requested(req)) {
+        /*
+         * A cancel/timeout can arrive after the node worker detached this
+         * request from submit_lock but before an SQE exists.  Finish it here so
+         * no later cancel SQE is needed to release the parked task.
+         */
+        llam_io_complete_req(node, req, -ECANCELED, 0U, true);
+        return;
+    }
 
     sqe = io_uring_get_sqe(&node->ring);
 

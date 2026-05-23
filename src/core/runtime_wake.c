@@ -548,6 +548,16 @@ void llam_kick_shard(llam_shard_t *shard) {
         return;
     }
     if (llam_eventfd_try_claim(&shard->event_pending) == 0U) {
+#if defined(__APPLE__)
+        /*
+         * Darwin EVFILT_USER wakeups are edge-like around the drain path:
+         * a producer can observe event_pending just before the worker clears it
+         * after consuming the kevent.  Re-triggering the user event is
+         * idempotent and closes the same reset-after-producer race that Windows
+         * manual-reset events need below.
+         */
+        (void)llam_kick_fd_raw(shard->event_fd);
+#endif
 #if LLAM_PLATFORM_WINDOWS
         /*
          * Manual-reset events can lose a coalesced wake if a second producer
@@ -586,6 +596,18 @@ void llam_kick_node(llam_node_t *node) {
         return;
     }
     if (llam_eventfd_try_claim(&node->event_pending) == 0U) {
+#if defined(__APPLE__)
+        /*
+         * I/O cancellation controls must wake the kqueue worker even when a
+         * previous wake bit is still visible.  Without this re-trigger, a cancel
+         * can land between kevent delivery and event_pending reset and leave the
+         * worker asleep with a queued control op.
+         */
+        if (node->mach_wake_enabled) {
+            (void)llam_kick_node_mach(node);
+        }
+        (void)llam_kick_fd_raw(node->event_fd);
+#endif
 #if LLAM_PLATFORM_WINDOWS
         (void)llam_kick_fd_raw(node->event_fd);
         if (node->windows_iocp_handle != NULL) {
