@@ -765,8 +765,16 @@ int llam_close_handle(llam_handle_t handle) {
         errno = EBADF;
         return -1;
     }
-    if (g_llam_runtime != NULL) {
-        llam_windows_forget_fd_assoc(g_llam_runtime, (llam_fd_t)(uintptr_t)handle);
+    {
+        /*
+         * HANDLE skip-completion metadata is runtime-local.  Host callers fall
+         * back to the default runtime; managed callers use their owning runtime.
+         */
+        llam_runtime_t *rt = llam_runtime_current_owner();
+
+        if (rt != NULL) {
+            llam_windows_forget_fd_assoc(rt, (llam_fd_t)(uintptr_t)handle);
+        }
     }
     if (!CloseHandle((HANDLE)handle)) {
         errno = llam_windows_system_error_to_errno(GetLastError());
