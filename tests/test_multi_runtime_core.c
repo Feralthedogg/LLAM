@@ -2860,6 +2860,13 @@ int main(void) {
     };
     size_t i;
 
+    /*
+     * CI timeout diagnostics depend on seeing the last completed subcase.
+     * Keep progress lines visible even when the process is killed externally.
+     */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     for (i = 0U; i < sizeof(tests) / sizeof(tests[0]); ++i) {
         if (run_named_test(&tests[i]) != 0) {
             return 1;
