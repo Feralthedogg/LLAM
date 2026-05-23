@@ -58,6 +58,7 @@ CLEAN_FILES = \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
 	asan-test_multi_runtime_core \
+	noowner-test_runtime_select_edges \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_multi_runtime_core \
@@ -443,7 +444,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared test test-asan test-tsan analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared test test-asan test-no-owner test-tsan analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 ifeq ($(HOST_PLATFORM),windows)
@@ -642,6 +643,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		cat /tmp/llam-server-flood-invalid.out >&2; \
 		exit 1; \
 	fi
+	$(MAKE) test-no-owner
 
 check: test
 
@@ -651,6 +653,9 @@ ASAN_TEST_TARGETS = \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
 	asan-test_multi_runtime_core
+
+NOOWNER_TEST_TARGETS = \
+	noowner-test_runtime_select_edges
 
 TSAN_TEST_TARGETS = \
 	tsan-test_runtime_core \
@@ -671,6 +676,16 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core
+
+test-no-owner:
+	@set -e; \
+	cleanup() { rm -f $(NOOWNER_TEST_TARGETS); }; \
+	trap cleanup EXIT; \
+	cleanup; \
+	$(MAKE) $(NOOWNER_TEST_TARGETS) \
+		OBJDIR=object-noowner \
+		CPPFLAGS="$(CPPFLAGS) -DLLAM_RUNTIME_DISABLE_OWNER_CHECKS=1"; \
+	./noowner-test_runtime_select_edges
 
 test-tsan:
 	@set -e; \
@@ -788,6 +803,9 @@ asan-test_runtime_api_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS)
 
 asan-test_runtime_core tsan-test_runtime_core: $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
+
+noowner-test_runtime_select_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS) $(LDLIBS)
 
 asan-test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS) $(LDLIBS)
