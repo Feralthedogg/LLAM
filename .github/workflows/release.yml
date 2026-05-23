@@ -87,6 +87,14 @@ jobs:
           LLAM_RELEASE_VERSION="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}" \
           LLAM_VERSION="$version" \
             ./scripts/package_release.sh "${{ matrix.target }}"
+          package_version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
+          package_version="${package_version#v}"
+          package_version="$(printf '%s' "$package_version" | tr '/' '-')"
+          archive="target/dist/llam-${package_version}-${{ matrix.target }}.tar.xz"
+          tar -tf "$archive" > package-files.txt
+          grep '/include/llam/runtime.h$' package-files.txt
+          grep '/include/llam/io.h$' package-files.txt
+          rm -f package-files.txt
 
       - name: Configure Windows release build
         if: runner.os == 'Windows'
@@ -138,13 +146,16 @@ jobs:
           Expand-Archive $archive -DestinationPath $tmp -Force
           $root = Join-Path $tmp "llam-$packageVersion-${{ matrix.target }}"
           foreach ($file in @(
+            "include\llam\runtime.h",
+            "include\llam\io.h",
+            "include\llam\platform.h",
             "examples\demo_internal.h",
             "examples\bench_support.c",
             "examples\stress_internal.h",
             "examples\env_compat.h"
           )) {
             if (-not (Test-Path (Join-Path $root $file))) {
-              throw "missing example package file: $file"
+              throw "missing package file: $file"
             }
           }
 

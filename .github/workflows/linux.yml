@@ -132,6 +132,7 @@ jobs:
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
           grep '/CHANGELOG.md$' package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt
+          grep '/include/llam/io.h$' package-files.txt
           grep '/examples/demo_internal.h$' package-files.txt
           grep '/examples/bench_support.c$' package-files.txt
           grep '/examples/stress_internal.h$' package-files.txt
