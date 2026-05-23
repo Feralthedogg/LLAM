@@ -489,6 +489,14 @@ static int test_positional_io_and_aligned_buffers(void) {
         llam_io_buffer_release(buffer);
         return test_fail("invalid aligned buffer request did not fail with EINVAL");
     }
+    buffer = (llam_io_buffer_t *)&buffer;
+    if (llam_pread_owned_aligned(LLAM_INVALID_FD, SIZE_MAX, 0U, 0U, &buffer) != -1 ||
+        errno != EINVAL ||
+        buffer != NULL) {
+        close_if_valid(&fd);
+        llam_io_buffer_release(buffer);
+        return test_fail("oversized owned pread request did not fail before allocation");
+    }
     if (llam_io_buffer_alloc_aligned(128U, 512U, &buffer) != 0 || buffer == NULL) {
         close_if_valid(&fd);
         return test_fail_errno("llam_io_buffer_alloc_aligned failed");
@@ -590,6 +598,58 @@ static int test_read_owned_invalid_fd_before_allocation(void) {
         return test_fail("invalid-fd owned-read RLIMIT_AS setup failed");
     default:
         return test_fail("llam_read_owned invalid fd returned an unexpected result");
+    }
+}
+
+static int test_pread_owned_invalid_fd_before_allocation(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("invalid-fd owned-pread fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        struct rlimit limit;
+        ssize_t bytes;
+
+        /*
+         * Positional owned reads allocate their destination buffer before the
+         * syscall unless invalid descriptors are rejected first. Keep this as
+         * a regression guard so a hostile count cannot mask EBADF as ENOMEM.
+         */
+        limit.rlim_cur = 128U * 1024U * 1024U;
+        limit.rlim_max = 128U * 1024U * 1024U;
+        if (setrlimit(RLIMIT_AS, &limit) != 0) {
+            _exit(10);
+        }
+        errno = 0;
+        bytes = llam_pread_owned_aligned(LLAM_INVALID_FD, 256U * 1024U * 1024U, 0U, 0U, &buffer);
+        if (bytes == -1 && errno == EBADF && buffer == NULL) {
+            _exit(0);
+        }
+        if (bytes == -1 && errno == ENOMEM) {
+            _exit(2);
+        }
+        _exit(3);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("invalid-fd owned-pread waitpid failed");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("invalid-fd owned-pread child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 2:
+        return test_fail("llam_pread_owned_aligned invalid fd allocated before returning EBADF");
+    case 10:
+        return test_fail("invalid-fd owned-pread RLIMIT_AS setup failed");
+    default:
+        return test_fail("llam_pread_owned_aligned invalid fd returned an unexpected result");
     }
 }
 #endif
@@ -1469,6 +1529,7 @@ int main(void) {
         test_positional_io_and_aligned_buffers() != 0 ||
 #if defined(__linux__)
         test_read_owned_invalid_fd_before_allocation() != 0 ||
+        test_pread_owned_invalid_fd_before_allocation() != 0 ||
 #endif
         test_managed_io_paths() != 0 ||
         test_owned_buffer_release_after_shutdown() != 0 ||

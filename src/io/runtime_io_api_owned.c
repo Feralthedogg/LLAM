@@ -300,8 +300,32 @@ static ssize_t llam_pread_owned_aligned_impl(bool handle_mode,
         return -1;
     }
     *out = NULL;
+    if (llam_positional_validate_async_rw_count(max_count) != 0) {
+        return -1;
+    }
+    if (!llam_io_buffer_alignment_valid(alignment)) {
+        errno = EINVAL;
+        return -1;
+    }
     if (max_count == 0U) {
         return 0;
+    }
+    /*
+     * Owned positional reads allocate the destination buffer before issuing the
+     * syscall. Reject obvious invalid sentinels first so huge counts cannot
+     * turn a descriptor/handle error into an allocation failure.
+     */
+    if (!handle_mode && LLAM_FD_IS_INVALID(fd)) {
+        errno = EBADF;
+        return -1;
+    }
+    if (handle_mode && LLAM_HANDLE_IS_INVALID(handle)) {
+#if LLAM_PLATFORM_POSIX
+        errno = EBADF;
+#else
+        errno = EINVAL;
+#endif
+        return -1;
     }
     buffer = llam_io_buffer_alloc_detached(max_count, alignment, 0U);
     if (buffer == NULL) {
