@@ -490,12 +490,13 @@ LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
  * @brief Destroy a runtime handle.
  *
  * @details
- * Requests cooperative stop, tears down runtime-owned resources, invalidates
- * the handle, and frees heap-backed runtimes returned by
- * ::llam_runtime_create. Passing NULL is a legacy alias for
- * ::llam_runtime_shutdown on the default runtime. Unknown handles are ignored
- * because this function has no errno channel; fallible handle APIs reject them
- * with @c EINVAL.
+ * Requests cooperative stop, tears down runtime-owned resources, and
+ * invalidates the handle. Heap-backed handle storage returned by
+ * ::llam_runtime_create is retired for the process lifetime rather than
+ * immediately reused, so stale raw pointers cannot alias a later runtime.
+ * Passing NULL is a legacy alias for ::llam_runtime_shutdown on the default
+ * runtime. Unknown handles are ignored because this function has no errno
+ * channel; fallible handle APIs reject them with @c EINVAL.
  */
 LLAM_API void llam_runtime_destroy(llam_runtime_t *runtime);
 

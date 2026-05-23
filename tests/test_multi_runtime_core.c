@@ -940,6 +940,33 @@ cleanup:
 #endif
 }
 
+static int test_destroyed_runtime_handle_address_not_reused(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *stale = NULL;
+
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &stale) != 0) {
+        return test_fail_errno("runtime create for stale-address guard failed");
+    }
+    llam_runtime_destroy(stale);
+
+    for (unsigned i = 0U; i < 128U; ++i) {
+        llam_runtime_t *runtime = NULL;
+
+        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+            return test_fail_errno("runtime recreate for stale-address guard failed");
+        }
+        if (runtime == stale) {
+            llam_runtime_destroy(runtime);
+            return test_fail("destroyed runtime handle address was reused");
+        }
+        llam_runtime_destroy(runtime);
+    }
+    return 0;
+}
+
 int main(void) {
     if (test_sync_handle_family_confusion() != 0) {
         return 1;
@@ -966,6 +993,9 @@ int main(void) {
         return 1;
     }
     if (test_runtime_destroy_waits_for_active_run() != 0) {
+        return 1;
+    }
+    if (test_destroyed_runtime_handle_address_not_reused() != 0) {
         return 1;
     }
     printf("[test_multi_runtime_core] ok\n");

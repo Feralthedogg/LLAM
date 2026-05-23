@@ -424,6 +424,6 @@ void llam_runtime_destroy_rt(llam_runtime_t *rt) {
     llam_runtime_lifecycle_unlock();
 
     if (heap_runtime) {
-        free(rt);
+        llam_runtime_retire_heap_handle(rt);
     }
 }

@@ -29,6 +29,7 @@
 
 static pthread_mutex_t g_llam_runtime_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static llam_runtime_t *g_llam_runtime_registry;
+static llam_runtime_t *g_llam_runtime_retired_handles;
 static atomic_uint_fast64_t g_llam_next_runtime_id = 1U;
 
 llam_runtime_t *llam_runtime_default_storage(void) {
@@ -127,6 +128,28 @@ void llam_runtime_unregister_handle(llam_runtime_t *rt) {
             break;
         }
     }
+    pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+}
+
+/**
+ * @brief Retain destroyed heap runtime storage for stale-handle safety.
+ *
+ * @details
+ * Public runtime handles are raw pointers for source compatibility.  If a
+ * destroyed heap runtime were returned to malloc immediately, a later
+ * ::llam_runtime_create could receive the same address and an old stale handle
+ * would alias the new runtime.  Keep only the already-cleaned handle storage on
+ * a process-lifetime retired list so the address cannot be recycled while user
+ * code may still hold the old pointer.
+ */
+void llam_runtime_retire_heap_handle(llam_runtime_t *rt) {
+    if (rt == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&g_llam_runtime_registry_lock);
+    rt->registry_next = g_llam_runtime_retired_handles;
+    g_llam_runtime_retired_handles = rt;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
 }
 
