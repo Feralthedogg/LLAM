@@ -112,6 +112,25 @@ void llam_channel_end_public_op(llam_channel_t *channel) {
     llam_public_active_op_end(&channel->active_ops);
 }
 
+void llam_channel_public_registry_lock(void) {
+    pthread_mutex_lock(&g_llam_channel_registry_lock);
+}
+
+void llam_channel_public_registry_unlock(void) {
+    pthread_mutex_unlock(&g_llam_channel_registry_lock);
+}
+
+llam_channel_t *llam_channel_resolve_public_handle_locked_unpinned(const llam_channel_t *handle) {
+    if (handle == NULL) {
+        return NULL;
+    }
+    return llam_public_slot_resolve_encoded(&g_llam_channel_public_slots,
+                                            (uintptr_t)handle,
+                                            LLAM_SYNC_PUBLIC_HANDLE_SHIFT,
+                                            NULL,
+                                            NULL);
+}
+
 static void llam_channel_end_partial_public_select_ops(llam_channel_t **channels, size_t count) {
     while (count > 0U) {
         --count;

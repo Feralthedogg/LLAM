@@ -219,6 +219,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_cond.o \
 	$(OBJDIR)/src/core/runtime_channel_cache.o \
 	$(OBJDIR)/src/core/runtime_channel_lifecycle.o \
+	$(OBJDIR)/src/core/runtime_channel_fast.o \
 	$(OBJDIR)/src/core/runtime_channel.o \
 	$(OBJDIR)/src/core/runtime_channel_select_fast.o \
 	$(OBJDIR)/src/core/runtime_channel_select.o \

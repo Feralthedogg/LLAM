@@ -69,6 +69,15 @@ typedef struct owner_diag_state {
     int payload;
 } owner_diag_state_t;
 
+#if defined(__APPLE__)
+typedef struct timer_handoff_state {
+    core_state_t core;
+    atomic_uint timer_armed;
+    unsigned yields;
+    uint64_t sleep_ns;
+} timer_handoff_state_t;
+#endif
+
 #if LLAM_PLATFORM_POSIX
 typedef struct dump_blocking_state {
     core_state_t core;
@@ -357,6 +366,34 @@ static void detached_task(void *arg) {
     llam_yield();
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
+
+#if defined(__APPLE__)
+static void timer_handoff_sleep_task(void *arg) {
+    timer_handoff_state_t *state = arg;
+
+    /*
+     * Store just before sleeping. On a deterministic single shard, this task
+     * keeps running until the sleep parks, so paired yielders see a live timer.
+     */
+    atomic_store_explicit(&state->timer_armed, 1U, memory_order_release);
+    if (llam_sleep_ns(state->sleep_ns) != 0) {
+        task_fail(&state->core, "timer handoff sleeper failed", errno);
+    }
+}
+
+static void timer_handoff_yield_task(void *arg) {
+    timer_handoff_state_t *state = arg;
+    unsigned i;
+
+    while (atomic_load_explicit(&state->timer_armed, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    for (i = 0U; i < state->yields; ++i) {
+        llam_yield();
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
+}
+#endif
 
 #if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS
 static void aarch64_simd_preservation_task(void *arg) {
@@ -1739,6 +1776,104 @@ cleanup_env:
     return rc;
 }
 
+static int test_direct_yield_timer_policy_is_bounded(void) {
+#if defined(__APPLE__)
+    char *saved_stats = test_dup_env_value("LLAM_DIRECT_HANDOFF_STATS");
+    char *saved_handoff = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF");
+    char *saved_allow_timers = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS");
+    char *saved_burst = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_BURST");
+    timer_handoff_state_t state;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_task_t *sleeper = NULL;
+    llam_task_t *first = NULL;
+    llam_task_t *second = NULL;
+    int rc = 1;
+
+    if (setenv("LLAM_DIRECT_HANDOFF_STATS", "1", 1) != 0 ||
+        unsetenv("LLAM_YIELD_DIRECT_HANDOFF") != 0 ||
+        unsetenv("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS") != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF_BURST", "64", 1) != 0) {
+        rc = test_fail_errno("setenv for timer direct-yield policy failed");
+        goto cleanup_env;
+    }
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    atomic_init(&state.timer_armed, 0U);
+    state.yields = 512U;
+    state.sleep_ns = 20ULL * 1000ULL * 1000ULL;
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno("timer direct-yield runtime init failed");
+        goto cleanup_env;
+    }
+    sleeper = llam_spawn(timer_handoff_sleep_task, &state, NULL);
+    first = llam_spawn(timer_handoff_yield_task, &state, NULL);
+    second = llam_spawn(timer_handoff_yield_task, &state, NULL);
+    if (sleeper == NULL || first == NULL || second == NULL) {
+        rc = test_fail_errno("timer direct-yield spawn failed");
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 ||
+        llam_join(sleeper) != 0 ||
+        llam_join(first) != 0 ||
+        llam_join(second) != 0) {
+        rc = test_fail_errno("timer direct-yield run/join failed");
+        goto cleanup_runtime;
+    }
+    sleeper = NULL;
+    first = NULL;
+    second = NULL;
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.core.ran, memory_order_relaxed) != 2U) {
+        rc = test_fail("timer direct-yield tasks did not complete cleanly");
+        goto cleanup_runtime;
+    }
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno("collect timer direct-yield stats failed");
+        goto cleanup_runtime;
+    }
+    if (stats.yield_direct_attempts == 0U || stats.yield_direct_fast_hits == 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] Darwin timer direct-yield policy produced no fast hits: attempts=%llu hits=%llu fail_policy=%llu\n",
+                (unsigned long long)stats.yield_direct_attempts,
+                (unsigned long long)stats.yield_direct_fast_hits,
+                (unsigned long long)stats.yield_direct_fail_policy);
+        rc = 1;
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (sleeper != NULL) {
+        (void)llam_detach(sleeper);
+    }
+    if (first != NULL) {
+        (void)llam_detach(first);
+    }
+    if (second != NULL) {
+        (void)llam_detach(second);
+    }
+    llam_runtime_shutdown();
+cleanup_env:
+    test_restore_env_value("LLAM_DIRECT_HANDOFF_STATS", saved_stats);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF", saved_handoff);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", saved_allow_timers);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_BURST", saved_burst);
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 static void *init_shutdown_race_init_thread(void *arg) {
     init_shutdown_race_state_t *state = arg;
     llam_runtime_opts_t opts;
@@ -2215,6 +2350,7 @@ static int test_concurrent_spawn_contract(void) {
 int main(void) {
     RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
+    RUN_RUNTIME_CORE_TEST(test_direct_yield_timer_policy_is_bounded);
     RUN_RUNTIME_CORE_TEST(test_runtime_handle_api);
     RUN_RUNTIME_CORE_TEST(test_runtime_lifecycle_and_task_contracts);
     RUN_RUNTIME_CORE_TEST(test_request_stop_returns_success);

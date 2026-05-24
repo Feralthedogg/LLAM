@@ -622,13 +622,24 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->direct_handoff_stats_enabled = llam_runtime_env_flag("LLAM_DIRECT_HANDOFF_STATS", 0U);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
 #else
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 0U, 65535U);
 #endif
+#if defined(__APPLE__)
+    /*
+     * Darwin sleep fanout benefits from direct handoff while timers are armed,
+     * but the bounded burst above still returns to the scheduler frequently
+     * enough to fire near-deadline timers.
+     */
+    rt->direct_handoff_allow_timers =
+        llam_runtime_env_flag("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS",
+                            rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 1U);
+#else
     rt->direct_handoff_allow_timers =
         llam_runtime_env_flag("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", 0U);
+#endif
     if (light_safepoint_env != NULL && light_safepoint_env[0] != '\0') {
         rt->cheap_safepoint = strcmp(light_safepoint_env, "0") != 0 ? 1U : 0U;
     } else {

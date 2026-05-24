@@ -168,6 +168,13 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
          * timer-heavy fanout can still return to the scheduler.
          */
         return rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 2U : 0U;
+#elif defined(__APPLE__)
+        /*
+         * Darwin uses the same owner-lane exchange as Linux. Keep debug-safe
+         * deterministic, but let balanced/latency profiles avoid scheduler
+         * round trips in yield-heavy fanout before timers are armed.
+         */
+        return rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 2U : 0U;
 #else
         return rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2U : 0U;
 #endif
@@ -787,19 +794,19 @@ int llam_detach(llam_task_t *task_handle) {
 }
 
 /**
- * @brief Sleep until an absolute monotonic deadline.
+ * @brief Shared implementation for absolute and relative sleeps.
  *
- * Managed tasks are inserted into the shard timer heap and parked. Non-managed
- * callers use @c nanosleep in a loop so this API remains useful before or
- * outside scheduler execution.
+ * @details
+ * @c llam_sleep_ns already samples the monotonic clock to build its absolute
+ * deadline.  Non-managed callers can reuse that sample for the first nanosleep
+ * iteration.  Managed callers must resample after @c llam_task_safepoint()
+ * because a safepoint can yield before the task parks.
  *
  * @param deadline_ns Absolute monotonic deadline in nanoseconds.
- *
- * @return 0 when the deadline has passed.
- * @return -1 with @c errno set on invalid runtime state, allocation failure,
- *         cancellation, or unexpected @c nanosleep failure outside the runtime.
+ * @param have_now_ns Whether @p now_ns is a valid monotonic timestamp.
+ * @param now_ns      Caller-provided timestamp when @p have_now_ns is true.
  */
-int llam_sleep_until(uint64_t deadline_ns) {
+static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_t now_ns) {
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_wait_node_t *node = NULL;
@@ -818,15 +825,16 @@ int llam_sleep_until(uint64_t deadline_ns) {
             return -1;
         }
         for (;;) {
-            uint64_t now_ns = llam_now_ns();
+            uint64_t current_ns = have_now_ns ? now_ns : llam_now_ns();
             struct timespec ts;
 
-            if (deadline_ns <= now_ns) {
+            have_now_ns = false;
+            if (deadline_ns <= current_ns) {
                 errno = caller_errno;
                 return 0;
             }
-            ts.tv_sec = (time_t)((deadline_ns - now_ns) / 1000000000ULL);
-            ts.tv_nsec = (long)((deadline_ns - now_ns) % 1000000000ULL);
+            ts.tv_sec = (time_t)((deadline_ns - current_ns) / 1000000000ULL);
+            ts.tv_nsec = (long)((deadline_ns - current_ns) % 1000000000ULL);
             rc = nanosleep(&ts, NULL);
             if (rc == 0) {
                 errno = caller_errno;
@@ -879,7 +887,9 @@ int llam_sleep_until(uint64_t deadline_ns) {
      * ENOMEM after the lock is released.
      */
     timer_inserted = task->active_timer != NULL;
-    if (timer_inserted && task->cancel_token == NULL) {
+    if (timer_inserted &&
+        task->cancel_token == NULL &&
+        shard->runtime->trace_events_enabled != 0U) {
         llam_trace_shard(shard, task, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_SLEEP);
         traced_sleep = true;
     }
@@ -921,7 +931,9 @@ int llam_sleep_until(uint64_t deadline_ns) {
 sleep_wait_ready:
     shard->metrics.sleeps += 1U;
     shard->metrics.parks += 1U;
-    if (!traced_sleep && !timer_completion_pending) {
+    if (!traced_sleep &&
+        !timer_completion_pending &&
+        shard->runtime->trace_events_enabled != 0U) {
         pthread_mutex_lock(&shard->lock);
         if (task->state == LLAM_TASK_STATE_PARKED &&
             (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) == LLAM_WAIT_SLEEP) {
@@ -947,12 +959,31 @@ sleep_wait_ready:
         errno = rc;
         return -1;
     }
-    if (!llam_deadline_passed(deadline_ns) && llam_task_cancel_token_is_cancelled(task)) {
+    if (task->cancel_token != NULL &&
+        !llam_deadline_passed(deadline_ns) &&
+        llam_task_cancel_token_is_cancelled(task)) {
         errno = ECANCELED;
         return -1;
     }
     errno = caller_errno;
     return 0;
+}
+
+/**
+ * @brief Sleep until an absolute monotonic deadline.
+ *
+ * Managed tasks are inserted into the shard timer heap and parked. Non-managed
+ * callers use @c nanosleep in a loop so this API remains useful before or
+ * outside scheduler execution.
+ *
+ * @param deadline_ns Absolute monotonic deadline in nanoseconds.
+ *
+ * @return 0 when the deadline has passed.
+ * @return -1 with @c errno set on invalid runtime state, allocation failure,
+ *         cancellation, or unexpected @c nanosleep failure outside the runtime.
+ */
+int llam_sleep_until(uint64_t deadline_ns) {
+    return llam_sleep_until_impl(deadline_ns, false, 0U);
 }
 
 /**
@@ -977,5 +1008,5 @@ int llam_sleep_ns(uint64_t duration_ns) {
     } else {
         deadline_ns = now_ns + duration_ns;
     }
-    return llam_sleep_until(deadline_ns);
+    return llam_sleep_until_impl(deadline_ns, true, now_ns);
 }

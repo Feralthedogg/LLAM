@@ -48,6 +48,18 @@ typedef struct select_state {
     unsigned mode;
 } select_state_t;
 
+typedef struct select_stale_second_state {
+    atomic_uint failures;
+    int first_errno;
+    char first_case[160];
+    llam_channel_t *ready;
+    llam_channel_t *stale;
+    void *received;
+    size_t selected;
+    int select_rc;
+    int select_errno;
+} select_stale_second_state_t;
+
 static int fail_errno(const char *message) {
     fprintf(stderr, "[test_runtime_select_edges] %s: errno=%d (%s)\n", message, errno, strerror(errno));
     return 1;
@@ -60,7 +72,26 @@ static void task_fail(select_state_t *state, const char *where, int err) {
     }
 }
 
+static void stale_second_task_fail(select_stale_second_state_t *state, const char *where, int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err;
+        (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
 static int check_task_failures(select_state_t *state) {
+    if (atomic_load_explicit(&state->failures, memory_order_relaxed) == 0U) {
+        return 0;
+    }
+    fprintf(stderr,
+            "[test_runtime_select_edges] task failed at %s errno=%d (%s)\n",
+            state->first_case,
+            state->first_errno,
+            strerror(state->first_errno));
+    return 1;
+}
+
+static int check_stale_second_task_failures(select_stale_second_state_t *state) {
     if (atomic_load_explicit(&state->failures, memory_order_relaxed) == 0U) {
         return 0;
     }
@@ -262,12 +293,102 @@ cleanup:
     return rc;
 }
 
+static void select_stale_second_ready_first_task(void *arg) {
+    select_stale_second_state_t *state = arg;
+    llam_select_op_t ops[2];
+
+    memset(ops, 0, sizeof(ops));
+    ops[0].kind = LLAM_SELECT_OP_RECV;
+    ops[0].channel = state->ready;
+    ops[0].recv_out = &state->received;
+    ops[1].kind = LLAM_SELECT_OP_RECV;
+    ops[1].channel = state->stale;
+    ops[1].recv_out = &state->received;
+
+    state->selected = SIZE_MAX;
+    errno = 0;
+    state->select_rc = llam_channel_select(ops, 2U, 0U, &state->selected);
+    state->select_errno = errno;
+
+    /*
+     * The two-op fast path must validate every public handle before touching
+     * channel state.  A stale second handle therefore rejects the whole call
+     * and must not consume the ready value from op 0.
+     */
+    if (state->select_rc != -1 || state->select_errno != EINVAL ||
+        state->selected != SIZE_MAX || state->received != NULL) {
+        stale_second_task_fail(state, "stale second handle was not rejected atomically", EINVAL);
+    }
+}
+
+static int run_select_stale_second_ready_first(void) {
+    select_stale_second_state_t state;
+    llam_task_t *task = NULL;
+    void *value = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    state.selected = SIZE_MAX;
+    state.ready = llam_channel_create(1U);
+    state.stale = llam_channel_create(1U);
+    if (state.ready == NULL || state.stale == NULL) {
+        goto cleanup;
+    }
+    if (llam_channel_try_send(state.ready, (void *)(uintptr_t)0xC0FFEEU) != 0) {
+        goto cleanup;
+    }
+    if (llam_channel_destroy(state.stale) != 0) {
+        goto cleanup;
+    }
+
+    task = llam_spawn(select_stale_second_ready_first_task, &state, NULL);
+    if (task == NULL) {
+        goto cleanup;
+    }
+    if (llam_run() != 0 || check_stale_second_task_failures(&state) != 0) {
+        goto cleanup;
+    }
+    if (llam_join(task) != 0) {
+        task = NULL;
+        goto cleanup;
+    }
+    task = NULL;
+    if (llam_channel_try_recv_result(state.ready, &value) != 0 || value != (void *)(uintptr_t)0xC0FFEEU) {
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (rc != 0) {
+        if (state.ready != NULL) {
+            (void)llam_channel_close(state.ready);
+        }
+        (void)llam_runtime_request_stop();
+        (void)llam_run();
+    }
+    if (task != NULL) {
+        (void)llam_join(task);
+    }
+    if (state.ready != NULL && llam_channel_destroy(state.ready) != 0) {
+        rc = 1;
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("select stale second ready first failed");
+    }
+    return rc;
+}
+
 int main(void) {
     unsigned rounds = select_race_rounds_from_env();
     unsigned i;
 
     if (init_runtime() != 0) {
         return fail_errno("runtime init for select races failed");
+    }
+    if (run_select_stale_second_ready_first() != 0) {
+        llam_runtime_shutdown();
+        return 1;
     }
     for (i = 0U; i < rounds; ++i) {
         if (run_select_race_once(SELECT_RACE_SEND) != 0 ||

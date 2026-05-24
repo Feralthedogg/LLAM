@@ -53,6 +53,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_lifecycle.c
     src/core/runtime_channel_cache.c
     src/core/runtime_channel_lifecycle.c
+    src/core/runtime_channel_fast.c
     src/core/runtime_channel.c
     src/core/runtime_channel_select_fast.c
     src/core/runtime_channel_select.c

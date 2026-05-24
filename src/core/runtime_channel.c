@@ -81,7 +81,7 @@ static void llam_channel_handoff_yield(void) {
  * without improving fairness for yield-heavy workloads, so release profiles
  * batch those safepoints while forced-yield diagnostics keep exact behavior.
  */
-static void llam_channel_hot_safepoint(void) {
+void llam_channel_hot_safepoint(void) {
     llam_runtime_t *rt;
     unsigned interval;
 
@@ -336,6 +336,17 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
     llam_wait_node_t *receiver;
     llam_wait_node_t *node;
     int rc;
+
+    if (!has_deadline) {
+        int fast = llam_channel_try_send_buffered_fast(channel, value);
+
+        if (fast > 0) {
+            return 0;
+        }
+        if (fast < 0) {
+            return -1;
+        }
+    }
 
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {

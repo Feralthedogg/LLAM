@@ -109,6 +109,92 @@ int llam_channel_select_try_one_fast(llam_select_op_t *op) {
     return rc;
 }
 
+static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, size_t *selected_index) {
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    llam_runtime_t *current_owner = llam_runtime_current_owner();
+#endif
+    llam_channel_t *first;
+    llam_channel_t *second;
+    int selected;
+
+    /*
+     * The two-op ready/timeout path is the dominant select shape in benchmarks
+     * and in Go-style channel races.  Validate both public handles before
+     * touching either channel so a stale later operand still rejects the whole
+     * call.  Holding the registry lock until the quick probes finish keeps the
+     * objects alive without taking active-op pins on both channels.
+     */
+    llam_channel_public_registry_lock();
+    first = llam_channel_resolve_public_handle_locked_unpinned(ops[0].channel);
+    if (LLAM_UNLIKELY(first == NULL)) {
+        llam_channel_public_registry_unlock();
+        errno = EINVAL;
+        return -1;
+    }
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    if (LLAM_UNLIKELY(first->owner_runtime == NULL || first->owner_runtime != current_owner)) {
+        llam_channel_public_registry_unlock();
+        errno = first->owner_runtime == NULL ? EINVAL : EXDEV;
+        return -1;
+    }
+#else
+    if (LLAM_UNLIKELY(first->owner_runtime == NULL)) {
+        llam_channel_public_registry_unlock();
+        errno = EINVAL;
+        return -1;
+    }
+#endif
+
+    second = llam_channel_resolve_public_handle_locked_unpinned(ops[1].channel);
+    if (LLAM_UNLIKELY(second == NULL)) {
+        llam_channel_public_registry_unlock();
+        errno = EINVAL;
+        return -1;
+    }
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    if (LLAM_UNLIKELY(second->owner_runtime == NULL || second->owner_runtime != current_owner)) {
+        llam_channel_public_registry_unlock();
+        errno = second->owner_runtime == NULL ? EINVAL : EXDEV;
+        return -1;
+    }
+#else
+    if (LLAM_UNLIKELY(second->owner_runtime == NULL)) {
+        llam_channel_public_registry_unlock();
+        errno = EINVAL;
+        return -1;
+    }
+#endif
+    if (LLAM_UNLIKELY(first == second)) {
+        llam_channel_public_registry_unlock();
+        return LLAM_SELECT_TRY_FALLBACK;
+    }
+
+    selected = llam_channel_select_try_one_resolved(&ops[0], first);
+    if (selected < 0 || selected == LLAM_SELECT_TRY_FALLBACK) {
+        llam_channel_public_registry_unlock();
+        return selected;
+    }
+    if (selected > 0) {
+        *selected_index = 0U;
+        llam_channel_public_registry_unlock();
+        return LLAM_SELECT_TRY_SELECTED;
+    }
+
+    selected = llam_channel_select_try_one_resolved(&ops[1], second);
+    if (selected < 0 || selected == LLAM_SELECT_TRY_FALLBACK) {
+        llam_channel_public_registry_unlock();
+        return selected;
+    }
+    if (selected > 0) {
+        *selected_index = 1U;
+        llam_channel_public_registry_unlock();
+        return LLAM_SELECT_TRY_SELECTED;
+    }
+
+    llam_channel_public_registry_unlock();
+    return LLAM_SELECT_TRY_NOT_READY;
+}
+
 int llam_channel_select_try_ready_batch(llam_select_op_t *ops,
                                         size_t op_count,
                                         size_t start,
@@ -118,6 +204,9 @@ int llam_channel_select_try_ready_batch(llam_select_op_t *ops,
 
     if (op_count > LLAM_CHANNEL_SELECT_INLINE_OPS) {
         return LLAM_SELECT_TRY_FALLBACK;
+    }
+    if (op_count == 2U && start == 0U) {
+        return llam_channel_select_try_ready_pair_registry(ops, selected_index);
     }
     if (llam_channel_resolve_public_handles_for_select(ops, op_count, channels) != 0) {
         return -1;

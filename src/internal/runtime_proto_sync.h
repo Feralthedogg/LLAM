@@ -88,6 +88,8 @@ bool llam_channel_cache_release(llam_channel_t *channel);
 int llam_channel_register_live(llam_channel_t *channel);
 void llam_channel_tls_cache_drain(void);
 void llam_channel_global_cache_drain(void);
+void llam_channel_hot_safepoint(void);
+int llam_channel_try_send_buffered_fast(llam_channel_t *handle, void *value);
 
 /*
  * Public channel-handle encoding.
@@ -99,6 +101,9 @@ void llam_channel_global_cache_drain(void);
  */
 llam_channel_t *llam_channel_resolve_public_handle(const llam_channel_t *handle);
 void llam_channel_end_public_op(llam_channel_t *channel);
+void llam_channel_public_registry_lock(void);
+void llam_channel_public_registry_unlock(void);
+llam_channel_t *llam_channel_resolve_public_handle_locked_unpinned(const llam_channel_t *handle);
 int llam_channel_resolve_public_handles_for_select(llam_select_op_t *ops,
                                                    size_t op_count,
                                                    llam_channel_t **out_channels);
