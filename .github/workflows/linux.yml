@@ -185,7 +185,7 @@ jobs:
             cat "$tmp_install/install-symlink.out"
             exit 1
           fi
-          grep 'refusing symlink install prefix' "$tmp_install/install-symlink.out"
+          grep 'refusing symlink component in install prefix' "$tmp_install/install-symlink.out"
           test ! -e "$tmp_install/outside/include/llam/runtime.h"
           "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix" --force
           test -f "$tmp_install/prefix/share/llam/CHANGELOG.md"

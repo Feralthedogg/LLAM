@@ -122,7 +122,7 @@ jobs:
             cat "$tmp/install-symlink.out"
             exit 1
           fi
-          grep 'refusing symlink install prefix' "$tmp/install-symlink.out"
+          grep 'refusing symlink component in install prefix' "$tmp/install-symlink.out"
           test ! -e "$tmp/outside/include/llam/runtime.h"
 
       - name: Configure Windows release build
