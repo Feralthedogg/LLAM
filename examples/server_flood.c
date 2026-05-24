@@ -32,11 +32,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "server_flood_stats.h"
+
 #if defined(_WIN32)
-int main(void) {
-    fprintf(stderr, "server_flood requires POSIX sockets/fork in this build\n");
-    return 2;
-}
+int main(void) { fprintf(stderr, "server_flood requires POSIX sockets/fork in this build\n"); return 2; }
 #else
 
 #include <arpa/inet.h>
@@ -101,15 +100,6 @@ typedef struct flood_client {
     bool closed;
 } flood_client_t;
 
-typedef struct flood_server_stats {
-    bool available;
-    uint64_t outbox_full_drops;
-    uint64_t outbox_closed_drops;
-    uint64_t broadcast_messages_created;
-    uint64_t broadcast_deliveries_attempted;
-    uint64_t broadcast_deliveries_enqueued;
-} flood_server_stats_t;
-
 static uint64_t flood_now_ns(void) {
     struct timespec ts;
 
@@ -155,12 +145,8 @@ static unsigned flood_env_unsigned(const char *name, unsigned fallback) {
     const char *value = getenv(name);
     unsigned parsed;
 
-    if (value == NULL || value[0] == '\0') {
-        return fallback;
-    }
-    if (!flood_parse_unsigned_value(value, &parsed)) {
-        return fallback;
-    }
+    if (value == NULL || value[0] == '\0') { return fallback; }
+    if (!flood_parse_unsigned_value(value, &parsed)) { return fallback; }
     return parsed;
 }
 
@@ -168,12 +154,8 @@ static double flood_env_double(const char *name, double fallback) {
     const char *value = getenv(name);
     double parsed;
 
-    if (value == NULL || value[0] == '\0') {
-        return fallback;
-    }
-    if (!flood_parse_double_value(value, &parsed)) {
-        return fallback;
-    }
+    if (value == NULL || value[0] == '\0') { return fallback; }
+    if (!flood_parse_double_value(value, &parsed)) { return fallback; }
     return parsed;
 }
 
@@ -292,9 +274,7 @@ static int flood_find_free_port(const char *host) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     int port;
 
-    if (fd < 0) {
-        return -1;
-    }
+    if (fd < 0) { return -1; }
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = 0;
@@ -353,149 +333,15 @@ static pid_t flood_start_server(const char *server_path,
     _exit(127);
 }
 
-static bool flood_parse_u64_field(const char *line, const char *key, uint64_t *out) {
-    const char *cursor = strstr(line, key);
-    char *end = NULL;
-    unsigned long long parsed;
-
-    if (cursor == NULL || out == NULL) {
-        return false;
-    }
-    cursor += strlen(key);
-    if (*cursor != '=') {
-        return false;
-    }
-    cursor += 1;
-    errno = 0;
-    parsed = strtoull(cursor, &end, 10);
-    if (errno != 0 || end == cursor) {
-        return false;
-    }
-    *out = (uint64_t)parsed;
-    return true;
-}
-
-static bool flood_read_server_stats(const char *stats_path, flood_server_stats_t *stats) {
-    char line[512];
-    char last_line[512];
-    FILE *file;
-
-    if (stats == NULL) {
-        return false;
-    }
-    memset(stats, 0, sizeof(*stats));
-    if (stats_path == NULL || stats_path[0] == '\0') {
-        return false;
-    }
-    file = fopen(stats_path, "r");
-    if (file == NULL) {
-        return false;
-    }
-    last_line[0] = '\0';
-    while (fgets(line, sizeof(line), file) != NULL) {
-        if (line[0] != '\0') {
-            (void)snprintf(last_line, sizeof(last_line), "%s", line);
-        }
-    }
-    fclose(file);
-    if (last_line[0] == '\0') {
-        return false;
-    }
-    last_line[strcspn(last_line, "\r\n")] = '\0';
-    if (!flood_parse_u64_field(last_line, "outbox_full_drops", &stats->outbox_full_drops) ||
-        !flood_parse_u64_field(last_line, "outbox_closed_drops", &stats->outbox_closed_drops) ||
-        !flood_parse_u64_field(last_line, "broadcast_messages_created", &stats->broadcast_messages_created) ||
-        !flood_parse_u64_field(last_line, "broadcast_deliveries_attempted", &stats->broadcast_deliveries_attempted) ||
-        !flood_parse_u64_field(last_line, "broadcast_deliveries_enqueued", &stats->broadcast_deliveries_enqueued)) {
-        return false;
-    }
-    stats->available = true;
-    return true;
-}
-
 static bool flood_read_server_stats_retry(const char *stats_path, flood_server_stats_t *stats) {
     uint64_t deadline = flood_now_ns() + 2000000000ULL;
 
     do {
-        if (flood_read_server_stats(stats_path, stats)) {
-            return true;
-        }
+        if (flood_read_server_stats(stats_path, stats)) { return true; }
         usleep(10000);
     } while (flood_now_ns() < deadline);
 
     return false;
-}
-
-static void flood_print_server_stats(const flood_server_stats_t *stats) {
-    printf("server flood stats: server stopped; outbox_full_drops=%" PRIu64
-           " outbox_closed_drops=%" PRIu64
-           " broadcast_messages_created=%" PRIu64
-           " broadcast_deliveries_attempted=%" PRIu64
-           " broadcast_deliveries_enqueued=%" PRIu64 "\n",
-           stats->outbox_full_drops,
-           stats->outbox_closed_drops,
-           stats->broadcast_messages_created,
-           stats->broadcast_deliveries_attempted,
-           stats->broadcast_deliveries_enqueued);
-}
-
-static intmax_t flood_delta_u64(uint64_t lhs, uint64_t rhs) {
-    if (lhs >= rhs) {
-        return (intmax_t)(lhs - rhs);
-    }
-    return -(intmax_t)(rhs - lhs);
-}
-
-static intmax_t flood_abs_imax(intmax_t value) {
-    return value < 0 ? -value : value;
-}
-
-static intmax_t flood_print_accounting(const flood_server_stats_t *stats,
-                                       uint64_t expected_deliveries,
-                                       uint64_t observed_deliveries,
-                                       uint64_t missing_deliveries) {
-    uint64_t outbox_drops = stats->outbox_full_drops + stats->outbox_closed_drops;
-    intmax_t expected_minus_attempted =
-        flood_delta_u64(expected_deliveries, stats->broadcast_deliveries_attempted);
-    intmax_t enqueued_minus_observed =
-        flood_delta_u64(stats->broadcast_deliveries_enqueued, observed_deliveries);
-    intmax_t explained_missing =
-        expected_minus_attempted + (intmax_t)outbox_drops + enqueued_minus_observed;
-    intmax_t accounting_gap = (intmax_t)missing_deliveries - explained_missing;
-    double drop_explained_ratio =
-        missing_deliveries > 0U ? (double)outbox_drops / (double)missing_deliveries : 0.0;
-
-    /*
-     * This is the core invariant that separates expected best-effort drops from
-     * mystery loss.  A near-zero gap means missing deliveries are explained by
-     * work the server had not attempted yet, bounded-outbox drops, or deliveries
-     * enqueued but not observed before client drain ended.
-     */
-    printf("server flood accounting: expected_minus_attempted=%" PRIdMAX
-           " outbox_drops=%" PRIu64
-           " enqueued_minus_observed=%" PRIdMAX
-           " explained_missing=%" PRIdMAX
-           " accounting_gap=%" PRIdMAX
-           " drop_explained_ratio=%.9f\n",
-           expected_minus_attempted,
-           outbox_drops,
-           enqueued_minus_observed,
-           explained_missing,
-           accounting_gap,
-           drop_explained_ratio);
-    return accounting_gap;
-}
-
-static intmax_t flood_accounting_tolerance(uint64_t expected_deliveries) {
-    uint64_t scaled = expected_deliveries / 1000000U;
-
-    if (scaled < 4096U) {
-        scaled = 4096U;
-    }
-    if (scaled > 100000U) {
-        scaled = 100000U;
-    }
-    return (intmax_t)scaled;
 }
 
 static bool flood_server_running(pid_t pid) {
@@ -528,9 +374,7 @@ static bool flood_stop_server(pid_t pid, double timeout_sec) {
     uint64_t deadline;
     int status;
 
-    if (pid <= 0) {
-        return false;
-    }
+    if (pid <= 0) { return false; }
     if (waitpid(pid, &status, WNOHANG) == pid) {
         flood_report_abnormal_server_status("exited before cleanup", status);
         return false;
@@ -853,9 +697,12 @@ int main(int argc, char **argv) {
     uint64_t send_cursor = 0U;
     uint64_t loops_without_progress = 0U;
     pid_t server_pid = -1;
+    char stats_dir[256] = "";
     char stats_path[256] = "";
     char dump_path[512] = "";
+    const char *tmp_root;
     const char *dump_dir;
+    int path_len;
     int port;
     int rc = 1;
 
@@ -879,12 +726,25 @@ int main(int argc, char **argv) {
         perror("find free port");
         goto done;
     }
-    (void)snprintf(stats_path,
-                   sizeof(stats_path),
-                   "/tmp/llam_server_flood_stats_%ld_%d.txt",
-                   (long)getpid(),
-                   port);
-    (void)unlink(stats_path);
+    tmp_root = getenv("TMPDIR");
+    if (tmp_root == NULL || tmp_root[0] == '\0') { tmp_root = "/tmp"; }
+    path_len = snprintf(stats_dir, sizeof(stats_dir), "%s/llam_server_flood_XXXXXX", tmp_root);
+    if (path_len < 0 || path_len >= (int)sizeof(stats_dir)) {
+        errno = ENAMETOOLONG;
+        perror("stats dir path");
+        goto done;
+    }
+    if (mkdtemp(stats_dir) == NULL) {
+        perror("mkdtemp stats dir");
+        goto done;
+    }
+    /* Private 0700 dir prevents untrusted path replacement before stats write. */
+    path_len = snprintf(stats_path, sizeof(stats_path), "%s/stats.txt", stats_dir);
+    if (path_len < 0 || path_len >= (int)sizeof(stats_path)) {
+        errno = ENAMETOOLONG;
+        perror("stats path");
+        goto done;
+    }
     dump_dir = getenv("LLAM_SERVER_FLOOD_DUMP_DIR");
     if (dump_dir == NULL || dump_dir[0] == '\0') {
         dump_dir = getenv("LLAM_SERVER_COMPOSITE_DUMP_DIR");
@@ -893,12 +753,12 @@ int main(int argc, char **argv) {
         dump_dir = getenv("OUT_DIR");
     }
     if (dump_dir != NULL && dump_dir[0] != '\0') {
-        (void)snprintf(dump_path,
-                       sizeof(dump_path),
-                       "%s/server-flood-runtime-dump-%ld-%d.log",
-                       dump_dir,
-                       (long)getpid(),
-                       port);
+        path_len = snprintf(dump_path, sizeof(dump_path), "%s/server-flood-runtime-dump-%ld-%d.log", dump_dir, (long)getpid(), port);
+        if (path_len < 0 || path_len >= (int)sizeof(dump_path)) {
+            errno = ENAMETOOLONG;
+            perror("dump path");
+            goto done;
+        }
     }
     server_pid = flood_start_server(opts.server_path, port, stats_path, dump_path, opts.server_lossless);
     if (server_pid < 0) {
@@ -1036,11 +896,8 @@ int main(int argc, char **argv) {
         goto done;
     }
     if (opts.min_delivery_ratio > 0.0 && expected_deliveries > 0U && delivery_ratio < opts.min_delivery_ratio) {
-        fprintf(stderr,
-                "delivery_ratio %.9f below required %.9f; missing_deliveries=%" PRIu64 "\n",
-                delivery_ratio,
-                opts.min_delivery_ratio,
-                missing_deliveries);
+        fprintf(stderr, "delivery_ratio %.9f below required %.9f; missing_deliveries=%" PRIu64 "\n",
+                delivery_ratio, opts.min_delivery_ratio, missing_deliveries);
         goto done;
     }
     rc = 0;
@@ -1067,10 +924,8 @@ done:
                 rc = 1;
             }
             if (flood_abs_imax(accounting_gap) > tolerance && rc == 0) {
-                fprintf(stderr,
-                        "accounting_gap=%" PRIdMAX " exceeds tolerance=%" PRIdMAX "\n",
-                        accounting_gap,
-                        tolerance);
+                fprintf(stderr, "accounting_gap=%" PRIdMAX " exceeds tolerance=%" PRIdMAX "\n",
+                        accounting_gap, tolerance);
                 rc = 1;
             }
         } else {
@@ -1081,15 +936,14 @@ done:
             }
         }
         if (killed) {
-            fprintf(stderr,
-                    "server did not stop within %.1fs after SIGINT; killed\n",
-                    opts.shutdown_timeout_sec);
+            fprintf(stderr, "server did not stop within %.1fs after SIGINT; killed\n", opts.shutdown_timeout_sec);
             if (opts.fail_on_forced_stop && rc == 0) {
                 rc = 1;
             }
         }
     }
-    (void)unlink(stats_path);
+    if (stats_path[0] != '\0') { (void)unlink(stats_path); }
+    if (stats_dir[0] != '\0') { (void)rmdir(stats_dir); }
     free(fds);
     free(clients);
     return rc;

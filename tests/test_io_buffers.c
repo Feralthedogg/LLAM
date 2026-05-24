@@ -1411,6 +1411,80 @@ cleanup:
     return rc;
 }
 
+static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *handle = NULL;
+    unsigned char *backend_storage = NULL;
+    const char payload[] = "safe";
+    size_t payload_len = strlen(payload);
+    int rc = 1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("provided-buffer clamp opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("provided-buffer clamp runtime create failed");
+    }
+    backend_storage = malloc(payload_len);
+    buffer = calloc(1U, sizeof(*buffer));
+    if (backend_storage == NULL || buffer == NULL) {
+        rc = test_fail_errno("provided-buffer clamp allocation failed");
+        goto cleanup;
+    }
+    memcpy(backend_storage, payload, payload_len);
+    buffer->owner_runtime = runtime;
+    buffer->detached_wrapper = true;
+    buffer->provided_storage = true;
+    buffer->provided_node_index = 0U;
+    buffer->provided_bid = 1U;
+    buffer->data = backend_storage;
+    /*
+     * A backend bug or corrupted request must not let shutdown copy past the
+     * provided ring slice.  The detach path should preserve only bytes inside
+     * the advertised capacity and leave a self-contained public buffer.
+     */
+    buffer->size = payload_len + 4U;
+    buffer->capacity = payload_len;
+    if (llam_io_buffer_public_register(buffer) != 0) {
+        rc = test_fail_errno("provided-buffer clamp public register failed");
+        goto cleanup;
+    }
+    handle = llam_io_buffer_public_handle(buffer);
+    if (handle == NULL) {
+        rc = test_fail("provided-buffer clamp public handle missing");
+        goto cleanup;
+    }
+
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+    if (llam_io_buffer_data(handle) == backend_storage) {
+        rc = test_fail("corrupt provided buffer still points at runtime storage after destroy");
+        goto cleanup;
+    }
+    if (llam_io_buffer_size(handle) != payload_len ||
+        memcmp(llam_io_buffer_data(handle), payload, payload_len) != 0) {
+        rc = test_fail("corrupt provided buffer detach did not clamp to capacity");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (handle != NULL) {
+        llam_io_buffer_release(handle);
+        handle = NULL;
+        buffer = NULL;
+    } else if (buffer != NULL) {
+        llam_io_buffer_release_raw(buffer);
+    }
+    if (runtime != NULL) {
+        llam_runtime_destroy(runtime);
+    }
+    free(backend_storage);
+    return rc;
+}
+
 static int test_public_owned_buffer_alloc_and_positional_io(void) {
     llam_io_buffer_opts_t opts;
     llam_io_buffer_t *buffer = NULL;
@@ -1537,7 +1611,8 @@ int main(void) {
         test_owned_buffer_stale_release_reuse_guard() != 0 ||
         test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
         test_public_owned_buffer_alloc_and_positional_io() != 0 ||
-        test_provided_owned_buffer_detaches_on_runtime_destroy() != 0) {
+        test_provided_owned_buffer_detaches_on_runtime_destroy() != 0 ||
+        test_provided_owned_buffer_detach_clamps_corrupt_size() != 0) {
         return 1;
     }
     printf("[test_io_buffers] ok\n");

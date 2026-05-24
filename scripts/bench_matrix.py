@@ -12,6 +12,8 @@ import subprocess
 import sys
 from typing import Any
 
+from safe_output import write_text_safely
+
 
 FIELD_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
 
@@ -348,7 +350,7 @@ def main() -> int:
 
     if args.json_out:
         out_path = pathlib.Path(args.json_out)
-        out_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        write_text_safely(out_path, json.dumps(results, indent=2))
         print(f"[bench-matrix] wrote {out_path}", file=sys.stderr)
 
     return 0

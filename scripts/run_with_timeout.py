@@ -19,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 
+from safe_output import open_text_for_write, prepare_output_path
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a command with a hard timeout and live log capture.")
@@ -110,15 +112,13 @@ def dump_state(dump_path: Path | None) -> str:
 
 def main() -> int:
     args = parse_args()
-    args.log.parent.mkdir(parents=True, exist_ok=True)
-
-    with args.log.open("w", encoding="utf-8", errors="replace") as log:
+    with open_text_for_write(args.log, encoding="utf-8", errors="replace") as log:
         log.write(f"[run_with_timeout] command={' '.join(args.command)} timeout={args.timeout:.3f}s\n")
         log.flush()
 
         child_env = os.environ.copy()
         if args.dump_on_timeout is not None:
-            args.dump_on_timeout.parent.mkdir(parents=True, exist_ok=True)
+            prepare_output_path(args.dump_on_timeout)
             child_env.setdefault("LLAM_RUNTIME_DUMP_ON_SIGNAL", str(args.dump_on_timeout))
 
         proc = subprocess.Popen(

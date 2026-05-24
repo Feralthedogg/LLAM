@@ -54,9 +54,16 @@ jobs:
       - name: Build liburing
         if: runner.os == 'Linux'
         run: |
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
-          make -C /tmp/liburing -j"$(nproc)"
-          sudo make -C /tmp/liburing install
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          liburing_commit="e3d35ea59d3ba09075ed4d7751e4bb9049cce64a"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin "$liburing_commit"
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$liburing_dir" rev-parse HEAD)" = "$liburing_commit"
+          make -C "$liburing_dir" -j"$(nproc)"
+          sudo make -C "$liburing_dir" install
           sudo ldconfig
 
       - name: Configure
@@ -72,7 +79,7 @@ jobs:
       - name: Pre-soak unit gate
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           ctest --test-dir build/soak --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
           for i in $(seq 1 10); do
             echo "[test_runtime_api_edges repeat $i/10]"

@@ -85,9 +85,16 @@ jobs:
       - name: Build liburing
         if: runner.os == 'Linux'
         run: |
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
-          make -C /tmp/liburing -j"$(nproc)"
-          sudo make -C /tmp/liburing install
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          liburing_commit="e3d35ea59d3ba09075ed4d7751e4bb9049cce64a"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin "$liburing_commit"
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$liburing_dir" rev-parse HEAD)" = "$liburing_commit"
+          make -C "$liburing_dir" -j"$(nproc)"
+          sudo make -C "$liburing_dir" install
           sudo ldconfig
 
       - name: Configure
@@ -103,13 +110,13 @@ jobs:
       - name: CTest
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           ctest --test-dir build/nightly --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
 
       - name: Fault and completion-order edge repeat
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           for i in $(seq 1 20); do
             echo "[test_runtime_api_edges repeat $i/20]"
             python3 scripts/run_with_timeout.py \
@@ -122,7 +129,7 @@ jobs:
       - name: Direct runtime stress repeat
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           for i in $(seq 1 "$RUNTIME_STRESS_REPEAT"); do
             echo "[test_runtime_stress repeat $i/$RUNTIME_STRESS_REPEAT]"
             ./build/nightly/test_runtime_stress
@@ -131,7 +138,7 @@ jobs:
       - name: Seeded runtime invariant repeat
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           for i in $(seq 1 "$RUNTIME_INVARIANT_REPEAT"); do
             seed=$((SERVER_SEED + i * 104729))
             echo "[test_runtime_invariants repeat $i/$RUNTIME_INVARIANT_REPEAT seed=$seed]"
@@ -214,15 +221,22 @@ jobs:
 
       - name: Build liburing
         run: |
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
-          make -C /tmp/liburing -j"$(nproc)"
-          sudo make -C /tmp/liburing install
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          liburing_commit="e3d35ea59d3ba09075ed4d7751e4bb9049cce64a"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin "$liburing_commit"
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$liburing_dir" rev-parse HEAD)" = "$liburing_commit"
+          make -C "$liburing_dir" -j"$(nproc)"
+          sudo make -C "$liburing_dir" install
           sudo ldconfig
 
       - name: ASan/UBSan quick gate
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           make clean all CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/build.log"
           make test CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/make_test.log"
           env LLAM_RUNTIME_FUZZ_SCENARIOS=96 ./test_runtime_fuzz 2>&1 | tee "$OUT_DIR/runtime_fuzz.log"
@@ -267,15 +281,22 @@ jobs:
 
       - name: Build liburing
         run: |
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
-          make -C /tmp/liburing -j"$(nproc)"
-          sudo make -C /tmp/liburing install
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          liburing_commit="e3d35ea59d3ba09075ed4d7751e4bb9049cce64a"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin "$liburing_commit"
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$liburing_dir" rev-parse HEAD)" = "$liburing_commit"
+          make -C "$liburing_dir" -j"$(nproc)"
+          sudo make -C "$liburing_dir" install
           sudo ldconfig
 
       - name: TSan runtime smoke
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           make clean test_runtime_stress \
             test_runtime_invariants \
             CC=clang \
@@ -322,7 +343,7 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\nightly\${{ matrix.name }}"
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
           $repeat = [int]("${{ github.event.inputs.runtime_stress_repeat || '20' }}")
           & {
             ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"

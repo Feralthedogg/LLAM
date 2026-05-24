@@ -9,4 +9,11 @@ IMAGE="${IMAGE:-llam-linux-ubuntu24}"
 VERIFY_CMD="${VERIFY_CMD:-make verify-linux CC=gcc}"
 
 docker build -f "$DOCKERFILE" -t "$IMAGE" .
-docker run --rm ${DOCKER_RUN_FLAGS:---privileged} "$IMAGE" sh -lc "$VERIFY_CMD"
+if [ -n "${DOCKER_RUN_FLAGS:-}" ]; then
+    # Intentionally split trusted local runner flags such as "-v path:path -e K=V".
+    # shellcheck disable=SC2086
+    set -- $DOCKER_RUN_FLAGS
+else
+    set -- --privileged
+fi
+docker run --rm "$@" "$IMAGE" sh -lc "$VERIFY_CMD"

@@ -19,6 +19,7 @@
  */
 
 #include "server_support.h"
+#include "diagnostic_output.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -36,6 +37,10 @@ bool chat_env_enabled(const char *value, bool default_value) {
            strcmp(value, "FALSE") != 0 &&
            strcmp(value, "off") != 0 &&
            strcmp(value, "OFF") != 0;
+}
+
+int chat_open_append_regular(const char *path) {
+    return llam_example_open_append_regular(path);
 }
 
 void chat_peer_name(const struct sockaddr_storage *addr, socklen_t addrlen, char *out, size_t out_size) {

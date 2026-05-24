@@ -261,6 +261,7 @@ void llam_io_buffer_public_end_op(const llam_io_buffer_t *buffer) {
 
 static void llam_io_buffer_detach_provided_storage_locked(llam_io_buffer_t *buffer) {
     unsigned char *copy = NULL;
+    size_t copy_size;
 
     if (buffer == NULL || !buffer->provided_storage || buffer->data == NULL) {
         return;
@@ -272,15 +273,28 @@ static void llam_io_buffer_detach_provided_storage_locked(llam_io_buffer_t *buff
      * normally LLAM_IO_BUFFER_INLINE_BYTES, but keep a heap fallback for future
      * larger backend groups.
      */
-    if (buffer->size <= sizeof(buffer->inline_data)) {
-        memcpy(buffer->inline_data, buffer->data, buffer->size);
+    copy_size = buffer->size;
+    if (LLAM_UNLIKELY(copy_size > buffer->capacity)) {
+        /*
+         * Capacity is the backend slice boundary. If a corrupt request or
+         * backend bug publishes size beyond that boundary, preserve only the
+         * bytes that can belong to this public buffer rather than over-reading
+         * runtime-owned ring storage during shutdown.
+         */
+        copy_size = buffer->capacity;
+    }
+    if (copy_size <= sizeof(buffer->inline_data)) {
+        if (copy_size != 0U) {
+            memcpy(buffer->inline_data, buffer->data, copy_size);
+        }
         buffer->data = buffer->inline_data;
+        buffer->size = copy_size;
         buffer->capacity = sizeof(buffer->inline_data);
         buffer->alignment = sizeof(void *);
         buffer->external_storage = false;
         buffer->aligned_storage = false;
     } else {
-        copy = malloc(buffer->size);
+        copy = malloc(copy_size);
         if (copy == NULL) {
             /*
              * Do not leave a dangling backend pointer.  Preserve a valid empty
@@ -293,9 +307,10 @@ static void llam_io_buffer_detach_provided_storage_locked(llam_io_buffer_t *buff
             buffer->external_storage = false;
             buffer->aligned_storage = false;
         } else {
-            memcpy(copy, buffer->data, buffer->size);
+            memcpy(copy, buffer->data, copy_size);
             buffer->data = copy;
-            buffer->capacity = buffer->size;
+            buffer->size = copy_size;
+            buffer->capacity = copy_size;
             buffer->alignment = sizeof(void *);
             buffer->external_storage = true;
             buffer->aligned_storage = false;

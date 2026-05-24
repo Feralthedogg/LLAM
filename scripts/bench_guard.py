@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from safe_output import write_text_safely
+
 
 DEFAULT_CASES = [
     "spawn_join",
@@ -136,8 +138,7 @@ def main() -> int:
             failures.append(f"{case}: {ops:.2f} < {minimum:.2f}")
 
     if args.out is not None:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_text_safely(args.out, json.dumps(results, indent=2, sort_keys=True) + "\n")
 
     if failures:
         for failure in failures:

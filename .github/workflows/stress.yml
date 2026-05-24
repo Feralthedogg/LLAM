@@ -92,9 +92,16 @@ jobs:
       - name: Build liburing
         if: runner.os == 'Linux'
         run: |
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
-          make -C /tmp/liburing -j"$(nproc)"
-          sudo make -C /tmp/liburing install
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          liburing_commit="e3d35ea59d3ba09075ed4d7751e4bb9049cce64a"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin "$liburing_commit"
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$liburing_dir" rev-parse HEAD)" = "$liburing_commit"
+          make -C "$liburing_dir" -j"$(nproc)"
+          sudo make -C "$liburing_dir" install
           sudo ldconfig
 
       - name: Configure
@@ -110,13 +117,13 @@ jobs:
       - name: Unit tests
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           ctest --test-dir build/stress --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
 
       - name: Fault and completion-order edge repeat
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           repeat=3
           timeout=120
           if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
@@ -135,7 +142,7 @@ jobs:
       - name: Direct runtime stress repeat
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           repeat="$RUNTIME_STRESS_REPEAT"
           timeout=120
           if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
@@ -163,7 +170,7 @@ jobs:
       - name: Seeded runtime invariant repeat
         run: |
           set -o pipefail
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           for i in $(seq 1 "$RUNTIME_INVARIANT_REPEAT"); do
             seed=$((SERVER_SEED + i * 104729))
             echo "[test_runtime_invariants repeat $i/$RUNTIME_INVARIANT_REPEAT seed=$seed]"
@@ -174,7 +181,7 @@ jobs:
 
       - name: Runtime stress
         run: |
-          mkdir -p "$OUT_DIR"
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           export LLAM_STRESS_ROUNDS="$STRESS_ROUNDS"
           export LLAM_STRESS_DYNAMIC_ROUNDS="$DYNAMIC_ROUNDS"
           export LLAM_STRESS_DYNAMIC_LIVE_POLL_WAITERS=64
@@ -332,7 +339,7 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
           ctest --test-dir build/windows --output-on-failure --verbose --timeout 120 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
             Tee-Object -FilePath "$artifactDir\ctest.log"
           if ($LASTEXITCODE -ne 0) {
@@ -343,7 +350,7 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
           $repeat = [int]("${{ github.event.inputs.runtime_stress_repeat || '5' }}")
           $test = ".\build\windows\Release\test_runtime_stress.exe"
           & {
@@ -360,7 +367,7 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
           $repeat = 3
           $test = ".\build\windows\Release\test_windows_iocp_io.exe"
           & {
@@ -381,7 +388,7 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
-          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
           $repeat = [int]($env:RUNTIME_INVARIANT_REPEAT)
           $seedBase = [int64]($env:SERVER_SEED)
           $test = ".\build\windows\Release\test_runtime_invariants.exe"

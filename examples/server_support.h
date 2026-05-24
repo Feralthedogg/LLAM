@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 
 bool chat_env_enabled(const char *value, bool default_value);
+int chat_open_append_regular(const char *path);
 void chat_peer_name(const struct sockaddr_storage *addr, socklen_t addrlen, char *out, size_t out_size);
 uint16_t chat_parse_port(const char *value, uint16_t default_port);
 void chat_print_usage(const char *program);

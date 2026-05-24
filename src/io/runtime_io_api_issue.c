@@ -87,13 +87,13 @@ void llam_task_exit_internal(void) {
     llam_runtime_t *rt;
     llam_task_t *task = g_llam_tls_task;
 
-    if (task == NULL || g_llam_tls_shard == NULL) {
+    if (LLAM_UNLIKELY(task == NULL ||
+                      g_llam_tls_shard == NULL ||
+                      task->owner_runtime == NULL ||
+                      g_llam_tls_shard->runtime != task->owner_runtime)) {
         abort();
     }
-    rt = task->owner_runtime != NULL ? task->owner_runtime : g_llam_tls_shard->runtime;
-    if (rt == NULL) {
-        abort();
-    }
+    rt = task->owner_runtime;
 
     pthread_mutex_lock(&task->lock);
     task->state = LLAM_TASK_STATE_DEAD;
@@ -124,7 +124,15 @@ void llam_task_bootstrap(llam_task_t *task) {
     llam_runtime_t *rt;
 
     g_llam_tls_task = task;
-    rt = task != NULL && task->owner_runtime != NULL ? task->owner_runtime : llam_runtime_current_owner();
+    /* Fail closed before corrupt cursors or NULL entry become arbitrary crashes. */
+    if (LLAM_UNLIKELY(task == NULL ||
+                      task->entry == NULL ||
+                      g_llam_tls_shard == NULL ||
+                      task->owner_runtime == NULL ||
+                      g_llam_tls_shard->runtime != task->owner_runtime)) {
+        abort();
+    }
+    rt = task->owner_runtime;
     llam_task_restore_errno(task);
     if (rt->run_timing_enabled != 0U || rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE) {
         atomic_store_explicit(&g_llam_tls_shard->last_safepoint_ns, llam_now_ns(), memory_order_relaxed);

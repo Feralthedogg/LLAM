@@ -11,6 +11,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from safe_output import open_binary_for_write, open_text_for_write
+
 try:
     import matplotlib.pyplot as plt
 except ModuleNotFoundError:
@@ -175,7 +177,7 @@ def llam_bench_command(root: pathlib.Path, no_build: bool) -> list[str]:
 
 
 def write_csv(path: pathlib.Path, rows: list[BenchRow]) -> None:
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    with open_text_for_write(path, newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["runtime", "case", "ops_per_sec", "p50_us", "p99_us"])
         for row in rows:
@@ -278,8 +280,9 @@ def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str]) -> No
     axes[0][0].legend(loc="upper right")
     axes[1][1].axhline(1.0, color="#111827", linewidth=1, linestyle="--", alpha=0.6)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=180)
+    graph_format = path.suffix.lower().lstrip(".") or "png"
+    with open_binary_for_write(path) as handle:
+        fig.savefig(handle, format=graph_format, dpi=180)
     plt.close(fig)
 
 
@@ -389,7 +392,6 @@ def main() -> int:
             )
         )
 
-    out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "runtime_compare.csv"
     graph_path = out_dir / "runtime_compare.png"
     graph_written = False

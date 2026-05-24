@@ -63,13 +63,18 @@ jobs:
           grep '/include/llam/io.h$' package-files.txt
           grep '/examples/demo_internal.h$' package-files.txt
           grep '/examples/bench_support.c$' package-files.txt
+          grep '/examples/server_flood_stats.c$' package-files.txt
+          grep '/examples/server_flood_stats.h$' package-files.txt
           grep '/examples/stress_internal.h$' package-files.txt
           grep '/examples/env_compat.h$' package-files.txt
           grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
           grep '/lib/pkgconfig/llam.pc$' package-files.txt
           tmp_install="$(mktemp -d)"
+          trap 'rm -rf "$tmp_install"' EXIT
           tar -C "$tmp_install" -xJf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz"
           pkg_root="$tmp_install/llam-ci-${{ matrix.package_target }}"
+          sh "$pkg_root/install.sh" --dry-run --prefix "$tmp_install/prefix" |
+            grep 'copy .*/include -> .*/include'
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -I"$pkg_root/include" -I"$pkg_root/examples" \
             "$pkg_root/examples/demo.c" \
@@ -94,6 +99,15 @@ jobs:
             exit 1
           fi
           grep 'refusing to overwrite' "$tmp_install/install.out"
+          ln -s "$tmp_install/outside" "$tmp_install/prefix-link"
+          mkdir -p "$tmp_install/outside"
+          if "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix-link" --force > "$tmp_install/install-symlink.out" 2>&1; then
+            echo "installer followed a symlink install prefix" >&2
+            cat "$tmp_install/install-symlink.out"
+            exit 1
+          fi
+          grep 'refusing symlink install prefix' "$tmp_install/install-symlink.out"
+          test ! -e "$tmp_install/outside/include/llam/runtime.h"
           "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix" --force
           test -f "$tmp_install/prefix/share/llam/CHANGELOG.md"
           rm -rf "$tmp_install" package-files.txt

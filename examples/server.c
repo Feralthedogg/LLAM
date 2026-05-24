@@ -797,15 +797,14 @@ static void chat_print_stats(FILE *stream, const chat_server_t *server) {
 
 static void chat_write_stats_file(const chat_server_t *server) {
     const char *path = getenv("LLAM_CHAT_STATS_PATH");
+    int fd;
     FILE *file;
 
-    if (path == NULL || path[0] == '\0') {
-        return;
-    }
-    file = fopen(path, "a");
-    if (file == NULL) {
-        return;
-    }
+    if (path == NULL || path[0] == '\0') { return; }
+    fd = chat_open_append_regular(path);
+    if (fd < 0) { return; }
+    file = fdopen(fd, "a");
+    if (file == NULL) { close(fd); return; }
     chat_print_stats(file, server);
     fflush(file);
     (void)fsync(fileno(file));
@@ -1318,15 +1317,14 @@ static void chat_stop_signal_thread(chat_server_t *server) {
 
 static void chat_dump_runtime_if_requested(const char *phase) {
     const char *path = getenv("LLAM_CHAT_DUMP_ON_STOP");
+    int fd;
     FILE *file;
 
-    if (path == NULL || path[0] == '\0') {
-        return;
-    }
-    file = fopen(path, "a");
-    if (file == NULL) {
-        return;
-    }
+    if (path == NULL || path[0] == '\0') { return; }
+    fd = chat_open_append_regular(path);
+    if (fd < 0) { return; }
+    file = fdopen(fd, "a");
+    if (file == NULL) { close(fd); return; }
     fprintf(file, "chat dump phase=%s\n", phase != NULL ? phase : "unknown");
     fflush(file);
     llam_dump_runtime_state(fileno(file));

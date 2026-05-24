@@ -1,6 +1,6 @@
 FROM ubuntu:24.04
 
-ARG LIBURING_REF=master
+ARG LIBURING_REF=e3d35ea59d3ba09075ed4d7751e4bb9049cce64a
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CC=gcc
 
@@ -17,11 +17,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rustc \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 --branch "$LIBURING_REF" https://github.com/axboe/liburing.git /tmp/liburing \
-    && make -C /tmp/liburing -j"$(nproc)" \
-    && make -C /tmp/liburing install \
-    && ldconfig \
-    && rm -rf /tmp/liburing
+RUN set -eux; \
+    tmp_dir="$(mktemp -d)"; \
+    trap 'rm -rf "$tmp_dir"' EXIT; \
+    git init "$tmp_dir/liburing"; \
+    git -C "$tmp_dir/liburing" remote add origin https://github.com/axboe/liburing.git; \
+    git -C "$tmp_dir/liburing" fetch --depth 1 origin "$LIBURING_REF"; \
+    git -C "$tmp_dir/liburing" checkout --detach FETCH_HEAD; \
+    test "$(git -C "$tmp_dir/liburing" rev-parse HEAD)" = "$LIBURING_REF"; \
+    make -C "$tmp_dir/liburing" -j"$(nproc)"; \
+    make -C "$tmp_dir/liburing" install; \
+    ldconfig
 
 WORKDIR /work
 COPY . .

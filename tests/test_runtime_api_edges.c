@@ -34,7 +34,9 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -577,6 +579,102 @@ static int test_fault_boundary_contracts(void) {
     llam_runtime_shutdown();
     return 0;
 }
+
+#if !LLAM_PLATFORM_WINDOWS
+static int expect_child_sigabrt(void (*child_fn)(void), const char *label) {
+    pid_t pid;
+    pid_t waited;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return fail_errno(label);
+    }
+    if (pid == 0) {
+        child_fn();
+        _exit(0);
+    }
+
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != pid) {
+        return fail_errno(label);
+    }
+    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGABRT) {
+        return fail_msg(label);
+    }
+    return 0;
+}
+
+static void bootstrap_null_task_child(void) {
+    /*
+     * This internal entry point is normally reached only from a prepared fiber
+     * context.  Corrupt cursors must fail closed with SIGABRT rather than
+     * falling through to a NULL task callback and SIGSEGV.
+     */
+    llam_task_bootstrap(NULL);
+}
+
+static void bootstrap_null_entry_child(void) {
+    llam_shard_t fake_shard;
+    llam_task_t fake_task;
+
+    memset(&fake_shard, 0, sizeof(fake_shard));
+    memset(&fake_task, 0, sizeof(fake_task));
+    fake_shard.runtime = llam_runtime_default_storage();
+    fake_task.owner_runtime = fake_shard.runtime;
+    g_llam_tls_shard = &fake_shard;
+    llam_task_bootstrap(&fake_task);
+}
+
+static void task_exit_null_owner_child(void) {
+    llam_shard_t fake_shard;
+    llam_task_t fake_task;
+
+    memset(&fake_shard, 0, sizeof(fake_shard));
+    memset(&fake_task, 0, sizeof(fake_task));
+    fake_shard.runtime = llam_runtime_default_storage();
+    g_llam_tls_shard = &fake_shard;
+    g_llam_tls_task = &fake_task;
+    llam_task_exit_internal();
+}
+
+static void task_exit_owner_mismatch_child(void) {
+    llam_runtime_t foreign_runtime;
+    llam_shard_t fake_shard;
+    llam_task_t fake_task;
+
+    memset(&foreign_runtime, 0, sizeof(foreign_runtime));
+    memset(&fake_shard, 0, sizeof(fake_shard));
+    memset(&fake_task, 0, sizeof(fake_task));
+    fake_shard.runtime = llam_runtime_default_storage();
+    fake_task.owner_runtime = &foreign_runtime;
+    g_llam_tls_shard = &fake_shard;
+    g_llam_tls_task = &fake_task;
+    llam_task_exit_internal();
+}
+
+static int test_task_bootstrap_invariant_fails_closed(void) {
+    if (expect_child_sigabrt(bootstrap_null_task_child,
+                             "task bootstrap NULL task did not fail closed with SIGABRT") != 0) {
+        return -1;
+    }
+    if (expect_child_sigabrt(bootstrap_null_entry_child,
+                             "task bootstrap NULL entry did not fail closed with SIGABRT") != 0) {
+        return -1;
+    }
+    if (expect_child_sigabrt(task_exit_null_owner_child,
+                             "task exit NULL owner did not fail closed with SIGABRT") != 0) {
+        return -1;
+    }
+    if (expect_child_sigabrt(task_exit_owner_mismatch_child,
+                             "task exit owner mismatch did not fail closed with SIGABRT") != 0) {
+        return -1;
+    }
+    return 0;
+}
+#endif
 
 static void *blocking_echo(void *arg) {
     edge_state_t *state = arg;
@@ -3755,7 +3853,8 @@ static int test_public_slot_generation_wrap_guard(void) {
         goto cleanup;
     }
     if (llam_public_slot_reserve(&table, &second_object, 1U, &reused_slot, &reused_generation) != 0) {
-        return fail_errno("public slot reserve after max generation failed");
+        rc = fail_errno("public slot reserve after max generation failed");
+        goto cleanup;
     }
     if (reused_slot == slot) {
         (void)fprintf(stderr,
@@ -3942,6 +4041,12 @@ int main(void) {
     if (run_edge_case("fault_boundary_contracts", test_fault_boundary_contracts) != 0) {
         return 1;
     }
+#if !LLAM_PLATFORM_WINDOWS
+    if (run_edge_case("task_bootstrap_invariant_fails_closed",
+                      test_task_bootstrap_invariant_fails_closed) != 0) {
+        return 1;
+    }
+#endif
     if (run_edge_case("unmanaged_boundary_contracts", test_unmanaged_boundary_contracts) != 0) {
         return 1;
     }

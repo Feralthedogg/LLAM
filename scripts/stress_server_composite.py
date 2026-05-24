@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from safe_output import prepare_output_path
+
 
 TAIL_LIMIT = 200
 
@@ -171,7 +173,7 @@ def start_server(server_path: Path, host: str, timeout_sec: float) -> RunningSer
     env.setdefault("LLAM_CHAT_QUIET", "1")
     if dump_dir and "LLAM_CHAT_DUMP_ON_STOP" not in env:
         dump_path = Path(dump_dir) / f"server-runtime-dump-{port}.log"
-        dump_path.parent.mkdir(parents=True, exist_ok=True)
+        prepare_output_path(dump_path)
         env["LLAM_CHAT_DUMP_ON_STOP"] = str(dump_path)
     proc = subprocess.Popen(
         [str(server_path.resolve()), str(port)],

@@ -285,6 +285,7 @@ target_link_libraries(demo PRIVATE llam_runtime)
 
 add_executable(stress ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/stress.c
+    examples/diagnostic_output.c
     examples/stress_support.c
     examples/stress_tasks.c
     examples/stress_core_cases.c
@@ -319,9 +320,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 target_link_libraries(bench PRIVATE llam_runtime)
 
-add_executable(server ${LLAM_POSIX_EXAMPLE_EXCLUDE}
+set(LLAM_SERVER_SOURCES
     examples/server.c
-    examples/server_support.c
+)
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    list(APPEND LLAM_SERVER_SOURCES
+        examples/diagnostic_output.c
+        examples/server_support.c
+    )
+endif()
+
+add_executable(server ${LLAM_POSIX_EXAMPLE_EXCLUDE}
+    ${LLAM_SERVER_SOURCES}
 )
 target_compile_definitions(server PRIVATE _GNU_SOURCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -332,8 +342,7 @@ endif()
 target_link_libraries(server PRIVATE llam_runtime)
 
 add_executable(server_lossless ${LLAM_POSIX_EXAMPLE_EXCLUDE}
-    examples/server.c
-    examples/server_support.c
+    ${LLAM_SERVER_SOURCES}
 )
 target_compile_definitions(server_lossless PRIVATE _GNU_SOURCE LLAM_CHAT_LOSSLESS_DEFAULT=1)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -345,6 +354,7 @@ target_link_libraries(server_lossless PRIVATE llam_runtime)
 
 add_executable(server_flood ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/server_flood.c
+    examples/server_flood_stats.c
 )
 target_compile_definitions(server_flood PRIVATE _GNU_SOURCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")

@@ -19,12 +19,11 @@
  */
 
 #include "stress_internal.h"
+#include "diagnostic_output.h"
 
 #if !LLAM_PLATFORM_WINDOWS
-#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
-#include <sys/stat.h>
 
 static atomic_bool g_stress_dump_thread_stop;
 static pthread_t g_stress_dump_thread;
@@ -35,7 +34,7 @@ static bool g_stress_dump_old_signal_set_valid;
 static char g_stress_dump_path[512];
 
 static void stress_write_signal_dump(void) {
-    int fd = open(g_stress_dump_path, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    int fd = llam_example_open_append_regular(g_stress_dump_path);
 
     if (fd < 0) {
         return;

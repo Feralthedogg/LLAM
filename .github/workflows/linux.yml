@@ -72,9 +72,16 @@ jobs:
 
       - name: Build liburing
         run: |
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
-          make -C /tmp/liburing -j"$(nproc)"
-          sudo make -C /tmp/liburing install
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          liburing_commit="e3d35ea59d3ba09075ed4d7751e4bb9049cce64a"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin "$liburing_commit"
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$liburing_dir" rev-parse HEAD)" = "$liburing_commit"
+          make -C "$liburing_dir" -j"$(nproc)"
+          sudo make -C "$liburing_dir" install
           sudo ldconfig
 
       - name: Make sanitizer build
@@ -135,13 +142,18 @@ jobs:
           grep '/include/llam/io.h$' package-files.txt
           grep '/examples/demo_internal.h$' package-files.txt
           grep '/examples/bench_support.c$' package-files.txt
+          grep '/examples/server_flood_stats.c$' package-files.txt
+          grep '/examples/server_flood_stats.h$' package-files.txt
           grep '/examples/stress_internal.h$' package-files.txt
           grep '/examples/env_compat.h$' package-files.txt
           grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
           grep '/lib/pkgconfig/llam.pc$' package-files.txt
           tmp_install="$(mktemp -d)"
+          trap 'rm -rf "$tmp_install"' EXIT
           tar -C "$tmp_install" -xJf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz"
           pkg_root="$tmp_install/llam-ci-${{ matrix.package_target }}"
+          sh "$pkg_root/install.sh" --dry-run --prefix "$tmp_install/prefix" |
+            grep 'copy .*/include -> .*/include'
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
             -I"$pkg_root/include" -I"$pkg_root/examples" \
             "$pkg_root/examples/demo.c" \
@@ -166,6 +178,15 @@ jobs:
             exit 1
           fi
           grep 'refusing to overwrite' "$tmp_install/install.out"
+          ln -s "$tmp_install/outside" "$tmp_install/prefix-link"
+          mkdir -p "$tmp_install/outside"
+          if "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix-link" --force > "$tmp_install/install-symlink.out" 2>&1; then
+            echo "installer followed a symlink install prefix" >&2
+            cat "$tmp_install/install-symlink.out"
+            exit 1
+          fi
+          grep 'refusing symlink install prefix' "$tmp_install/install-symlink.out"
+          test ! -e "$tmp_install/outside/include/llam/runtime.h"
           "$tmp_install/llam-ci-${{ matrix.package_target }}/install.sh" --prefix "$tmp_install/prefix" --force
           test -f "$tmp_install/prefix/share/llam/CHANGELOG.md"
           rm -rf "$tmp_install" package-files.txt

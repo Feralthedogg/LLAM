@@ -51,9 +51,16 @@ jobs:
       - name: Build liburing
         if: runner.os == 'Linux'
         run: |
-          git clone --depth 1 https://github.com/axboe/liburing.git /tmp/liburing
-          make -C /tmp/liburing -j"$(nproc)"
-          sudo make -C /tmp/liburing install
+          liburing_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-liburing.XXXXXX")"
+          liburing_commit="e3d35ea59d3ba09075ed4d7751e4bb9049cce64a"
+          trap 'rm -rf "$liburing_dir"' EXIT
+          git init "$liburing_dir"
+          git -C "$liburing_dir" remote add origin https://github.com/axboe/liburing.git
+          git -C "$liburing_dir" fetch --depth 1 origin "$liburing_commit"
+          git -C "$liburing_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$liburing_dir" rev-parse HEAD)" = "$liburing_commit"
+          make -C "$liburing_dir" -j"$(nproc)"
+          sudo make -C "$liburing_dir" install
           sudo ldconfig
 
       - name: Build and test POSIX
@@ -89,12 +96,34 @@ jobs:
             ./scripts/package_release.sh "${{ matrix.target }}"
           package_version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
           package_version="${package_version#v}"
-          package_version="$(printf '%s' "$package_version" | tr '/' '-')"
           archive="target/dist/llam-${package_version}-${{ matrix.target }}.tar.xz"
           tar -tf "$archive" > package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt
           grep '/include/llam/io.h$' package-files.txt
+          grep '/examples/server_flood_stats.c$' package-files.txt
+          grep '/examples/server_flood_stats.h$' package-files.txt
           rm -f package-files.txt
+          tmp="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-smoke.XXXXXX")"
+          trap 'rm -rf "$tmp"' EXIT
+          tar -xf "$archive" -C "$tmp"
+          sh "$tmp/llam-${package_version}-${{ matrix.target }}/install.sh" --dry-run --prefix "$tmp/prefix" |
+            grep 'copy .*/include -> .*/include'
+          for file in VERSION ABI_MAJOR LIBRARY_VERSION; do
+            test -f "$tmp/llam-${package_version}-${{ matrix.target }}/${file}"
+          done
+          sh "$tmp/llam-${package_version}-${{ matrix.target }}/install.sh" --prefix "$tmp/prefix-success" --force
+          test "$(cat "$tmp/prefix-success/share/llam/VERSION")" = "$package_version"
+          test "$(cat "$tmp/prefix-success/share/llam/ABI_MAJOR")" = "2"
+          test "$(cat "$tmp/prefix-success/share/llam/LIBRARY_VERSION")" = "$version"
+          mkdir -p "$tmp/outside"
+          ln -s "$tmp/outside" "$tmp/prefix-link"
+          if sh "$tmp/llam-${package_version}-${{ matrix.target }}/install.sh" --prefix "$tmp/prefix-link" --force > "$tmp/install-symlink.out" 2>&1; then
+            echo "installer followed a symlink install prefix" >&2
+            cat "$tmp/install-symlink.out"
+            exit 1
+          fi
+          grep 'refusing symlink install prefix' "$tmp/install-symlink.out"
+          test ! -e "$tmp/outside/include/llam/runtime.h"
 
       - name: Configure Windows release build
         if: runner.os == 'Windows'
@@ -135,15 +164,15 @@ jobs:
           $releaseVersion = "dev"
           if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
             $tagName = $env:GITHUB_REF_NAME
-            $version = $tagName.TrimStart("v")
+            $version = $tagName -replace '^v', ''
             $releaseVersion = $tagName
           }
           .\scripts\package_release_windows.ps1 -Target "${{ matrix.target }}" -BuildDir "build\release-windows" -Configuration Release -Version $releaseVersion -LibraryVersion $version
-          $packageVersion = $releaseVersion.TrimStart("v").Replace("/", "-")
+          $packageVersion = $releaseVersion -replace '^v', ''
           $archive = "target\dist\llam-$packageVersion-${{ matrix.target }}.zip"
           $tmp = Join-Path $env:RUNNER_TEMP "llam-windows-package-smoke"
-          Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
-          Expand-Archive $archive -DestinationPath $tmp -Force
+          Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath $archive -DestinationPath $tmp -Force
           $root = Join-Path $tmp "llam-$packageVersion-${{ matrix.target }}"
           foreach ($file in @(
             "include\llam\runtime.h",
@@ -151,11 +180,87 @@ jobs:
             "include\llam\platform.h",
             "examples\demo_internal.h",
             "examples\bench_support.c",
+            "examples\server_flood_stats.c",
+            "examples\server_flood_stats.h",
             "examples\stress_internal.h",
             "examples\env_compat.h"
           )) {
-            if (-not (Test-Path (Join-Path $root $file))) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $file))) {
               throw "missing package file: $file"
+            }
+          }
+          $archiveInstall = & (Join-Path $root "install.ps1") -DryRun -Prefix (Join-Path $tmp "prefix") 6>&1 | Out-String
+          if ($archiveInstall -notmatch "copy .*include" -or $archiveInstall -notmatch "copy .*lib") {
+            throw "archive-local Windows installer dry-run did not copy include/lib"
+          }
+          foreach ($file in @("VERSION", "ABI_MAJOR", "LIBRARY_VERSION")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $file))) {
+              throw "missing package metadata file: $file"
+            }
+          }
+          $successPrefix = Join-Path $tmp "prefix-success"
+          & (Join-Path $root "install.ps1") -Prefix $successPrefix -Force
+          if ((Get-Content -LiteralPath (Join-Path $successPrefix "share\llam\VERSION") -Raw).Trim() -ne $packageVersion) {
+            throw "archive-local Windows installer did not install VERSION metadata"
+          }
+          if ((Get-Content -LiteralPath (Join-Path $successPrefix "share\llam\ABI_MAJOR") -Raw).Trim() -ne "2") {
+            throw "archive-local Windows installer did not install ABI_MAJOR metadata"
+          }
+          if ((Get-Content -LiteralPath (Join-Path $successPrefix "share\llam\LIBRARY_VERSION") -Raw).Trim() -ne $version) {
+            throw "archive-local Windows installer did not install LIBRARY_VERSION metadata"
+          }
+          $hardlinkPrefix = Join-Path $tmp "prefix-hardlink"
+          $hardlinkHeaderDir = Join-Path $hardlinkPrefix "include\llam"
+          New-Item -ItemType Directory -Force -Path $hardlinkHeaderDir | Out-Null
+          $outsideHeader = Join-Path $tmp "outside-runtime.h"
+          Set-Content -LiteralPath $outsideHeader -Value "outside"
+          New-Item -ItemType HardLink -Path (Join-Path $hardlinkHeaderDir "runtime.h") -Target $outsideHeader | Out-Null
+          try {
+            & (Join-Path $root "install.ps1") -Prefix $hardlinkPrefix -Force
+            throw "archive-local Windows installer overwrote a hard-linked destination"
+          } catch {
+            if ($_.Exception.Message -notmatch "refusing hard-linked destination") {
+              throw
+            }
+          }
+          if ((Get-Content -LiteralPath $outsideHeader -Raw) -notmatch "outside") {
+            throw "archive-local Windows installer clobbered a hard-linked outside file"
+          }
+          $directoryPrefix = Join-Path $tmp "prefix-directory-conflict"
+          $directoryHeaderDir = Join-Path $directoryPrefix "include\llam"
+          New-Item -ItemType Directory -Force -Path (Join-Path $directoryHeaderDir "runtime.h") | Out-Null
+          try {
+            & (Join-Path $root "install.ps1") -Prefix $directoryPrefix -Force
+            throw "archive-local Windows installer accepted a directory where runtime.h must be a file"
+          } catch {
+            if ($_.Exception.Message -notmatch "refusing directory destination where LLAM expects a file") {
+              throw
+            }
+          }
+          $installerSource = Get-Content -LiteralPath (Join-Path $root "install.ps1") -Raw
+          $tokens = $null
+          $parseErrors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseInput($installerSource, [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) {
+            throw "archive-local Windows installer failed to parse"
+          }
+          $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+            ForEach-Object { . ([scriptblock]::Create($_.Extent.Text)) }
+          $badPackage = "llam-bad-windows-x86_64"
+          $badZip = Join-Path $tmp "bad-reserved.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::Open($badZip, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            [void]$zip.CreateEntry("$badPackage/NUL")
+          } finally {
+            $zip.Dispose()
+          }
+          try {
+            Assert-SafeZipArchive $badZip $badPackage
+            throw "archive-local Windows installer accepted a reserved device-name archive member"
+          } catch {
+            if ($_.Exception.Message -notmatch "refusing Windows-reserved archive member") {
+              throw
             }
           }
 
@@ -198,7 +303,7 @@ jobs:
       - name: Build checksum manifest
         run: |
           cd release-artifacts
-          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          cat ./*.sha256 | LC_ALL=C sort -k2 > SHA256SUMS
 
       - name: Build release notes
         env:
@@ -211,6 +316,20 @@ jobs:
           version="${TAG#v}"
           base_url="https://github.com/${REPOSITORY}/releases/download/${TAG}"
           run_url="https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}"
+          changelog_section="${RUNNER_TEMP}/llam-release-changelog.md"
+          awk -v version="$version" '
+            index($0, "## " version " ") == 1 || $0 == "## " version {
+              in_section=1
+              print
+              next
+            }
+            /^## / && in_section { exit }
+            in_section { print }
+          ' CHANGELOG.md > "$changelog_section"
+          if [ ! -s "$changelog_section" ]; then
+            echo "missing CHANGELOG.md section for ${version}" >&2
+            exit 1
+          fi
           {
             echo "# LLAM ${version}"
             echo
@@ -260,11 +379,7 @@ jobs:
             echo
             echo "- [CHANGELOG.md](${base_url}/CHANGELOG.md) is attached to this release and included inside every platform archive."
             echo
-            awk '
-              /^## 1\.0\.2 / { in_section=1; print; next }
-              /^## / && in_section { exit }
-              in_section { print }
-            ' ../CHANGELOG.md
+            cat "$changelog_section"
             echo
             echo "## Standalone Installers"
             echo
