@@ -36,7 +36,10 @@ if ([string]::IsNullOrWhiteSpace($Path)) {
 }
 
 Assert-NoReparseComponent $Path
-New-Item -ItemType Directory -Force -LiteralPath $Path | Out-Null
+# New-Item does not consistently expose -LiteralPath across the PowerShell
+# versions installed on hosted Windows images.  The .NET API treats the string
+# literally, which preserves the no-wildcard safety property we need here.
+[System.IO.Directory]::CreateDirectory($Path) | Out-Null
 Assert-NoReparseComponent $Path
 
 $item = Get-Item -LiteralPath $Path -Force
