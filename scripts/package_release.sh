@@ -95,7 +95,7 @@ validate_safe_stage_tree() {
             esac
         done
     ' sh {} +
-    find "$root" \( -perm -0002 -o -perm -4000 -o -perm -2000 \) -exec sh -c '
+    find "$root" ! -type l \( -perm -0002 -o -perm -4000 -o -perm -2000 \) -exec sh -c '
         for path do
             echo "refusing unsafe release stage mode: $path" >&2
             exit 1
