@@ -1,6 +1,6 @@
 # LLAM ChangeLog
 
-## 2.0.0 - 2026-05-23
+## 2.0.0 - 2026-05-25
 
 ### Added
 
@@ -129,6 +129,10 @@
 * channel lifecycle, public slot helpers, owned I/O buffer accessors, and
   lifecycle locking were split out of oversized translation units without
   changing public behavior.
+
+* README architecture diagrams now show the 2.x runtime-handle boundary,
+  runtime-owned scheduler/cache/I/O state, public-handle hardening flow, and
+  optional broker process boundary in more detail.
 
 ### Fixed
 
@@ -316,6 +320,11 @@
   `llam_channel_recv()` more explicitly; production and FFI callers should use
   the `_result` forms when `NULL` is a valid payload or callback result.
 
+* move the broker channel slot table out of `llam_broker_t` inline storage and
+  into broker-owned heap storage. This keeps stack-allocated broker control
+  objects below conservative Windows thread-stack limits while preserving
+  broker ownership and channel table cleanup semantics.
+
 ### Tests
 
 * add direct public-slot family collision and max-epoch regression coverage, plus
@@ -370,6 +379,10 @@
 
 * keep Windows release packaging and installer defaults aligned with the new
   `v2.0.0` release tag.
+
+* add a broker control-object size guard to `test_security_capability` so large
+  data-plane tables stay heap-owned instead of accidentally making
+  stack-allocated broker values unsafe on Windows.
 
 ## 1.2.0 - 2026-05-21
 
