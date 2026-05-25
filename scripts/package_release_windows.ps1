@@ -213,7 +213,10 @@ foreach ($Dir in @(
     "share\llam\cmake",
     "lib\pkgconfig"
 )) {
-    New-Item -ItemType Directory -Force -LiteralPath (Join-Path $Stage $Dir) | Out-Null
+    # Hosted Windows PowerShell images do not consistently expose
+    # New-Item -LiteralPath.  CreateDirectory keeps the path literal while
+    # preserving the wildcard-safe staging invariant.
+    [System.IO.Directory]::CreateDirectory((Join-Path $Stage $Dir)) | Out-Null
 }
 
 function Require-Input([string]$Path) {
