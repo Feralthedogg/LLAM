@@ -8,11 +8,27 @@
  * before any object storage is dereferenced.
  *
  * @copyright Copyright 2026 Feralthedogg
- * SPDX-License-Identifier: Apache-2.0
+ *
+ * @par License
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 #ifndef LLAM_RUNTIME_PUBLIC_SLOT_H
 #define LLAM_RUNTIME_PUBLIC_SLOT_H
+
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 #define LLAM_PUBLIC_HANDLE_MAX_SLOTS ((size_t)UINT32_MAX)
 #define LLAM_PUBLIC_SLOT_FREE_NONE ((size_t)0U)
@@ -28,20 +44,30 @@
 #define LLAM_PUBLIC_HANDLE_FAMILY_CANCEL_TOKEN 5U
 #define LLAM_PUBLIC_HANDLE_FAMILY_TASK_GROUP 6U
 #define LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER 7U
+#define LLAM_PUBLIC_HANDLE_EPOCH_MASK LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH
 
 typedef struct llam_public_slot {
     void *object;
+    /*
+     * generation is the sealed public token. epoch is the monotonic internal
+     * counter used for ABA protection and slot_nonce is rotated on each reuse
+     * so adjacent public handles cannot be predicted from a leaked old token.
+     */
     uint32_t generation;
+    uint32_t epoch;
+    uint64_t slot_nonce;
     size_t next_free_plus_one;
 } llam_public_slot_t;
 
-_Static_assert(sizeof(llam_public_slot_t) <= 24U, "public handle slots must stay cache-compact");
+_Static_assert(sizeof(llam_public_slot_t) <= 32U, "public handle slots must stay cache-compact");
 
 typedef struct llam_public_slot_table {
     llam_public_slot_t *slots;
     size_t count;
     size_t capacity;
     size_t free_head_plus_one;
+    /* Cold-path table key mixed from OS entropy and the creating runtime. */
+    uint64_t handle_secret;
 } llam_public_slot_table_t;
 
 static inline uint32_t llam_public_slot_next_generation(uint32_t generation) {
@@ -85,48 +111,24 @@ static inline bool llam_public_slot_family_valid(uint32_t family) {
 }
 
 /*
- * Family-tagged generations reserve the low bits for the object family.  This
+ * Family-tagged generations reserve the low bits for the object family. This
  * keeps independent task/channel/mutex/etc. slot tables from accepting each
  * other's encoded handle values when a C FFI caller passes the wrong opaque
- * type.  The remaining high bits are still a large ABA generation counter.
+ * type. The remaining high bits store a sealed verifier token, not the raw
+ * epoch; stale handles keep ABA protection without exposing a predictable next
+ * generation.
  */
 static inline uint32_t llam_public_slot_family_generation(uint32_t epoch, uint32_t family) {
     return (uint32_t)(epoch << LLAM_PUBLIC_HANDLE_FAMILY_BITS) | family;
 }
 
-static inline bool llam_public_slot_family_generation_exhausted(uint32_t generation) {
-    return (generation >> LLAM_PUBLIC_HANDLE_FAMILY_BITS) >= LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH;
-}
-
-static inline uint32_t llam_public_slot_next_family_generation(uint32_t generation, uint32_t family) {
-    uint32_t epoch = generation >> LLAM_PUBLIC_HANDLE_FAMILY_BITS;
-
-    epoch += 1U;
-    return llam_public_slot_family_generation(epoch, family);
-}
-
-static inline uint32_t llam_public_slot_initial_generation_for(uint32_t family) {
-    return family != 0U ? family : 1U;
-}
-
-static inline bool llam_public_slot_generation_exhausted_for(uint32_t generation, uint32_t family) {
-    if (family != 0U) {
-        return llam_public_slot_family_generation_exhausted(generation);
-    }
-    return llam_public_slot_generation_exhausted(generation);
-}
-
-static inline uint32_t llam_public_slot_next_generation_for(uint32_t generation, uint32_t family) {
-    if (family != 0U) {
-        return llam_public_slot_next_family_generation(generation, family);
-    }
-    return llam_public_slot_next_generation(generation);
-}
+#include "runtime_public_slot_seal.h"
 
 static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
                                                 void *object,
                                                 size_t initial_capacity,
                                                 uint32_t family,
+                                                uint64_t owner_secret,
                                                 size_t *out_slot,
                                                 uint32_t *out_generation) {
     size_t slot;
@@ -146,11 +148,32 @@ static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
         entry = &table->slots[slot];
         table->free_head_plus_one = entry->next_free_plus_one;
         entry->next_free_plus_one = LLAM_PUBLIC_SLOT_FREE_NONE;
-        if (LLAM_UNLIKELY(llam_public_slot_generation_exhausted_for(entry->generation, family))) {
+        if (LLAM_UNLIKELY(family != 0U
+                              ? entry->epoch >= LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH
+                              : llam_public_slot_generation_exhausted(entry->generation))) {
             entry->object = NULL;
             continue;
         }
-        entry->generation = llam_public_slot_next_generation_for(entry->generation, family);
+        if (family != 0U) {
+            entry->epoch += 1U;
+            entry->slot_nonce = llam_public_slot_next_nonce(table,
+                                                            object,
+                                                            owner_secret,
+                                                            slot,
+                                                            family,
+                                                            entry->epoch);
+            entry->generation = llam_public_slot_family_generation_for_epoch(table,
+                                                                             slot,
+                                                                             object,
+                                                                             family,
+                                                                             owner_secret,
+                                                                             entry->epoch,
+                                                                             entry->slot_nonce);
+        } else {
+            entry->generation = llam_public_slot_next_generation(entry->generation);
+            entry->epoch = entry->generation;
+            entry->slot_nonce = 0U;
+        }
         entry->object = object;
         *out_slot = slot;
         *out_generation = entry->generation;
@@ -187,7 +210,23 @@ static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
 
     slot = table->count++;
     table->slots[slot].object = object;
-    table->slots[slot].generation = llam_public_slot_initial_generation_for(family);
+    table->slots[slot].epoch = 1U;
+    table->slots[slot].slot_nonce = family != 0U
+                                        ? llam_public_slot_next_nonce(table,
+                                                                      object,
+                                                                      owner_secret,
+                                                                      slot,
+                                                                      family,
+                                                                      1U)
+                                        : 0U;
+    table->slots[slot].generation =
+        llam_public_slot_initial_generation_for_slot(table,
+                                                     slot,
+                                                     object,
+                                                     family,
+                                                     owner_secret,
+                                                     1U,
+                                                     table->slots[slot].slot_nonce);
     table->slots[slot].next_free_plus_one = LLAM_PUBLIC_SLOT_FREE_NONE;
     *out_slot = slot;
     *out_generation = table->slots[slot].generation;
@@ -199,7 +238,17 @@ static inline int llam_public_slot_reserve(llam_public_slot_table_t *table,
                                            size_t initial_capacity,
                                            size_t *out_slot,
                                            uint32_t *out_generation) {
-    return llam_public_slot_reserve_impl(table, object, initial_capacity, 0U, out_slot, out_generation);
+    return llam_public_slot_reserve_impl(table, object, initial_capacity, 0U, 0U, out_slot, out_generation);
+}
+
+static inline int llam_public_slot_reserve_family_secret(llam_public_slot_table_t *table,
+                                                         void *object,
+                                                         size_t initial_capacity,
+                                                         uint32_t family,
+                                                         uint64_t owner_secret,
+                                                         size_t *out_slot,
+                                                         uint32_t *out_generation) {
+    return llam_public_slot_reserve_impl(table, object, initial_capacity, family, owner_secret, out_slot, out_generation);
 }
 
 static inline int llam_public_slot_reserve_family(llam_public_slot_table_t *table,
@@ -208,7 +257,7 @@ static inline int llam_public_slot_reserve_family(llam_public_slot_table_t *tabl
                                                   uint32_t family,
                                                   size_t *out_slot,
                                                   uint32_t *out_generation) {
-    return llam_public_slot_reserve_impl(table, object, initial_capacity, family, out_slot, out_generation);
+    return llam_public_slot_reserve_family_secret(table, object, initial_capacity, family, 0U, out_slot, out_generation);
 }
 
 static inline void *llam_public_slot_resolve(const llam_public_slot_table_t *table,
@@ -260,6 +309,7 @@ static inline int llam_public_slot_reactivate_impl(llam_public_slot_table_t *tab
                                                    size_t slot,
                                                    void *object,
                                                    uint32_t family,
+                                                   uint64_t owner_secret,
                                                    uint32_t *out_generation) {
     llam_public_slot_t *entry;
 
@@ -276,11 +326,32 @@ static inline int llam_public_slot_reactivate_impl(llam_public_slot_table_t *tab
         errno = EINVAL;
         return -1;
     }
-    if (LLAM_UNLIKELY(llam_public_slot_generation_exhausted_for(entry->generation, family))) {
+    if (LLAM_UNLIKELY(family != 0U
+                          ? entry->epoch >= LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH
+                          : llam_public_slot_generation_exhausted(entry->generation))) {
         errno = EOVERFLOW;
         return -1;
     }
-    entry->generation = llam_public_slot_next_generation_for(entry->generation, family);
+    if (family != 0U) {
+        entry->epoch += 1U;
+        entry->slot_nonce = llam_public_slot_next_nonce(table,
+                                                        object,
+                                                        owner_secret,
+                                                        slot,
+                                                        family,
+                                                        entry->epoch);
+        entry->generation = llam_public_slot_family_generation_for_epoch(table,
+                                                                         slot,
+                                                                         object,
+                                                                         family,
+                                                                         owner_secret,
+                                                                         entry->epoch,
+                                                                         entry->slot_nonce);
+    } else {
+        entry->generation = llam_public_slot_next_generation(entry->generation);
+        entry->epoch = entry->generation;
+        entry->slot_nonce = 0U;
+    }
     *out_generation = entry->generation;
     return 0;
 }
@@ -289,7 +360,16 @@ static inline int llam_public_slot_reactivate(llam_public_slot_table_t *table,
                                               size_t slot,
                                               void *object,
                                               uint32_t *out_generation) {
-    return llam_public_slot_reactivate_impl(table, slot, object, 0U, out_generation);
+    return llam_public_slot_reactivate_impl(table, slot, object, 0U, 0U, out_generation);
+}
+
+static inline int llam_public_slot_reactivate_family_secret(llam_public_slot_table_t *table,
+                                                            size_t slot,
+                                                            void *object,
+                                                            uint32_t family,
+                                                            uint64_t owner_secret,
+                                                            uint32_t *out_generation) {
+    return llam_public_slot_reactivate_impl(table, slot, object, family, owner_secret, out_generation);
 }
 
 static inline int llam_public_slot_reactivate_family(llam_public_slot_table_t *table,
@@ -297,7 +377,7 @@ static inline int llam_public_slot_reactivate_family(llam_public_slot_table_t *t
                                                      void *object,
                                                      uint32_t family,
                                                      uint32_t *out_generation) {
-    return llam_public_slot_reactivate_impl(table, slot, object, family, out_generation);
+    return llam_public_slot_reactivate_family_secret(table, slot, object, family, 0U, out_generation);
 }
 
 static inline void llam_public_slot_release(llam_public_slot_table_t *table,

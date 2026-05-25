@@ -237,44 +237,7 @@ void llam_darwin_process_submissions(llam_node_t *node) {
 
 /** @brief Queue deactivation controls for all active watches during shutdown. */
 void llam_darwin_queue_shutdown_controls(llam_node_t *node) {
-    bool kicked = false;
-
-    pthread_mutex_lock(&node->watch_lock);
-    for (llam_poll_watch_t *watch = node->poll_watches; watch != NULL; watch = watch->next) {
-        if (watch->active && !watch->deactivate_queued) {
-            watch->deactivate_queued = true;
-            if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch) == 0) {
-                kicked = true;
-            } else {
-                // Keep shutdown retryable if control allocation fails.
-                watch->deactivate_queued = false;
-            }
-        }
-    }
-    for (llam_accept_watch_t *watch = node->accept_watches; watch != NULL; watch = watch->next) {
-        if (watch->active && !watch->deactivate_queued) {
-            watch->deactivate_queued = true;
-            if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch) == 0) {
-                kicked = true;
-            } else {
-                watch->deactivate_queued = false;
-            }
-        }
-    }
-    for (llam_recv_watch_t *watch = node->recv_watches; watch != NULL; watch = watch->next) {
-        if (watch->active && !watch->deactivate_queued) {
-            watch->deactivate_queued = true;
-            if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch) == 0) {
-                kicked = true;
-            } else {
-                watch->deactivate_queued = false;
-            }
-        }
-    }
-    pthread_mutex_unlock(&node->watch_lock);
-    if (kicked) {
-        llam_kick_node(node);
-    }
+    llam_io_queue_shutdown_controls_common(node);
 }
 
 /**

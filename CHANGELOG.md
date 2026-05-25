@@ -13,6 +13,69 @@
 * multi-runtime regression coverage: add `test_multi_runtime_core` and connect
   it to Make, CMake, CI, Docker verification, and sanitizer target suites.
 
+* internal broker capability foundation: add broker-local capability keys,
+  attenuable rights tokens, revocation epochs, tamper-resistant MAC validation,
+  broker-owned control/ring attenuation, object-specific generation revocation,
+  `test_security_capability`, POSIX Unix-domain and Windows named-pipe control
+  transports, and `llam_broker --self-test` / `--serve-once` /
+  `--serve-n` / `--serve` / `--client-self-test` hooks as the first gate for
+  future out-of-process secure transport work. The untrusted control transport
+  rejects raw arbitrary token minting with `EACCES`; capability issuance remains
+  tied to trusted broker object creation, bounded buffer/channel grant requests,
+  or broker-side attenuation/revocation.
+  Tokens minted through the local control transport are additionally bound to a
+  per-session broker subject id, so replaying the serialized token on another
+  broker control connection fails with `EACCES`.
+  Shared-memory ring serving now has the same subject-binding hook: a ring
+  served under one subject rejects subject-0 or different-subject serving before
+  consuming pending submissions.
+  Broker capability MAC keys are now created only by broker setup. Ordinary
+  in-process runtime creation no longer depends on broker capability entropy or
+  carries broker signing authority, preserving the documented separation between
+  UAF/FFI hardening handles and out-of-process capability boundaries.
+  Broker capability MAC key creation now requires secure OS entropy and fails
+  closed instead of falling back to deterministic address/time/pid material;
+  token issuance now also requires entropy for MAC-covered nonces and clears
+  partial output on failure; transport subject creation follows the same
+  fail-closed rule so cross-session replay binding never degrades to
+  deterministic fd/path state.
+  Client-visible broker validation now rejects zero-right validation with
+  `EINVAL`, closing a rightless live-token oracle while keeping internal
+  attenuation validation broker-only.
+  Failed capability attenuation and broker object-revocation helpers now clear
+  non-aliased output tokens, so callers cannot accidentally reuse stale
+  serialized authority after an `EACCES`/`EINVAL` failure.
+  Object-specific revocation now issues the replacement token before committing
+  the live slot generation, so entropy failure reports `EIO` without invalidating
+  the caller's existing token.
+  `test_security_capability` includes entropy-failure and zero-right validation
+  regression guards, failed-output token clearing checks, and revoke atomicity
+  coverage.
+
+* broker data-plane foundation: add POSIX `shm_open`/`mmap` and Windows
+  named-file-mapping submission/completion rings plus explicit buffer-grant
+  validation so a future broker worker can move high-volume requests without
+  sharing runtime keys or registries with the client process. The ring path can
+  process broker-side capability validation/attenuation/revocation requests and
+  broker-owned buffer read/write copies through a bounded shared data window.
+  The local control transport now also exercises fixed-size broker-owned buffer
+  read/write, byte-channel send/receive/close, POSIX `SCM_RIGHTS` descriptor
+  grants, Windows `DuplicateHandle` named-pipe HANDLE grants,
+  descriptor/HANDLE read/write via broker-owned tokens, and predefined
+  task spawn/join/detach requests, keeping smoke tests independent from
+  shared-memory ring setup while preserving bounded payloads and avoiding raw
+  client descriptors or function pointers.
+  POSIX fd and Windows
+  HANDLE read/write can route through broker-owned descriptor slots instead of
+  exposing raw descriptor authority to the client side, with descriptor/HANDLE
+  duplication performed under the broker table lock before blocking I/O runs.
+  Broker-owned byte channels can now route send, receive, and close requests
+  through the same capability-checked ring path. Predefined broker-owned task
+  commands can now spawn on the broker runtime and be joined or detached through
+  ring-issued capabilities without accepting raw client function pointers; the
+  initial command set covers scalar return, increment, popcount, and cooperative
+  sleep/return work.
+
 * sanitizer entry points: add `make test-asan` for public handle/runtime/I/O
   edge coverage and `make test-tsan` as a shorter runtime core, shutdown, and
   multi-runtime race gate.
@@ -73,6 +136,12 @@
   mistyped FFI handle from one object family cannot be accepted by another
   registry that happens to hold the same slot and generation.
 
+* harden family-tagged public handle generations with sealed verifier tokens
+  derived from runtime/table secret material, slot id, internal epoch, and a
+  per-slot nonce. Trivially guessed first handles and monotonic next-generation
+  guesses after slot reuse are rejected. This remains an in-process UAF/FFI
+  hardening layer, not a cryptographic sandbox boundary.
+
 * reject `llam_runtime_run_handle(NULL)` with `EINVAL` instead of allowing the
   explicit runtime handle path to dereference a null handle.
 
@@ -82,6 +151,152 @@
 * make internal raw owned-buffer cleanup prefer live wrapper membership before
   public-handle decoding, preventing a large public slot table from hiding raw
   cleanup behind a decodable but unrelated slot number.
+
+* harden broker shared-memory submission/completion rings with broker-private
+  progress cursors and corrupt client-controlled head/tail window checks.
+  Impossible or rewound windows now fail closed with `EINVAL`/`EAGAIN` instead
+  of allowing stale ring slots to be interpreted as fresh broker requests.
+
+* bind broker capability validation to the live broker runtime id after MAC
+  validation. This makes an internally fabricated or accidentally cross-issued
+  foreign-runtime token fail closed even if it has a valid signature under the
+  current test key material.
+* make broker capability validation live-object aware. Structurally valid tokens
+  now fail once object-specific revocation rotates the buffer, descriptor,
+  channel, or task slot generation, and transport/ring validation paths share the
+  same stale-token rejection.
+
+* serialize public broker validation and attenuation with object-specific
+  revocation under the broker lock, eliminating a TSan-reproduced race between
+  live-slot authorization reads and generation rotation.
+
+* harden POSIX broker Unix-domain listen paths: pre-existing filesystem entries
+  are no longer unlinked as stale endpoints, newly bound broker sockets are
+  chmod'd to owner-only `0600` instead of inheriting a permissive umask, and
+  serve-once cleanup unlinks only the exact socket inode it created.
+
+* guard broker object tables and ring-session cursors with broker-local locking.
+  Serving the same shared-memory ring concurrently now fails with `EBUSY`, and
+  broker descriptor/HANDLE I/O duplicates authority before the blocking call to
+  avoid close/reuse races while keeping unrelated broker operations unblocked.
+
+* guard broker destroy with active-operation pins. Once destroy starts, new
+  broker operations fail closed, while accepted ring/control/data-plane
+  operations finish before broker-owned tables, descriptors, MAC keys, and
+  runtime state are cleared. Same-thread helper calls made by the accepted
+  operation keep using its existing broker authority instead of failing as new
+  external work.
+
+* scrub broker authority residue during teardown: capability MAC keys,
+  revocation epoch, object id counters, transport subject sessions, and ring
+  subject sessions are cleared after accepted broker operations drain.
+  Capability validation now wipes temporary MAC comparison material after use.
+
+* fix broker subject scoping for nested operations. A subject introduced by an
+  inner transport or ring operation is now restored when that operation returns,
+  so it cannot leak into an outer bearer operation and accidentally authorize
+  later validation, attenuation, revocation, or issuance under the wrong
+  session.
+
+* keep broker local-control transport subjects stable across repeated
+  `serve_one` calls on the same connection and fail closed with `ENOSPC` when a
+  new control connection cannot reserve a subject slot. This prevents
+  one-request serving helpers from minting tokens that cannot be validated on
+  the next request. POSIX control sessions are keyed by socket object identity
+  rather than fd number alone, so descriptor-number reuse does not inherit the
+  old subject. New subject reservation is now also rejected after broker destroy
+  starts, preventing shutdown from racing with a fresh external audience.
+
+* add sequential multi-session broker serving. `llam_broker --serve-n` and
+  `--serve` keep broker-owned authority state in one process while assigning a
+  fresh session subject to each accepted local control connection; a client
+  STOP closes only that session.
+
+* isolate malformed local-control broker sessions. A short write, early close,
+  or broken pipe now fails only that accepted client session, while
+  long-running `--serve` / `--serve-n` brokers continue accepting later
+  sessions with fresh subject ids.
+
+* harden Windows broker named-pipe creation with an explicit current-user,
+  LocalSystem, and Administrators DACL plus remote-client rejection. Pipe
+  creation now fails closed if the security descriptor cannot be built instead
+  of relying on the process default DACL.
+
+* harden Windows broker ring named-file-mapping creation with the same explicit
+  current-user, LocalSystem, and Administrators DACL. The security capability
+  test now inspects the mapping DACL so the ring boundary cannot silently fall
+  back to an ambient process default descriptor.
+
+* add high-entropy private broker ring mapping names and switch shared-memory
+  mapping tests away from predictable pid-derived names. Named mappings remain
+  bearer rendezvous authority, but broker setup no longer defaults to names an
+  opportunistic same-UID process can guess from the test process id.
+  POSIX broker ring setup can now create an immediately unlinked shm object and
+  map it by fd, giving the broker a path to deliver ring authority with
+  `SCM_RIGHTS` instead of exposing any reusable shared-memory name.
+  Windows broker ring setup can now create an unnamed file mapping and map a
+  duplicated HANDLE, giving the broker the same no-reusable-name authority path
+  with `DuplicateHandle`.
+  The local control transport now exposes this as
+  `LLAM_BROKER_WIRE_OP_CREATE_RING`: POSIX replies attach the immediately
+  unlinked ring fd with `SCM_RIGHTS`, Windows replies duplicate the unnamed
+  mapping HANDLE into the connected pipe peer, and the broker retains its own
+  mapping in ring-session state for teardown without publishing a reusable
+  shm or object-manager name. The matching `LLAM_BROKER_WIRE_OP_SERVE_RING`
+  operation serves one submission from that broker-owned session by
+  subject-scoped session id, rejecting invalid or foreign sessions before any
+  client-visible ring entry is consumed. Session-id serving now claims the
+  session busy state while still holding the broker table lock, closing the
+  lookup-to-execution window where cleanup could otherwise unmap the
+  broker-owned ring. If response fd/HANDLE delivery fails after session
+  creation, the broker now tears down the just-created ring session so a
+  disconnecting client cannot strand private mappings or exhaust the ring
+  session table. POSIX broker response writes use no-SIGPIPE send paths,
+  turning closed-peer writes into ordinary `EPIPE`/`ECONNRESET` failures
+  instead of process termination.
+
+* reject global `LLAM_BROKER_WIRE_OP_REVOKE_ALL` on the untrusted local control
+  transport with `EACCES`. Global epoch revocation remains available only as a
+  trusted in-process broker-management API; client-visible revocation must use
+  object-specific destroy authority.
+
+* close descriptor grants received with malformed broker wire headers or any
+  non-`REGISTER_DESCRIPTOR` operation. A client can no longer combine an invalid
+  request header or unrelated control op with an attached fd/HANDLE to leak a
+  broker-side duplicated descriptor and exhaust broker resources. The transport
+  wrapper now treats the dispatcher as the single owner of accepted descriptor
+  grants, avoiding fd/HANDLE double-close hazards on malformed requests.
+  POSIX `SCM_RIGHTS` requests that attach multiple fds are now rejected after
+  closing every received fd, preventing over-authorized descriptor arrays from
+  leaking the later ancillary fds into the broker process.
+  POSIX broker-control sockets, accepted sessions, received descriptor grants,
+  broker-owned descriptor slots, private ring mapping fds, response fd
+  duplicates, and ring mapping duplicates are now marked close-on-exec so
+  broker capability transport or data-plane authority is not inherited by later
+  helper `exec` calls.
+  Failed POSIX broker wire reads now clear request/response output storage
+  before returning an error, preventing partial attacker-controlled control
+  messages from being reused by buggy callers that ignore the failure return.
+  Direct broker-owned buffer reads, channel receives, and descriptor/HANDLE
+  reads now clear caller output on failure and zero the unused suffix after
+  successful short reads/receives, matching the shared-ring stale-output policy.
+
+* reject oversized broker ring task command ids before narrowing to the
+  predefined 32-bit command enum. This keeps high-bit shared-memory submissions
+  from truncating into an allowed broker-owned task command.
+
+* clear validated shared-memory ring output windows on failed output-producing
+  broker operations and clear the unused suffix after successful short
+  descriptor/HANDLE reads or channel receives. Failed attenuation, revocation,
+  buffer read, descriptor/HANDLE read, channel receive, or predefined task spawn
+  no longer leaves stale token or data bytes that could be mistaken for fresh
+  broker output by a buggy client that ignores the failure completion; short
+  success paths now also protect clients that mishandle the returned byte count.
+
+* clear token outputs before validation in raw capability issuance and
+  broker-owned buffer/channel/descriptor/task creation paths. Invalid input or
+  early creation failure can no longer leave a stale previous token in caller
+  storage that might be confused with newly issued authority.
 
 * clarify the managed-sleep TLS boundary, dynamic-watchdog diagnostic printf
   type, and ABI/sentinel tests so static analysis no longer masks real findings
@@ -105,6 +320,28 @@
 
 * add direct public-slot family collision and max-epoch regression coverage, plus
   multi-runtime sync handle confusion and null runtime handle checks.
+
+* add broker ring counter-corruption coverage for stale replay, inverted
+  windows, and oversized submission/completion windows.
+
+* add broker ring failed-output coverage proving failed output-producing
+  operations clear the validated shared-memory output window before publishing
+  a failure completion.
+
+* add broker concurrent channel state coverage under `test_security_capability`
+  and include the security-capability test in ASan/UBSan and TSan suites.
+
+* add a broker destroy-vs-active-ring-I/O regression test proving that a
+  concurrent destroy waits for the pinned operation before clearing
+  broker-owned state.
+
+* add a broker nested-operation regression test proving that an already
+  accepted operation can still call internal broker helpers after destroy has
+  started, while new external operations remain rejected.
+
+* add disconnected-`CREATE_RING` coverage proving a client that closes before
+  receiving the private ring fd cannot leave an unreachable broker-owned ring
+  session behind.
 
 * add ABI layout and single-evaluation predicate checks for `reserved0`,
   `LLAM_FD_IS_INVALID()`, and `LLAM_HANDLE_IS_INVALID()`.

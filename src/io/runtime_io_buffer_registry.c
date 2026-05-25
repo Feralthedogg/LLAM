@@ -61,12 +61,15 @@ static int llam_io_buffer_public_reserve_slot_locked(llam_io_buffer_t *buffer, s
      * Owned buffers can cross FFI boundaries and outlive the producing task, so
      * their public handle must not collide with task/sync registry handles.
      */
-    return llam_public_slot_reserve_family(&g_llam_io_buffer_public_slots,
-                                           buffer,
-                                           64U,
-                                           LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER,
-                                           out_slot,
-                                           &generation);
+    return llam_public_slot_reserve_family_secret(&g_llam_io_buffer_public_slots,
+                                                  buffer,
+                                                  64U,
+                                                  LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER,
+                                                  buffer->owner_runtime != NULL
+                                                      ? buffer->owner_runtime->public_handle_secret
+                                                      : 0U,
+                                                  out_slot,
+                                                  &generation);
 }
 
 static bool llam_io_buffer_public_decode_handle_locked(const llam_io_buffer_t *handle,

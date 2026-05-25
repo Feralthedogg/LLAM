@@ -36,6 +36,7 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason);
 llam_wait_reason_t llam_io_abort_wait_reason(llam_io_abort_reason_t reason);
 void llam_io_set_abort_result(llam_io_req_t *req, llam_io_abort_reason_t reason);
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard);
+uint64_t llam_hash_watch_identity_u64(uint64_t value);
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
 void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
 
@@ -51,10 +52,21 @@ static inline bool llam_io_req_abort_requested(const llam_io_req_t *req) {
 void llam_accept_watch_enqueue_waiter(llam_accept_watch_t *watch, llam_io_req_t *req);
 int llam_accept_watch_pop_ready(llam_accept_watch_t *watch);
 bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req);
+void llam_accept_watch_push_waiter_front(llam_accept_watch_t *watch, llam_io_req_t *req);
 void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req);
 bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req);
+llam_io_req_t *llam_poll_watch_take_waiters(llam_poll_watch_t *watch);
+void llam_poll_watch_push_waiters_front(llam_poll_watch_t *watch, llam_io_req_t *waiters);
 void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req);
 bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req);
+void llam_recv_watch_push_waiter_front(llam_recv_watch_t *watch, llam_io_req_t *req);
+bool llam_recv_watch_pop_ready_shared(llam_recv_watch_t *watch,
+                                      size_t *size_out,
+                                      unsigned short *bid_out,
+                                      bool *has_buffer_out,
+                                      unsigned *node_index_out,
+                                      unsigned char **copy_data_out,
+                                      size_t *copy_capacity_out);
 bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              size_t *size_out,
                              unsigned short *bid_out,
@@ -69,7 +81,12 @@ bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
 llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, llam_fd_t fd);
 llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, llam_fd_t fd, short events);
 llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, llam_fd_t fd);
+void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch);
+void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch);
+void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
 void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
+void llam_accept_watch_splice_ready(llam_accept_watch_t *target, llam_accept_watch_t *source);
+void llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *source);
 
 /*
  * Request allocation, capability checks, and submission queues.
@@ -82,6 +99,7 @@ int llam_io_req_node_index(const llam_io_req_t *req);
 void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta);
 void llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
+llam_io_req_t *llam_take_node_submissions(llam_node_t *node);
 
 /*
  * Live watch and waiter rehome support for dynamic shard/node movement.
@@ -89,6 +107,45 @@ bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_io_rehome_idle_watch_state(llam_node_t *source, llam_node_t *target);
 bool llam_io_rehome_marked_watch_state(llam_node_t *source, llam_node_t *target);
 unsigned llam_multishot_owner_node_index(llam_runtime_t *rt, unsigned fallback_node_index, llam_fd_t fd);
+bool llam_arm_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch, bool *kick_node);
+bool llam_arm_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch, bool *kick_node);
+bool llam_arm_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch, bool *kick_node);
+bool llam_arm_watch_locked_common(llam_node_t *node,
+                                  bool *active,
+                                  bool *activating,
+                                  bool *deactivate_queued,
+                                  llam_io_control_kind_t deactivate_kind,
+                                  llam_io_control_kind_t activate_kind,
+                                  void *target,
+                                  bool *kick_node);
+void llam_io_lock_rehome_pair(llam_node_t *source,
+                              llam_node_t *target,
+                              llam_node_t **source_locked,
+                              llam_node_t **target_locked);
+void llam_io_unlock_rehome_pair(llam_node_t *source, llam_node_t *target);
+unsigned llam_watch_migration_target_index(llam_runtime_t *rt,
+                                           unsigned fallback_target_index,
+                                           unsigned current_target_index,
+                                           llam_fd_t fd);
+unsigned llam_watch_migration_target_or_none(unsigned desired_target_index, unsigned source_index);
+void llam_poll_watch_note_waiter_migration(llam_poll_watch_t *watch,
+                                           unsigned desired_target_index,
+                                           unsigned source_index);
+void llam_accept_watch_note_waiter_migration(llam_accept_watch_t *watch,
+                                             unsigned desired_target_index,
+                                             unsigned source_index);
+void llam_recv_watch_note_waiter_migration(llam_recv_watch_t *watch,
+                                           unsigned desired_target_index,
+                                           unsigned source_index);
+void llam_poll_watch_mark_live_migration(llam_poll_watch_t *watch,
+                                         unsigned desired_target_index,
+                                         unsigned source_index);
+void llam_accept_watch_mark_live_migration(llam_accept_watch_t *watch,
+                                           unsigned desired_target_index,
+                                           unsigned source_index);
+void llam_recv_watch_mark_live_migration(llam_recv_watch_t *watch,
+                                         unsigned desired_target_index,
+                                         unsigned source_index);
 
 /*
  * Backend node setup, probing, and worker lifecycle.
@@ -102,7 +159,9 @@ void llam_node_unregister_cq_eventfd(llam_node_t *node);
 int llam_node_setup_recv_buf_ring(llam_node_t *node);
 int llam_node_queue_control(llam_node_t *node, llam_io_control_kind_t kind, void *target);
 int llam_node_queue_control_locked(llam_node_t *node, llam_io_control_kind_t kind, void *target);
+bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kind, const void *target);
 bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind);
+void llam_io_queue_shutdown_controls_common(llam_node_t *node);
 void llam_probe_ring_support(llam_node_t *node);
 void llam_io_buffer_public_detach_runtime_storage(llam_runtime_t *rt);
 

@@ -613,6 +613,38 @@ void *llam_blocking_connect_impl(void *arg) {
 }
 
 /**
+ * @brief Prepare one cancellation-aware blocking poll slice.
+ *
+ * Blocking fallbacks poll in short slices so cancellation/runtime stop can be
+ * observed without relying on backend-specific interrupt support.
+ */
+static bool llam_blocking_prepare_poll_slice(llam_io_req_t *req, uint64_t deadline_ns, int *slice_ms) {
+    if (llam_blocking_req_cancelled(req)) {
+        llam_blocking_req_set_cancelled(req);
+        return false;
+    }
+    *slice_ms = 10;
+    if (req->timeout_ms >= 0) {
+        uint64_t now_ns = llam_now_ns();
+        uint64_t remain_ns;
+
+        if (now_ns >= deadline_ns) {
+            req->poll_revents = 0;
+            req->result = 0;
+            return false;
+        }
+        remain_ns = deadline_ns - now_ns;
+        *slice_ms = (int)(remain_ns / 1000000ULL);
+        if (*slice_ms <= 0) {
+            *slice_ms = 1;
+        } else if (*slice_ms > 10) {
+            *slice_ms = 10;
+        }
+    }
+    return true;
+}
+
+/**
  * @brief Blocking-worker fallback for poll operations.
  *
  * Polling is sliced into at most 10 ms intervals so finite timeouts remain
@@ -634,26 +666,8 @@ void *llam_blocking_poll_impl(void *arg) {
     for (;;) {
         int slice_ms = 10;
 
-        if (llam_blocking_req_cancelled(req)) {
-            llam_blocking_req_set_cancelled(req);
+        if (!llam_blocking_prepare_poll_slice(req, deadline_ns, &slice_ms)) {
             return req;
-        }
-        if (req->timeout_ms >= 0) {
-            uint64_t now_ns = llam_now_ns();
-            uint64_t remain_ns;
-
-            if (now_ns >= deadline_ns) {
-                req->poll_revents = 0;
-                req->result = 0;
-                return req;
-            }
-            remain_ns = deadline_ns - now_ns;
-            slice_ms = (int)(remain_ns / 1000000ULL);
-            if (slice_ms <= 0) {
-                slice_ms = 1;
-            } else if (slice_ms > 10) {
-                slice_ms = 10;
-            }
         }
 
         req->result = llam_platform_poll_fd(req->fd, req->poll_events, req->timeout_ms < 0 ? 10 : slice_ms, &req->poll_revents);
@@ -685,26 +699,8 @@ void *llam_blocking_handle_poll_impl(void *arg) {
     for (;;) {
         int slice_ms = 10;
 
-        if (llam_blocking_req_cancelled(req)) {
-            llam_blocking_req_set_cancelled(req);
+        if (!llam_blocking_prepare_poll_slice(req, deadline_ns, &slice_ms)) {
             return req;
-        }
-        if (req->timeout_ms >= 0) {
-            uint64_t now_ns = llam_now_ns();
-            uint64_t remain_ns;
-
-            if (now_ns >= deadline_ns) {
-                req->poll_revents = 0;
-                req->result = 0;
-                return req;
-            }
-            remain_ns = deadline_ns - now_ns;
-            slice_ms = (int)(remain_ns / 1000000ULL);
-            if (slice_ms <= 0) {
-                slice_ms = 1;
-            } else if (slice_ms > 10) {
-                slice_ms = 10;
-            }
         }
 
         req->result = llam_platform_poll_handle(req->handle,

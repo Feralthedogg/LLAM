@@ -72,6 +72,18 @@ int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
             return -1;
         }
     }
+    {
+        uint64_t secret = 0U;
+
+        if (!llam_public_slot_entropy_from_os(&secret)) {
+            secret = 0U;
+        }
+        secret ^= llam_public_slot_fallback_secret(rt, &rt->runtime_id, rt->runtime_id);
+        rt->public_handle_secret = llam_public_slot_mix64(secret ^ rt->runtime_id);
+        if (rt->public_handle_secret == 0U) {
+            rt->public_handle_secret = UINT64_C(0xd6e8feb86659fd93);
+        }
+    }
     rt->heap_allocated = heap_allocated;
     atomic_store_explicit(&rt->destroy_claimed, false, memory_order_release);
     atomic_store_explicit(&rt->active_ops, 0U, memory_order_release);

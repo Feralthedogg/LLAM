@@ -77,7 +77,7 @@ if ($Native) {
     foreach ($forcedGeneration in @("10", "11")) {
         Write-Host "forced policy verification: LLAM_WINDOWS_FORCE_GENERATION=$forcedGeneration"
         $env:LLAM_WINDOWS_FORCE_GENERATION = $forcedGeneration
-        & ctest --test-dir $buildDir --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io"
+        & ctest --test-dir $buildDir --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
         if ($LASTEXITCODE -ne 0) {
             Remove-Item Env:\LLAM_WINDOWS_FORCE_GENERATION -ErrorAction SilentlyContinue
             exit $LASTEXITCODE

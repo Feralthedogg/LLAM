@@ -367,6 +367,26 @@ int llam_platform_poll_now(llam_fd_t fd, short events, short *revents) {
 }
 
 /**
+ * @brief Restore temporary nonblocking flags without clobbering syscall errno.
+ */
+static void llam_direct_restore_flags_preserve_errno(llam_fd_t fd, bool restore_flags, int saved_flags) {
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+    int saved_errno;
+
+    if (!restore_flags) {
+        return;
+    }
+    saved_errno = errno;
+    (void)fcntl(fd, F_SETFL, saved_flags);
+    errno = saved_errno;
+#else
+    (void)fd;
+    (void)restore_flags;
+    (void)saved_flags;
+#endif
+}
+
+/**
  * @brief Try a read/write/recv operation as an immediate non-blocking syscall.
  *
  * Return values are tri-state:
@@ -500,11 +520,7 @@ int llam_try_direct_rw(llam_fd_t fd,
             rc = llam_platform_read_fd(fd, buf, count);
         }
         if (rc >= 0) {
-            if (restore_flags) {
-                int saved_errno = errno;
-                (void)fcntl(fd, F_SETFL, saved_flags);
-                errno = saved_errno;
-            }
+            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
             if (result_out != NULL) {
                 *result_out = rc;
             }
@@ -514,21 +530,10 @@ int llam_try_direct_rw(llam_fd_t fd,
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            if (restore_flags) {
-                int saved_errno = errno;
-                (void)fcntl(fd, F_SETFL, saved_flags);
-                errno = saved_errno;
-            }
+            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
             return 0;
         }
-        {
-            int saved_errno = errno;
-
-            if (restore_flags) {
-                (void)fcntl(fd, F_SETFL, saved_flags);
-            }
-            errno = saved_errno;
-        }
+        llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
         return -1;
     }
 }
@@ -615,12 +620,7 @@ int llam_try_direct_writev(llam_fd_t fd,
     for (;;) {
         rc = writev(fd, native_iov, iovcnt);
         if (rc >= 0) {
-            if (restore_flags) {
-                int saved_errno = errno;
-
-                (void)fcntl(fd, F_SETFL, saved_flags);
-                errno = saved_errno;
-            }
+            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
             if (result_out != NULL) {
                 *result_out = rc;
             }
@@ -630,22 +630,10 @@ int llam_try_direct_writev(llam_fd_t fd,
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            if (restore_flags) {
-                int saved_errno = errno;
-
-                (void)fcntl(fd, F_SETFL, saved_flags);
-                errno = saved_errno;
-            }
+            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
             return 0;
         }
-        {
-            int saved_errno = errno;
-
-            if (restore_flags) {
-                (void)fcntl(fd, F_SETFL, saved_flags);
-            }
-            errno = saved_errno;
-        }
+        llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
         return -1;
     }
 #else
@@ -730,12 +718,7 @@ int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrl
         accepted = llam_platform_accept_fd(fd, addr, addrlen);
         if (!LLAM_FD_IS_INVALID(accepted)) {
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-            if (restore_flags) {
-                int saved_errno = errno;
-
-                (void)fcntl(fd, F_SETFL, saved_flags);
-                errno = saved_errno;
-            }
+            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
 #endif
             if (result_out != NULL) {
                 *result_out = accepted;
@@ -747,25 +730,13 @@ int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrl
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-            if (restore_flags) {
-                int saved_errno = errno;
-
-                (void)fcntl(fd, F_SETFL, saved_flags);
-                errno = saved_errno;
-            }
+            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
 #endif
             return 0;
         }
-        {
-            int saved_errno = errno;
-
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-            if (restore_flags) {
-                (void)fcntl(fd, F_SETFL, saved_flags);
-            }
+        llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
 #endif
-            errno = saved_errno;
-        }
         return -1;
     }
 }

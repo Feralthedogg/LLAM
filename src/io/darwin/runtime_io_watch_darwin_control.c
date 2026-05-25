@@ -38,69 +38,6 @@ int llam_node_queue_control(llam_node_t *node, llam_io_control_kind_t kind, void
     return rc;
 }
 
-/** @brief Enqueue a control operation while watch_lock is held. */
-int llam_node_queue_control_locked(llam_node_t *node, llam_io_control_kind_t kind, void *target) {
-    llam_io_control_op_t *op = calloc(1, sizeof(*op));
-
-    if (op == NULL) {
-        return -1;
-    }
-    op->kind = kind;
-    op->target = target;
-    if (node->control_tail != NULL) {
-        node->control_tail->next = op;
-    } else {
-        node->control_head = op;
-    }
-    node->control_tail = op;
-    return 0;
-}
-
-/** @brief Append a receive waiter while watch_lock is held. */
-void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    req->next = NULL;
-    if (watch->wait_tail != NULL) {
-        watch->wait_tail->next = req;
-    } else {
-        watch->wait_head = req;
-    }
-    watch->wait_tail = req;
-}
-
-/**
- * @brief Remove a receive waiter while watch_lock is held.
- *
- * A NULL watch means completion already detached the request.
- */
-bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur;
-
-    if (watch == NULL || req == NULL) {
-        return false;
-    }
-
-    cur = watch->wait_head;
-
-    while (cur != NULL) {
-        if (cur == req) {
-            if (prev != NULL) {
-                prev->next = cur->next;
-            } else {
-                watch->wait_head = cur->next;
-            }
-            if (watch->wait_tail == cur) {
-                watch->wait_tail = prev;
-            }
-            cur->next = NULL;
-            return true;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    return false;
-}
-
 /** @brief Pop buffered receive readiness, optionally transferring copy ownership. */
 bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              size_t *size_out,
@@ -109,41 +46,13 @@ bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              unsigned *node_index_out,
                              unsigned char **copy_data_out,
                              size_t *copy_capacity_out) {
-    llam_recv_ready_t *ready = watch->ready_head;
-
-    if (ready == NULL) {
-        return false;
-    }
-    watch->ready_head = ready->next;
-    if (watch->ready_head == NULL) {
-        watch->ready_tail = NULL;
-    }
-    watch->ready_depth -= 1U;
-    if (size_out != NULL) {
-        *size_out = ready->size;
-    }
-    if (bid_out != NULL) {
-        *bid_out = ready->bid;
-    }
-    if (has_buffer_out != NULL) {
-        *has_buffer_out = ready->has_buffer;
-    }
-    if (node_index_out != NULL) {
-        *node_index_out = ready->node_index;
-    }
-    if (copy_data_out != NULL) {
-        // Transfer heap payload copy ownership to caller.
-        *copy_data_out = ready->copy_data;
-        ready->copy_data = NULL;
-    }
-    // If the caller does not accept ownership, the ready node still owns the
-    // copied payload and must release it before disappearing.
-    free(ready->copy_data);
-    if (copy_capacity_out != NULL) {
-        *copy_capacity_out = ready->copy_capacity;
-    }
-    free(ready);
-    return true;
+    return llam_recv_watch_pop_ready_shared(watch,
+                                           size_out,
+                                           bid_out,
+                                           has_buffer_out,
+                                           node_index_out,
+                                           copy_data_out,
+                                           copy_capacity_out);
 }
 
 /** @brief Detach all queued control operations from a node. */

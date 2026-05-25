@@ -20,31 +20,6 @@
 
 #include "runtime_io_watch_windows_internal.h"
 
-static llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
-    llam_io_req_t *head;
-    llam_io_req_t *cursor;
-
-    /*
-     * Move the whole submit list out under the node lock, then mark requests
-     * inflight before issuing kernel calls.  Completion/cancel paths use this
-     * state to decide whether ownership still belongs to the parked task or has
-     * moved to the IOCP backend.
-     */
-    pthread_mutex_lock(&node->submit_lock);
-    head = node->submit_head;
-    node->submit_head = NULL;
-    node->submit_tail = NULL;
-    cursor = head;
-    while (cursor != NULL) {
-        atomic_store_explicit(&cursor->inflight_owner_shard, cursor->owner_shard, memory_order_release);
-        atomic_store(&cursor->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
-        llam_shard_note_inflight_io_waiter(cursor->owner_runtime, cursor->owner_shard, 1);
-        cursor = cursor->next;
-    }
-    pthread_mutex_unlock(&node->submit_lock);
-    return head;
-}
-
 static bool llam_windows_req_is_handle_rw(const llam_io_req_t *req) {
     return req != NULL &&
            (req->kind == LLAM_IO_KIND_HANDLE_READ ||

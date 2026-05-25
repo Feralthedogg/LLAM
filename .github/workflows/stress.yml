@@ -333,14 +333,14 @@ jobs:
 
       - name: Build native Windows backend
         shell: pwsh
-        run: cmake --build build/windows --config Release --target bench test_abi_compat test_multi_runtime_core test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io
+        run: cmake --build build/windows --config Release --target bench llam_broker test_abi_compat test_multi_runtime_core test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io test_security_capability
 
       - name: CTest Windows backend
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
           .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
-          ctest --test-dir build/windows --output-on-failure --verbose --timeout 120 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
+          ctest --test-dir build/windows --output-on-failure --verbose --timeout 120 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test" *>&1 |
             Tee-Object -FilePath "$artifactDir\ctest.log"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
@@ -413,7 +413,7 @@ jobs:
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
           foreach ($generation in @("10", "11")) {
             $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
-            ctest --test-dir build/windows --output-on-failure --verbose --timeout 120 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io" *>&1 |
+            ctest --test-dir build/windows --output-on-failure --verbose --timeout 120 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test" *>&1 |
               Tee-Object -FilePath "$artifactDir\forced-windows-$generation.log"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE

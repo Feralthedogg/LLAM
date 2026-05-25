@@ -54,12 +54,15 @@ static bool llam_task_is_live_locked(const llam_task_t *task) {
 static int llam_task_reserve_public_slot_locked(llam_task_t *task, size_t *out_slot) {
     uint32_t generation = 0U;
 
-    return llam_public_slot_reserve_family(&g_llam_task_public_slots,
-                                           task,
-                                           256U,
-                                           LLAM_PUBLIC_HANDLE_FAMILY_TASK,
-                                           out_slot,
-                                           &generation);
+    return llam_public_slot_reserve_family_secret(&g_llam_task_public_slots,
+                                                  task,
+                                                  256U,
+                                                  LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                                  task->owner_runtime != NULL
+                                                      ? task->owner_runtime->public_handle_secret
+                                                      : 0U,
+                                                  out_slot,
+                                                  &generation);
 }
 
 static void llam_task_invalidate_public_handle_locked(llam_task_t *task) {
@@ -67,11 +70,14 @@ static void llam_task_invalidate_public_handle_locked(llam_task_t *task) {
     int saved_errno = errno;
 
     if (task == NULL ||
-        llam_public_slot_reactivate_family(&g_llam_task_public_slots,
-                                           task->public_handle_slot,
-                                           task,
-                                           LLAM_PUBLIC_HANDLE_FAMILY_TASK,
-                                           &generation) == 0) {
+        llam_public_slot_reactivate_family_secret(&g_llam_task_public_slots,
+                                                  task->public_handle_slot,
+                                                  task,
+                                                  LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                                  task->owner_runtime != NULL
+                                                      ? task->owner_runtime->public_handle_secret
+                                                      : 0U,
+                                                  &generation) == 0) {
         if (task != NULL) {
             atomic_store_explicit(&task->public_handle_generation, generation, memory_order_release);
         }

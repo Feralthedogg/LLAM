@@ -3897,18 +3897,28 @@ cleanup:
 static int test_public_slot_family_tags_reject_wrong_family(void) {
     llam_public_slot_table_t channel_table;
     llam_public_slot_table_t mutex_table;
+    llam_public_slot_table_t reuse_table;
     int channel_object = 1;
     int mutex_object = 2;
+    int reuse_first_object = 3;
+    int reuse_second_object = 4;
     size_t channel_slot = 0U;
     size_t mutex_slot = 0U;
+    size_t reuse_slot = 0U;
+    size_t reuse_second_slot = 0U;
     uint32_t channel_generation = 0U;
     uint32_t mutex_generation = 0U;
+    uint32_t reuse_generation = 0U;
+    uint32_t reuse_second_generation = 0U;
+    uint32_t naive_next_generation = 0U;
     uint32_t reused_generation = 0U;
     size_t reused_slot = 0U;
     int rc = 1;
 
     memset(&channel_table, 0, sizeof(channel_table));
     memset(&mutex_table, 0, sizeof(mutex_table));
+    memset(&reuse_table, 0, sizeof(reuse_table));
+    reuse_table.handle_secret = UINT64_C(0x8e14f6c2a9b57d31);
     if (llam_public_slot_reserve_family(&channel_table,
                                         &channel_object,
                                         1U,
@@ -3937,9 +3947,55 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
                       mutex_generation);
         goto cleanup;
     }
+    if (channel_generation == LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL ||
+        mutex_generation == LLAM_PUBLIC_HANDLE_FAMILY_MUTEX ||
+        llam_public_slot_resolve(&channel_table,
+                                 channel_slot,
+                                 LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL) != NULL ||
+        llam_public_slot_resolve(&mutex_table,
+                                 mutex_slot,
+                                 LLAM_PUBLIC_HANDLE_FAMILY_MUTEX) != NULL) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] guessable family generation resolved live\n");
+        goto cleanup;
+    }
     if (llam_public_slot_resolve(&channel_table, channel_slot, mutex_generation) != NULL ||
         llam_public_slot_resolve(&mutex_table, mutex_slot, channel_generation) != NULL) {
         (void)fprintf(stderr, "[test_runtime_api_edges] wrong-family generation resolved live\n");
+        goto cleanup;
+    }
+
+    if (llam_public_slot_reserve_family(&reuse_table,
+                                        &reuse_first_object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                        &reuse_slot,
+                                        &reuse_generation) != 0) {
+        rc = fail_errno("family slot reuse first reserve failed");
+        goto cleanup;
+    }
+    llam_public_slot_release(&reuse_table, reuse_slot, &reuse_first_object, reuse_generation);
+    if (llam_public_slot_reserve_family(&reuse_table,
+                                        &reuse_second_object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                        &reuse_second_slot,
+                                        &reuse_second_generation) != 0) {
+        rc = fail_errno("family slot reuse second reserve failed");
+        goto cleanup;
+    }
+    naive_next_generation =
+        llam_public_slot_family_generation((reuse_generation >> LLAM_PUBLIC_HANDLE_FAMILY_BITS) + 1U,
+                                           LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL);
+    if (reuse_second_slot != reuse_slot ||
+        reuse_second_generation == naive_next_generation ||
+        llam_public_slot_resolve(&reuse_table, reuse_slot, naive_next_generation) != NULL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] predictable family generation reuse accepted: "
+                      "old=%u naive=%u new=(%zu,%u)\n",
+                      reuse_generation,
+                      naive_next_generation,
+                      reuse_second_slot,
+                      reuse_second_generation);
         goto cleanup;
     }
 
@@ -3951,6 +4007,7 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
     channel_table.slots[channel_slot].generation =
         llam_public_slot_family_generation(LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH,
                                            LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL);
+    channel_table.slots[channel_slot].epoch = LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH;
     llam_public_slot_release(&channel_table,
                              channel_slot,
                              &channel_object,
@@ -3977,6 +4034,96 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
 cleanup:
     free(channel_table.slots);
     free(mutex_table.slots);
+    free(reuse_table.slots);
+    return rc;
+}
+
+static int test_public_channel_forged_initial_handle_rejected(void) {
+    llam_channel_t *channel = NULL;
+    llam_channel_t *forged = NULL;
+    uintptr_t real_raw = 0U;
+    size_t real_slot = 0U;
+    uint32_t real_generation = 0U;
+    int value = 17;
+    void *out = NULL;
+    int rc = 1;
+
+    if (llam_runtime_init(NULL) != 0) {
+        return fail_errno("forged channel handle runtime init failed");
+    }
+
+    channel = llam_channel_create(1U);
+    if (channel == NULL) {
+        rc = fail_errno("forged channel handle fixture allocation failed");
+        goto cleanup;
+    }
+    real_raw = (uintptr_t)channel;
+    real_slot = public_handle_slot(channel);
+    real_generation = (uint32_t)real_raw;
+
+    /*
+     * This is the value a caller can guess if the first channel slot always
+     * starts at generation == LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL.  It must not
+     * be accepted as a capability for the live channel unless the caller was
+     * actually given the encoded handle returned by llam_channel_create().
+     */
+    forged = (llam_channel_t *)llam_public_slot_encode_handle(0U,
+                                                              LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                                              LLAM_SYNC_PUBLIC_HANDLE_SHIFT);
+
+    errno = 0;
+    if (llam_channel_try_send(forged, &value) != -1 || errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged channel handle accepted errno=%d\n",
+                      errno);
+        goto cleanup;
+    }
+
+    /*
+     * Regression guard for the sealed generation token: a caller that knows the
+     * slot number and tries sequential family-tagged epochs must still fail.
+     * The real generation is skipped so this only exercises forged handles.
+     */
+    for (uint32_t epoch = 1U; epoch <= 4096U; ++epoch) {
+        uint32_t guessed_generation =
+            llam_public_slot_family_generation(epoch, LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL);
+
+        if (guessed_generation == real_generation) {
+            continue;
+        }
+        forged = (llam_channel_t *)llam_public_slot_encode_handle(real_slot,
+                                                                  guessed_generation,
+                                                                  LLAM_SYNC_PUBLIC_HANDLE_SHIFT);
+        errno = 0;
+        if (llam_channel_try_send(forged, &value) != -1 || errno != EINVAL) {
+            (void)fprintf(stderr,
+                          "[test_runtime_api_edges] sequential forged channel handle accepted "
+                          "slot=%zu epoch=%u generation=%u real=%u errno=%d\n",
+                          real_slot,
+                          epoch,
+                          guessed_generation,
+                          real_generation,
+                          errno);
+            goto cleanup;
+        }
+    }
+
+    if (llam_channel_try_recv_result(channel, &out) != -1 || errno != EAGAIN || out != NULL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged channel handle changed channel state errno=%d\n",
+                      errno);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (channel != NULL) {
+        if (llam_channel_try_recv_result(channel, &out) == 0) {
+            out = NULL;
+        }
+        (void)llam_channel_destroy(channel);
+    }
+    llam_runtime_shutdown();
     return rc;
 }
 
@@ -4021,6 +4168,10 @@ int main(void) {
     }
     if (run_edge_case("public_slot_family_tags_reject_wrong_family",
                       test_public_slot_family_tags_reject_wrong_family) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_channel_forged_initial_handle_rejected",
+                      test_public_channel_forged_initial_handle_rejected) != 0) {
         return 1;
     }
     if (run_edge_case("cancel_token_destroy_race", test_cancel_token_destroy_race) != 0) {

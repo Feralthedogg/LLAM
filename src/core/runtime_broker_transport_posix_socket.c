@@ -1,0 +1,193 @@
+/**
+ * @file src/core/runtime_broker_transport_posix_socket.c
+ * @brief POSIX Unix-domain broker socket lifecycle helpers.
+ *
+ * @details
+ * POSIX broker transports use Unix-domain sockets for local control messages
+ * and SCM_RIGHTS fd passing for descriptor authority. This file owns endpoint
+ * creation, connection, accept, close, and CLOEXEC setup; framing and request
+ * serving stay in runtime_broker_transport_posix.c.
+ *
+ * @copyright Copyright 2026 Feralthedogg
+ *
+ * @par License
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "runtime_internal.h"
+#include "runtime_broker.h"
+
+#if !LLAM_PLATFORM_WINDOWS
+
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+#include <fcntl.h>
+#include <string.h>
+
+int llam_broker_set_cloexec_fd(int fd) {
+    int flags;
+
+    if (LLAM_UNLIKELY(fd < 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    flags = fcntl(fd, F_GETFD);
+    if (flags < 0) {
+        return -1;
+    }
+    if ((flags & FD_CLOEXEC) != 0) {
+        return 0;
+    }
+    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+static int llam_broker_open_unix_endpoint(const char *path, struct sockaddr_un *addr, int *out_fd) {
+    size_t path_len;
+    int fd;
+
+    if (LLAM_UNLIKELY(path == NULL || addr == NULL || out_fd == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    path_len = strlen(path);
+    if (LLAM_UNLIKELY(path_len == 0U || path_len >= sizeof(addr->sun_path))) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    if (llam_broker_set_cloexec_fd(fd) != 0) {
+        int saved_errno = errno;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    memset(addr, 0, sizeof(*addr));
+    addr->sun_family = AF_UNIX;
+    memcpy(addr->sun_path, path, path_len + 1U);
+    *out_fd = fd;
+    return 0;
+}
+
+int llam_broker_listen_unix(const char *path, int *out_fd) {
+    struct sockaddr_un addr;
+    struct stat existing;
+    int fd;
+
+    if (llam_broker_open_unix_endpoint(path, &addr, &fd) != 0) {
+        return -1;
+    }
+    /*
+     * Do not unlink a client-controlled path during listen. Even "unlink only
+     * sockets" has a time-of-check/time-of-use gap in writable directories; the
+     * caller must choose a private directory or clean stale endpoints itself.
+     */
+    if (lstat(path, &existing) == 0) {
+        (void)existing;
+        close(fd);
+        errno = EEXIST;
+        return -1;
+    } else if (errno != ENOENT) {
+        int saved_errno = errno;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        chmod(path, S_IRUSR | S_IWUSR) != 0 ||
+        listen(fd, 16) != 0) {
+        int saved_errno = errno;
+
+        llam_broker_unlink_owned_socket(path, fd);
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    *out_fd = fd;
+    return 0;
+}
+
+int llam_broker_connect_unix(const char *path, int *out_fd) {
+    struct sockaddr_un addr;
+    int fd;
+
+    if (llam_broker_open_unix_endpoint(path, &addr, &fd) != 0) {
+        return -1;
+    }
+    if (connect(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        int saved_errno = errno;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    *out_fd = fd;
+    return 0;
+}
+
+int llam_broker_accept_one(int listen_fd, int *out_fd) {
+    int fd;
+
+    if (LLAM_UNLIKELY(listen_fd < 0 || out_fd == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    do {
+        fd = accept(listen_fd, NULL, NULL);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0) {
+        return -1;
+    }
+    if (llam_broker_set_cloexec_fd(fd) != 0) {
+        int saved_errno = errno;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    *out_fd = fd;
+    return 0;
+}
+
+void llam_broker_close_fd(int fd) {
+    if (fd >= 0) {
+        close(fd);
+    }
+}
+
+int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
+    (void)name;
+    (void)out_handle;
+    errno = ENOTSUP;
+    return -1;
+}
+
+int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {
+    (void)name;
+    (void)out_handle;
+    errno = ENOTSUP;
+    return -1;
+}
+
+void llam_broker_close_handle(llam_handle_t handle) {
+    llam_broker_close_fd((int)handle);
+}
+
+#endif

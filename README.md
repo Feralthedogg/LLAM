@@ -28,7 +28,8 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 - Blocking integration through `llam_call_blocking`, `llam_enter_blocking`, and `llam_leave_blocking`.
 - Runtime tuning through profiles, dynamic workers, worker rings, SQPOLL, and idle-spin controls.
 - Observability through runtime stats and debug dumps.
-- Stable ABI metadata for dynamic language-runtime loaders.
+- Stable ABI metadata and explicit runtime-handle APIs for embedders.
+- Internal broker/capability foundation for out-of-process isolation experiments.
 - Static and shared library build targets.
 - Built-in demo, chat server, stress, benchmark, Docker verification, and Go/Tokio comparison scripts.
 
@@ -51,6 +52,9 @@ the host accepted that mode and how often it avoided a completion-port round
 trip.
 
 Production and stress-operation guidance is documented in `docs/operations.md`.
+The in-process handle and out-of-process broker threat boundaries are
+documented in `docs/security.md`; in-process opaque handles are misuse/UAF
+hardening, not protection against arbitrary same-process memory read/write.
 
 ## Getting Started
 
@@ -222,6 +226,7 @@ Build outputs:
 - `test_abi_compat`: old-prefix option/stat struct compatibility.
 - `test_connect_io`: direct and runtime-managed `llam_connect()` success and invalid-input checks.
 - `test_runtime_core`: lifecycle, task metadata, yielding, sleeping, blocking callbacks, and stats checks.
+- `test_multi_runtime_core`: explicit runtime-handle ownership, shutdown isolation, and cross-runtime misuse checks.
 - `test_runtime_api_edges`: focused public API edge coverage for task ownership, cancellation, channel close/drain, blocking callbacks, cond/mutex deadlines, and managed/unmanaged call boundaries.
 - `test_runtime_select_edges`: focused `llam_channel_select()` send/close/cancel race coverage for lost-wakeup attribution outside the example server.
 - `test_runtime_io_dump`: focused live-I/O diagnostic coverage proving a parked fd-readiness wait appears in `llam_dump_runtime_state()` either as native request ownership or as an explicit blocking fallback job.
@@ -231,8 +236,14 @@ Build outputs:
 - `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
 - `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
+- `test_windows_policy`: Windows 10/11 policy selection and environment override checks.
+- `test_windows_runtime_smoke`: native Windows scheduler/backend smoke coverage.
+- `test_windows_iocp_io`: Windows-only IOCP socket/HANDLE I/O smoke coverage.
 - `test_windows_iocp_dump`: Windows-only IOCP pending-request dump coverage for parked `AcceptEx` ownership.
+- `test_windows_handle_io`: Windows-only HANDLE read/write coverage.
+- `test_security_capability`: broker capability, token, transport, ring, descriptor, and stale-output hardening checks.
 - `test_shared_load`: `dlopen()` coverage for the shared library ABI surface.
+- `llam_broker`: internal broker-control self-test and local client/server smoke harness.
 
 ## Using LLAM In An Application
 
@@ -940,9 +951,38 @@ The current line treats the public C ABI as stable while moving the canonical
 embedding boundary to explicit runtime handles. These items are part of the
 current maintained contract rather than future roadmap work:
 
-- Focused direct API tests cover lifecycle, public handle stale/reuse guards, task ownership, cancellation, channel close/select, blocking callbacks, condition/mutex deadlines, managed/unmanaged call boundaries, task-local isolation, structured task-group ownership, and live I/O wait diagnostics. The baseline coverage lives in `test_runtime_api_edges`, `test_runtime_select_edges`, `test_runtime_io_dump`, and `test_runtime_group_local_edges`.
-- Runtime-owned failures should be reduced into focused runtime tests before they rely on example-server reproduction. The example server remains an integration and policy workload, while scheduler, cancellation, wakeup, select, and ownership regressions belong in direct tests.
-- The runtime handle API is the supported embedding boundary. The public header, ABI guide, operations guide, and direct tests pin the current contract: explicit heap-backed runtimes can be created, spawned into, driven, and destroyed independently; legacy host-thread lifecycle wrappers target `llam_runtime_default()`, while managed task spawn/stop/shutdown wrappers use the task's owner runtime; spawn-time cancellation tokens and task-group children stay in their target owner runtime; and owner-tagged runtime objects fail cross-owner managed use with `EXDEV`.
+- Focused direct API tests cover lifecycle, public handle stale/reuse/forgery
+  guards, task ownership, cancellation, channel close/select, blocking
+  callbacks, condition/mutex deadlines, managed/unmanaged call boundaries,
+  task-local isolation, structured task-group ownership, and live I/O wait
+  diagnostics. The baseline coverage lives in `test_runtime_api_edges`,
+  `test_runtime_select_edges`, `test_runtime_io_dump`, and
+  `test_runtime_group_local_edges`.
+- Runtime-owned failures should be reduced into focused runtime tests before
+  they rely on example-server reproduction. The example server remains an
+  integration and policy workload, while scheduler, cancellation, wakeup,
+  select, and ownership regressions belong in direct tests.
+- The runtime handle API is the supported embedding boundary. The public header,
+  ABI guide, operations guide, and direct tests pin the current contract:
+  explicit heap-backed runtimes can be created, spawned into, driven, and
+  destroyed independently; legacy host-thread lifecycle wrappers target
+  `llam_runtime_default()`, while managed task spawn/stop/shutdown wrappers use
+  the task's owner runtime; spawn-time cancellation tokens and task-group
+  children stay in their target owner runtime; and owner-tagged runtime objects
+  fail cross-owner managed use with `EXDEV`.
+- In-process opaque handles are hardened against stale use, wrong-family casts,
+  simple forgery, owner mismatch, and active-operation destroy races. They are
+  not a capability boundary against arbitrary same-process memory read/write.
+  The stronger boundary is the internal broker model: a broker-owned runtime
+  keeps MAC keys, registries, descriptors/HANDLEs, ring sessions, and I/O
+  authority outside the untrusted client address space. Current broker coverage
+  includes subject-bound tokens, POSIX Unix-domain and Windows named-pipe
+  control transports, buffer/channel/descriptor/HANDLE grants, shared-memory
+  ring setup, object-specific revocation, broker-owned task commands,
+  stale-output zeroing, active-operation pins during destroy, and raw-token
+  minting rejection. Details and limits are in `docs/security.md`; tests are
+  `test_security_capability`, `llam_broker --self-test`, and
+  `llam_broker --serve-n` / `--client-self-test`.
 - Default release builds keep owner diagnostics enabled. `LLAM_RUNTIME_DISABLE_OWNER_CHECKS=1` is an explicit source-build profiling knob for unsafe singleton-only binaries, not the documented ABI-conformance mode.
 - Rare-hang diagnostics are expected to be actionable. `llam_dump_runtime_state()` emits lifecycle/stop state, active I/O waiters, block-helper wake state, node submit/control/watch queues, shard wake/I/O ownership, and task-level wait ownership (`wait_owner`, cancellation registration, deadlines, active I/O requests, and blocking jobs). CI long-running stress jobs stream partial output through `scripts/run_with_timeout.py`, request a signal-driven runtime dump before timeout shutdown on POSIX stress binaries, and server composite runs can emit stop-time runtime dumps into the artifact directory.
 - Release archives are expected to stay self-contained: public headers, shared/static libraries, CMake config, pkg-config metadata, examples, install scripts, and operations docs.
@@ -954,10 +994,28 @@ current maintained contract rather than future roadmap work:
 Future core-runtime work should tighten LLAM itself without changing the stable
 2.x source-compatible public contract:
 
-- Keep extending direct API coverage when new edge cases are found, especially around shutdown races, cancellation ownership, lost wakeups, select fanout, blocking helpers, and I/O request ownership.
-- Continue promoting low-level stress failures out of examples into minimal runtime tests when the bug belongs to LLAM rather than to sample-application policy.
-- Continue hardening true concurrent multi-runtime execution. Explicit runtime handles now own scheduler state, caches, blocking workers, and backend routing; public handles still use process-wide family-tagged slot tables, with each object carrying an owner runtime and failing cross-owner managed use with `EXDEV`. Remaining work should broaden platform I/O owner tests, keep signal/fault hooks reference-counted across concurrent runtime lifecycles, and preserve single-runtime benchmark guardrails.
-- Keep improving diagnostic dumps so rare shutdown, cancellation, wake handoff, and I/O ownership hangs produce enough state to debug without reproducing under a debugger.
+- Keep extending direct API coverage when new edge cases are found, especially
+  around shutdown races, cancellation ownership, lost wakeups, select fanout,
+  blocking helpers, and I/O request ownership.
+- Continue promoting low-level stress failures out of examples into minimal
+  runtime tests when the bug belongs to LLAM rather than to sample-application
+  policy.
+- Continue hardening true concurrent multi-runtime execution. Explicit runtime
+  handles now own scheduler state, caches, blocking workers, and backend
+  routing; public handles remain process-local UAF/FFI hardening guards with
+  owner-runtime checks. Remaining work should broaden platform I/O owner tests,
+  keep signal/fault hooks reference-counted across concurrent runtime
+  lifecycles, and preserve single-runtime benchmark guardrails.
+- Extend broker-mode isolation above the current internal capability foundation.
+  The implemented foundation already covers subject-bound token validation,
+  attenuation/revocation, broker-controlled buffer/channel/descriptor grants,
+  POSIX `SCM_RIGHTS`, Windows `DuplicateHandle`, private ring setup over control
+  transport, predefined task commands, stale-output zeroing, and broker-local
+  locking. Remaining work is a broader runtime RPC surface and production policy
+  around which operations may expose raw descriptor/HANDLE authority.
+- Keep improving diagnostic dumps so rare shutdown, cancellation, wake handoff,
+  and I/O ownership hangs produce enough state to debug without reproducing
+  under a debugger.
 
 ### 3. Performance Roadmap
 
@@ -1000,41 +1058,110 @@ clear examples, and CI that catches platform regressions early.
 
 LLAM is a user-level N:M thread scheduler. A small number of OS worker threads (typically one per CPU core) run many lightweight tasks. Each task has its own stack and can be suspended and resumed without kernel intervention.
 
+The diagrams below separate three boundaries that matter in the current 2.x
+tree: the public API boundary, the runtime-instance ownership boundary, and the
+optional broker/process boundary used when an embedder needs stronger isolation
+than in-process opaque handles can provide.
+
 ```mermaid
 flowchart TB
-    subgraph UserSpace["User Space"]
-        direction TB
-        Tasks["Tasks (N lightweight fibers)"] --> Shards
-        subgraph Shards["Scheduler Shards (per worker)"]
-            direction LR
-            S0["Shard 0\nhot_q / norm_q / inject_q\ntimers / allocator"]
-            S1["Shard 1\nhot_q / norm_q / inject_q\ntimers / allocator"]
-            S0 <-->|work steal| S1
+    App["C application or embedding host"] --> PublicAPI["include/llam/runtime.h\nstable public C ABI"]
+    PublicAPI --> DefaultAPI["legacy default-runtime wrappers\nllam_runtime_init / llam_spawn / llam_run"]
+    PublicAPI --> HandleAPI["explicit runtime-handle API\nllam_runtime_create / spawn_ex / run_handle / destroy"]
+
+    subgraph Process["Host process"]
+        direction LR
+        DefaultAPI --> DefaultRuntime["default runtime\nllam_runtime_default()"]
+        HandleAPI --> RuntimeA["runtime A"]
+        HandleAPI --> RuntimeB["runtime B"]
+
+        subgraph RuntimeAState["runtime A owned state"]
+            direction TB
+            RegistryA["public handle tables\nsealed generation tokens\nowner-runtime checks"]
+            ShardsA["scheduler shards\nhot_q / norm_q / inject_q\ntimers / allocators / stack caches"]
+            NodesA["I/O nodes\nsubmit queues / control queues\nwatch tables"]
+            BlockA["blocking pool\nopaque helper compensation"]
+            DebugA["stats and dump state\ntrace / wake diagnostics"]
+            RegistryA --> ShardsA
+            ShardsA <--> NodesA
+            ShardsA <--> BlockA
+            ShardsA --> DebugA
         end
-        Shards --> Nodes
-        subgraph Nodes["I/O Nodes"]
-            direction LR
-            N0["Node 0\nio_uring / kqueue\nwatch tables"]
-            N1["Node 1\nio_uring / kqueue\nwatch tables"]
+
+        subgraph RuntimeBState["runtime B owned state"]
+            direction TB
+            RegistryB["owner-tagged objects"]
+            ShardsB["independent shards"]
+            NodesB["independent I/O backend"]
+            RegistryB --> ShardsB
+            ShardsB <--> NodesB
         end
-        Watchdog["Watchdog\nprobe / scale / merge / rehome"] -.-> Shards
-        BlockPool["Blocking Thread Pool"] -.-> Shards
-        OpaqueHelpers["Opaque Helpers\n(per-shard compensation)"] -.-> Shards
+
+        RuntimeA --> RegistryA
+        RuntimeB --> RegistryB
+        RegistryA -. "cross-owner object use" .-> EXDEV["EXDEV"]
+        RegistryB -. "cross-owner object use" .-> EXDEV
     end
-    Shards -->|runs on| Workers["OS Threads (M pthreads)"]
+
+    subgraph BrokerBoundary["optional broker process boundary"]
+        direction TB
+        Client["untrusted client process\nserialized tokens only"]
+        Broker["trusted LLAM broker\nruntime + MAC keys + registries\nfds / HANDLEs / ring sessions"]
+        Client <-->|control transport or ring| Broker
+    end
 ```
 
 ```mermaid
 flowchart LR
-    App["Application"] --> API["include/llam\npublic API"]
-    API --> Core["src/core\nscheduler / tasks / sync"]
-    API --> IO["src/io\nI/O API + backends"]
-    Core --> Engine["src/engine\nworkers / watchdog"]
-    Engine --> Blocking["blocking\ncompensation"]
-    IO --> Linux["src/io/linux\nio_uring"]
-    IO --> Darwin["src/io/darwin\nkqueue"]
-    IO --> Windows["Windows\nIOCP sockets + HANDLEs"]
-    Core --> ASM["src/asm\ncontext switch"]
+    PublicAPI["public headers\ninclude/llam"] --> CoreAPI["src/core\nlifecycle / spawn / join / sync / channels"]
+    PublicAPI --> IOAPI["src/io\nread / write / accept / connect / poll / owned buffers"]
+    PublicAPI --> PlatformAPI["include/llam/platform.h\nfd / HANDLE / sockaddr portability"]
+
+    CoreAPI --> RuntimeOwner["runtime ownership\nowner checks / default wrappers"]
+    CoreAPI --> Scheduler["scheduler core\ntasks / run queues / timers / wake"]
+    CoreAPI --> Handles["public handle registry\nfamily tags / sealed generations / active ops"]
+    CoreAPI --> Sync["sync primitives\nmutex / cond / channel / select / cancel"]
+    CoreAPI --> BrokerCore["broker foundation\ncapability tokens / grants / revocation"]
+
+    Scheduler --> Engine["src/engine\nworkers / watchdog / rehome / scale"]
+    Scheduler --> ASM["src/asm and context files\nplatform context switch"]
+    Scheduler --> Alloc["runtime caches\nslabs / stacks / wait nodes / I/O reqs"]
+
+    IOAPI --> IOEngine["I/O engine\nnode selection / direct path / fallback"]
+    IOEngine --> Linux["src/io/linux\nio_uring / epoll-style watches"]
+    IOEngine --> Darwin["src/io/darwin\nkqueue / EVFILT_USER / migration"]
+    IOEngine --> Windows["src/io/windows\nIOCP / Winsock / HANDLE I/O"]
+    IOEngine --> WatchCommon["shared watch helpers\nlookup / queues / waiters / migration"]
+
+    BrokerCore --> BrokerTransport["broker transports\nPOSIX Unix sockets / Windows named pipes"]
+    BrokerCore --> BrokerRing["broker rings\nprivate shm or duplicated HANDLE mappings"]
+```
+
+```mermaid
+sequenceDiagram
+    participant Task as Managed task
+    participant API as LLAM I/O API
+    participant Shard as Owner shard
+    participant Node as I/O node
+    participant Kernel as OS backend
+    participant Fallback as Blocking helper
+
+    Task->>API: llam_read / write / poll / accept / connect
+    API->>API: try immediate nonblocking/direct path
+    alt direct completion
+        API-->>Task: return without parking
+    else not ready but backend supports request
+        API->>Shard: allocate request and park task
+        Shard->>Node: enqueue submit/control packet
+        Node->>Kernel: io_uring / kqueue / IOCP
+        Kernel-->>Node: completion or readiness
+        Node->>Shard: wake owner task
+        Shard-->>Task: resume with result or errno
+    else unsupported fd or policy fallback
+        API->>Fallback: delegate blocking operation
+        Fallback-->>Shard: completion wake
+        Shard-->>Task: resume with result or errno
+    end
 ```
 
 ### N:M Threading Model

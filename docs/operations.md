@@ -190,7 +190,43 @@ Explicit runtime handles own their scheduler state, caches, blocking helper
 pool, and platform backend routing. Public handles are still backed by
 process-wide family-tagged slot tables; each object is owner-tagged so
 cross-runtime managed use fails with `EXDEV` instead of silently crossing queues
-or wait lists.
+or wait lists. The slot tables use sealed generation tokens derived from a
+runtime/table secret, slot id, internal epoch, and per-slot nonce, so trivial
+first-handle guesses and monotonic next-generation guesses do not become valid
+handles after object creation or slot reuse. This is an in-process UAF/FFI
+hardening layer, not a cryptographic capability boundary against code that can
+already read or corrupt LLAM memory.
+
+When the threat model includes untrusted code with possible same-process memory
+corruption, use a process boundary. The internal broker-control foundation keeps
+capability MAC keys and object authority inside a broker-owned runtime. The
+default runtime handles remain the trusted in-process fast path; ordinary
+runtime creation does not require broker entropy and must not be described as a
+cryptographic security boundary.
+
+The current broker path is intentionally narrower than the public C API. It
+covers subject-bound tokens, POSIX Unix-domain and Windows named-pipe control
+transports, bounded buffer/channel grants, descriptor/HANDLE grants, private
+ring setup over the control transport, broker-owned buffer/channel/descriptor
+data-plane operations, predefined task commands, attenuation/revocation,
+stale-output zeroing, active-operation pins during destroy, and raw-token
+minting rejection. Treat the following as operational invariants:
+
+- Descriptor/HANDLE authority is registered through `SCM_RIGHTS` on POSIX or
+  `DuplicateHandle` from the connected named-pipe peer on Windows; raw numeric
+  fd/HANDLE values in client messages are not authority.
+- Broker transports bind tokens to the issuing subject/session and reject replay
+  on another session with `EACCES`.
+- Token issuance requires OS entropy for nonce bytes; entropy failure returns
+  `EIO` and clears partial output.
+- Broker wire-read failures and failed broker-owned reads clear caller output,
+  and successful short reads clear the unused suffix.
+- Broker-owned fds and ring transport fds are close-on-exec on POSIX.
+- Broker destroy rejects new operations, drains already-pinned operations, and
+  scrubs MAC keys, revocation state, object ids, and subject sessions.
+
+`docs/security.md` is the authority for broker threat boundaries, current
+coverage, non-goals, and follow-up RPC work.
 
 Managed task lifecycle wrappers are constrained to the current owner runtime.
 If task code receives a foreign runtime handle and calls `llam_runtime_destroy()`,

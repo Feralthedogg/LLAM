@@ -1,12 +1,12 @@
 /**
  * @file src/io/linux/runtime_io_watch_linux_state.c
- * @brief Linux watch state queues, wait-list ownership, and ready-buffer bookkeeping.
+ * @brief Linux/io_uring watch waiter and buffered-readiness state helpers.
  *
  * @details
- * Linux multishot watches keep waiters and buffered readiness under a node's
- * @c watch_lock. Submission queue state is protected by @c submit_lock. Helpers
- * in this file do only list ownership manipulation; backend submission and CQE
- * interpretation live in companion files.
+ * These helpers mutate watch-local queues while the owning node watch lock is
+ * held. Shared queue mechanics live in runtime_io_watch.c; this file keeps the
+ * Linux-specific accept/receive ready-list ownership rules close to the backend
+ * code that consumes them.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -25,247 +25,6 @@
  */
 
 #include "runtime_io_watch_linux_internal.h"
-
-/**
- * @brief Append a request to a node's submit queue while submit_lock is held.
- *
- * @param node Destination I/O node.
- * @param req  Request to enqueue.
- */
-void llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req) {
-    req->next = NULL;
-    if (node->submit_tail != NULL) {
-        node->submit_tail->next = req;
-    } else {
-        node->submit_head = req;
-    }
-    node->submit_tail = req;
-}
-
-/**
- * @brief Remove a request from a node's submit queue while submit_lock is held.
- *
- * @param node Node whose queue is searched.
- * @param req  Request to remove.
- * @return true if the request was removed before submission.
- */
-bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req) {
-    llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur = node->submit_head;
-
-    while (cur != NULL) {
-        if (cur == req) {
-            if (prev != NULL) {
-                prev->next = cur->next;
-            } else {
-                node->submit_head = cur->next;
-            }
-            if (node->submit_tail == cur) {
-                node->submit_tail = prev;
-            }
-            cur->next = NULL;
-            return true;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    return false;
-}
-
-/**
- * @brief Detach all pending submissions and mark them in-flight.
- *
- * @param node Node whose submit queue should be drained.
- * @return Head of detached request list.
- */
-llam_io_req_t *llam_take_node_submissions(llam_node_t *node) {
-    llam_io_req_t *head;
-    llam_io_req_t *cursor;
-
-    pthread_mutex_lock(&node->submit_lock);
-    head = node->submit_head;
-    node->submit_head = NULL;
-    node->submit_tail = NULL;
-    cursor = head;
-    while (cursor != NULL) {
-        // Ownership changes from submit queue to backend in-flight state before
-        // the list is returned to the submitter thread.
-        atomic_store_explicit(&cursor->inflight_owner_shard, cursor->owner_shard, memory_order_release);
-        atomic_store(&cursor->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
-        llam_shard_note_inflight_io_waiter(cursor->owner_runtime, cursor->owner_shard, 1);
-        cursor = cursor->next;
-    }
-    pthread_mutex_unlock(&node->submit_lock);
-    return head;
-}
-
-/** @brief Append a poll waiter while watch_lock is held. */
-void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
-    req->next = NULL;
-    if (watch->wait_tail != NULL) {
-        watch->wait_tail->next = req;
-    } else {
-        watch->wait_head = req;
-    }
-    watch->wait_tail = req;
-}
-
-/**
- * @brief Remove a poll waiter while watch_lock is held.
- *
- * @return true if removed, false if already detached.
- */
-bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
-    llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur;
-
-    if (watch == NULL || req == NULL) {
-        return false;
-    }
-
-    cur = watch->wait_head;
-
-    while (cur != NULL) {
-        if (cur == req) {
-            if (prev != NULL) {
-                prev->next = cur->next;
-            } else {
-                watch->wait_head = cur->next;
-            }
-            if (watch->wait_tail == cur) {
-                watch->wait_tail = prev;
-            }
-            cur->next = NULL;
-            return true;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    return false;
-}
-
-/**
- * @brief Detach all poll waiters from a watch.
- *
- * @param watch Poll watch whose waiters are taken.
- * @return Detached waiter list.
- */
-llam_io_req_t *llam_poll_watch_take_waiters(llam_poll_watch_t *watch) {
-    llam_io_req_t *head = watch->wait_head;
-
-    watch->wait_head = NULL;
-    watch->wait_tail = NULL;
-    return head;
-}
-
-/**
- * @brief Destroy and unlink a poll watch while watch_lock is held.
- *
- * @param node  Node owning the watch list.
- * @param watch Watch to remove.
- */
-void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch) {
-    llam_poll_watch_t **cursor = &node->poll_watches;
-
-    while (*cursor != NULL) {
-        if (*cursor == watch) {
-            *cursor = watch->next;
-            free(watch);
-            return;
-        }
-        cursor = &(*cursor)->next;
-    }
-}
-
-/** @brief Append an accept waiter while watch_lock is held. */
-void llam_accept_watch_enqueue_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
-    req->next = NULL;
-    if (watch->wait_tail != NULL) {
-        watch->wait_tail->next = req;
-    } else {
-        watch->wait_head = req;
-    }
-    watch->wait_tail = req;
-}
-
-/**
- * @brief Remove an accept waiter while watch_lock is held.
- *
- * @return true if removed, false if already detached.
- */
-bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
-    llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur;
-
-    if (watch == NULL || req == NULL) {
-        return false;
-    }
-
-    cur = watch->wait_head;
-
-    while (cur != NULL) {
-        if (cur == req) {
-            if (prev != NULL) {
-                prev->next = cur->next;
-            } else {
-                watch->wait_head = cur->next;
-            }
-            if (watch->wait_tail == cur) {
-                watch->wait_tail = prev;
-            }
-            cur->next = NULL;
-            return true;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    return false;
-}
-
-/** @brief Append a receive waiter while watch_lock is held. */
-void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    req->next = NULL;
-    if (watch->wait_tail != NULL) {
-        watch->wait_tail->next = req;
-    } else {
-        watch->wait_head = req;
-    }
-    watch->wait_tail = req;
-}
-
-/**
- * @brief Remove a receive waiter while watch_lock is held.
- *
- * @return true if removed, false if already detached.
- */
-bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    llam_io_req_t *prev = NULL;
-    llam_io_req_t *cur;
-
-    if (watch == NULL || req == NULL) {
-        return false;
-    }
-
-    cur = watch->wait_head;
-
-    while (cur != NULL) {
-        if (cur == req) {
-            if (prev != NULL) {
-                prev->next = cur->next;
-            } else {
-                watch->wait_head = cur->next;
-            }
-            if (watch->wait_tail == cur) {
-                watch->wait_tail = prev;
-            }
-            cur->next = NULL;
-            return true;
-        }
-        prev = cur;
-        cur = cur->next;
-    }
-    return false;
-}
 
 /**
  * @brief Pop one accept waiter from a watch.
@@ -475,41 +234,11 @@ bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              unsigned *node_index_out,
                              unsigned char **copy_data_out,
                              size_t *copy_capacity_out) {
-    llam_recv_ready_t *ready = watch->ready_head;
-
-    if (ready == NULL) {
-        return false;
-    }
-
-    watch->ready_head = ready->next;
-    if (watch->ready_head == NULL) {
-        watch->ready_tail = NULL;
-    }
-    watch->ready_depth -= 1U;
-    if (size_out != NULL) {
-        *size_out = ready->size;
-    }
-    if (bid_out != NULL) {
-        *bid_out = ready->bid;
-    }
-    if (has_buffer_out != NULL) {
-        *has_buffer_out = ready->has_buffer;
-    }
-    if (node_index_out != NULL) {
-        *node_index_out = ready->node_index;
-    }
-    if (copy_data_out != NULL) {
-        // Transfer copy_data ownership to caller; otherwise it is released when
-        // the ready entry is freed.
-        *copy_data_out = ready->copy_data;
-        ready->copy_data = NULL;
-    }
-    // No ownership transfer was requested, so the ready node must release the
-    // copied payload before the node itself is freed.
-    free(ready->copy_data);
-    if (copy_capacity_out != NULL) {
-        *copy_capacity_out = ready->copy_capacity;
-    }
-    free(ready);
-    return true;
+    return llam_recv_watch_pop_ready_shared(watch,
+                                           size_out,
+                                           bid_out,
+                                           has_buffer_out,
+                                           node_index_out,
+                                           copy_data_out,
+                                           copy_capacity_out);
 }

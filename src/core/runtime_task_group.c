@@ -66,12 +66,15 @@ static llam_task_group_t *llam_task_group_public_handle(llam_task_group_t *group
 static int llam_task_group_reserve_public_slot_locked(llam_task_group_t *group, size_t *out_slot) {
     uint32_t generation = 0U;
 
-    return llam_public_slot_reserve_family(&g_llam_task_group_public_slots,
-                                           group,
-                                           64U,
-                                           LLAM_PUBLIC_HANDLE_FAMILY_TASK_GROUP,
-                                           out_slot,
-                                           &generation);
+    return llam_public_slot_reserve_family_secret(&g_llam_task_group_public_slots,
+                                                  group,
+                                                  64U,
+                                                  LLAM_PUBLIC_HANDLE_FAMILY_TASK_GROUP,
+                                                  group->owner_runtime != NULL
+                                                      ? group->owner_runtime->public_handle_secret
+                                                      : 0U,
+                                                  out_slot,
+                                                  &generation);
 }
 
 static int llam_task_group_register_live(llam_task_group_t *group) {

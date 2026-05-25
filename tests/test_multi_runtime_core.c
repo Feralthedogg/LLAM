@@ -1601,11 +1601,23 @@ static int test_cross_runtime_allocator_returns_are_remote(void) {
 
     allocator = &runtime_b->shards[0].allocator;
     errno = 0;
-    if (atomic_load_explicit(&allocator->task_remote_free, memory_order_acquire) == NULL ||
-        atomic_load_explicit(&allocator->wait_remote_free, memory_order_acquire) == NULL ||
-        atomic_load_explicit(&allocator->timer_remote_free, memory_order_acquire) == NULL ||
-        atomic_load_explicit(&allocator->io_req_remote_free, memory_order_acquire) == NULL ||
-        atomic_load_explicit(&allocator->io_buffer_remote_free, memory_order_acquire) == NULL) {
+    if (atomic_load_explicit(&allocator->task_remote_free, memory_order_acquire) == NULL) {
+        rc = test_fail_errno("foreign runtime task object bypassed remote-free queue");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&allocator->wait_remote_free, memory_order_acquire) == NULL) {
+        rc = test_fail_errno("foreign runtime wait node bypassed remote-free queue");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&allocator->timer_remote_free, memory_order_acquire) == NULL) {
+        rc = test_fail_errno("foreign runtime timer node bypassed remote-free queue");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&allocator->io_req_remote_free, memory_order_acquire) == NULL) {
+        rc = test_fail_errno("foreign runtime io request bypassed remote-free queue");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&allocator->io_buffer_remote_free, memory_order_acquire) == NULL) {
         rc = test_fail_errno("foreign runtime objects bypassed remote-free queues");
         goto cleanup;
     }

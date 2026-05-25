@@ -33,12 +33,15 @@ static llam_public_slot_table_t g_llam_cond_public_slots;
 static int llam_cond_reserve_public_slot_locked(llam_cond_t *cond, size_t *out_slot) {
     uint32_t generation = 0U;
 
-    return llam_public_slot_reserve_family(&g_llam_cond_public_slots,
-                                           cond,
-                                           64U,
-                                           LLAM_PUBLIC_HANDLE_FAMILY_COND,
-                                           out_slot,
-                                           &generation);
+    return llam_public_slot_reserve_family_secret(&g_llam_cond_public_slots,
+                                                  cond,
+                                                  64U,
+                                                  LLAM_PUBLIC_HANDLE_FAMILY_COND,
+                                                  cond->owner_runtime != NULL
+                                                      ? cond->owner_runtime->public_handle_secret
+                                                      : 0U,
+                                                  out_slot,
+                                                  &generation);
 }
 
 static int llam_cond_register_live(llam_cond_t *cond) {

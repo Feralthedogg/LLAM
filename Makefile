@@ -28,6 +28,7 @@ CLEAN_FILES = \
 	demo \
 	stress \
 	bench \
+	llam_broker \
 	server \
 	server_lossless \
 	server_flood \
@@ -52,20 +53,24 @@ CLEAN_FILES = \
 	test_windows_iocp_io \
 	test_windows_iocp_dump \
 	test_windows_handle_io \
+	test_security_capability \
 	test_shared_load \
 	asan-test_runtime_api_edges \
 	asan-test_runtime_core \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
 	asan-test_multi_runtime_core \
+	asan-test_security_capability \
 	noowner-test_runtime_select_edges \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_multi_runtime_core \
+	tsan-test_security_capability \
 	libllam_runtime.a \
 	demo.exe \
 	stress.exe \
 	bench.exe \
+	llam_broker.exe \
 	server.exe \
 	server_lossless.exe \
 	server_flood.exe \
@@ -90,6 +95,7 @@ CLEAN_FILES = \
 	test_windows_iocp_io.exe \
 	test_windows_iocp_dump.exe \
 	test_windows_handle_io.exe \
+	test_security_capability.exe \
 	test_shared_load.exe \
 	libllam_runtime.dylib \
 	libllam_runtime.$(LLAM_ABI_MAJOR).dylib \
@@ -149,6 +155,11 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_internal.h \
 	src/internal/runtime_types.h \
 	src/internal/runtime_public_slot.h \
+	src/internal/runtime_public_slot_seal.h \
+	src/internal/runtime_capability.h \
+	src/internal/runtime_broker.h \
+	src/internal/runtime_broker_windows_security.h \
+	src/internal/runtime_broker_ring.h \
 	src/internal/runtime_state.h \
 	src/internal/runtime_protos.h \
 	src/internal/runtime_proto_core.h \
@@ -157,6 +168,11 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_proto_sync.h \
 	src/engine/runtime_watchdog_internal.h \
 	src/io/runtime_io_api_internal.h \
+	src/io/runtime_io_watch_migration_live_finalize_template.inc \
+	src/io/runtime_io_watch_migration_live_forward_template.inc \
+	src/io/runtime_io_watch_rehome_accept_template.inc \
+	src/io/runtime_io_watch_rehome_recv_template.inc \
+	src/io/runtime_io_watch_rehome_template.inc \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
 	src/io/linux/runtime_io_watch_linux_internal.h \
 	src/io/windows/runtime_io_watch_windows_internal.h
@@ -167,6 +183,33 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_errno.o \
 	$(OBJDIR)/src/core/runtime_util.o \
 	$(OBJDIR)/src/core/runtime_io_udata.o \
+	$(OBJDIR)/src/core/runtime_capability.o \
+	$(OBJDIR)/src/core/runtime_broker.o \
+	$(OBJDIR)/src/core/runtime_broker_ops.o \
+	$(OBJDIR)/src/core/runtime_broker_validate.o \
+	$(OBJDIR)/src/core/runtime_broker_buffer.o \
+	$(OBJDIR)/src/core/runtime_broker_descriptor.o \
+	$(OBJDIR)/src/core/runtime_broker_channel.o \
+	$(OBJDIR)/src/core/runtime_broker_revoke.o \
+	$(OBJDIR)/src/core/runtime_broker_task.o \
+	$(OBJDIR)/src/core/runtime_broker_windows_security.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_ops.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_ring.o \
+	$(OBJDIR)/src/core/runtime_broker_transport.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_windows.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_windows_fd_stubs.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_windows_pipe.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_windows_session.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_posix.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_posix_message.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_posix_socket.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_unix.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_selftest.o \
+	$(OBJDIR)/src/core/runtime_broker_ring.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_dispatch.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_shm.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_shm_posix.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_shm_windows.o \
 	$(OBJDIR)/src/core/runtime_fault.o \
 	$(OBJDIR)/src/core/runtime_names.o \
 	$(OBJDIR)/src/core/runtime_time.o \
@@ -214,6 +257,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_shutdown.o \
 	$(OBJDIR)/src/core/runtime_run.o \
 	$(OBJDIR)/src/core/runtime_sync.o \
+	$(OBJDIR)/src/core/runtime_mutex_lifecycle.o \
 	$(OBJDIR)/src/core/runtime_mutex.o \
 	$(OBJDIR)/src/core/runtime_cond_lifecycle.o \
 	$(OBJDIR)/src/core/runtime_cond.o \
@@ -243,7 +287,11 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_debug_dump_helpers.o \
 	$(OBJDIR)/src/core/runtime_debug_stats_json.o \
 	$(OBJDIR)/src/core/runtime_debug.o \
-	$(OBJDIR)/src/io/runtime_io_watch.o
+	$(OBJDIR)/src/io/runtime_io_watch.o \
+	$(OBJDIR)/src/io/runtime_io_watch_lookup.o \
+	$(OBJDIR)/src/io/runtime_io_watch_migration.o \
+	$(OBJDIR)/src/io/runtime_io_watch_queue.o \
+	$(OBJDIR)/src/io/runtime_io_watch_waiter.o
 
 ifeq ($(HOST_PLATFORM),linux)
 LDLIBS += -lm
@@ -291,7 +339,7 @@ RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/context_x86_64.o
 endif
 else ifeq ($(HOST_PLATFORM),windows)
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
-LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock
+LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock -ladvapi32
 CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
 RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_state.o \
@@ -331,6 +379,8 @@ BENCH_OBJS = \
 	$(OBJDIR)/examples/bench.o \
 	$(OBJDIR)/examples/bench_support.o \
 	$(OBJDIR)/examples/bench_entry.o
+BROKER_OBJS = \
+	$(OBJDIR)/examples/broker.o
 SERVER_OBJS = \
 	$(OBJDIR)/examples/server.o \
 	$(OBJDIR)/examples/diagnostic_output.o \
@@ -386,6 +436,8 @@ TEST_WINDOWS_IOCP_DUMP_OBJS = \
 	$(OBJDIR)/tests/test_windows_iocp_dump.o
 TEST_WINDOWS_HANDLE_IO_OBJS = \
 	$(OBJDIR)/tests/test_windows_handle_io.o
+TEST_SECURITY_CAPABILITY_OBJS = \
+	$(OBJDIR)/tests/test_security_capability.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
@@ -395,6 +447,7 @@ BUILD_OBJS = \
 	$(DEMO_OBJS) \
 	$(STRESS_OBJS) \
 	$(BENCH_OBJS) \
+	$(BROKER_OBJS) \
 	$(SERVER_OBJS) \
 	$(SERVER_LOSSLESS_OBJS) \
 	$(SERVER_FLOOD_OBJS) \
@@ -417,11 +470,13 @@ BUILD_OBJS = \
 	$(TEST_WINDOWS_POLICY_OBJS) \
 	$(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) \
 	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
+	$(TEST_SECURITY_CAPABILITY_OBJS) \
 	$(TEST_SHARED_LOAD_OBJS)
 LINK_TARGETS = \
 	demo \
 	stress \
 	bench \
+	llam_broker \
 	server \
 	server_lossless \
 	server_flood \
@@ -446,6 +501,7 @@ LINK_TARGETS = \
 	test_windows_iocp_io \
 	test_windows_iocp_dump \
 	test_windows_handle_io \
+	test_security_capability \
 	test_shared_load \
 	libllam_runtime.a
 
@@ -458,11 +514,12 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?=
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
 	bench \
+	llam_broker \
 	server \
 	server_lossless \
 	server_flood \
@@ -487,6 +544,7 @@ WINDOWS_CMAKE_TARGETS = \
 	test_windows_iocp_io \
 	test_windows_iocp_dump \
 	test_windows_handle_io \
+	test_security_capability \
 	test_shared_load
 
 .PHONY: windows-cmake-configure windows-cmake-build windows-cmake-test
@@ -606,7 +664,7 @@ $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 		mv "$$tmp" "$@"; \
 	fi
 
-all: demo stress bench server server_lossless server_flood static shared
+all: demo stress bench llam_broker server server_lossless server_flood static shared
 
 static: libllam_runtime.a
 
@@ -615,7 +673,7 @@ libllam_runtime.a: $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_shared_load server stress server_flood shared
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -637,6 +695,34 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	./test_windows_iocp_io
 	./test_windows_iocp_dump
 	./test_windows_handle_io
+	./test_security_capability
+	./llam_broker --self-test
+	@broker_sock="$${TMPDIR:-/tmp}/llam-broker-test.$$$$.sock"; \
+	server_out="$${TMPDIR:-/tmp}/llam-broker-test.$$$$.out"; \
+	rm -f "$$broker_sock" "$$server_out"; \
+	./llam_broker --serve-n "$$broker_sock" 3 >"$$server_out" 2>&1 & \
+	server_pid="$$!"; \
+	for _i in $$(seq 1 100); do \
+		if [ -S "$$broker_sock" ]; then break; fi; \
+		sleep 0.02; \
+	done; \
+	python3 -c 'import socket, sys; sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); sock.connect(sys.argv[1]); sock.shutdown(socket.SHUT_RDWR); sock.close()' "$$broker_sock" && \
+	./llam_broker --client-self-test "$$broker_sock" && \
+	./llam_broker --client-self-test "$$broker_sock"; \
+	client_rc="$$?"; \
+	if [ "$$client_rc" -ne 0 ]; then \
+		kill "$$server_pid" >/dev/null 2>&1 || true; \
+		wait "$$server_pid" >/dev/null 2>&1 || true; \
+		cat "$$server_out" >&2; \
+		rm -f "$$broker_sock" "$$server_out"; \
+		exit "$$client_rc"; \
+	fi; \
+	if ! wait "$$server_pid"; then \
+		cat "$$server_out" >&2; \
+		rm -f "$$broker_sock" "$$server_out"; \
+		exit 1; \
+	fi; \
+	rm -f "$$broker_sock" "$$server_out"
 	./test_shared_load ./$(SHLIB_REAL)
 	@tmp_out="$$(mktemp "$${TMPDIR:-/tmp}/llam-server-flood-invalid.XXXXXX")"; \
 	trap 'rm -f "$$tmp_out"' 0 1 2 3 15; \
@@ -1755,7 +1841,8 @@ ASAN_TEST_TARGETS = \
 	asan-test_runtime_core \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
-	asan-test_multi_runtime_core
+	asan-test_multi_runtime_core \
+	asan-test_security_capability
 
 NOOWNER_TEST_TARGETS = \
 	noowner-test_runtime_select_edges
@@ -1763,7 +1850,8 @@ NOOWNER_TEST_TARGETS = \
 TSAN_TEST_TARGETS = \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
-	tsan-test_multi_runtime_core
+	tsan-test_multi_runtime_core \
+	tsan-test_security_capability
 
 test-asan:
 	@set -e; \
@@ -1778,7 +1866,8 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_core; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
+	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability
 
 test-no-owner:
 	@set -e; \
@@ -1801,7 +1890,8 @@ test-tsan:
 		LDLIBS="$(LDLIBS) -fsanitize=thread"; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \
-	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability
 
 analyze-cppcheck:
 	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
@@ -1843,6 +1933,9 @@ stress: $(RUNTIME_OBJS) $(STRESS_OBJS)
 
 bench: $(RUNTIME_OBJS) $(BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BENCH_OBJS) $(LDLIBS)
+
+llam_broker: $(RUNTIME_OBJS) $(BROKER_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BROKER_OBJS) $(LDLIBS)
 
 server: $(RUNTIME_OBJS) $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_OBJS) $(LDLIBS)
@@ -1919,6 +2012,9 @@ asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: $(RUNTI
 asan-test_multi_runtime_core tsan-test_multi_runtime_core: $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
 
+asan-test_security_capability tsan-test_security_capability: $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
+
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)
 
@@ -1933,6 +2029,9 @@ test_windows_iocp_dump: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS)
 
 test_windows_handle_io: $(RUNTIME_OBJS) $(TEST_WINDOWS_HANDLE_IO_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_HANDLE_IO_OBJS) $(LDLIBS)
+
+test_security_capability: $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
@@ -2077,6 +2176,10 @@ $(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c $(LLAM_PUBLIC_HDRS) exa
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
+$(OBJDIR)/examples/broker.o: examples/broker.c $(LLAM_PUBLIC_HDRS) $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
 $(OBJDIR)/examples/server.o: examples/server.c examples/server_support.h $(LLAM_PUBLIC_HDRS) $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
@@ -2097,7 +2200,10 @@ $(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/%.o: tests/%.c $(LLAM_PUBLIC_HDRS)
+# Some tests intentionally include private runtime headers to validate teardown,
+# ownership, and backend invariants. Rebuild all test objects on private layout
+# changes so internal tests cannot link against a stale object view of structs.
+$(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

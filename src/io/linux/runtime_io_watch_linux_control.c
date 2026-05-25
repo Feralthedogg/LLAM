@@ -27,32 +27,6 @@
 #include "runtime_io_watch_linux_internal.h"
 
 /**
- * @brief Enqueue a control operation while watch_lock is held.
- *
- * @param node   Target node.
- * @param kind   Control operation kind.
- * @param target Watch or request pointer consumed by the worker.
- * @return 0 on success, -1 on allocation failure.
- */
-int llam_node_queue_control_locked(llam_node_t *node, llam_io_control_kind_t kind, void *target) {
-    llam_io_control_op_t *op = calloc(1, sizeof(*op));
-
-    if (op == NULL) {
-        return -1;
-    }
-
-    op->kind = kind;
-    op->target = target;
-    if (node->control_tail != NULL) {
-        node->control_tail->next = op;
-    } else {
-        node->control_head = op;
-    }
-    node->control_tail = op;
-    return 0;
-}
-
-/**
  * @brief Enqueue a control operation and wake the node worker.
  *
  * @param node   Target node.

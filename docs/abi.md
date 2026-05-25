@@ -32,6 +32,40 @@ ABI rules:
 - Pointers returned as static strings are owned by the library and remain valid
   until process exit.
 
+## Public Handle Hardening Model
+
+LLAM public handles are opaque lifetime guards, not cryptographic process
+sandbox capabilities.  Callers must treat task, channel, mutex, condvar,
+cancellation-token, task-group, and owned-buffer handles as uninterpreted values
+returned by LLAM.
+
+The runtime rejects stale, consumed, wrong-family, and wrong-runtime-owner
+handles before dereferencing object storage. Family-tagged handle generations
+carry a sealed verifier token derived from a runtime/table secret, slot id,
+internal epoch, and per-slot nonce. The first handle in a family and the next
+handle after slot reuse are therefore not the trivial `slot + family` or
+monotonic `generation + 1` values. This protects FFI bindings and accidental
+in-process misuse from turning guessed values into valid objects.
+
+This is not an isolation boundary against malicious code that can read or write
+arbitrary memory inside the same process.  If an attacker can disclose runtime
+internals, they may also disclose handle table state or secrets; embedders that
+need isolation must use process, sandbox, or language-runtime boundaries above
+LLAM.
+
+The 2.x tree also contains an internal broker capability foundation for a
+stronger, process-boundary model. The broker owns runtime state, MAC keys,
+registries, descriptors/HANDLEs, and ring sessions outside the untrusted client
+address space. Clients hold serialized, subject-bound tokens with explicit
+rights and revocation epochs. Current broker coverage includes local POSIX
+Unix-domain and Windows named-pipe control transports, bounded buffer/channel
+grants, POSIX `SCM_RIGHTS` descriptor grants, Windows `DuplicateHandle` HANDLE
+grants, private shared-memory ring setup, token attenuation/revocation,
+broker-owned descriptor/channel/buffer data-plane requests, and predefined task
+commands. These symbols are internal implementation details, not part of the
+stable public ABI; embedders should treat them as the broker-mode foundation
+documented in `docs/security.md`.
+
 Dynamic loaders should resolve and check these symbols first:
 
 ```c

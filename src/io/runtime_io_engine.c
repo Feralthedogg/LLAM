@@ -34,6 +34,86 @@
 #include "runtime_windows_iocp.h"
 #endif
 
+#if !defined(__linux__)
+/**
+ * @brief Disable provided-buffer support on non-Linux backends.
+ *
+ * Provided receive buffers are currently an io_uring-only optimization. The
+ * non-Linux backends share one fallback implementation so capability state stays
+ * consistent across Darwin, Windows, and generic builds.
+ */
+int llam_node_setup_recv_buf_ring(llam_node_t *node) {
+    if (node != NULL) {
+        node->supports_provided_buffers = false;
+        node->recv_buf_entries = 0U;
+        node->recv_buf_mask = 0U;
+        node->recv_buf_group = -1;
+    }
+    return 0;
+}
+
+int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
+    (void)node;
+    (void)bid;
+    errno = ENOSYS;
+    return -1;
+}
+
+void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
+    if (node == NULL) {
+        return;
+    }
+    free(node->recv_buf_storage);
+    node->recv_buf_storage = NULL;
+    node->recv_buf_ring = NULL;
+    node->supports_provided_buffers = false;
+}
+#endif
+
+/**
+ * @brief Check whether an I/O node supports a request kind.
+ *
+ * All platform backends publish the same capability flags on @c llam_node_t.
+ * Keeping the switch central avoids backend drift when a new request kind is
+ * added or a fallback rule changes.
+ *
+ * @param node Node whose capability flags are inspected.
+ * @param kind Runtime I/O request kind.
+ *
+ * @return @c true when the backend can submit @p kind.
+ */
+bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
+    if (node == NULL) {
+        return false;
+    }
+    switch (kind) {
+    case LLAM_IO_KIND_READ:
+        return node->supports_read;
+    case LLAM_IO_KIND_WRITE:
+        return node->supports_write;
+    case LLAM_IO_KIND_ACCEPT:
+        return node->supports_accept;
+    case LLAM_IO_KIND_CONNECT:
+        return node->supports_connect;
+    case LLAM_IO_KIND_POLL:
+        return node->supports_poll;
+    case LLAM_IO_KIND_HANDLE_READ:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
+    case LLAM_IO_KIND_HANDLE_WRITE:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
+    case LLAM_IO_KIND_PREAD:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
+    case LLAM_IO_KIND_PWRITE:
+        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
+    case LLAM_IO_KIND_HANDLE_PREAD:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
+    case LLAM_IO_KIND_HANDLE_PWRITE:
+        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
+    default:
+        return false;
+    }
+}
+
 #if defined(__linux__)
 
 /**
@@ -155,43 +235,6 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     }
     errno = -rc;
     return -1;
-}
-
-/**
- * @brief Check whether an I/O node supports a request kind.
- *
- * @param node Node whose capability flags are inspected.
- * @param kind Runtime I/O request kind.
- *
- * @return @c true when the backend can submit @p kind.
- */
-bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
-    switch (kind) {
-    case LLAM_IO_KIND_READ:
-        return node->supports_read;
-    case LLAM_IO_KIND_WRITE:
-        return node->supports_write;
-    case LLAM_IO_KIND_ACCEPT:
-        return node->supports_accept;
-    case LLAM_IO_KIND_CONNECT:
-        return node->supports_connect;
-    case LLAM_IO_KIND_POLL:
-        return node->supports_poll;
-    case LLAM_IO_KIND_HANDLE_READ:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_WRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    case LLAM_IO_KIND_PREAD:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
-    case LLAM_IO_KIND_PWRITE:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
-    case LLAM_IO_KIND_HANDLE_PREAD:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_PWRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    default:
-        return false;
-    }
 }
 
 #if defined(LLAM_HAVE_IO_URING_BUF_RING_HELPERS)
@@ -505,93 +548,6 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
 }
 
 /**
- * @brief Check whether a non-Linux node supports an I/O request kind.
- *
- * @param node Node whose capability flags are inspected.
- * @param kind Runtime I/O request kind.
- *
- * @return @c true when @p kind is supported.
- */
-bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
-    if (node == NULL) {
-        return false;
-    }
-    switch (kind) {
-    case LLAM_IO_KIND_READ:
-        return node->supports_read;
-    case LLAM_IO_KIND_WRITE:
-        return node->supports_write;
-    case LLAM_IO_KIND_ACCEPT:
-        return node->supports_accept;
-    case LLAM_IO_KIND_CONNECT:
-        return node->supports_connect;
-    case LLAM_IO_KIND_POLL:
-        return node->supports_poll;
-    case LLAM_IO_KIND_HANDLE_READ:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_WRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    case LLAM_IO_KIND_PREAD:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
-    case LLAM_IO_KIND_PWRITE:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
-    case LLAM_IO_KIND_HANDLE_PREAD:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_PWRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    default:
-        return false;
-    }
-}
-
-/**
- * @brief Disable provided-buffer support on non-Linux backends.
- *
- * @param node Node to update.
- *
- * @return Always 0.
- */
-int llam_node_setup_recv_buf_ring(llam_node_t *node) {
-    if (node != NULL) {
-        node->supports_provided_buffers = false;
-        node->recv_buf_entries = 0U;
-        node->recv_buf_mask = 0U;
-        node->recv_buf_group = -1;
-    }
-    return 0;
-}
-
-/**
- * @brief Reject provided-buffer recycling on non-Linux backends.
- *
- * @param node Unused node pointer.
- * @param bid  Unused buffer id.
- *
- * @return Always -1 with @c errno set to @c ENOSYS.
- */
-int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
-    (void)node;
-    (void)bid;
-    errno = ENOSYS;
-    return -1;
-}
-
-/**
- * @brief Clear non-Linux provided-buffer state.
- *
- * @param node Node to clean up; may be @c NULL.
- */
-void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
-    if (node == NULL) {
-        return;
-    }
-    free(node->recv_buf_storage);
-    node->recv_buf_storage = NULL;
-    node->recv_buf_ring = NULL;
-    node->supports_provided_buffers = false;
-}
-
-/**
  * @brief Tear down non-Linux wake registration state.
  *
  * @param node Node to update; may be @c NULL.
@@ -690,65 +646,6 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     return 0;
 }
 
-bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
-    if (node == NULL) {
-        return false;
-    }
-    switch (kind) {
-    case LLAM_IO_KIND_READ:
-        return node->supports_read;
-    case LLAM_IO_KIND_WRITE:
-        return node->supports_write;
-    case LLAM_IO_KIND_ACCEPT:
-        return node->supports_accept;
-    case LLAM_IO_KIND_CONNECT:
-        return node->supports_connect;
-    case LLAM_IO_KIND_POLL:
-        return node->supports_poll;
-    case LLAM_IO_KIND_HANDLE_READ:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_WRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    case LLAM_IO_KIND_PREAD:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
-    case LLAM_IO_KIND_PWRITE:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
-    case LLAM_IO_KIND_HANDLE_PREAD:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_PWRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    default:
-        return false;
-    }
-}
-
-int llam_node_setup_recv_buf_ring(llam_node_t *node) {
-    if (node != NULL) {
-        node->supports_provided_buffers = false;
-        node->recv_buf_entries = 0U;
-        node->recv_buf_mask = 0U;
-        node->recv_buf_group = -1;
-    }
-    return 0;
-}
-
-int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
-    (void)node;
-    (void)bid;
-    errno = ENOSYS;
-    return -1;
-}
-
-void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
-    if (node == NULL) {
-        return;
-    }
-    free(node->recv_buf_storage);
-    node->recv_buf_storage = NULL;
-    node->recv_buf_ring = NULL;
-    node->supports_provided_buffers = false;
-}
-
 void llam_node_unregister_cq_eventfd(llam_node_t *node) {
     if (node == NULL) {
         return;
@@ -802,65 +699,6 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->mach_wake_port = 0U;
     node->mach_wake_pset = 0U;
     return 0;
-}
-
-bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind) {
-    if (node == NULL) {
-        return false;
-    }
-    switch (kind) {
-    case LLAM_IO_KIND_READ:
-        return node->supports_read;
-    case LLAM_IO_KIND_WRITE:
-        return node->supports_write;
-    case LLAM_IO_KIND_ACCEPT:
-        return node->supports_accept;
-    case LLAM_IO_KIND_CONNECT:
-        return node->supports_connect;
-    case LLAM_IO_KIND_POLL:
-        return node->supports_poll;
-    case LLAM_IO_KIND_HANDLE_READ:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_WRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    case LLAM_IO_KIND_PREAD:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_read;
-    case LLAM_IO_KIND_PWRITE:
-        return LLAM_RUNTIME_BACKEND_LINUX && node->supports_write;
-    case LLAM_IO_KIND_HANDLE_PREAD:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_read;
-    case LLAM_IO_KIND_HANDLE_PWRITE:
-        return LLAM_RUNTIME_BACKEND_WINDOWS && node->supports_write;
-    default:
-        return false;
-    }
-}
-
-int llam_node_setup_recv_buf_ring(llam_node_t *node) {
-    if (node != NULL) {
-        node->supports_provided_buffers = false;
-        node->recv_buf_entries = 0U;
-        node->recv_buf_mask = 0U;
-        node->recv_buf_group = -1;
-    }
-    return 0;
-}
-
-int llam_node_recycle_recv_buffer(llam_node_t *node, unsigned short bid) {
-    (void)node;
-    (void)bid;
-    errno = ENOSYS;
-    return -1;
-}
-
-void llam_node_destroy_recv_buf_ring(llam_node_t *node) {
-    if (node == NULL) {
-        return;
-    }
-    free(node->recv_buf_storage);
-    node->recv_buf_storage = NULL;
-    node->recv_buf_ring = NULL;
-    node->supports_provided_buffers = false;
 }
 
 void llam_node_unregister_cq_eventfd(llam_node_t *node) {

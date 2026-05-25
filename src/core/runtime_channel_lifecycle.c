@@ -32,12 +32,15 @@ static llam_public_slot_table_t g_llam_channel_public_slots;
 static int llam_channel_reserve_public_slot_locked(llam_channel_t *channel, size_t *out_slot) {
     uint32_t generation = 0U;
 
-    return llam_public_slot_reserve_family(&g_llam_channel_public_slots,
-                                           channel,
-                                           64U,
-                                           LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
-                                           out_slot,
-                                           &generation);
+    return llam_public_slot_reserve_family_secret(&g_llam_channel_public_slots,
+                                                  channel,
+                                                  64U,
+                                                  LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                                  channel->owner_runtime != NULL
+                                                      ? channel->owner_runtime->public_handle_secret
+                                                      : 0U,
+                                                  out_slot,
+                                                  &generation);
 }
 
 int llam_channel_register_live(llam_channel_t *channel) {

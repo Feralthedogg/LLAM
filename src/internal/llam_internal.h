@@ -52,7 +52,6 @@
 #define LLAM_RUNTIME_DISABLE_OWNER_CHECKS 0
 #endif
 
-#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
 /** @brief Internal task states used by tracing, diagnostics, and assembly-visible code. */
 typedef enum llam_task_state_id {
     LLAM_TASK_STATE_NEW = 0,
@@ -92,6 +91,7 @@ typedef enum llam_trace_kind {
     LLAM_TRACE_WATCHDOG = 9,
 } llam_trace_kind_t;
 
+#if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
 /**
  * @brief Windows x86-64 callee-saved context layout.
  *
@@ -148,45 +148,6 @@ _Static_assert(offsetof(llam_ctx_t, simd_valid) == 256, "llam_ctx_t.simd_valid o
 _Static_assert(offsetof(llam_ctx_t, simd_flags) == 260, "llam_ctx_t.simd_flags offset must match asm/windows/x86_64 context switch");
 _Static_assert(sizeof(llam_ctx_t) == 264, "llam_ctx_t size must match asm/windows/x86_64 context switch");
 #elif (defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64
-/** @brief Internal task states used by tracing, diagnostics, and assembly-visible code. */
-typedef enum llam_task_state_id {
-    LLAM_TASK_STATE_NEW = 0,
-    LLAM_TASK_STATE_RUNNABLE = 1,
-    LLAM_TASK_STATE_RUNNING = 2,
-    LLAM_TASK_STATE_PARKED = 3,
-    LLAM_TASK_STATE_BLOCKED_OPAQUE = 4,
-    LLAM_TASK_STATE_DEAD = 5,
-} llam_task_state_id_t;
-
-/** @brief Reason a task left running state or was woken. */
-typedef enum llam_wait_reason {
-    LLAM_WAIT_NONE = 0,
-    LLAM_WAIT_YIELD = 1,
-    LLAM_WAIT_JOIN = 2,
-    LLAM_WAIT_SLEEP = 3,
-    LLAM_WAIT_BLOCKING = 4,
-    LLAM_WAIT_IO = 5,
-    LLAM_WAIT_CANCEL = 6,
-    LLAM_WAIT_MUTEX = 7,
-    LLAM_WAIT_COND = 8,
-    LLAM_WAIT_CHANNEL_SEND = 9,
-    LLAM_WAIT_CHANNEL_RECV = 10,
-    LLAM_WAIT_TIMEOUT = 11,
-} llam_wait_reason_t;
-
-/** @brief Trace event categories recorded by shard-local trace buffers. */
-typedef enum llam_trace_kind {
-    LLAM_TRACE_STATE = 1,
-    LLAM_TRACE_WAKE = 2,
-    LLAM_TRACE_BLOCK_SUBMIT = 3,
-    LLAM_TRACE_BLOCK_COMPLETE = 4,
-    LLAM_TRACE_IO_SUBMIT = 5,
-    LLAM_TRACE_IO_COMPLETE = 6,
-    LLAM_TRACE_IDLE = 7,
-    LLAM_TRACE_STEAL = 8,
-    LLAM_TRACE_WATCHDOG = 9,
-} llam_trace_kind_t;
-
 /**
  * @brief x86-64 callee-saved context layout.
  *
@@ -220,45 +181,6 @@ _Static_assert(offsetof(llam_ctx_t, x87_cw) == 60, "llam_ctx_t.x87_cw offset mus
 _Static_assert(offsetof(llam_ctx_t, xsave_area) == 64, "llam_ctx_t.xsave_area offset must match asm/x86_64 context switch");
 _Static_assert(sizeof(llam_ctx_t) == 72, "llam_ctx_t size must match asm/x86_64 context switch");
 #elif LLAM_ARCH_AARCH64
-/** @brief Internal task states used by tracing and diagnostics on AArch64. */
-typedef enum llam_task_state_id {
-    LLAM_TASK_STATE_NEW = 0,
-    LLAM_TASK_STATE_RUNNABLE = 1,
-    LLAM_TASK_STATE_RUNNING = 2,
-    LLAM_TASK_STATE_PARKED = 3,
-    LLAM_TASK_STATE_BLOCKED_OPAQUE = 4,
-    LLAM_TASK_STATE_DEAD = 5,
-} llam_task_state_id_t;
-
-/** @brief Reason a task left running state or was woken on AArch64. */
-typedef enum llam_wait_reason {
-    LLAM_WAIT_NONE = 0,
-    LLAM_WAIT_YIELD = 1,
-    LLAM_WAIT_JOIN = 2,
-    LLAM_WAIT_SLEEP = 3,
-    LLAM_WAIT_BLOCKING = 4,
-    LLAM_WAIT_IO = 5,
-    LLAM_WAIT_CANCEL = 6,
-    LLAM_WAIT_MUTEX = 7,
-    LLAM_WAIT_COND = 8,
-    LLAM_WAIT_CHANNEL_SEND = 9,
-    LLAM_WAIT_CHANNEL_RECV = 10,
-    LLAM_WAIT_TIMEOUT = 11,
-} llam_wait_reason_t;
-
-/** @brief Trace event categories recorded by shard-local trace buffers on AArch64. */
-typedef enum llam_trace_kind {
-    LLAM_TRACE_STATE = 1,
-    LLAM_TRACE_WAKE = 2,
-    LLAM_TRACE_BLOCK_SUBMIT = 3,
-    LLAM_TRACE_BLOCK_COMPLETE = 4,
-    LLAM_TRACE_IO_SUBMIT = 5,
-    LLAM_TRACE_IO_COMPLETE = 6,
-    LLAM_TRACE_IDLE = 7,
-    LLAM_TRACE_STEAL = 8,
-    LLAM_TRACE_WATCHDOG = 9,
-} llam_trace_kind_t;
-
 /**
  * @brief AArch64 callee-saved context layout.
  *
@@ -316,45 +238,6 @@ _Static_assert(sizeof(llam_ctx_t) == 192, "llam_ctx_t size must match asm/arm64 
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
-
-/** @brief Internal task states used by the portable context backend. */
-typedef enum llam_task_state_id {
-    LLAM_TASK_STATE_NEW = 0,
-    LLAM_TASK_STATE_RUNNABLE = 1,
-    LLAM_TASK_STATE_RUNNING = 2,
-    LLAM_TASK_STATE_PARKED = 3,
-    LLAM_TASK_STATE_BLOCKED_OPAQUE = 4,
-    LLAM_TASK_STATE_DEAD = 5,
-} llam_task_state_id_t;
-
-/** @brief Reason a portable-backend task left running state or was woken. */
-typedef enum llam_wait_reason {
-    LLAM_WAIT_NONE = 0,
-    LLAM_WAIT_YIELD = 1,
-    LLAM_WAIT_JOIN = 2,
-    LLAM_WAIT_SLEEP = 3,
-    LLAM_WAIT_BLOCKING = 4,
-    LLAM_WAIT_IO = 5,
-    LLAM_WAIT_CANCEL = 6,
-    LLAM_WAIT_MUTEX = 7,
-    LLAM_WAIT_COND = 8,
-    LLAM_WAIT_CHANNEL_SEND = 9,
-    LLAM_WAIT_CHANNEL_RECV = 10,
-    LLAM_WAIT_TIMEOUT = 11,
-} llam_wait_reason_t;
-
-/** @brief Trace event categories recorded by shard-local trace buffers. */
-typedef enum llam_trace_kind {
-    LLAM_TRACE_STATE = 1,
-    LLAM_TRACE_WAKE = 2,
-    LLAM_TRACE_BLOCK_SUBMIT = 3,
-    LLAM_TRACE_BLOCK_COMPLETE = 4,
-    LLAM_TRACE_IO_SUBMIT = 5,
-    LLAM_TRACE_IO_COMPLETE = 6,
-    LLAM_TRACE_IDLE = 7,
-    LLAM_TRACE_STEAL = 8,
-    LLAM_TRACE_WATCHDOG = 9,
-} llam_trace_kind_t;
 
 /**
  * @brief Portable ucontext-backed context layout.

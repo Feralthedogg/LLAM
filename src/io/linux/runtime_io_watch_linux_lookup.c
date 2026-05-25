@@ -1,11 +1,11 @@
 /**
  * @file src/io/linux/runtime_io_watch_linux_lookup.c
- * @brief Linux watch lookup and registration helpers for fd-based operations.
+ * @brief Linux watch receive cleanup and completion helpers for fd watches.
  *
  * @details
- * Poll and receive watches include device/inode identity in addition to fd
- * number. That prevents stale watch state from satisfying a new file/socket
- * that reused the same numeric fd after close/open churn.
+ * Common lookup/creation code lives in @c runtime_io_watch_lookup.c. This file
+ * keeps Linux-specific receive-ready release semantics because io_uring
+ * provided buffers must be recycled to their owner node.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -24,196 +24,6 @@
  */
 
 #include "runtime_io_watch_linux_internal.h"
-
-/**
- * @brief Capture stable identity fields for an fd.
- *
- * @param fd     File descriptor to inspect.
- * @param st_dev Optional device id output.
- * @param st_ino Optional inode id output.
- * @return true on successful @c fstat.
- */
-bool llam_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
-    struct stat st;
-
-    if (fstat(fd, &st) != 0) {
-        return false;
-    }
-    if (st_dev != NULL) {
-        *st_dev = st.st_dev;
-    }
-    if (st_ino != NULL) {
-        *st_ino = st.st_ino;
-    }
-    return true;
-}
-
-/**
- * @brief Find an existing poll watch while watch_lock is held.
- *
- * @param node   Node whose poll watch table is searched.
- * @param fd     File descriptor.
- * @param events Requested poll event mask.
- * @return Matching watch, or NULL.
- */
-llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short events) {
-    llam_poll_watch_t *watch = node->poll_watches;
-    dev_t st_dev = 0;
-    ino_t st_ino = 0;
-
-    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
-        return NULL;
-    }
-    while (watch != NULL) {
-        if (watch->fd == fd && watch->events == events && watch->st_dev == st_dev && watch->st_ino == st_ino) {
-            return watch;
-        }
-        watch = watch->next;
-    }
-    return NULL;
-}
-
-/**
- * @brief Find an existing accept watch while watch_lock is held.
- *
- * @param node Node whose accept watch table is searched.
- * @param fd   Listener descriptor.
- * @return Matching watch, or NULL.
- */
-llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd) {
-    llam_accept_watch_t *watch = node->accept_watches;
-
-    while (watch != NULL) {
-        if (watch->fd == fd) {
-            return watch;
-        }
-        watch = watch->next;
-    }
-    return NULL;
-}
-
-/**
- * @brief Find an existing receive watch while watch_lock is held.
- *
- * @param node   Node whose receive watch table is searched.
- * @param fd     File descriptor.
- * @param st_dev Captured device id.
- * @param st_ino Captured inode id.
- * @return Matching watch, or NULL.
- */
-llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t st_dev, ino_t st_ino) {
-    llam_recv_watch_t *watch = node->recv_watches;
-
-    while (watch != NULL) {
-        if (watch->fd == fd && watch->st_dev == st_dev && watch->st_ino == st_ino) {
-            return watch;
-        }
-        watch = watch->next;
-    }
-    return NULL;
-}
-
-/**
- * @brief Find or create a poll watch while watch_lock is held.
- *
- * @param node   Node that will own the watch.
- * @param fd     File descriptor.
- * @param events Poll event mask.
- * @return Watch on success, NULL on fstat/allocation failure.
- */
-llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int fd, short events) {
-    llam_poll_watch_t *watch = node->poll_watches;
-    dev_t st_dev = 0;
-    ino_t st_ino = 0;
-
-    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
-        return NULL;
-    }
-    while (watch != NULL) {
-        if (watch->fd == fd && watch->events == events && watch->st_dev == st_dev && watch->st_ino == st_ino) {
-            return watch;
-        }
-        watch = watch->next;
-    }
-
-    watch = calloc(1, sizeof(*watch));
-    if (watch == NULL) {
-        return NULL;
-    }
-    watch->fd = fd;
-    watch->st_dev = st_dev;
-    watch->st_ino = st_ino;
-    watch->events = events;
-    watch->migrate_target_node_index = UINT_MAX;
-    // live_transferred is set during watch migration once the target owns all
-    // waiters/ready data but the source may still receive a final CQE.
-    watch->live_transferred = false;
-    watch->next = node->poll_watches;
-    node->poll_watches = watch;
-    return watch;
-}
-
-/**
- * @brief Find or create an accept watch while watch_lock is held.
- *
- * @param node Node that will own the watch.
- * @param fd   Listener descriptor.
- * @return Watch on success, NULL on allocation failure.
- */
-llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, int fd) {
-    llam_accept_watch_t *watch = llam_find_accept_watch_locked(node, fd);
-
-    if (watch != NULL) {
-        return watch;
-    }
-
-    watch = calloc(1, sizeof(*watch));
-    if (watch == NULL) {
-        return NULL;
-    }
-    watch->fd = fd;
-    watch->migrate_target_node_index = UINT_MAX;
-    watch->live_transferred = false;
-    watch->next = node->accept_watches;
-    node->accept_watches = watch;
-    return watch;
-}
-
-/**
- * @brief Find or create a receive watch while watch_lock is held.
- *
- * @param node Node that will own the watch.
- * @param fd   File descriptor.
- * @return Watch on success, NULL on fstat/allocation failure.
- */
-llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int fd) {
-    llam_recv_watch_t *watch;
-    dev_t st_dev = 0;
-    ino_t st_ino = 0;
-
-    if (!llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
-        return NULL;
-    }
-
-    watch = llam_find_recv_watch_locked(node, fd, st_dev, st_ino);
-
-    if (watch != NULL) {
-        return watch;
-    }
-
-    watch = calloc(1, sizeof(*watch));
-    if (watch == NULL) {
-        return NULL;
-    }
-    watch->fd = fd;
-    watch->st_dev = st_dev;
-    watch->st_ino = st_ino;
-    watch->migrate_target_node_index = UINT_MAX;
-    watch->live_transferred = false;
-    watch->next = node->recv_watches;
-    node->recv_watches = watch;
-    return watch;
-}
 
 /**
  * @brief Destroy and unlink a receive watch while watch_lock is held.
@@ -238,25 +48,6 @@ void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch)
         }
         cursor = &(*cursor)->next;
     }
-}
-
-/**
- * @brief Destroy an idle receive watch if no activation/deactivation is pending.
- *
- * @param node  Node owning the watch.
- * @param watch Candidate watch.
- */
-void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch) {
-    if (watch == NULL) {
-        return;
-    }
-    if (watch->active || watch->activating || watch->deactivate_queued) {
-        return;
-    }
-    if (watch->wait_head != NULL || watch->ready_head != NULL) {
-        return;
-    }
-    llam_destroy_recv_watch_locked(node, watch);
 }
 
 /**

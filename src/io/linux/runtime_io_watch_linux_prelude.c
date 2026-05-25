@@ -37,21 +37,6 @@ void llam_io_uring_sqe_set_buf_group_compat(struct io_uring_sqe *sqe, int buf_gr
 }
 
 /**
- * @brief Mix a 64-bit watch identity component.
- *
- * @param value Input value.
- * @return Mixed hash value.
- */
-uint64_t llam_hash_watch_identity_u64(uint64_t value) {
-    value ^= value >> 30;
-    value *= UINT64_C(0xbf58476d1ce4e5b9);
-    value ^= value >> 27;
-    value *= UINT64_C(0x94d049bb133111eb);
-    value ^= value >> 31;
-    return value;
-}
-
-/**
  * @brief Pick the owner node for multishot watch state.
  *
  * @param rt                  Runtime owning nodes.
@@ -201,53 +186,4 @@ bool llam_node_spin_for_cqe(llam_node_t *node) {
         llam_pause_cpu();
     }
     return false;
-}
-
-/**
- * @brief Update per-shard in-flight I/O waiter pressure accounting.
- *
- * @param owner_shard Shard id to update.
- * @param delta       Positive to increment, negative to decrement.
- */
-void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta) {
-    if (rt == NULL || delta == 0 || owner_shard >= rt->active_shards) {
-        return;
-    }
-    if (delta > 0) {
-        atomic_fetch_add_explicit(&rt->shards[owner_shard].inflight_io_waiters, (unsigned)delta, memory_order_acq_rel);
-    } else {
-        atomic_fetch_sub_explicit(&rt->shards[owner_shard].inflight_io_waiters, (unsigned)(-delta), memory_order_acq_rel);
-    }
-}
-
-/**
- * @brief Transfer in-flight request ownership between shards.
- *
- * @param req        Request whose owner counter should move.
- * @param from_shard Expected current owner shard id.
- * @param to_shard   New owner shard id.
- * @return true if ownership moved.
- */
-bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard) {
-    unsigned expected;
-
-    llam_runtime_t *rt = req != NULL ? req->owner_runtime : NULL;
-
-    if (req == NULL || rt == NULL || from_shard == to_shard ||
-        from_shard >= rt->active_shards || to_shard >= rt->active_shards) {
-        return false;
-    }
-
-    expected = from_shard;
-    if (!atomic_compare_exchange_strong_explicit(&req->inflight_owner_shard,
-                                                 &expected,
-                                                 to_shard,
-                                                 memory_order_acq_rel,
-                                                 memory_order_acquire)) {
-        return false;
-    }
-
-    llam_shard_note_inflight_io_waiter(rt, from_shard, -1);
-    llam_shard_note_inflight_io_waiter(rt, to_shard, 1);
-    return true;
 }

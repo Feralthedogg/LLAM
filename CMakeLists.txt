@@ -40,6 +40,33 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_allocator_quiescent.c
     src/core/runtime_api.c
     src/core/runtime_blocking_api.c
+    src/core/runtime_capability.c
+    src/core/runtime_broker.c
+    src/core/runtime_broker_ops.c
+    src/core/runtime_broker_validate.c
+    src/core/runtime_broker_buffer.c
+    src/core/runtime_broker_descriptor.c
+    src/core/runtime_broker_channel.c
+    src/core/runtime_broker_revoke.c
+    src/core/runtime_broker_task.c
+    src/core/runtime_broker_windows_security.c
+    src/core/runtime_broker_transport_ops.c
+    src/core/runtime_broker_transport_ring.c
+    src/core/runtime_broker_transport.c
+    src/core/runtime_broker_transport_windows.c
+    src/core/runtime_broker_transport_windows_fd_stubs.c
+    src/core/runtime_broker_transport_windows_pipe.c
+    src/core/runtime_broker_transport_windows_session.c
+    src/core/runtime_broker_transport_posix.c
+    src/core/runtime_broker_transport_posix_message.c
+    src/core/runtime_broker_transport_posix_socket.c
+    src/core/runtime_broker_transport_unix.c
+    src/core/runtime_broker_transport_selftest.c
+    src/core/runtime_broker_ring.c
+    src/core/runtime_broker_ring_dispatch.c
+    src/core/runtime_broker_ring_shm.c
+    src/core/runtime_broker_ring_shm_posix.c
+    src/core/runtime_broker_ring_shm_windows.c
     src/core/runtime_cancel_api.c
     src/core/runtime_context_portable.c
     src/core/runtime_debug.c
@@ -61,6 +88,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_cond.c
     src/core/runtime_handle.c
     src/core/runtime_owner.c
+    src/core/runtime_mutex_lifecycle.c
     src/core/runtime_mutex.c
     src/core/runtime_names.c
     src/core/runtime_norm_queue.c
@@ -114,6 +142,10 @@ set(LLAM_RUNTIME_SOURCES
     src/io/runtime_io_api_public.c
     src/io/runtime_io_engine.c
     src/io/runtime_io_watch.c
+    src/io/runtime_io_watch_lookup.c
+    src/io/runtime_io_watch_migration.c
+    src/io/runtime_io_watch_queue.c
+    src/io/runtime_io_watch_waiter.c
     src/io/windows/runtime_windows_iocp.c
 )
 
@@ -258,8 +290,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(llam_runtime PUBLIC uring m)
     target_link_libraries(llam_runtime_shared PUBLIC uring m)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_link_libraries(llam_runtime PUBLIC ws2_32 mswsock synchronization)
-    target_link_libraries(llam_runtime_shared PUBLIC ws2_32 mswsock synchronization)
+    target_link_libraries(llam_runtime PUBLIC ws2_32 mswsock synchronization advapi32)
+    target_link_libraries(llam_runtime_shared PUBLIC ws2_32 mswsock synchronization advapi32)
 endif()
 
 set(LLAM_POSIX_EXAMPLE_EXCLUDE)
@@ -320,6 +352,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(bench PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
 endif()
 target_link_libraries(bench PRIVATE llam_runtime)
+
+add_executable(llam_broker
+    examples/broker.c
+)
+target_include_directories(llam_broker PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+)
+target_compile_definitions(llam_broker PRIVATE _GNU_SOURCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_compile_definitions(llam_broker PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    target_compile_definitions(llam_broker PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+endif()
+target_link_libraries(llam_broker PRIVATE llam_runtime)
 
 set(LLAM_SERVER_SOURCES
     examples/server.c
@@ -459,6 +506,11 @@ add_executable(test_windows_runtime_smoke
 )
 target_link_libraries(test_windows_runtime_smoke PRIVATE llam_runtime)
 
+add_executable(test_security_capability
+    tests/test_security_capability.c
+)
+target_link_libraries(test_security_capability PRIVATE llam_runtime)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_executable(test_windows_iocp_io
         tests/test_windows_iocp_io.c
@@ -516,6 +568,7 @@ foreach(LLAM_TEST_TARGET
         test_io_buffers
         test_windows_policy
         test_windows_runtime_smoke
+        test_security_capability
         test_shared_load)
     target_include_directories(${LLAM_TEST_TARGET} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -543,6 +596,8 @@ add_test(NAME test_runtime_shutdown_internal COMMAND test_runtime_shutdown_inter
 add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
+add_test(NAME test_security_capability COMMAND test_security_capability)
+add_test(NAME llam_broker_self_test COMMAND llam_broker --self-test)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_windows_iocp_io COMMAND test_windows_iocp_io)
     add_test(NAME test_windows_iocp_dump COMMAND test_windows_iocp_dump)

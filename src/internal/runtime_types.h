@@ -1035,6 +1035,7 @@ struct llam_node {
 struct llam_runtime {
     llam_runtime_t *registry_next;
     uint64_t runtime_id;
+    uint64_t public_handle_secret;
     bool heap_allocated;
     atomic_bool destroy_claimed;
     _Atomic size_t active_ops;

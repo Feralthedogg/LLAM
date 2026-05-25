@@ -19,6 +19,7 @@
  */
 
 #include "llam/runtime.h"
+#include "test_env.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -88,41 +89,6 @@ static unsigned invariant_range(invariant_prng_t *prng, unsigned min_value, unsi
     uint64_t span = (uint64_t)max_value - (uint64_t)min_value + 1U;
 
     return min_value + (unsigned)(invariant_next(prng) % span);
-}
-
-static unsigned env_u32(const char *name, unsigned default_value, unsigned max_value) {
-    const char *raw = getenv(name);
-    char *end = NULL;
-    unsigned long parsed;
-
-    if (raw == NULL || *raw == '\0') {
-        return default_value;
-    }
-    errno = 0;
-    parsed = strtoul(raw, &end, 10);
-    if (errno != 0 || end == raw || *end != '\0' || parsed == 0UL) {
-        return default_value;
-    }
-    if (parsed > max_value) {
-        parsed = max_value;
-    }
-    return (unsigned)parsed;
-}
-
-static uint64_t env_u64(const char *name, uint64_t default_value) {
-    const char *raw = getenv(name);
-    char *end = NULL;
-    unsigned long long parsed;
-
-    if (raw == NULL || *raw == '\0') {
-        return default_value;
-    }
-    errno = 0;
-    parsed = strtoull(raw, &end, 10);
-    if (errno != 0 || end == raw || *end != '\0' || parsed == 0ULL) {
-        return default_value;
-    }
-    return (uint64_t)parsed;
 }
 
 static void invariant_error_init(invariant_error_t *error) {
@@ -650,10 +616,10 @@ static int run_scenario(uint64_t seed, unsigned index) {
 }
 
 int main(void) {
-    uint64_t seed = env_u64("LLAM_RUNTIME_INVARIANT_SEED", UINT64_C(0x4c4c414d494e5654));
-    unsigned scenarios = env_u32("LLAM_RUNTIME_INVARIANT_SCENARIOS",
-                                 INVARIANT_DEFAULT_SCENARIOS,
-                                 INVARIANT_MAX_SCENARIOS);
+    uint64_t seed = llam_test_env_u64("LLAM_RUNTIME_INVARIANT_SEED", UINT64_C(0x4c4c414d494e5654));
+    unsigned scenarios = llam_test_env_u32("LLAM_RUNTIME_INVARIANT_SCENARIOS",
+                                           INVARIANT_DEFAULT_SCENARIOS,
+                                           INVARIANT_MAX_SCENARIOS);
 
     for (unsigned i = 0U; i < scenarios; ++i) {
         if (run_scenario(seed, i) != 0) {

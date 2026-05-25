@@ -26,61 +26,15 @@
 #ifndef LLAM_EXAMPLES_ENV_COMPAT_H
 #define LLAM_EXAMPLES_ENV_COMPAT_H
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+const char *llam_env_get(const char *name);
 
 static inline const char *llam_example_env_get(const char *name) {
-    char compat_name[128];
-    const char *value;
-
-    if (name == NULL) {
-        return NULL;
-    }
-    if (strncmp(name, "LLAM_", 5U) == 0) {
-        value = getenv(name);
-        if (value != NULL) {
-            return value;
-        }
-        if (strcmp(name, "LLAM_EXPERIMENTAL_WORKER_RINGS") == 0) {
-            value = getenv("LLAM_EXPERIMENTAL_SHARD_RINGS");
-            if (value == NULL) {
-                value = getenv("NM_EXPERIMENTAL_SHARD_RINGS");
-            }
-            if (value != NULL) {
-                return value;
-            }
-        } else if (strcmp(name, "LLAM_EXPERIMENTAL_WORKER_RINGS_MULTISHOT") == 0) {
-            value = getenv("LLAM_EXPERIMENTAL_SHARD_RINGS_MULTISHOT");
-            if (value == NULL) {
-                value = getenv("NM_EXPERIMENTAL_SHARD_RINGS_MULTISHOT");
-            }
-            if (value != NULL) {
-                return value;
-            }
-        } else if (strcmp(name, "LLAM_EXPERIMENTAL_DYNAMIC_WORKERS") == 0) {
-            value = getenv("LLAM_EXPERIMENTAL_DYNAMIC_SHARDS");
-            if (value == NULL) {
-                value = getenv("NM_EXPERIMENTAL_DYNAMIC_SHARDS");
-            }
-            if (value != NULL) {
-                return value;
-            }
-        }
-        if (snprintf(compat_name, sizeof(compat_name), "NM_%s", name + 5) >= (int)sizeof(compat_name)) {
-            return NULL;
-        }
-        return getenv(compat_name);
-    }
-    if (strncmp(name, "NM_", 3U) == 0) {
-        if (snprintf(compat_name, sizeof(compat_name), "LLAM_%s", name + 3) < (int)sizeof(compat_name)) {
-            value = getenv(compat_name);
-            if (value != NULL) {
-                return value;
-            }
-        }
-    }
-    return getenv(name);
+    /*
+     * Examples are linked with the runtime in this repository. Delegate alias
+     * handling to the runtime utility so LLAM_/legacy NM_ compatibility stays
+     * in one implementation instead of drifting across examples and core code.
+     */
+    return llam_env_get(name);
 }
 
 #endif

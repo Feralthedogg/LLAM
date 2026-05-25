@@ -12,6 +12,7 @@ compile_commands.json
 /*.plist
 /bench
 /demo
+/llam_broker
 /stress
 /server
 /server_flood
@@ -32,6 +33,7 @@ test_runtime_select_edges
 test_runtime_shutdown_internal
 test_runtime_stress
 test_runtime_unmanaged_join
+test_security_capability
 test_shared_load
 test_sync_primitives
 test_windows_handle_io

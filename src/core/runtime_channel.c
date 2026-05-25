@@ -921,138 +921,14 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
  * @return Received pointer on success, or @c NULL with @c errno set.
  */
 void *llam_channel_recv(llam_channel_t *channel) {
-    llam_shard_t *shard;
-    llam_task_t *task;
-    llam_wait_node_t *sender;
-    llam_wait_node_t *node;
-    void *value;
-    void *refill_value;
-    int rc;
+    void *value = NULL;
 
-    channel = llam_channel_resolve_public_handle(channel);
-    if (channel == NULL) {
-        errno = EINVAL;
-        return NULL;
-    }
-    if (llam_runtime_require_object_owner(channel->owner_runtime) != 0) {
-        llam_channel_end_public_op(channel);
-        return NULL;
-    }
-    task = g_llam_tls_task;
-    shard = g_llam_tls_shard;
-
-    pthread_mutex_lock(&channel->lock);
-    if (channel->count > 0U) {
-        if (channel->capacity == 1U) {
-            value = channel->buffer[0];
-        } else {
-            value = channel->buffer[channel->head];
-            channel->head = (channel->head + 1U) & channel->mask;
-        }
-        channel->count -= 1U;
-
-        sender = llam_channel_pop_live_sender(channel, &refill_value);
-        if (sender != NULL) {
-            if (channel->capacity == 1U) {
-                channel->buffer[0] = refill_value;
-            } else {
-                channel->buffer[channel->tail] = refill_value;
-                channel->tail = (channel->tail + 1U) & channel->mask;
-            }
-            channel->count += 1U;
-        }
-        pthread_mutex_unlock(&channel->lock);
-        if (sender != NULL) {
-            llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
-        } else if (channel->capacity != 1U ||
-                   channel->owner_runtime->channel_local_handoff_enabled == 0U) {
-            llam_channel_hot_safepoint();
-        }
-        if (value == NULL) {
-            errno = 0;
-        }
-        llam_channel_end_public_op(channel);
-        return value;
-    }
-
-    sender = llam_channel_pop_live_sender(channel, &value);
-    if (sender != NULL) {
-        pthread_mutex_unlock(&channel->lock);
-        llam_channel_wake_waiter(sender, LLAM_WAIT_CHANNEL_SEND);
-        if (value == NULL) {
-            errno = 0;
-        }
-        llam_channel_end_public_op(channel);
-        return value;
-    }
-
-    if (channel->closed) {
-        pthread_mutex_unlock(&channel->lock);
-        llam_channel_end_public_op(channel);
-        errno = EPIPE;
-        return NULL;
-    }
-
-    node = llam_sync_wait_node_acquire(shard);
-    if (node == NULL) {
-        pthread_mutex_unlock(&channel->lock);
-        llam_channel_end_public_op(channel);
-        errno = ENOMEM;
-        return NULL;
-    }
-
-    node->task = task;
-    node->owner_shard = shard->id;
-    node->error_code = task->cancel_token != NULL ? ECANCELED : 0;
-    llam_wait_queue_push_tail(&channel->recv_waiters, node);
-    pthread_mutex_unlock(&channel->lock);
-    llam_task_ensure_listed(task);
-    llam_task_set_wait_node_tracking(task, node, &channel->recv_waiters, &channel->lock, shard->id);
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_CHANNEL_RECV;
-    if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
-        bool removed;
-
-        if (llam_wait_node_completed(node)) {
-            goto wait_ready;
-        }
-        pthread_mutex_lock(&channel->lock);
-        removed = llam_wait_queue_remove(&channel->recv_waiters, node);
-        pthread_mutex_unlock(&channel->lock);
-        if (!removed) {
-            /* A sender/close path already popped the node; consume that result. */
-            goto wait_ready;
-        }
-        task->state = LLAM_TASK_STATE_RUNNING;
-        task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(task);
-        llam_sync_wait_node_release(shard, node);
-        errno = ECANCELED;
-        llam_channel_end_public_op(channel);
-        return NULL;
-    }
-
-wait_ready:
-    if (llam_wait_node_should_park(node)) {
-        llam_park_current_task(LLAM_WAIT_CHANNEL_RECV, LLAM_TRACE_STATE);
-    }
-    llam_cancel_token_unregister_task(task);
-    llam_task_clear_wait_tracking(task);
-    value = node->value;
-    rc = node->error_code;
-    if (node->scalar_value != 0) {
-        llam_channel_waiter_consumed(channel);
-    }
-    llam_sync_wait_node_release(shard, node);
-    if (rc != 0) {
-        llam_channel_end_public_op(channel);
-        errno = rc;
+    if (llam_channel_recv_result(channel, &value) != 0) {
         return NULL;
     }
     if (value == NULL) {
         errno = 0;
     }
-    llam_channel_end_public_op(channel);
     return value;
 }
 
