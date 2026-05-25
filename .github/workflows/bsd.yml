@@ -122,7 +122,7 @@ jobs:
           ./test_abi_compat
           ./test_runtime_core
           ./test_multi_runtime_core
-          ./test_runtime_api_edges
+          LLAM_API_EDGE_CANCEL_RACE_ROUNDS=256 ./test_runtime_api_edges
           ./test_runtime_select_edges
           ./test_io_buffers
           ./test_shared_load ./libllam_runtime.so.2.0.0

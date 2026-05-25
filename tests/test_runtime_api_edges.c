@@ -255,8 +255,26 @@ static int init_runtime(void) {
     return llam_runtime_init(&opts);
 }
 
+static unsigned cancel_token_destroy_race_rounds(void) {
+    const char *env = getenv("LLAM_API_EDGE_CANCEL_RACE_ROUNDS");
+    char *end = NULL;
+    unsigned long value;
+
+    if (env == NULL || env[0] == '\0') {
+        return 4000U;
+    }
+    errno = 0;
+    value = strtoul(env, &end, 10);
+    if (errno != 0 || end == env || *end != '\0' || value == 0UL || value > 4000UL) {
+        return 4000U;
+    }
+    return (unsigned)value;
+}
+
 static int test_cancel_token_destroy_race(void) {
-    for (unsigned i = 0U; i < 4000U; ++i) {
+    const unsigned rounds = cancel_token_destroy_race_rounds();
+
+    for (unsigned i = 0U; i < rounds; ++i) {
         cancel_destroy_race_state_t state;
         pthread_t canceler;
         pthread_t destroyer;
