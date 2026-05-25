@@ -128,32 +128,6 @@ int llam_accept_watch_pop_ready(llam_accept_watch_t *watch) {
 }
 
 /**
- * @brief Destroy and unlink an accept watch while watch_lock is held.
- *
- * Buffered accepted fds are closed because their ownership never reached user
- * code.
- */
-void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch) {
-    llam_accept_watch_t **cursor = &node->accept_watches;
-
-    while (*cursor != NULL) {
-        if (*cursor == watch) {
-            *cursor = watch->next;
-            while (watch->ready_head != NULL) {
-                llam_accept_ready_t *next = watch->ready_head->next;
-
-                close(watch->ready_head->fd);
-                free(watch->ready_head);
-                watch->ready_head = next;
-            }
-            free(watch);
-            return;
-        }
-        cursor = &(*cursor)->next;
-    }
-}
-
-/**
  * @brief Release a buffered receive-ready entry.
  *
  * @param rt            Runtime used to resolve provided-buffer owner node.

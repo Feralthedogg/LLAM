@@ -3961,7 +3961,9 @@ done:
     }
     if (serve_started) {
         if (pipe_fds[1] >= 0) {
-            (void)write(pipe_fds[1], inbound, sizeof(inbound));
+            ssize_t ignored = write(pipe_fds[1], inbound, sizeof(inbound));
+
+            (void)ignored;
         }
         (void)pthread_join(serve_thread, NULL);
     }
