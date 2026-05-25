@@ -217,7 +217,7 @@ typedef struct llam_broker {
     atomic_uint_fast64_t revocation_epoch;
     llam_broker_buffer_slot_t buffers[LLAM_BROKER_BUFFER_SLOTS];
     llam_broker_descriptor_slot_t descriptors[LLAM_BROKER_DESCRIPTOR_SLOTS];
-    llam_broker_channel_slot_t channels[LLAM_BROKER_CHANNEL_SLOTS];
+    llam_broker_channel_slot_t *channels;
     llam_broker_task_slot_t tasks[LLAM_BROKER_TASK_SLOTS];
     llam_broker_ring_session_t ring_sessions[LLAM_BROKER_RING_SESSIONS];
     llam_broker_transport_session_t transport_sessions[LLAM_BROKER_TRANSPORT_SESSIONS];

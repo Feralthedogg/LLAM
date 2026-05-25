@@ -139,6 +139,24 @@ int llam_broker_init(llam_broker_t *broker, const llam_runtime_opts_t *opts, siz
         errno = saved_errno;
         return -1;
     }
+    /*
+     * Broker channels carry their fixed-size message ring in each slot. Keeping
+     * that table inline made llam_broker_t too large for the default Windows
+     * thread stack when examples/tests declared the broker as a local variable.
+     * The broker still owns the table, but its storage now comes from the heap.
+     */
+    broker->channels = (llam_broker_channel_slot_t *)calloc(LLAM_BROKER_CHANNEL_SLOTS,
+                                                            sizeof(*broker->channels));
+    if (broker->channels == NULL) {
+        llam_capability_key_clear(&broker->capability_key);
+        llam_runtime_destroy(runtime);
+        (void)pthread_cond_destroy(&broker->idle_cond);
+        broker->idle_cond_initialized = false;
+        (void)pthread_mutex_destroy(&broker->lock);
+        broker->lock_initialized = false;
+        errno = ENOMEM;
+        return -1;
+    }
     broker->runtime = runtime;
     atomic_init(&broker->revocation_epoch, 1U);
     broker->next_buffer_id = 1U;
@@ -182,6 +200,8 @@ void llam_broker_destroy(llam_broker_t *broker) {
     llam_broker_clear_buffers(broker);
     llam_broker_clear_descriptors(broker);
     llam_broker_clear_channels(broker);
+    free(broker->channels);
+    broker->channels = NULL;
     llam_broker_clear_session_state(broker);
     llam_capability_key_clear(&broker->capability_key);
     atomic_store_explicit(&broker->revocation_epoch, 0U, memory_order_release);

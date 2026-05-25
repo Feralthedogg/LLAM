@@ -1058,40 +1058,49 @@ clear examples, and CI that catches platform regressions early.
 
 LLAM is a user-level N:M thread scheduler. A small number of OS worker threads (typically one per CPU core) run many lightweight tasks. Each task has its own stack and can be suspended and resumed without kernel intervention.
 
-The diagrams below separate three boundaries that matter in the current 2.x
-tree: the public API boundary, the runtime-instance ownership boundary, and the
-optional broker/process boundary used when an embedder needs stronger isolation
-than in-process opaque handles can provide.
+The diagrams below separate the boundaries that matter in the current 2.x tree:
+the public API entry points, runtime-instance ownership, per-runtime scheduler
+and backend state, public-handle hardening, and the optional broker/process
+boundary used when an embedder needs stronger isolation than in-process opaque
+handles can provide.
 
 ```mermaid
 flowchart TB
     App["C application or embedding host"] --> PublicAPI["include/llam/runtime.h\nstable public C ABI"]
     PublicAPI --> DefaultAPI["legacy default-runtime wrappers\nllam_runtime_init / llam_spawn / llam_run"]
     PublicAPI --> HandleAPI["explicit runtime-handle API\nllam_runtime_create / spawn_ex / run_handle / destroy"]
+    PublicAPI --> ObjectAPI["runtime-owned object APIs\nchannel / mutex / cond / cancel / task group / I/O buffer"]
 
     subgraph Process["Host process"]
         direction LR
         DefaultAPI --> DefaultRuntime["default runtime\nllam_runtime_default()"]
         HandleAPI --> RuntimeA["runtime A"]
         HandleAPI --> RuntimeB["runtime B"]
+        ObjectAPI --> RuntimeA
+        ObjectAPI --> RuntimeB
 
         subgraph RuntimeAState["runtime A owned state"]
             direction TB
-            RegistryA["public handle tables\nsealed generation tokens\nowner-runtime checks"]
-            ShardsA["scheduler shards\nhot_q / norm_q / inject_q\ntimers / allocators / stack caches"]
-            NodesA["I/O nodes\nsubmit queues / control queues\nwatch tables"]
-            BlockA["blocking pool\nopaque helper compensation"]
-            DebugA["stats and dump state\ntrace / wake diagnostics"]
+            LifecycleA["lifecycle gate\ncreate -> run -> request_stop -> drain -> destroy"]
+            RegistryA["public handle registries\nfamily tags / sealed generations\nowner-runtime checks / active-op pins"]
+            ShardsA["scheduler shards\nhot_q / norm_q / inject_q\ntimer heap / worker wake"]
+            CachesA["runtime and shard caches\ntasks / stacks / wait nodes / I/O reqs / buffers"]
+            NodesA["I/O backend nodes\nsubmit queues / control queues\nwatch tables / fd identity"]
+            BlockA["blocking subsystem\nopaque helper compensation\nblocking worker pool"]
+            DebugA["diagnostics\nstats JSON / state dump\nwake, shutdown, I/O ownership"]
+            LifecycleA --> RegistryA
             RegistryA --> ShardsA
+            ShardsA <--> CachesA
             ShardsA <--> NodesA
             ShardsA <--> BlockA
+            LifecycleA --> DebugA
             ShardsA --> DebugA
         end
 
         subgraph RuntimeBState["runtime B owned state"]
             direction TB
-            RegistryB["owner-tagged objects"]
-            ShardsB["independent shards"]
+            RegistryB["separate registries"]
+            ShardsB["independent shards and caches"]
             NodesB["independent I/O backend"]
             RegistryB --> ShardsB
             ShardsB <--> NodesB
@@ -1099,15 +1108,22 @@ flowchart TB
 
         RuntimeA --> RegistryA
         RuntimeB --> RegistryB
-        RegistryA -. "cross-owner object use" .-> EXDEV["EXDEV"]
-        RegistryB -. "cross-owner object use" .-> EXDEV
+        RegistryA -. "foreign runtime object" .-> EXDEV["-1 / EXDEV"]
+        RegistryB -. "foreign runtime object" .-> EXDEV
+        RegistryA -. "stale or consumed handle" .-> EINVAL["-1 / EINVAL"]
+        RegistryA -. "active public op during destroy" .-> EBUSY["-1 / EBUSY"]
     end
 
     subgraph BrokerBoundary["optional broker process boundary"]
         direction TB
-        Client["untrusted client process\nserialized tokens only"]
+        Client["untrusted client process\nserialized subject-bound tokens only"]
         Broker["trusted LLAM broker\nruntime + MAC keys + registries\nfds / HANDLEs / ring sessions"]
-        Client <-->|control transport or ring| Broker
+        Transport["local control transport\nUnix socket + SCM_RIGHTS\nWindows named pipe + DuplicateHandle"]
+        Ring["private data-plane rings\nbroker-owned cursors\nbounded shared window"]
+        Client <-->|requests / responses| Transport
+        Transport <--> Broker
+        Client <-->|optional shared ring| Ring
+        Ring <--> Broker
     end
 ```
 
@@ -1117,24 +1133,47 @@ flowchart LR
     PublicAPI --> IOAPI["src/io\nread / write / accept / connect / poll / owned buffers"]
     PublicAPI --> PlatformAPI["include/llam/platform.h\nfd / HANDLE / sockaddr portability"]
 
-    CoreAPI --> RuntimeOwner["runtime ownership\nowner checks / default wrappers"]
-    CoreAPI --> Scheduler["scheduler core\ntasks / run queues / timers / wake"]
-    CoreAPI --> Handles["public handle registry\nfamily tags / sealed generations / active ops"]
-    CoreAPI --> Sync["sync primitives\nmutex / cond / channel / select / cancel"]
+    CoreAPI --> RuntimeOwner["runtime ownership\nhandle validation / default wrappers\ncurrent-task owner routing"]
+    CoreAPI --> Scheduler["scheduler core\ntasks / run queues / timers / wake\ncooperative preemption safepoints"]
+    CoreAPI --> Handles["public handle registry\nfamily tags / sealed generations\nactive ops / stale-handle rejection"]
+    CoreAPI --> Sync["sync primitives\nmutex / cond / channel / select / cancel\nlost-wakeup and close wake contracts"]
     CoreAPI --> BrokerCore["broker foundation\ncapability tokens / grants / revocation"]
+    CoreAPI --> RuntimeDebug["diagnostics\nstate dumps / JSON stats / watchdog reports"]
 
-    Scheduler --> Engine["src/engine\nworkers / watchdog / rehome / scale"]
+    Scheduler --> Engine["src/engine\nworkers / watchdog / rehome / scale\nrequest-based preemption"]
     Scheduler --> ASM["src/asm and context files\nplatform context switch"]
     Scheduler --> Alloc["runtime caches\nslabs / stacks / wait nodes / I/O reqs"]
 
-    IOAPI --> IOEngine["I/O engine\nnode selection / direct path / fallback"]
-    IOEngine --> Linux["src/io/linux\nio_uring / epoll-style watches"]
-    IOEngine --> Darwin["src/io/darwin\nkqueue / EVFILT_USER / migration"]
-    IOEngine --> Windows["src/io/windows\nIOCP / Winsock / HANDLE I/O"]
-    IOEngine --> WatchCommon["shared watch helpers\nlookup / queues / waiters / migration"]
+    IOAPI --> IOEngine["I/O engine\nruntime-owned node selection\ndirect path / async submit / fallback"]
+    IOAPI --> OwnedBuffers["owned I/O buffers\nruntime registry / aligned allocation\nrelease-after-shutdown rules"]
+    IOEngine --> Linux["src/io/linux\nio_uring / epoll-style watches\nfd identity / CQE ownership"]
+    IOEngine --> Darwin["src/io/darwin\nkqueue / EVFILT_USER / Mach wake\nmigration and rehome"]
+    IOEngine --> Windows["src/io/windows\nIOCP / Winsock / HANDLE I/O\nAcceptEx / ConnectEx / overlapped ops"]
+    IOEngine --> WatchCommon["shared watch helpers\nlookup / queues / waiters / migration\ncancel and timeout races"]
 
-    BrokerCore --> BrokerTransport["broker transports\nPOSIX Unix sockets / Windows named pipes"]
-    BrokerCore --> BrokerRing["broker rings\nprivate shm or duplicated HANDLE mappings"]
+    BrokerCore --> BrokerTransport["broker transports\nPOSIX Unix sockets / Windows named pipes\nsubject-bound sessions"]
+    BrokerCore --> BrokerRing["broker rings\nprivate shm or duplicated HANDLE mappings\nbroker-private progress cursors"]
+```
+
+```mermaid
+flowchart TB
+    Caller["public API caller"] --> Decode["decode opaque handle\nfamily + slot + sealed generation"]
+    Decode --> Table["lookup family registry\nslot object + internal epoch + nonce"]
+    Table --> Owner{"owner runtime matches\ncurrent or explicit runtime?"}
+    Owner -- "no" --> Cross["fail -1 / EXDEV\nno object dereference"]
+    Owner -- "yes" --> Gen{"sealed generation valid\nand object is live?"}
+    Gen -- "no" --> Stale["fail -1 / EINVAL\nstale, consumed, or forged"]
+    Gen -- "yes" --> Active{"destroy in progress\nor active-op conflict?"}
+    Active -- "yes" --> Busy["fail -1 / EBUSY"]
+    Active -- "no" --> Pin["pin active public op\nor fast-claim join/detach"]
+    Pin --> Operation["perform operation\nwait / wake / I/O / release"]
+    Operation --> End["drop active pin\npublish wake or final state"]
+
+    subgraph SecurityBoundary["security boundary"]
+        ProcessHandles["in-process handles\nmisuse and UAF hardening"]
+        BrokerTokens["broker tokens\nMAC, rights, subject, revocation epoch"]
+        ProcessHandles -. "not a cryptographic sandbox" .-> BrokerTokens
+    end
 ```
 
 ```mermaid
@@ -1147,6 +1186,7 @@ sequenceDiagram
     participant Fallback as Blocking helper
 
     Task->>API: llam_read / write / poll / accept / connect
+    API->>API: validate owner runtime and descriptor state
     API->>API: try immediate nonblocking/direct path
     alt direct completion
         API-->>Task: return without parking

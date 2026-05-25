@@ -44,6 +44,14 @@
 #include <unistd.h>
 #endif
 
+/*
+ * Broker values are intentionally valid caller-owned objects, so examples and
+ * tests may place them on the stack. Keep the control object below conservative
+ * Windows thread-stack limits; large data-plane tables must be broker-owned heap
+ * storage instead of inline fields.
+ */
+_Static_assert(sizeof(llam_broker_t) < (256U * 1024U), "llam_broker_t must remain stack-safe");
+
 static llam_capability_key_t test_key(void) {
     llam_capability_key_t key;
 

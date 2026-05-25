@@ -31,7 +31,7 @@
 void llam_broker_clear_channels(llam_broker_t *broker) {
     size_t i;
 
-    if (broker == NULL) {
+    if (broker == NULL || broker->channels == NULL) {
         return;
     }
     for (i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
@@ -44,6 +44,10 @@ llam_broker_channel_slot_t *llam_broker_find_channel_unlocked(llam_broker_t *bro
                                                               uint64_t required_rights) {
     size_t i;
 
+    if (LLAM_UNLIKELY(broker == NULL || broker->channels == NULL)) {
+        errno = EINVAL;
+        return NULL;
+    }
     if (llam_broker_validate_token_family_unlocked(broker,
                                                    token,
                                                    LLAM_BROKER_CAP_FAMILY_CHANNEL,
@@ -78,6 +82,7 @@ int llam_broker_create_channel(llam_broker_t *broker,
         memset(out_token, 0, sizeof(*out_token));
     }
     if (LLAM_UNLIKELY(broker == NULL ||
+                      broker->channels == NULL ||
                       capacity == 0U ||
                       capacity > LLAM_BROKER_CHANNEL_CAPACITY ||
                       rights == 0U ||
