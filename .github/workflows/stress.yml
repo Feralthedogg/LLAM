@@ -491,10 +491,10 @@ jobs:
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
           # Hosted Windows runners, especially the windows-2025 image while it
           # is being redirected to the next VS image, can dip below the precise
-          # select-ready baseline without failing runtime correctness. Keep this
-          # as a catastrophic-regression gate; scheduled benchmark jobs own
-          # public comparison numbers.
-          $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=450000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=100000,poll_wake=40000"
+          # select-ready/channel baselines without failing runtime correctness.
+          # Keep this as a catastrophic-regression gate; scheduled benchmark
+          # jobs own public comparison numbers.
+          $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=450000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=100000,poll_wake=40000"
           python scripts\bench_guard.py --bench ".\build\windows\Release\bench.exe" --out "$artifactDir\perf_guard.json" *>&1 |
             Tee-Object -FilePath "$artifactDir\perf_guard.log"
           if ($LASTEXITCODE -ne 0) {
