@@ -224,6 +224,14 @@ int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
     if (revents != NULL) {
         *revents = 0;
     }
+    if (fcntl(fd, F_GETFD) < 0 && errno == EBADF) {
+        /*
+         * A closed descriptor may be reused by the temporary kqueue itself.
+         * Preflight the caller's fd so stale descriptors cannot be mistaken
+         * for readiness on that internal kqueue handle.
+         */
+        return llam_invalid_fd_poll_result(revents);
+    }
     kq = kqueue();
     if (kq < 0) {
         return -1;
