@@ -150,7 +150,9 @@ jobs:
           ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.0/'
           LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 \
             ./scripts/package_release.sh "${{ matrix.package_target }}"
-          tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
+          if ! tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt 2>/dev/null; then
+            xz -dc "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" | tar -tf - > package-files.txt
+          fi
           grep '/include/llam/platform.h$' package-files.txt
           grep '/lib/libllam_runtime.a$' package-files.txt
           grep '/lib/libllam_runtime.so$' package-files.txt
