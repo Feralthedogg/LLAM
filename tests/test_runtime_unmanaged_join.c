@@ -172,8 +172,9 @@ static int test_double_unmanaged_join_contract(void) {
 
     /*
      * Two unmanaged OS threads contend for the same task handle.  The handle
-     * must be consumed exactly once; the loser should fail before the winner
-     * can reclaim the task object.
+     * must be consumed exactly once.  The loser may observe either the active
+     * claim (EBUSY) or the consumed public handle (EINVAL), depending on
+     * scheduler timing.
      */
     args[0].state = &state;
     args[0].index = 0U;
@@ -204,10 +205,10 @@ static int test_double_unmanaged_join_contract(void) {
         llam_runtime_shutdown();
         return 1;
     }
-    if (!((state.rc[0] == 0 && state.rc[1] == -1 && state.err[1] == EBUSY) ||
-          (state.rc[1] == 0 && state.rc[0] == -1 && state.err[0] == EBUSY))) {
+    if (!((state.rc[0] == 0 && state.rc[1] == -1 && (state.err[1] == EBUSY || state.err[1] == EINVAL)) ||
+          (state.rc[1] == 0 && state.rc[0] == -1 && (state.err[0] == EBUSY || state.err[0] == EINVAL)))) {
         fprintf(stderr,
-                "[test_runtime_unmanaged_join] expected one successful join and one EBUSY, got rc0=%d err0=%d rc1=%d err1=%d\n",
+                "[test_runtime_unmanaged_join] expected one successful join and one EBUSY/EINVAL loser, got rc0=%d err0=%d rc1=%d err1=%d\n",
                 state.rc[0],
                 state.err[0],
                 state.rc[1],

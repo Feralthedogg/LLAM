@@ -174,8 +174,17 @@ sha256_file() {
 
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$path" | awk '{ print $1 }'
-    else
+    elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$path" | awk '{ print $1 }'
+    elif command -v sha256 >/dev/null 2>&1; then
+        sha256 -q "$path"
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 -r "$path" | awk '{ print $1 }'
+    elif command -v cksum >/dev/null 2>&1; then
+        cksum -a sha256 "$path" | awk '{ print $1 }'
+    else
+        echo "sha256sum, shasum, sha256, openssl, or cksum is required for checksum verification" >&2
+        exit 1
     fi
 }
 
