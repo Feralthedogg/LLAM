@@ -126,6 +126,24 @@ static int llam_broker_transport_join_task(llam_broker_t *broker,
     return llam_broker_join_task(broker, token, out_result0);
 }
 
+static size_t llam_broker_transport_serve_ring_batch_size(const llam_broker_wire_request_t *request) {
+    uint64_t requested;
+
+    /*
+     * SERVE_RING predates broker-side batching, so length==0 keeps the old
+     * one-request behavior. Nonzero values are capped to the broker's bounded
+     * stack batch to make the control-plane knob safe for untrusted clients.
+     */
+    requested = request != NULL ? request->length : 0U;
+    if (requested == 0U) {
+        return 1U;
+    }
+    if (requested > (uint64_t)LLAM_BROKER_RING_SERVE_BATCH_MAX) {
+        return LLAM_BROKER_RING_SERVE_BATCH_MAX;
+    }
+    return (size_t)requested;
+}
+
 void llam_broker_process_request(llam_broker_t *broker,
                                  const llam_broker_wire_request_t *request,
                                  llam_broker_wire_response_t *response,
@@ -251,11 +269,20 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
         }
         break;
     case LLAM_BROKER_WIRE_OP_SERVE_RING:
-        if (llam_broker_ring_serve_session(broker, request->slot, llam_broker_current_subject(broker)) == 0) {
-            response->status = 0;
-        } else {
-            saved_errno = errno;
-            llam_broker_response_error(response, saved_errno);
+        {
+            size_t served = 0U;
+
+            if (llam_broker_ring_serve_session_batch(broker,
+                                                     request->slot,
+                                                     llam_broker_current_subject(broker),
+                                                     llam_broker_transport_serve_ring_batch_size(request),
+                                                     &served) == 0) {
+                response->status = 0;
+                response->result0 = (uint64_t)served;
+            } else {
+                saved_errno = errno;
+                llam_broker_response_error(response, saved_errno);
+            }
         }
         break;
     case LLAM_BROKER_WIRE_OP_BUFFER_READ:

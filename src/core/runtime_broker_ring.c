@@ -195,10 +195,19 @@ int llam_broker_ring_forget_session(llam_broker_t *broker, uint64_t session_id, 
     return 0;
 }
 
-int llam_broker_ring_serve_session(llam_broker_t *broker, uint64_t session_id, uint64_t subject_id) {
+int llam_broker_ring_serve_session_batch(llam_broker_t *broker,
+                                         uint64_t session_id,
+                                         uint64_t subject_id,
+                                         size_t max_requests,
+                                         size_t *out_served) {
     llam_broker_ring_t *ring;
     llam_broker_ring_session_t *session;
 
+    if (LLAM_UNLIKELY(out_served == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_served = 0U;
     if (llam_broker_ring_begin_locked_owned_session(broker, session_id, subject_id, &session) != 0) {
         return -1;
     }
@@ -214,7 +223,13 @@ int llam_broker_ring_serve_session(llam_broker_t *broker, uint64_t session_id, u
         errno = EBUSY;
         return -1;
     }
-    return llam_broker_ring_serve_locked_session(broker, ring, session);
+    return llam_broker_ring_serve_locked_session_batch(broker, ring, session, max_requests, out_served);
+}
+
+int llam_broker_ring_serve_session(llam_broker_t *broker, uint64_t session_id, uint64_t subject_id) {
+    size_t served;
+
+    return llam_broker_ring_serve_session_batch(broker, session_id, subject_id, 1U, &served);
 }
 
 int llam_broker_ring_init(llam_broker_ring_t *ring) {

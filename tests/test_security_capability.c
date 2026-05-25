@@ -6098,9 +6098,12 @@ static int test_broker_pipe_transport_handle_grants(void) {
     llam_broker_ring_mapping_t transport_ring;
     llam_broker_ring_mapping_t by_name;
     llam_broker_ring_submission_t ring_submission;
-    llam_broker_ring_completion_t ring_completion;
+    llam_broker_ring_completion_t ring_completions[3];
+    llam_broker_ring_stats_t ring_stats;
     char out[sizeof(outbound)];
     uint64_t ring_session_id = 0U;
+    size_t drained_count = 0U;
+    size_t ring_i;
     DWORD transferred = 0U;
     int broker_initialized = 0;
     int rc = -1;
@@ -6196,12 +6199,32 @@ static int test_broker_pipe_transport_handle_grants(void) {
         response.error_code != EINVAL) {
         goto done;
     }
+    for (ring_i = 1U; ring_i < 3U; ++ring_i) {
+        ring_submission.request_id = 7002U + (uint64_t)ring_i;
+        ring_submission.op = LLAM_BROKER_RING_OP_NOP;
+        if (llam_broker_ring_submit_push(transport_ring.ring, &ring_submission) != 0) {
+            goto done;
+        }
+    }
     request.slot = ring_session_id;
+    request.length = 3U;
     if (llam_broker_request_handle(client, &request, &response) != 0 ||
         response.status != 0 ||
-        llam_broker_ring_complete_pop(transport_ring.ring, &ring_completion) != 0 ||
-        ring_completion.request_id != ring_submission.request_id ||
-        ring_completion.status != 0) {
+        response.result0 != 3U ||
+        llam_broker_ring_complete_drain(transport_ring.ring, ring_completions, 3U, &drained_count) != 0 ||
+        drained_count != 3U) {
+        goto done;
+    }
+    for (ring_i = 0U; ring_i < drained_count; ++ring_i) {
+        if (ring_completions[ring_i].request_id != 7002U + (uint64_t)ring_i ||
+            ring_completions[ring_i].status != 0) {
+            goto done;
+        }
+    }
+    if (llam_broker_ring_collect_stats(transport_ring.ring, &ring_stats) != 0 ||
+        ring_stats.broker_serve_success != 3U ||
+        ring_stats.broker_submit_head_publishes != 1U ||
+        ring_stats.broker_complete_tail_publishes != 1U) {
         goto done;
     }
 
@@ -6787,9 +6810,12 @@ static int test_broker_socketpair_transport(void) {
     llam_broker_ring_mapping_t transport_ring;
     llam_broker_ring_mapping_t by_name;
     llam_broker_ring_submission_t ring_submission;
-    llam_broker_ring_completion_t ring_completion;
+    llam_broker_ring_completion_t ring_completions[3];
+    llam_broker_ring_stats_t ring_stats;
     unsigned char descriptor_result[sizeof(descriptor_write_payload)];
     uint64_t ring_session_id = 0U;
+    size_t drained_count = 0U;
+    size_t ring_i;
     bool thread_started = false;
     int ring_fd = -1;
     int rc = -1;
@@ -6903,12 +6929,32 @@ static int test_broker_socketpair_transport(void) {
         response.error_code != EINVAL) {
         goto done;
     }
+    for (ring_i = 1U; ring_i < 3U; ++ring_i) {
+        ring_submission.request_id = 7001U + (uint64_t)ring_i;
+        ring_submission.op = LLAM_BROKER_RING_OP_NOP;
+        if (llam_broker_ring_submit_push(transport_ring.ring, &ring_submission) != 0) {
+            goto done;
+        }
+    }
     request.slot = ring_session_id;
+    request.length = 3U;
     if (llam_broker_request_fd(fds[0], &request, &response) != 0 ||
         response.status != 0 ||
-        llam_broker_ring_complete_pop(transport_ring.ring, &ring_completion) != 0 ||
-        ring_completion.request_id != ring_submission.request_id ||
-        ring_completion.status != 0) {
+        response.result0 != 3U ||
+        llam_broker_ring_complete_drain(transport_ring.ring, ring_completions, 3U, &drained_count) != 0 ||
+        drained_count != 3U) {
+        goto done;
+    }
+    for (ring_i = 0U; ring_i < drained_count; ++ring_i) {
+        if (ring_completions[ring_i].request_id != 7001U + (uint64_t)ring_i ||
+            ring_completions[ring_i].status != 0) {
+            goto done;
+        }
+    }
+    if (llam_broker_ring_collect_stats(transport_ring.ring, &ring_stats) != 0 ||
+        ring_stats.broker_serve_success != 3U ||
+        ring_stats.broker_submit_head_publishes != 1U ||
+        ring_stats.broker_complete_tail_publishes != 1U) {
         goto done;
     }
 

@@ -1010,9 +1010,10 @@ Future core-runtime work should tighten LLAM itself without changing the stable
   The implemented foundation already covers subject-bound token validation,
   attenuation/revocation, broker-controlled buffer/channel/descriptor grants,
   POSIX `SCM_RIGHTS`, Windows `DuplicateHandle`, private ring setup over control
-  transport, predefined task commands, stale-output zeroing, and broker-local
-  locking. Remaining work is a broader runtime RPC surface and production policy
-  around which operations may expose raw descriptor/HANDLE authority.
+  transport, bounded batched ring serving, predefined task commands,
+  stale-output zeroing, and broker-local locking. Remaining work is a broader
+  runtime RPC surface and production policy around which operations may expose
+  raw descriptor/HANDLE authority.
 - Keep improving diagnostic dumps so rare shutdown, cancellation, wake handoff,
   and I/O ownership hangs produce enough state to debug without reproducing
   under a debugger.

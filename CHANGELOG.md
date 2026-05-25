@@ -186,6 +186,11 @@
   Windows 2022, and Windows 2025 with a higher broker-ring flood count instead
   of relying only on the broad CTest pass to surface IPC regressions.
 
+* extend the `LLAM_BROKER_WIRE_OP_SERVE_RING` control-plane RPC so transports
+  can request a bounded broker-ring serve batch. A zero request length preserves
+  the old single-request behavior, nonzero lengths are capped to the broker's
+  bounded stack batch, and `result0` reports the number of served submissions.
+
 * bind broker capability validation to the live broker runtime id after MAC
   validation. This makes an internally fabricated or accidentally cross-issued
   foreign-runtime token fail closed even if it has a valid signature under the
@@ -371,6 +376,10 @@
   request latency, cursor publications per request, and broker completion-tail
   publish count so future shared-ring IPC regressions are caught by tests rather
   than inferred from ad-hoc benchmarks.
+
+* cover POSIX and Windows broker control transports serving multiple shared-ring
+  submissions per `SERVE_RING` request and assert that broker cursor publication
+  counters advance once for the batch.
 
 * add broker concurrent channel state coverage under `test_security_capability`
   and include the security-capability test in ASan/UBSan and TSan suites.

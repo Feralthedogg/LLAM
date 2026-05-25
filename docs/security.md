@@ -135,12 +135,15 @@ broker-control foundation:
   the connected named-pipe peer and return that peer-local HANDLE value. The
   broker retains its own mapping in broker-owned ring-session state, so
   shutdown can unmap it without trusting client-visible ring memory.
-- `LLAM_BROKER_WIRE_OP_SERVE_RING` drives one submission from a
-  transport-created ring by broker session id. The session id is scoped to the
-  control-transport subject; invalid or foreign sessions fail before consuming
-  a client submission. Session-id serving claims the session busy state while
-  still holding the broker table lock, so response-failure cleanup cannot unmap
-  the broker-owned ring between lookup and execution.
+- `LLAM_BROKER_WIRE_OP_SERVE_RING` drives submissions from a
+  transport-created ring by broker session id. A zero request length keeps the
+  original single-request behavior; a nonzero length asks the broker to serve a
+  bounded batch and is capped at `LLAM_BROKER_RING_SERVE_BATCH_MAX`. The
+  response `result0` reports the number of submissions served. The session id
+  is scoped to the control-transport subject; invalid or foreign sessions fail
+  before consuming a client submission. Session-id serving claims the session
+  busy state while still holding the broker table lock, so response-failure
+  cleanup cannot unmap the broker-owned ring between lookup and execution.
 - If a client disconnects after `CREATE_RING` allocates broker-owned ring state
   but before the fd/HANDLE response can be delivered, the broker reclaims that
   session immediately. POSIX transport writes use no-SIGPIPE send paths so this

@@ -267,6 +267,11 @@ int llam_broker_ring_forget_session(llam_broker_t *broker,
 int llam_broker_ring_serve_session(llam_broker_t *broker,
                                    uint64_t session_id,
                                    uint64_t subject_id);
+int llam_broker_ring_serve_session_batch(llam_broker_t *broker,
+                                         uint64_t session_id,
+                                         uint64_t subject_id,
+                                         size_t max_requests,
+                                         size_t *out_served);
 int llam_broker_ring_serve_locked_session(llam_broker_t *broker,
                                           llam_broker_ring_t *ring,
                                           llam_broker_ring_session_t *session);
