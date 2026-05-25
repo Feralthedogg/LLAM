@@ -26,48 +26,10 @@
 
 #include "runtime_io_watch_windows_internal.h"
 
-void llam_accept_watch_enqueue_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-}
-
 int llam_accept_watch_pop_ready(llam_accept_watch_t *watch) {
     (void)watch;
     errno = EAGAIN;
     return -1;
-}
-
-bool llam_accept_watch_remove_waiter(llam_accept_watch_t *watch, llam_io_req_t *req) {
-    /*
-     * The generic setup-abort path may call remove after a racing completion has
-     * already cleared the request's watch pointer. Unsupported Windows watch
-     * stubs therefore keep the same no-op NULL contract as POSIX backends.
-     */
-    (void)watch;
-    (void)req;
-    return false;
-}
-
-void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-}
-
-bool llam_poll_watch_remove_waiter(llam_poll_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-    return false;
-}
-
-void llam_recv_watch_enqueue_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-}
-
-bool llam_recv_watch_remove_waiter(llam_recv_watch_t *watch, llam_io_req_t *req) {
-    (void)watch;
-    (void)req;
-    return false;
 }
 
 bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
