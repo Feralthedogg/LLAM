@@ -107,7 +107,7 @@ jobs:
         run: |
           set -eu
           gmake clean
-          gmake all \
+          gmake -j2 all \
             test_abi_contract \
             test_abi_compat \
             test_runtime_core \
@@ -130,7 +130,7 @@ jobs:
         run: |
           set -eu
           cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
-          cmake --build build/bsd --target \
+          cmake --build build/bsd --parallel 2 --target \
             test_abi_contract \
             test_abi_compat \
             test_runtime_core \
