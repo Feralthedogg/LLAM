@@ -65,24 +65,33 @@ jobs:
           set -eu
           retry() {
             attempts=0
+            max_attempts="${LLAM_BSD_PKG_RETRIES:-10}"
+            delay_seconds="${LLAM_BSD_PKG_RETRY_DELAY:-30}"
             while ! "$@"; do
               attempts=$((attempts + 1))
-              if [ "$attempts" -ge 6 ]; then
+              if [ "$attempts" -ge "$max_attempts" ]; then
                 return 1
               fi
-              sleep 30
+              sleep "$delay_seconds"
             done
           }
           case "$(uname -s)" in
             FreeBSD|DragonFly)
+              packages=""
               if ! command -v gmake >/dev/null 2>&1; then
-                retry sudo pkg install -y gmake
+                packages="$packages gmake"
               fi
               if ! command -v cmake >/dev/null 2>&1; then
-                retry sudo pkg install -y cmake
+                packages="$packages cmake"
               fi
               if ! command -v xz >/dev/null 2>&1; then
-                retry sudo pkg install -y xz
+                packages="$packages xz"
+              fi
+              if [ -n "$packages" ]; then
+                if [ "$(uname -s)" = DragonFly ]; then
+                  retry sudo pkg update -f || true
+                fi
+                retry sudo pkg install -y $packages
               fi
               ;;
             OpenBSD)
