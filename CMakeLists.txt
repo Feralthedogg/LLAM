@@ -290,7 +290,10 @@ foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
     elseif(LLAM_SYSTEM_IS_BSD)
-        target_compile_definitions(${LLAM_TARGET} PRIVATE _XOPEN_SOURCE=700)
+        # BSD libc headers hide MAP_ANON/MAP_ANONYMOUS behind strict
+        # _XOPEN_SOURCE on some targets. Keep the default BSD namespace visible
+        # so the runtime allocator can use anonymous mmap portably.
+        target_compile_definitions(${LLAM_TARGET} PRIVATE _BSD_SOURCE)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         if(LLAM_HAVE_IO_URING_SETUP_BUF_RING)
             target_compile_definitions(${LLAM_TARGET} PRIVATE LLAM_HAVE_IO_URING_BUF_RING_HELPERS=1)

@@ -242,7 +242,20 @@ int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
     }
 
     rc = kevent(kq, changes, nchanges, fired, 2, ts_ptr);
-    if (rc >= 0) {
+    if (rc < 0 && (errno == EBADF || errno == EINVAL)) {
+        /*
+         * Some kqueue implementations reject a stale descriptor at the
+         * syscall boundary instead of returning an EV_ERROR event. Preserve
+         * the public poll-like contract: invalid per-fd state is reported as
+         * POLLNVAL with a positive descriptor count, not as a wrapper failure.
+         */
+        out |= POLLNVAL;
+        if (revents != NULL) {
+            *revents = out;
+        }
+        errno = 0;
+        rc = 1;
+    } else if (rc >= 0) {
         int i;
 
         for (i = 0; i < rc; ++i) {
