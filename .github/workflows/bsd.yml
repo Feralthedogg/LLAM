@@ -107,7 +107,8 @@ jobs:
         run: |
           set -eu
           gmake clean
-          gmake -j2 all \
+          gmake -j2 static \
+            shared \
             test_abi_contract \
             test_abi_compat \
             test_runtime_core \
@@ -145,6 +146,7 @@ jobs:
       - name: Package smoke
         run: |
           set -eu
+          gmake -j2 demo stress bench server server_lossless server_flood static shared CC=cc
           ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.0/'
           LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 \
             ./scripts/package_release.sh "${{ matrix.package_target }}"

@@ -346,7 +346,14 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
           gmake clean
-          gmake -j2 all \
+          gmake -j2 demo \
+            stress \
+            bench \
+            server \
+            server_lossless \
+            server_flood \
+            static \
+            shared \
             test_abi_contract \
             test_abi_compat \
             test_runtime_core \
