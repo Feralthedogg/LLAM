@@ -1631,6 +1631,7 @@ typedef struct trace_race_state {
 typedef struct run_race_state {
     init_race_barrier_t *barrier;
     atomic_uint *attempting;
+    atomic_uint *failed;
     int rc;
     int err;
 } run_race_state_t;
@@ -1638,6 +1639,8 @@ typedef struct run_race_state {
 typedef struct run_hold_state {
     atomic_uint started;
     atomic_uint release;
+    atomic_uint *attempting;
+    atomic_uint *failed;
 } run_hold_state_t;
 
 typedef struct spawn_race_state {
@@ -1924,6 +1927,9 @@ static void *run_race_thread(void *arg) {
     errno = 0;
     state->rc = llam_run();
     state->err = errno;
+    if (state->rc != 0) {
+        atomic_fetch_add_explicit(state->failed, 1U, memory_order_release);
+    }
     return NULL;
 }
 
@@ -1931,7 +1937,20 @@ static void run_hold_task(void *arg) {
     run_hold_state_t *state = arg;
 
     atomic_store_explicit(&state->started, 1U, memory_order_release);
-    while (atomic_load_explicit(&state->release, memory_order_acquire) == 0U) {
+    /*
+     * Keep the first scheduler driver alive until the contender has actually
+     * lost the run-token race.  Counting "about to call llam_run" is not
+     * enough on slower BSD schedulers: the winner can drain before the second
+     * host thread enters llam_run(), producing two sequential successes instead
+     * of a true concurrent-run failure.
+     */
+    for (unsigned i = 0U;
+         i < 1000000U && atomic_load_explicit(&state->release, memory_order_acquire) == 0U;
+         ++i) {
+        if (atomic_load_explicit(state->attempting, memory_order_acquire) >= 2U &&
+            atomic_load_explicit(state->failed, memory_order_acquire) >= 1U) {
+            break;
+        }
         llam_yield();
     }
 }
@@ -2219,9 +2238,10 @@ static int test_concurrent_run_contract(void) {
     for (unsigned round = 0U; round < 128U; ++round) {
         init_race_barrier_t barrier = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0U, 0U};
         atomic_uint attempting;
+        atomic_uint failed;
         run_hold_state_t hold;
-        run_race_state_t first = {&barrier, &attempting, 123, 0};
-        run_race_state_t second = {&barrier, &attempting, 123, 0};
+        run_race_state_t first = {&barrier, &attempting, &failed, 123, 0};
+        run_race_state_t second = {&barrier, &attempting, &failed, 123, 0};
         llam_runtime_opts_t opts;
         pthread_t first_thread;
         pthread_t second_thread;
@@ -2229,8 +2249,11 @@ static int test_concurrent_run_contract(void) {
         int second_rc;
 
         atomic_init(&attempting, 0U);
+        atomic_init(&failed, 0U);
         atomic_init(&hold.started, 0U);
         atomic_init(&hold.release, 0U);
+        hold.attempting = &attempting;
+        hold.failed = &failed;
         memset(&opts, 0, sizeof(opts));
         opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
@@ -2259,7 +2282,7 @@ static int test_concurrent_run_contract(void) {
             usleep(100);
         }
         for (unsigned i = 0U; i < 10000U &&
-                              atomic_load_explicit(&attempting, memory_order_acquire) < 2U;
+                              atomic_load_explicit(&failed, memory_order_acquire) == 0U;
              ++i) {
             usleep(100);
         }
