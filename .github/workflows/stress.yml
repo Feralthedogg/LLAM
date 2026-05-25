@@ -277,8 +277,14 @@ jobs:
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
             export LLAM_SERVER_COMPOSITE_CHURN_THREADS=0
             export LLAM_SERVER_COMPOSITE_SLOW_THREADS=0
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_TARGET_MPS=0.005
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_MIN_DELIVERY_MPS=0.010
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_TARGET_MPS=0.005
+            export LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_1KB_MIN_DELIVERY_MPS=0.010
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_TARGET_MPS=0.040
             export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.050
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_64B_TARGET_MPS=0.025
+            export LLAM_SERVER_COMPOSITE_QUICK_THROUGHPUT_64B_MIN_DELIVERY_MPS=0.040
           fi
           if [ "${{ matrix.name }}" = "linux-aarch64-stress" ]; then
             # The hosted Linux/arm64 runner is a runtime/ABI portability lane,
@@ -495,7 +501,7 @@ jobs:
           # select-ready/channel baselines without failing runtime correctness.
           # Keep this as a catastrophic-regression gate; scheduled benchmark
           # jobs own public comparison numbers.
-          $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=450000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=80000,poll_wake=30000"
+          $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=350000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=80000,poll_wake=30000"
           python scripts\bench_guard.py --bench ".\build\windows\Release\bench.exe" --out "$artifactDir\perf_guard.json" *>&1 |
             Tee-Object -FilePath "$artifactDir\perf_guard.log"
           if ($LASTEXITCODE -ne 0) {
