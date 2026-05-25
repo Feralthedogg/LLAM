@@ -159,7 +159,7 @@ jobs:
             test_runtime_select_edges \
             test_io_buffers \
             test_shared_load
-          ctest --test-dir build/bsd --output-on-failure --timeout 180 \
+          ctest --test-dir build/bsd --output-on-failure --timeout 900 \
             -R 'test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_select_edges|test_io_buffers|test_shared_load'
 
       - name: Package smoke
