@@ -98,6 +98,8 @@ typedef struct cond_owner_recheck_state {
     llam_mutex_t *raw_mutex;
     llam_cond_t *raw_cond;
     atomic_uint mutex_owned;
+    atomic_uint cond_locked;
+    atomic_uint stop;
     int wait_rc;
     int wait_errno;
 } cond_owner_recheck_state_t;
@@ -1293,7 +1295,10 @@ static void *cond_owner_recheck_corrupt_thread(void *arg) {
         .tv_nsec = 50000000L,
     };
 
-    while (atomic_load_explicit(&state->mutex_owned, memory_order_acquire) == 0U) {
+    pthread_mutex_lock(&state->raw_cond->lock);
+    atomic_store_explicit(&state->cond_locked, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->mutex_owned, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&state->stop, memory_order_acquire) == 0U) {
         struct timespec spin_delay = {
             .tv_sec = 0,
             .tv_nsec = 1000000L,
@@ -1301,8 +1306,12 @@ static void *cond_owner_recheck_corrupt_thread(void *arg) {
 
         nanosleep(&spin_delay, NULL);
     }
+    if (atomic_load_explicit(&state->stop, memory_order_acquire) != 0U) {
+        pthread_mutex_unlock(&state->raw_cond->lock);
+        return NULL;
+    }
     /*
-     * The test holds raw_cond->lock before the task enters cond_wait().  This
+     * This thread owns raw_cond->lock before the task enters cond_wait().  The
      * delay gives the waiter time to pass the first mutex-owner check and block
      * on the cond lock.  Corrupting owner then exercises the second defensive
      * recheck path after the wait node has been queued.
@@ -2827,7 +2836,6 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
     cond_owner_recheck_state_t state;
     pthread_t corrupter;
     llam_task_t *task = NULL;
-    bool raw_cond_locked = false;
     bool corrupter_started = false;
     int rc = 1;
 
@@ -2835,6 +2843,8 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
     atomic_init(&state.edge.failures, 0U);
     atomic_init(&state.edge.ran, 0U);
     atomic_init(&state.mutex_owned, 0U);
+    atomic_init(&state.cond_locked, 0U);
+    atomic_init(&state.stop, 0U);
     state.wait_rc = -2;
     state.wait_errno = 0;
 
@@ -2848,14 +2858,6 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
     if (state.raw_mutex == NULL || state.raw_cond == NULL) {
         goto cleanup_no_runtime;
     }
-    /*
-     * Hold the internal cond lock so the managed waiter reaches the owner
-     * recheck after a controlled external state change.  The failure path must
-     * remove the just-enqueued wait node before returning EPERM.
-     */
-    pthread_mutex_lock(&state.raw_cond->lock);
-    raw_cond_locked = true;
-
     if (init_runtime() != 0) {
         goto cleanup_no_runtime;
     }
@@ -2867,7 +2869,14 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
         goto cleanup_runtime;
     }
     corrupter_started = true;
-    raw_cond_locked = false;
+    while (atomic_load_explicit(&state.cond_locked, memory_order_acquire) == 0U) {
+        struct timespec spin_delay = {
+            .tv_sec = 0,
+            .tv_nsec = 1000000L,
+        };
+
+        nanosleep(&spin_delay, NULL);
+    }
 
     if (llam_run() != 0 || llam_join(task) != 0 || check_task_failures(&state.edge) != 0) {
         goto cleanup_runtime;
@@ -2886,18 +2895,12 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
     rc = 0;
 
 cleanup_runtime:
-    if (raw_cond_locked && state.raw_cond != NULL) {
-        pthread_mutex_unlock(&state.raw_cond->lock);
-        raw_cond_locked = false;
-    }
+    atomic_store_explicit(&state.stop, 1U, memory_order_release);
     if (corrupter_started) {
         pthread_join(corrupter, NULL);
     }
     llam_runtime_shutdown();
 cleanup_no_runtime:
-    if (raw_cond_locked && state.raw_cond != NULL) {
-        pthread_mutex_unlock(&state.raw_cond->lock);
-    }
     llam_mutex_end_public_op(state.raw_mutex);
     llam_cond_end_public_op(state.raw_cond);
     if (state.cond != NULL && llam_cond_destroy(state.cond) != 0) {
