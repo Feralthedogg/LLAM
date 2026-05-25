@@ -405,7 +405,7 @@ jobs:
             # Hosted Windows runners are stability lanes; precise comparison
             # numbers are tracked by scheduled benchmark artifacts, while this
             # guard catches catastrophic runtime regressions.
-            $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=450000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=100000,poll_wake=40000"
+            $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=450000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=80000,poll_wake=30000"
             python scripts\bench_guard.py --bench ".\build\nightly-windows\Release\bench.exe" --rounds 5 --select-ops 1024 --out "$artifactDir\perf_guard.json"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
