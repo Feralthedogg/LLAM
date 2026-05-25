@@ -163,7 +163,10 @@
   Ring layout version 2 separates the four shared producer/consumer cursors
   onto independent cache lines and adds a batched completion drain primitive, so
   high-rate broker transports avoid avoidable cursor false sharing and can
-  publish the client drain cursor once per response batch. Broker rings now
+  publish the client drain cursor once per response batch. Broker serving now
+  reserves and executes bounded multi-entry request batches, then publishes
+  `submit_head` and `complete_tail` once per served batch instead of once per
+  request; single-request serving remains a wrapper over the same path. Broker rings now
   expose diagnostic-only counters for empty/full `EAGAIN` pressure, batch drain
   size, cursor-publication estimates, and broker serve latency, plus an optional
   doorbell wait helper backed by Linux eventfd, Darwin kqueue user events, and
@@ -328,6 +331,11 @@
   type, and ABI/sentinel tests so static analysis no longer masks real findings
   behind tool-noise warnings.
 
+* make live runtime dumps avoid unsynchronized raw wait-owner pointer reads.
+  Task-level `wait_owner` is now derived from atomic wait reason plus atomic
+  I/O/blocking-job owners, eliminating a TSan-reproduced race between
+  diagnostics and wait-tracking cleanup.
+
 * explicit runtime creation no longer reports singleton-style `EBUSY` when two
   heap-backed runtime handles are created concurrently; construction remains
   serialized internally while both handles can initialize successfully.
@@ -358,6 +366,11 @@
 * add broker ring failed-output coverage proving failed output-producing
   operations clear the validated shared-memory output window before publishing
   a failure completion.
+
+* add a broker ring batch performance gate that records requests/s, p50/p99
+  request latency, cursor publications per request, and broker completion-tail
+  publish count so future shared-ring IPC regressions are caught by tests rather
+  than inferred from ad-hoc benchmarks.
 
 * add broker concurrent channel state coverage under `test_security_capability`
   and include the security-capability test in ASan/UBSan and TSan suites.

@@ -37,6 +37,7 @@
 #define LLAM_BROKER_RING_MASK (LLAM_BROKER_RING_CAP - 1U)
 #define LLAM_BROKER_RING_DATA_BYTES 4096U
 #define LLAM_BROKER_RING_CACHELINE 64U
+#define LLAM_BROKER_RING_SERVE_BATCH_MAX 32U
 
 typedef enum llam_broker_ring_op {
     LLAM_BROKER_RING_OP_NOP = 0,
@@ -247,6 +248,15 @@ int llam_broker_ring_serve_one(llam_broker_t *broker, llam_broker_ring_t *ring);
 int llam_broker_ring_serve_one_subject(llam_broker_t *broker,
                                        llam_broker_ring_t *ring,
                                        uint64_t subject_id);
+int llam_broker_ring_serve_batch(llam_broker_t *broker,
+                                 llam_broker_ring_t *ring,
+                                 size_t max_requests,
+                                 size_t *out_served);
+int llam_broker_ring_serve_batch_subject(llam_broker_t *broker,
+                                         llam_broker_ring_t *ring,
+                                         uint64_t subject_id,
+                                         size_t max_requests,
+                                         size_t *out_served);
 int llam_broker_ring_register_mapping(llam_broker_t *broker,
                                       llam_broker_ring_mapping_t *mapping,
                                       uint64_t subject_id,
@@ -260,6 +270,11 @@ int llam_broker_ring_serve_session(llam_broker_t *broker,
 int llam_broker_ring_serve_locked_session(llam_broker_t *broker,
                                           llam_broker_ring_t *ring,
                                           llam_broker_ring_session_t *session);
+int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
+                                                llam_broker_ring_t *ring,
+                                                llam_broker_ring_session_t *session,
+                                                size_t max_requests,
+                                                size_t *out_served);
 
 bool llam_broker_ring_mapping_ring_valid(const llam_broker_ring_t *ring);
 bool llam_broker_ring_name_valid(const char *name);

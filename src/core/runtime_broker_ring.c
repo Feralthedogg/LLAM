@@ -376,12 +376,34 @@ int llam_broker_ring_complete_drain(llam_broker_ring_t *ring,
 int llam_broker_ring_serve_one_subject(llam_broker_t *broker,
                                        llam_broker_ring_t *ring,
                                        uint64_t subject_id) {
+    size_t served;
+
+    if (llam_broker_ring_serve_batch_subject(broker, ring, subject_id, 1U, &served) != 0) {
+        return -1;
+    }
+    if (LLAM_UNLIKELY(served != 1U)) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return 0;
+}
+
+int llam_broker_ring_serve_one(llam_broker_t *broker, llam_broker_ring_t *ring) {
+    return llam_broker_ring_serve_one_subject(broker, ring, 0U);
+}
+
+int llam_broker_ring_serve_batch_subject(llam_broker_t *broker,
+                                         llam_broker_ring_t *ring,
+                                         uint64_t subject_id,
+                                         size_t max_requests,
+                                         size_t *out_served) {
     llam_broker_ring_session_t *session;
 
-    if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring))) {
+    if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring) || out_served == NULL)) {
         errno = EINVAL;
         return -1;
     }
+    *out_served = 0U;
     if (llam_broker_begin_op_subject(broker, subject_id) != 0) {
         return -1;
     }
@@ -401,11 +423,14 @@ int llam_broker_ring_serve_one_subject(llam_broker_t *broker,
         errno = EBUSY;
         return -1;
     }
-    return llam_broker_ring_serve_locked_session(broker, ring, session);
+    return llam_broker_ring_serve_locked_session_batch(broker, ring, session, max_requests, out_served);
 }
 
-int llam_broker_ring_serve_one(llam_broker_t *broker, llam_broker_ring_t *ring) {
-    return llam_broker_ring_serve_one_subject(broker, ring, 0U);
+int llam_broker_ring_serve_batch(llam_broker_t *broker,
+                                 llam_broker_ring_t *ring,
+                                 size_t max_requests,
+                                 size_t *out_served) {
+    return llam_broker_ring_serve_batch_subject(broker, ring, 0U, max_requests, out_served);
 }
 
 int llam_broker_buffer_grant_init(llam_broker_buffer_grant_t *grant,

@@ -92,12 +92,60 @@ static uint64_t test_env_u64(const char *name, uint64_t fallback, uint64_t max_v
     return (uint64_t)parsed;
 }
 
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+
+#if defined(__SANITIZE_ADDRESS__) || \
+    defined(__SANITIZE_THREAD__) || \
+    __has_feature(address_sanitizer) || \
+    __has_feature(thread_sanitizer)
+#define LLAM_TEST_SANITIZER_BUILD 1
+#else
+#define LLAM_TEST_SANITIZER_BUILD 0
+#endif
+
 static uint64_t test_broker_ring_flood_iters(void) {
     return test_env_u64("LLAM_BROKER_RING_FLOOD_ITERS", UINT64_C(20000), UINT64_C(1000000));
 }
 
 static uint64_t test_broker_ring_replay_iters(void) {
     return test_env_u64("LLAM_BROKER_RING_REPLAY_ITERS", UINT64_C(1024), UINT64_C(100000));
+}
+
+static uint64_t test_broker_ring_batch_perf_iters(void) {
+    return test_env_u64("LLAM_BROKER_RING_BATCH_PERF_ITERS", UINT64_C(32768), UINT64_C(1000000));
+}
+
+static uint64_t test_broker_ring_batch_min_ops(void) {
+#if LLAM_TEST_SANITIZER_BUILD
+    return test_env_u64("LLAM_BROKER_RING_BATCH_MIN_OPS", UINT64_C(1000), UINT64_C(1000000000));
+#else
+    return test_env_u64("LLAM_BROKER_RING_BATCH_MIN_OPS", UINT64_C(100000), UINT64_C(1000000000));
+#endif
+}
+
+static uint64_t test_broker_ring_batch_max_p50_us(void) {
+#if LLAM_TEST_SANITIZER_BUILD
+    return test_env_u64("LLAM_BROKER_RING_BATCH_MAX_P50_US", UINT64_C(50000), UINT64_C(60000000));
+#else
+    return test_env_u64("LLAM_BROKER_RING_BATCH_MAX_P50_US", UINT64_C(5000), UINT64_C(60000000));
+#endif
+}
+
+static uint64_t test_broker_ring_batch_max_p99_us(void) {
+#if LLAM_TEST_SANITIZER_BUILD
+    return test_env_u64("LLAM_BROKER_RING_BATCH_MAX_P99_US", UINT64_C(500000), UINT64_C(60000000));
+#else
+    return test_env_u64("LLAM_BROKER_RING_BATCH_MAX_P99_US", UINT64_C(50000), UINT64_C(60000000));
+#endif
+}
+
+static int compare_u64(const void *lhs, const void *rhs) {
+    const uint64_t a = *(const uint64_t *)lhs;
+    const uint64_t b = *(const uint64_t *)rhs;
+
+    return (a > b) - (a < b);
 }
 
 static llam_capability_key_t test_key(void) {
@@ -2997,6 +3045,217 @@ done:
     if (submit_available_initialized) {
         llam_broker_ring_doorbell_destroy(&submit_available);
     }
+    return rc;
+}
+
+static int test_broker_ring_batch_perf_gate(void) {
+    enum { DRAIN_BATCH = LLAM_BROKER_RING_SERVE_BATCH_MAX };
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_t ring;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completions[DRAIN_BATCH];
+    llam_broker_ring_stats_t stats;
+    uint64_t *submit_ns = NULL;
+    uint64_t *latency_ns = NULL;
+    const uint64_t iterations = test_broker_ring_batch_perf_iters();
+    const uint64_t min_ops = test_broker_ring_batch_min_ops();
+    const uint64_t max_p50_us = test_broker_ring_batch_max_p50_us();
+    const uint64_t max_p99_us = test_broker_ring_batch_max_p99_us();
+    const uint64_t max_cursor_x1000 = test_env_u64("LLAM_BROKER_RING_BATCH_MAX_CURSOR_X1000",
+                                                   UINT64_C(1200),
+                                                   UINT64_C(100000));
+    const uint64_t expected_broker_batches =
+        (iterations + (uint64_t)LLAM_BROKER_RING_SERVE_BATCH_MAX - 1U) /
+        (uint64_t)LLAM_BROKER_RING_SERVE_BATCH_MAX;
+    uint64_t next_submit = 1U;
+    uint64_t next_complete = 1U;
+    uint64_t completed = 0U;
+    uint64_t start_ns;
+    uint64_t end_ns;
+    uint64_t elapsed_ns;
+    uint64_t ops_per_sec;
+    uint64_t p50_us;
+    uint64_t p99_us;
+    uint64_t cursor_x1000;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    submit_ns = (uint64_t *)calloc((size_t)iterations, sizeof(*submit_ns));
+    latency_ns = (uint64_t *)calloc((size_t)iterations, sizeof(*latency_ns));
+    if (submit_ns == NULL || latency_ns == NULL) {
+        goto done;
+    }
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        goto done;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        goto done;
+    }
+    broker_initialized = true;
+    if (llam_broker_ring_init(&ring) != 0) {
+        goto done;
+    }
+
+    start_ns = llam_now_ns();
+    while (completed < iterations) {
+        bool progressed = false;
+
+        while (next_submit <= iterations) {
+            memset(&submission, 0, sizeof(submission));
+            submission.request_id = next_submit;
+            submission.op = LLAM_BROKER_RING_OP_NOP;
+            if (llam_broker_ring_submit_push(&ring, &submission) == 0) {
+                submit_ns[(size_t)(next_submit - 1U)] = llam_now_ns();
+                ++next_submit;
+                progressed = true;
+                continue;
+            }
+            if (errno != EAGAIN) {
+                fprintf(stderr,
+                        "[test_security_capability] broker ring batch perf submit failed errno=%d\n",
+                        errno);
+                goto done;
+            }
+            break;
+        }
+
+        for (;;) {
+            size_t served = 0U;
+
+            if (llam_broker_ring_serve_batch(&broker,
+                                             &ring,
+                                             LLAM_BROKER_RING_SERVE_BATCH_MAX,
+                                             &served) == 0) {
+                if (served == 0U) {
+                    fprintf(stderr,
+                            "[test_security_capability] broker ring batch perf served zero requests\n");
+                    goto done;
+                }
+                progressed = true;
+                continue;
+            }
+            if (errno != EAGAIN) {
+                fprintf(stderr,
+                        "[test_security_capability] broker ring batch perf serve failed errno=%d\n",
+                        errno);
+                goto done;
+            }
+            break;
+        }
+
+        for (;;) {
+            size_t count = 0U;
+            uint64_t now_ns;
+
+            if (llam_broker_ring_complete_drain(&ring, completions, DRAIN_BATCH, &count) != 0) {
+                fprintf(stderr,
+                        "[test_security_capability] broker ring batch perf drain failed errno=%d\n",
+                        errno);
+                goto done;
+            }
+            if (count == 0U) {
+                break;
+            }
+            now_ns = llam_now_ns();
+            for (size_t i = 0U; i < count; ++i) {
+                if (completions[i].request_id != next_complete ||
+                    completions[i].status != 0 ||
+                    completions[i].error_code != 0) {
+                    fprintf(stderr,
+                            "[test_security_capability] broker ring batch perf completion mismatch got=%llu expected=%llu status=%d errno=%d\n",
+                            (unsigned long long)completions[i].request_id,
+                            (unsigned long long)next_complete,
+                            completions[i].status,
+                            completions[i].error_code);
+                    goto done;
+                }
+                latency_ns[(size_t)completed] = now_ns - submit_ns[(size_t)(next_complete - 1U)];
+                ++completed;
+                ++next_complete;
+            }
+            progressed = true;
+        }
+
+        if (!progressed) {
+            fprintf(stderr,
+                    "[test_security_capability] broker ring batch perf made no progress submit=%llu complete=%llu\n",
+                    (unsigned long long)next_submit,
+                    (unsigned long long)next_complete);
+            goto done;
+        }
+    }
+    end_ns = llam_now_ns();
+    elapsed_ns = end_ns > start_ns ? end_ns - start_ns : 1U;
+    qsort(latency_ns, (size_t)iterations, sizeof(*latency_ns), compare_u64);
+    ops_per_sec = (uint64_t)(((long double)iterations * 1000000000.0L) / (long double)elapsed_ns);
+    p50_us = latency_ns[(size_t)(iterations / 2U)] / 1000U;
+    p99_us = latency_ns[(size_t)(((iterations * 99U) / 100U) < iterations
+                                     ? ((iterations * 99U) / 100U)
+                                     : (iterations - 1U))] /
+             1000U;
+
+    if (llam_broker_ring_collect_stats(&ring, &stats) != 0) {
+        goto done;
+    }
+    cursor_x1000 = stats.cursor_write_estimate * 1000U / iterations;
+    printf("[test_security_capability] broker ring batch perf: "
+           "requests=%llu ops_per_sec=%llu p50_us=%llu p99_us=%llu "
+           "cursor_publish_per_request_x1000=%llu broker_complete_tail_publishes=%llu\n",
+           (unsigned long long)iterations,
+           (unsigned long long)ops_per_sec,
+           (unsigned long long)p50_us,
+           (unsigned long long)p99_us,
+           (unsigned long long)cursor_x1000,
+           (unsigned long long)stats.broker_complete_tail_publishes);
+
+    /*
+     * This is intentionally a conservative perf guard. It makes the batching
+     * contract observable in CI without turning sanitizer or VM jitter into a
+     * false failure source: cursor publication count is strict, latency/ops
+     * thresholds are loose and env-tunable.
+     */
+    if (stats.client_submit_pushes != iterations ||
+        stats.broker_serve_success != iterations ||
+        stats.broker_submit_head_publishes > expected_broker_batches + 2U ||
+        stats.broker_complete_tail_publishes > expected_broker_batches + 2U ||
+        stats.client_complete_drain_entries != iterations ||
+        stats.client_complete_batch_max < LLAM_BROKER_RING_SERVE_BATCH_MAX ||
+        cursor_x1000 > max_cursor_x1000 ||
+        ops_per_sec < min_ops ||
+        p50_us > max_p50_us ||
+        p99_us > max_p99_us) {
+        fprintf(stderr,
+                "[test_security_capability] broker ring batch perf gate failed: "
+                "ops=%llu min=%llu p50=%llu max_p50=%llu p99=%llu max_p99=%llu "
+                "cursor_x1000=%llu max_cursor_x1000=%llu submit=%llu serve_success=%llu "
+                "submit_head_publishes=%llu complete_tail_publishes=%llu drain_entries=%llu batch_max=%llu expected_batches=%llu\n",
+                (unsigned long long)ops_per_sec,
+                (unsigned long long)min_ops,
+                (unsigned long long)p50_us,
+                (unsigned long long)max_p50_us,
+                (unsigned long long)p99_us,
+                (unsigned long long)max_p99_us,
+                (unsigned long long)cursor_x1000,
+                (unsigned long long)max_cursor_x1000,
+                (unsigned long long)stats.client_submit_pushes,
+                (unsigned long long)stats.broker_serve_success,
+                (unsigned long long)stats.broker_submit_head_publishes,
+                (unsigned long long)stats.broker_complete_tail_publishes,
+                (unsigned long long)stats.client_complete_drain_entries,
+                (unsigned long long)stats.client_complete_batch_max,
+                (unsigned long long)expected_broker_batches);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    free(latency_ns);
+    free(submit_ns);
     return rc;
 }
 
@@ -7229,6 +7488,7 @@ int main(int argc, char **argv) {
         test_broker_ring_and_buffer_grants() != 0 ||
         test_broker_ring_doorbell_waits() != 0 ||
         test_broker_ring_doorbell_flood() != 0 ||
+        test_broker_ring_batch_perf_gate() != 0 ||
         test_broker_ring_capability_validate_op() != 0 ||
         test_broker_ring_capability_attenuate_op() != 0 ||
         test_broker_ring_capability_revoke_op() != 0 ||

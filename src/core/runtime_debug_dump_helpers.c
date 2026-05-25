@@ -122,26 +122,35 @@ unsigned llam_io_control_list_count_diag(const llam_io_control_op_t *head) {
 }
 
 const char *llam_task_wait_owner_name_diag(const llam_task_t *task) {
+    llam_wait_reason_t wait_reason;
+
     if (task == NULL) {
         return "none";
     }
     if (llam_task_active_io_req_load(task) != NULL) {
         return "io_req";
     }
-    if (task->active_select_state != NULL) {
-        return "select";
-    }
-    if (task->active_wait_node != NULL) {
-        return "wait_node";
-    }
     if (llam_task_active_block_job_load(task) != NULL) {
         return "blocking_job";
     }
-    if (task->join_target != NULL) {
+    /*
+     * Raw wait-node/select/join/timer pointers are mutated by timeout,
+     * cancellation, and wake paths while dumps can run from another OS thread.
+     * Derive the public owner label from the atomic wait reason instead of
+     * racing the diagnostic-only owner pointers.
+     */
+    wait_reason = (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire);
+    if (wait_reason == LLAM_WAIT_JOIN) {
         return "join_target";
     }
-    if (task->active_timer != NULL) {
+    if (wait_reason == LLAM_WAIT_SLEEP) {
         return "timer";
+    }
+    if (wait_reason == LLAM_WAIT_MUTEX ||
+        wait_reason == LLAM_WAIT_COND ||
+        wait_reason == LLAM_WAIT_CHANNEL_SEND ||
+        wait_reason == LLAM_WAIT_CHANNEL_RECV) {
+        return "wait_node";
     }
     return "none";
 }
