@@ -63,38 +63,48 @@ jobs:
       - name: Install packages
         run: |
           set -eu
+          retry() {
+            attempts=0
+            while ! "$@"; do
+              attempts=$((attempts + 1))
+              if [ "$attempts" -ge 3 ]; then
+                return 1
+              fi
+              sleep 10
+            done
+          }
           case "$(uname -s)" in
             FreeBSD|DragonFly)
               if ! command -v gmake >/dev/null 2>&1; then
-                sudo pkg install -y gmake
+                retry sudo pkg install -y gmake
               fi
               if ! command -v cmake >/dev/null 2>&1; then
-                sudo pkg install -y cmake
+                retry sudo pkg install -y cmake
               fi
               if ! command -v xz >/dev/null 2>&1; then
-                sudo pkg install -y xz
+                retry sudo pkg install -y xz
               fi
               ;;
             OpenBSD)
               if ! command -v gmake >/dev/null 2>&1; then
-                sudo pkg_add gmake
+                retry sudo pkg_add gmake
               fi
               if ! command -v cmake >/dev/null 2>&1; then
-                sudo pkg_add cmake
+                retry sudo pkg_add cmake
               fi
               if ! command -v xz >/dev/null 2>&1; then
-                sudo pkg_add xz
+                retry sudo pkg_add xz
               fi
               ;;
             NetBSD)
               if ! command -v gmake >/dev/null 2>&1; then
-                sudo pkgin -y install gmake
+                retry sudo pkgin -y install gmake
               fi
               if ! command -v cmake >/dev/null 2>&1; then
-                sudo pkgin -y install cmake
+                retry sudo pkgin -y install cmake
               fi
               if ! command -v xz >/dev/null 2>&1; then
-                sudo pkgin -y install xz
+                retry sudo pkgin -y install xz
               fi
               ;;
           esac
