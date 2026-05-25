@@ -28,6 +28,7 @@
 #include "runtime_broker_ring.h"
 
 #include <errno.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,10 +39,15 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 
 /*
@@ -51,6 +57,48 @@
  * storage instead of inline fields.
  */
 _Static_assert(sizeof(llam_broker_t) < (256U * 1024U), "llam_broker_t must remain stack-safe");
+_Static_assert(offsetof(llam_broker_ring_t, submit_head) % LLAM_BROKER_RING_CACHELINE == 0U,
+               "broker submit_head cursor must start on a cache-line boundary");
+_Static_assert(offsetof(llam_broker_ring_t, submit_tail) - offsetof(llam_broker_ring_t, submit_head) >=
+                   LLAM_BROKER_RING_CACHELINE,
+               "broker submit_head and submit_tail must not share a cache line");
+_Static_assert(offsetof(llam_broker_ring_t, complete_head) - offsetof(llam_broker_ring_t, submit_tail) >=
+                   LLAM_BROKER_RING_CACHELINE,
+               "broker submit_tail and complete_head must not share a cache line");
+_Static_assert(offsetof(llam_broker_ring_t, complete_tail) - offsetof(llam_broker_ring_t, complete_head) >=
+                   LLAM_BROKER_RING_CACHELINE,
+               "broker complete_head and complete_tail must not share a cache line");
+_Static_assert(offsetof(llam_broker_ring_t, client_stats) - offsetof(llam_broker_ring_t, complete_tail) >=
+                   LLAM_BROKER_RING_CACHELINE,
+               "broker completion cursor and client stats must not share a cache line");
+_Static_assert(offsetof(llam_broker_ring_t, broker_stats) - offsetof(llam_broker_ring_t, client_stats) >=
+                   LLAM_BROKER_RING_CACHELINE,
+               "broker client and broker stats must not share a cache line");
+
+static uint64_t test_env_u64(const char *name, uint64_t fallback, uint64_t max_value) {
+    const char *value;
+    char *end = NULL;
+    unsigned long long parsed;
+
+    value = getenv(name);
+    if (value == NULL || value[0] == '\0') {
+        return fallback;
+    }
+    errno = 0;
+    parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0U || (uint64_t)parsed > max_value) {
+        return fallback;
+    }
+    return (uint64_t)parsed;
+}
+
+static uint64_t test_broker_ring_flood_iters(void) {
+    return test_env_u64("LLAM_BROKER_RING_FLOOD_ITERS", UINT64_C(20000), UINT64_C(1000000));
+}
+
+static uint64_t test_broker_ring_replay_iters(void) {
+    return test_env_u64("LLAM_BROKER_RING_REPLAY_ITERS", UINT64_C(1024), UINT64_C(100000));
+}
 
 static llam_capability_key_t test_key(void) {
     llam_capability_key_t key;
@@ -2336,7 +2384,10 @@ static int test_broker_ring_and_buffer_grants(void) {
     llam_broker_ring_submission_t popped_submission;
     llam_broker_ring_completion_t completion;
     llam_broker_ring_completion_t popped_completion;
+    llam_broker_ring_completion_t drained_completions[3];
+    llam_broker_ring_stats_t stats;
     llam_broker_buffer_grant_t grant;
+    size_t drained_count;
     unsigned i;
 
     if (llam_broker_ring_init(&ring) != 0) {
@@ -2374,8 +2425,8 @@ static int test_broker_ring_and_buffer_grants(void) {
      * reject impossible counter windows instead of interpreting stale slots as
      * fresh commands.
      */
-    atomic_store_explicit(&ring.submit_head, 5U, memory_order_relaxed);
-    atomic_store_explicit(&ring.submit_tail, 4U, memory_order_relaxed);
+    atomic_store_explicit(&ring.submit_head.value, 5U, memory_order_relaxed);
+    atomic_store_explicit(&ring.submit_tail.value, 4U, memory_order_relaxed);
     errno = 0;
     if (expect_errno(llam_broker_ring_submit_pop(&ring, &popped_submission),
                      EINVAL,
@@ -2402,8 +2453,78 @@ static int test_broker_ring_and_buffer_grants(void) {
         popped_completion.result0 != completion.result0) {
         return -1;
     }
-    atomic_store_explicit(&ring.complete_head, 0U, memory_order_relaxed);
-    atomic_store_explicit(&ring.complete_tail, (uint64_t)LLAM_BROKER_RING_CAP + 1U, memory_order_relaxed);
+    if (llam_broker_ring_init(&ring) != 0) {
+        return -1;
+    }
+    for (i = 0U; i < 3U; ++i) {
+        memset(&completion, 0, sizeof(completion));
+        completion.request_id = (uint64_t)i + 100U;
+        completion.status = 0;
+        completion.result0 = (uint64_t)i + 200U;
+        if (llam_broker_ring_complete_push(&ring, &completion) != 0) {
+            return -1;
+        }
+    }
+    drained_count = 0U;
+    if (llam_broker_ring_complete_drain(&ring,
+                                        drained_completions,
+                                        sizeof(drained_completions) / sizeof(drained_completions[0]),
+                                        &drained_count) != 0 ||
+        drained_count != 3U ||
+        drained_completions[0].request_id != 100U ||
+        drained_completions[2].result0 != 202U ||
+        atomic_load_explicit(&ring.complete_head.value, memory_order_acquire) != 3U) {
+        return -1;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_complete_pop(&ring, &popped_completion),
+                     EAGAIN,
+                     "drained broker completion ring popped entry") != 0) {
+        return -1;
+    }
+
+    if (llam_broker_ring_init(&ring) != 0) {
+        return -1;
+    }
+    memset(&submission, 0, sizeof(submission));
+    submission.op = LLAM_BROKER_RING_OP_NOP;
+    for (i = 0U; i < 2U; ++i) {
+        submission.request_id = (uint64_t)i + 1U;
+        if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+            return -1;
+        }
+    }
+    for (i = 0U; i < 3U; ++i) {
+        memset(&completion, 0, sizeof(completion));
+        completion.request_id = (uint64_t)i + 10U;
+        if (llam_broker_ring_complete_push(&ring, &completion) != 0) {
+            return -1;
+        }
+    }
+    if (llam_broker_ring_complete_drain(&ring, drained_completions, 2U, &drained_count) != 0 ||
+        drained_count != 2U ||
+        llam_broker_ring_complete_pop(&ring, &popped_completion) != 0) {
+        return -1;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_complete_pop(&ring, &popped_completion),
+                     EAGAIN,
+                     "stats broker completion ring empty pop succeeded") != 0 ||
+        llam_broker_ring_collect_stats(&ring, &stats) != 0 ||
+        stats.client_submit_pushes != 2U ||
+        stats.client_submit_tail_publishes != 2U ||
+        stats.client_complete_drain_calls != 3U ||
+        stats.client_complete_drain_entries != 3U ||
+        stats.client_complete_empty != 1U ||
+        stats.client_complete_head_publishes != 2U ||
+        stats.client_complete_batch_max != 2U ||
+        stats.broker_complete_tail_publishes != 3U ||
+        stats.cursor_write_estimate != 7U) {
+        return -1;
+    }
+
+    atomic_store_explicit(&ring.complete_head.value, 0U, memory_order_relaxed);
+    atomic_store_explicit(&ring.complete_tail.value, (uint64_t)LLAM_BROKER_RING_CAP + 1U, memory_order_relaxed);
     errno = 0;
     if (expect_errno(llam_broker_ring_complete_pop(&ring, &popped_completion),
                      EINVAL,
@@ -2450,6 +2571,866 @@ static int test_broker_ring_and_buffer_grants(void) {
     return 0;
 }
 
+static int test_broker_ring_doorbell_waits(void) {
+    llam_broker_ring_t ring;
+    llam_broker_ring_doorbell_t doorbell;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_submission_t popped_submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_completion_t popped_completion;
+    bool doorbell_initialized = false;
+    unsigned i;
+    int rc = -1;
+
+    if (llam_broker_ring_init(&ring) != 0 ||
+        llam_broker_ring_doorbell_init(&doorbell) != 0) {
+        return -1;
+    }
+    doorbell_initialized = true;
+
+    /*
+     * The doorbell is intentionally only a wait accelerator. The cursor state
+     * is still authoritative, so a stale or unrelated wake must not make an
+     * empty/full condition look ready.
+     */
+    errno = 0;
+    if (expect_errno(llam_broker_ring_wait_submit_available(&ring, &doorbell, 0),
+                     ETIMEDOUT,
+                     "empty submit ring wait reported available work") != 0) {
+        goto done;
+    }
+
+    memset(&submission, 0, sizeof(submission));
+    submission.request_id = 1U;
+    submission.op = LLAM_BROKER_RING_OP_NOP;
+    if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
+        llam_broker_ring_doorbell_signal(&doorbell) != 0 ||
+        llam_broker_ring_wait_submit_available(&ring, &doorbell, 1000) != 0 ||
+        llam_broker_ring_submit_pop(&ring, &popped_submission) != 0 ||
+        popped_submission.request_id != submission.request_id) {
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_wait_submit_available(&ring, &doorbell, 0),
+                     ETIMEDOUT,
+                     "drained submit doorbell left a stale wake") != 0) {
+        goto done;
+    }
+
+    for (i = 0U; i < LLAM_BROKER_RING_CAP; ++i) {
+        submission.request_id = (uint64_t)i + 100U;
+        if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+            goto done;
+        }
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_wait_submit_space(&ring, &doorbell, 0),
+                     ETIMEDOUT,
+                     "full submit ring wait reported free space") != 0) {
+        goto done;
+    }
+    if (llam_broker_ring_submit_pop(&ring, &popped_submission) != 0 ||
+        llam_broker_ring_doorbell_signal(&doorbell) != 0 ||
+        llam_broker_ring_wait_submit_space(&ring, &doorbell, 1000) != 0) {
+        goto done;
+    }
+
+    if (llam_broker_ring_init(&ring) != 0) {
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_wait_completion_available(&ring, &doorbell, 0),
+                     ETIMEDOUT,
+                     "empty completion ring wait reported available work") != 0) {
+        goto done;
+    }
+    memset(&completion, 0, sizeof(completion));
+    completion.request_id = 7U;
+    if (llam_broker_ring_complete_push(&ring, &completion) != 0 ||
+        llam_broker_ring_doorbell_signal(&doorbell) != 0 ||
+        llam_broker_ring_wait_completion_available(&ring, &doorbell, 1000) != 0 ||
+        llam_broker_ring_complete_pop(&ring, &popped_completion) != 0 ||
+        popped_completion.request_id != completion.request_id) {
+        goto done;
+    }
+
+    for (i = 0U; i < LLAM_BROKER_RING_CAP; ++i) {
+        completion.request_id = (uint64_t)i + 200U;
+        if (llam_broker_ring_complete_push(&ring, &completion) != 0) {
+            goto done;
+        }
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_wait_completion_space(&ring, &doorbell, 0),
+                     ETIMEDOUT,
+                     "full completion ring wait reported free space") != 0) {
+        goto done;
+    }
+    if (llam_broker_ring_complete_pop(&ring, &popped_completion) != 0 ||
+        llam_broker_ring_doorbell_signal(&doorbell) != 0 ||
+        llam_broker_ring_wait_completion_space(&ring, &doorbell, 1000) != 0) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (doorbell_initialized) {
+        llam_broker_ring_doorbell_destroy(&doorbell);
+    }
+    return rc;
+}
+
+typedef struct broker_ring_doorbell_flood_state {
+    llam_broker_ring_t *ring;
+    llam_broker_ring_doorbell_t *submit_available;
+    llam_broker_ring_doorbell_t *submit_space;
+    llam_broker_ring_doorbell_t *completion_available;
+    llam_broker_ring_doorbell_t *completion_space;
+    uint64_t iterations;
+    atomic_int stop;
+    atomic_int error_code;
+} broker_ring_doorbell_flood_state_t;
+
+static int broker_ring_doorbell_flood_serve(broker_ring_doorbell_flood_state_t *state) {
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    uint64_t served = 0U;
+    unsigned idle_rounds = 0U;
+
+    while (served < state->iterations &&
+           atomic_load_explicit(&state->stop, memory_order_acquire) == 0) {
+        if (llam_broker_ring_submit_pop(state->ring, &submission) != 0) {
+            if (errno != EAGAIN) {
+                return errno == 0 ? EINVAL : errno;
+            }
+            if (atomic_load_explicit(&state->stop, memory_order_acquire) != 0) {
+                return ECANCELED;
+            }
+            if (llam_broker_ring_wait_submit_available(state->ring, state->submit_available, 5000) != 0) {
+                if (errno == ETIMEDOUT && ++idle_rounds < 10000U) {
+                    continue;
+                }
+                return errno == 0 ? ETIMEDOUT : errno;
+            }
+            continue;
+        }
+        idle_rounds = 0U;
+        if (llam_broker_ring_doorbell_signal(state->submit_space) != 0) {
+            return errno == 0 ? EIO : errno;
+        }
+
+        memset(&completion, 0, sizeof(completion));
+        completion.request_id = submission.request_id;
+        completion.status = 0;
+        completion.result0 = submission.request_id ^ UINT64_C(0xa55aa55aa55aa55a);
+        for (;;) {
+            if (llam_broker_ring_complete_push(state->ring, &completion) == 0) {
+                if (llam_broker_ring_doorbell_signal(state->completion_available) != 0) {
+                    return errno == 0 ? EIO : errno;
+                }
+                break;
+            }
+            if (errno != EAGAIN) {
+                return errno == 0 ? EINVAL : errno;
+            }
+            if (atomic_load_explicit(&state->stop, memory_order_acquire) != 0) {
+                return ECANCELED;
+            }
+            if (llam_broker_ring_wait_completion_space(state->ring, state->completion_space, 5000) != 0) {
+                if (errno == ETIMEDOUT && ++idle_rounds < 10000U) {
+                    continue;
+                }
+                return errno == 0 ? ETIMEDOUT : errno;
+            }
+        }
+        ++served;
+    }
+    return 0;
+}
+
+#if LLAM_PLATFORM_WINDOWS
+static DWORD WINAPI broker_ring_doorbell_flood_thread(LPVOID arg) {
+    broker_ring_doorbell_flood_state_t *state = (broker_ring_doorbell_flood_state_t *)arg;
+    int rc = broker_ring_doorbell_flood_serve(state);
+
+    atomic_store_explicit(&state->error_code, rc, memory_order_release);
+    return rc == 0 ? 0U : 1U;
+}
+#else
+static void *broker_ring_doorbell_flood_thread(void *arg) {
+    broker_ring_doorbell_flood_state_t *state = (broker_ring_doorbell_flood_state_t *)arg;
+    int rc = broker_ring_doorbell_flood_serve(state);
+
+    atomic_store_explicit(&state->error_code, rc, memory_order_release);
+    return NULL;
+}
+#endif
+
+static int test_broker_ring_doorbell_flood(void) {
+    enum { DRAIN_BATCH = 32U };
+    llam_broker_ring_t ring;
+    llam_broker_ring_doorbell_t submit_available;
+    llam_broker_ring_doorbell_t submit_space;
+    llam_broker_ring_doorbell_t completion_available;
+    llam_broker_ring_doorbell_t completion_space;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completions[DRAIN_BATCH];
+    llam_broker_ring_stats_t stats;
+    broker_ring_doorbell_flood_state_t state;
+    const uint64_t flood_iters = test_broker_ring_flood_iters();
+    uint64_t next_submit = 1U;
+    uint64_t next_complete = 1U;
+    unsigned idle_rounds = 0U;
+    bool submit_available_initialized = false;
+    bool submit_space_initialized = false;
+    bool completion_available_initialized = false;
+    bool completion_space_initialized = false;
+    bool thread_started = false;
+    int rc = -1;
+#if LLAM_PLATFORM_WINDOWS
+    HANDLE thread = NULL;
+    DWORD wait_rc;
+    DWORD thread_rc = 1U;
+#else
+    pthread_t thread;
+#endif
+
+    if (llam_broker_ring_init(&ring) != 0 ||
+        llam_broker_ring_doorbell_init(&submit_available) != 0) {
+        fprintf(stderr, "[test_security_capability] broker ring doorbell flood init failed errno=%d\n", errno);
+        goto done;
+    }
+    submit_available_initialized = true;
+    if (llam_broker_ring_doorbell_init(&submit_space) != 0) {
+        fprintf(stderr, "[test_security_capability] broker ring doorbell flood submit-space init failed errno=%d\n", errno);
+        goto done;
+    }
+    submit_space_initialized = true;
+    if (llam_broker_ring_doorbell_init(&completion_available) != 0) {
+        fprintf(stderr, "[test_security_capability] broker ring doorbell flood completion-available init failed errno=%d\n", errno);
+        goto done;
+    }
+    completion_available_initialized = true;
+    if (llam_broker_ring_doorbell_init(&completion_space) != 0) {
+        fprintf(stderr, "[test_security_capability] broker ring doorbell flood completion-space init failed errno=%d\n", errno);
+        goto done;
+    }
+    completion_space_initialized = true;
+
+    memset(&state, 0, sizeof(state));
+    state.ring = &ring;
+    state.submit_available = &submit_available;
+    state.submit_space = &submit_space;
+    state.completion_available = &completion_available;
+    state.completion_space = &completion_space;
+    state.iterations = flood_iters;
+    atomic_init(&state.stop, 0);
+    atomic_init(&state.error_code, 0);
+#if LLAM_PLATFORM_WINDOWS
+    thread = CreateThread(NULL, 0U, broker_ring_doorbell_flood_thread, &state, 0U, NULL);
+    if (thread == NULL) {
+        fprintf(stderr, "[test_security_capability] broker ring doorbell flood CreateThread failed error=%lu\n", (unsigned long)GetLastError());
+        goto done;
+    }
+#else
+    if (pthread_create(&thread, NULL, broker_ring_doorbell_flood_thread, &state) != 0) {
+        fprintf(stderr, "[test_security_capability] broker ring doorbell flood pthread_create failed\n");
+        goto done;
+    }
+#endif
+    thread_started = true;
+
+    while (next_complete <= flood_iters) {
+        bool progressed = false;
+
+        while (next_submit <= flood_iters) {
+            memset(&submission, 0, sizeof(submission));
+            submission.request_id = next_submit;
+            submission.op = LLAM_BROKER_RING_OP_NOP;
+            if (llam_broker_ring_submit_push(&ring, &submission) == 0) {
+                if (llam_broker_ring_doorbell_signal(&submit_available) != 0) {
+                    fprintf(stderr,
+                            "[test_security_capability] broker ring doorbell flood submit signal failed errno=%d\n",
+                            errno);
+                    goto done;
+                }
+                ++next_submit;
+                progressed = true;
+                continue;
+            } else if (errno != EAGAIN) {
+                fprintf(stderr,
+                        "[test_security_capability] broker ring doorbell flood submit failed errno=%d\n",
+                        errno);
+                goto done;
+            }
+            break;
+        }
+
+        for (;;) {
+            size_t count = 0U;
+
+            if (llam_broker_ring_complete_drain(&ring, completions, DRAIN_BATCH, &count) != 0) {
+                fprintf(stderr,
+                        "[test_security_capability] broker ring doorbell flood drain failed errno=%d\n",
+                        errno);
+                goto done;
+            }
+            if (count == 0U) {
+                break;
+            }
+            if (llam_broker_ring_doorbell_signal(&completion_space) != 0) {
+                fprintf(stderr,
+                        "[test_security_capability] broker ring doorbell flood completion-space signal failed errno=%d\n",
+                        errno);
+                goto done;
+            }
+            for (size_t i = 0U; i < count; ++i) {
+                if (completions[i].request_id != next_complete ||
+                    completions[i].status != 0 ||
+                    completions[i].result0 != (next_complete ^ UINT64_C(0xa55aa55aa55aa55a))) {
+                    fprintf(stderr,
+                            "[test_security_capability] broker ring doorbell flood completion mismatch got=%llu expected=%llu\n",
+                            (unsigned long long)completions[i].request_id,
+                            (unsigned long long)next_complete);
+                    goto done;
+                }
+                ++next_complete;
+            }
+            progressed = true;
+        }
+
+        if (!progressed) {
+            if (next_submit <= flood_iters) {
+                if (llam_broker_ring_wait_submit_space(&ring, &submit_space, 5000) != 0) {
+                    if (errno == ETIMEDOUT && ++idle_rounds < 10000U) {
+                        continue;
+                    }
+                    fprintf(stderr,
+                            "[test_security_capability] broker ring doorbell flood wait submit-space failed errno=%d next_submit=%llu next_complete=%llu\n",
+                            errno,
+                            (unsigned long long)next_submit,
+                            (unsigned long long)next_complete);
+                    goto done;
+                }
+            } else if (llam_broker_ring_wait_completion_available(&ring, &completion_available, 5000) != 0) {
+                if (errno == ETIMEDOUT && ++idle_rounds < 10000U) {
+                    continue;
+                }
+                fprintf(stderr,
+                        "[test_security_capability] broker ring doorbell flood wait completion-available failed errno=%d next_submit=%llu next_complete=%llu\n",
+                        errno,
+                        (unsigned long long)next_submit,
+                        (unsigned long long)next_complete);
+                goto done;
+            }
+        } else {
+            idle_rounds = 0U;
+        }
+    }
+
+#if LLAM_PLATFORM_WINDOWS
+    wait_rc = WaitForSingleObject(thread, 5000U);
+    if (wait_rc != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(thread, &thread_rc) ||
+        thread_rc != 0U) {
+        fprintf(stderr,
+                "[test_security_capability] broker ring doorbell flood thread failed wait=%lu rc=%lu state_error=%d\n",
+                (unsigned long)wait_rc,
+                (unsigned long)thread_rc,
+                atomic_load_explicit(&state.error_code, memory_order_acquire));
+        goto done;
+    }
+    CloseHandle(thread);
+    thread = NULL;
+#else
+    (void)pthread_join(thread, NULL);
+#endif
+    thread_started = false;
+
+    if (atomic_load_explicit(&state.error_code, memory_order_acquire) != 0 ||
+        llam_broker_ring_collect_stats(&ring, &stats) != 0 ||
+        stats.client_submit_pushes != flood_iters ||
+        stats.broker_complete_tail_publishes != flood_iters ||
+        stats.client_complete_drain_entries != flood_iters ||
+        stats.cursor_write_estimate < flood_iters * 2U) {
+        fprintf(stderr,
+                "[test_security_capability] broker ring doorbell flood stats failed: "
+                "error=%d submit=%llu complete_tail=%llu drain_entries=%llu cursor_writes=%llu\n",
+                atomic_load_explicit(&state.error_code, memory_order_acquire),
+                (unsigned long long)stats.client_submit_pushes,
+                (unsigned long long)stats.broker_complete_tail_publishes,
+                (unsigned long long)stats.client_complete_drain_entries,
+                (unsigned long long)stats.cursor_write_estimate);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (thread_started) {
+        atomic_store_explicit(&state.stop, 1, memory_order_release);
+        if (submit_available_initialized) {
+            (void)llam_broker_ring_doorbell_signal(&submit_available);
+        }
+        if (completion_space_initialized) {
+            (void)llam_broker_ring_doorbell_signal(&completion_space);
+        }
+    }
+#if LLAM_PLATFORM_WINDOWS
+    if (thread != NULL) {
+        (void)WaitForSingleObject(thread, 5000U);
+        CloseHandle(thread);
+    }
+#else
+    if (thread_started) {
+        (void)pthread_join(thread, NULL);
+    }
+#endif
+    if (completion_space_initialized) {
+        llam_broker_ring_doorbell_destroy(&completion_space);
+    }
+    if (completion_available_initialized) {
+        llam_broker_ring_doorbell_destroy(&completion_available);
+    }
+    if (submit_space_initialized) {
+        llam_broker_ring_doorbell_destroy(&submit_space);
+    }
+    if (submit_available_initialized) {
+        llam_broker_ring_doorbell_destroy(&submit_available);
+    }
+    return rc;
+}
+
+#if !LLAM_PLATFORM_WINDOWS
+static int test_broker_ring_multiprocess_flood(void) {
+    typedef struct broker_ring_flood_shared {
+        llam_broker_ring_t ring;
+    } broker_ring_flood_shared_t;
+
+    broker_ring_flood_shared_t *shared = NULL;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_stats_t stats;
+    const uint64_t flood_iters = test_broker_ring_flood_iters();
+    uint64_t next_submit = 1U;
+    uint64_t next_complete = 1U;
+    pid_t child;
+    int status = 0;
+    int rc = -1;
+
+    shared = mmap(NULL,
+                  sizeof(*shared),
+                  PROT_READ | PROT_WRITE,
+                  MAP_SHARED | MAP_ANONYMOUS,
+                  -1,
+                  0);
+    if (shared == MAP_FAILED) {
+        return -1;
+    }
+    if (llam_broker_ring_init(&shared->ring) != 0) {
+        goto done;
+    }
+
+    child = fork();
+    if (child < 0) {
+        goto done;
+    }
+    if (child == 0) {
+        uint64_t served = 0U;
+
+        while (served < flood_iters) {
+            if (llam_broker_ring_submit_pop(&shared->ring, &submission) == 0) {
+                memset(&completion, 0, sizeof(completion));
+                completion.request_id = submission.request_id;
+                completion.status = 0;
+                completion.result0 = submission.request_id ^ UINT64_C(0x5a5a5a5a5a5a5a5a);
+                for (;;) {
+                    if (llam_broker_ring_complete_push(&shared->ring, &completion) == 0) {
+                        break;
+                    }
+                    if (errno != EAGAIN) {
+                        _exit(3);
+                    }
+                    sched_yield();
+                }
+                ++served;
+                continue;
+            }
+            if (errno != EAGAIN) {
+                _exit(2);
+            }
+            sched_yield();
+        }
+        _exit(0);
+    }
+
+    /*
+     * This is a real process-shared ring stress: the parent owns submit/drain
+     * cursors and the child owns pop/complete cursors. It catches cursor window
+     * corruption and false-sharing-sensitive publication regressions without
+     * involving broker policy code.
+     */
+    while (next_complete <= flood_iters) {
+        bool progressed = false;
+
+        while (next_submit <= flood_iters) {
+            memset(&submission, 0, sizeof(submission));
+            submission.request_id = next_submit;
+            submission.op = LLAM_BROKER_RING_OP_NOP;
+            if (llam_broker_ring_submit_push(&shared->ring, &submission) == 0) {
+                ++next_submit;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto wait_child;
+        }
+
+        while (next_complete <= flood_iters) {
+            if (llam_broker_ring_complete_pop(&shared->ring, &completion) == 0) {
+                if (completion.request_id != next_complete ||
+                    completion.status != 0 ||
+                    completion.result0 != (next_complete ^ UINT64_C(0x5a5a5a5a5a5a5a5a))) {
+                    goto wait_child;
+                }
+                ++next_complete;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto wait_child;
+        }
+
+        if (!progressed) {
+            sched_yield();
+        }
+    }
+    rc = 0;
+
+wait_child:
+    if (rc != 0) {
+        (void)kill(child, SIGTERM);
+    }
+    if (waitpid(child, &status, 0) != child ||
+        !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        rc = -1;
+    }
+    if (rc == 0 &&
+        (llam_broker_ring_collect_stats(&shared->ring, &stats) != 0 ||
+         stats.client_submit_pushes != flood_iters ||
+         stats.broker_complete_tail_publishes != flood_iters ||
+         stats.client_complete_drain_entries != flood_iters ||
+         stats.cursor_write_estimate < flood_iters * 2U)) {
+        rc = -1;
+    }
+
+done:
+    if (shared != NULL && shared != MAP_FAILED) {
+        munmap(shared, sizeof(*shared));
+    }
+    return rc;
+}
+
+static int test_broker_ring_multiprocess_session_replay_guard(void) {
+    enum { MAX_PHASE_SPINS = 1000000U };
+    typedef struct broker_ring_session_shared {
+        llam_broker_ring_t ring;
+        atomic_uint phase;
+    } broker_ring_session_shared_t;
+
+    broker_ring_session_shared_t *shared = NULL;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    const uint64_t replay_iters = test_broker_ring_replay_iters();
+    pid_t child;
+    int status = 0;
+    int rc = -1;
+    uint64_t next_submit = 1U;
+    uint64_t next_complete = 1U;
+
+    shared = mmap(NULL,
+                  sizeof(*shared),
+                  PROT_READ | PROT_WRITE,
+                  MAP_SHARED | MAP_ANONYMOUS,
+                  -1,
+                  0);
+    if (shared == MAP_FAILED) {
+        return -1;
+    }
+    if (llam_broker_ring_init(&shared->ring) != 0) {
+        goto done;
+    }
+    atomic_init(&shared->phase, 0U);
+
+    child = fork();
+    if (child < 0) {
+        goto done;
+    }
+    if (child == 0) {
+        llam_runtime_opts_t opts;
+        llam_broker_t broker;
+        bool broker_initialized = false;
+        uint64_t served = 0U;
+        unsigned spins;
+
+        if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(2);
+        }
+        opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+        if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(2);
+        }
+        broker_initialized = true;
+
+        while (served < replay_iters) {
+            if (llam_broker_ring_serve_one(&broker, &shared->ring) == 0) {
+                ++served;
+                continue;
+            }
+            if (errno != EAGAIN) {
+                if (broker_initialized) {
+                    llam_broker_destroy(&broker);
+                }
+                _exit(3);
+            }
+            sched_yield();
+        }
+
+        /*
+         * The parent rewinds the client-visible cursors after the broker has
+         * served the flood. A real broker session must reject that stale replay
+         * from its private cursor even though the ring memory is process-shared.
+         */
+        for (spins = 0U; spins < MAX_PHASE_SPINS; ++spins) {
+            if (atomic_load_explicit(&shared->phase, memory_order_acquire) == 1U) {
+                break;
+            }
+            sched_yield();
+        }
+        if (spins == MAX_PHASE_SPINS) {
+            if (broker_initialized) {
+                llam_broker_destroy(&broker);
+            }
+            _exit(4);
+        }
+
+        errno = 0;
+        if (expect_errno(llam_broker_ring_serve_one(&broker, &shared->ring),
+                         EINVAL,
+                         "cross-process broker session replayed stale cursor") != 0) {
+            if (broker_initialized) {
+                llam_broker_destroy(&broker);
+            }
+            _exit(5);
+        }
+        if (broker_initialized) {
+            llam_broker_destroy(&broker);
+        }
+        _exit(0);
+    }
+
+    while (next_complete <= replay_iters) {
+        bool progressed = false;
+
+        while (next_submit <= replay_iters) {
+            memset(&submission, 0, sizeof(submission));
+            submission.request_id = next_submit;
+            submission.op = LLAM_BROKER_RING_OP_NOP;
+            if (llam_broker_ring_submit_push(&shared->ring, &submission) == 0) {
+                ++next_submit;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto wait_child;
+        }
+
+        while (next_complete <= replay_iters) {
+            if (llam_broker_ring_complete_pop(&shared->ring, &completion) == 0) {
+                if (completion.request_id != next_complete || completion.status != 0) {
+                    goto wait_child;
+                }
+                ++next_complete;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto wait_child;
+        }
+
+        if (!progressed) {
+            sched_yield();
+        }
+    }
+
+    atomic_store_explicit(&shared->ring.submit_head.value, 0U, memory_order_relaxed);
+    atomic_store_explicit(&shared->ring.submit_tail.value, 1U, memory_order_release);
+    atomic_store_explicit(&shared->phase, 1U, memory_order_release);
+    rc = 0;
+
+wait_child:
+    if (rc != 0) {
+        (void)kill(child, SIGTERM);
+    }
+    if (waitpid(child, &status, 0) != child ||
+        !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        rc = -1;
+    }
+
+done:
+    if (shared != NULL && shared != MAP_FAILED) {
+        munmap(shared, sizeof(*shared));
+    }
+    return rc;
+}
+
+static int test_broker_ring_multiprocess_teardown_guard(void) {
+    enum {
+        TEARDOWN_SERVED = 64U,
+        TEARDOWN_SUBMITTED = 128U,
+        MAX_DRAIN_SPINS = 1000000U
+    };
+    typedef struct broker_ring_teardown_shared {
+        llam_broker_ring_t ring;
+    } broker_ring_teardown_shared_t;
+
+    broker_ring_teardown_shared_t *shared = NULL;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_stats_t stats;
+    pid_t child;
+    int status = 0;
+    int rc = -1;
+    uint64_t next_submit;
+    uint64_t next_complete = 1U;
+    unsigned spins;
+
+    shared = mmap(NULL,
+                  sizeof(*shared),
+                  PROT_READ | PROT_WRITE,
+                  MAP_SHARED | MAP_ANONYMOUS,
+                  -1,
+                  0);
+    if (shared == MAP_FAILED) {
+        return -1;
+    }
+    if (llam_broker_ring_init(&shared->ring) != 0) {
+        goto done;
+    }
+
+    child = fork();
+    if (child < 0) {
+        goto done;
+    }
+    if (child == 0) {
+        llam_runtime_opts_t opts;
+        llam_broker_t broker;
+        bool broker_initialized = false;
+        uint64_t served = 0U;
+
+        if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(2);
+        }
+        opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+        if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(2);
+        }
+        broker_initialized = true;
+
+        while (served < TEARDOWN_SERVED) {
+            if (llam_broker_ring_serve_one(&broker, &shared->ring) == 0) {
+                ++served;
+                continue;
+            }
+            if (errno != EAGAIN) {
+                if (broker_initialized) {
+                    llam_broker_destroy(&broker);
+                }
+                _exit(3);
+            }
+            sched_yield();
+        }
+        if (broker_initialized) {
+            llam_broker_destroy(&broker);
+        }
+        _exit(0);
+    }
+
+    /*
+     * Leave half the submitted requests unserved when the broker process exits.
+     * The client side must be able to drain the completed prefix, observe normal
+     * child teardown, and unmap the ring without waiting forever on stale slots.
+     */
+    for (next_submit = 1U; next_submit <= TEARDOWN_SUBMITTED; ++next_submit) {
+        memset(&submission, 0, sizeof(submission));
+        submission.request_id = next_submit;
+        submission.op = LLAM_BROKER_RING_OP_NOP;
+        while (llam_broker_ring_submit_push(&shared->ring, &submission) != 0) {
+            if (errno != EAGAIN) {
+                goto wait_child;
+            }
+            sched_yield();
+        }
+    }
+
+    for (spins = 0U; next_complete <= TEARDOWN_SERVED && spins < MAX_DRAIN_SPINS; ++spins) {
+        if (llam_broker_ring_complete_pop(&shared->ring, &completion) == 0) {
+            if (completion.request_id != next_complete || completion.status != 0) {
+                goto wait_child;
+            }
+            ++next_complete;
+            continue;
+        }
+        if (errno != EAGAIN) {
+            goto wait_child;
+        }
+        sched_yield();
+    }
+    if (next_complete <= TEARDOWN_SERVED) {
+        goto wait_child;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_complete_pop(&shared->ring, &completion),
+                     EAGAIN,
+                     "teardown guard found unexpected completion after broker exit") != 0) {
+        goto wait_child;
+    }
+    rc = 0;
+
+wait_child:
+    if (rc != 0) {
+        (void)kill(child, SIGTERM);
+    }
+    if (waitpid(child, &status, 0) != child ||
+        !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        rc = -1;
+    }
+    if (rc == 0 &&
+        (llam_broker_ring_collect_stats(&shared->ring, &stats) != 0 ||
+         stats.client_submit_pushes != TEARDOWN_SUBMITTED ||
+         stats.broker_serve_success != TEARDOWN_SERVED ||
+         stats.client_complete_drain_entries != TEARDOWN_SERVED)) {
+        rc = -1;
+    }
+
+done:
+    if (shared != NULL && shared != MAP_FAILED) {
+        munmap(shared, sizeof(*shared));
+    }
+    return rc;
+}
+#endif
+
 static int test_broker_ring_capability_validate_op(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -2457,6 +3438,7 @@ static int test_broker_ring_capability_validate_op(void) {
     llam_capability_token_t token;
     llam_broker_ring_submission_t submission;
     llam_broker_ring_completion_t completion;
+    llam_broker_ring_stats_t stats;
     int rc = -1;
 
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
@@ -2484,29 +3466,42 @@ static int test_broker_ring_capability_validate_op(void) {
         completion.result0 != 1U) {
         goto done;
     }
+    if (llam_broker_ring_collect_stats(&ring, &stats) != 0 ||
+        stats.broker_serve_calls != 1U ||
+        stats.broker_serve_success != 1U ||
+        stats.broker_submit_head_publishes != 1U ||
+        stats.broker_complete_tail_publishes != 1U ||
+        stats.client_complete_head_publishes != 1U ||
+        stats.cursor_write_estimate != 4U) {
+        goto done;
+    }
 
     /*
      * The client can write the shared counters. Broker serving must use
      * broker-private cursors, otherwise rewinding submit_head would replay the
      * previous submission.
      */
-    atomic_store_explicit(&ring.submit_head, 0U, memory_order_relaxed);
-    atomic_store_explicit(&ring.submit_tail, 1U, memory_order_relaxed);
+    atomic_store_explicit(&ring.submit_head.value, 0U, memory_order_relaxed);
+    atomic_store_explicit(&ring.submit_tail.value, 1U, memory_order_relaxed);
     errno = 0;
     if (expect_errno(llam_broker_ring_serve_one(&broker, &ring),
                      EAGAIN,
                      "broker replayed stale submission after submit_head rewind") != 0) {
         goto done;
     }
-    atomic_store_explicit(&ring.submit_tail, 0U, memory_order_relaxed);
+    if (llam_broker_ring_collect_stats(&ring, &stats) != 0 ||
+        stats.broker_submit_empty != 1U) {
+        goto done;
+    }
+    atomic_store_explicit(&ring.submit_tail.value, 0U, memory_order_relaxed);
     errno = 0;
     if (expect_errno(llam_broker_ring_serve_one(&broker, &ring),
                      EINVAL,
                      "broker accepted submit_tail behind private cursor") != 0) {
         goto done;
     }
-    atomic_store_explicit(&ring.submit_head, 1U, memory_order_relaxed);
-    atomic_store_explicit(&ring.submit_tail, 1U, memory_order_relaxed);
+    atomic_store_explicit(&ring.submit_head.value, 1U, memory_order_relaxed);
+    atomic_store_explicit(&ring.submit_tail.value, 1U, memory_order_relaxed);
 
     submission.request_id = 2U;
     submission.token = token;
@@ -3994,6 +4989,662 @@ done:
 #endif
 
 #if LLAM_PLATFORM_WINDOWS
+typedef struct broker_ring_windows_flood_state {
+    llam_broker_ring_t *ring;
+    uint64_t iterations;
+    atomic_int stop;
+    int rc;
+} broker_ring_windows_flood_state_t;
+
+static DWORD WINAPI broker_ring_windows_flood_thread(LPVOID arg) {
+    broker_ring_windows_flood_state_t *state = (broker_ring_windows_flood_state_t *)arg;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    uint64_t served = 0U;
+
+    state->rc = -1;
+    while (served < state->iterations &&
+           atomic_load_explicit(&state->stop, memory_order_acquire) == 0) {
+        if (llam_broker_ring_submit_pop(state->ring, &submission) == 0) {
+            memset(&completion, 0, sizeof(completion));
+            completion.request_id = submission.request_id;
+            completion.status = 0;
+            completion.result0 = submission.request_id ^ UINT64_C(0xa55aa55aa55aa55a);
+            for (;;) {
+                if (atomic_load_explicit(&state->stop, memory_order_acquire) != 0) {
+                    return 3U;
+                }
+                if (llam_broker_ring_complete_push(state->ring, &completion) == 0) {
+                    break;
+                }
+                if (errno != EAGAIN) {
+                    return 2U;
+                }
+                Sleep(0);
+            }
+            ++served;
+            continue;
+        }
+        if (errno != EAGAIN) {
+            return 1U;
+        }
+        Sleep(0);
+    }
+    state->rc = 0;
+    return 0U;
+}
+
+static int broker_ring_windows_process_child(const char *name, uint64_t iterations) {
+    llam_broker_ring_mapping_t mapping;
+    broker_ring_windows_flood_state_t state;
+    DWORD thread_rc;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    if (llam_broker_ring_open_shm(name, &mapping) != 0) {
+        return 2;
+    }
+
+    /*
+     * Reuse the same serving loop as the thread-based test, but run it from a
+     * separate process mapping. This proves the Windows ring data plane works
+     * across process address spaces instead of only across duplicate views in one
+     * process.
+     */
+    memset(&state, 0, sizeof(state));
+    state.ring = mapping.ring;
+    state.iterations = iterations;
+    atomic_init(&state.stop, 0);
+    state.rc = -1;
+    thread_rc = broker_ring_windows_flood_thread(&state);
+    llam_broker_ring_unmap(&mapping);
+    return thread_rc == 0U && state.rc == 0 ? 0 : 3;
+}
+
+static int broker_ring_windows_session_child(const char *name, uint64_t iterations) {
+    enum { MAX_PHASE_SPINS = 1000000U };
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_mapping_t mapping;
+    bool broker_initialized = false;
+    uint64_t served = 0U;
+    unsigned spins;
+    int rc = 3;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return 2;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return 2;
+    }
+    broker_initialized = true;
+    if (llam_broker_ring_open_shm(name, &mapping) != 0) {
+        goto done;
+    }
+
+    while (served < iterations) {
+        if (llam_broker_ring_serve_one(&broker, mapping.ring) == 0) {
+            ++served;
+            continue;
+        }
+        if (errno != EAGAIN) {
+            goto done;
+        }
+        Sleep(0);
+    }
+
+    /*
+     * The parent rewinds the client-visible counters after all completions have
+     * been drained. This separate process must still use the broker-private
+     * session cursor and reject the stale replay instead of serving slot 0 again.
+     */
+    for (spins = 0U; spins < MAX_PHASE_SPINS; ++spins) {
+        uint64_t shared_head = atomic_load_explicit(&mapping.ring->submit_head.value, memory_order_acquire);
+        uint64_t shared_tail = atomic_load_explicit(&mapping.ring->submit_tail.value, memory_order_acquire);
+
+        if (shared_head == 0U && shared_tail == 1U) {
+            break;
+        }
+        Sleep(0);
+    }
+    if (spins == MAX_PHASE_SPINS) {
+        rc = 4;
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_serve_one(&broker, mapping.ring),
+                     EINVAL,
+                     "windows cross-process broker session replayed stale cursor") != 0) {
+        rc = 5;
+        goto done;
+    }
+    rc = 0;
+
+done:
+    llam_broker_ring_unmap(&mapping);
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int broker_ring_windows_teardown_child(const char *name, uint64_t iterations) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_mapping_t mapping;
+    bool broker_initialized = false;
+    uint64_t served = 0U;
+    int rc = 3;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return 2;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return 2;
+    }
+    broker_initialized = true;
+    if (llam_broker_ring_open_shm(name, &mapping) != 0) {
+        goto done;
+    }
+
+    while (served < iterations) {
+        if (llam_broker_ring_serve_one(&broker, mapping.ring) == 0) {
+            ++served;
+            continue;
+        }
+        if (errno != EAGAIN) {
+            goto done;
+        }
+        Sleep(0);
+    }
+    rc = 0;
+
+done:
+    llam_broker_ring_unmap(&mapping);
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int test_broker_ring_windows_cross_process_flood(void) {
+    char name[128];
+    char exe_path[MAX_PATH];
+    char command[1024];
+    llam_broker_ring_mapping_t mapping;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_stats_t stats;
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    const uint64_t flood_iters = test_broker_ring_flood_iters();
+    DWORD wait_rc;
+    DWORD exit_code = 1U;
+    uint64_t next_submit = 1U;
+    uint64_t next_complete = 1U;
+    int rc = -1;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    snprintf(name,
+             sizeof(name),
+             "Local\\llam-broker-ring-xproc-%lu-%lu",
+             (unsigned long)GetCurrentProcessId(),
+             (unsigned long)GetTickCount());
+    if (llam_broker_ring_create_shm(name, &mapping) != 0) {
+        goto done;
+    }
+    if (GetModuleFileNameA(NULL, exe_path, sizeof(exe_path)) == 0U) {
+        goto done;
+    }
+    snprintf(command,
+             sizeof(command),
+             "\"%s\" --broker-ring-windows-child \"%s\" %llu",
+             exe_path,
+             name,
+             (unsigned long long)flood_iters);
+
+    memset(&startup, 0, sizeof(startup));
+    memset(&process, 0, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessA(NULL,
+                        command,
+                        NULL,
+                        NULL,
+                        FALSE,
+                        0U,
+                        NULL,
+                        NULL,
+                        &startup,
+                        &process)) {
+        goto done;
+    }
+
+    while (next_complete <= flood_iters) {
+        bool progressed = false;
+
+        while (next_submit <= flood_iters) {
+            memset(&submission, 0, sizeof(submission));
+            submission.request_id = next_submit;
+            submission.op = LLAM_BROKER_RING_OP_NOP;
+            if (llam_broker_ring_submit_push(mapping.ring, &submission) == 0) {
+                ++next_submit;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto done_process;
+        }
+
+        while (next_complete <= flood_iters) {
+            if (llam_broker_ring_complete_pop(mapping.ring, &completion) == 0) {
+                if (completion.request_id != next_complete ||
+                    completion.status != 0 ||
+                    completion.result0 != (next_complete ^ UINT64_C(0xa55aa55aa55aa55a))) {
+                    goto done_process;
+                }
+                ++next_complete;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto done_process;
+        }
+
+        if (!progressed) {
+            Sleep(0);
+        }
+    }
+
+    wait_rc = WaitForSingleObject(process.hProcess, 5000U);
+    if (wait_rc != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &exit_code) ||
+        exit_code != 0U) {
+        goto done_process;
+    }
+    if (llam_broker_ring_collect_stats(mapping.ring, &stats) != 0 ||
+        stats.client_submit_pushes != flood_iters ||
+        stats.broker_complete_tail_publishes != flood_iters ||
+        stats.client_complete_drain_entries != flood_iters ||
+        stats.cursor_write_estimate < flood_iters * 2U) {
+        goto done_process;
+    }
+    rc = 0;
+
+done_process:
+    if (rc != 0) {
+        (void)TerminateProcess(process.hProcess, 1U);
+        (void)WaitForSingleObject(process.hProcess, 1000U);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+done:
+    llam_broker_ring_unmap(&mapping);
+    return rc;
+}
+
+static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
+    char name[128];
+    char exe_path[MAX_PATH];
+    char command[1024];
+    llam_broker_ring_mapping_t mapping;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_stats_t stats;
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    const uint64_t replay_iters = test_broker_ring_replay_iters();
+    DWORD wait_rc;
+    DWORD exit_code = 1U;
+    uint64_t next_submit = 1U;
+    uint64_t next_complete = 1U;
+    int rc = -1;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    snprintf(name,
+             sizeof(name),
+             "Local\\llam-broker-ring-session-replay-%lu-%lu",
+             (unsigned long)GetCurrentProcessId(),
+             (unsigned long)GetTickCount());
+    if (llam_broker_ring_create_shm(name, &mapping) != 0) {
+        goto done;
+    }
+    if (GetModuleFileNameA(NULL, exe_path, sizeof(exe_path)) == 0U) {
+        goto done;
+    }
+    snprintf(command,
+             sizeof(command),
+             "\"%s\" --broker-ring-windows-session-child \"%s\" %llu",
+             exe_path,
+             name,
+             (unsigned long long)replay_iters);
+
+    memset(&startup, 0, sizeof(startup));
+    memset(&process, 0, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessA(NULL,
+                        command,
+                        NULL,
+                        NULL,
+                        FALSE,
+                        0U,
+                        NULL,
+                        NULL,
+                        &startup,
+                        &process)) {
+        goto done;
+    }
+
+    while (next_complete <= replay_iters) {
+        bool progressed = false;
+
+        while (next_submit <= replay_iters) {
+            memset(&submission, 0, sizeof(submission));
+            submission.request_id = next_submit;
+            submission.op = LLAM_BROKER_RING_OP_NOP;
+            if (llam_broker_ring_submit_push(mapping.ring, &submission) == 0) {
+                ++next_submit;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto done_process;
+        }
+
+        while (next_complete <= replay_iters) {
+            if (llam_broker_ring_complete_pop(mapping.ring, &completion) == 0) {
+                if (completion.request_id != next_complete || completion.status != 0) {
+                    goto done_process;
+                }
+                ++next_complete;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto done_process;
+        }
+
+        if (!progressed) {
+            Sleep(0);
+        }
+    }
+
+    atomic_store_explicit(&mapping.ring->submit_head.value, 0U, memory_order_relaxed);
+    atomic_store_explicit(&mapping.ring->submit_tail.value, 1U, memory_order_release);
+    wait_rc = WaitForSingleObject(process.hProcess, 5000U);
+    if (wait_rc != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &exit_code) ||
+        exit_code != 0U) {
+        goto done_process;
+    }
+    if (llam_broker_ring_collect_stats(mapping.ring, &stats) != 0 ||
+        stats.client_submit_pushes != replay_iters ||
+        stats.broker_serve_success != replay_iters ||
+        stats.broker_complete_tail_publishes != replay_iters ||
+        stats.client_complete_drain_entries != replay_iters) {
+        goto done_process;
+    }
+    rc = 0;
+
+done_process:
+    if (rc != 0) {
+        (void)TerminateProcess(process.hProcess, 1U);
+        (void)WaitForSingleObject(process.hProcess, 1000U);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+done:
+    llam_broker_ring_unmap(&mapping);
+    return rc;
+}
+
+static int test_broker_ring_windows_cross_process_teardown_guard(void) {
+    enum {
+        TEARDOWN_SERVED = 64U,
+        TEARDOWN_SUBMITTED = 128U,
+        MAX_DRAIN_SPINS = 1000000U
+    };
+    char name[128];
+    char exe_path[MAX_PATH];
+    char command[1024];
+    llam_broker_ring_mapping_t mapping;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_stats_t stats;
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    DWORD wait_rc;
+    DWORD exit_code = 1U;
+    uint64_t next_submit;
+    uint64_t next_complete = 1U;
+    unsigned spins;
+    int rc = -1;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    snprintf(name,
+             sizeof(name),
+             "Local\\llam-broker-ring-teardown-%lu-%lu",
+             (unsigned long)GetCurrentProcessId(),
+             (unsigned long)GetTickCount());
+    if (llam_broker_ring_create_shm(name, &mapping) != 0) {
+        goto done;
+    }
+    if (GetModuleFileNameA(NULL, exe_path, sizeof(exe_path)) == 0U) {
+        goto done;
+    }
+    snprintf(command,
+             sizeof(command),
+             "\"%s\" --broker-ring-windows-teardown-child \"%s\" %u",
+             exe_path,
+             name,
+             (unsigned)TEARDOWN_SERVED);
+
+    memset(&startup, 0, sizeof(startup));
+    memset(&process, 0, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessA(NULL,
+                        command,
+                        NULL,
+                        NULL,
+                        FALSE,
+                        0U,
+                        NULL,
+                        NULL,
+                        &startup,
+                        &process)) {
+        goto done;
+    }
+
+    /*
+     * The child broker serves only a prefix and exits normally. The client side
+     * must drain that prefix and tear down the mapping without assuming the
+     * remaining submitted slots will ever receive completions.
+     */
+    for (next_submit = 1U; next_submit <= TEARDOWN_SUBMITTED; ++next_submit) {
+        memset(&submission, 0, sizeof(submission));
+        submission.request_id = next_submit;
+        submission.op = LLAM_BROKER_RING_OP_NOP;
+        while (llam_broker_ring_submit_push(mapping.ring, &submission) != 0) {
+            if (errno != EAGAIN) {
+                goto done_process;
+            }
+            Sleep(0);
+        }
+    }
+
+    for (spins = 0U; next_complete <= TEARDOWN_SERVED && spins < MAX_DRAIN_SPINS; ++spins) {
+        if (llam_broker_ring_complete_pop(mapping.ring, &completion) == 0) {
+            if (completion.request_id != next_complete || completion.status != 0) {
+                goto done_process;
+            }
+            ++next_complete;
+            continue;
+        }
+        if (errno != EAGAIN) {
+            goto done_process;
+        }
+        Sleep(0);
+    }
+    if (next_complete <= TEARDOWN_SERVED) {
+        goto done_process;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_complete_pop(mapping.ring, &completion),
+                     EAGAIN,
+                     "windows teardown guard found unexpected completion after broker exit") != 0) {
+        goto done_process;
+    }
+
+    wait_rc = WaitForSingleObject(process.hProcess, 5000U);
+    if (wait_rc != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(process.hProcess, &exit_code) ||
+        exit_code != 0U) {
+        goto done_process;
+    }
+    if (llam_broker_ring_collect_stats(mapping.ring, &stats) != 0 ||
+        stats.client_submit_pushes != TEARDOWN_SUBMITTED ||
+        stats.broker_serve_success != TEARDOWN_SERVED ||
+        stats.client_complete_drain_entries != TEARDOWN_SERVED) {
+        goto done_process;
+    }
+    rc = 0;
+
+done_process:
+    if (rc != 0) {
+        (void)TerminateProcess(process.hProcess, 1U);
+        (void)WaitForSingleObject(process.hProcess, 1000U);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+done:
+    llam_broker_ring_unmap(&mapping);
+    return rc;
+}
+
+static int test_broker_ring_windows_mapping_flood(void) {
+    llam_broker_ring_mapping_t broker_mapping;
+    llam_broker_ring_mapping_t client_mapping;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_stats_t stats;
+    broker_ring_windows_flood_state_t state;
+    HANDLE thread = NULL;
+    const uint64_t flood_iters = test_broker_ring_flood_iters();
+    DWORD wait_rc;
+    DWORD thread_rc = 1U;
+    uint64_t next_submit = 1U;
+    uint64_t next_complete = 1U;
+    int rc = -1;
+
+    memset(&broker_mapping, 0, sizeof(broker_mapping));
+    memset(&client_mapping, 0, sizeof(client_mapping));
+    broker_mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    client_mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    if (llam_broker_ring_create_private_handle(&broker_mapping) != 0 ||
+        llam_broker_ring_map_handle(broker_mapping.mapping_handle, false, &client_mapping) != 0) {
+        goto done;
+    }
+
+    /*
+     * Windows has a distinct mapping/HANDLE backend. Stress it through two
+     * mapped views so cursor cache-line layout, ordering, and diagnostic stats
+     * are covered without depending on named-pipe control-plane policy.
+     */
+    memset(&state, 0, sizeof(state));
+    state.ring = broker_mapping.ring;
+    state.iterations = flood_iters;
+    atomic_init(&state.stop, 0);
+    state.rc = -1;
+    thread = CreateThread(NULL, 0U, broker_ring_windows_flood_thread, &state, 0U, NULL);
+    if (thread == NULL) {
+        goto done;
+    }
+
+    while (next_complete <= flood_iters) {
+        bool progressed = false;
+
+        while (next_submit <= flood_iters) {
+            memset(&submission, 0, sizeof(submission));
+            submission.request_id = next_submit;
+            submission.op = LLAM_BROKER_RING_OP_NOP;
+            if (llam_broker_ring_submit_push(client_mapping.ring, &submission) == 0) {
+                ++next_submit;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto done;
+        }
+
+        while (next_complete <= flood_iters) {
+            if (llam_broker_ring_complete_pop(client_mapping.ring, &completion) == 0) {
+                if (completion.request_id != next_complete ||
+                    completion.status != 0 ||
+                    completion.result0 != (next_complete ^ UINT64_C(0xa55aa55aa55aa55a))) {
+                    goto done;
+                }
+                ++next_complete;
+                progressed = true;
+                continue;
+            }
+            if (errno == EAGAIN) {
+                break;
+            }
+            goto done;
+        }
+
+        if (!progressed) {
+            Sleep(0);
+        }
+    }
+    wait_rc = WaitForSingleObject(thread, 5000U);
+    if (wait_rc != WAIT_OBJECT_0 ||
+        !GetExitCodeThread(thread, &thread_rc) ||
+        thread_rc != 0U ||
+        state.rc != 0) {
+        goto done;
+    }
+    CloseHandle(thread);
+    thread = NULL;
+
+    if (llam_broker_ring_collect_stats(client_mapping.ring, &stats) != 0 ||
+        stats.client_submit_pushes != flood_iters ||
+        stats.broker_complete_tail_publishes != flood_iters ||
+        stats.client_complete_drain_entries != flood_iters ||
+        stats.cursor_write_estimate < flood_iters * 2U) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (thread != NULL) {
+        atomic_store_explicit(&state.stop, 1, memory_order_release);
+        (void)WaitForSingleObject(thread, 1000U);
+        CloseHandle(thread);
+    }
+    llam_broker_ring_unmap(&client_mapping);
+    llam_broker_ring_unmap(&broker_mapping);
+    return rc;
+}
+
 static int test_broker_ring_handle_data_plane(void) {
     static const char inbound[] = "broker handle read";
     static const char outbound[] = "broker handle write";
@@ -5523,7 +7174,36 @@ done:
 }
 #endif
 
-int main(void) {
+int main(int argc, char **argv) {
+#if LLAM_PLATFORM_WINDOWS
+    if (argc == 4 &&
+        (strcmp(argv[1], "--broker-ring-windows-child") == 0 ||
+         strcmp(argv[1], "--broker-ring-windows-session-child") == 0 ||
+         strcmp(argv[1], "--broker-ring-windows-teardown-child") == 0)) {
+        char *end = NULL;
+        unsigned long long iterations;
+
+        errno = 0;
+        iterations = strtoull(argv[3], &end, 10);
+        if (argv[2][0] == '\0' || end == argv[3] || *end != '\0') {
+            return 2;
+        }
+        if (errno != 0 || iterations == 0U || (uint64_t)iterations > UINT64_C(1000000)) {
+            return 2;
+        }
+        if (strcmp(argv[1], "--broker-ring-windows-session-child") == 0) {
+            return broker_ring_windows_session_child(argv[2], (uint64_t)iterations);
+        }
+        if (strcmp(argv[1], "--broker-ring-windows-teardown-child") == 0) {
+            return broker_ring_windows_teardown_child(argv[2], (uint64_t)iterations);
+        }
+        return broker_ring_windows_process_child(argv[2], (uint64_t)iterations);
+    }
+#else
+    (void)argc;
+    (void)argv;
+#endif
+
     if (test_token_validation_and_rights() != 0 ||
         test_token_tamper_rejected() != 0 ||
         test_token_subject_binding() != 0 ||
@@ -5547,6 +7227,8 @@ int main(void) {
         test_broker_destroy_drains_unjoined_task_slots() != 0 ||
         test_broker_rejects_foreign_runtime_token() != 0 ||
         test_broker_ring_and_buffer_grants() != 0 ||
+        test_broker_ring_doorbell_waits() != 0 ||
+        test_broker_ring_doorbell_flood() != 0 ||
         test_broker_ring_capability_validate_op() != 0 ||
         test_broker_ring_capability_attenuate_op() != 0 ||
         test_broker_ring_capability_revoke_op() != 0 ||
@@ -5602,6 +7284,15 @@ int main(void) {
     if (test_broker_ring_fd_mapping_authority() != 0) {
         return 1;
     }
+    if (test_broker_ring_multiprocess_flood() != 0) {
+        return 1;
+    }
+    if (test_broker_ring_multiprocess_session_replay_guard() != 0) {
+        return 1;
+    }
+    if (test_broker_ring_multiprocess_teardown_guard() != 0) {
+        return 1;
+    }
     if (test_broker_nested_op_survives_destroy_start() != 0) {
         return 1;
     }
@@ -5622,6 +7313,18 @@ int main(void) {
     }
 #else
     if (test_broker_ring_handle_data_plane() != 0) {
+        return 1;
+    }
+    if (test_broker_ring_windows_mapping_flood() != 0) {
+        return 1;
+    }
+    if (test_broker_ring_windows_cross_process_flood() != 0) {
+        return 1;
+    }
+    if (test_broker_ring_windows_cross_process_session_replay_guard() != 0) {
+        return 1;
+    }
+    if (test_broker_ring_windows_cross_process_teardown_guard() != 0) {
         return 1;
     }
     if (test_broker_pipe_transport_handle_grants() != 0) {

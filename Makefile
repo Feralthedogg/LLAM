@@ -206,7 +206,9 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_broker_transport_unix.o \
 	$(OBJDIR)/src/core/runtime_broker_transport_selftest.o \
 	$(OBJDIR)/src/core/runtime_broker_ring.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_doorbell.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_dispatch.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_stats.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_shm.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_shm_posix.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_shm_windows.o \

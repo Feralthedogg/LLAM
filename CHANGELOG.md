@@ -160,6 +160,28 @@
   progress cursors and corrupt client-controlled head/tail window checks.
   Impossible or rewound windows now fail closed with `EINVAL`/`EAGAIN` instead
   of allowing stale ring slots to be interpreted as fresh broker requests.
+  Ring layout version 2 separates the four shared producer/consumer cursors
+  onto independent cache lines and adds a batched completion drain primitive, so
+  high-rate broker transports avoid avoidable cursor false sharing and can
+  publish the client drain cursor once per response batch. Broker rings now
+  expose diagnostic-only counters for empty/full `EAGAIN` pressure, batch drain
+  size, cursor-publication estimates, and broker serve latency, plus an optional
+  doorbell wait helper backed by Linux eventfd, Darwin kqueue user events, and
+  Windows events so transports can sleep on empty/full transitions instead of
+  tight-polling. Security regression coverage now includes doorbell-driven flood
+  coverage, a POSIX process-shared ring flood, a Windows unnamed-file-mapping
+  ring flood, and a Windows child-process named-mapping flood so cursor ordering
+  and stats are exercised across the platform mapping backends. POSIX coverage
+  also runs forked/PID-separated broker processes through the real broker-ring
+  session path and then rewinds client-visible cursors to prove broker-private
+  cursors reject stale replay after teardown coordination on both POSIX and
+  Windows mappings. POSIX and Windows coverage also include process-separated
+  broker teardown guards where the broker exits after serving only a prefix of
+  a larger submitted window, proving clients can drain the completed prefix and
+  unmap without waiting forever on abandoned slots. Stress CI now repeats
+  `test_security_capability` as a dedicated broker-ring gate on Linux, macOS,
+  Windows 2022, and Windows 2025 with a higher broker-ring flood count instead
+  of relying only on the broad CTest pass to surface IPC regressions.
 
 * bind broker capability validation to the live broker runtime id after MAC
   validation. This makes an internally fabricated or accidentally cross-issued

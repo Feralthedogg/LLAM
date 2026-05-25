@@ -400,6 +400,34 @@ static void llam_drain_fd_raw(int fd) {
 #endif
 }
 
+int llam_wake_handle_signal(int fd) {
+    if (fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!llam_kick_fd_raw(fd)) {
+        errno = EAGAIN;
+        return -1;
+    }
+    return 0;
+}
+
+void llam_wake_handle_drain(int fd) {
+    if (fd < 0) {
+        return;
+    }
+#if defined(__APPLE__)
+    /*
+     * EVFILT_USER with EV_CLEAR is consumed by a zero-timeout wait. The shard
+     * and node paths normally call drain after a wait has already consumed the
+     * event; the explicit poll here makes standalone doorbells safe when a
+     * producer signals before the consumer reaches the kernel wait.
+     */
+    (void)llam_wake_handle_wait_ns(fd, 0, 0U);
+#endif
+    llam_drain_fd_raw(fd);
+}
+
 #if defined(__APPLE__)
 /** @brief Mach message used to wake a Darwin I/O node through a Mach port. */
 typedef struct llam_mach_wake_msg {

@@ -207,6 +207,8 @@ void llam_opaque_wake_wait(llam_shard_t *shard);
 void llam_wake_all_shards(llam_runtime_t *rt);
 int llam_wake_handle_create(void);
 void llam_wake_handle_close(int fd);
+void llam_wake_handle_drain(int fd);
+int llam_wake_handle_signal(int fd);
 int llam_wake_handle_wait(int fd, int timeout_ms);
 int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns);
 

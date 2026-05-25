@@ -120,6 +120,26 @@ jobs:
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           ctest --test-dir build/stress --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
 
+      - name: Broker ring security stress repeat
+        run: |
+          set -o pipefail
+          python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
+          repeat=3
+          timeout=120
+          if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
+            repeat=1
+            timeout=90
+          fi
+          export LLAM_BROKER_RING_FLOOD_ITERS=50000
+          for i in $(seq 1 "$repeat"); do
+            echo "[test_security_capability broker-ring repeat $i/$repeat]"
+            python3 scripts/run_with_timeout.py \
+              --timeout "$timeout" \
+              --dump-on-timeout "$OUT_DIR/test_security_capability_repeat_$i.timeout-dump.log" \
+              --log "$OUT_DIR/test_security_capability_repeat_$i.log" \
+              -- ./build/stress/test_security_capability
+          done 2>&1 | tee "$OUT_DIR/test_security_capability_repeat.log"
+
       - name: Fault and completion-order edge repeat
         run: |
           set -o pipefail
@@ -345,6 +365,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
+
+      - name: Broker ring security stress repeat
+        shell: pwsh
+        run: |
+          $artifactDir = ".artifacts\stress\${{ matrix.name }}"
+          .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
+          $repeat = 3
+          $test = ".\build\windows\Release\test_security_capability.exe"
+          $env:LLAM_BROKER_RING_FLOOD_ITERS = "50000"
+          & {
+            for ($i = 1; $i -le $repeat; $i++) {
+              "[test_security_capability broker-ring repeat $i/$repeat]"
+              & $test
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+            Remove-Item Env:\LLAM_BROKER_RING_FLOOD_ITERS -ErrorAction SilentlyContinue
+          } *>&1 | Tee-Object -FilePath "$artifactDir\test_security_capability_repeat.log"
 
       - name: Direct runtime stress repeat
         shell: pwsh

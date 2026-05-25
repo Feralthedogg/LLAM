@@ -311,8 +311,14 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
 }
 
 void llam_windows_process_submissions(llam_node_t *node) {
-    llam_io_req_t *reqs = llam_take_node_submissions(node);
+    llam_io_req_t *reqs;
     unsigned submitted = 0U;
+
+    if (node == NULL) {
+        return;
+    }
+
+    reqs = llam_take_node_submissions(node);
 
     while (reqs != NULL) {
         llam_io_req_t *next = reqs->next;

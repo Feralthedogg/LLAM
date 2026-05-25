@@ -39,7 +39,7 @@ static int llam_broker_ring_session_complete_reserve(const llam_broker_ring_t *r
         return -1;
     }
     tail = session->complete_tail;
-    head = atomic_load_explicit(&ring->complete_head, memory_order_acquire);
+    head = atomic_load_explicit(&ring->complete_head.value, memory_order_acquire);
     if (LLAM_UNLIKELY(!llam_broker_ring_window_valid(head, tail))) {
         errno = EINVAL;
         return -1;
@@ -63,7 +63,7 @@ static int llam_broker_ring_session_submit_pop(llam_broker_ring_t *ring,
         return -1;
     }
     head = session->submit_head;
-    tail = atomic_load_explicit(&ring->submit_tail, memory_order_acquire);
+    tail = atomic_load_explicit(&ring->submit_tail.value, memory_order_acquire);
     if (LLAM_UNLIKELY(!llam_broker_ring_window_valid(head, tail))) {
         errno = EINVAL;
         return -1;
@@ -74,8 +74,18 @@ static int llam_broker_ring_session_submit_pop(llam_broker_ring_t *ring,
     }
     *out_entry = ring->submissions[head & LLAM_BROKER_RING_MASK];
     session->submit_head = head + 1U;
-    atomic_store_explicit(&ring->submit_head, session->submit_head, memory_order_release);
     return 0;
+}
+
+static void llam_broker_ring_session_submit_publish(llam_broker_ring_t *ring,
+                                                    const llam_broker_ring_session_t *session) {
+    /*
+     * The session cursor is broker-private. Publish it only after the request
+     * has produced a completion so the shared cache line is not dirtied during
+     * every dispatch prologue and future multi-request batches can flush once.
+     */
+    atomic_store_explicit(&ring->submit_head.value, session->submit_head, memory_order_release);
+    llam_broker_ring_broker_stat_add(ring, LLAM_BROKER_RING_BROKER_STAT_SUBMIT_HEAD_PUBLISHES, 1U);
 }
 
 static void llam_broker_ring_session_complete_publish(llam_broker_ring_t *ring,
@@ -84,7 +94,8 @@ static void llam_broker_ring_session_complete_publish(llam_broker_ring_t *ring,
                                                       const llam_broker_ring_completion_t *entry) {
     ring->completions[tail & LLAM_BROKER_RING_MASK] = *entry;
     session->complete_tail = tail + 1U;
-    atomic_store_explicit(&ring->complete_tail, session->complete_tail, memory_order_release);
+    atomic_store_explicit(&ring->complete_tail.value, session->complete_tail, memory_order_release);
+    llam_broker_ring_broker_stat_add(ring, LLAM_BROKER_RING_BROKER_STAT_COMPLETE_TAIL_PUBLISHES, 1U);
 }
 
 static int llam_broker_ring_data_range(uint64_t offset, uint64_t length, size_t *out_offset, size_t *out_length) {
@@ -149,14 +160,28 @@ int llam_broker_ring_serve_locked_session(llam_broker_t *broker,
     size_t ring_offset;
     size_t length;
     uint64_t completion_tail;
+    uint64_t serve_start_ns;
+    uint64_t serve_end_ns;
 
     /*
      * The caller owns an active broker op and the broker lock. Reserve the
      * queue slots and mark busy before unlocking so forget/destroy paths see a
      * pinned session for the entire blocking broker operation.
      */
-    if (llam_broker_ring_session_complete_reserve(ring, session, &completion_tail) != 0 ||
-        llam_broker_ring_session_submit_pop(ring, session, &submission) != 0) {
+    llam_broker_ring_broker_stat_add(ring, LLAM_BROKER_RING_BROKER_STAT_SERVE_CALLS, 1U);
+    serve_start_ns = llam_now_ns();
+    if (llam_broker_ring_session_complete_reserve(ring, session, &completion_tail) != 0) {
+        if (errno == EAGAIN) {
+            llam_broker_ring_broker_stat_add(ring, LLAM_BROKER_RING_BROKER_STAT_COMPLETE_FULL, 1U);
+        }
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
+        return -1;
+    }
+    if (llam_broker_ring_session_submit_pop(ring, session, &submission) != 0) {
+        if (errno == EAGAIN) {
+            llam_broker_ring_broker_stat_add(ring, LLAM_BROKER_RING_BROKER_STAT_SUBMIT_EMPTY, 1U);
+        }
         llam_broker_unlock(broker);
         llam_broker_end_op(broker);
         return -1;
@@ -358,6 +383,15 @@ int llam_broker_ring_serve_locked_session(llam_broker_t *broker,
         return -1;
     }
     llam_broker_ring_session_complete_publish(ring, session, completion_tail, &completion);
+    llam_broker_ring_session_submit_publish(ring, session);
+    serve_end_ns = llam_now_ns();
+    if (serve_end_ns >= serve_start_ns) {
+        uint64_t latency_ns = serve_end_ns - serve_start_ns;
+
+        llam_broker_ring_broker_stat_add(ring, LLAM_BROKER_RING_BROKER_STAT_SERVE_LATENCY_NS_TOTAL, latency_ns);
+        llam_broker_ring_broker_stat_max(ring, LLAM_BROKER_RING_BROKER_STAT_SERVE_LATENCY_NS_MAX, latency_ns);
+    }
+    llam_broker_ring_broker_stat_add(ring, LLAM_BROKER_RING_BROKER_STAT_SERVE_SUCCESS, 1U);
     session->busy = false;
     llam_broker_unlock(broker);
     llam_broker_end_op(broker);
