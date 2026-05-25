@@ -275,10 +275,139 @@ jobs:
             target/dist/*.zip.sha256
           if-no-files-found: error
 
+  build-bsd-artifacts:
+    name: build-artifacts (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: cpa.sh {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: freebsd-x86_64
+            os: freebsd
+            version: '15.0'
+            arch: x86-64
+          - target: openbsd-x86_64
+            os: openbsd
+            version: '7.9'
+            arch: x86-64
+          - target: netbsd-x86_64
+            os: netbsd
+            version: '10.1'
+            arch: x86-64
+          - target: dragonflybsd-x86_64
+            os: dragonflybsd
+            version: '6.4.2'
+            arch: x86-64
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Start BSD VM
+        uses: cross-platform-actions/action@v1.1.0
+        with:
+          operating_system: ${{ matrix.os }}
+          version: ${{ matrix.version }}
+          architecture: ${{ matrix.arch }}
+          shell: sh
+          memory: 6G
+          cpu_count: 2
+
+      - name: Install BSD packages
+        run: |
+          set -eu
+          case "$(uname -s)" in
+            FreeBSD|DragonFly)
+              command -v gmake >/dev/null 2>&1 || sudo pkg install -y gmake
+              command -v cmake >/dev/null 2>&1 || sudo pkg install -y cmake
+              command -v xz >/dev/null 2>&1 || sudo pkg install -y xz
+              ;;
+            OpenBSD)
+              command -v gmake >/dev/null 2>&1 || sudo pkg_add gmake
+              command -v cmake >/dev/null 2>&1 || sudo pkg_add cmake
+              command -v xz >/dev/null 2>&1 || sudo pkg_add xz
+              ;;
+            NetBSD)
+              command -v gmake >/dev/null 2>&1 || sudo pkgin -y install gmake
+              command -v cmake >/dev/null 2>&1 || sudo pkgin -y install cmake
+              command -v xz >/dev/null 2>&1 || sudo pkgin -y install xz
+              ;;
+          esac
+
+      - name: Build, test, and package BSD
+        run: |
+          set -eu
+          version="2.0.0"
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          gmake clean
+          gmake all \
+            test_abi_contract \
+            test_abi_compat \
+            test_runtime_core \
+            test_multi_runtime_core \
+            test_runtime_api_edges \
+            test_runtime_select_edges \
+            test_io_buffers \
+            test_shared_load \
+            CC=cc \
+            LLAM_VERSION="$version"
+          ./test_abi_contract
+          ./test_abi_compat
+          ./test_runtime_core
+          ./test_multi_runtime_core
+          ./test_runtime_api_edges
+          ./test_runtime_select_edges
+          ./test_io_buffers
+          ./test_shared_load ./libllam_runtime.so."$version"
+          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
+          cmake --build build/bsd --target \
+            test_abi_contract \
+            test_abi_compat \
+            test_runtime_core \
+            test_multi_runtime_core \
+            test_runtime_api_edges \
+            test_runtime_select_edges \
+            test_io_buffers \
+            test_shared_load
+          ctest --test-dir build/bsd --output-on-failure --timeout 180 \
+            -R 'test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_io_buffers|test_shared_load'
+          LLAM_RELEASE_VERSION="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}" \
+          LLAM_VERSION="$version" \
+            ./scripts/package_release.sh "${{ matrix.target }}"
+          package_version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
+          package_version="${package_version#v}"
+          archive="target/dist/llam-${package_version}-${{ matrix.target }}.tar.xz"
+          tar -tf "$archive" > package-files.txt
+          grep '/include/llam/runtime.h$' package-files.txt
+          grep '/include/llam/platform.h$' package-files.txt
+          grep '/lib/libllam_runtime.so$' package-files.txt
+          grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
+          grep '/lib/pkgconfig/llam.pc$' package-files.txt
+
+      - name: Sync BSD artifacts back to runner
+        shell: bash
+        run: cpa.sh --sync-files vm-to-runner
+
+      - name: Upload BSD platform artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            target/dist/*.tar.xz
+            target/dist/*.tar.xz.sha256
+          if-no-files-found: error
+
   publish-release:
     name: publish-release
     needs:
       - build-artifacts
+      - build-bsd-artifacts
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
@@ -333,12 +462,12 @@ jobs:
           {
             echo "# LLAM ${version}"
             echo
-            echo "LLAM ${version} publishes native runtime builds for Linux, macOS, and Windows x86_64."
+            echo "LLAM ${version} publishes native runtime builds for Linux, macOS, BSD, and Windows x86_64."
             echo
             echo "## Highlights"
             echo
             echo "- Native Darwin x86_64 assembly context switching for Intel Mac builds."
-            echo "- kqueue-based macOS I/O backend for both Apple Silicon and Intel Mac."
+            echo "- kqueue-based macOS and BSD I/O backend coverage."
             echo "- io_uring/liburing Linux I/O backend for x86_64 and aarch64."
             echo "- Windows x86_64 IOCP backend archive with WSARecv/WSASend/AcceptEx/ConnectEx coverage."
             echo "- SDK metadata for CMake and pkg-config consumers."
@@ -352,6 +481,10 @@ jobs:
               "linux-aarch64|Linux aarch64" \
               "macos-x86_64|macOS x86_64" \
               "macos-aarch64|macOS arm64" \
+              "freebsd-x86_64|FreeBSD x86_64" \
+              "openbsd-x86_64|OpenBSD x86_64" \
+              "netbsd-x86_64|NetBSD x86_64" \
+              "dragonflybsd-x86_64|DragonFly BSD x86_64" \
               "windows-x86_64|Windows x86_64"; do
               target="${row%%|*}"
               label="${row#*|}"
@@ -372,7 +505,7 @@ jobs:
             echo "- Static runtime library: \`libllam_runtime.a\` on POSIX or \`llam_runtime.lib\` on Windows."
             echo "- Platform shared runtime library: \`libllam_runtime.so\`, \`libllam_runtime.dylib\`, or \`llam_runtime.dll\`."
             echo "- CMake package files under \`share/llam/cmake/\` and pkg-config metadata under \`lib/pkgconfig/\`."
-            echo "- Archive installers: \`install.sh --prefix <dir>\` on Linux/macOS and \`install.ps1 -Prefix <dir>\` on Windows."
+            echo "- Archive installers: \`install.sh --prefix <dir>\` on POSIX and \`install.ps1 -Prefix <dir>\` on Windows."
             echo "- Docs, examples, \`CHANGELOG.md\`, and bundled smoke executables where supported."
             echo
             echo "## Changelog"
@@ -385,18 +518,18 @@ jobs:
             echo
             echo "| File | Use | Checksum |"
             echo "| --- | --- | --- |"
-            echo "| [install.sh](${base_url}/install.sh) | Linux/macOS release archives | [checksum](${base_url}/install.sh.sha256) |"
+            echo "| [install.sh](${base_url}/install.sh) | POSIX release archives | [checksum](${base_url}/install.sh.sha256) |"
             echo "| [install.ps1](${base_url}/install.ps1) | Windows release archives | [checksum](${base_url}/install.ps1.sha256) |"
             echo
             echo "## Install Commands"
             echo
-            echo "Linux/macOS auto-detect:"
+            echo "POSIX auto-detect:"
             echo
             echo "\`\`\`bash"
             echo "curl -fsSL ${base_url}/install.sh | sh -s -- --version ${version} --base-url \"${base_url}\" --prefix \"\$HOME/.local\""
             echo "\`\`\`"
             echo
-            echo "Linux/macOS explicit target:"
+            echo "POSIX explicit target:"
             echo
             echo "\`\`\`bash"
             echo "curl -fsSL ${base_url}/install.sh | sh -s -- --version ${version} --base-url \"${base_url}\" --target macos-aarch64 --prefix \"\$HOME/.local\""

@@ -4,6 +4,13 @@
 
 ### Added
 
+* BSD platform support foundation: add FreeBSD, OpenBSD, NetBSD, and DragonFly
+  platform macros, share the kqueue readiness/user-wake backend with Darwin
+  where portable, keep Mach/ulock paths Darwin-only, wire BSD x86_64/aarch64
+  context paths into Make/CMake, add BSD release target detection, and add a
+  BSD GitHub Actions VM smoke matrix for core/API/select/I/O-buffer/shared-load
+  tests and package-shape checks.
+
 * explicit multi-runtime lifecycle surface: `llam_runtime_create()`,
   `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and
   `llam_runtime_destroy()` are the canonical embedding boundary. Legacy

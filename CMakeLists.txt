@@ -32,6 +32,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_OSX_ARCHITECTURES)
     endif()
 endif()
 
+set(LLAM_SYSTEM_IS_BSD FALSE)
+if(CMAKE_SYSTEM_NAME MATCHES "^(FreeBSD|OpenBSD|NetBSD|DragonFly)$")
+    set(LLAM_SYSTEM_IS_BSD TRUE)
+endif()
+
+set(LLAM_SYSTEM_IS_KQUEUE FALSE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR LLAM_SYSTEM_IS_BSD)
+    set(LLAM_SYSTEM_IS_KQUEUE TRUE)
+endif()
+
 set(LLAM_RUNTIME_SOURCES
     src/core/runtime.c
     src/core/runtime_abi.c
@@ -151,7 +161,7 @@ set(LLAM_RUNTIME_SOURCES
     src/io/windows/runtime_windows_iocp.c
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+if(LLAM_SYSTEM_IS_KQUEUE)
     list(APPEND LLAM_RUNTIME_SOURCES
         src/io/darwin/runtime_io_watch_darwin_state.c
         src/io/darwin/runtime_io_watch_darwin_migration_live.c
@@ -205,6 +215,15 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "x86
         src/asm/linux/x86_64/runtime_linux_x86_64.S
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "aarch64|arm64")
+    list(APPEND LLAM_RUNTIME_SOURCES
+        src/core/runtime_context_arm64.c
+        src/asm/linux/arm64/context_arm64.S
+    )
+elseif(LLAM_SYSTEM_IS_BSD AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
+    list(APPEND LLAM_RUNTIME_SOURCES
+        src/asm/linux/x86_64/context_x86_64.S
+    )
+elseif(LLAM_SYSTEM_IS_BSD AND LLAM_TARGET_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND LLAM_RUNTIME_SOURCES
         src/core/runtime_context_arm64.c
         src/asm/linux/arm64/context_arm64.S
@@ -270,6 +289,8 @@ foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+    elseif(LLAM_SYSTEM_IS_BSD)
+        target_compile_definitions(${LLAM_TARGET} PRIVATE _XOPEN_SOURCE=700)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         if(LLAM_HAVE_IO_URING_SETUP_BUF_RING)
             target_compile_definitions(${LLAM_TARGET} PRIVATE LLAM_HAVE_IO_URING_BUF_RING_HELPERS=1)
@@ -350,6 +371,9 @@ target_include_directories(bench PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
 )
 target_compile_definitions(bench PRIVATE _GNU_SOURCE)
+if(LLAM_SYSTEM_IS_BSD)
+    target_compile_definitions(bench PRIVATE _XOPEN_SOURCE=700)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(bench PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
 endif()
@@ -365,6 +389,8 @@ target_include_directories(llam_broker PRIVATE
 target_compile_definitions(llam_broker PRIVATE _GNU_SOURCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_compile_definitions(llam_broker PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(LLAM_SYSTEM_IS_BSD)
+    target_compile_definitions(llam_broker PRIVATE _XOPEN_SOURCE=700)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(llam_broker PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
 endif()
@@ -386,6 +412,8 @@ add_executable(server ${LLAM_POSIX_EXAMPLE_EXCLUDE}
 target_compile_definitions(server PRIVATE _GNU_SOURCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_compile_definitions(server PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(LLAM_SYSTEM_IS_BSD)
+    target_compile_definitions(server PRIVATE _XOPEN_SOURCE=700)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(server PRIVATE _WIN32_WINNT=0x0A00)
 endif()
@@ -397,6 +425,8 @@ add_executable(server_lossless ${LLAM_POSIX_EXAMPLE_EXCLUDE}
 target_compile_definitions(server_lossless PRIVATE _GNU_SOURCE LLAM_CHAT_LOSSLESS_DEFAULT=1)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_compile_definitions(server_lossless PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(LLAM_SYSTEM_IS_BSD)
+    target_compile_definitions(server_lossless PRIVATE _XOPEN_SOURCE=700)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(server_lossless PRIVATE _WIN32_WINNT=0x0A00)
 endif()
@@ -409,6 +439,8 @@ add_executable(server_flood ${LLAM_POSIX_EXAMPLE_EXCLUDE}
 target_compile_definitions(server_flood PRIVATE _GNU_SOURCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_compile_definitions(server_flood PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+elseif(LLAM_SYSTEM_IS_BSD)
+    target_compile_definitions(server_flood PRIVATE _XOPEN_SOURCE=700)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(server_flood PRIVATE _WIN32_WINNT=0x0A00)
 endif()
@@ -579,6 +611,8 @@ foreach(LLAM_TEST_TARGET
     target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _GNU_SOURCE)
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
+    elseif(LLAM_SYSTEM_IS_BSD)
+        target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _XOPEN_SOURCE=700)
     elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     endif()

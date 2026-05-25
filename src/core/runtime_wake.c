@@ -3,7 +3,8 @@
  * @brief Wakeup paths that move parked tasks back to runnable queues and notify workers.
  *
  * @details
- * Wake handles abstract eventfd on Linux/POSIX and kqueue user events on Darwin.
+ * Wake handles abstract Linux eventfd/futex, kqueue user events, Windows
+ * events, and a pthread-cond fallback for opaque helpers.
  * Shards and I/O nodes use an atomic pending bit to coalesce wakeups; this keeps
  * repeated kicks from flooding the kernel while a worker is already awake.
  *
@@ -29,8 +30,11 @@
 #include "runtime_windows_iocp.h"
 #endif
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_DARWIN
 #include <dlfcn.h>
+#endif
+
+#if LLAM_RUNTIME_BACKEND_KQUEUE
 #include <sys/event.h>
 #endif
 
@@ -148,7 +152,7 @@ static void llam_windows_wake_handle_take(int fd, HANDLE *handle_out, HANDLE *ti
  * @return File descriptor for the wake handle, or -1 with @c errno set.
  */
 int llam_wake_handle_create(void) {
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     struct kevent kev;
     int fd = kqueue();
 
@@ -228,7 +232,7 @@ int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns) {
         return -1;
     }
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     struct kevent event;
     struct timespec ts;
     struct timespec *ts_ptr = NULL;
@@ -326,7 +330,7 @@ static bool llam_kick_fd_raw(int fd) {
         return false;
     }
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     {
         struct kevent kev;
 
@@ -360,8 +364,8 @@ static bool llam_kick_fd_raw(int fd) {
 /**
  * @brief Drain a raw wake descriptor.
  *
- * Linux/POSIX eventfd wake counts are read until empty. Darwin EVFILT_USER with
- * EV_CLEAR is drained by the kevent wait itself, so no explicit read is needed.
+     * Linux eventfd wake counts are read until empty. EVFILT_USER with EV_CLEAR
+     * is drained by the kevent wait itself, so no explicit read is needed.
  *
  * @param fd Wake descriptor.
  */
@@ -370,7 +374,7 @@ static void llam_drain_fd_raw(int fd) {
         return;
     }
 
-#if !defined(__APPLE__)
+#if !LLAM_RUNTIME_BACKEND_KQUEUE
 #if LLAM_PLATFORM_WINDOWS
     {
         HANDLE os_handle = llam_windows_wake_handle_get(fd);
@@ -416,7 +420,7 @@ void llam_wake_handle_drain(int fd) {
     if (fd < 0) {
         return;
     }
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     /*
      * EVFILT_USER with EV_CLEAR is consumed by a zero-timeout wait. The shard
      * and node paths normally call drain after a wait has already consumed the
@@ -428,7 +432,7 @@ void llam_wake_handle_drain(int fd) {
     llam_drain_fd_raw(fd);
 }
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_DARWIN
 /** @brief Mach message used to wake a Darwin I/O node through a Mach port. */
 typedef struct llam_mach_wake_msg {
     mach_msg_header_t header;
@@ -576,9 +580,9 @@ void llam_kick_shard(llam_shard_t *shard) {
         return;
     }
     if (llam_eventfd_try_claim(&shard->event_pending) == 0U) {
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
         /*
-         * Darwin EVFILT_USER wakeups are edge-like around the drain path:
+         * EVFILT_USER wakeups are edge-like around the drain path:
          * a producer can observe event_pending just before the worker clears it
          * after consuming the kevent.  Re-triggering the user event is
          * idempotent and closes the same reset-after-producer race that Windows
@@ -624,16 +628,18 @@ void llam_kick_node(llam_node_t *node) {
         return;
     }
     if (llam_eventfd_try_claim(&node->event_pending) == 0U) {
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
         /*
          * I/O cancellation controls must wake the kqueue worker even when a
          * previous wake bit is still visible.  Without this re-trigger, a cancel
          * can land between kevent delivery and event_pending reset and leave the
          * worker asleep with a queued control op.
          */
+#if LLAM_RUNTIME_BACKEND_DARWIN
         if (node->mach_wake_enabled) {
             (void)llam_kick_node_mach(node);
         }
+#endif
         (void)llam_kick_fd_raw(node->event_fd);
 #endif
 #if LLAM_PLATFORM_WINDOWS
@@ -644,7 +650,7 @@ void llam_kick_node(llam_node_t *node) {
 #endif
         return;
     }
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_DARWIN
     if (node->mach_wake_enabled) {
         kicked = llam_kick_node_mach(node);
     }
@@ -689,7 +695,7 @@ void llam_drain_node_wake(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_DARWIN
     if (node->mach_wake_enabled) {
         llam_drain_node_mach(node);
     }

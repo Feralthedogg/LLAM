@@ -230,10 +230,10 @@ static bool llam_read_ready_direct_blocking_enabled(void) {
 /**
  * @brief Return whether not-ready accept should use the blocking-helper path.
  *
- * Darwin one-shot accept readiness is correct for many workloads, but hosted
+ * Kqueue one-shot accept readiness is correct for many workloads, but hosted
  * CI can expose a narrow registration/re-arm race in serial connect/accept
- * tests with peer-address output. The helper path is only used for accept
- * calls that cannot use the multishot accept-watch path. It keeps the listener
+ * tests with peer-address output. The helper path is only used for accept calls
+ * that cannot use the multishot accept-watch path. It keeps the listener
  * nonblocking and polls in short slices, so it does not pin a scheduler worker
  * and still observes task cancellation.
  */
@@ -247,7 +247,7 @@ static bool llam_accept_direct_blocking_enabled(void) {
         if (env != NULL && env[0] != '\0') {
             value = strcmp(env, "0") != 0 ? 1 : 0;
         } else {
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
             value = 1;
 #else
             value = 0;

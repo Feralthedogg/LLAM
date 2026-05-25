@@ -197,9 +197,9 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
             waiters = next;
         }
     } else if (rearm) {
-        // EV_DISPATCH disables the watch after delivery, so re-enable it if
-        // waiters remain and no error occurred.
-        if (llam_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH | EV_CLEAR) != 0) {
+        // One-shot kqueue delivery disables the watch after delivery, so
+        // re-enable it if waiters remain and no error occurred.
+        if (llam_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR) != 0) {
             int rearm_errno = errno;
             llam_io_req_t *waiters;
 
@@ -364,8 +364,8 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
             waiters = next;
         }
     } else if (rearm) {
-        // EV_DISPATCH requires explicit re-enable when waiters remain.
-        if (llam_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH | EV_CLEAR) != 0) {
+        // One-shot kqueue delivery requires explicit re-enable when waiters remain.
+        if (llam_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR) != 0) {
             int rearm_errno = errno;
             llam_io_req_t *waiters;
 

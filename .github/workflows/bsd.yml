@@ -1,0 +1,156 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
+name: bsd
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: bsd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: cpa.sh {0}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: freebsd-x86_64
+            os: freebsd
+            version: '15.0'
+            arch: x86-64
+            package_target: freebsd-x86_64
+          - name: openbsd-x86_64
+            os: openbsd
+            version: '7.9'
+            arch: x86-64
+            package_target: openbsd-x86_64
+          - name: netbsd-x86_64
+            os: netbsd
+            version: '10.1'
+            arch: x86-64
+            package_target: netbsd-x86_64
+          - name: dragonflybsd-x86_64
+            os: dragonflybsd
+            version: '6.4.2'
+            arch: x86-64
+            package_target: dragonflybsd-x86_64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Start BSD VM
+        uses: cross-platform-actions/action@v1.1.0
+        with:
+          operating_system: ${{ matrix.os }}
+          version: ${{ matrix.version }}
+          architecture: ${{ matrix.arch }}
+          shell: sh
+          memory: 6G
+          cpu_count: 2
+
+      - name: Install packages
+        run: |
+          set -eu
+          case "$(uname -s)" in
+            FreeBSD|DragonFly)
+              if ! command -v gmake >/dev/null 2>&1; then
+                sudo pkg install -y gmake
+              fi
+              if ! command -v cmake >/dev/null 2>&1; then
+                sudo pkg install -y cmake
+              fi
+              if ! command -v xz >/dev/null 2>&1; then
+                sudo pkg install -y xz
+              fi
+              ;;
+            OpenBSD)
+              if ! command -v gmake >/dev/null 2>&1; then
+                sudo pkg_add gmake
+              fi
+              if ! command -v cmake >/dev/null 2>&1; then
+                sudo pkg_add cmake
+              fi
+              if ! command -v xz >/dev/null 2>&1; then
+                sudo pkg_add xz
+              fi
+              ;;
+            NetBSD)
+              if ! command -v gmake >/dev/null 2>&1; then
+                sudo pkgin -y install gmake
+              fi
+              if ! command -v cmake >/dev/null 2>&1; then
+                sudo pkgin -y install cmake
+              fi
+              if ! command -v xz >/dev/null 2>&1; then
+                sudo pkgin -y install xz
+              fi
+              ;;
+          esac
+          command -v cc
+          command -v gmake
+          command -v cmake
+          command -v xz
+
+      - name: Build and run core tests
+        run: |
+          set -eu
+          gmake clean
+          gmake all \
+            test_abi_contract \
+            test_abi_compat \
+            test_runtime_core \
+            test_multi_runtime_core \
+            test_runtime_api_edges \
+            test_runtime_select_edges \
+            test_io_buffers \
+            test_shared_load \
+            CC=cc
+          ./test_abi_contract
+          ./test_abi_compat
+          ./test_runtime_core
+          ./test_multi_runtime_core
+          ./test_runtime_api_edges
+          ./test_runtime_select_edges
+          ./test_io_buffers
+          ./test_shared_load ./libllam_runtime.so.2.0.0
+
+      - name: CMake build and CTest smoke
+        run: |
+          set -eu
+          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
+          cmake --build build/bsd --target \
+            test_abi_contract \
+            test_abi_compat \
+            test_runtime_core \
+            test_multi_runtime_core \
+            test_runtime_api_edges \
+            test_runtime_select_edges \
+            test_io_buffers \
+            test_shared_load
+          ctest --test-dir build/bsd --output-on-failure --timeout 180 \
+            -R 'test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_io_buffers|test_shared_load'
+
+      - name: Package smoke
+        run: |
+          set -eu
+          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.0/'
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 \
+            ./scripts/package_release.sh "${{ matrix.package_target }}"
+          tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
+          grep '/include/llam/platform.h$' package-files.txt
+          grep '/lib/libllam_runtime.a$' package-files.txt
+          grep '/lib/libllam_runtime.so$' package-files.txt
+          grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
+          grep '/lib/pkgconfig/llam.pc$' package-files.txt

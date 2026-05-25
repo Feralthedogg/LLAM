@@ -739,7 +739,7 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         task->ctx.simd_flags = LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
     }
 #endif
-#if ((defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64) || \
+#if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64) || \
     (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)
     {
         uintptr_t stack_top = (uintptr_t)task->stack_base + task->stack_size;

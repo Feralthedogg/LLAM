@@ -57,6 +57,48 @@
 #define LLAM_PLATFORM_DARWIN 0
 #endif
 
+/** @brief Non-zero when compiling for FreeBSD. */
+#if defined(__FreeBSD__) && !LLAM_PLATFORM_WINDOWS
+#define LLAM_PLATFORM_FREEBSD 1
+#else
+#define LLAM_PLATFORM_FREEBSD 0
+#endif
+
+/** @brief Non-zero when compiling for OpenBSD. */
+#if defined(__OpenBSD__) && !LLAM_PLATFORM_WINDOWS
+#define LLAM_PLATFORM_OPENBSD 1
+#else
+#define LLAM_PLATFORM_OPENBSD 0
+#endif
+
+/** @brief Non-zero when compiling for NetBSD. */
+#if defined(__NetBSD__) && !LLAM_PLATFORM_WINDOWS
+#define LLAM_PLATFORM_NETBSD 1
+#else
+#define LLAM_PLATFORM_NETBSD 0
+#endif
+
+/** @brief Non-zero when compiling for DragonFly BSD. */
+#if defined(__DragonFly__) && !LLAM_PLATFORM_WINDOWS
+#define LLAM_PLATFORM_DRAGONFLY 1
+#else
+#define LLAM_PLATFORM_DRAGONFLY 0
+#endif
+
+/** @brief Non-zero when compiling for a BSD family platform. */
+#if LLAM_PLATFORM_FREEBSD || LLAM_PLATFORM_OPENBSD || LLAM_PLATFORM_NETBSD || LLAM_PLATFORM_DRAGONFLY
+#define LLAM_PLATFORM_BSD 1
+#else
+#define LLAM_PLATFORM_BSD 0
+#endif
+
+/** @brief Non-zero when the platform exposes kqueue as the native readiness backend. */
+#if LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD
+#define LLAM_PLATFORM_KQUEUE 1
+#else
+#define LLAM_PLATFORM_KQUEUE 0
+#endif
+
 /** @brief Non-zero when the public fd type is POSIX-compatible. */
 #if !LLAM_PLATFORM_WINDOWS
 #define LLAM_PLATFORM_POSIX 1
@@ -163,6 +205,14 @@ static inline int llam_handle_is_invalid(llam_handle_t handle) {
 #define LLAM_PLATFORM_NAME "linux"
 #elif LLAM_PLATFORM_DARWIN
 #define LLAM_PLATFORM_NAME "darwin"
+#elif LLAM_PLATFORM_FREEBSD
+#define LLAM_PLATFORM_NAME "freebsd"
+#elif LLAM_PLATFORM_OPENBSD
+#define LLAM_PLATFORM_NAME "openbsd"
+#elif LLAM_PLATFORM_NETBSD
+#define LLAM_PLATFORM_NAME "netbsd"
+#elif LLAM_PLATFORM_DRAGONFLY
+#define LLAM_PLATFORM_NAME "dragonfly"
 #else
 #define LLAM_PLATFORM_NAME "posix"
 #endif

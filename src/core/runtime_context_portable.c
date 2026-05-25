@@ -25,7 +25,7 @@
 
 #include "runtime_internal.h"
 
-#if !(((defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64) || \
+#if !(((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64) || \
       (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)) && \
     !LLAM_ARCH_AARCH64
 

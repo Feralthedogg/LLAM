@@ -438,7 +438,7 @@ unsigned llam_count_allowed_cpus(unsigned **out_cpus) {
     }
     *out_cpus = cpus;
     return count;
-#else
+#elif LLAM_PLATFORM_DARWIN
     unsigned count;
     unsigned *cpus;
     unsigned i;
@@ -457,6 +457,34 @@ unsigned llam_count_allowed_cpus(unsigned **out_cpus) {
         return 0;
     }
 
+    cpus = calloc(count, sizeof(*cpus));
+    if (cpus == NULL) {
+        return 0;
+    }
+    for (i = 0; i < count; ++i) {
+        cpus[i] = i;
+    }
+    *out_cpus = cpus;
+    return count;
+#else
+    long online;
+    unsigned count;
+    unsigned *cpus;
+    unsigned i;
+
+    if (out_cpus == NULL) {
+        return 0;
+    }
+
+#ifdef _SC_NPROCESSORS_ONLN
+    online = sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    online = 1;
+#endif
+    if (online <= 0) {
+        online = 1;
+    }
+    count = (unsigned)online;
     cpus = calloc(count, sizeof(*cpus));
     if (cpus == NULL) {
         return 0;

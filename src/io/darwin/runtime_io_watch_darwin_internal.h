@@ -1,11 +1,11 @@
 /**
  * @file src/io/darwin/runtime_io_watch_darwin_internal.h
- * @brief Darwin/kqueue I/O watch backend private declarations.
+ * @brief Darwin/BSD kqueue I/O watch backend private declarations.
  *
  * @details
- * The Darwin backend uses kqueue for request readiness and multishot-style watch
- * state. This header collects private contracts shared by the Darwin state,
- * control, worker, event, completion, and migration files.
+ * The kqueue backend uses kevents for request readiness and multishot-style
+ * watch state. This header collects private contracts shared by the kqueue
+ * state, control, worker, event, completion, and migration files.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -32,6 +32,43 @@
 
 /** Maximum kevents submitted/read in one Darwin backend batch. */
 #define LLAM_DARWIN_KEVENT_BATCH 32U
+
+/*
+ * BSD kqueue variants are close to Darwin but not identical.  Keep portability
+ * gates here so worker/control files can stay focused on watch ownership logic.
+ */
+#ifdef EV_DISPATCH
+#define LLAM_KQUEUE_WATCH_ONESHOT_FLAGS EV_DISPATCH
+#else
+#define LLAM_KQUEUE_WATCH_ONESHOT_FLAGS EV_ONESHOT
+#endif
+
+#ifdef EV_UDATA_SPECIFIC
+#define LLAM_KQUEUE_UDATA_FLAGS EV_UDATA_SPECIFIC
+#else
+#define LLAM_KQUEUE_UDATA_FLAGS 0U
+#endif
+
+#ifdef EVFILT_MACHPORT
+#define LLAM_KQUEUE_HAS_MACHPORT 1
+#else
+#define LLAM_KQUEUE_HAS_MACHPORT 0
+#endif
+
+static inline bool llam_kqueue_is_worker_wake_event(const struct kevent *event) {
+    if (event == NULL) {
+        return false;
+    }
+    if (event->filter == EVFILT_USER) {
+        return true;
+    }
+#if LLAM_KQUEUE_HAS_MACHPORT
+    if (event->filter == EVFILT_MACHPORT) {
+        return true;
+    }
+#endif
+    return false;
+}
 
 /** @brief Temporary accept completion list node drained after releasing locks. */
 typedef struct llam_darwin_accept_completion {

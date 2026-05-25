@@ -18,6 +18,10 @@ if [ -z "$target" ]; then
     case "$(uname -s)" in
         Darwin) target="macos-$(uname -m)" ;;
         Linux) target="linux-$(uname -m)" ;;
+        FreeBSD) target="freebsd-$(uname -m)" ;;
+        OpenBSD) target="openbsd-$(uname -m)" ;;
+        NetBSD) target="netbsd-$(uname -m)" ;;
+        DragonFly) target="dragonflybsd-$(uname -m)" ;;
         *) target="$(uname -s)-$(uname -m)" ;;
     esac
 fi
@@ -26,7 +30,7 @@ case "$target" in
     linux-*)
         private_libs="-pthread -luring -lm"
         ;;
-    macos-*|darwin-*)
+    macos-*|darwin-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*)
         private_libs="-pthread"
         ;;
     *)

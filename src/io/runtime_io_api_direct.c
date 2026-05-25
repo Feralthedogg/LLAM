@@ -195,8 +195,8 @@ void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req) {
 /**
  * @brief Platform polling wrapper used by fallback paths.
  *
- * Darwin uses a temporary kqueue so the rest of the runtime can use poll-like
- * semantics. Other platforms delegate to @c poll directly.
+ * Kqueue platforms use a temporary kqueue so the rest of the runtime can use
+ * poll-like semantics. Other platforms delegate to @c poll directly.
  *
  * @param fd         Descriptor to poll.
  * @param events     Requested events.
@@ -211,7 +211,7 @@ int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
         (void)timeout_ms;
         return llam_invalid_fd_poll_result(revents);
     }
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     struct kevent changes[2];
     struct kevent fired[2];
     struct timespec ts;
@@ -251,7 +251,7 @@ int llam_platform_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
 
                 /*
                  * poll(2) reports per-descriptor failures through revents and
-                 * still returns a positive descriptor count. Darwin's kqueue
+                 * still returns a positive descriptor count. kqueue
                  * reports a closed fd as EV_ERROR, and the temporary kqueue fd
                  * can even reuse the same integer value as the caller's stale
                  * descriptor. Keep the public wrapper poll-compatible by

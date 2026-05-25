@@ -142,7 +142,7 @@ int llam_darwin_req_change_one(llam_node_t *node, llam_io_req_t *req, int16_t fi
     EV_SET(&change,
            (uintptr_t)req->fd,
            filter,
-           (uint16_t)(flags | EV_UDATA_SPECIFIC),
+           (uint16_t)(flags | LLAM_KQUEUE_UDATA_FLAGS),
            0U,
            0,
            (void *)(uintptr_t)llam_io_udata_encode(req, LLAM_IO_UDATA_REQ));

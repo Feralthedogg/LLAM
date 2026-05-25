@@ -7,13 +7,17 @@
 ![C11](https://img.shields.io/badge/C-C11-blue)
 ![Linux](https://img.shields.io/badge/Linux-io_uring-yellow)
 ![macOS](https://img.shields.io/badge/macOS-kqueue-lightgrey)
+![BSD](https://img.shields.io/badge/BSD-kqueue-lightblue)
 ![Windows](https://img.shields.io/badge/Windows-IOCP-orange)
 ![Build](https://img.shields.io/badge/build-Make%20%2F%20CMake-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, `connect`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
 
-LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darwin backend uses kqueue-based watch and completion paths, and the native Windows 10/11 backend uses IOCP for overlapped Winsock `read`/`write`/`accept`/`connect` plus generic HANDLE `ReadFile`/`WriteFile` requests.
+LLAM is not Linux-only. The Linux backend uses io_uring/liburing, macOS/Darwin
+and BSD use kqueue-based watch and completion paths, and the native Windows
+10/11 backend uses IOCP for overlapped Winsock `read`/`write`/`accept`/`connect`
+plus generic HANDLE `ReadFile`/`WriteFile` requests.
 
 ## Key Features
 
@@ -21,6 +25,7 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 - N:M scheduling over runtime worker threads.
 - Linux I/O backend based on io_uring/liburing.
 - macOS/Darwin I/O backend based on kqueue.
+- FreeBSD, OpenBSD, NetBSD, and DragonFly BSD kqueue backend wiring.
 - Windows 10/11 backend with IOCP request completions for sockets and overlapped HANDLEs, Windows wake handles, and x86_64 context-switch assembly.
 - Task primitives: `spawn`, `yield`, `join`, `sleep`, deadlines, and task metadata.
 - Synchronization primitives: mutex, condition variable, channel, and cancellation token.
@@ -41,7 +46,17 @@ LLAM is not Linux-only. The Linux backend uses io_uring/liburing, the macOS/Darw
 | Linux aarch64 | Supported | io_uring/liburing | GCC or Clang | `make verify-linux CC=gcc` |
 | macOS arm64 | Primary macOS path | kqueue | Apple Clang | `CC=clang make verify-darwin` |
 | macOS x86_64 | Supported | kqueue + x86_64 asm context switch | Apple Clang | `CC=clang make verify-darwin` |
+| FreeBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
+| OpenBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
+| NetBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
+| DragonFly BSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
 | Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx, overlapped HANDLE ReadFile/WriteFile, plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MSVC/MASM or MinGW through CMake; Makefile delegates to that CMake path on Windows | CMake Windows build plus runtime core/API/shutdown/buffer tests, `test_windows_policy`, `test_windows_runtime_smoke`, `test_windows_iocp_io`, and `test_windows_handle_io`; `scripts/verify_windows.ps1 -Native` |
+
+BSD support shares the kqueue watch backend with Darwin where the kernel
+contract is common, while Darwin-only Mach wake and scheduler hints remain
+guarded behind Darwin-specific code. The BSD CI matrix is the current support
+gate; long soak and platform-specific performance tuning still trail Linux and
+macOS until native runner history is available.
 
 Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, IOCP-backed socket requests, and overlapped HANDLE I/O. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
 On Windows 11 policy, associated socket/HANDLE objects attempt
@@ -70,6 +85,19 @@ Install macOS command-line tools:
 xcode-select --install
 ```
 
+Install BSD dependencies:
+
+```sh
+# FreeBSD / DragonFly
+sudo pkg install -y gmake
+
+# OpenBSD
+sudo pkg_add gmake
+
+# NetBSD
+sudo pkgin -y install gmake
+```
+
 Build on Linux:
 
 ```bash
@@ -80,6 +108,12 @@ Build on macOS:
 
 ```bash
 CC=clang make -j4
+```
+
+Build on BSD:
+
+```sh
+gmake -j4 CC=cc
 ```
 
 Build native Windows with CMake:
@@ -262,14 +296,15 @@ The Makefile equivalent is `make shared`.
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
 `v2.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
-macOS x86_64, and macOS arm64, plus a native Windows x86_64 `.zip` archive
-through `.github/workflows/release.yml`.
+macOS x86_64, macOS arm64, and BSD targets that pass the BSD CI smoke gate, plus
+a native Windows x86_64 `.zip` archive through `.github/workflows/release.yml`.
 
 The 2.x release gate is platform-local plus sanitizer-backed: Linux must pass
 `make verify-linux` or Docker verification, macOS must pass the Darwin verify
-path, Windows must pass native CMake/CTest plus Windows stress smoke, and the
-focused ASan/UBSan suite must pass for public handle, I/O buffer, shutdown, and
-multi-runtime edge coverage. The full checklist is in `docs/operations.md`.
+path, BSD targets must pass the VM smoke workflow, Windows must pass native
+CMake/CTest plus Windows stress smoke, and the focused ASan/UBSan suite must
+pass for public handle, I/O buffer, shutdown, and multi-runtime edge coverage.
+The full checklist is in `docs/operations.md`.
 
 Use an installed SDK with CMake:
 
@@ -286,13 +321,13 @@ Use an installed SDK with `pkg-config`:
 cc main.c $(pkg-config --cflags --libs llam) -o my_app
 ```
 
-Install on Linux/macOS:
+Install on Linux/macOS/BSD:
 
 ```bash
 curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --prefix "$HOME/.local"
 ```
 
-Install a specific Linux/macOS target:
+Install a specific POSIX target:
 
 ```bash
 curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --target macos-aarch64 --prefix "$HOME/.local"
@@ -312,7 +347,7 @@ Include the canonical public API:
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer size-aware `_ex` entry points so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
 Embedding code that needs independent scheduler instances should use `llam_runtime_create()`, `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`. The older host-thread lifecycle calls remain convenience wrappers for the process-default runtime; managed task spawn/stop/shutdown wrappers target the task's owner runtime and do not stop foreign runtimes.
-macOS-specific performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
+macOS/BSD kqueue performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
 Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
 
 ## Execution Model
@@ -453,7 +488,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS uses kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, and owned-buffer reads on supported native backends. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS and BSD use kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, and owned-buffer reads on supported native backends. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
 
 ```c
 #include "llam/runtime.h"
@@ -719,6 +754,9 @@ Time, debug, and platform:
 | `LLAM_INVALID_HANDLE` / `LLAM_HANDLE_IS_INVALID` | Platform-correct invalid generic-handle sentinel and predicate. |
 | `LLAM_PLATFORM_LINUX` | Linux build flag. |
 | `LLAM_PLATFORM_DARWIN` | macOS/Darwin build flag. |
+| `LLAM_PLATFORM_FREEBSD` / `LLAM_PLATFORM_OPENBSD` / `LLAM_PLATFORM_NETBSD` / `LLAM_PLATFORM_DRAGONFLY` | BSD family build flags. |
+| `LLAM_PLATFORM_BSD` | Any supported BSD-family build flag. |
+| `LLAM_PLATFORM_KQUEUE` | Darwin or BSD kqueue backend build flag. |
 | `LLAM_PLATFORM_WINDOWS` | Windows build flag. |
 | `LLAM_PLATFORM_NAME` | Platform name string. |
 
@@ -790,16 +828,16 @@ Selected environment variables:
 | `LLAM_ARM64_UNSAFE_SKIP_SCHEDULER_SIMD` | `0`, `1` | Alias for `LLAM_AARCH64_UNSAFE_SKIP_SCHEDULER_SIMD`. |
 | `LLAM_DIRECT_BLOCKING_IO` | `0`, `1` | Allow eligible blocking socket read/write operations to run through compensated direct blocking regions. |
 | `LLAM_DIRECT_BLOCKING_POLL` | `0`, `1`, unset | Control direct blocking poll fallback; Linux/Windows auto mode handles finite waits directly when profitable. |
-| `LLAM_ACCEPT_DIRECT_BLOCKING` | `0`, `1` | Route managed `accept` calls that cannot use multishot accept-watch through a compensated helper poll loop; default is enabled on macOS and disabled elsewhere. |
+| `LLAM_ACCEPT_DIRECT_BLOCKING` | `0`, `1` | Route managed `accept` calls that cannot use multishot accept-watch through a compensated helper poll loop; default is enabled on kqueue platforms and disabled elsewhere. |
 | `LLAM_IO_POLL_REDIRECT_TIMEOUT_MS` | milliseconds | Redirect long direct-poll waits through opaque blocking compensation on Linux. |
-| `LLAM_IO_COOP_YIELD` | `0`, `1` | Enable cooperative yields around direct I/O fast paths; default is enabled on macOS, Linux, and Windows. |
-| `LLAM_IO_POLL_COOP_YIELD` | `0`, `1` | Enable cooperative yields in poll readiness paths; default is enabled on macOS, Linux, and Windows. |
-| `LLAM_IO_POLL_PRE_YIELD` | `0`, `1` | Let poll hand off to same-shard runnable producers before the first readiness probe; default is enabled on macOS and Windows. |
-| `LLAM_IO_POLL_EXTRA_YIELD` | `0`, `1` | Add an extra poll-readiness yield; default is enabled on macOS and Windows. |
+| `LLAM_IO_COOP_YIELD` | `0`, `1` | Enable cooperative yields around direct I/O fast paths; default is enabled on kqueue platforms, Linux, and Windows. |
+| `LLAM_IO_POLL_COOP_YIELD` | `0`, `1` | Enable cooperative yields in poll readiness paths; default is enabled on kqueue platforms, Linux, and Windows. |
+| `LLAM_IO_POLL_PRE_YIELD` | `0`, `1` | Let poll hand off to same-shard runnable producers before the first readiness probe; default is enabled on kqueue platforms and Windows. |
+| `LLAM_IO_POLL_EXTRA_YIELD` | `0`, `1` | Add an extra poll-readiness yield; default is enabled on kqueue platforms and Windows. |
 | `LLAM_IO_POLL_READY_YIELDS` | `0`-`8` | Bound short same-shard ready-yield probes before poll parks in the backend. |
 | `LLAM_READ_READY_INITIAL_HANDOFF` | `0`, `1` | Let `llam_read_when_ready()` hand off once to local producers before its first read probe; default is disabled. |
 | `LLAM_READ_READY_DIRECT_BLOCKING` | `0`, `1` | Let infinite `llam_read_when_ready()` use compensated direct blocking reads; default is disabled. |
-| `LLAM_POLL_SOCKET_PEEK` | `0`, `1` | Use `MSG_PEEK` for socket `POLLIN` fast checks; default is enabled on macOS and opt-in elsewhere. |
+| `LLAM_POLL_SOCKET_PEEK` | `0`, `1` | Use `MSG_PEEK` for socket `POLLIN` fast checks; default is enabled on kqueue platforms and opt-in elsewhere. |
 | `LLAM_IO_WRITE_HANDOFF` | `0`, `1` | Yield after small socket writes so local readers can run; default is enabled on macOS and Linux. |
 | `LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF` | `0`, `1` | Prefer direct same-shard task handoff after eligible socket writes; default is enabled on macOS, Linux, and Windows. |
 | `LLAM_YIELD_DIRECT_HANDOFF` | `0`, `1`, unset | Allow ordinary yields to switch directly to same-shard runnable work when no timers or inject work are pending. |
@@ -1036,13 +1074,12 @@ New platform work should extend the existing backend model without weakening
 the Linux, Darwin, or Windows fast paths. The priority is correctness first,
 then native I/O integration, then platform-specific context-switch tuning.
 
-- BSD: start with FreeBSD as the first target because it has mature kqueue semantics and a practical CI story; use kqueue for socket readiness, timer integration, and user wakeups instead of trying to emulate Linux io_uring.
-- BSD variants: keep OpenBSD and NetBSD as follow-up targets after FreeBSD is stable; isolate differences in `src/io/bsd/` and `src/platform/` so the public ABI remains unchanged.
-- BSD portability: avoid Linux-only assumptions such as `eventfd`, `epoll`, `timerfd`, and io_uring in shared code; prefer POSIX primitives plus kqueue `EVFILT_USER` or pipe-based fallback where needed.
+- BSD: FreeBSD, OpenBSD, NetBSD, and DragonFly BSD now share the kqueue readiness, user-wake, direct-poll, and packaging path. The remaining work is native soak history, target-specific tuning, and widening CI beyond the current x86_64 smoke gate.
+- BSD portability: keep Linux-only assumptions such as `eventfd`, `epoll`, `timerfd`, and io_uring out of shared kqueue code; use kqueue `EVFILT_USER` for runtime wakeups and guard Darwin-only Mach/ulock paths behind Darwin checks.
 - RISC-V: start with Linux `riscv64` on the existing io_uring backend and portable context path, then add dedicated `src/asm/linux/riscv64/` context switching once ABI save/restore rules are fully tested.
 - RISC-V ABI: add explicit tests for stack alignment, callee-saved register preservation, atomic width assumptions, and task entry/exit trampolines before enabling the assembly path by default.
-- CI: add riscv64 cross-build and QEMU smoke first, then native runner stress if available; add FreeBSD CI through a VM/action runner before marking BSD as supported.
-- Release policy: do not publish BSD or RISC-V release artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
+- CI: keep the BSD VM matrix green for FreeBSD, OpenBSD, NetBSD, and DragonFly BSD; add riscv64 cross-build and QEMU smoke first, then native runner stress if available.
+- Release policy: publish BSD artifacts only after the target's VM smoke gate passes. Do not publish RISC-V artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
 
 ### 5. C Ecosystem And Operations
 
@@ -1148,7 +1185,7 @@ flowchart LR
     IOAPI --> IOEngine["I/O engine\nruntime-owned node selection\ndirect path / async submit / fallback"]
     IOAPI --> OwnedBuffers["owned I/O buffers\nruntime registry / aligned allocation\nrelease-after-shutdown rules"]
     IOEngine --> Linux["src/io/linux\nio_uring / epoll-style watches\nfd identity / CQE ownership"]
-    IOEngine --> Darwin["src/io/darwin\nkqueue / EVFILT_USER / Mach wake\nmigration and rehome"]
+    IOEngine --> Kqueue["src/io/darwin\nDarwin/BSD kqueue / EVFILT_USER\nDarwin Mach wake when available"]
     IOEngine --> Windows["src/io/windows\nIOCP / Winsock / HANDLE I/O\nAcceptEx / ConnectEx / overlapped ops"]
     IOEngine --> WatchCommon["shared watch helpers\nlookup / queues / waiters / migration\ncancel and timeout races"]
 
@@ -1220,7 +1257,10 @@ sequenceDiagram
 
 The `norm_q` has two implementations selected at init time: a mutex-guarded FIFO queue, or a **Chase-Lev lock-free deque** (`llam_cldeque_t`) for work-stealing. The lock-free deque is a bounded circular buffer of 4096 task pointers with separated `top` (steal end) and `bottom` (push/pop end) atomics, each on its own cache line.
 
-**Nodes** are platform I/O event backends. Each node owns either an `io_uring` ring (Linux) or a kqueue fd (Darwin), plus watch tables, submit queues, and control queues. Shards submit I/O requests to nodes; nodes complete requests back to the owning shard's task.
+**Nodes** are platform I/O event backends. Each node owns either an `io_uring`
+ring (Linux), a kqueue fd (Darwin/BSD), or an IOCP port (Windows), plus watch
+tables, submit queues, and control queues. Shards submit I/O requests to nodes;
+nodes complete requests back to the owning shard's task.
 
 ### Scheduler Loop
 
@@ -1252,6 +1292,8 @@ Context switches are performed in hand-written assembly for each supported platf
 | Linux aarch64 | `x19-x29, x30, sp` | `stp`/`ldp` in `context_arm64.S` |
 | Darwin x86_64 | `rbx, rbp, r12-r15`, `rsp` | Same register set as Linux x86_64 |
 | Darwin arm64 | `x19-x29, x30, sp` | Same register set as Linux aarch64 |
+| BSD x86_64 | `rbx, rbp, r12-r15`, `rsp` | ELF x86_64 context switch path |
+| BSD aarch64 | `x19-x29, x30, sp` | AArch64 context switch path |
 | Fallback | Full register set | `ucontext` via `swapcontext()` |
 
 On x86_64, the fast path is approximately:
@@ -1274,7 +1316,7 @@ LLAM provides scheduler-safe I/O through a multi-tier completion strategy. Each 
 1. Direct nonblocking fast path (try without parking)
 2. Cooperative yield + retry if local work is pending
 3. Direct blocking heuristic for short-lived ops
-4. Async backend submission (io_uring SQE or kqueue kevent)
+4. Async backend submission (io_uring SQE, kqueue kevent, or IOCP packet)
 5. Blocking-worker fallback if the backend cannot handle the fd
 ```
 
@@ -1290,11 +1332,18 @@ is still legal but gives the runtime less diagnostic context around fd reuse.
 - SQPOLL mode (experimental) where the kernel polls the SQ without syscalls.
 - Completion-driven task wake: CQE processing identifies the owning shard and re-enqueues the task.
 
-**Darwin backend** (`src/io/darwin/`): each node uses kqueue with `EVFILT_READ`, `EVFILT_WRITE`, and `EVFILT_USER` for wake signaling. Darwin nodes use Mach ports (`semaphore_t`, `mach_port_t`) for cross-thread wake when available.
+**Kqueue backend** (`src/io/darwin/`): Darwin and BSD nodes use kqueue with
+`EVFILT_READ`, `EVFILT_WRITE`, and `EVFILT_USER` for readiness and runtime wake
+signaling. Darwin additionally uses Mach ports (`semaphore_t`, `mach_port_t`)
+for cross-thread wake when available; BSD stays on the portable kqueue user-event
+path.
 
 **Windows backend** (`src/io/windows/`): each node uses IOCP for overlapped Winsock operations and generic HANDLE `ReadFile`/`WriteFile` requests. Socket readiness policy stays conservative for stream `POLLIN` unless explicitly enabled; waitable HANDLE polling uses the platform wait path because it observes signaled handle state, not socket readiness.
 
-Linux and Darwin backends support **multishot watches** — a single registered watch serves multiple waiters, avoiding redundant kernel registrations for the same fd. Watch tables track fd identity by `(dev_t, ino_t)` to detect fd reuse.
+Linux and kqueue backends support **multishot watches** — a single registered
+watch serves multiple waiters, avoiding redundant kernel registrations for the
+same fd. Watch tables track fd identity by `(dev_t, ino_t)` where the platform
+exposes stable identity to detect fd reuse.
 
 **I/O request lifecycle**: requests (`llam_io_req_t`) carry an atomic `wait_mode` that transitions through `NONE → SUBMIT_QUEUE → INFLIGHT → (completion)` or `NONE → POLL_WATCH/ACCEPT_WATCH/RECV_WATCH → (completion)`. An atomic `abort_reason` field handles cancellation and timeout races without locks.
 

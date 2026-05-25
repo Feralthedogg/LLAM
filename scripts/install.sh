@@ -179,6 +179,45 @@ sha256_file() {
     fi
 }
 
+tar_list_archive() {
+    archive_path="$1"
+
+    if tar -tf "$archive_path" 2>/dev/null; then
+        return 0
+    fi
+    if command -v xz >/dev/null 2>&1; then
+        xz -dc "$archive_path" | tar -tf -
+        return $?
+    fi
+    tar -tf "$archive_path"
+}
+
+tar_verbose_archive() {
+    archive_path="$1"
+
+    if tar -tvf "$archive_path" 2>/dev/null; then
+        return 0
+    fi
+    if command -v xz >/dev/null 2>&1; then
+        xz -dc "$archive_path" | tar -tvf -
+        return $?
+    fi
+    tar -tvf "$archive_path"
+}
+
+tar_extract_archive() {
+    archive_path="$1"
+
+    if tar -xf "$archive_path" 2>/dev/null; then
+        return 0
+    fi
+    if command -v xz >/dev/null 2>&1; then
+        xz -dc "$archive_path" | tar -xf -
+        return $?
+    fi
+    tar -xf "$archive_path"
+}
+
 verify_archive_checksum() {
     archive_path="$1"
     checksum_path="$2"
@@ -402,7 +441,7 @@ validate_archive_members() {
     verbose_file="$tmp_dir/archive.verbose"
     duplicate_file="$tmp_dir/archive.duplicates"
 
-    tar -tf "$archive_path" > "$members_file"
+    tar_list_archive "$archive_path" > "$members_file"
     : > "$canonical_file"
     while IFS= read -r member; do
         case "$member" in
@@ -451,7 +490,7 @@ validate_archive_members() {
         return 1
     fi
 
-    tar -tvf "$archive_path" > "$verbose_file"
+    tar_verbose_archive "$archive_path" > "$verbose_file"
     while IFS= read -r line; do
         mode_field="${line%% *}"
         type_char="${line%"${line#?}"}"
@@ -667,6 +706,10 @@ detect_target() {
     case "$os" in
         Linux) os_name="linux" ;;
         Darwin) os_name="macos" ;;
+        FreeBSD) os_name="freebsd" ;;
+        OpenBSD) os_name="openbsd" ;;
+        NetBSD) os_name="netbsd" ;;
+        DragonFly) os_name="dragonflybsd" ;;
         *)
             echo "unsupported OS for LLAM release installer: $os" >&2
             exit 1
@@ -745,7 +788,7 @@ run_standalone_install() {
         cd "$tmp_dir"
         verify_archive_checksum "$archive" "$archive.sha256" "$archive"
         validate_archive_members "$archive" "$package"
-        tar -xf "$archive"
+        tar_extract_archive "$archive"
     )
 
     if [ ! -f "$tmp_dir/$package/install.sh" ] || [ -L "$tmp_dir/$package/install.sh" ]; then

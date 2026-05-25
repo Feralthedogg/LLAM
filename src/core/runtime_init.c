@@ -622,7 +622,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->direct_handoff_stats_enabled = llam_runtime_env_flag("LLAM_DIRECT_HANDOFF_STATS", 0U);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
-#elif defined(__linux__) || defined(__APPLE__)
+#elif LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_KQUEUE
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
 #else
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 0U, 65535U);
@@ -856,7 +856,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_init(&rt->shards[i].opaque_helper_opaque_wait, 0U);
 #endif
         rt->shards[i].opaque_redirect_target_id = UINT_MAX;
-#if defined(__linux__) || LLAM_PLATFORM_WINDOWS || defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_LINUX || LLAM_PLATFORM_WINDOWS || LLAM_RUNTIME_BACKEND_KQUEUE
         atomic_init(&rt->shards[i].opaque_wake_seq, 0U);
 #endif
         if (io_node_ids != NULL) {

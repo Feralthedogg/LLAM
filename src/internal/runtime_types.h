@@ -873,7 +873,7 @@ struct llam_shard {
     bool lock_initialized;
     bool opaque_lock_initialized;
     bool opaque_cv_initialized;
-#if defined(__linux__) || LLAM_PLATFORM_WINDOWS || defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_LINUX || LLAM_PLATFORM_WINDOWS || LLAM_RUNTIME_BACKEND_KQUEUE
     atomic_uint opaque_wake_seq;
 #endif
 #if defined(__APPLE__)

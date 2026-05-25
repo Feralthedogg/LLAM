@@ -20,6 +20,10 @@ if [ -z "$target" ]; then
     case "$os" in
         Darwin) os_name="macos" ;;
         Linux) os_name="linux" ;;
+        FreeBSD) os_name="freebsd" ;;
+        OpenBSD) os_name="openbsd" ;;
+        NetBSD) os_name="netbsd" ;;
+        DragonFly) os_name="dragonflybsd" ;;
         *) os_name="$(printf '%s' "$os" | LC_ALL=C tr '[:upper:]' '[:lower:]')" ;;
     esac
     case "$arch" in
@@ -33,6 +37,10 @@ fi
 case "$host_os" in
     Darwin) host_target_os="macos" ;;
     Linux) host_target_os="linux" ;;
+    FreeBSD) host_target_os="freebsd" ;;
+    OpenBSD) host_target_os="openbsd" ;;
+    NetBSD) host_target_os="netbsd" ;;
+    DragonFly) host_target_os="dragonflybsd" ;;
     *)
         echo "unsupported release packaging host: $host_os" >&2
         exit 1
@@ -271,7 +279,7 @@ case "$host_os" in
         require_input "$root_dir/libllam_runtime.$abi_major.dylib"
         require_input "$root_dir/libllam_runtime.dylib"
         ;;
-    Linux)
+    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
         require_input "$root_dir/libllam_runtime.so.$library_version"
         require_input "$root_dir/libllam_runtime.so.$abi_major"
         require_input "$root_dir/libllam_runtime.so"
@@ -307,7 +315,7 @@ case "$host_os" in
         validate_release_input_link_or_file "$root_dir/libllam_runtime.dylib"
         validate_expected_symlink_target "$root_dir/libllam_runtime.dylib" "libllam_runtime.$abi_major.dylib"
         ;;
-    Linux)
+    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
         validate_release_input_file "$root_dir/libllam_runtime.so.$library_version"
         validate_release_input_link_or_file "$root_dir/libllam_runtime.so.$abi_major"
         validate_release_input_link_or_file "$root_dir/libllam_runtime.so"
@@ -350,7 +358,7 @@ case "$host_os" in
         cp "$root_dir/libllam_runtime.$abi_major.dylib" "$stage/lib/"
         cp -P "$root_dir/libllam_runtime.dylib" "$stage/lib/"
         ;;
-    Linux)
+    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
         cp "$root_dir/libllam_runtime.so.$library_version" "$stage/lib/"
         cp -P "$root_dir/libllam_runtime.so.$abi_major" "$stage/lib/"
         cp -P "$root_dir/libllam_runtime.so" "$stage/lib/"
@@ -366,7 +374,14 @@ LLAM_VERSION="$library_version" LLAM_ABI_MAJOR="$abi_major" \
 
 validate_safe_stage_tree "$stage"
 
-tar -C "$out_dir" -cJf "$archive" "$package_name"
+if ! tar -C "$out_dir" -cJf "$archive" "$package_name" 2>/dev/null; then
+    rm -f "$archive"
+    if ! command -v xz >/dev/null 2>&1; then
+        echo "tar does not support -J and xz is not available" >&2
+        exit 1
+    fi
+    tar -C "$out_dir" -cf - "$package_name" | xz -z -c > "$archive"
+fi
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$out_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 else

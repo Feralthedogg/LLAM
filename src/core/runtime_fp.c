@@ -41,7 +41,7 @@ void llam_clear_xsave_globals(void) {
     g_llam_fp_control_context = 0U;
 }
 
-#if ((defined(__linux__) || defined(__APPLE__)) && LLAM_ARCH_X86_64) || \
+#if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64) || \
     (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)
 /** @brief Read the current SSE MXCSR control/status register. */
 static uint32_t llam_current_mxcsr(void) {

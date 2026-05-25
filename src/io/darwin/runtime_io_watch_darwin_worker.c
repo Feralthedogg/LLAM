@@ -1,9 +1,9 @@
 /**
  * @file src/io/darwin/runtime_io_watch_darwin_worker.c
- * @brief Darwin I/O worker loop and kqueue polling lifecycle.
+ * @brief Darwin/BSD I/O worker loop and kqueue polling lifecycle.
  *
  * @details
- * Each Darwin I/O node owns a kqueue worker. The worker applies queued control
+ * Each kqueue I/O node owns a worker. The worker applies queued control
  * operations, submits one-shot requests, waits for kqueue events, handles user
  * wake events, and dispatches tagged watch/request events to specialized
  * handlers.
@@ -35,11 +35,11 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         llam_poll_watch_t *watch = op->target;
         llam_io_req_t *waiters = NULL;
 
-        rc = llam_darwin_poll_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH);
+        rc = llam_darwin_poll_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS);
         pthread_mutex_lock(&node->watch_lock);
         if (rc == 0) {
-            // EV_DISPATCH produces one event then disables the watch until the
-            // event handler explicitly re-enables it.
+            // Kqueue one-shot delivery disables the watch until the event
+            // handler explicitly re-enables it.
             watch->active = true;
             watch->activating = false;
             watch->deactivate_queued = false;
@@ -93,7 +93,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         llam_accept_watch_t *watch = op->target;
         llam_io_req_t *waiters = NULL;
 
-        rc = llam_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH | EV_CLEAR);
+        rc = llam_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
         pthread_mutex_lock(&node->watch_lock);
         if (rc == 0) {
             watch->active = true;
@@ -150,7 +150,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         llam_recv_watch_t *watch = op->target;
         llam_io_req_t *waiters = NULL;
 
-        rc = llam_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | EV_DISPATCH | EV_CLEAR);
+        rc = llam_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
         pthread_mutex_lock(&node->watch_lock);
         if (rc == 0) {
             watch->active = true;
@@ -290,7 +290,7 @@ void *llam_io_worker_main(void *arg) {
             ts_ptr = &ts;
         } else {
             // Pending backend work can block indefinitely; wake controls use
-            // EVFILT_USER/MACHPORT to interrupt this wait.
+            // EVFILT_USER and Darwin EVFILT_MACHPORT to interrupt this wait.
             ts_ptr = NULL;
         }
 
@@ -306,7 +306,7 @@ void *llam_io_worker_main(void *arg) {
             uint64_t user_data;
             unsigned tag;
 
-            if (events[i].filter == EVFILT_USER || events[i].filter == EVFILT_MACHPORT) {
+            if (llam_kqueue_is_worker_wake_event(&events[i])) {
                 llam_drain_node_wake(node);
                 continue;
             }

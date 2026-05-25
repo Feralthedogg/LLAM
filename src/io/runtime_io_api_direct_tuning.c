@@ -78,7 +78,7 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
          * available for local experiments.
          */
         return false;
-#elif defined(__linux__)
+#elif LLAM_RUNTIME_BACKEND_LINUX
         llam_runtime_t *rt;
         llam_shard_t *shard = g_llam_tls_shard;
         llam_node_t *node;
@@ -94,11 +94,11 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
         }
         node = &rt->nodes[shard->io_node_index];
         return timeout_ms < 0 && (!node->ring_ready || !node->supports_poll);
-#elif defined(__APPLE__)
+#elif LLAM_RUNTIME_BACKEND_KQUEUE
         const llam_runtime_t *rt = llam_direct_current_runtime();
 
-        // Darwin keeps infinite waits on the kqueue backend so one parked task
-        // cannot pin a scheduler worker.  Finite waits are safe to redirect
+        // Kqueue platforms keep infinite waits on the backend so one parked
+        // task cannot pin a scheduler worker. Finite waits are safe to redirect
         // through compensated direct poll in the latency-oriented profiles.
         return rt != NULL && timeout_ms > 0 &&
                (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY ||
@@ -153,9 +153,9 @@ static bool llam_write_handoff_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF");
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
-#elif defined(__linux__)
+#elif LLAM_RUNTIME_BACKEND_LINUX
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -175,9 +175,9 @@ bool llam_io_coop_yield_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_COOP_YIELD");
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
-#elif defined(__linux__)
+#elif LLAM_RUNTIME_BACKEND_LINUX
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -201,9 +201,9 @@ bool llam_io_poll_coop_yield_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_POLL_COOP_YIELD");
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
-#elif defined(__linux__)
+#elif LLAM_RUNTIME_BACKEND_LINUX
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
@@ -227,7 +227,7 @@ bool llam_io_poll_extra_yield_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_POLL_EXTRA_YIELD");
 
-#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -250,7 +250,7 @@ bool llam_io_poll_pre_yield_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_POLL_PRE_YIELD");
 
-#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -274,9 +274,9 @@ unsigned llam_io_poll_ready_yields(void) {
 
 #if LLAM_RUNTIME_BACKEND_WINDOWS
         value = 2;
-#elif defined(__APPLE__)
+#elif LLAM_RUNTIME_BACKEND_KQUEUE
         /*
-         * Darwin socketpair producer/consumer patterns often become ready
+         * Kqueue socketpair producer/consumer patterns often become ready
          * after one scheduler handoff but before the kqueue backend is worth
          * arming.  Two short probes keep poll_wake on the direct path without
          * changing long-wait semantics; LLAM_IO_POLL_READY_YIELDS remains the
@@ -318,7 +318,7 @@ static bool llam_poll_socket_peek_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_POLL_SOCKET_PEEK");
 
-#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -411,7 +411,7 @@ static bool llam_write_direct_local_handoff_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF");
 
-#if defined(__APPLE__) || defined(__linux__) || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
@@ -433,7 +433,7 @@ static uint64_t llam_write_handoff_recent_yield_ns(void) {
     if (value == UINT64_MAX) {
         const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_RECENT_YIELD_NS");
 
-#if defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
         value = 1000000ULL;
 #else
         value = 0ULL;
@@ -465,7 +465,7 @@ static bool llam_write_handoff_check_fd_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_CHECK_FD");
 
-#if defined(__APPLE__) || defined(__linux__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
         value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
 #else
         value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;

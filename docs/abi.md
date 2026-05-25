@@ -269,6 +269,7 @@ Expected dynamic artifacts:
 
 ```text
 Linux:  libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.2.0.0
+BSD:    libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.2.0.0
 macOS:  libllam_runtime.dylib -> libllam_runtime.2.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.

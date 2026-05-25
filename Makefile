@@ -121,6 +121,8 @@ ifeq ($(UNAME_S),Linux)
 HOST_PLATFORM := linux
 else ifeq ($(UNAME_S),Darwin)
 HOST_PLATFORM := darwin
+else ifneq ($(filter $(UNAME_S),FreeBSD OpenBSD NetBSD DragonFly),)
+HOST_PLATFORM := bsd
 else
 HOST_PLATFORM := posix
 endif
@@ -130,6 +132,12 @@ ifeq ($(HOST_PLATFORM),darwin)
 SHLIB_LINK = libllam_runtime.dylib
 SHLIB_REAL = libllam_runtime.$(LLAM_ABI_MAJOR).dylib
 SHLIB_LDFLAGS = -dynamiclib -Wl,-install_name,@rpath/$(SHLIB_REAL)
+DL_LIBS =
+else ifeq ($(HOST_PLATFORM),bsd)
+SHLIB_LINK = libllam_runtime.so
+SHLIB_SONAME = libllam_runtime.so.$(LLAM_ABI_MAJOR)
+SHLIB_REAL = libllam_runtime.so.$(LLAM_VERSION)
+SHLIB_LDFLAGS = -shared -Wl,-soname,$(SHLIB_SONAME)
 DL_LIBS =
 else
 SHLIB_LINK = libllam_runtime.so
@@ -360,6 +368,29 @@ endif
 else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -luring,$(LDLIBS))
+ifeq ($(HOST_PLATFORM),bsd)
+RUNTIME_OBJS += \
+	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_state.o \
+	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_live.o \
+	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_rehome.o \
+	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_control.o \
+	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_completion.o \
+	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_events.o \
+	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_worker.o
+ifeq ($(UNAME_M),x86_64)
+RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o
+else ifeq ($(UNAME_M),amd64)
+RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o
+else ifeq ($(UNAME_M),aarch64)
+RUNTIME_OBJS += \
+	$(OBJDIR)/src/core/runtime_context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+else ifeq ($(UNAME_M),arm64)
+RUNTIME_OBJS += \
+	$(OBJDIR)/src/core/runtime_context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+endif
+endif
 endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 DEMO_OBJS = \

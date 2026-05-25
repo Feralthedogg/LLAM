@@ -141,7 +141,7 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
 
         task->last_run_ns = run_ns;
         task->total_run_ns += run_ns;
-#if ((defined(__linux__) || defined(__APPLE__)) || LLAM_PLATFORM_WINDOWS) && LLAM_ARCH_X86_64
+#if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) || LLAM_PLATFORM_WINDOWS) && LLAM_ARCH_X86_64
         llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
 #elif LLAM_ARCH_AARCH64
         llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.sp);

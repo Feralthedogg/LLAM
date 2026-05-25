@@ -29,7 +29,7 @@
 
 #include "runtime_internal.h"
 
-#if defined(__APPLE__)
+#if LLAM_RUNTIME_BACKEND_KQUEUE
 #include <sys/event.h>
 #endif
 

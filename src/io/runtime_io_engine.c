@@ -6,7 +6,7 @@
  * Linux nodes wrap io_uring rings and optional features such as SQPOLL,
  * completion eventfd registration, provided receive buffers, and opcode
  * probing. Non-Linux nodes expose the same runtime-facing capability surface
- * using kqueue/Mach wake support where available.
+ * using kqueue readiness and Darwin Mach wake support where available.
  *
  * The rest of the runtime talks to nodes through capability flags and submit
  * helpers, so unsupported backend features degrade to direct or blocking
@@ -422,11 +422,14 @@ void llam_probe_ring_support(llam_node_t *node) {
     io_uring_free_probe(probe);
 }
 
-#elif defined(__APPLE__)
+#elif LLAM_RUNTIME_BACKEND_KQUEUE
 
+#if LLAM_RUNTIME_BACKEND_DARWIN
 #include <mach/mach.h>
+#endif
 #include <sys/event.h>
 
+#if LLAM_RUNTIME_BACKEND_DARWIN
 /**
  * @brief Release Mach wake resources used by a Darwin I/O node.
  *
@@ -503,13 +506,14 @@ static int llam_node_init_mach_wake(llam_node_t *node) {
     node->mach_wake_enabled = true;
     return 0;
 }
+#endif
 
 /**
- * @brief Initialize the non-Linux I/O node capability surface.
+ * @brief Initialize the kqueue I/O node capability surface.
  *
- * Darwin does not use io_uring, but the runtime still exposes a "ready" node
- * with poll/accept/read/write capability flags so higher layers can use the
- * same API and dispatch through kqueue-backed watcher code.
+ * Kqueue platforms do not use io_uring, but the runtime still exposes a
+ * "ready" node with the same capability surface so higher layers can dispatch
+ * through kqueue-backed watcher code or direct/blocking fallbacks.
  *
  * @param rt   Runtime owning the node; currently unused on this backend.
  * @param node Node to initialize.
@@ -530,7 +534,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->supports_connect = false;
     node->supports_poll = false;
     /*
-     * Darwin recv-watch currently uses level-triggered kqueue readiness.
+     * Kqueue recv-watch currently uses level-triggered readiness.
      * Under repeated owned-read stress it can strand a waiter after an early
      * completion/rearm race, so keep recv on the one-shot/fallback path until
      * the watcher has an explicit drain-and-rearm handshake.
@@ -543,7 +547,9 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->mach_wake_enabled = false;
     node->mach_wake_port = 0U;
     node->mach_wake_pset = 0U;
+#if LLAM_RUNTIME_BACKEND_DARWIN
     (void)llam_node_init_mach_wake(node);
+#endif
     return 0;
 }
 
@@ -557,12 +563,18 @@ void llam_node_unregister_cq_eventfd(llam_node_t *node) {
         return;
     }
     node->cq_eventfd_registered = false;
+#if LLAM_RUNTIME_BACKEND_DARWIN
     if (node->mach_wake_enabled) {
         llam_node_destroy_mach_wake((mach_port_t)node->mach_wake_port, (mach_port_t)node->mach_wake_pset);
         node->mach_wake_enabled = false;
         node->mach_wake_port = 0U;
         node->mach_wake_pset = 0U;
     }
+#else
+    node->mach_wake_enabled = false;
+    node->mach_wake_port = 0U;
+    node->mach_wake_pset = 0U;
+#endif
 }
 
 /**
@@ -584,7 +596,7 @@ void llam_probe_ring_support(llam_node_t *node) {
     node->supports_connect = false;
     node->supports_poll = false;
     /*
-     * Keep recv-watch disabled on Darwin for the same reason as init: poll and
+     * Keep recv-watch disabled on kqueue for the same reason as init: poll and
      * accept watches are stable, but recv needs a stricter rearm contract.
      */
     node->supports_multishot_recv = false;

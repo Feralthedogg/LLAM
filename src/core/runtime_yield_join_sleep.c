@@ -34,7 +34,7 @@
 /** @brief Sentinel used to mark an explicit user yield without sampling a real timestamp. */
 #define LLAM_RECENT_EXPLICIT_YIELD UINT64_MAX
 
-#if defined(__linux__) || defined(__APPLE__) || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
 #define LLAM_DIRECT_OWNER_HANDOFF 1
 #else
 #define LLAM_DIRECT_OWNER_HANDOFF 0
@@ -161,18 +161,18 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
     if (value == LLAM_DIRECT_YIELD_HANDOFF_AUTO) {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
         return rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 2U : 0U;
-#elif defined(__linux__)
+#elif LLAM_RUNTIME_BACKEND_LINUX
         /*
          * Linux owner-lane exchange is cheap enough to use for ordinary yields
          * as well. The runtime burst guard bounds long handoff chains so
          * timer-heavy fanout can still return to the scheduler.
          */
         return rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 2U : 0U;
-#elif defined(__APPLE__)
+#elif LLAM_RUNTIME_BACKEND_KQUEUE
         /*
-         * Darwin uses the same owner-lane exchange as Linux. Keep debug-safe
-         * deterministic, but let balanced/latency profiles avoid scheduler
-         * round trips in yield-heavy fanout before timers are armed.
+         * Kqueue platforms use the same owner-lane exchange as Linux. Keep
+         * debug-safe deterministic, but let balanced/latency profiles avoid
+         * scheduler round trips in yield-heavy fanout before timers are armed.
          */
         return rt != NULL && rt->profile != LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 2U : 0U;
 #else

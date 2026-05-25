@@ -108,13 +108,15 @@ disable it for release benchmarking unless diagnostics are required.
 
 ## 6. Platform Differences
 
-Linux and macOS have different kernel contracts. Linux uses io_uring/liburing
-where available, while macOS uses kqueue and Darwin-specific scheduler hints.
-Windows native support covers scheduler/core, Windows event wake handles, x86_64
-context switching, IOCP-backed Winsock requests, and overlapped HANDLE
-`ReadFile`/`WriteFile` requests. Windows 10 and Windows 11 share the public API;
-LLAM selects a `win10-conservative` or `win11-batched` tuning policy at runtime
-and CI forces both branches through `LLAM_WINDOWS_FORCE_GENERATION`.
+Linux, kqueue platforms, and Windows have different kernel contracts. Linux
+uses io_uring/liburing where available. macOS and the BSD family use kqueue for
+readiness and runtime wakeups; Darwin-specific Mach scheduler/wake hints stay
+behind Darwin-only guards. Windows native support covers scheduler/core, Windows
+event wake handles, x86_64 context switching, IOCP-backed Winsock requests, and
+overlapped HANDLE `ReadFile`/`WriteFile` requests. Windows 10 and Windows 11
+share the public API; LLAM selects a `win10-conservative` or `win11-batched`
+tuning policy at runtime and CI forces both branches through
+`LLAM_WINDOWS_FORCE_GENERATION`.
 
 The native Windows IOCP request backend covers overlapped `WSARecv`, `WSASend`,
 `AcceptEx`, `ConnectEx`, and generic HANDLE `ReadFile`/`WriteFile` requests.
@@ -136,6 +138,10 @@ Production rollout is gated by native Windows CMake/CTest, Windows 2022/2025
 stress, forced Windows 10/11 policy checks, IOCP smoke coverage, HANDLE I/O
 coverage, public handle/lifetime edge tests, shutdown and owned-buffer tests,
 shared-library export checks, and benchmark smoke coverage.
+BSD rollout is gated by the `.github/workflows/bsd.yml` VM matrix for FreeBSD,
+OpenBSD, NetBSD, and DragonFly BSD. That gate currently builds the runtime,
+runs core/API/select/I/O-buffer/shared-load smoke tests, and validates release
+archive shape for each target before BSD artifacts are treated as publishable.
 The top-level Makefile does not maintain a separate Windows compiler pipeline:
 when `HOST_PLATFORM=windows` it delegates build, test, shared/static, package,
 and explicit executable/test targets to the native CMake backend. This keeps the
@@ -410,6 +416,8 @@ Before tagging a release build, require:
 
 - `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
 - `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.
+- BSD VM smoke through `.github/workflows/bsd.yml` for FreeBSD, OpenBSD,
+  NetBSD, and DragonFly BSD before publishing BSD artifacts.
 - Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
   the Windows 2022/2025 stress jobs, including forced Windows 10/11 policies and
   opt-in TCP `POLLIN` IOCP smoke.

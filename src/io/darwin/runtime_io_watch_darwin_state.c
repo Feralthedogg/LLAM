@@ -1,11 +1,12 @@
 /**
  * @file src/io/darwin/runtime_io_watch_darwin_state.c
- * @brief Darwin/kqueue watch state queues and wait-list ownership helpers.
+ * @brief Darwin/BSD kqueue watch state queues and wait-list ownership helpers.
  *
  * @details
- * Darwin watch state mirrors the Linux multishot watch model but uses kqueue
- * EV_DISPATCH events and copied receive buffers instead of io_uring provided
- * buffers. Watch and ready queues are protected by the node's @c watch_lock.
+ * Kqueue watch state mirrors the Linux multishot watch model but uses
+ * one-shot kevent delivery and copied receive buffers instead of io_uring
+ * provided buffers. Watch and ready queues are protected by the node's
+ * @c watch_lock.
  *
  * @copyright Copyright 2026 Feralthedogg
  *

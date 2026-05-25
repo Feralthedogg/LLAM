@@ -45,7 +45,7 @@ static inline bool llam_public_slot_entropy_from_os(uint64_t *out_secret) {
     if (out_secret == NULL) {
         return false;
     }
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#if LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_FREEBSD || LLAM_PLATFORM_OPENBSD || LLAM_PLATFORM_NETBSD || LLAM_PLATFORM_DRAGONFLY
     arc4random_buf(out_secret, sizeof(*out_secret));
     return *out_secret != 0U;
 #elif defined(__linux__)
