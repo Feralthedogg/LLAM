@@ -291,7 +291,7 @@ jobs:
             arch: x86-64
           - target: openbsd-x86_64
             os: openbsd
-            version: '7.9'
+            version: '7.8'
             arch: x86-64
           - target: netbsd-x86_64
             os: netbsd

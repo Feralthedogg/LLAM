@@ -33,7 +33,7 @@ jobs:
             package_target: freebsd-x86_64
           - name: openbsd-x86_64
             os: openbsd
-            version: '7.9'
+            version: '7.8'
             arch: x86-64
             package_target: openbsd-x86_64
           - name: netbsd-x86_64

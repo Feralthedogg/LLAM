@@ -6,6 +6,7 @@ AR ?= ar
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer
 CPPFLAGS ?= -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE
 LDLIBS ?= -pthread -luring
+SERVER_FLOOD_LDLIBS ?= -pthread
 OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 PICFLAGS ?= -fPIC
@@ -369,6 +370,10 @@ else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -luring,$(LDLIBS))
 ifeq ($(HOST_PLATFORM),bsd)
+SERVER_FLOOD_LDLIBS += -lm
+ifeq ($(UNAME_S),NetBSD)
+LDLIBS += -lrt
+endif
 RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_state.o \
 	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_live.o \
@@ -1977,7 +1982,7 @@ server_lossless: $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS) $(LDLIBS)
 
 server_flood: $(SERVER_FLOOD_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(SERVER_FLOOD_OBJS) -pthread
+	$(CC) $(CFLAGS) -o $@ $(SERVER_FLOOD_OBJS) $(SERVER_FLOOD_LDLIBS)
 
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)

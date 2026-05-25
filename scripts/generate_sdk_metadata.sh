@@ -30,7 +30,10 @@ case "$target" in
     linux-*)
         private_libs="-pthread -luring -lm"
         ;;
-    macos-*|darwin-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*)
+    netbsd-*)
+        private_libs="-pthread -lrt"
+        ;;
+    macos-*|darwin-*|freebsd-*|openbsd-*|dragonflybsd-*)
         private_libs="-pthread"
         ;;
     *)
@@ -69,6 +72,8 @@ cat > "$stage/share/llam/cmake/llam-targets.cmake" <<'EOF'
 set(_LLAM_PLATFORM_LIBS Threads::Threads)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND _LLAM_PLATFORM_LIBS uring m)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
+    list(APPEND _LLAM_PLATFORM_LIBS rt)
 endif()
 
 if(NOT TARGET llam::runtime)
