@@ -39,6 +39,34 @@
 
 #include "runtime_internal.h"
 
+static bool llam_scheduler_signal_stack_failure_is_fatal(int err) {
+    /*
+     * The alternate signal stack is a diagnostics surface for guard-page fault
+     * reports, not a correctness prerequisite for running tasks.  DragonFlyBSD
+     * can transiently report EAGAIN when tests rapidly move shard 0 across host
+     * pthreads; treating that as fatal makes the scheduler fail even though the
+     * runtime can safely continue with reduced crash diagnostics.
+     */
+    return err != EAGAIN;
+}
+
+static int llam_scheduler_try_install_signal_stack(llam_shard_t *shard) {
+    int saved_errno;
+
+    if (llam_install_thread_signal_stack(shard) == 0) {
+        return 0;
+    }
+
+    saved_errno = errno;
+    if (!llam_scheduler_signal_stack_failure_is_fatal(saved_errno)) {
+        errno = 0;
+        return 0;
+    }
+
+    errno = saved_errno;
+    return -1;
+}
+
 /**
  * @brief Mark a task as running on a shard and update dispatch metrics.
  *
@@ -272,7 +300,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     shard->primary_thread = pthread_self();
     llam_bind_current_thread_to_cpu(shard->cpu_id);
     llam_tune_scheduler_thread(shard, false);
-    if (llam_install_thread_signal_stack(shard) != 0) {
+    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
         llam_record_fatal(rt, errno);
         g_llam_tls_shard = NULL;
         g_llam_tls_task = NULL;
@@ -387,7 +415,7 @@ void *llam_opaque_helper_main(void *arg) {
     g_llam_tls_scheduler_ctx = &shard->opaque_scheduler_ctx;
     llam_bind_current_thread_to_cpu(shard->cpu_id);
     llam_tune_scheduler_thread(shard, true);
-    if (llam_install_thread_signal_stack(shard) != 0) {
+    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
         pthread_mutex_lock(&shard->opaque_lock);
         shard->opaque_helper_failed = true;
         shard->opaque_helper_ready = false;
