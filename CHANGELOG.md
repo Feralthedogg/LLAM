@@ -82,6 +82,11 @@
   response-failure cleanup, BSD timeouts/package bootstrap, stress diagnostics,
   and hosted-runner performance guardrails.
 
+* made the Windows cross-process broker ring session-replay guard wait for an
+  explicit child readiness event before rewinding public cursors, avoiding a
+  hosted Windows 2022 scheduling race where the process wait timeout could be
+  charged before the replay check began.
+
 ### Performance
 
 * recovered release-quality `spawn_join` measurements by running public

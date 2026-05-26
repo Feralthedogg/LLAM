@@ -7453,11 +7453,14 @@ static int broker_ring_windows_process_child(const char *name, uint64_t iteratio
     return thread_rc == 0U && state.rc == 0 ? 0 : 3;
 }
 
-static int broker_ring_windows_session_child(const char *name, uint64_t iterations) {
+static int broker_ring_windows_session_child(const char *name,
+                                             const char *ready_event_name,
+                                             uint64_t iterations) {
     enum { PHASE_TIMEOUT_MS = 60000U };
     llam_runtime_opts_t opts;
     llam_broker_t broker;
     llam_broker_ring_mapping_t mapping;
+    HANDLE ready_event = NULL;
     ULONGLONG deadline_ms;
     bool broker_initialized = false;
     uint64_t served = 0U;
@@ -7476,6 +7479,10 @@ static int broker_ring_windows_session_child(const char *name, uint64_t iteratio
     if (llam_broker_ring_open_shm(name, &mapping) != 0) {
         goto done;
     }
+    ready_event = OpenEventA(EVENT_MODIFY_STATE, FALSE, ready_event_name);
+    if (ready_event == NULL) {
+        goto done;
+    }
 
     while (served < iterations) {
         if (llam_broker_ring_serve_one(&broker, mapping.ring) == 0) {
@@ -7486,6 +7493,16 @@ static int broker_ring_windows_session_child(const char *name, uint64_t iteratio
             goto done;
         }
         Sleep(0);
+    }
+    /*
+     * Signal the parent only after this child has left the serve loop and is
+     * ready to observe the deliberate public-cursor rewind. Without this
+     * handshake, hosted Windows runners can charge the parent process-wait
+     * timeout to scheduler starvation before the replay check even starts.
+     */
+    if (!SetEvent(ready_event)) {
+        rc = 6;
+        goto done;
     }
 
     /*
@@ -7517,6 +7534,9 @@ static int broker_ring_windows_session_child(const char *name, uint64_t iteratio
     rc = 0;
 
 done:
+    if (ready_event != NULL) {
+        CloseHandle(ready_event);
+    }
     llam_broker_ring_unmap(&mapping);
     if (broker_initialized) {
         llam_broker_destroy(&broker);
@@ -7568,6 +7588,7 @@ done:
 
 static int test_broker_ring_windows_cross_process_flood(void) {
     char name[128];
+    char ready_event_name[128];
     char exe_path[MAX_PATH];
     char command[1024];
     llam_broker_ring_mapping_t mapping;
@@ -7701,6 +7722,7 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
     llam_broker_ring_stats_t stats;
     STARTUPINFOA startup;
     PROCESS_INFORMATION process;
+    HANDLE ready_event = NULL;
     const uint64_t replay_iters = test_broker_ring_replay_iters();
     DWORD wait_rc;
     DWORD exit_code = 1U;
@@ -7715,6 +7737,15 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
              "Local\\llam-broker-ring-session-replay-%lu-%lu",
              (unsigned long)GetCurrentProcessId(),
              (unsigned long)GetTickCount());
+    snprintf(ready_event_name,
+             sizeof(ready_event_name),
+             "Local\\llam-broker-ring-session-ready-%lu-%lu",
+             (unsigned long)GetCurrentProcessId(),
+             (unsigned long)GetTickCount());
+    ready_event = CreateEventA(NULL, TRUE, FALSE, ready_event_name);
+    if (ready_event == NULL) {
+        goto done;
+    }
     if (llam_broker_ring_create_shm(name, &mapping) != 0) {
         goto done;
     }
@@ -7723,9 +7754,10 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
     }
     snprintf(command,
              sizeof(command),
-             "\"%s\" --broker-ring-windows-session-child \"%s\" %llu",
+             "\"%s\" --broker-ring-windows-session-child \"%s\" \"%s\" %llu",
              exe_path,
              name,
+             ready_event_name,
              (unsigned long long)replay_iters);
 
     memset(&startup, 0, sizeof(startup));
@@ -7788,6 +7820,14 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
         }
     }
 
+    wait_rc = WaitForSingleObject(ready_event, 60000U);
+    if (wait_rc != WAIT_OBJECT_0) {
+        fprintf(stderr,
+                "[test_security_capability] windows session replay child not ready "
+                "wait=%lu\n",
+                (unsigned long)wait_rc);
+        goto done_process;
+    }
     atomic_store_explicit(&mapping.ring->submit_head.value, 0U, memory_order_relaxed);
     atomic_store_explicit(&mapping.ring->submit_tail.value, 1U, memory_order_release);
     /*
@@ -7832,6 +7872,9 @@ done_process:
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
 done:
+    if (ready_event != NULL) {
+        CloseHandle(ready_event);
+    }
     llam_broker_ring_unmap(&mapping);
     return rc;
 }
@@ -9880,9 +9923,22 @@ done:
 
 int main(int argc, char **argv) {
 #if LLAM_PLATFORM_WINDOWS
+    if (argc == 5 && strcmp(argv[1], "--broker-ring-windows-session-child") == 0) {
+        char *end = NULL;
+        unsigned long long iterations;
+
+        errno = 0;
+        iterations = strtoull(argv[4], &end, 10);
+        if (argv[2][0] == '\0' || argv[3][0] == '\0' || end == argv[4] || *end != '\0') {
+            return 2;
+        }
+        if (errno != 0 || iterations == 0U || (uint64_t)iterations > UINT64_C(1000000)) {
+            return 2;
+        }
+        return broker_ring_windows_session_child(argv[2], argv[3], (uint64_t)iterations);
+    }
     if (argc == 4 &&
         (strcmp(argv[1], "--broker-ring-windows-child") == 0 ||
-         strcmp(argv[1], "--broker-ring-windows-session-child") == 0 ||
          strcmp(argv[1], "--broker-ring-windows-teardown-child") == 0)) {
         char *end = NULL;
         unsigned long long iterations;
@@ -9894,9 +9950,6 @@ int main(int argc, char **argv) {
         }
         if (errno != 0 || iterations == 0U || (uint64_t)iterations > UINT64_C(1000000)) {
             return 2;
-        }
-        if (strcmp(argv[1], "--broker-ring-windows-session-child") == 0) {
-            return broker_ring_windows_session_child(argv[2], (uint64_t)iterations);
         }
         if (strcmp(argv[1], "--broker-ring-windows-teardown-child") == 0) {
             return broker_ring_windows_teardown_child(argv[2], (uint64_t)iterations);
