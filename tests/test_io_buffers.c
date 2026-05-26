@@ -1269,6 +1269,38 @@ static llam_io_buffer_t *allocate_internal_test_buffer(const char *payload, llam
     return buffer;
 }
 
+static int test_owned_buffer_public_handle_corrupt_slot_guard(void) {
+    llam_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *handle = NULL;
+    llam_io_buffer_t *corrupt_handle;
+    size_t saved_slot;
+    uint32_t saved_generation;
+    int rc = 0;
+
+    buffer = allocate_internal_test_buffer("slot", &handle);
+    if (buffer == NULL) {
+        return test_fail_errno("owned-buffer public-handle guard allocation failed");
+    }
+
+    saved_slot = buffer->public_handle_slot;
+    saved_generation = buffer->public_handle_generation;
+    /*
+     * Owned read APIs publish an already-filled internal buffer as an opaque
+     * public handle.  A slot-table mismatch must fail closed so callers never
+     * see "positive byte count + NULL handle" after publication fails.
+     */
+    buffer->public_handle_slot = (size_t)-1;
+    corrupt_handle = llam_io_buffer_public_handle(buffer);
+    buffer->public_handle_slot = saved_slot;
+    buffer->public_handle_generation = saved_generation;
+
+    if (corrupt_handle != NULL) {
+        rc = test_fail("corrupt owned-buffer public slot produced a handle");
+    }
+    llam_io_buffer_release(handle);
+    return rc;
+}
+
 static int test_owned_buffer_raw_release_decodable_pointer_guard(void) {
     llam_io_buffer_t *target = NULL;
     llam_io_buffer_t *target_handle = NULL;
@@ -1697,6 +1729,7 @@ int main(void) {
         test_owned_buffer_release_after_shutdown() != 0 ||
         test_owned_buffer_accessor_release_race() != 0 ||
         test_owned_buffer_stale_release_reuse_guard() != 0 ||
+        test_owned_buffer_public_handle_corrupt_slot_guard() != 0 ||
         test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
         test_public_owned_buffer_alloc_and_positional_io() != 0 ||
         test_provided_owned_buffer_detaches_on_runtime_destroy() != 0 ||

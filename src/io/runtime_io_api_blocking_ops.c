@@ -239,6 +239,7 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
                                   bool force_recv,
                                   llam_io_buffer_t **out) {
     llam_io_buffer_t *buffer;
+    llam_io_buffer_t *public_handle;
     llam_io_req_t *req;
     ssize_t result;
     int saved_errno = 0;
@@ -309,7 +310,18 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
             return 0;
         }
         buffer->size = (size_t)result;
-        *out = llam_io_buffer_public_handle(buffer);
+        public_handle = llam_io_buffer_public_handle(buffer);
+        if (public_handle == NULL) {
+            /*
+             * The buffer was already detached and populated, but publication is
+             * still a separate registry step.  Do not report a successful read
+             * with a NULL owned handle if registry state is inconsistent.
+             */
+            llam_io_buffer_release_raw(buffer);
+            errno = ENOMEM;
+            return -1;
+        }
+        *out = public_handle;
         return result;
     }
 
@@ -424,7 +436,13 @@ read_owned_done:
 
     buffer->size = (size_t)result;
     llam_api_io_req_release(g_llam_tls_shard, req);
-    *out = llam_io_buffer_public_handle(buffer);
+    public_handle = llam_io_buffer_public_handle(buffer);
+    if (public_handle == NULL) {
+        llam_io_buffer_release_raw(buffer);
+        errno = ENOMEM;
+        return -1;
+    }
+    *out = public_handle;
     return result;
 }
 
