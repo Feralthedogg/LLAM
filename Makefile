@@ -202,7 +202,10 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_broker_revoke.o \
 	$(OBJDIR)/src/core/runtime_broker_task.o \
 	$(OBJDIR)/src/core/runtime_broker_windows_security.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_dispatch.o \
 	$(OBJDIR)/src/core/runtime_broker_transport_ops.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_response.o \
+	$(OBJDIR)/src/core/runtime_broker_transport_rollback.o \
 	$(OBJDIR)/src/core/runtime_broker_transport_ring.o \
 	$(OBJDIR)/src/core/runtime_broker_transport.o \
 	$(OBJDIR)/src/core/runtime_broker_transport_windows.o \
@@ -215,6 +218,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_broker_transport_unix.o \
 	$(OBJDIR)/src/core/runtime_broker_transport_selftest.o \
 	$(OBJDIR)/src/core/runtime_broker_ring.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_buffer_grant.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_doorbell.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_dispatch.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_stats.o \
