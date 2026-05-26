@@ -937,6 +937,9 @@ done:
         }
         if (killed) {
             fprintf(stderr, "server did not stop within %.1fs after SIGINT; killed\n", opts.shutdown_timeout_sec);
+            if (dump_path[0] != '\0') {
+                fprintf(stderr, "server runtime dump path: %s\n", dump_path);
+            }
             if (opts.fail_on_forced_stop && rc == 0) {
                 rc = 1;
             }
