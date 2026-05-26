@@ -500,6 +500,11 @@
 
 ### Tests
 
+* give the Windows cross-process broker ring session-replay guard a longer
+  child-exit window. The test still requires stale replay rejection and clean
+  child exit, but no longer fails when hosted Windows Server 2022 briefly
+  starves the child process after the parent rewinds public cursors.
+
 * add explicit per-test timeouts to the BSD VM core-test gate so rare hangs
   report the failing executable instead of timing out the entire workflow.
 

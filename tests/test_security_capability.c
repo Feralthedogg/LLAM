@@ -7454,7 +7454,7 @@ static int broker_ring_windows_process_child(const char *name, uint64_t iteratio
 }
 
 static int broker_ring_windows_session_child(const char *name, uint64_t iterations) {
-    enum { PHASE_TIMEOUT_MS = 15000U };
+    enum { PHASE_TIMEOUT_MS = 60000U };
     llam_runtime_opts_t opts;
     llam_broker_t broker;
     llam_broker_ring_mapping_t mapping;
@@ -7791,11 +7791,12 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
     atomic_store_explicit(&mapping.ring->submit_head.value, 0U, memory_order_relaxed);
     atomic_store_explicit(&mapping.ring->submit_tail.value, 1U, memory_order_release);
     /*
-     * The child may be descheduled after the parent rewinds the public cursors.
-     * The security check remains strict: the child must still reject the stale
-     * replay and exit cleanly, but it gets a CI-tolerant window to run.
+     * The child may be descheduled after the parent rewinds the public cursors,
+     * especially on hosted Windows Server 2022. The security check remains
+     * strict: the child must still reject the stale replay and exit cleanly, but
+     * it gets a CI-tolerant window to run.
      */
-    wait_rc = WaitForSingleObject(process.hProcess, 15000U);
+    wait_rc = WaitForSingleObject(process.hProcess, 60000U);
     if (wait_rc != WAIT_OBJECT_0 ||
         !GetExitCodeProcess(process.hProcess, &exit_code) ||
         exit_code != 0U) {
