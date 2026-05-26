@@ -544,6 +544,17 @@ static int test_fault_boundary_contracts(void) {
     if (llam_runtime_collect_stats_ex(NULL, LLAM_RUNTIME_STATS_CURRENT_SIZE) != -1 || errno != EINVAL) {
         return fail_msg("stats NULL did not fail with EINVAL");
     }
+    memset(&stats, 0xA5, sizeof(stats));
+    errno = 0;
+    if (llam_runtime_collect_stats_ex_handle((llam_runtime_t *)(uintptr_t)0x1234U,
+                                             &stats,
+                                             LLAM_RUNTIME_STATS_CURRENT_SIZE) != -1 ||
+        errno != EINVAL ||
+        stats.active_workers != 0U ||
+        stats.online_workers != 0U ||
+        stats.ctx_switches != 0U) {
+        return fail_msg("invalid stats handle did not fail closed");
+    }
     errno = 0;
     if (llam_channel_create(0U) != NULL || errno != EINVAL) {
         return fail_msg("channel create zero capacity did not fail with EINVAL");

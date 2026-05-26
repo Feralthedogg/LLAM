@@ -385,7 +385,9 @@ LLAM_API void llam_runtime_shutdown(void);
  * @details
  * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
  * LLAM writes only the overlapping prefix of @p stats and zeroes any caller
- * tail beyond the current library's ::llam_runtime_stats_t.
+ * tail beyond the current library's ::llam_runtime_stats_t. If @p stats and
+ * @p stats_size are valid, failure paths clear the caller-visible prefix before
+ * returning so stale counters are not mistaken for a fresh snapshot.
  *
  * @param stats Destination statistics object. Must not be NULL.
  * @param stats_size Size of the caller's ::llam_runtime_stats_t definition.
@@ -399,7 +401,8 @@ LLAM_API int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t s
  * @details
  * This is the handle-scoped form for embedders that use
  * ::llam_runtime_create/::llam_runtime_run_handle instead of the legacy default
- * runtime wrappers.  Unknown runtime handles fail with @c EINVAL.
+ * runtime wrappers.  Unknown runtime handles fail with @c EINVAL. If @p stats
+ * and @p stats_size are valid, failure paths clear the caller-visible prefix.
  *
  * @param runtime Runtime returned by ::llam_runtime_create or ::llam_runtime_default; not NULL.
  * @param stats Destination statistics object. Must not be NULL.
