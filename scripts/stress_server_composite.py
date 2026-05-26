@@ -530,10 +530,21 @@ def phase_flood(args: argparse.Namespace) -> None:
             ),
         ]
     else:
+        # Soak mode is a long-running stability/accounting profile. Keep the
+        # high-rate flood load, but leave delivery-MPS regression checks to the
+        # shorter Stress workflow where hosted-runner throttling is less noisy.
+        default_throughput_8b_min_delivery_mps = 0.0 if args.soak_hour else 1.3
+        default_throughput_64b_min_delivery_mps = 0.0 if args.soak_hour else 1.0
         throughput_8b_target_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_8B_TARGET_MPS", 0.30)
-        throughput_8b_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_8B_MIN_DELIVERY_MPS", 1.3)
+        throughput_8b_min_delivery_mps = env_float(
+            "LLAM_SERVER_COMPOSITE_THROUGHPUT_8B_MIN_DELIVERY_MPS",
+            default_throughput_8b_min_delivery_mps,
+        )
         throughput_64b_target_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_64B_TARGET_MPS", 0.15)
-        throughput_64b_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_64B_MIN_DELIVERY_MPS", 1.0)
+        throughput_64b_min_delivery_mps = env_float(
+            "LLAM_SERVER_COMPOSITE_THROUGHPUT_64B_MIN_DELIVERY_MPS",
+            default_throughput_64b_min_delivery_mps,
+        )
         cases = [
             ("lossless-8b", 8, lossless_duration, 8, 32, 0.02, 0.05, 0.999),
             (

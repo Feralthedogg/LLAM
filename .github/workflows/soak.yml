@@ -104,12 +104,6 @@ jobs:
       - name: One-hour server composite soak
         run: |
           set -o pipefail
-          if [ "${{ matrix.name }}" = "macos-aarch64-hour-soak" ]; then
-            # Hosted macOS can throttle long-running tiny-message floods; keep
-            # shutdown/accounting guards hard while avoiding false throughput
-            # failures that do not indicate runtime corruption.
-            export LLAM_SERVER_COMPOSITE_THROUGHPUT_8B_MIN_DELIVERY_MPS=0.750
-          fi
           python3 scripts/stress_server_composite.py \
             --server ./build/soak/server \
             --server-flood ./build/soak/server_flood \
