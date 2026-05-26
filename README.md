@@ -211,11 +211,16 @@ stay at zero. Pass `--seed N` to replay randomized correctness payloads and
 edge churn behavior from a previous run.
 
 `--quick` is intended for hosted CI runners. It keeps exact-delivery checks but
-uses a lower absolute flood delivery threshold than standard and hour-long runs.
+uses a lower absolute flood delivery threshold than the standard profile.
 
 The one-hour profile runs the same classes of checks with a long soak layout:
 30 minutes of main flood, two 5-minute payload flood phases, and 20 minutes of
-mixed edge stress.
+mixed edge stress. It keeps the high-rate best-effort flood load, but treats
+the run as a stability/accounting soak rather than a throughput benchmark:
+zero traffic, missing stats, accounting gaps, closed-outbox drops, forced
+server stop, resource-limit violations, and unexpected edge client errors still
+fail the run; absolute delivery-MPS regression checks are left to the standard
+Stress workflow and scheduled benchmark jobs.
 
 Run focused API/ABI tests:
 
@@ -232,7 +237,7 @@ GitHub Actions is split by cost and depth:
 - `linux`, `macos`, and `Stress` are PR/push gates.
 - `Stress` repeats `test_runtime_stress`, pins/reports server stress seeds, streams long stress logs through `scripts/run_with_timeout.py`, and uploads diagnostics logs on failure or timeout.
 - `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental TSan, and benchmark guardrails from `.github/workflows/nightly.yml`.
-- `Weekly Soak` runs the hour-long composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
+- `Weekly Soak` runs the hour-long stability/accounting composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
 - `Runtime Benchmarks` runs scheduled LLAM/Go/Tokio benchmark comparisons and uploads graphs/results.
 
 Current reliability coverage is split between direct runtime tests and the

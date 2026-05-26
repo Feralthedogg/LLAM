@@ -471,8 +471,9 @@ def phase_flood(args: argparse.Namespace) -> None:
     lossless_duration = 2.0 if args.quick else 5.0
     if args.quick:
         # Hosted CI runners vary heavily; quick mode is a smoke/stability
-        # profile, not a throughput benchmark. The standard/soak profiles keep
-        # the high-rate best-effort flood.
+        # profile, not a throughput benchmark. The standard profile keeps
+        # throughput guardrails; soak keeps the same flood load but validates
+        # long-run accounting/shutdown/resource behavior instead.
         quick_lossless_target_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_TARGET_MPS", 0.02)
         quick_lossless_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_QUICK_LOSSLESS_MIN_DELIVERY_MPS", 0.05)
         quick_lossless_1kb_target_mps = env_float(

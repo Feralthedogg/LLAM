@@ -444,14 +444,19 @@ Before tagging a release build, require:
   deterministic runtime fuzz, conservative scheduler/channel/select/I/O
   benchmark guardrails, ASan/UBSan
   quick gate, and experimental TSan diagnostics.
-- `Weekly Soak` hour-long server composite on Linux x86_64 and macOS arm64
-  before claiming long-running server stability.
+- `Weekly Soak` hour-long server composite on Linux x86_64 and macOS arm64.
+  This profile is the long-running stability/accounting gate: it keeps the
+  high-rate best-effort flood load, but absolute delivery-MPS regression checks
+  belong to `Stress`, `Nightly Deep CI`, and scheduled benchmark jobs. The soak
+  still fails on zero traffic, missing stats, accounting gaps, closed-outbox
+  drops, forced server stop, resource-limit violations, or unexpected edge
+  client errors. Require this gate before claiming long-running server
+  stability.
 - `python3 scripts/stress_server_composite.py --quick --seed 1234` on at least one POSIX
   platform. Quick mode is a hosted-runner smoke gate and uses a lower absolute
-  flood delivery threshold than standard/hour mode; delivery ratio must still
-  remain exact. Keep the printed seed from failed randomized edge runs so the
-  same churn/reset sequence can be replayed.
-- The hour-long server composite profile before claiming server stability.
+  flood delivery threshold than standard mode; delivery ratio must still remain
+  exact. Keep the printed seed from failed randomized edge runs so the same
+  churn/reset sequence can be replayed.
 - `python3 scripts/bench_runtime_compare.py --runtime all` for the public
   LLAM/Go/Tokio comparison graph. Keep the default multi-sample median mode for
   release numbers.

@@ -155,6 +155,12 @@
   runtime-owned scheduler/cache/I/O state, public-handle hardening flow, and
   optional broker process boundary in more detail.
 
+* server composite stress policy now separates throughput guardrails from
+  long-running soak checks. The standard Stress workflow keeps absolute
+  delivery-MPS thresholds, while `--soak-hour` keeps the same high-rate flood
+  load but gates on traffic, stats, accounting, shutdown, resource limits, and
+  unexpected edge errors instead of hosted-runner-sensitive MPS numbers.
+
 ### Fixed
 
 * harden public opaque handles with family-tagged generations so a forged or
