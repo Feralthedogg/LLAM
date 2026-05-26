@@ -251,6 +251,12 @@ jobs:
             # benchmarks own precise cross-platform performance tracking.
             export LLAM_BENCH_GUARD_MIN_OPS="select_recv_ready=3000000,select_timeout=7000000"
           fi
+          if [ "${{ matrix.name }}" = "linux-x86_64-stress" ]; then
+            # Shared Linux/x86_64 runners occasionally starve the park/wake
+            # microbench while runtime stress and server correctness stay clean.
+            # Scheduled benchmark jobs own precise regression tracking.
+            export LLAM_BENCH_GUARD_MIN_OPS="select_park_wake=500000"
+          fi
           if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then
             # Hosted Apple Silicon runners can temporarily halve pipe/kqueue
             # and spawn throughput while runtime stress and server correctness
