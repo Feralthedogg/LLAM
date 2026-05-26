@@ -170,6 +170,16 @@
 * reject `llam_runtime_run_handle(NULL)` with `EINVAL` instead of allowing the
   explicit runtime handle path to dereference a null handle.
 
+* preserve managed task/shard TLS when an embedder creates an explicit runtime
+  from inside an existing LLAM task. A successful nested `llam_runtime_create()`
+  no longer makes the caller look like an unmanaged host thread for subsequent
+  sync, I/O, or current-task queries.
+
+* roll back registered partial runtime initialization failures through the
+  normal runtime shutdown path. Failures after public runtime registration, and
+  after backend setup such as Winsock startup on Windows, now release backend
+  resources before returning the original initialization errno.
+
 * split internal raw owned-buffer cleanup from the public encoded-handle release
   path so public buffer accessors cannot consume a guessed raw wrapper address.
 

@@ -69,6 +69,11 @@ typedef struct owner_diag_state {
     int payload;
 } owner_diag_state_t;
 
+typedef struct nested_runtime_create_state {
+    core_state_t core;
+    llam_runtime_t *created_runtime;
+} nested_runtime_create_state_t;
+
 #if defined(__APPLE__)
 typedef struct timer_handoff_state {
     core_state_t core;
@@ -526,6 +531,146 @@ static int test_preinit_contracts(void) {
         return test_fail("llam_sleep_ns before init did not fail with EINVAL");
     }
     return 0;
+}
+
+static int test_runtime_registered_init_failure_rolls_back(void) {
+    unsigned *cpus = NULL;
+    unsigned cpu_count = llam_count_allowed_cpus(&cpus);
+    llam_runtime_opts_t bad_opts;
+    llam_runtime_opts_t good_opts;
+    llam_runtime_t *runtime = (llam_runtime_t *)(uintptr_t)0x1U;
+
+    free(cpus);
+    if (cpu_count <= 1U) {
+        return 0;
+    }
+
+    memset(&bad_opts, 0, sizeof(bad_opts));
+    bad_opts.deterministic = 1U;
+    bad_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    bad_opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL;
+    bad_opts.sqpoll_cpu = INT32_MAX;
+
+    /*
+     * Invalid explicit SQPOLL CPU validation happens after the runtime is
+     * registered and, on Windows, after Winsock startup.  Failure must roll the
+     * partially initialized runtime back through the normal shutdown path so
+     * backend resources are released and later init/create calls remain valid.
+     */
+    errno = 0;
+    if (llam_runtime_init_ex(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 ||
+        errno != EINVAL) {
+        llam_runtime_shutdown();
+        return test_fail("registered default-runtime init failure did not report EINVAL");
+    }
+
+    memset(&good_opts, 0, sizeof(good_opts));
+    good_opts.deterministic = 1U;
+    good_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_init_ex(&good_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("default runtime did not reinitialize after registered init failure");
+    }
+    llam_runtime_shutdown();
+
+    errno = 0;
+    if (llam_runtime_create(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != -1 ||
+        errno != EINVAL ||
+        runtime != NULL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("registered explicit-runtime init failure did not clear output/report EINVAL");
+    }
+    if (llam_runtime_create(&good_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("explicit runtime did not create after registered init failure");
+    }
+    llam_runtime_destroy(runtime);
+    return 0;
+}
+
+static void nested_runtime_create_task(void *arg) {
+    nested_runtime_create_state_t *state = arg;
+    llam_task_t *self_before = llam_current_task();
+    llam_task_t *self_after;
+    llam_runtime_opts_t opts;
+
+    if (self_before == NULL) {
+        task_fail(&state->core, "nested runtime create task had no current task", EINVAL);
+        return;
+    }
+
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state->created_runtime) != 0) {
+        task_fail(&state->core, "llam_runtime_create from managed task failed", errno);
+        return;
+    }
+    if (state->created_runtime == NULL || state->created_runtime == llam_runtime_default()) {
+        task_fail(&state->core, "nested runtime create returned invalid runtime handle", EINVAL);
+        return;
+    }
+
+    /*
+     * Creating an explicit runtime from inside a managed task must not erase the
+     * caller's TLS task/shard context.  A regression here makes later sync/I/O
+     * calls run as unmanaged host calls and breaks multi-runtime embedding.
+     */
+    self_after = llam_current_task();
+    if (self_after == NULL || self_after != self_before) {
+        task_fail(&state->core, "llam_runtime_create corrupted managed task TLS", EINVAL);
+        return;
+    }
+    llam_yield();
+    self_after = llam_current_task();
+    if (self_after == NULL || self_after != self_before) {
+        task_fail(&state->core, "managed task TLS was not stable after nested create yield", EINVAL);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
+}
+
+static int test_runtime_create_preserves_managed_tls(void) {
+    nested_runtime_create_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *task;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("default runtime init for nested create test failed");
+    }
+    task = llam_spawn(nested_runtime_create_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("nested runtime create task spawn failed");
+    }
+    if (llam_run() != 0) {
+        rc = test_fail_errno("nested runtime create test run failed");
+    }
+    if (llam_join(task) != 0 && rc == 0) {
+        rc = test_fail_errno("nested runtime create task join failed");
+    }
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U && rc == 0) {
+        errno = state.core.first_errno;
+        rc = test_fail(state.core.first_case);
+    }
+    if (atomic_load_explicit(&state.core.ran, memory_order_relaxed) != 1U && rc == 0) {
+        rc = test_fail("nested runtime create task did not complete");
+    }
+    /*
+     * Foreign runtime destruction from the managed task is intentionally ignored;
+     * the host that owns the newly-created handle tears it down after the task
+     * exits so the test also covers post-run explicit destroy.
+     */
+    llam_runtime_destroy(state.created_runtime);
+    llam_runtime_shutdown();
+    return rc;
 }
 
 static int test_runtime_handle_api(void) {
@@ -2372,6 +2517,8 @@ static int test_concurrent_spawn_contract(void) {
 
 int main(void) {
     RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
+    RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
+    RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_timer_policy_is_bounded);
     RUN_RUNTIME_CORE_TEST(test_runtime_handle_api);

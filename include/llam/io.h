@@ -257,7 +257,8 @@ LLAM_API size_t llam_io_buffer_alignment(const llam_io_buffer_t *buffer);
  * @brief Positional read into a newly allocated aligned owned buffer.
  *
  * @details On success with a positive byte count, @p out receives a buffer that
- * must be released with ::llam_io_buffer_release. EOF returns 0 and stores NULL.
+ * must be released with ::llam_io_buffer_release. EOF returns 0 and stores
+ * NULL. Failure returns -1, stores NULL in @p out, and sets @c errno.
  */
 LLAM_API ssize_t llam_pread_owned_aligned(llam_fd_t fd,
                                           size_t max_count,

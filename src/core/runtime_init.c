@@ -114,6 +114,27 @@ static void llam_metrics_init(llam_metrics_t *metrics) {
 }
 
 /**
+ * @brief Tear down a registered partially-initialized runtime and preserve errno.
+ *
+ * @details
+ * After ::llam_runtime_register_handle succeeds, initialization may have already
+ * acquired process/backend resources such as Winsock on Windows.  Failure paths
+ * from that point must use normal runtime shutdown instead of open-coding
+ * unregister+memset, otherwise backend-specific cleanup can be skipped.  The
+ * original initialization error is restored after cleanup because teardown may
+ * call system APIs that touch @c errno.
+ */
+static int llam_runtime_init_fail_registered(llam_runtime_t *rt, int error_code) {
+    if (error_code == 0) {
+        error_code = EINVAL;
+    }
+    errno = error_code;
+    llam_runtime_shutdown_rt(rt);
+    errno = error_code;
+    return -1;
+}
+
+/**
  * @brief Initialize a shard trace ring after calloc-backed shard allocation.
  *
  * Trace events are atomic because trace producers can be peer wake paths, I/O
@@ -553,12 +574,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     errno = 0;
     observed = llam_count_allowed_cpus(&cpus);
     if (observed == 0U) {
+        int saved_errno = errno != 0 ? errno : ENODEV;
+
         if (errno == 0) {
             errno = ENODEV;
         }
-        llam_runtime_unregister_handle(rt);
-        memset(rt, 0, sizeof(*rt));
-        return -1;
+        return llam_runtime_init_fail_registered(rt, saved_errno);
     }
     observed_total = observed;
 
@@ -711,10 +732,10 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->experimental_dynamic_shards = 0U;
     }
     if (llam_runtime_reserve_sqpoll_cpu(rt, &cpus, &observed) != 0) {
+        int saved_errno = errno;
+
         free(cpus);
-        llam_runtime_unregister_handle(rt);
-        memset(rt, 0, sizeof(*rt));
-        return -1;
+        return llam_runtime_init_fail_registered(rt, saved_errno);
     }
     rt->observed_shards = observed_total;
     rt->active_shards = rt->deterministic != 0U ? 1U : observed;
@@ -1176,6 +1197,9 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,
                          size_t opts_size,
                          bool heap_allocated) {
+    llam_shard_t *saved_tls_shard = g_llam_tls_shard;
+    llam_task_t *saved_tls_task = g_llam_tls_task;
+    llam_ctx_t *saved_tls_scheduler_ctx = g_llam_tls_scheduler_ctx;
     int rc;
 
     /*
@@ -1190,6 +1214,18 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
         return -1;
     }
     rc = llam_runtime_init_ex_rt_unlocked(rt, opts, opts_size, heap_allocated);
+    /*
+     * The init body clears TLS while constructing a runtime so partial-init
+     * cleanup can use host-side teardown paths.  If an embedder creates an
+     * explicit runtime from an existing LLAM task, restore that task context
+     * before returning; otherwise a successful create corrupts the caller's
+     * managed execution frame.
+     */
+    if (saved_tls_task != NULL || saved_tls_scheduler_ctx != NULL) {
+        g_llam_tls_shard = saved_tls_shard;
+        g_llam_tls_task = saved_tls_task;
+        g_llam_tls_scheduler_ctx = saved_tls_scheduler_ctx;
+    }
     llam_runtime_lifecycle_unlock();
     return rc;
 }
