@@ -34,7 +34,9 @@
 
 #if LLAM_PLATFORM_POSIX
 #include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -2069,6 +2071,73 @@ cleanup:
 #endif
 }
 
+static int test_process_signal_handler_survives_peer_runtime_destroy(void) {
+#if LLAM_PLATFORM_POSIX
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("signal handler isolation fork failed");
+    }
+    if (pid == 0) {
+        llam_runtime_opts_t opts;
+        llam_runtime_t *runtime_a = NULL;
+        llam_runtime_t *runtime_b = NULL;
+        struct sigaction default_action;
+
+        memset(&default_action, 0, sizeof(default_action));
+        sigemptyset(&default_action.sa_mask);
+        default_action.sa_handler = SIG_DFL;
+        if (sigaction(LLAM_PREEMPT_SIGNAL, &default_action, NULL) != 0) {
+            _exit(9);
+        }
+
+        if (init_runtime_opts(&opts) != 0) {
+            _exit(10);
+        }
+        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+            llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+            _exit(11);
+        }
+
+        llam_runtime_destroy(runtime_a);
+
+        /*
+         * Preemption uses a process-wide signal handler. Destroying one
+         * runtime must not restore SIGUSR1 to the previous/default action
+         * while another runtime can still receive watchdog preemption.
+         */
+        if (raise(LLAM_PREEMPT_SIGNAL) != 0) {
+            _exit(12);
+        }
+
+        llam_runtime_destroy(runtime_b);
+        _exit(0);
+    }
+
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return test_fail_errno("signal handler isolation waitpid failed");
+        }
+    }
+    if (WIFSIGNALED(status)) {
+        errno = 0;
+        fprintf(stderr,
+                "[test_multi_runtime_core] child died from signal %d after peer runtime destroy\n",
+                WTERMSIG(status));
+        return 1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        errno = WIFEXITED(status) ? WEXITSTATUS(status) : ECHILD;
+        return test_fail_errno("signal handler isolation child failed");
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
 static int test_host_try_ops_ignore_default_runtime_race(void) {
 #if LLAM_PLATFORM_POSIX
     host_try_default_race_state_t state;
@@ -2922,6 +2991,8 @@ int main(void) {
         {"concurrent_runtime_io", test_concurrent_runtime_io},
         {"explicit_owned_buffers_survive_runtime_destroy", test_explicit_owned_buffers_survive_runtime_destroy},
         {"destroyed_runtime_io_cancel_does_not_stop_peer_runtime", test_destroyed_runtime_io_cancel_does_not_stop_peer_runtime},
+        {"process_signal_handler_survives_peer_runtime_destroy",
+         test_process_signal_handler_survives_peer_runtime_destroy},
         {"host_try_ops_ignore_default_runtime_race", test_host_try_ops_ignore_default_runtime_race},
         {"explicit_channel_host_try_races_runtime_destroy", test_explicit_channel_host_try_races_runtime_destroy},
         {"default_channel_host_try_ops_ignore_default_runtime_reinit", test_default_channel_host_try_ops_ignore_default_runtime_reinit},

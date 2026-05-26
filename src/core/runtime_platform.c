@@ -36,6 +36,13 @@
 #include <sys/sysctl.h>
 #endif
 
+static pthread_mutex_t g_llam_process_signal_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_llam_process_signal_refs;
+static bool g_llam_process_preempt_installed;
+static bool g_llam_process_segv_installed;
+static struct sigaction g_llam_process_previous_preempt_action;
+static struct sigaction g_llam_process_previous_segv_action;
+
 /**
  * @brief Optionally bind the current thread to a CPU.
  *
@@ -281,52 +288,107 @@ void llam_pause_cpu(void) {
 /**
  * @brief Install process-wide preemption and fault signal handlers.
  *
- * @param rt Runtime storing previous handlers for later restoration.
+ * @details
+ * POSIX signal actions are process-global, while LLAM 2.x allows multiple
+ * explicit runtimes to coexist.  The first runtime installs the handlers and
+ * saves the previous process actions; later runtimes only take a reference.
+ * Restoration happens when the last referencing runtime shuts down.
+ *
+ * @param rt Runtime taking a process-handler reference.
  *
  * @return 0 on success, or -1 with @c errno set by @c sigaction.
  */
 int llam_install_process_signal_handlers(llam_runtime_t *rt) {
     struct sigaction action;
+    int saved_errno;
+
+    if (rt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    pthread_mutex_lock(&g_llam_process_signal_lock);
+    if (g_llam_process_signal_refs > 0U) {
+        g_llam_process_signal_refs += 1U;
+        rt->previous_preempt_action = g_llam_process_previous_preempt_action;
+        rt->previous_segv_action = g_llam_process_previous_segv_action;
+        rt->preempt_signal_installed = true;
+        rt->segv_signal_installed = true;
+        pthread_mutex_unlock(&g_llam_process_signal_lock);
+        return 0;
+    }
 
     memset(&action, 0, sizeof(action));
     sigemptyset(&action.sa_mask);
     action.sa_handler = llam_preempt_signal_handler;
     action.sa_flags = SA_RESTART | SA_ONSTACK;
-    if (sigaction(LLAM_PREEMPT_SIGNAL, &action, &rt->previous_preempt_action) != 0) {
+    if (sigaction(LLAM_PREEMPT_SIGNAL, &action, &g_llam_process_previous_preempt_action) != 0) {
+        saved_errno = errno;
+        pthread_mutex_unlock(&g_llam_process_signal_lock);
+        errno = saved_errno;
         return -1;
     }
-    rt->preempt_signal_installed = true;
+    g_llam_process_preempt_installed = true;
 
     memset(&action, 0, sizeof(action));
     sigemptyset(&action.sa_mask);
     action.sa_sigaction = llam_fault_signal_handler;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    if (sigaction(SIGSEGV, &action, &rt->previous_segv_action) != 0) {
-        int saved_errno = errno;
+    if (sigaction(SIGSEGV, &action, &g_llam_process_previous_segv_action) != 0) {
+        saved_errno = errno;
 
-        (void)sigaction(LLAM_PREEMPT_SIGNAL, &rt->previous_preempt_action, NULL);
-        rt->preempt_signal_installed = false;
+        (void)sigaction(LLAM_PREEMPT_SIGNAL, &g_llam_process_previous_preempt_action, NULL);
+        g_llam_process_preempt_installed = false;
+        pthread_mutex_unlock(&g_llam_process_signal_lock);
         errno = saved_errno;
         return -1;
     }
+    g_llam_process_segv_installed = true;
+    g_llam_process_signal_refs = 1U;
+    rt->previous_preempt_action = g_llam_process_previous_preempt_action;
+    rt->previous_segv_action = g_llam_process_previous_segv_action;
+    rt->preempt_signal_installed = true;
     rt->segv_signal_installed = true;
+    pthread_mutex_unlock(&g_llam_process_signal_lock);
     return 0;
 }
 
 /**
- * @brief Restore process-wide signal handlers installed by the runtime.
+ * @brief Release this runtime's process-wide signal handler reference.
  *
- * @param rt Runtime containing saved handler state.
+ * @details
+ * The previous process actions are restored only after the last active runtime
+ * releases its reference.  Restoring on every runtime destroy would expose
+ * peer runtimes to the default @c SIGUSR1 action while their watchdogs may
+ * still request preemption.
+ *
+ * @param rt Runtime containing local handler-reference state.
  */
 void llam_restore_process_signal_handlers(llam_runtime_t *rt) {
-    if (rt->segv_signal_installed) {
-        (void)sigaction(SIGSEGV, &rt->previous_segv_action, NULL);
-        rt->segv_signal_installed = false;
+    if (rt == NULL || (!rt->segv_signal_installed && !rt->preempt_signal_installed)) {
+        return;
     }
-    if (rt->preempt_signal_installed) {
-        (void)sigaction(LLAM_PREEMPT_SIGNAL, &rt->previous_preempt_action, NULL);
-        rt->preempt_signal_installed = false;
+
+    pthread_mutex_lock(&g_llam_process_signal_lock);
+    if (g_llam_process_signal_refs > 0U) {
+        g_llam_process_signal_refs -= 1U;
     }
+    rt->segv_signal_installed = false;
+    rt->preempt_signal_installed = false;
+
+    if (g_llam_process_signal_refs == 0U) {
+        if (g_llam_process_segv_installed) {
+            (void)sigaction(SIGSEGV, &g_llam_process_previous_segv_action, NULL);
+            g_llam_process_segv_installed = false;
+        }
+        if (g_llam_process_preempt_installed) {
+            (void)sigaction(LLAM_PREEMPT_SIGNAL, &g_llam_process_previous_preempt_action, NULL);
+            g_llam_process_preempt_installed = false;
+        }
+        memset(&g_llam_process_previous_preempt_action, 0, sizeof(g_llam_process_previous_preempt_action));
+        memset(&g_llam_process_previous_segv_action, 0, sizeof(g_llam_process_previous_segv_action));
+    }
+    pthread_mutex_unlock(&g_llam_process_signal_lock);
 }
 
 /**
