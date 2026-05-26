@@ -7814,6 +7814,71 @@ done:
     return rc;
 }
 
+static int test_broker_register_handle_clears_inherit_flag(void) {
+    SECURITY_ATTRIBUTES attrs;
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    HANDLE read_pipe_read = INVALID_HANDLE_VALUE;
+    HANDLE read_pipe_write = INVALID_HANDLE_VALUE;
+    DWORD flags = 0U;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.nLength = sizeof(attrs);
+    attrs.bInheritHandle = TRUE;
+    if (!CreatePipe(&read_pipe_read, &read_pipe_write, &attrs, 0U)) {
+        return -1;
+    }
+    if (!GetHandleInformation(read_pipe_read, &flags) ||
+        (flags & HANDLE_FLAG_INHERIT) == 0U) {
+        goto done;
+    }
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        goto done;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        goto done;
+    }
+    broker_initialized = true;
+
+    /*
+     * POSIX descriptor registration clears FD_CLOEXEC.  Windows must clear the
+     * equivalent HANDLE_FLAG_INHERIT bit too; otherwise broker-registered
+     * HANDLE authority can leak into child processes created with handle
+     * inheritance enabled.
+     */
+    if (llam_broker_register_handle(&broker,
+                                    (llam_handle_t)read_pipe_read,
+                                    LLAM_CAP_RIGHT_READ,
+                                    false,
+                                    &token) != 0) {
+        goto done;
+    }
+    flags = HANDLE_FLAG_INHERIT;
+    if (!GetHandleInformation(read_pipe_read, &flags) ||
+        (flags & HANDLE_FLAG_INHERIT) != 0U) {
+        fprintf(stderr, "[test_security_capability] broker registered HANDLE remained inheritable\n");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (read_pipe_read != INVALID_HANDLE_VALUE) {
+        CloseHandle(read_pipe_read);
+    }
+    if (read_pipe_write != INVALID_HANDLE_VALUE) {
+        CloseHandle(read_pipe_write);
+    }
+    return rc;
+}
+
 typedef struct broker_pipe_server_state {
     llam_broker_t *broker;
     llam_handle_t handle;
@@ -9533,6 +9598,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_serve_local_n_survives_malformed_session);
 #else
     LLAM_RUN_SECURITY_TEST(test_broker_ring_handle_data_plane);
+    LLAM_RUN_SECURITY_TEST(test_broker_register_handle_clears_inherit_flag);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_mapping_flood);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_flood);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_session_replay_guard);

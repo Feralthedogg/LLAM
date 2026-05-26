@@ -254,6 +254,10 @@ broker-control foundation:
   response fds, and mapped ring fd duplicates. This prevents later helper
   `exec` calls from inheriting broker capability transport or data-plane
   authority by accident.
+- Windows broker-registered HANDLEs clear `HANDLE_FLAG_INHERIT` during
+  descriptor registration. This mirrors the POSIX close-on-exec rule and keeps
+  broker descriptor authority out of child processes created with handle
+  inheritance enabled.
 - Failed POSIX broker wire reads clear the caller's request/response structure
   before returning an error. A short write, early close, truncated ancillary
   message, or malformed descriptor grant therefore cannot leave attacker-chosen

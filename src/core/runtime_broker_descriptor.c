@@ -37,7 +37,14 @@
 
 static int llam_broker_descriptor_set_cloexec(llam_handle_t handle) {
 #if LLAM_PLATFORM_WINDOWS
-    (void)handle;
+    if (LLAM_UNLIKELY(llam_broker_descriptor_handle_invalid(handle))) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!SetHandleInformation((HANDLE)handle, HANDLE_FLAG_INHERIT, 0U)) {
+        errno = llam_windows_system_error_to_errno(GetLastError());
+        return -1;
+    }
     return 0;
 #else
     int fd = (int)handle;

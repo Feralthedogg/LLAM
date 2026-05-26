@@ -364,6 +364,9 @@
   duplicates, and ring mapping duplicates are now marked close-on-exec so
   broker capability transport or data-plane authority is not inherited by later
   helper `exec` calls.
+  Windows broker-registered HANDLEs now clear `HANDLE_FLAG_INHERIT` during
+  descriptor registration, matching the POSIX close-on-exec boundary for
+  child processes created with handle inheritance enabled.
   Failed POSIX broker wire reads now clear request/response output storage
   before returning an error, preventing partial attacker-controlled control
   messages from being reused by buggy callers that ignore the failure return.
