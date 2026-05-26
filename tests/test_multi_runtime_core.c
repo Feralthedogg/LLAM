@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if LLAM_PLATFORM_POSIX
@@ -2138,6 +2139,72 @@ static int test_process_signal_handler_survives_peer_runtime_destroy(void) {
 #endif
 }
 
+static int test_process_fp_globals_survive_peer_runtime_destroy(void) {
+#if LLAM_PLATFORM_POSIX && LLAM_ARCH_X86_64
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime_a = NULL;
+    llam_runtime_t *runtime_b = NULL;
+    const char *old_fp_env = getenv("LLAM_FP_CONTROL_CONTEXT");
+    char *old_fp_env_copy = NULL;
+    int rc = 1;
+
+    if (old_fp_env != NULL) {
+        old_fp_env_copy = malloc(strlen(old_fp_env) + 1U);
+        if (old_fp_env_copy == NULL) {
+            return test_fail_errno("FP global isolation env copy failed");
+        }
+        strcpy(old_fp_env_copy, old_fp_env);
+    }
+    if (setenv("LLAM_FP_CONTROL_CONTEXT", "1", 1) != 0) {
+        rc = test_fail_errno("FP global isolation setenv failed");
+        goto cleanup;
+    }
+    if (init_runtime_opts(&opts) != 0) {
+        rc = test_fail_errno("FP global isolation opts init failed");
+        goto cleanup;
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        rc = test_fail_errno("FP global isolation runtime create failed");
+        goto cleanup;
+    }
+    if (g_llam_fp_control_context == 0U) {
+        rc = test_fail("FP global isolation did not enable FP-control context");
+        goto cleanup;
+    }
+
+    llam_runtime_destroy(runtime_a);
+    runtime_a = NULL;
+    if (g_llam_fp_control_context == 0U) {
+        rc = test_fail("FP global isolation peer destroy cleared live context policy");
+        goto cleanup;
+    }
+
+    llam_runtime_destroy(runtime_b);
+    runtime_b = NULL;
+    if (g_llam_fp_control_context != 0U) {
+        rc = test_fail("FP global isolation final destroy did not clear context policy");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime_b);
+    llam_runtime_destroy(runtime_a);
+    if (old_fp_env_copy != NULL) {
+        if (setenv("LLAM_FP_CONTROL_CONTEXT", old_fp_env_copy, 1) != 0 && rc == 0) {
+            rc = test_fail_errno("FP global isolation env restore failed");
+        }
+        free(old_fp_env_copy);
+    } else if (unsetenv("LLAM_FP_CONTROL_CONTEXT") != 0 && rc == 0) {
+        rc = test_fail_errno("FP global isolation env unset failed");
+    }
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 static int test_host_try_ops_ignore_default_runtime_race(void) {
 #if LLAM_PLATFORM_POSIX
     host_try_default_race_state_t state;
@@ -2993,6 +3060,8 @@ int main(void) {
         {"destroyed_runtime_io_cancel_does_not_stop_peer_runtime", test_destroyed_runtime_io_cancel_does_not_stop_peer_runtime},
         {"process_signal_handler_survives_peer_runtime_destroy",
          test_process_signal_handler_survives_peer_runtime_destroy},
+        {"process_fp_globals_survive_peer_runtime_destroy",
+         test_process_fp_globals_survive_peer_runtime_destroy},
         {"host_try_ops_ignore_default_runtime_race", test_host_try_ops_ignore_default_runtime_race},
         {"explicit_channel_host_try_races_runtime_destroy", test_explicit_channel_host_try_races_runtime_destroy},
         {"default_channel_host_try_ops_ignore_default_runtime_reinit", test_default_channel_host_try_ops_ignore_default_runtime_reinit},

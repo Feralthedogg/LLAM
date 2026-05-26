@@ -32,6 +32,21 @@
 #include <malloc.h>
 #endif
 
+#if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64) || \
+    (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)
+#define LLAM_XSAVE_PROCESS_GLOBALS 1
+#else
+#define LLAM_XSAVE_PROCESS_GLOBALS 0
+#endif
+
+static pthread_mutex_t g_llam_xsave_global_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned g_llam_xsave_global_refs;
+static bool g_llam_xsave_global_enabled;
+static uint32_t g_llam_xsave_global_fp_control_context;
+static uint64_t g_llam_xsave_global_mask;
+static size_t g_llam_xsave_global_area_size;
+static size_t g_llam_xsave_global_area_alloc_size;
+
 /**
  * @brief Clear cached global extended-context capability flags.
  */
@@ -41,8 +56,53 @@ void llam_clear_xsave_globals(void) {
     g_llam_fp_control_context = 0U;
 }
 
-#if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64) || \
-    (LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64)
+#if LLAM_XSAVE_PROCESS_GLOBALS
+/**
+ * @brief Publish cached process-wide FP switch policy into assembly globals.
+ */
+static void llam_publish_xsave_globals_locked(void) {
+    g_llam_fp_control_context = g_llam_xsave_global_fp_control_context;
+    g_llam_xsave_mask_lo = (uint32_t)g_llam_xsave_global_mask;
+    g_llam_xsave_mask_hi = (uint32_t)(g_llam_xsave_global_mask >> 32U);
+}
+
+/**
+ * @brief Copy cached process-wide FP switch policy into a runtime.
+ */
+static void llam_apply_xsave_globals_to_runtime_locked(llam_runtime_t *rt) {
+    rt->xsave_enabled = g_llam_xsave_global_enabled;
+    rt->xsave_mask = g_llam_xsave_global_mask;
+    rt->xsave_area_size = g_llam_xsave_global_area_size;
+    rt->xsave_area_alloc_size = g_llam_xsave_global_area_alloc_size;
+    llam_publish_xsave_globals_locked();
+}
+#endif
+
+/**
+ * @brief Release one runtime's reference to process-wide FP switch globals.
+ */
+void llam_release_xsave_globals(llam_runtime_t *rt) {
+    if (rt == NULL || !rt->fp_globals_retained) {
+        return;
+    }
+
+    pthread_mutex_lock(&g_llam_xsave_global_lock);
+    if (g_llam_xsave_global_refs > 0U) {
+        g_llam_xsave_global_refs -= 1U;
+    }
+    rt->fp_globals_retained = false;
+    if (g_llam_xsave_global_refs == 0U) {
+        g_llam_xsave_global_enabled = false;
+        g_llam_xsave_global_fp_control_context = 0U;
+        g_llam_xsave_global_mask = 0U;
+        g_llam_xsave_global_area_size = 0U;
+        g_llam_xsave_global_area_alloc_size = 0U;
+        llam_clear_xsave_globals();
+    }
+    pthread_mutex_unlock(&g_llam_xsave_global_lock);
+}
+
+#if LLAM_XSAVE_PROCESS_GLOBALS
 /** @brief Read the current SSE MXCSR control/status register. */
 static uint32_t llam_current_mxcsr(void) {
 #if defined(_MSC_VER)
@@ -103,6 +163,7 @@ static void llam_save_xsave_area(void *area, uint64_t mask) {
  */
 int llam_detect_xsave_support(llam_runtime_t *rt) {
     const char *fp_env;
+    int rc = 0;
 #if defined(__linux__)
     const char *xsave_env;
     unsigned max_leaf;
@@ -114,13 +175,37 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
     uint64_t xcr0;
 #endif
 
-    llam_clear_xsave_globals();
     if (rt == NULL) {
         return 0;
     }
 
+    /*
+     * The x86 assembly switch path reads process-wide globals.  Multiple
+     * explicit runtimes therefore share one stable FP policy while any runtime
+     * is alive; a peer create/destroy must not transiently clear these globals.
+     */
+    pthread_mutex_lock(&g_llam_xsave_global_lock);
+    if (rt->fp_globals_retained) {
+        llam_apply_xsave_globals_to_runtime_locked(rt);
+        pthread_mutex_unlock(&g_llam_xsave_global_lock);
+        return 0;
+    }
+    if (g_llam_xsave_global_refs > 0U) {
+        g_llam_xsave_global_refs += 1U;
+        rt->fp_globals_retained = true;
+        llam_apply_xsave_globals_to_runtime_locked(rt);
+        pthread_mutex_unlock(&g_llam_xsave_global_lock);
+        return 0;
+    }
+
+    llam_clear_xsave_globals();
+    rt->xsave_enabled = false;
+    rt->xsave_mask = 0U;
+    rt->xsave_area_size = 0U;
+    rt->xsave_area_alloc_size = 0U;
+
     fp_env = llam_env_get("LLAM_FP_CONTROL_CONTEXT");
-    g_llam_fp_control_context =
+    g_llam_xsave_global_fp_control_context =
         (fp_env == NULL || fp_env[0] == '\0' || strcmp(fp_env, "0") != 0) ? 1U : 0U;
 
 #if !defined(__linux__)
@@ -129,34 +214,26 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
      * preserve only FP control state. Keep XSAVE disabled until each platform's
      * capability probe and signal/SEH interactions are explicitly validated.
      */
-    rt->xsave_enabled = false;
-    rt->xsave_mask = 0U;
-    rt->xsave_area_size = 0U;
-    rt->xsave_area_alloc_size = 0U;
-    return 0;
+    goto done;
 #else
     xsave_env = llam_env_get("LLAM_XSAVE_CONTEXT");
     // XSAVE is opt-in because it increases per-context allocation and switch cost.
     if (xsave_env == NULL || xsave_env[0] == '\0' || strcmp(xsave_env, "0") == 0) {
-        rt->xsave_enabled = false;
-        rt->xsave_mask = 0U;
-        rt->xsave_area_size = 0U;
-        rt->xsave_area_alloc_size = 0U;
-        return 0;
+        goto done;
     }
 
     max_leaf = __get_cpuid_max(0, NULL);
     if (max_leaf < 0xDU) {
-        return 0;
+        goto done;
     }
     if (!__get_cpuid(1U, &eax, &ebx, &ecx, &edx)) {
-        return 0;
+        goto done;
     }
     if ((ecx & bit_XSAVE) == 0U || (ecx & bit_OSXSAVE) == 0U) {
-        return 0;
+        goto done;
     }
     if (!__get_cpuid_count(0xDU, 0U, &eax, &ebx, &ecx, &edx)) {
-        return 0;
+        goto done;
     }
 
     xcr0 = llam_xgetbv(0U);
@@ -165,20 +242,28 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
     if ((rt->xsave_mask & 0x3U) != 0x3U) {
         // x87/SSE state must be present before the runtime can rely on XSAVE.
         rt->xsave_mask = 0U;
-        return 0;
+        goto done;
     }
 
     rt->xsave_area_size = ebx > ecx ? (size_t)ebx : (size_t)ecx;
     if (rt->xsave_area_size == 0U) {
         rt->xsave_mask = 0U;
-        return 0;
+        goto done;
     }
     rt->xsave_area_alloc_size = llam_align_up(rt->xsave_area_size, 64U);
     rt->xsave_enabled = true;
-    g_llam_xsave_mask_lo = (uint32_t)rt->xsave_mask;
-    g_llam_xsave_mask_hi = (uint32_t)(rt->xsave_mask >> 32U);
-    return 0;
 #endif
+
+done:
+    g_llam_xsave_global_enabled = rt->xsave_enabled;
+    g_llam_xsave_global_mask = rt->xsave_mask;
+    g_llam_xsave_global_area_size = rt->xsave_area_size;
+    g_llam_xsave_global_area_alloc_size = rt->xsave_area_alloc_size;
+    g_llam_xsave_global_refs = 1U;
+    rt->fp_globals_retained = true;
+    llam_publish_xsave_globals_locked();
+    pthread_mutex_unlock(&g_llam_xsave_global_lock);
+    return rc;
 }
 
 /**

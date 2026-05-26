@@ -1066,6 +1066,8 @@ struct llam_runtime {
     unsigned sqpoll_cpu_reserved;
     int sqpoll_cpu;
     bool xsave_enabled;
+    /* Process-global x86 FP switch globals stay published until this ref drops. */
+    bool fp_globals_retained;
     bool winsock_started;
     unsigned windows_unsafe_skip_task_simd;
 #if LLAM_RUNTIME_BACKEND_WINDOWS

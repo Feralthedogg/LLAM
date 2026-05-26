@@ -346,7 +346,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
         rt->winsock_started = false;
     }
 #endif
-    llam_clear_xsave_globals();
+    llam_release_xsave_globals(rt);
     /*
      * Remove the runtime from the public handle registry before zeroing it.
      * Otherwise an old pointer can pass handle validation and race into freed

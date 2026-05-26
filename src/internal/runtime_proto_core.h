@@ -189,6 +189,7 @@ void llam_clear_xsave_globals(void);
 void llam_ctx_destroy_fp_state(llam_ctx_t *ctx);
 int llam_ctx_init_fp_state(llam_ctx_t *ctx, llam_runtime_t *rt);
 int llam_detect_xsave_support(llam_runtime_t *rt);
+void llam_release_xsave_globals(llam_runtime_t *rt);
 void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext);
 int llam_install_process_signal_handlers(llam_runtime_t *rt);
 int llam_install_thread_signal_stack(llam_shard_t *shard);
