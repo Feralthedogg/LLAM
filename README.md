@@ -902,7 +902,7 @@ go run scripts/bench_go_compare.go
 Compare LLAM, Go, and Tokio:
 
 ```bash
-python3 scripts/bench_runtime_compare.py --runtime all
+python3 scripts/bench_runtime_compare.py --runtime all --isolate-cases
 ```
 
 The comparison script runs three process-level samples per runtime by default
@@ -910,9 +910,9 @@ and reports the median row for each case so one noisy scheduler outlier does
 not dominate the table. Use `--samples 1` for a quick smoke run or
 `--sample-policy best` when locally measuring peak tuning.
 
-For latency-sensitive cases such as `spawn_join`, use isolated case execution
-so each benchmark case starts from a fresh process instead of inheriting worker
-state from the previous case:
+Release-quality comparison numbers should use isolated case execution so each
+benchmark case starts from a fresh process instead of inheriting worker, timer,
+cache, or CPU-frequency state from the previous case:
 
 ```bash
 python3 scripts/bench_runtime_compare.py \

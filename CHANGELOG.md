@@ -4,6 +4,11 @@
 
 ### Added
 
+* benchmark workflow and release-gate documentation now use isolated case
+  execution for public LLAM/Go/Tokio comparison numbers, preventing
+  cross-case worker, timer, cache, and CPU-frequency state from depressing
+  latency-sensitive cases such as `spawn_join`.
+
 * BSD platform support foundation: add FreeBSD, OpenBSD, NetBSD, and DragonFly
   platform macros, share the kqueue readiness/user-wake backend with Darwin
   where portable, keep Mach/ulock paths Darwin-only, wire BSD x86_64/aarch64

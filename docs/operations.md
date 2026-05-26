@@ -407,7 +407,7 @@ LLAM_BENCH_ONLY=select_timeout ./bench
 The cross-runtime script includes these cases for LLAM, Go, and Tokio:
 
 ```bash
-python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1
+python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1 --isolate-cases
 ```
 
 By default the script runs three process-level samples per runtime and reports
@@ -415,9 +415,9 @@ the median row for each benchmark case. This keeps short cases such as
 `spawn_join` from being dominated by a single OS scheduling outlier. Use
 `--samples 1` only for quick smoke checks.
 
-When investigating a specific regression, add `--isolate-cases` so each case
-runs in a fresh process. This avoids cross-case worker-count, timer, cache, and
-CPU-frequency state from a previous benchmark case leaking into the next one.
+Use `--isolate-cases` for release-quality numbers so each case runs in a fresh
+process. This avoids cross-case worker-count, timer, cache, and CPU-frequency
+state from a previous benchmark case leaking into the next one.
 
 ```bash
 python3 scripts/bench_runtime_compare.py \
@@ -457,8 +457,8 @@ Before tagging a release build, require:
   flood delivery threshold than standard mode; delivery ratio must still remain
   exact. Keep the printed seed from failed randomized edge runs so the same
   churn/reset sequence can be replayed.
-- `python3 scripts/bench_runtime_compare.py --runtime all` for the public
-  LLAM/Go/Tokio comparison graph. Keep the default multi-sample median mode for
-  release numbers.
+- `python3 scripts/bench_runtime_compare.py --runtime all --isolate-cases` for
+  the public LLAM/Go/Tokio comparison graph. Keep the default multi-sample
+  median mode for release numbers.
 - No unexplained `skipped=` phases. A skipped phase is acceptable only when the
   platform contract explicitly lacks that backend feature.

@@ -110,6 +110,7 @@ jobs:
             --rounds "$ROUNDS" \
             --warmup "$WARMUP" \
             --timeout 240 \
+            --isolate-cases \
             --out-dir "$OUT_DIR"
         env:
           CC: ${{ matrix.cc }}
