@@ -20,7 +20,7 @@
 
 #include "runtime_io_watch_windows_internal.h"
 
-static llam_windows_fd_assoc_t *llam_windows_find_assoc(llam_node_t *node, uintptr_t key) {
+static llam_windows_fd_assoc_t *llam_windows_find_assoc_locked(llam_node_t *node, uintptr_t key) {
     llam_windows_fd_assoc_t *assoc;
 
     if (node == NULL) {
@@ -54,7 +54,6 @@ static unsigned llam_windows_try_skip_completion_on_success(llam_node_t *node, H
 
 int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
     llam_windows_fd_assoc_t *assoc;
-    bool known_fd = false;
     HANDLE handle;
     DWORD error_code;
 
@@ -62,38 +61,38 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
         errno = EINVAL;
         return -1;
     }
-    assoc = llam_windows_find_assoc(node, (uintptr_t)fd);
-    known_fd = assoc != NULL;
-
-    handle = CreateIoCompletionPort((HANDLE)(uintptr_t)fd, (HANDLE)node->windows_iocp_handle, 0, 0);
-    if (handle == NULL) {
-        error_code = GetLastError();
-        if (error_code == ERROR_INVALID_PARAMETER && known_fd) {
-            return 0;
-        }
-        errno = error_code == ERROR_NOT_ENOUGH_MEMORY ? ENOMEM : EINVAL;
-        return -1;
-    }
-    if (known_fd) {
-        return 0;
-    }
 
     assoc = calloc(1, sizeof(*assoc));
     if (assoc == NULL) {
         errno = ENOMEM;
         return -1;
     }
+
+    pthread_mutex_lock(&node->watch_lock);
+    if (llam_windows_find_assoc_locked(node, (uintptr_t)fd) != NULL) {
+        pthread_mutex_unlock(&node->watch_lock);
+        free(assoc);
+        return 0;
+    }
+    handle = CreateIoCompletionPort((HANDLE)(uintptr_t)fd, (HANDLE)node->windows_iocp_handle, 0, 0);
+    if (handle == NULL) {
+        error_code = GetLastError();
+        pthread_mutex_unlock(&node->watch_lock);
+        free(assoc);
+        errno = error_code == ERROR_NOT_ENOUGH_MEMORY ? ENOMEM : EINVAL;
+        return -1;
+    }
     assoc->fd = fd;
     assoc->skip_completion_on_success = llam_windows_try_skip_completion_on_success(node, (HANDLE)(uintptr_t)fd);
     assoc->next = node->windows_fd_assoc_head;
     node->windows_fd_assoc_head = assoc;
+    pthread_mutex_unlock(&node->watch_lock);
     return 0;
 }
 
 int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
     uintptr_t key = (uintptr_t)raw_handle;
     llam_windows_fd_assoc_t *assoc;
-    bool known_handle = false;
     HANDLE handle;
     DWORD error_code;
 
@@ -101,31 +100,32 @@ int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
         errno = EINVAL;
         return -1;
     }
-    assoc = llam_windows_find_assoc(node, key);
-    known_handle = assoc != NULL;
-
-    handle = CreateIoCompletionPort((HANDLE)raw_handle, (HANDLE)node->windows_iocp_handle, 0, 0);
-    if (handle == NULL) {
-        error_code = GetLastError();
-        if (error_code == ERROR_INVALID_PARAMETER && known_handle) {
-            return 0;
-        }
-        errno = llam_windows_system_error_to_errno(error_code);
-        return -1;
-    }
-    if (known_handle) {
-        return 0;
-    }
 
     assoc = calloc(1, sizeof(*assoc));
     if (assoc == NULL) {
         errno = ENOMEM;
         return -1;
     }
+
+    pthread_mutex_lock(&node->watch_lock);
+    if (llam_windows_find_assoc_locked(node, key) != NULL) {
+        pthread_mutex_unlock(&node->watch_lock);
+        free(assoc);
+        return 0;
+    }
+    handle = CreateIoCompletionPort((HANDLE)raw_handle, (HANDLE)node->windows_iocp_handle, 0, 0);
+    if (handle == NULL) {
+        error_code = GetLastError();
+        pthread_mutex_unlock(&node->watch_lock);
+        free(assoc);
+        errno = llam_windows_system_error_to_errno(error_code);
+        return -1;
+    }
     assoc->fd = (llam_fd_t)key;
     assoc->skip_completion_on_success = llam_windows_try_skip_completion_on_success(node, (HANDLE)raw_handle);
     assoc->next = node->windows_fd_assoc_head;
     node->windows_fd_assoc_head = assoc;
+    pthread_mutex_unlock(&node->watch_lock);
     return 0;
 }
 
@@ -138,8 +138,10 @@ void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
     for (unsigned i = 0U; i < rt->active_nodes; ++i) {
         llam_node_t *node = &rt->nodes[i];
         llam_windows_fd_assoc_t *prev = NULL;
-        llam_windows_fd_assoc_t *assoc = node->windows_fd_assoc_head;
+        llam_windows_fd_assoc_t *assoc;
 
+        pthread_mutex_lock(&node->watch_lock);
+        assoc = node->windows_fd_assoc_head;
         while (assoc != NULL) {
             if ((uintptr_t)assoc->fd == key) {
                 if (prev != NULL) {
@@ -153,19 +155,36 @@ void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
             prev = assoc;
             assoc = assoc->next;
         }
+        pthread_mutex_unlock(&node->watch_lock);
     }
 }
 
 bool llam_windows_fd_skips_completion_on_success(llam_node_t *node, llam_fd_t fd) {
-    llam_windows_fd_assoc_t *assoc = llam_windows_find_assoc(node, (uintptr_t)fd);
+    llam_windows_fd_assoc_t *assoc;
+    bool skips;
 
-    return assoc != NULL && assoc->skip_completion_on_success != 0U;
+    if (node == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&node->watch_lock);
+    assoc = llam_windows_find_assoc_locked(node, (uintptr_t)fd);
+    skips = assoc != NULL && assoc->skip_completion_on_success != 0U;
+    pthread_mutex_unlock(&node->watch_lock);
+    return skips;
 }
 
 bool llam_windows_handle_skips_completion_on_success(llam_node_t *node, llam_handle_t handle) {
-    llam_windows_fd_assoc_t *assoc = llam_windows_find_assoc(node, (uintptr_t)handle);
+    llam_windows_fd_assoc_t *assoc;
+    bool skips;
 
-    return assoc != NULL && assoc->skip_completion_on_success != 0U;
+    if (node == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&node->watch_lock);
+    assoc = llam_windows_find_assoc_locked(node, (uintptr_t)handle);
+    skips = assoc != NULL && assoc->skip_completion_on_success != 0U;
+    pthread_mutex_unlock(&node->watch_lock);
+    return skips;
 }
 
 int llam_windows_load_acceptex(llam_node_t *node, SOCKET socket_fd, LPFN_ACCEPTEX *fn_out) {

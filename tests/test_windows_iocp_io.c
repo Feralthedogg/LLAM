@@ -44,12 +44,18 @@ int main(void) {
 }
 #else
 
+#include "../src/io/windows/runtime_io_watch_windows_internal.h"
+
+#define LLAM_WINDOWS_ASSOC_RACE_TASKS 4U
+#define LLAM_WINDOWS_ASSOC_RACE_ROUNDS 64U
+
 typedef struct windows_iocp_state {
     llam_fd_t listener;
     struct sockaddr_in addr;
     atomic_uint failures;
     atomic_uint server_done;
     atomic_uint client_done;
+    atomic_uint assoc_done;
     int first_errno;
     char first_case[96];
 } windows_iocp_state_t;
@@ -285,6 +291,43 @@ cleanup:
     }
 }
 
+static void assoc_forget_race_task(void *arg) {
+    windows_iocp_state_t *state = arg;
+    llam_runtime_t *rt = g_llam_tls_shard != NULL ? g_llam_tls_shard->runtime : NULL;
+    llam_node_t *node;
+
+    if (rt == NULL || rt->nodes == NULL || rt->active_nodes == 0U) {
+        task_fail(state, "assoc race missing runtime node", EINVAL);
+        return;
+    }
+    node = &rt->nodes[0];
+    for (unsigned i = 0U; i < LLAM_WINDOWS_ASSOC_RACE_ROUNDS; ++i) {
+        llam_fd_t fd = create_overlapped_udp_socket();
+
+        if (LLAM_FD_IS_INVALID(fd)) {
+            task_fail(state, "assoc race socket create", errno);
+            return;
+        }
+        /*
+         * This used to mutate node->windows_fd_assoc_head without locking while
+         * llam_close() forgot entries from task context.  Multiple tasks doing
+         * associate/close cycles now exercise that metadata path directly.
+         */
+        if (llam_windows_associate_fd(node, fd) != 0) {
+            int saved_errno = errno;
+
+            closesocket(fd);
+            task_fail(state, "assoc race IOCP associate", saved_errno);
+            return;
+        }
+        if (llam_close(fd) != 0) {
+            task_fail(state, "assoc race llam_close", errno);
+            return;
+        }
+    }
+    atomic_fetch_add_explicit(&state->assoc_done, 1U, memory_order_relaxed);
+}
+
 static void server_task(void *arg) {
     windows_iocp_state_t *state = arg;
     char buffer[4];
@@ -412,12 +455,15 @@ int main(void) {
     llam_runtime_opts_t opts;
     llam_task_t *server;
     llam_task_t *client;
+    llam_task_t *assoc_tasks[LLAM_WINDOWS_ASSOC_RACE_TASKS];
 
     memset(&state, 0, sizeof(state));
     state.listener = LLAM_INVALID_FD;
     atomic_init(&state.failures, 0U);
     atomic_init(&state.server_done, 0U);
     atomic_init(&state.client_done, 0U);
+    atomic_init(&state.assoc_done, 0U);
+    memset(assoc_tasks, 0, sizeof(assoc_tasks));
 
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return fail_errno("llam_runtime_opts_init failed");
@@ -438,10 +484,20 @@ int main(void) {
 
     server = llam_spawn(server_task, &state, NULL);
     client = llam_spawn(client_task, &state, NULL);
+    for (unsigned i = 0U; i < LLAM_WINDOWS_ASSOC_RACE_TASKS; ++i) {
+        assoc_tasks[i] = llam_spawn(assoc_forget_race_task, &state, NULL);
+    }
     if (server == NULL || client == NULL) {
         closesocket(state.listener);
         llam_runtime_shutdown();
         return fail_errno("llam_spawn failed");
+    }
+    for (unsigned i = 0U; i < LLAM_WINDOWS_ASSOC_RACE_TASKS; ++i) {
+        if (assoc_tasks[i] == NULL) {
+            closesocket(state.listener);
+            llam_runtime_shutdown();
+            return fail_errno("llam_spawn assoc race failed");
+        }
     }
     if (llam_run() != 0) {
         closesocket(state.listener);
@@ -452,6 +508,13 @@ int main(void) {
         closesocket(state.listener);
         llam_runtime_shutdown();
         return fail_errno("llam_join failed");
+    }
+    for (unsigned i = 0U; i < LLAM_WINDOWS_ASSOC_RACE_TASKS; ++i) {
+        if (llam_join(assoc_tasks[i]) != 0) {
+            closesocket(state.listener);
+            llam_runtime_shutdown();
+            return fail_errno("llam_join assoc race failed");
+        }
     }
     closesocket(state.listener);
     llam_runtime_shutdown();
@@ -464,7 +527,8 @@ int main(void) {
         return 1;
     }
     if (atomic_load_explicit(&state.server_done, memory_order_relaxed) != 1U ||
-        atomic_load_explicit(&state.client_done, memory_order_relaxed) != 1U) {
+        atomic_load_explicit(&state.client_done, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.assoc_done, memory_order_relaxed) != LLAM_WINDOWS_ASSOC_RACE_TASKS) {
         fprintf(stderr, "[test_windows_iocp_io] missing completion\n");
         return 1;
     }
