@@ -3944,16 +3944,22 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
     int mutex_object = 2;
     int reuse_first_object = 3;
     int reuse_second_object = 4;
+    int reuse_third_object = 5;
     size_t channel_slot = 0U;
     size_t mutex_slot = 0U;
     size_t reuse_slot = 0U;
     size_t reuse_second_slot = 0U;
+    size_t reuse_third_slot = 0U;
     uint32_t channel_generation = 0U;
     uint32_t mutex_generation = 0U;
     uint32_t reuse_generation = 0U;
     uint32_t reuse_second_generation = 0U;
+    uint32_t reuse_third_generation = 0U;
     uint32_t naive_next_generation = 0U;
+    uint32_t collision_epoch = 0U;
+    uint32_t collision_generation = 0U;
     uint32_t reused_generation = 0U;
+    uint64_t collision_nonce = 0U;
     size_t reused_slot = 0U;
     int rc = 1;
 
@@ -4038,6 +4044,49 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
                       naive_next_generation,
                       reuse_second_slot,
                       reuse_second_generation);
+        goto cleanup;
+    }
+
+    /*
+     * Sealed family tokens are narrower than the internal epoch.  Force the
+     * next sealed token to equal the just-consumed handle and verify reserve
+     * burns another epoch instead of reissuing an adjacent ABA alias.
+     */
+    llam_public_slot_release(&reuse_table, reuse_second_slot, &reuse_second_object, reuse_second_generation);
+    collision_epoch = reuse_table.slots[reuse_slot].epoch + 1U;
+    collision_nonce = llam_public_slot_next_nonce(&reuse_table,
+                                                  &reuse_third_object,
+                                                  0U,
+                                                  reuse_slot,
+                                                  LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                                  collision_epoch);
+    collision_generation = llam_public_slot_family_generation_for_epoch(&reuse_table,
+                                                                        reuse_slot,
+                                                                        &reuse_third_object,
+                                                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                                                        0U,
+                                                                        collision_epoch,
+                                                                        collision_nonce);
+    reuse_table.slots[reuse_slot].generation = collision_generation;
+    if (llam_public_slot_reserve_family(&reuse_table,
+                                        &reuse_third_object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                        &reuse_third_slot,
+                                        &reuse_third_generation) != 0) {
+        rc = fail_errno("family slot adjacent collision reserve failed");
+        goto cleanup;
+    }
+    if (reuse_third_slot != reuse_slot ||
+        reuse_third_generation == collision_generation ||
+        llam_public_slot_resolve(&reuse_table, reuse_slot, collision_generation) != NULL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] adjacent family generation collision was reissued: "
+                      "slot=%zu colliding=%u new=(%zu,%u)\n",
+                      reuse_slot,
+                      collision_generation,
+                      reuse_third_slot,
+                      reuse_third_generation);
         goto cleanup;
     }
 

@@ -124,6 +124,51 @@ static inline uint32_t llam_public_slot_family_generation(uint32_t epoch, uint32
 
 #include "runtime_public_slot_seal.h"
 
+static inline int llam_public_slot_refresh_family_generation(llam_public_slot_table_t *table,
+                                                             llam_public_slot_t *entry,
+                                                             size_t slot,
+                                                             void *object,
+                                                             uint32_t family,
+                                                             uint64_t owner_secret) {
+    uint32_t previous_generation;
+
+    if (LLAM_UNLIKELY(table == NULL ||
+                      entry == NULL ||
+                      object == NULL ||
+                      !llam_public_slot_family_valid(family))) {
+        errno = EINVAL;
+        return -1;
+    }
+    previous_generation = entry->generation;
+    while (entry->epoch < LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH) {
+        entry->epoch += 1U;
+        entry->slot_nonce = llam_public_slot_next_nonce(table,
+                                                        object,
+                                                        owner_secret,
+                                                        slot,
+                                                        family,
+                                                        entry->epoch);
+        entry->generation = llam_public_slot_family_generation_for_epoch(table,
+                                                                         slot,
+                                                                         object,
+                                                                         family,
+                                                                         owner_secret,
+                                                                         entry->epoch,
+                                                                         entry->slot_nonce);
+        if (LLAM_LIKELY(entry->generation != previous_generation)) {
+            return 0;
+        }
+    }
+    /*
+     * The sealed token is intentionally narrower than the internal epoch so
+     * public handles stay pointer-sized.  Force at least adjacent-generation
+     * ABA separation: if a sealed token collides with the immediately consumed
+     * handle, burn epochs until the public value changes or the slot is retired.
+     */
+    errno = EOVERFLOW;
+    return -1;
+}
+
 static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
                                                 void *object,
                                                 size_t initial_capacity,
@@ -155,20 +200,10 @@ static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
             continue;
         }
         if (family != 0U) {
-            entry->epoch += 1U;
-            entry->slot_nonce = llam_public_slot_next_nonce(table,
-                                                            object,
-                                                            owner_secret,
-                                                            slot,
-                                                            family,
-                                                            entry->epoch);
-            entry->generation = llam_public_slot_family_generation_for_epoch(table,
-                                                                             slot,
-                                                                             object,
-                                                                             family,
-                                                                             owner_secret,
-                                                                             entry->epoch,
-                                                                             entry->slot_nonce);
+            if (llam_public_slot_refresh_family_generation(table, entry, slot, object, family, owner_secret) != 0) {
+                entry->object = NULL;
+                continue;
+            }
         } else {
             entry->generation = llam_public_slot_next_generation(entry->generation);
             entry->epoch = entry->generation;
@@ -210,23 +245,21 @@ static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
 
     slot = table->count++;
     table->slots[slot].object = object;
-    table->slots[slot].epoch = 1U;
-    table->slots[slot].slot_nonce = family != 0U
-                                        ? llam_public_slot_next_nonce(table,
-                                                                      object,
-                                                                      owner_secret,
-                                                                      slot,
-                                                                      family,
-                                                                      1U)
-                                        : 0U;
-    table->slots[slot].generation =
-        llam_public_slot_initial_generation_for_slot(table,
-                                                     slot,
-                                                     object,
-                                                     family,
-                                                     owner_secret,
-                                                     1U,
-                                                     table->slots[slot].slot_nonce);
+    table->slots[slot].epoch = family != 0U ? 0U : 1U;
+    table->slots[slot].slot_nonce = 0U;
+    if (family != 0U) {
+        if (llam_public_slot_refresh_family_generation(table,
+                                                       &table->slots[slot],
+                                                       slot,
+                                                       object,
+                                                       family,
+                                                       owner_secret) != 0) {
+            table->slots[slot].object = NULL;
+            return -1;
+        }
+    } else {
+        table->slots[slot].generation = 1U;
+    }
     table->slots[slot].next_free_plus_one = LLAM_PUBLIC_SLOT_FREE_NONE;
     *out_slot = slot;
     *out_generation = table->slots[slot].generation;
@@ -333,20 +366,9 @@ static inline int llam_public_slot_reactivate_impl(llam_public_slot_table_t *tab
         return -1;
     }
     if (family != 0U) {
-        entry->epoch += 1U;
-        entry->slot_nonce = llam_public_slot_next_nonce(table,
-                                                        object,
-                                                        owner_secret,
-                                                        slot,
-                                                        family,
-                                                        entry->epoch);
-        entry->generation = llam_public_slot_family_generation_for_epoch(table,
-                                                                         slot,
-                                                                         object,
-                                                                         family,
-                                                                         owner_secret,
-                                                                         entry->epoch,
-                                                                         entry->slot_nonce);
+        if (llam_public_slot_refresh_family_generation(table, entry, slot, object, family, owner_secret) != 0) {
+            return -1;
+        }
     } else {
         entry->generation = llam_public_slot_next_generation(entry->generation);
         entry->epoch = entry->generation;
