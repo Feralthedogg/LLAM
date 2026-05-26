@@ -818,10 +818,32 @@ int main(void) {
     llam_cond_t *idle_cond;
     llam_channel_t *idle_channel;
     llam_task_group_t *group = NULL;
+    void *stale_output;
 
     errno = 0;
     if (llam_channel_create(0U) != NULL || errno != EINVAL) {
         return test_fail("llam_channel_create(0) did not fail with EINVAL");
+    }
+    stale_output = (void *)(uintptr_t)0x1234U;
+    errno = 0;
+    if (llam_channel_recv_result(NULL, &stale_output) != -1 ||
+        errno != EINVAL ||
+        stale_output != NULL) {
+        return test_fail("llam_channel_recv_result failure left stale output");
+    }
+    stale_output = (void *)(uintptr_t)0x1234U;
+    errno = 0;
+    if (llam_channel_try_recv_result(NULL, &stale_output) != -1 ||
+        errno != EINVAL ||
+        stale_output != NULL) {
+        return test_fail("llam_channel_try_recv_result failure left stale output");
+    }
+    stale_output = (void *)(uintptr_t)0x1234U;
+    errno = 0;
+    if (llam_channel_recv_until_result(NULL, 0U, &stale_output) != -1 ||
+        errno != EINVAL ||
+        stale_output != NULL) {
+        return test_fail("llam_channel_recv_until_result failure left stale output");
     }
     errno = 0;
     if (llam_mutex_destroy(NULL) != -1 || errno != EINVAL) {

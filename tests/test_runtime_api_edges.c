@@ -2504,8 +2504,8 @@ static int test_destroyed_sync_handles_reject_public_ops(void) {
     }
     errno = 0;
     value = &sentinel;
-    if (llam_channel_try_recv_result(channel, &value) != -1 || errno != EINVAL || value != &sentinel) {
-        return fail_msg("destroyed channel try_recv did not fail with EINVAL");
+    if (llam_channel_try_recv_result(channel, &value) != -1 || errno != EINVAL || value != NULL) {
+        return fail_msg("destroyed channel try_recv did not fail closed with EINVAL");
     }
     errno = 0;
     if (llam_channel_close(channel) != -1 || errno != EINVAL) {

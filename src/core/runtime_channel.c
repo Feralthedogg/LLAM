@@ -619,8 +619,17 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
     void *refill_value;
     int rc;
 
+    if (out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    /*
+     * Result-style receive APIs must not leave a stale payload pointer behind
+     * on validation, owner, timeout, close, or cancellation failures.
+     */
+    *out = NULL;
     channel = llam_channel_resolve_public_handle(channel);
-    if (channel == NULL || out == NULL) {
+    if (channel == NULL) {
         llam_channel_end_public_op(channel);
         errno = EINVAL;
         return -1;
@@ -631,7 +640,6 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
     }
     task = g_llam_tls_task;
     shard = g_llam_tls_shard;
-    *out = NULL;
 
     pthread_mutex_lock(&channel->lock);
     if (channel->count > 0U) {
@@ -815,8 +823,13 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
     bool owner_live;
     llam_runtime_t *pinned_runtime = NULL;
 
+    if (out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out = NULL;
     channel = llam_channel_resolve_public_handle(channel);
-    if (channel == NULL || out == NULL) {
+    if (channel == NULL) {
         llam_channel_end_public_op(channel);
         errno = EINVAL;
         return -1;
@@ -826,7 +839,6 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
         return -1;
     }
     owner_live = llam_runtime_begin_object_owner_op_if_live(channel->owner_runtime, &pinned_runtime);
-    *out = NULL;
 
     pthread_mutex_lock(&channel->lock);
     if (!owner_live) {
