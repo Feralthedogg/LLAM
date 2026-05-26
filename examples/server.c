@@ -773,10 +773,10 @@ static void chat_request_stop(chat_server_t *server) {
     if (fd >= 0) {
         (void)close(fd);
     }
+    /* Wake parked tasks before host-side close waits for references to drain. */
+    (void)llam_runtime_request_stop();
     chat_server_close_all(server);
     (void)chat_wait_clients_drained(server, CHAT_SHUTDOWN_DRAIN_MS);
-    /* Stop the runtime after host-side close/drain to avoid cleanup races. */
-    (void)llam_runtime_request_stop();
     chat_dump_runtime_if_requested("request-stop");
     chat_write_stats_file(server);
 }
