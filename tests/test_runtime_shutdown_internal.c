@@ -319,6 +319,26 @@ static int exercise_linux_invalid_control_preserves_sq_tail(void) {
     return 0;
 }
 
+static int exercise_linux_wait_cqe_interrupt_policy(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+    /*
+     * io_uring_wait_cqe_timeout can be interrupted by process signals.  The
+     * worker should simply retry later; treating EINTR like a backend failure
+     * poisons otherwise healthy runtimes under profilers or signal-heavy tests.
+     */
+    if (llam_linux_wait_cqe_error_is_fatal(EINTR)) {
+        return fail_msg("Linux CQ wait EINTR was treated as fatal");
+    }
+    if (llam_linux_wait_cqe_error_is_fatal(ETIME)) {
+        return fail_msg("Linux CQ wait timeout was treated as fatal");
+    }
+    if (!llam_linux_wait_cqe_error_is_fatal(EIO)) {
+        return fail_msg("Linux CQ wait EIO was not treated as fatal");
+    }
+#endif
+    return 0;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
@@ -333,6 +353,9 @@ int main(void) {
         return 1;
     }
     if (exercise_linux_invalid_control_preserves_sq_tail() != 0) {
+        return 1;
+    }
+    if (exercise_linux_wait_cqe_interrupt_policy() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");

@@ -164,5 +164,6 @@ void llam_io_queue_shutdown_controls(llam_node_t *node);
 void llam_io_submit_batch(llam_node_t *node);
 void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe);
 void llam_io_drain_completions(llam_node_t *node);
+bool llam_linux_wait_cqe_error_is_fatal(int err);
 
 #endif

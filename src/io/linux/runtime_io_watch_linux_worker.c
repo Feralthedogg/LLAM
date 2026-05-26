@@ -48,6 +48,11 @@ void llam_io_drain_completions(llam_node_t *node) {
     }
 }
 
+/** @brief Return whether a timed CQ wait failure should poison the runtime. */
+bool llam_linux_wait_cqe_error_is_fatal(int err) {
+    return err != ETIME && err != EINTR;
+}
+
 /**
  * @brief Main loop for a Linux I/O node worker.
  *
@@ -106,7 +111,7 @@ void *llam_io_worker_main(void *arg) {
             rc = io_uring_wait_cqe_timeout(&node->ring, &cqe, &ts);
             if (rc == 0 && cqe != NULL) {
                 llam_io_handle_cqe(node, cqe);
-            } else if (rc != -ETIME && rc < 0) {
+            } else if (rc < 0 && llam_linux_wait_cqe_error_is_fatal(-rc)) {
                 llam_record_fatal(rt, -rc);
             }
         }
