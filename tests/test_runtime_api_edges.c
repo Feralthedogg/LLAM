@@ -22,6 +22,8 @@
 #include "runtime_internal.h"
 
 #include <errno.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -4129,6 +4131,50 @@ cleanup:
     return rc;
 }
 
+static int test_public_slot_shift_bounds(void) {
+    const unsigned word_bits = (unsigned)(sizeof(uintptr_t) * CHAR_BIT);
+    size_t decoded_slot = 123U;
+    uint32_t decoded_generation = 456U;
+    uintptr_t encoded;
+
+    /*
+     * Public handle helpers are internal, but every opaque-handle family uses
+     * them. Invalid shift values must fail closed instead of invoking C shift
+     * UB, because sanitizer-only UB in a helper can mask the real caller fault.
+     */
+    encoded = llam_public_slot_encode_handle(0U, 1U, word_bits);
+    if (encoded != 0U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] oversized public slot shift encoded handle=%" PRIuPTR "\n",
+                      encoded);
+        return 1;
+    }
+    if (llam_public_slot_decode_handle((uintptr_t)1U, word_bits, &decoded_slot, &decoded_generation)) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] oversized public slot shift decoded successfully\n");
+        return 1;
+    }
+    if (decoded_slot != 123U || decoded_generation != 456U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] failed public slot decode mutated outputs: slot=%zu generation=%u\n",
+                      decoded_slot,
+                      decoded_generation);
+        return 1;
+    }
+
+    if (word_bits > 32U) {
+        const size_t unencodable_slot = (size_t)(UINTPTR_MAX >> 32U);
+
+        encoded = llam_public_slot_encode_handle(unencodable_slot, 1U, 32U);
+        if (encoded != 0U) {
+            (void)fprintf(stderr,
+                          "[test_runtime_api_edges] unencodable public slot encoded handle=%" PRIuPTR "\n",
+                          encoded);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_public_channel_forged_initial_handle_rejected(void) {
     llam_channel_t *channel = NULL;
     llam_channel_t *forged = NULL;
@@ -4259,6 +4305,10 @@ int main(void) {
     }
     if (run_edge_case("public_slot_family_tags_reject_wrong_family",
                       test_public_slot_family_tags_reject_wrong_family) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_slot_shift_bounds",
+                      test_public_slot_shift_bounds) != 0) {
         return 1;
     }
     if (run_edge_case("public_channel_forged_initial_handle_rejected",

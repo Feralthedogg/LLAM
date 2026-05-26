@@ -26,6 +26,8 @@
 #ifndef LLAM_RUNTIME_PUBLIC_SLOT_H
 #define LLAM_RUNTIME_PUBLIC_SLOT_H
 
+#include <limits.h>
+
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
@@ -45,6 +47,7 @@
 #define LLAM_PUBLIC_HANDLE_FAMILY_TASK_GROUP 6U
 #define LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER 7U
 #define LLAM_PUBLIC_HANDLE_EPOCH_MASK LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH
+#define LLAM_PUBLIC_SLOT_WORD_BITS ((unsigned)(sizeof(uintptr_t) * CHAR_BIT))
 
 typedef struct llam_public_slot {
     void *object;
@@ -79,6 +82,13 @@ static inline uint32_t llam_public_slot_next_generation(uint32_t generation) {
 static inline uintptr_t llam_public_slot_encode_handle(size_t slot, uint32_t generation, unsigned shift) {
     uintptr_t slot_word = (uintptr_t)slot + 1U;
 
+    if (LLAM_UNLIKELY(generation == 0U ||
+                      shift >= LLAM_PUBLIC_SLOT_WORD_BITS ||
+                      slot_word == 0U ||
+                      (shift > 0U && slot_word > (UINTPTR_MAX >> shift)) ||
+                      (shift > 0U && ((uintptr_t)generation >> shift) != 0U))) {
+        return 0U;
+    }
     return generation != 0U ? (slot_word << shift) | (uintptr_t)generation : 0U;
 }
 
@@ -90,6 +100,9 @@ static inline bool llam_public_slot_decode_handle(uintptr_t raw,
     uint32_t generation;
 
     if (LLAM_UNLIKELY(out_slot == NULL || out_generation == NULL)) {
+        return false;
+    }
+    if (LLAM_UNLIKELY(shift >= LLAM_PUBLIC_SLOT_WORD_BITS)) {
         return false;
     }
     slot_word = raw >> shift;
