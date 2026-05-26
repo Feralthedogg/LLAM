@@ -298,6 +298,22 @@ void *llam_io_worker_main(void *arg) {
             count = kevent(node->event_fd, NULL, 0, events, (int)LLAM_DARWIN_KEVENT_BATCH, ts_ptr);
         } while (count < 0 && errno == EINTR);
         if (count < 0) {
+            /*
+             * BSD kqueue implementations can transiently report no kernel
+             * resources while LLAM rapidly tears down and recreates runtime
+             * workers in lifecycle race tests. Treat that like an empty poll
+             * iteration instead of poisoning the runtime with a fatal error;
+             * back off briefly so a persistent kernel pressure condition does
+             * not turn the I/O worker into a spin loop.
+             */
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct timespec retry_ts;
+
+                retry_ts.tv_sec = 0;
+                retry_ts.tv_nsec = 1000000L;
+                (void)nanosleep(&retry_ts, NULL);
+                continue;
+            }
             llam_record_fatal(rt, errno);
             break;
         }
