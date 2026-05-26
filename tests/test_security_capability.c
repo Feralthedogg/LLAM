@@ -7232,13 +7232,13 @@ static int broker_ring_windows_process_child(const char *name, uint64_t iteratio
 }
 
 static int broker_ring_windows_session_child(const char *name, uint64_t iterations) {
-    enum { MAX_PHASE_SPINS = 1000000U };
+    enum { PHASE_TIMEOUT_MS = 5000U };
     llam_runtime_opts_t opts;
     llam_broker_t broker;
     llam_broker_ring_mapping_t mapping;
+    ULONGLONG deadline_ms;
     bool broker_initialized = false;
     uint64_t served = 0U;
-    unsigned spins;
     int rc = 3;
 
     memset(&mapping, 0, sizeof(mapping));
@@ -7271,18 +7271,19 @@ static int broker_ring_windows_session_child(const char *name, uint64_t iteratio
      * been drained. This separate process must still use the broker-private
      * session cursor and reject the stale replay instead of serving slot 0 again.
      */
-    for (spins = 0U; spins < MAX_PHASE_SPINS; ++spins) {
+    deadline_ms = GetTickCount64() + PHASE_TIMEOUT_MS;
+    for (;;) {
         uint64_t shared_head = atomic_load_explicit(&mapping.ring->submit_head.value, memory_order_acquire);
         uint64_t shared_tail = atomic_load_explicit(&mapping.ring->submit_tail.value, memory_order_acquire);
 
         if (shared_head == 0U && shared_tail == 1U) {
             break;
         }
-        Sleep(0);
-    }
-    if (spins == MAX_PHASE_SPINS) {
-        rc = 4;
-        goto done;
+        if (GetTickCount64() >= deadline_ms) {
+            rc = 4;
+            goto done;
+        }
+        Sleep(1U);
     }
     errno = 0;
     if (expect_errno(llam_broker_ring_serve_one(&broker, mapping.ring),
@@ -7537,6 +7538,12 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
         while (next_complete <= replay_iters) {
             if (llam_broker_ring_complete_pop(mapping.ring, &completion) == 0) {
                 if (completion.request_id != next_complete || completion.status != 0) {
+                    fprintf(stderr,
+                            "[test_security_capability] windows session replay completion mismatch "
+                            "request=%llu expected=%llu status=%d\n",
+                            (unsigned long long)completion.request_id,
+                            (unsigned long long)next_complete,
+                            completion.status);
                     goto done_process;
                 }
                 ++next_complete;
@@ -7560,6 +7567,11 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
     if (wait_rc != WAIT_OBJECT_0 ||
         !GetExitCodeProcess(process.hProcess, &exit_code) ||
         exit_code != 0U) {
+        fprintf(stderr,
+                "[test_security_capability] windows session replay child failed "
+                "wait=%lu exit=%lu\n",
+                (unsigned long)wait_rc,
+                (unsigned long)exit_code);
         goto done_process;
     }
     if (llam_broker_ring_collect_stats(mapping.ring, &stats) != 0 ||
@@ -7567,6 +7579,14 @@ static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
         stats.broker_serve_success != replay_iters ||
         stats.broker_complete_tail_publishes != replay_iters ||
         stats.client_complete_drain_entries != replay_iters) {
+        fprintf(stderr,
+                "[test_security_capability] windows session replay stats mismatch "
+                "submit=%llu serve=%llu complete_tail=%llu drained=%llu expected=%llu\n",
+                (unsigned long long)stats.client_submit_pushes,
+                (unsigned long long)stats.broker_serve_success,
+                (unsigned long long)stats.broker_complete_tail_publishes,
+                (unsigned long long)stats.client_complete_drain_entries,
+                (unsigned long long)replay_iters);
         goto done_process;
     }
     rc = 0;
