@@ -989,9 +989,11 @@ struct llam_node {
     unsigned windows_poll_timeout_ms;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t submit_lock;
+    pthread_mutex_t windows_assoc_lock;
     pthread_mutex_t watch_lock;
     pthread_mutex_t recv_buf_lock;
     bool submit_lock_initialized;
+    bool windows_assoc_lock_initialized;
     bool watch_lock_initialized;
     bool recv_buf_lock_initialized;
     llam_io_req_t *submit_head;
