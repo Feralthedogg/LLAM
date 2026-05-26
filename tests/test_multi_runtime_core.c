@@ -152,6 +152,17 @@ typedef struct managed_foreign_destroy_state {
     int first_errno;
 } managed_foreign_destroy_state_t;
 
+typedef struct multi_blocking_isolation_state {
+    atomic_uint a_callback_started;
+    atomic_uint a_can_finish;
+    atomic_uint a_task_done;
+    atomic_uint b_callback_done;
+    atomic_uint b_task_done;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[64];
+} multi_blocking_isolation_state_t;
+
 #if LLAM_PLATFORM_POSIX
 #define HOST_TRY_RACE_ITERS 4000U
 
@@ -894,6 +905,80 @@ static void idle_never_run_task(void *arg) {
     (void)arg;
 }
 #endif
+
+static void multi_blocking_isolation_fail(multi_blocking_isolation_state_t *state,
+                                          const char *where,
+                                          int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err != 0 ? err : EPROTO;
+        snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+    atomic_store_explicit(&state->a_can_finish, 1U, memory_order_release);
+}
+
+static void *multi_blocking_wait_callback(void *arg) {
+    multi_blocking_isolation_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + 5000000000ULL;
+
+    atomic_store_explicit(&state->a_callback_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->a_can_finish, memory_order_acquire) == 0U) {
+        if (llam_now_ns() >= deadline_ns) {
+            multi_blocking_isolation_fail(state, "runtime A blocking callback timeout", ETIMEDOUT);
+            return NULL;
+        }
+        llam_pause_cpu();
+    }
+    return state;
+}
+
+static void *multi_blocking_fast_callback(void *arg) {
+    multi_blocking_isolation_state_t *state = arg;
+
+    atomic_store_explicit(&state->b_callback_done, 1U, memory_order_release);
+    return state;
+}
+
+static void multi_blocking_waiter_task(void *arg) {
+    multi_blocking_isolation_state_t *state = arg;
+    void *out = NULL;
+
+    if (llam_call_blocking_result(multi_blocking_wait_callback, state, &out) != 0 ||
+        out != state) {
+        multi_blocking_isolation_fail(state, "runtime A blocking call", errno);
+        return;
+    }
+    atomic_store_explicit(&state->a_task_done, 1U, memory_order_release);
+}
+
+static void multi_blocking_peer_task(void *arg) {
+    multi_blocking_isolation_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + 5000000000ULL;
+    void *out = NULL;
+
+    /*
+     * Wait until runtime A has parked in its own blocking callback. Runtime B
+     * must still run this task and its blocking worker independently; otherwise
+     * multi-runtime embedding can deadlock even though each runtime is healthy
+     * in isolation.
+     */
+    while (atomic_load_explicit(&state->a_callback_started, memory_order_acquire) == 0U) {
+        if (llam_now_ns() >= deadline_ns) {
+            multi_blocking_isolation_fail(state, "runtime B waited for A callback", ETIMEDOUT);
+            return;
+        }
+        if (llam_sleep_ns(1000000ULL) != 0 && errno != ECANCELED) {
+            multi_blocking_isolation_fail(state, "runtime B wait sleep", errno);
+            return;
+        }
+    }
+    if (llam_call_blocking_result(multi_blocking_fast_callback, state, &out) != 0 ||
+        out != state) {
+        multi_blocking_isolation_fail(state, "runtime B blocking call", errno);
+        return;
+    }
+    atomic_store_explicit(&state->b_task_done, 1U, memory_order_release);
+    atomic_store_explicit(&state->a_can_finish, 1U, memory_order_release);
+}
 
 #if LLAM_PLATFORM_POSIX
 static void *run_runtime_thread(void *arg) {
@@ -3129,6 +3214,74 @@ cleanup:
     return rc;
 }
 
+static int test_concurrent_blocking_pool_isolation(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime_a = NULL;
+    llam_runtime_t *runtime_b = NULL;
+    llam_task_t *task_a = NULL;
+    llam_task_t *task_b = NULL;
+    multi_blocking_isolation_state_t state;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.a_callback_started, 0U);
+    atomic_init(&state.a_can_finish, 0U);
+    atomic_init(&state.a_task_done, 0U);
+    atomic_init(&state.b_callback_done, 0U);
+    atomic_init(&state.b_task_done, 0U);
+    atomic_init(&state.failures, 0U);
+
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        rc = test_fail_errno("runtime create for blocking isolation failed");
+        goto cleanup;
+    }
+    task_a = llam_runtime_spawn_ex(runtime_a, multi_blocking_waiter_task, &state, NULL, 0U);
+    task_b = llam_runtime_spawn_ex(runtime_b, multi_blocking_peer_task, &state, NULL, 0U);
+    if (task_a == NULL || task_b == NULL) {
+        rc = test_fail_errno("runtime spawn for blocking isolation failed");
+        goto cleanup;
+    }
+    if (run_two_runtimes(runtime_a, runtime_b) != 0) {
+        rc = test_fail_errno("blocking isolation runtimes failed");
+        goto cleanup;
+    }
+    if (llam_join(task_b) != 0 || llam_join(task_a) != 0) {
+        rc = test_fail_errno("blocking isolation join failed");
+        goto cleanup;
+    }
+    task_a = NULL;
+    task_b = NULL;
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.a_task_done, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.b_task_done, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.b_callback_done, memory_order_acquire) != 1U) {
+        fprintf(stderr,
+                "[test_multi_runtime_core] blocking isolation failed at %s: errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        rc = 1;
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&state.a_can_finish, 1U, memory_order_release);
+    if (task_b != NULL) {
+        (void)llam_detach(task_b);
+    }
+    if (task_a != NULL) {
+        (void)llam_detach(task_a);
+    }
+    llam_runtime_destroy(runtime_b);
+    llam_runtime_destroy(runtime_a);
+    return rc;
+}
+
 int main(void) {
     static const multi_runtime_named_test_t tests[] = {
         {"sync_handle_family_confusion", test_sync_handle_family_confusion},
@@ -3161,6 +3314,7 @@ int main(void) {
         {"explicit_channel_drain_after_owner_runtime_destroy", test_explicit_channel_drain_after_owner_runtime_destroy},
         {"legacy_stop_wrappers_target_current_runtime", test_legacy_stop_wrappers_target_current_runtime},
         {"managed_destroy_foreign_runtime_does_not_stop_peer", test_managed_destroy_foreign_runtime_does_not_stop_peer},
+        {"concurrent_blocking_pool_isolation", test_concurrent_blocking_pool_isolation},
     };
     size_t i;
 
