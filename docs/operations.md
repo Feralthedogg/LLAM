@@ -142,6 +142,11 @@ BSD rollout is gated by the `.github/workflows/bsd.yml` VM matrix for FreeBSD,
 OpenBSD, NetBSD, and DragonFly BSD. That gate currently builds the runtime,
 runs core/API/select/I/O-buffer/shared-load smoke tests, and validates release
 archive shape for each target before BSD artifacts are treated as publishable.
+DragonFlyBSD package repository or package-install outages are treated as
+infrastructure skips because the public mirror availability has been unstable;
+compiler, build, test, and package-shape failures after dependencies are present
+remain hard failures. FreeBSD, OpenBSD, and NetBSD package or test failures are
+not skipped.
 The top-level Makefile does not maintain a separate Windows compiler pipeline:
 when `HOST_PLATFORM=windows` it delegates build, test, shared/static, package,
 and explicit executable/test targets to the native CMake backend. This keeps the

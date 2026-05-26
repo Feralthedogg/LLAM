@@ -445,7 +445,26 @@
   objects below conservative Windows thread-stack limits while preserving
   broker ownership and channel table cleanup semantics.
 
+* degrade transient alternate-signal-stack setup failures on DragonFlyBSD from
+  fatal scheduler startup errors into reduced crash-diagnostic coverage. The
+  alternate stack is used to make guard-page fault dumps more actionable; an
+  `EAGAIN` while a shard is rapidly moved across host pthreads should not make
+  otherwise valid scheduler/run-token tests fail.
+
+* keep the Windows security-capability helper build portable by moving helper
+  definitions to the translation-unit scope expected by MSVC and CMake builds.
+
 ### Tests
+
+* add explicit per-test timeouts to the BSD VM core-test gate so rare hangs
+  report the failing executable instead of timing out the entire workflow.
+
+* make the cancellation-token destroy race edge test yield from host pthread
+  spin loops and use a smaller BSD smoke iteration count, avoiding false
+  NetBSD timeouts while preserving the active-operation/destroy race coverage.
+
+* treat DragonFlyBSD package repository/install outages as infrastructure skips
+  while keeping FreeBSD, OpenBSD, and NetBSD package/test failures hard-gated.
 
 * add direct public-slot family collision and max-epoch regression coverage, plus
   multi-runtime sync handle confusion and null runtime handle checks.
