@@ -178,6 +178,14 @@ typedef struct runtime_destroy_running_state {
     atomic_uint entered;
 } runtime_destroy_running_state_t;
 
+typedef struct runtime_join_destroy_race_state {
+    llam_runtime_t *runtime;
+    llam_task_t *task;
+    atomic_uint join_started;
+    int join_rc;
+    int join_errno;
+} runtime_join_destroy_race_state_t;
+
 typedef struct runtime_run_start_destroy_race_state {
     llam_runtime_t *runtime;
     pthread_mutex_t lock;
@@ -881,6 +889,10 @@ static void stop_wait_task(void *arg) {
         /* Wait until external runtime destruction requests cooperative stop. */
     }
 }
+
+static void idle_never_run_task(void *arg) {
+    (void)arg;
+}
 #endif
 
 #if LLAM_PLATFORM_POSIX
@@ -916,6 +928,17 @@ static void *destroy_runtime_thread(void *arg) {
     pthread_mutex_unlock(&state->lock);
 
     llam_runtime_destroy(state->runtime);
+    return NULL;
+}
+
+static void *join_destroy_race_thread(void *arg) {
+    runtime_join_destroy_race_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + 5000000ULL;
+
+    atomic_store_explicit(&state->join_started, 1U, memory_order_release);
+    errno = 0;
+    state->join_rc = llam_join_until(state->task, deadline_ns);
+    state->join_errno = errno;
     return NULL;
 }
 
@@ -2527,6 +2550,69 @@ cleanup:
 #endif
 }
 
+static int test_unmanaged_join_races_runtime_destroy(void) {
+#if LLAM_PLATFORM_POSIX
+    enum { JOIN_DESTROY_RACE_ITERS = 128 };
+    llam_runtime_opts_t opts;
+
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+
+    for (unsigned i = 0U; i < JOIN_DESTROY_RACE_ITERS; ++i) {
+        runtime_join_destroy_race_state_t state;
+        pthread_t thread;
+        int err;
+
+        memset(&state, 0, sizeof(state));
+        atomic_init(&state.join_started, 0U);
+        state.join_rc = 0;
+        state.join_errno = 0;
+        if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &state.runtime) != 0) {
+            return test_fail_errno("runtime create for unmanaged join/destroy race failed");
+        }
+        state.task = llam_runtime_spawn_ex(state.runtime, idle_never_run_task, NULL, NULL, 0U);
+        if (state.task == NULL) {
+            llam_runtime_destroy(state.runtime);
+            return test_fail_errno("spawn for unmanaged join/destroy race failed");
+        }
+
+        err = pthread_create(&thread, NULL, join_destroy_race_thread, &state);
+        if (err != 0) {
+            errno = err;
+            llam_runtime_destroy(state.runtime);
+            return test_fail_errno("join thread for unmanaged join/destroy race failed");
+        }
+        while (atomic_load_explicit(&state.join_started, memory_order_acquire) == 0U) {
+            llam_pause_cpu();
+        }
+        usleep(1000);
+
+        /*
+         * The unmanaged join fast path holds a raw task pointer while polling.
+         * Destroy must not free the task slab until that claim has either
+         * completed or timed out; ASan catches this as a UAF when the pinning
+         * contract regresses.
+         */
+        llam_runtime_destroy(state.runtime);
+        state.runtime = NULL;
+        pthread_join(thread, NULL);
+        if (state.join_rc == 0) {
+            return test_fail("unmanaged join unexpectedly completed a never-run task");
+        }
+        if (state.join_errno != EINVAL &&
+            state.join_errno != ETIMEDOUT &&
+            state.join_errno != ECANCELED) {
+            errno = state.join_errno;
+            return test_fail_errno("unmanaged join/destroy race returned unexpected errno");
+        }
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
 static int test_runtime_run_start_destroy_race(void) {
 #if LLAM_PLATFORM_POSIX
     enum { RUN_DESTROY_RACE_ITERS = 128 };
@@ -3067,6 +3153,7 @@ int main(void) {
         {"default_channel_host_try_ops_ignore_default_runtime_reinit", test_default_channel_host_try_ops_ignore_default_runtime_reinit},
         {"concurrent_runtime_destroy_is_single_owner", test_concurrent_runtime_destroy_is_single_owner},
         {"runtime_destroy_waits_for_active_run", test_runtime_destroy_waits_for_active_run},
+        {"unmanaged_join_races_runtime_destroy", test_unmanaged_join_races_runtime_destroy},
         {"runtime_run_start_destroy_race", test_runtime_run_start_destroy_race},
         {"runtime_stats_destroy_race", test_runtime_stats_destroy_race},
         {"destroyed_runtime_handle_address_not_reused", test_destroyed_runtime_handle_address_not_reused},

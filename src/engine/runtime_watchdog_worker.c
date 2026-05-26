@@ -287,8 +287,15 @@ void *llam_ctrl_worker_main(void *arg) {
         uint64_t now_ns = llam_now_ns();
         unsigned i;
 
-        if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
-            !llam_runtime_has_live_tasks(rt)) {
+        /*
+         * shutdown_requested is only published by teardown after the caller has
+         * left the scheduler/run phase.  At that point the controller must not
+         * wait for live_tasks to drain: explicit runtime_destroy() may be
+         * tearing down a never-run runtime whose queued tasks can no longer make
+         * progress.  Task/object quiescence is handled by the shutdown reclaim
+         * and public active-op pins after this thread exits.
+         */
+        if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire)) {
             break;
         }
 

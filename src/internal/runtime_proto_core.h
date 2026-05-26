@@ -60,11 +60,13 @@ void llam_task_wait_public_ops_quiescent(llam_task_t *task);
 int llam_task_claim_join_public_handle(const llam_task_t *handle,
                                        llam_task_t *self,
                                        llam_task_t **out_task,
-                                       llam_runtime_t **out_rt);
+                                       llam_runtime_t **out_rt,
+                                       bool *out_task_pinned);
 int llam_task_claim_detach_public_handle(const llam_task_t *handle,
                                          llam_task_t **out_task,
                                          llam_runtime_t **out_rt,
-                                         bool *out_reclaim_after_unlock);
+                                         bool *out_reclaim_after_unlock,
+                                         bool *out_task_pinned);
 
 /*
  * Task-local errno and fiber context-switch boundaries.

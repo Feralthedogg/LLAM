@@ -171,17 +171,19 @@ static llam_task_t *llam_task_resolve_public_handle_locked(const llam_task_t *ha
 int llam_task_claim_join_public_handle(const llam_task_t *handle,
                                        llam_task_t *self,
                                        llam_task_t **out_task,
-                                       llam_runtime_t **out_rt) {
+                                       llam_runtime_t **out_rt,
+                                       bool *out_task_pinned) {
     llam_task_t *task;
     llam_runtime_t *rt;
     unsigned expected = 0U;
 
-    if (LLAM_UNLIKELY(out_task == NULL || out_rt == NULL)) {
+    if (LLAM_UNLIKELY(out_task == NULL || out_rt == NULL || out_task_pinned == NULL)) {
         errno = EINVAL;
         return -1;
     }
     *out_task = NULL;
     *out_rt = NULL;
+    *out_task_pinned = false;
 
     pthread_mutex_lock(&g_llam_task_registry_lock);
     task = llam_task_resolve_public_handle_locked(handle);
@@ -219,6 +221,16 @@ int llam_task_claim_join_public_handle(const llam_task_t *handle,
         errno = EBUSY;
         return -1;
     }
+    if (self == NULL) {
+        /*
+         * Unmanaged joins poll a raw task pointer outside scheduler protection.
+         * Pin the task before dropping the registry lock so concurrent runtime
+         * destruction cannot free the slab while the host thread is still
+         * validating or timing out the join.
+         */
+        llam_public_active_op_begin(&task->active_ops);
+        *out_task_pinned = true;
+    }
 
     pthread_mutex_unlock(&g_llam_task_registry_lock);
 
@@ -230,18 +242,20 @@ int llam_task_claim_join_public_handle(const llam_task_t *handle,
 int llam_task_claim_detach_public_handle(const llam_task_t *handle,
                                          llam_task_t **out_task,
                                          llam_runtime_t **out_rt,
-                                         bool *out_reclaim_after_unlock) {
+                                         bool *out_reclaim_after_unlock,
+                                         bool *out_task_pinned) {
     llam_task_t *task;
     llam_runtime_t *rt;
     unsigned expected = 0U;
 
-    if (LLAM_UNLIKELY(out_task == NULL || out_rt == NULL || out_reclaim_after_unlock == NULL)) {
+    if (LLAM_UNLIKELY(out_task == NULL || out_rt == NULL || out_reclaim_after_unlock == NULL || out_task_pinned == NULL)) {
         errno = EINVAL;
         return -1;
     }
     *out_task = NULL;
     *out_rt = NULL;
     *out_reclaim_after_unlock = false;
+    *out_task_pinned = false;
 
     pthread_mutex_lock(&g_llam_task_registry_lock);
     task = llam_task_resolve_public_handle_locked(handle);
@@ -295,6 +309,15 @@ int llam_task_claim_detach_public_handle(const llam_task_t *handle,
                                                 memory_order_acq_rel,
                                                 memory_order_acquire)) {
         *out_reclaim_after_unlock = true;
+        if (g_llam_tls_task == NULL && g_llam_tls_shard == NULL) {
+            /*
+             * Host-side detach may need to reclaim after the registry lock is
+             * released. Hold a short public-op pin so runtime_destroy cannot
+             * free the task slab before detach reaches the reclaim path.
+             */
+            llam_public_active_op_begin(&task->active_ops);
+            *out_task_pinned = true;
+        }
     }
     pthread_mutex_unlock(&task->lock);
     pthread_mutex_unlock(&g_llam_task_registry_lock);

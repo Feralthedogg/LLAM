@@ -618,19 +618,31 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
     llam_task_t *self = g_llam_tls_task;
     llam_task_t *task = NULL;
     llam_runtime_t *rt = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
+    bool task_pinned = false;
     int caller_errno = errno;
 
-    if (llam_task_claim_join_public_handle(task_handle, self, &task, &rt) != 0) {
+    if (llam_task_claim_join_public_handle(task_handle, self, &task, &rt, &task_pinned) != 0) {
         return -1;
     }
 
     if (self == NULL) {
+        if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
+            int saved_errno = errno;
+
+            llam_task_release_join_claim(task);
+            llam_task_end_public_op(task);
+            errno = saved_errno;
+            return -1;
+        }
         while (atomic_load_explicit(&task->completed, memory_order_acquire) == 0U &&
                atomic_load(&rt->fatal_errno) == 0) {
             struct timespec ts;
 
             if (has_deadline && llam_deadline_passed(deadline_ns)) {
                 llam_task_release_join_claim(task);
+                llam_task_end_public_op(task);
+                llam_runtime_end_public_op(pinned_runtime);
                 errno = ETIMEDOUT;
                 return -1;
             }
@@ -640,15 +652,21 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
         }
         if (atomic_load(&rt->fatal_errno) != 0) {
             llam_task_release_join_claim(task);
+            llam_task_end_public_op(task);
+            llam_runtime_end_public_op(pinned_runtime);
             errno = atomic_load(&rt->fatal_errno);
             return -1;
         }
         if (atomic_load_explicit(&task->detached, memory_order_acquire) != 0U) {
             llam_task_release_join_claim(task);
+            llam_task_end_public_op(task);
+            llam_runtime_end_public_op(pinned_runtime);
             errno = EINVAL;
             return -1;
         }
+        llam_task_end_public_op(task);
         llam_try_reclaim_joined_task(rt, task);
+        llam_runtime_end_public_op(pinned_runtime);
         errno = caller_errno;
         return 0;
     }
@@ -779,16 +797,28 @@ int llam_join_until(llam_task_t *task, uint64_t deadline_ns) {
 int llam_detach(llam_task_t *task_handle) {
     llam_task_t *task = NULL;
     llam_runtime_t *rt = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
     bool reclaim_after_unlock = false;
+    bool task_pinned = false;
 
     llam_task_safepoint();
 
-    if (llam_task_claim_detach_public_handle(task_handle, &task, &rt, &reclaim_after_unlock) != 0) {
+    if (llam_task_claim_detach_public_handle(task_handle, &task, &rt, &reclaim_after_unlock, &task_pinned) != 0) {
         return -1;
     }
 
     if (reclaim_after_unlock) {
+        if (task_pinned && llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
+            // Destroy already owns the runtime; dropping the task pin lets teardown reclaim it.
+            llam_task_end_public_op(task);
+            return 0;
+        }
+        if (task_pinned) {
+            llam_task_end_public_op(task);
+            task_pinned = false;
+        }
         llam_reclaim_claimed_task(rt, task);
+        llam_runtime_end_public_op(pinned_runtime);
     }
     return 0;
 }
