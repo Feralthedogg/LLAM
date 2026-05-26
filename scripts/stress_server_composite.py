@@ -530,10 +530,32 @@ def phase_flood(args: argparse.Namespace) -> None:
             ),
         ]
     else:
+        throughput_8b_target_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_8B_TARGET_MPS", 0.30)
+        throughput_8b_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_8B_MIN_DELIVERY_MPS", 1.3)
+        throughput_64b_target_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_64B_TARGET_MPS", 0.15)
+        throughput_64b_min_delivery_mps = env_float("LLAM_SERVER_COMPOSITE_THROUGHPUT_64B_MIN_DELIVERY_MPS", 1.0)
         cases = [
             ("lossless-8b", 8, lossless_duration, 8, 32, 0.02, 0.05, 0.999),
-            ("throughput-8b", 16, args.flood_duration, 8, 64, 0.30, 1.3, 0.0),
-            ("throughput-64b", 16, args.payload_flood_duration, 64, 64, 0.15, 1.0, 0.0),
+            (
+                "throughput-8b",
+                16,
+                args.flood_duration,
+                8,
+                64,
+                throughput_8b_target_mps,
+                throughput_8b_min_delivery_mps,
+                0.0,
+            ),
+            (
+                "throughput-64b",
+                16,
+                args.payload_flood_duration,
+                64,
+                64,
+                throughput_64b_target_mps,
+                throughput_64b_min_delivery_mps,
+                0.0,
+            ),
             ("lossless-1kb", 8, args.payload_flood_duration, 1024, 16, 0.02, 0.05, 0.999),
         ]
     for label, clients, duration, payload_bytes, batch, target_mps, min_delivery_mps, case_min_ratio in cases:
