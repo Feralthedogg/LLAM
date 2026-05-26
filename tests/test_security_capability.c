@@ -6979,6 +6979,81 @@ done:
     return rc;
 }
 
+static int test_broker_nested_ring_create_survives_destroy_start(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    broker_destroy_thread_state_t destroy_state;
+    pthread_t destroy_thread;
+    llam_handle_t descriptor = LLAM_INVALID_HANDLE;
+    uint64_t session_id = 0U;
+    bool broker_initialized = false;
+    bool active_op = false;
+    bool destroy_started = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (llam_broker_begin_op(&broker) != 0) {
+        goto done;
+    }
+    active_op = true;
+    destroy_state.broker = &broker;
+    if (pthread_create(&destroy_thread, NULL, broker_destroy_thread, &destroy_state) != 0) {
+        goto done;
+    }
+    destroy_started = true;
+
+    /*
+     * CREATE_RING allocates transport authority, then registers a private ring
+     * session. It is still a bounded accepted operation and must not fail only
+     * because broker destroy started after the transport active-op was claimed.
+     */
+    for (unsigned i = 0U; i < 100000U; ++i) {
+        if (broker_test_destroying(&broker)) {
+            break;
+        }
+        sched_yield();
+    }
+    if (!broker_test_destroying(&broker)) {
+        goto done;
+    }
+    if (llam_broker_transport_create_ring(&broker, &descriptor, &session_id) != 0 ||
+        llam_handle_is_invalid(descriptor) ||
+        session_id == 0U) {
+        goto done;
+    }
+    llam_broker_close_handle(descriptor);
+    descriptor = LLAM_INVALID_HANDLE;
+    llam_broker_end_op(&broker);
+    active_op = false;
+    (void)pthread_join(destroy_thread, NULL);
+    destroy_started = false;
+    broker_initialized = false;
+    rc = 0;
+
+done:
+    if (!llam_handle_is_invalid(descriptor)) {
+        llam_broker_close_handle(descriptor);
+    }
+    if (active_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (destroy_started) {
+        (void)pthread_join(destroy_thread, NULL);
+        broker_initialized = false;
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
 static int test_broker_destroy_waits_for_active_ring_io(void) {
     static const char inbound[] = "destroy waits";
     llam_runtime_opts_t opts;
@@ -9821,6 +9896,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_multiprocess_teardown_guard);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_op_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_dispatch_survives_destroy_start);
+    LLAM_RUN_SECURITY_TEST(test_broker_nested_ring_create_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);

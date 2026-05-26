@@ -124,21 +124,33 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
-    if (llam_broker_lock(broker) != 0) {
+    /*
+     * Registration transfers mapping ownership into the broker session table.
+     * Pin it like other broker operations so destroy cannot clear session state
+     * while an accepted CREATE_RING request is finishing.
+     */
+    if (llam_broker_begin_op_subject(broker, subject_id) != 0) {
         return -1;
     }
-    if (LLAM_UNLIKELY(!broker->initialized || broker->runtime == NULL || broker->destroying)) {
+    if (llam_broker_lock(broker) != 0) {
+        llam_broker_end_op(broker);
+        return -1;
+    }
+    if (LLAM_UNLIKELY(!broker->initialized || broker->runtime == NULL)) {
         llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
         errno = EINVAL;
         return -1;
     }
     session = llam_broker_ring_session_get(broker, mapping->ring, subject_id);
     if (session == NULL) {
         llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
         return -1;
     }
     if (LLAM_UNLIKELY(session->owns_mapping)) {
         llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
         errno = EBUSY;
         return -1;
     }
@@ -163,6 +175,7 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
     mapping->name[0] = '\0';
 
     llam_broker_unlock(broker);
+    llam_broker_end_op(broker);
     return 0;
 }
 

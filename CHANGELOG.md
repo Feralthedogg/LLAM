@@ -257,6 +257,11 @@
   an already accepted nested transport request can finish bounded operations
   such as `PING` without being misclassified as a new external request.
 
+* pin broker ring-session registration as an active operation. `CREATE_RING`
+  requests accepted before teardown can now finish the private mapping/session
+  handoff instead of failing after allocating a transport descriptor because
+  destroy set the broker's teardown flag mid-request.
+
 * bound broker destroy latency for predefined broker tasks. Broker teardown now
   requests cooperative runtime stop before draining task slots, so a client that
   leaves a long `SLEEP_NS_RETURN_U64` command unjoined cannot delay broker
