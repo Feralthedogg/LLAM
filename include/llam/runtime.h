@@ -1062,7 +1062,8 @@ LLAM_API int llam_channel_send_until(llam_channel_t *channel, void *value, uint6
  * @brief Receive a pointer value, parking the task if the channel is empty.
  *
  * @details Must be called from a managed LLAM task; outside task context fails
- * with @c ENOTSUP.
+ * with @c ENOTSUP. @p out is cleared to @c NULL before validation/waiting so
+ * failure paths never expose a stale payload pointer.
  *
  * @param channel Channel to receive from.
  * @param out Destination for the received pointer. Must not be NULL.
@@ -1078,7 +1079,9 @@ LLAM_API int llam_channel_recv_result(llam_channel_t *channel, void **out);
  * values may also be drained after runtime shutdown so host cleanup code can
  * destroy channels after stopping the scheduler. Empty open channels fail with
  * @c EAGAIN while the runtime is alive and @c ENOTSUP after shutdown. Timed
- * receive APIs use @c ETIMEDOUT only when a real deadline expires.
+ * receive APIs use @c ETIMEDOUT only when a real deadline expires. @p out is
+ * cleared to @c NULL before validation so failure paths never expose a stale
+ * payload pointer.
  *
  * @param channel Channel to receive from.
  * @param out Destination for the received pointer. Must not be NULL.
@@ -1091,7 +1094,9 @@ LLAM_API int llam_channel_try_recv_result(llam_channel_t *channel, void **out);
  *
  * @details Must be called from a managed LLAM task; outside task context fails
  * with @c ENOTSUP. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
- * is treated as an already-expired deadline.
+ * is treated as an already-expired deadline. @p out is cleared to @c NULL
+ * before validation/waiting so failure paths never expose a stale payload
+ * pointer.
  *
  * @param channel Channel to receive from.
  * @param deadline_ns Absolute deadline in llam_now_ns() units.
