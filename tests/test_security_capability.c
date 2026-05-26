@@ -4440,6 +4440,46 @@ static int test_broker_ring_and_buffer_grants(void) {
     return 0;
 }
 
+typedef struct broker_ring_delayed_submit_state {
+    llam_broker_ring_t *ring;
+    llam_broker_ring_doorbell_t *doorbell;
+    uint64_t request_id;
+    unsigned delay_ms;
+    atomic_int error_code;
+} broker_ring_delayed_submit_state_t;
+
+static void broker_test_sleep_ms(unsigned delay_ms) {
+#if LLAM_PLATFORM_WINDOWS
+    Sleep((DWORD)delay_ms);
+#else
+    usleep((useconds_t)delay_ms * 1000U);
+#endif
+}
+
+#if LLAM_PLATFORM_WINDOWS
+static DWORD WINAPI broker_ring_delayed_submit_thread(LPVOID arg) {
+    broker_ring_delayed_submit_state_t *state = (broker_ring_delayed_submit_state_t *)arg;
+#else
+static void *broker_ring_delayed_submit_thread(void *arg) {
+    broker_ring_delayed_submit_state_t *state = (broker_ring_delayed_submit_state_t *)arg;
+#endif
+    llam_broker_ring_submission_t submission;
+
+    broker_test_sleep_ms(state->delay_ms);
+    memset(&submission, 0, sizeof(submission));
+    submission.request_id = state->request_id;
+    submission.op = LLAM_BROKER_RING_OP_NOP;
+    if (llam_broker_ring_submit_push(state->ring, &submission) != 0 ||
+        llam_broker_ring_doorbell_signal(state->doorbell) != 0) {
+        atomic_store_explicit(&state->error_code, errno == 0 ? EINVAL : errno, memory_order_release);
+    }
+#if LLAM_PLATFORM_WINDOWS
+    return 0U;
+#else
+    return NULL;
+#endif
+}
+
 static int test_broker_ring_doorbell_waits(void) {
     llam_broker_ring_t ring;
     llam_broker_ring_doorbell_t doorbell;
@@ -4467,6 +4507,56 @@ static int test_broker_ring_doorbell_waits(void) {
                      ETIMEDOUT,
                      "empty submit ring wait reported available work") != 0) {
         goto done;
+    }
+    /*
+     * A stale wake is not readiness, but it also must not collapse a nonzero
+     * timeout into an immediate failure. Otherwise a benign unrelated signal can
+     * make a subsequent producer look like a lost wakeup.
+     */
+    {
+        broker_ring_delayed_submit_state_t delayed_state;
+#if LLAM_PLATFORM_WINDOWS
+        HANDLE delayed_thread;
+#else
+        pthread_t delayed_thread;
+#endif
+
+        memset(&delayed_state, 0, sizeof(delayed_state));
+        delayed_state.ring = &ring;
+        delayed_state.doorbell = &doorbell;
+        delayed_state.request_id = 42U;
+        delayed_state.delay_ms = 25U;
+        atomic_init(&delayed_state.error_code, 0);
+        if (llam_broker_ring_doorbell_signal(&doorbell) != 0) {
+            goto done;
+        }
+#if LLAM_PLATFORM_WINDOWS
+        delayed_thread = CreateThread(NULL, 0U, broker_ring_delayed_submit_thread, &delayed_state, 0U, NULL);
+        if (delayed_thread == NULL) {
+            goto done;
+        }
+        if (llam_broker_ring_wait_submit_available(&ring, &doorbell, 1000) != 0) {
+            WaitForSingleObject(delayed_thread, INFINITE);
+            CloseHandle(delayed_thread);
+            goto done;
+        }
+        WaitForSingleObject(delayed_thread, INFINITE);
+        CloseHandle(delayed_thread);
+#else
+        if (pthread_create(&delayed_thread, NULL, broker_ring_delayed_submit_thread, &delayed_state) != 0) {
+            goto done;
+        }
+        if (llam_broker_ring_wait_submit_available(&ring, &doorbell, 1000) != 0) {
+            pthread_join(delayed_thread, NULL);
+            goto done;
+        }
+        pthread_join(delayed_thread, NULL);
+#endif
+        if (atomic_load_explicit(&delayed_state.error_code, memory_order_acquire) != 0 ||
+            llam_broker_ring_submit_pop(&ring, &popped_submission) != 0 ||
+            popped_submission.request_id != delayed_state.request_id) {
+            goto done;
+        }
     }
 
     memset(&submission, 0, sizeof(submission));

@@ -422,6 +422,11 @@
   predefined 32-bit command enum. This keeps high-bit shared-memory submissions
   from truncating into an allowed broker-owned task command.
 
+* preserve nonzero broker ring doorbell wait timeouts after stale or unrelated
+  wake signals. A stale doorbell wake is still not treated as readiness, but it
+  no longer turns a later valid producer signal into an immediate `ETIMEDOUT`
+  failure before the requested timeout has elapsed.
+
 * clear validated shared-memory ring output windows on failed output-producing
   broker operations and clear the unused suffix after successful short
   descriptor/HANDLE reads or channel receives. Failed attenuation, revocation,

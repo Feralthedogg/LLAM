@@ -78,7 +78,13 @@ static int llam_broker_ring_wait_ready(const llam_broker_ring_t *ring,
     if (atomic_load_explicit(&doorbell->pending, memory_order_acquire) != 0U) {
         llam_wake_handle_drain(doorbell->handle);
         atomic_store_explicit(&doorbell->pending, 0U, memory_order_release);
-        return ready(ring) ? 0 : (errno = ETIMEDOUT, -1);
+        if (ready(ring)) {
+            return 0;
+        }
+        if (timeout_ms == 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
     }
 
     wait_rc = llam_wake_handle_wait(doorbell->handle, timeout_ms);
