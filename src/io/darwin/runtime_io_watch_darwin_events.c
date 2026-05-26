@@ -59,7 +59,8 @@ void llam_darwin_handle_poll_watch_event(llam_node_t *node, llam_poll_watch_t *w
     if (release_pending) {
         atomic_fetch_sub(&node->pending_ops, 1U);
     }
-    if (llam_darwin_poll_watch_change(node, watch, EV_DELETE) != 0 && errno != ENOENT && errno != EAGAIN) {
+    if (llam_darwin_poll_watch_change(node, watch, EV_DELETE) != 0 &&
+        llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
         llam_record_fatal(node->runtime, errno);
     }
     if (finalize_target != UINT_MAX) {
@@ -120,8 +121,7 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
                 if (waiter == NULL) {
                     if (watch->migrate_target_node_index != UINT_MAX &&
                         watch->migrate_target_node_index != node->index) {
-                        // Accepted fd ownership will transfer to the target
-                        // watch or be stored/closed by fallback logic.
+                        // Accepted fd ownership transfers to the target watch or fallback storage.
                         live_target = watch->migrate_target_node_index;
                     } else {
                         llam_accept_watch_push_ready(watch, accepted_fd);
@@ -181,7 +181,8 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
         llam_io_req_t *waiters;
 
         // A permanent accept error wakes every parked waiter with that errno.
-        if (llam_darwin_accept_watch_change(node, watch, EV_DELETE) != 0 && errno != ENOENT) {
+        if (llam_darwin_accept_watch_change(node, watch, EV_DELETE) != 0 &&
+            llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         pthread_mutex_lock(&node->watch_lock);
@@ -220,7 +221,8 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
                 waiters = next;
             }
         }
-    } else if (llam_darwin_accept_watch_change(node, watch, EV_DELETE) != 0 && errno != ENOENT) {
+    } else if (llam_darwin_accept_watch_change(node, watch, EV_DELETE) != 0 &&
+               llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
         llam_record_fatal(node->runtime, errno);
     }
 
@@ -272,8 +274,7 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
                 if (waiter == NULL) {
                     if (watch->migrate_target_node_index != UINT_MAX &&
                         watch->migrate_target_node_index != node->index) {
-                        // Forward copied packet bytes to the target watch if
-                        // migration is taking over this fd.
+                        // Forward copied packet bytes when migration takes over this fd.
                         live_target = watch->migrate_target_node_index;
                     } else if (!llam_recv_watch_push_ready_copy(watch, packet, (size_t)received)) {
                         recv_error = ENOMEM;
@@ -348,7 +349,8 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
         llam_io_req_t *waiters;
 
         // Error tears down the watch and wakes every waiter with the same errno.
-        if (llam_darwin_recv_watch_change(node, watch, EV_DELETE) != 0 && errno != ENOENT) {
+        if (llam_darwin_recv_watch_change(node, watch, EV_DELETE) != 0 &&
+            llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         pthread_mutex_lock(&node->watch_lock);
@@ -386,7 +388,8 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
                 waiters = next;
             }
         }
-    } else if (llam_darwin_recv_watch_change(node, watch, EV_DELETE) != 0 && errno != ENOENT) {
+    } else if (llam_darwin_recv_watch_change(node, watch, EV_DELETE) != 0 &&
+               llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
         llam_record_fatal(node->runtime, errno);
     }
 

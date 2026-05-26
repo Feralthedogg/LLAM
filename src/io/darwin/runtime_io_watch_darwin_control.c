@@ -77,6 +77,19 @@ int llam_darwin_kevent_apply(llam_node_t *node, struct kevent *changes, int chan
     return rc;
 }
 
+/** @brief Return whether a best-effort kqueue cleanup failure should poison the runtime. */
+bool llam_darwin_kevent_cleanup_error_is_fatal(int err) {
+    if (err == ENOENT || err == EAGAIN) {
+        return false;
+    }
+#if defined(EWOULDBLOCK)
+    if (err == EWOULDBLOCK) {
+        return false;
+    }
+#endif
+    return true;
+}
+
 /** @brief Add/delete kqueue filters for a poll watch. */
 int llam_darwin_poll_watch_change(llam_node_t *node, llam_poll_watch_t *watch, uint16_t flags) {
     struct kevent changes[2];
@@ -196,25 +209,27 @@ void llam_darwin_req_delete(llam_node_t *node, llam_io_req_t *req) {
     switch (req->kind) {
     case LLAM_IO_KIND_READ:
     case LLAM_IO_KIND_ACCEPT:
-        if (llam_darwin_req_change_one(node, req, EVFILT_READ, EV_DELETE) != 0 && errno != ENOENT) {
+        if (llam_darwin_req_change_one(node, req, EVFILT_READ, EV_DELETE) != 0 &&
+            llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         break;
     case LLAM_IO_KIND_WRITE:
     case LLAM_IO_KIND_CONNECT:
-        if (llam_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 && errno != ENOENT) {
+        if (llam_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 &&
+            llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         break;
     case LLAM_IO_KIND_POLL:
         if ((req->poll_events & (POLLIN | POLLPRI)) != 0 &&
             llam_darwin_req_change_one(node, req, EVFILT_READ, EV_DELETE) != 0 &&
-            errno != ENOENT) {
+            llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         if ((req->poll_events & POLLOUT) != 0 &&
             llam_darwin_req_change_one(node, req, EVFILT_WRITE, EV_DELETE) != 0 &&
-            errno != ENOENT) {
+            llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         break;

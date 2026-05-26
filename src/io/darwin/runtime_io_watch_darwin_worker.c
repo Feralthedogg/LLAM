@@ -78,7 +78,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
             migrate_target = watch->migrate_target_node_index;
         }
         pthread_mutex_unlock(&node->watch_lock);
-        if (rc != 0 && errno != ENOENT && errno != EAGAIN) {
+        if (rc != 0 && llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         if (migrate_target != UINT_MAX &&
@@ -135,7 +135,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
             migrate_target = watch->migrate_target_node_index;
         }
         pthread_mutex_unlock(&node->watch_lock);
-        if (rc != 0 && errno != ENOENT) {
+        if (rc != 0 && llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         if (migrate_target != UINT_MAX &&
@@ -194,7 +194,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
             llam_maybe_destroy_recv_watch_locked(node, watch);
         }
         pthread_mutex_unlock(&node->watch_lock);
-        if (rc != 0 && errno != ENOENT) {
+        if (rc != 0 && llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
             llam_record_fatal(node->runtime, errno);
         }
         if (migrate_target != UINT_MAX &&

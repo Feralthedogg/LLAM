@@ -158,6 +158,7 @@ bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              size_t *copy_capacity_out);
 llam_io_control_op_t *llam_take_node_controls(llam_node_t *node);
 int llam_darwin_kevent_apply(llam_node_t *node, struct kevent *changes, int change_count);
+bool llam_darwin_kevent_cleanup_error_is_fatal(int err);
 int llam_darwin_poll_watch_change(llam_node_t *node, llam_poll_watch_t *watch, uint16_t flags);
 int llam_darwin_accept_watch_change(llam_node_t *node, llam_accept_watch_t *watch, uint16_t flags);
 int llam_darwin_recv_watch_change(llam_node_t *node, llam_recv_watch_t *watch, uint16_t flags);
