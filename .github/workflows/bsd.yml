@@ -125,6 +125,28 @@ jobs:
       - name: Build and run core tests
         run: |
           set -eu
+          run_with_timeout() {
+            label="$1"
+            timeout_seconds="$2"
+            shift 2
+            echo "[$label] $*"
+            "$@" &
+            pid="$!"
+            elapsed=0
+            while kill -0 "$pid" 2>/dev/null; do
+              if [ "$elapsed" -ge "$timeout_seconds" ]; then
+                echo "[$label] timed out after ${timeout_seconds}s; killing pid ${pid}" >&2
+                kill -TERM "$pid" 2>/dev/null || true
+                sleep 2
+                kill -KILL "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                return 124
+              fi
+              sleep 5
+              elapsed=$((elapsed + 5))
+            done
+            wait "$pid"
+          }
           gmake clean
           gmake -j2 static \
             shared \
@@ -137,14 +159,14 @@ jobs:
             test_io_buffers \
             test_shared_load \
             CC=cc
-          ./test_abi_contract
-          ./test_abi_compat
-          ./test_runtime_core
-          ./test_multi_runtime_core
-          LLAM_API_EDGE_CANCEL_RACE_ROUNDS=256 ./test_runtime_api_edges
-          ./test_runtime_select_edges
-          ./test_io_buffers
-          ./test_shared_load ./libllam_runtime.so.2.0.0
+          run_with_timeout test_abi_contract 120 ./test_abi_contract
+          run_with_timeout test_abi_compat 120 ./test_abi_compat
+          run_with_timeout test_runtime_core 240 ./test_runtime_core
+          run_with_timeout test_multi_runtime_core 240 ./test_multi_runtime_core
+          run_with_timeout test_runtime_api_edges 300 env LLAM_API_EDGE_CANCEL_RACE_ROUNDS=256 ./test_runtime_api_edges
+          run_with_timeout test_runtime_select_edges 120 ./test_runtime_select_edges
+          run_with_timeout test_io_buffers 120 ./test_io_buffers
+          run_with_timeout test_shared_load 120 ./test_shared_load ./libllam_runtime.so.2.0.0
 
       - name: CMake build and CTest smoke
         run: |
