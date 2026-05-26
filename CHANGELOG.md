@@ -252,6 +252,11 @@
   operation keep using its existing broker authority instead of failing as new
   external work.
 
+* make the broker wire dispatcher itself participate in active-operation
+  pinning. Direct dispatcher calls now reject new work once destroy starts, but
+  an already accepted nested transport request can finish bounded operations
+  such as `PING` without being misclassified as a new external request.
+
 * bound broker destroy latency for predefined broker tasks. Broker teardown now
   requests cooperative runtime stop before draining task slots, so a client that
   leaves a long `SLEEP_NS_RETURN_U64` command unjoined cannot delay broker

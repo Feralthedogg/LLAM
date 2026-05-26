@@ -28,12 +28,15 @@
 
 #include <string.h>
 
-static void llam_broker_response_init(const llam_broker_t *broker, llam_broker_wire_response_t *response) {
+static void llam_broker_response_init_empty(llam_broker_wire_response_t *response) {
     memset(response, 0, sizeof(*response));
     response->magic = LLAM_BROKER_WIRE_MAGIC;
     response->version = LLAM_BROKER_WIRE_VERSION;
+}
+
+static void llam_broker_response_bind_broker(llam_broker_t *broker, llam_broker_wire_response_t *response) {
     response->runtime_id = broker != NULL && broker->runtime != NULL ? broker->runtime->runtime_id : 0U;
-    response->revocation_epoch = llam_broker_revocation_epoch(broker);
+    response->revocation_epoch = broker != NULL ? atomic_load_explicit(&broker->revocation_epoch, memory_order_acquire) : 0U;
 }
 
 static void llam_broker_response_error(llam_broker_wire_response_t *response, int error_code) {
@@ -110,15 +113,8 @@ static int llam_broker_transport_join_task(llam_broker_t *broker,
         errno = saved_errno;
         return -1;
     }
-    /*
-     * The local control transport is a simple request/response path, not the
-     * high-throughput broker worker loop. Drive the broker runtime here so a
-     * client can spawn a predefined command and synchronously join it without
-     * gaining access to raw function pointers or runtime internals. Long
-     * sleeping commands are excluded so one client cannot pin the broker serve
-     * thread for an attacker-selected sleep duration; clients should retry
-     * those joins after receiving EAGAIN.
-     */
+    /* Drive only quick predefined tasks; long sleeps stay retryable EAGAIN so
+     * one client cannot pin the broker serve thread for attacker-chosen time. */
     if (llam_broker_task_join_runtime_drive_allowed(broker, token, &drive_allowed) != 0) {
         return -1;
     }
@@ -139,11 +135,8 @@ static int llam_broker_transport_join_task(llam_broker_t *broker,
 static size_t llam_broker_transport_serve_ring_batch_size(const llam_broker_wire_request_t *request) {
     uint64_t requested;
 
-    /*
-     * SERVE_RING predates broker-side batching, so length==0 keeps the old
-     * one-request behavior. Nonzero values are capped to the broker's bounded
-     * stack batch to make the control-plane knob safe for untrusted clients.
-     */
+    /* length==0 keeps old one-request serving; nonzero values are bounded so
+     * untrusted clients cannot force oversized stack batches. */
     requested = request != NULL ? request->length : 0U;
     if (requested == 0U) {
         return 1U;
@@ -170,7 +163,7 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
         errno = EINVAL;
         return;
     }
-    llam_broker_response_init(broker, response);
+    llam_broker_response_init_empty(response);
     if (out_should_close != NULL) {
         *out_should_close = false;
     }
@@ -184,21 +177,21 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
         llam_broker_response_error(response, EINVAL);
         return;
     }
-    if (LLAM_UNLIKELY(broker == NULL ||
-                      !broker->initialized ||
-                      broker->runtime == NULL ||
-                      broker->destroying)) {
-        /* PING must not make an invalid broker context look healthy. */
-        llam_broker_close_unclaimed_descriptor(descriptor_handle);
-        llam_broker_response_error(response, EINVAL);
-        return;
-    }
     if (!llam_handle_is_invalid(descriptor_handle) &&
         request->op != (uint32_t)LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR) {
         llam_broker_close_unclaimed_descriptor(descriptor_handle);
         llam_broker_response_error(response, EINVAL);
         return;
     }
+    if (LLAM_UNLIKELY(llam_broker_begin_op(broker) != 0)) {
+        saved_errno = errno != 0 ? errno : EINVAL;
+        /* Match transport serve active-op semantics: reject new work after
+         * destroy starts, but let nested accepted requests finish. */
+        llam_broker_close_unclaimed_descriptor(descriptor_handle);
+        llam_broker_response_error(response, saved_errno);
+        return;
+    }
+    llam_broker_response_bind_broker(broker, response);
 
     switch ((llam_broker_wire_op_t)request->op) {
     case LLAM_BROKER_WIRE_OP_PING:
@@ -378,12 +371,8 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
                 llam_broker_response_error(response, saved_errno);
                 break;
             }
-            /*
-             * Ownership is transferred only by the local OS fd/HANDLE-passing
-             * mechanism. The wire request never treats a numeric descriptor field
-             * as authority, so clients cannot forge broker descriptor slots by
-             * guessing fd values.
-             */
+            /* Only SCM_RIGHTS/DuplicateHandle transfers authority; numeric wire
+             * descriptor fields are never trusted as broker-owned handles. */
             if (llam_broker_register_handle(broker, descriptor_handle, rights, true, &response->token) == 0) {
                 response->status = 0;
             } else {
@@ -477,12 +466,8 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
         }
         break;
     case LLAM_BROKER_WIRE_OP_REVOKE_ALL:
-        /*
-         * Global epoch revocation is a trusted broker-management action, not a
-         * client-transport capability. Exposing it here would let any connected
-         * client invalidate every other session's tokens without presenting
-         * object-specific destroy authority.
-         */
+        /* Global revocation is broker-management authority, not a client
+         * transport capability. */
         llam_broker_response_error(response, EACCES);
         break;
     case LLAM_BROKER_WIRE_OP_STOP:
@@ -495,4 +480,5 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
         llam_broker_response_error(response, EINVAL);
         break;
     }
+    llam_broker_end_op(broker);
 }

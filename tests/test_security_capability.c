@@ -6907,6 +6907,78 @@ done:
     return rc;
 }
 
+static int test_broker_nested_dispatch_survives_destroy_start(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_wire_request_t request;
+    llam_broker_wire_response_t response;
+    broker_destroy_thread_state_t destroy_state;
+    pthread_t destroy_thread;
+    bool broker_initialized = false;
+    bool active_op = false;
+    bool destroy_started = false;
+    bool should_close = true;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (llam_broker_begin_op(&broker) != 0) {
+        goto done;
+    }
+    active_op = true;
+    destroy_state.broker = &broker;
+    if (pthread_create(&destroy_thread, NULL, broker_destroy_thread, &destroy_state) != 0) {
+        goto done;
+    }
+    destroy_started = true;
+
+    /*
+     * This models a transport request accepted just before teardown. The outer
+     * active-op pin must allow the dispatcher to finish a bounded operation;
+     * otherwise destroy can make an already accepted request fail mid-flight.
+     */
+    for (unsigned i = 0U; i < 100000U; ++i) {
+        if (broker_test_destroying(&broker)) {
+            break;
+        }
+        sched_yield();
+    }
+    if (!broker_test_destroying(&broker)) {
+        goto done;
+    }
+    request_init(&request, LLAM_BROKER_WIRE_OP_PING);
+    memset(&response, 0x5a, sizeof(response));
+    llam_broker_process_request(&broker, &request, &response, &should_close);
+    if (response.status != 0 || response.error_code != 0 || should_close) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    active_op = false;
+    (void)pthread_join(destroy_thread, NULL);
+    destroy_started = false;
+    broker_initialized = false;
+    rc = 0;
+
+done:
+    if (active_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (destroy_started) {
+        (void)pthread_join(destroy_thread, NULL);
+        broker_initialized = false;
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
 static int test_broker_destroy_waits_for_active_ring_io(void) {
     static const char inbound[] = "destroy waits";
     llam_runtime_opts_t opts;
@@ -9748,6 +9820,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_multiprocess_session_replay_guard);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_multiprocess_teardown_guard);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_op_survives_destroy_start);
+    LLAM_RUN_SECURITY_TEST(test_broker_nested_dispatch_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);
