@@ -83,12 +83,7 @@ typedef struct chat_message {
 } chat_message_t;
 
 typedef struct chat_outbox {
-    /*
-     * The example deliberately uses LLAM mutex/channel primitives here instead
-     * of pthread mutex/cond so outbox contention parks only the managed task,
-     * not the scheduler worker.  Producers use the mutex for the tiny ring
-     * update; writers sleep on the one-slot wake channel.
-     */
+    /* Use LLAM sync primitives so outbox contention parks tasks, not workers. */
     llam_mutex_t *lock;
     llam_channel_t *wake;
     atomic_uint_fast64_t *full_drop_counter;
@@ -110,6 +105,7 @@ typedef struct chat_server {
     pthread_t signal_thread;
     bool signal_thread_started;
     atomic_bool signal_thread_stop;
+    atomic_bool signal_thread_done;
     bool quiet;
     bool lossless_outbox;
     llam_cancel_token_t *stop_token;
@@ -137,11 +133,7 @@ struct chat_client {
     chat_outbox_t outbox;
     atomic_uint refs;
     atomic_uint closing;
-    /*
-     * Broadcast snapshots retain clients outside clients_lock.  close waits for
-     * this counter before closing the outbox so a target cannot be removed from
-     * the list while another task is still about to enqueue into it.
-     */
+    /* close waits for snapshot enqueues before closing the outbox. */
     atomic_uint enqueue_refs;
     chat_client_t *next;
 };
@@ -448,11 +440,7 @@ static int chat_write_batch(chat_client_t *client, chat_message_t **messages, si
         if (iov_count == 0U) {
             return 0;
         }
-        /*
-         * Outbox batches are already ordered per client. Coalescing adjacent
-         * message prefix/data slices into one writev keeps chat semantics while
-         * avoiding one syscall per tiny broadcast delivery.
-         */
+        /* Coalesce ordered prefix/data slices to avoid one syscall per tiny delivery. */
         nwritten = writev(fd, iov, (int)iov_count);
         if (nwritten > 0) {
             chat_advance_written(messages, count, &index, &offset, (size_t)nwritten);
@@ -524,8 +512,7 @@ static void chat_outbox_release_queued_locked(chat_outbox_t *outbox) {
 static void chat_outbox_lock(chat_outbox_t *outbox) {
     for (;;) {
         if (llam_mutex_trylock(outbox->lock) == 0) { return; }
-        // Outbox critical sections only move ring pointers; yield instead of
-        // parking an entire task on very short contention windows.
+        // Ring updates are tiny; yield instead of parking on short contention.
         if (llam_current_task() != NULL) { llam_yield(); } else { usleep(1000U); }
     }
 }
@@ -544,12 +531,7 @@ static void chat_outbox_close(chat_outbox_t *outbox) {
 static void chat_outbox_destroy(chat_outbox_t *outbox) {
     if (outbox == NULL) { return; }
     chat_outbox_close(outbox);
-    /*
-     * Keep the final backlog drain under the same mutex used by producers and
-     * the writer.  Final release should own the outbox, but CI stress can hit
-     * shutdown edges where a task is still unwinding after wake channel close;
-     * preserving the normal ring-buffer lock discipline makes that path safe.
-     */
+    /* Preserve ring-buffer lock discipline while shutdown tasks unwind. */
     if (outbox->lock != NULL) {
         chat_outbox_lock(outbox);
         chat_outbox_release_queued_locked(outbox);
@@ -560,12 +542,7 @@ static void chat_outbox_destroy(chat_outbox_t *outbox) {
     if (outbox->wake != NULL) {
         void *ignored = NULL;
 
-        /*
-         * Final client release owns the outbox exclusively, but it can happen
-         * from host-side cleanup after the runtime has already stopped.  Only
-         * the nonblocking receive API is valid for draining buffered wake tokens
-         * across that shutdown boundary.
-         */
+        /* Host-side final release may run after runtime stop; drain nonblocking. */
         while (llam_channel_try_recv_result(outbox->wake, &ignored) == 0) {
             ignored = NULL;
         }
@@ -1095,8 +1072,7 @@ static chat_client_t *chat_client_create(chat_server_t *server,
         return NULL;
     }
     (void)atomic_fetch_add_explicit(&server->live_clients, 1U, memory_order_relaxed);
-    // The accept loop owns the initial local reference. The client list and
-    // spawned reader/writer tasks take explicit additional references.
+    // The accept loop owns the initial local reference.
     atomic_init(&client->refs, 1U);
     atomic_init(&client->closing, 0U);
     atomic_init(&client->enqueue_refs, 0U);
@@ -1255,6 +1231,7 @@ static void *chat_signal_thread_main(void *arg) {
             break;
         }
     }
+    atomic_store_explicit(&server->signal_thread_done, true, memory_order_release);
     return NULL;
 }
 
@@ -1295,6 +1272,7 @@ static int chat_start_signal_thread(chat_server_t *server) {
     int err;
 
     atomic_store_explicit(&server->signal_thread_stop, false, memory_order_release);
+    atomic_store_explicit(&server->signal_thread_done, false, memory_order_release);
     err = pthread_create(&server->signal_thread, NULL, chat_signal_thread_main, server);
     if (err != 0) {
         errno = err;
@@ -1309,10 +1287,14 @@ static void chat_stop_signal_thread(chat_server_t *server) {
         return;
     }
     atomic_store_explicit(&server->signal_thread_stop, true, memory_order_release);
-    (void)pthread_kill(server->signal_thread, CHAT_SIGNAL_THREAD_WAKE);
+    /* If SIGINT/SIGTERM already returned the helper, just join it. */
+    if (!atomic_load_explicit(&server->signal_thread_done, memory_order_acquire)) {
+        (void)pthread_kill(server->signal_thread, CHAT_SIGNAL_THREAD_WAKE);
+    }
     (void)pthread_join(server->signal_thread, NULL);
     server->signal_thread_started = false;
     atomic_store_explicit(&server->signal_thread_stop, false, memory_order_release);
+    atomic_store_explicit(&server->signal_thread_done, false, memory_order_release);
 }
 
 static void chat_dump_runtime_if_requested(const char *phase) {
@@ -1392,6 +1374,7 @@ int main(int argc, char **argv) {
     atomic_init(&server.broadcast_deliveries_enqueued, 0U);
     atomic_init(&server.live_clients, 0U);
     atomic_init(&server.signal_thread_stop, false);
+    atomic_init(&server.signal_thread_done, false);
     quiet_env = getenv("LLAM_CHAT_QUIET");
     server.quiet = quiet_env != NULL && strcmp(quiet_env, "0") != 0;
     server.lossless_outbox = lossless_outbox;
@@ -1481,14 +1464,17 @@ int main(int argc, char **argv) {
     }
     chat_server_close_all(&server);
     (void)chat_wait_clients_drained(&server, CHAT_SHUTDOWN_DRAIN_MS);
+    chat_dump_runtime_if_requested("main-after-drain");
     chat_write_stats_file(&server);
     if (!server.quiet) {
         chat_print_stats(stdout, &server);
         fflush(stdout);
     }
+    chat_dump_runtime_if_requested("main-before-signal-join");
     chat_stop_signal_thread(&server);
     (void)llam_cancel_token_destroy(server.stop_token);
     chat_destroy_clients_lock(&server);
+    chat_dump_runtime_if_requested("main-before-runtime-shutdown");
     llam_runtime_shutdown();
     return rc;
 }

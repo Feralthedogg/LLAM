@@ -256,7 +256,7 @@ jobs:
             # and spawn throughput while runtime stress and server correctness
             # stay clean. Keep this as a catastrophic smoke guard; scheduled
             # benchmark jobs own precise Darwin performance tracking.
-            export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,select_recv_ready=1500000,io_echo=100000,poll_wake=100000"
+            export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,channel_pingpong=1000000,select_recv_ready=1500000,io_echo=100000,poll_wake=100000"
           fi
           python3 scripts/bench_guard.py \
             --bench ./build/stress/bench \
