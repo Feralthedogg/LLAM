@@ -37,7 +37,7 @@
 
 static int llam_broker_descriptor_set_cloexec(llam_handle_t handle) {
 #if LLAM_PLATFORM_WINDOWS
-    if (LLAM_UNLIKELY(llam_broker_descriptor_handle_invalid(handle))) {
+    if (LLAM_UNLIKELY(LLAM_HANDLE_IS_INVALID(handle))) {
         errno = EINVAL;
         return -1;
     }
