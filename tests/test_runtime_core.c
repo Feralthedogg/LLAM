@@ -2088,15 +2088,22 @@ static void run_hold_task(void *arg) {
      * enough on slower BSD schedulers: the winner can drain before the second
      * host thread enters llam_run(), producing two sequential successes instead
      * of a true concurrent-run failure.
+     *
+     * Use a short timer sleep instead of a pure yield spin.  DragonFlyBSD can
+     * otherwise let the watchdog sample a synthetic test-only state where a
+     * live task is repeatedly yielding but no external wake source is visible,
+     * causing an EDEADLK false positive before the losing llam_run() returns.
      */
     for (unsigned i = 0U;
-         i < 1000000U && atomic_load_explicit(&state->release, memory_order_acquire) == 0U;
+         i < 10000U && atomic_load_explicit(&state->release, memory_order_acquire) == 0U;
          ++i) {
         if (atomic_load_explicit(state->attempting, memory_order_acquire) >= 2U &&
             atomic_load_explicit(state->failed, memory_order_acquire) >= 1U) {
             break;
         }
-        llam_yield();
+        if (llam_sleep_ns(1000000ULL) != 0) {
+            break;
+        }
     }
 }
 
