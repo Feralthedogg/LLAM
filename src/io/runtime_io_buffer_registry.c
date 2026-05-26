@@ -324,6 +324,29 @@ static void llam_io_buffer_detach_provided_storage_locked(llam_io_buffer_t *buff
     buffer->provided_node_index = UINT_MAX;
 }
 
+void *llam_io_buffer_public_data(llam_io_buffer_t *buffer) {
+    llam_io_buffer_t *live = NULL;
+    void *data = NULL;
+
+    if (buffer == NULL) {
+        return NULL;
+    }
+
+    (void)pthread_mutex_lock(&g_llam_io_buffer_public_registry_lock);
+    if (llam_io_buffer_public_decode_handle_locked(buffer, false, &live)) {
+        /*
+         * Public data pointers are documented as valid until release.  Provided
+         * buffer rings are runtime-owned, so expose only wrapper-owned storage
+         * to prevent a caller-held pointer from becoming dangling when the
+         * producing runtime is destroyed before the buffer handle is released.
+         */
+        llam_io_buffer_detach_provided_storage_locked(live);
+        data = live->data;
+    }
+    (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
+    return data;
+}
+
 void llam_io_buffer_public_detach_runtime_storage(llam_runtime_t *rt) {
     llam_io_buffer_t *buffer;
 

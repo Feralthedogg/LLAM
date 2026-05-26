@@ -180,15 +180,7 @@ void llam_io_buffer_release_raw(llam_io_buffer_t *buffer) {
 }
 
 void *llam_io_buffer_data(llam_io_buffer_t *buffer) {
-    llam_io_buffer_t *live = llam_io_buffer_public_begin_op(buffer);
-    void *data;
-
-    if (live == NULL) {
-        return NULL;
-    }
-    data = live->data;
-    llam_io_buffer_public_end_op(live);
-    return data;
+    return llam_io_buffer_public_data(buffer);
 }
 
 size_t llam_io_buffer_size(const llam_io_buffer_t *buffer) {

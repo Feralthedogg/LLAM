@@ -1411,6 +1411,94 @@ cleanup:
     return rc;
 }
 
+static int test_provided_owned_buffer_data_accessor_detaches_storage(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *handle = NULL;
+    unsigned char *backend_storage = NULL;
+    const char payload[] = "borrowed";
+    size_t payload_len = strlen(payload);
+    void *borrowed = NULL;
+    int rc = 1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("provided-buffer accessor opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("provided-buffer accessor runtime create failed");
+    }
+    backend_storage = malloc(LLAM_IO_BUFFER_INLINE_BYTES);
+    buffer = calloc(1U, sizeof(*buffer));
+    if (backend_storage == NULL || buffer == NULL) {
+        rc = test_fail_errno("provided-buffer accessor allocation failed");
+        goto cleanup;
+    }
+    memcpy(backend_storage, payload, payload_len);
+    buffer->owner_runtime = runtime;
+    buffer->detached_wrapper = true;
+    buffer->provided_storage = true;
+    buffer->provided_node_index = 0U;
+    buffer->provided_bid = 1U;
+    buffer->data = backend_storage;
+    buffer->size = payload_len;
+    buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
+    if (llam_io_buffer_public_register(buffer) != 0) {
+        rc = test_fail_errno("provided-buffer accessor public register failed");
+        goto cleanup;
+    }
+    handle = llam_io_buffer_public_handle(buffer);
+    if (handle == NULL) {
+        rc = test_fail("provided-buffer accessor public handle missing");
+        goto cleanup;
+    }
+
+    /*
+     * A borrowed pointer returned by the public accessor must not point into a
+     * runtime-owned provided-buffer ring. Otherwise code that follows the
+     * "valid until release" contract can keep a pointer that becomes dangling
+     * when the producer runtime is destroyed.
+     */
+    borrowed = llam_io_buffer_data(handle);
+    if (borrowed == NULL) {
+        rc = test_fail("provided-buffer accessor returned NULL");
+        goto cleanup;
+    }
+    if (borrowed == backend_storage) {
+        rc = test_fail("provided-buffer accessor exposed runtime-owned storage");
+        goto cleanup;
+    }
+    if (llam_io_buffer_size(handle) != payload_len ||
+        memcmp(borrowed, payload, payload_len) != 0) {
+        rc = test_fail("provided-buffer accessor detach corrupted payload");
+        goto cleanup;
+    }
+
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+    if (llam_io_buffer_data(handle) != borrowed ||
+        llam_io_buffer_size(handle) != payload_len ||
+        memcmp(borrowed, payload, payload_len) != 0) {
+        rc = test_fail("provided-buffer borrowed data changed after runtime destroy");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (handle != NULL) {
+        llam_io_buffer_release(handle);
+        handle = NULL;
+        buffer = NULL;
+    } else if (buffer != NULL) {
+        llam_io_buffer_release_raw(buffer);
+    }
+    if (runtime != NULL) {
+        llam_runtime_destroy(runtime);
+    }
+    free(backend_storage);
+    return rc;
+}
+
 static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
@@ -1612,6 +1700,7 @@ int main(void) {
         test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
         test_public_owned_buffer_alloc_and_positional_io() != 0 ||
         test_provided_owned_buffer_detaches_on_runtime_destroy() != 0 ||
+        test_provided_owned_buffer_data_accessor_detaches_storage() != 0 ||
         test_provided_owned_buffer_detach_clamps_corrupt_size() != 0) {
         return 1;
     }

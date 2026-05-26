@@ -299,6 +299,7 @@ llam_io_buffer_t *llam_io_buffer_public_unregister(llam_io_buffer_t *buffer);
 llam_io_buffer_t *llam_io_buffer_public_unregister_raw(llam_io_buffer_t *buffer);
 llam_io_buffer_t *llam_io_buffer_public_begin_op(const llam_io_buffer_t *buffer);
 void llam_io_buffer_public_end_op(const llam_io_buffer_t *buffer);
+void *llam_io_buffer_public_data(llam_io_buffer_t *buffer);
 void llam_io_buffer_release_raw(llam_io_buffer_t *buffer);
 int llam_try_direct_rw(llam_fd_t fd,
                      void *buf,
