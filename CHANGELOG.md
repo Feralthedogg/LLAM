@@ -1,20 +1,96 @@
 # LLAM ChangeLog
 
-## 2.0.0 - 2026-05-25
+## 2.0.1 - Unreleased
 
 ### Added
 
-* benchmark workflow and release-gate documentation now use isolated case
-  execution for public LLAM/Go/Tokio comparison numbers, preventing
-  cross-case worker, timer, cache, and CPU-frequency state from depressing
+* BSD platform support foundation for FreeBSD, OpenBSD, NetBSD, and
+  DragonFlyBSD, including platform macros, kqueue readiness/user-wake reuse
+  where portable, BSD package target detection, CMake/Make wiring, and a BSD
+  VM smoke matrix for core/API/select/I/O-buffer/shared-load coverage.
+
+* isolated benchmark case execution in the release benchmark workflow and
+  release-gate documentation. Public LLAM/Go/Tokio comparisons now avoid
+  cross-case worker, timer, cache, and CPU-frequency state carrying into
   latency-sensitive cases such as `spawn_join`.
 
-* BSD platform support foundation: add FreeBSD, OpenBSD, NetBSD, and DragonFly
-  platform macros, share the kqueue readiness/user-wake backend with Darwin
-  where portable, keep Mach/ulock paths Darwin-only, wire BSD x86_64/aarch64
-  context paths into Make/CMake, add BSD release target detection, and add a
-  BSD GitHub Actions VM smoke matrix for core/API/select/I/O-buffer/shared-load
-  tests and package-shape checks.
+* additional multi-runtime, blocking-pool, public-handle, owned-buffer, broker,
+  Windows IOCP, BSD kqueue, and server-stress regression coverage for the
+  post-2.0.0 hardening queue.
+
+### Changed
+
+* server composite stress policy now separates throughput guardrails from
+  long-running soak stability checks. Standard Stress keeps absolute
+  delivery-MPS thresholds, while `--soak-hour` gates on traffic, stats,
+  accounting, shutdown, resource limits, and unexpected edge errors instead of
+  hosted-runner-sensitive MPS numbers.
+
+* release and package smoke checks now cover the expanded BSD targets, stricter
+  install/package path safety cases, shared-library metadata, and isolated
+  benchmark commands used for release-quality comparisons.
+
+* runtime owner, public-slot, channel, select, kqueue, io_uring, Windows IOCP,
+  broker-ring, and broker-transport paths received targeted hot-path and
+  teardown stabilization without changing the public C ABI.
+
+### Fixed
+
+* preserve managed task/shard TLS when an embedder creates an explicit runtime
+  from inside an existing LLAM task. Successful nested runtime creation no
+  longer makes the caller look unmanaged for later sync, I/O, or current-task
+  queries.
+
+* roll back registered partial runtime initialization failures through the
+  normal runtime shutdown path so backend resources, including Windows Winsock
+  setup, are released before returning the original initialization errno.
+
+* clear channel receive outputs on failure and document the output-clearing
+  contract, preventing stale caller storage from surviving failed receive paths.
+
+* harden owned-buffer handle publication, public handle shift bounds, adjacent
+  public-handle generation guesses, unmanaged join/destroy races, multi-runtime
+  blocking-pool isolation, signal/floating-point global lifetime, provided
+  buffer detachment before data access, and concurrent run/watchdog contracts.
+
+* stabilize Linux io_uring interrupted waits, Darwin/BSD kqueue transient
+  `EAGAIN` and cleanup errors, BSD poll validation, DragonFly alternate signal
+  stack `EAGAIN`, Windows IOCP association metadata/locking, Windows IOCP smoke
+  completion, and UDP IOCP poll opt-in behavior.
+
+* harden broker capability and transport paths after 2.0.0: reject slot-zero
+  tokens, enforce family-specific rights allowlists, bound direct buffer
+  grants, clear output authority on failed attenuation/revocation/transport
+  calls, preserve revoke atomicity on entropy failure, serialize concurrent
+  broker destroy, pin dispatcher/ring operations during teardown, close POSIX
+  broker fds with close-on-exec protections, and clear inherited Windows HANDLE
+  authority.
+
+* prevent broker teardown and transport races from stranding shared-memory ring
+  sessions, duplicated response fds/HANDLEs, predefined task grants, detached
+  task slots, broker byte channels, descriptor/HANDLE grants, or stale doorbell
+  waits after response failures, disconnects, or concurrent destroy.
+
+### Tests
+
+* latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
+  BSD VM smoke coverage, Windows stress/build coverage through the Stress
+  matrix, and package-shape checks.
+
+* added and stabilized edge-case coverage for broker replay guards, ring
+  doorbell/flood paths, predefined task detach races, Windows named-pipe
+  response-failure cleanup, BSD timeouts/package bootstrap, stress diagnostics,
+  and hosted-runner performance guardrails.
+
+### Performance
+
+* recovered release-quality `spawn_join` measurements by running public
+  comparisons with `--isolate-cases`; isolated LLAM-only median smoke currently
+  shows `spawn_join` around 4M ops/s on the local macOS aarch64 host.
+
+## 2.0.0 - 2026-05-25
+
+### Added
 
 * explicit multi-runtime lifecycle surface: `llam_runtime_create()`,
   `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and
@@ -54,23 +130,9 @@
   Client-visible broker validation now rejects zero-right validation with
   `EINVAL`, closing a rightless live-token oracle while keeping internal
   attenuation validation broker-only.
-  Raw capability issuance and validation now reject object slot zero with
-  `EINVAL`, matching the nonzero broker live-object id space and preventing a
-  slot-0 token from becoming structurally valid outside live-table checks.
-  Direct broker object creation and direct object-token minting now enforce the
-  same family-specific rights allowlist as the transport path, so buffer,
-  descriptor, channel, and predefined-task tokens cannot carry out-of-family or
-  future-reserved rights.
-  Direct broker buffer registration also enforces the same 1MiB bounded grant
-  limit as the transport path, preventing trusted-helper misuse from reserving
-  unexpectedly large broker-local buffers.
-  The unsupported Windows `llam_broker_register_fd()` compatibility stub now
-  clears token output before returning `ENOTSUP`, matching other broker
-  authority-returning failure paths.
   Failed capability attenuation and broker object-revocation helpers now clear
-  output tokens even for in-place `token == out_token` calls, so destructive
-  narrowing/revocation attempts cannot accidentally keep stale serialized
-  authority after an `EACCES`/`EINVAL` failure.
+  non-aliased output tokens, so callers cannot accidentally reuse stale
+  serialized authority after an `EACCES`/`EINVAL` failure.
   Object-specific revocation now issues the replacement token before committing
   the live slot generation, so entropy failure reports `EIO` without invalidating
   the caller's existing token.
@@ -160,12 +222,6 @@
   runtime-owned scheduler/cache/I/O state, public-handle hardening flow, and
   optional broker process boundary in more detail.
 
-* server composite stress policy now separates throughput guardrails from
-  long-running soak checks. The standard Stress workflow keeps absolute
-  delivery-MPS thresholds, while `--soak-hour` keeps the same high-rate flood
-  load but gates on traffic, stats, accounting, shutdown, resource limits, and
-  unexpected edge errors instead of hosted-runner-sensitive MPS numbers.
-
 ### Fixed
 
 * harden public opaque handles with family-tagged generations so a forged or
@@ -180,16 +236,6 @@
 
 * reject `llam_runtime_run_handle(NULL)` with `EINVAL` instead of allowing the
   explicit runtime handle path to dereference a null handle.
-
-* preserve managed task/shard TLS when an embedder creates an explicit runtime
-  from inside an existing LLAM task. A successful nested `llam_runtime_create()`
-  no longer makes the caller look like an unmanaged host thread for subsequent
-  sync, I/O, or current-task queries.
-
-* roll back registered partial runtime initialization failures through the
-  normal runtime shutdown path. Failures after public runtime registration, and
-  after backend setup such as Winsock startup on Windows, now release backend
-  resources before returning the original initialization errno.
 
 * split internal raw owned-buffer cleanup from the public encoded-handle release
   path so public buffer accessors cannot consume a guessed raw wrapper address.
@@ -263,33 +309,6 @@
   operation keep using its existing broker authority instead of failing as new
   external work.
 
-* serialize concurrent broker destroy calls through a single teardown owner.
-  Racing destroy callers now wait until broker-owned rings, channels, sessions,
-  and the private runtime have been claimed by the owner and invalidated,
-  preventing duplicate cleanup of the same broker resources.
-
-* make the broker wire dispatcher itself participate in active-operation
-  pinning. Direct dispatcher calls now reject new work once destroy starts, but
-  an already accepted nested transport request can finish bounded operations
-  such as `PING` without being misclassified as a new external request.
-
-* pin broker ring-session registration as an active operation. `CREATE_RING`
-  requests accepted before teardown can now finish the private mapping/session
-  handoff instead of failing after allocating a transport descriptor because
-  destroy set the broker's teardown flag mid-request.
-
-* bound broker destroy latency for predefined broker tasks. Broker teardown now
-  requests cooperative runtime stop before draining task slots, so a client that
-  leaves a long `SLEEP_NS_RETURN_U64` command unjoined cannot delay broker
-  shutdown until the sleep duration naturally expires.
-
-* prevent byte-stream broker `TASK_JOIN` from becoming a delay primitive for
-  long sleeping broker commands. Pending `SLEEP_NS_RETURN_U64` joins now return
-  `EAGAIN` promptly instead of driving the broker runtime until the
-  client-selected sleep duration completes; otherwise quick joins also return
-  `EAGAIN` while any peer sleep command is still pending, because driving the
-  broker runtime would drain that sleep too.
-
 * scrub broker authority residue during teardown: capability MAC keys,
   revocation epoch, object id counters, transport subject sessions, and ring
   subject sessions are cleared after accepted broker operations drain.
@@ -354,22 +373,9 @@
   broker-owned ring. If response fd/HANDLE delivery fails after session
   creation, the broker now tears down the just-created ring session so a
   disconnecting client cannot strand private mappings or exhaust the ring
-  session table. Control-transport response failure now also rolls back
-  just-created buffer, channel, descriptor, and predefined-task grants, so a
-  disconnecting client cannot strand unreachable broker-owned heap, fd/HANDLE,
-  channel, or task authority. Predefined-task rollback now claims the spawned
-  slot with a CAS, clears client-visible rights, and lets the task detach
-  itself from its trampoline before broker-slot reset. This prevents both a
-  permanent detached state and a host-thread detach race with task exit/reclaim.
-  Client-visible broker task detach now uses the same CAS claim before marking
-  a spawned task detached, preventing a racing task completion from leaving an
-  active `DETACHED` slot with no task handle to reclaim it.
-  Windows named-pipe `CREATE_RING` response failure now closes any peer-process
-  duplicated response HANDLE with `DUPLICATE_CLOSE_SOURCE`, preventing an
-  unreachable remote mapping HANDLE from remaining in the client process.
-  POSIX broker response
-  writes use no-SIGPIPE send paths, turning closed-peer writes into ordinary
-  `EPIPE`/`ECONNRESET` failures instead of process termination.
+  session table. POSIX broker response writes use no-SIGPIPE send paths,
+  turning closed-peer writes into ordinary `EPIPE`/`ECONNRESET` failures
+  instead of process termination.
 
 * reject global `LLAM_BROKER_WIRE_OP_REVOKE_ALL` on the untrusted local control
   transport with `EACCES`. Global epoch revocation remains available only as a
@@ -389,69 +395,17 @@
   broker-owned descriptor slots, private ring mapping fds, response fd
   duplicates, and ring mapping duplicates are now marked close-on-exec so
   broker capability transport or data-plane authority is not inherited by later
-  helper `exec` calls. POSIX broker socket creation, descriptor/ring fd
-  duplication, and `SCM_RIGHTS` receive paths now prefer `SOCK_CLOEXEC`,
-  `F_DUPFD_CLOEXEC`, and `MSG_CMSG_CLOEXEC` where available, reducing the
-  fork/exec race window before falling back to `fcntl(FD_CLOEXEC)`.
-  Windows broker-registered HANDLEs now clear `HANDLE_FLAG_INHERIT` during
-  descriptor registration, matching the POSIX close-on-exec boundary for
-  child processes created with handle inheritance enabled.
+  helper `exec` calls.
   Failed POSIX broker wire reads now clear request/response output storage
   before returning an error, preventing partial attacker-controlled control
   messages from being reused by buggy callers that ignore the failure return.
   Direct broker-owned buffer reads, channel receives, and descriptor/HANDLE
   reads now clear caller output on failure and zero the unused suffix after
   successful short reads/receives, matching the shared-ring stale-output policy.
-  Broker transport failure responses now also clear token, result, and data
-  outputs after rolling back just-created authority, so a client that ignores
-  `status < 0` cannot reuse stale success fields from a failed response.
-  Plain POSIX request helpers, POSIX descriptor-request helpers, and Windows
-  HANDLE request helpers now also normalize successfully read failure responses,
-  preserving `status`/`error_code` while clearing token/result/data authority
-  fields supplied by a faulty or hostile broker peer.
-  The same helpers now reject malformed response framing with `EINVAL`, clear
-  the full response payload, and close any attached response descriptor before
-  returning, so a forged success frame with bad magic/version cannot expose
-  token, result, data, fd, or HANDLE authority to a lax caller.
-  POSIX response-descriptor reads now also close and suppress any `SCM_RIGHTS`
-  fd attached to an error response, so malformed descriptor-bearing failures
-  cannot expose fd authority alongside a failed status.
-  Broker client request helpers now clear response storage on invalid input or
-  request-write failure before a response can be read, covering closed-peer
-  control sockets, descriptor-bearing requests, response-descriptor requests,
-  Windows HANDLE request helpers, and unsupported Windows fd stubs.
-  Broker shared-ring private-name generation now clears the name buffer before
-  returning `ENAMETOOLONG`, and local endpoint helper failures now clear fd or
-  HANDLE outputs to `-1`/`LLAM_INVALID_HANDLE`. This prevents callers that
-  mishandle a failing return code from reusing stale rendezvous names or stale
-  descriptor authority.
-  Broker transport subject lookup, ring-session registration, ring stats
-  collection, and ring submission/completion drain helpers now also clear their
-  output storage before returning invalid-input or empty-ring errors, preventing
-  stale subject ids, session ids, diagnostic counters, or completion payloads
-  from surviving failed control-plane calls. Completion-drain helpers also
-  reject impossible element counts with `EOVERFLOW` before size multiplication
-  can wrap; the first completion slot is scrubbed as a stale-authority sentinel
-  before the fail-closed return. Broker ring serve helpers, ring transport
-  creation, task join result output, and shared-memory ring create/open/import
-  helpers now follow the same fail-closed output rule, so failed direct broker
-  calls cannot leave stale served counts, task results, fd/HANDLE descriptors,
-  session ids, or mapping handles in caller-owned storage. Direct broker token
-  mint helpers now also clear token output before invalid-broker failures, and
-  POSIX broker socket identity capture clears cleanup identity output before
-  invalid path failures so stale endpoint identity cannot be reused after a
-  failed capture. Broker control dispatch now rejects even `PING` when the
-  broker context is null, uninitialized, destroyed, or missing its runtime, so
-  malformed internal calls cannot make an invalid control plane look healthy.
 
 * reject oversized broker ring task command ids before narrowing to the
   predefined 32-bit command enum. This keeps high-bit shared-memory submissions
   from truncating into an allowed broker-owned task command.
-
-* preserve nonzero broker ring doorbell wait timeouts after stale or unrelated
-  wake signals. A stale doorbell wake is still not treated as readiness, but it
-  no longer turns a later valid producer signal into an immediate `ETIMEDOUT`
-  failure before the requested timeout has elapsed.
 
 * clear validated shared-memory ring output windows on failed output-producing
   broker operations and clear the unused suffix after successful short
@@ -494,31 +448,7 @@
   objects below conservative Windows thread-stack limits while preserving
   broker ownership and channel table cleanup semantics.
 
-* degrade transient alternate-signal-stack setup failures on DragonFlyBSD from
-  fatal scheduler startup errors into reduced crash-diagnostic coverage. The
-  alternate stack is used to make guard-page fault dumps more actionable; an
-  `EAGAIN` while a shard is rapidly moved across host pthreads should not make
-  otherwise valid scheduler/run-token tests fail.
-
-* keep the Windows security-capability helper build portable by moving helper
-  definitions to the translation-unit scope expected by MSVC and CMake builds.
-
 ### Tests
-
-* give the Windows cross-process broker ring session-replay guard a longer
-  child-exit window. The test still requires stale replay rejection and clean
-  child exit, but no longer fails when hosted Windows Server 2022 briefly
-  starves the child process after the parent rewinds public cursors.
-
-* add explicit per-test timeouts to the BSD VM core-test gate so rare hangs
-  report the failing executable instead of timing out the entire workflow.
-
-* make the cancellation-token destroy race edge test yield from host pthread
-  spin loops and use a smaller BSD smoke iteration count, avoiding false
-  NetBSD timeouts while preserving the active-operation/destroy race coverage.
-
-* treat DragonFlyBSD package repository/install outages as infrastructure skips
-  while keeping FreeBSD, OpenBSD, and NetBSD package/test failures hard-gated.
 
 * add direct public-slot family collision and max-epoch regression coverage, plus
   multi-runtime sync handle confusion and null runtime handle checks.
@@ -553,13 +483,6 @@
 * add disconnected-`CREATE_RING` coverage proving a client that closes before
   receiving the private ring fd cannot leave an unreachable broker-owned ring
   session behind.
-
-* add Windows named-pipe `CREATE_RING` response-failure coverage proving a
-  closed client pipe cannot strand a peer-local duplicated mapping HANDLE.
-
-* add predefined broker task detach race coverage proving a concurrently
-  completing task cannot strand an active detached slot after its public detach
-  token is consumed.
 
 * add ABI layout and single-evaluation predicate checks for `reserved0`,
   `LLAM_FD_IS_INVALID()`, and `LLAM_HANDLE_IS_INVALID()`.
