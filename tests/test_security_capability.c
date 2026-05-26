@@ -9532,36 +9532,16 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_create_ring_response_failure_reclaims_session);
     LLAM_RUN_SECURITY_TEST(test_broker_serve_local_n_survives_malformed_session);
 #else
-    if (test_broker_ring_handle_data_plane() != 0) {
-        return 1;
-    }
-    if (test_broker_ring_windows_mapping_flood() != 0) {
-        return 1;
-    }
-    if (test_broker_ring_windows_cross_process_flood() != 0) {
-        return 1;
-    }
-    if (test_broker_ring_windows_cross_process_session_replay_guard() != 0) {
-        return 1;
-    }
-    if (test_broker_ring_windows_cross_process_teardown_guard() != 0) {
-        return 1;
-    }
-    if (test_broker_pipe_transport_handle_grants() != 0) {
-        return 1;
-    }
-    if (test_broker_pipe_create_ring_write_failure_closes_remote_handle() != 0) {
-        return 1;
-    }
-    if (test_broker_pipe_serve_local_n_survives_malformed_session() != 0) {
-        return 1;
-    }
-    if (test_broker_ring_mapping_has_restricted_dacl() != 0) {
-        return 1;
-    }
-    if (test_broker_ring_handle_mapping_authority() != 0) {
-        return 1;
-    }
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_handle_data_plane);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_mapping_flood);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_flood);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_session_replay_guard);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_teardown_guard);
+    LLAM_RUN_SECURITY_TEST(test_broker_pipe_transport_handle_grants);
+    LLAM_RUN_SECURITY_TEST(test_broker_pipe_create_ring_write_failure_closes_remote_handle);
+    LLAM_RUN_SECURITY_TEST(test_broker_pipe_serve_local_n_survives_malformed_session);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_mapping_has_restricted_dacl);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_handle_mapping_authority);
 #endif
     puts("test_security_capability ok");
     return 0;
