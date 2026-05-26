@@ -2386,7 +2386,19 @@ static int test_concurrent_run_contract(void) {
      * llam_run() is the single scheduler driver for shard zero.  Concurrent
      * unmanaged callers must produce one runner and one EINVAL failure; two
      * successful callers would execute the same shard state at the same time.
+     *
+     * Keep one initialized runtime across all rounds. This isolates the run
+     * token race from rapid backend thread/kqueue teardown churn on BSD VMs,
+     * which is covered separately by the lifecycle race tests above.
      */
+    llam_runtime_opts_t opts;
+
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("llam_runtime_init for concurrent run failed");
+    }
     for (unsigned round = 0U; round < 128U; ++round) {
         init_race_barrier_t barrier = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0U, 0U};
         atomic_uint attempting;
@@ -2394,7 +2406,6 @@ static int test_concurrent_run_contract(void) {
         run_hold_state_t hold;
         run_race_state_t first = {&barrier, &attempting, &failed, 123, 0};
         run_race_state_t second = {&barrier, &attempting, &failed, 123, 0};
-        llam_runtime_opts_t opts;
         pthread_t first_thread;
         pthread_t second_thread;
         int first_rc;
@@ -2406,12 +2417,6 @@ static int test_concurrent_run_contract(void) {
         atomic_init(&hold.release, 0U);
         hold.attempting = &attempting;
         hold.failed = &failed;
-        memset(&opts, 0, sizeof(opts));
-        opts.deterministic = 1U;
-        opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-        if (llam_runtime_init(&opts) != 0) {
-            return test_fail_errno("llam_runtime_init for concurrent run failed");
-        }
         if (llam_spawn(run_hold_task, &hold, NULL) == NULL) {
             llam_runtime_shutdown();
             return test_fail_errno("llam_spawn for concurrent run hold task failed");
@@ -2460,8 +2465,8 @@ static int test_concurrent_run_contract(void) {
             llam_runtime_shutdown();
             return 1;
         }
-        llam_runtime_shutdown();
     }
+    llam_runtime_shutdown();
     return 0;
 }
 
