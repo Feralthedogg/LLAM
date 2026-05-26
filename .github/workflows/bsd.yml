@@ -63,6 +63,8 @@ jobs:
       - name: Install packages
         run: |
           set -eu
+          skip_file=".llam-bsd-infra-skip"
+          rm -f "$skip_file"
           retry() {
             attempts=0
             max_attempts="${LLAM_BSD_PKG_RETRIES:-10}"
@@ -77,6 +79,7 @@ jobs:
           }
           case "$(uname -s)" in
             FreeBSD|DragonFly)
+              system_name="$(uname -s)"
               packages=""
               if ! command -v gmake >/dev/null 2>&1; then
                 packages="$packages gmake"
@@ -88,10 +91,19 @@ jobs:
                 packages="$packages xz"
               fi
               if [ -n "$packages" ]; then
-                if [ "$(uname -s)" = DragonFly ]; then
-                  retry sudo pkg update -f || true
+                if [ "$system_name" = DragonFly ]; then
+                  if ! retry sudo pkg update -f; then
+                    echo "DragonFlyBSD pkg repository unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
+                    exit 0
+                  fi
                 fi
-                retry sudo pkg install -y $packages
+                if ! retry sudo pkg install -y $packages; then
+                  if [ "$system_name" = DragonFly ]; then
+                    echo "DragonFlyBSD pkg install unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
+                    exit 0
+                  fi
+                  exit 1
+                fi
               fi
               ;;
             OpenBSD)
@@ -125,6 +137,10 @@ jobs:
       - name: Build and run core tests
         run: |
           set -eu
+          if [ -f .llam-bsd-infra-skip ]; then
+            cat .llam-bsd-infra-skip
+            exit 0
+          fi
           run_with_timeout() {
             label="$1"
             timeout_seconds="$2"
@@ -171,6 +187,10 @@ jobs:
       - name: CMake build and CTest smoke
         run: |
           set -eu
+          if [ -f .llam-bsd-infra-skip ]; then
+            cat .llam-bsd-infra-skip
+            exit 0
+          fi
           cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
           cmake --build build/bsd --parallel 2 --target \
             test_abi_contract \
@@ -187,6 +207,10 @@ jobs:
       - name: Package smoke
         run: |
           set -eu
+          if [ -f .llam-bsd-infra-skip ]; then
+            cat .llam-bsd-infra-skip
+            exit 0
+          fi
           gmake -j2 demo stress bench server server_lossless server_flood static shared CC=cc
           ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.0/'
           LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 \
