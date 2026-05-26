@@ -252,6 +252,11 @@
   operation keep using its existing broker authority instead of failing as new
   external work.
 
+* serialize concurrent broker destroy calls through a single teardown owner.
+  Racing destroy callers now wait until broker-owned rings, channels, sessions,
+  and the private runtime have been claimed by the owner and invalidated,
+  preventing duplicate cleanup of the same broker resources.
+
 * make the broker wire dispatcher itself participate in active-operation
   pinning. Direct dispatcher calls now reject new work once destroy starts, but
   an already accepted nested transport request can finish bounded operations

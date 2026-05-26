@@ -7054,6 +7054,81 @@ done:
     return rc;
 }
 
+static int test_broker_destroy_is_single_owner_under_race(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    broker_destroy_thread_state_t first_state;
+    broker_destroy_thread_state_t second_state;
+    pthread_t first_thread;
+    pthread_t second_thread;
+    bool broker_initialized = false;
+    bool active_op = false;
+    bool first_started = false;
+    bool second_started = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    /*
+     * Hold one operation open so both destroy callers enter the teardown wait.
+     * Once released, exactly one caller may own the broker-owned runtime and
+     * heap state; the other must wait for teardown to complete and return.
+     */
+    if (llam_broker_begin_op(&broker) != 0) {
+        goto done;
+    }
+    active_op = true;
+    first_state.broker = &broker;
+    second_state.broker = &broker;
+    if (pthread_create(&first_thread, NULL, broker_destroy_thread, &first_state) != 0) {
+        goto done;
+    }
+    first_started = true;
+    if (pthread_create(&second_thread, NULL, broker_destroy_thread, &second_state) != 0) {
+        goto done;
+    }
+    second_started = true;
+    for (unsigned i = 0U; i < 100000U; ++i) {
+        if (broker_test_destroying(&broker) && broker_test_active_ops(&broker) >= 1U) {
+            break;
+        }
+        sched_yield();
+    }
+    if (!broker_test_destroying(&broker)) {
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    active_op = false;
+    (void)pthread_join(first_thread, NULL);
+    first_started = false;
+    (void)pthread_join(second_thread, NULL);
+    second_started = false;
+    broker_initialized = false;
+    rc = 0;
+
+done:
+    if (active_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (first_started) {
+        (void)pthread_join(first_thread, NULL);
+    }
+    if (second_started) {
+        (void)pthread_join(second_thread, NULL);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
 static int test_broker_destroy_waits_for_active_ring_io(void) {
     static const char inbound[] = "destroy waits";
     llam_runtime_opts_t opts;
@@ -9897,6 +9972,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_nested_op_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_dispatch_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_ring_create_survives_destroy_start);
+    LLAM_RUN_SECURITY_TEST(test_broker_destroy_is_single_owner_under_race);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);

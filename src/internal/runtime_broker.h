@@ -233,6 +233,7 @@ typedef struct llam_broker {
     uint64_t next_task_id;
     uint64_t next_transport_subject_nonce;
     uint32_t active_ops;
+    uint32_t destroy_waiters;
     bool initialized;
     bool destroying;
     bool lock_initialized;

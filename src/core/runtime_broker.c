@@ -224,6 +224,28 @@ void llam_broker_destroy(llam_broker_t *broker) {
         llam_broker_unlock(broker);
         return;
     }
+    if (broker->destroying) {
+        /*
+         * Destroy is externally idempotent, but teardown is not reentrant: it
+         * frees broker-owned rings, channels, and the private runtime.  A
+         * racing caller must wait until the owner has made the broker
+         * uninitialized instead of claiming the same resources twice.
+         */
+        if (!broker->idle_cond_initialized) {
+            llam_broker_unlock(broker);
+            return;
+        }
+        broker->destroy_waiters += 1U;
+        while (broker->initialized && broker->idle_cond_initialized) {
+            (void)pthread_cond_wait(&broker->idle_cond, &broker->lock);
+        }
+        broker->destroy_waiters -= 1U;
+        if (broker->destroy_waiters == 0U && broker->idle_cond_initialized) {
+            (void)pthread_cond_broadcast(&broker->idle_cond);
+        }
+        llam_broker_unlock(broker);
+        return;
+    }
     broker->destroying = true;
     while (broker->active_ops > 0U && broker->idle_cond_initialized) {
         (void)pthread_cond_wait(&broker->idle_cond, &broker->lock);
@@ -247,6 +269,13 @@ void llam_broker_destroy(llam_broker_t *broker) {
     }
     broker->initialized = false;
     broker->runtime = NULL;
+    if (broker->idle_cond_initialized) {
+        (void)pthread_cond_broadcast(&broker->idle_cond);
+    }
+    while (broker->destroy_waiters > 0U && broker->idle_cond_initialized) {
+        (void)pthread_cond_wait(&broker->idle_cond, &broker->lock);
+    }
+    broker->destroying = false;
     llam_broker_unlock(broker);
 
     llam_broker_clear_buffers(broker);
@@ -261,7 +290,6 @@ void llam_broker_destroy(llam_broker_t *broker) {
     broker->next_descriptor_id = 0U;
     broker->next_channel_id = 0U;
     broker->next_task_id = 0U;
-    broker->destroying = false;
     if (runtime != NULL) {
         llam_runtime_destroy(runtime);
     }
