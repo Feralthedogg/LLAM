@@ -123,11 +123,17 @@ int llam_channel_select_try_one_fast(llam_select_op_t *op) {
 
 static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, size_t *selected_index) {
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
-    llam_runtime_t *current_owner = llam_runtime_current_owner();
+    llam_runtime_t *current_owner = llam_runtime_tls_owner_fast();
 #endif
     llam_channel_t *first;
     llam_channel_t *second;
     int selected;
+
+#if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
+    if (LLAM_UNLIKELY(current_owner == NULL)) {
+        current_owner = llam_runtime_current_owner();
+    }
+#endif
 
     /*
      * The two-op ready/timeout path is the dominant select shape in benchmarks

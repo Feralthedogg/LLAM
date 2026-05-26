@@ -95,7 +95,10 @@ void llam_channel_hot_safepoint(void) {
         return;
     }
 
-    rt = llam_runtime_current_owner();
+    rt = llam_runtime_tls_owner_fast();
+    if (LLAM_UNLIKELY(rt == NULL)) {
+        return;
+    }
     interval = rt->channel_safepoint_interval;
 
     if (interval <= 1U || rt->forced_yield_every != 0U) {
@@ -133,7 +136,11 @@ static bool llam_channel_has_local_runnable_hint(void) {
 
 static bool llam_channel_buffered_handoff_enabled(void) {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
-    llam_runtime_t *rt = llam_runtime_current_owner();
+    llam_runtime_t *rt = llam_runtime_tls_owner_fast();
+
+    if (rt == NULL) {
+        return false;
+    }
 
     return rt->channel_local_handoff_enabled != 0U &&
            llam_channel_has_local_runnable_hint();

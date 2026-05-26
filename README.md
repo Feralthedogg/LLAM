@@ -905,6 +905,17 @@ and reports the median row for each case so one noisy scheduler outlier does
 not dominate the table. Use `--samples 1` for a quick smoke run or
 `--sample-policy best` when locally measuring peak tuning.
 
+For latency-sensitive cases such as `spawn_join`, use isolated case execution
+so each benchmark case starts from a fresh process instead of inheriting worker
+state from the previous case:
+
+```bash
+python3 scripts/bench_runtime_compare.py \
+  --runtime all \
+  --cases spawn_join,select_recv_ready,poll_wake \
+  --isolate-cases
+```
+
 Graph generation requires Python `matplotlib`. Without it, the script still writes CSV and prints tables.
 The scheduled `Runtime Benchmarks` workflow runs the same comparison on Linux
 x86_64, macOS arm64, macOS x86_64, Windows Server 2022, and Windows Server

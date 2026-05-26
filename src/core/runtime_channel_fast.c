@@ -41,7 +41,10 @@ int llam_channel_try_send_buffered_fast(llam_channel_t *handle, void *value) {
         return LLAM_CHANNEL_FAST_FALLBACK;
     }
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
-    current_owner = llam_runtime_current_owner();
+    current_owner = llam_runtime_tls_owner_fast();
+    if (LLAM_UNLIKELY(current_owner == NULL)) {
+        current_owner = llam_runtime_current_owner();
+    }
 #endif
 
     /*

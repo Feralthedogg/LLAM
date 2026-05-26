@@ -156,7 +156,10 @@ int llam_channel_resolve_public_handles_for_select(llam_select_op_t *ops,
     }
 
 #if !LLAM_RUNTIME_DISABLE_OWNER_CHECKS
-    current_owner = llam_runtime_current_owner();
+    current_owner = llam_runtime_tls_owner_fast();
+    if (LLAM_UNLIKELY(current_owner == NULL)) {
+        current_owner = llam_runtime_current_owner();
+    }
 #endif
     pthread_mutex_lock(&g_llam_channel_registry_lock);
     for (i = 0U; i < op_count; ++i) {

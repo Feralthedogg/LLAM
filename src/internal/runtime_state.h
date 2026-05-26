@@ -40,6 +40,29 @@ extern _Thread_local llam_shard_t *g_llam_tls_shard;
 extern _Thread_local llam_task_t *g_llam_tls_task;
 extern _Thread_local llam_ctx_t *g_llam_tls_scheduler_ctx;
 
+/**
+ * @brief Return the current managed runtime without touching default runtime state.
+ *
+ * @details
+ * This helper is for hot paths that already require a managed LLAM task. The
+ * full llam_runtime_current_owner() helper still owns host-thread fallback
+ * semantics; this inline form only avoids an out-of-line call when TLS is
+ * already installed by the scheduler.
+ */
+static inline llam_runtime_t *llam_runtime_tls_owner_fast(void) {
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_task_t *task;
+
+    if (LLAM_LIKELY(shard != NULL && shard->runtime != NULL)) {
+        return shard->runtime;
+    }
+    task = g_llam_tls_task;
+    if (LLAM_UNLIKELY(task != NULL && task->owner_runtime != NULL)) {
+        return task->owner_runtime;
+    }
+    return NULL;
+}
+
 // Recursion/fast-path hints used by channel handoff and opaque-block redirect.
 extern _Thread_local unsigned g_llam_tls_io_handoff_yield;
 extern _Thread_local unsigned g_llam_tls_opaque_redirect_hint;

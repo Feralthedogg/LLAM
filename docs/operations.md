@@ -415,6 +415,19 @@ the median row for each benchmark case. This keeps short cases such as
 `spawn_join` from being dominated by a single OS scheduling outlier. Use
 `--samples 1` only for quick smoke checks.
 
+When investigating a specific regression, add `--isolate-cases` so each case
+runs in a fresh process. This avoids cross-case worker-count, timer, cache, and
+CPU-frequency state from a previous benchmark case leaking into the next one.
+
+```bash
+python3 scripts/bench_runtime_compare.py \
+  --runtime all \
+  --cases spawn_join,select_recv_ready,poll_wake \
+  --rounds 31 \
+  --warmup 1 \
+  --isolate-cases
+```
+
 ## 10. Release Gate
 
 Before tagging a release build, require:

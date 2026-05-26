@@ -55,6 +55,15 @@ def normalize_case(name: str) -> str:
     return NAME_ALIASES.get(name, name)
 
 
+def parse_cases(value: str) -> list[str]:
+    cases = [item.strip() for item in re.split(r"[,\s]+", value) if item.strip()]
+    unknown = [case for case in cases if case not in DEFAULT_CASES]
+
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown benchmark case(s): {', '.join(unknown)}")
+    return cases
+
+
 def parse_output(runtime: str, output: str) -> list[BenchRow]:
     rows: list[BenchRow] = []
     prefixes = {
@@ -90,11 +99,14 @@ def run_command(
     timeout: int,
     sample: int,
     samples: int,
+    case: str | None = None,
 ) -> list[BenchRow]:
+    label = f"{runtime} {case}" if case is not None else runtime
+
     if samples > 1:
-        print(f"[bench-runtime-compare] running {runtime} sample {sample}/{samples}", file=sys.stderr)
+        print(f"[bench-runtime-compare] running {label} sample {sample}/{samples}", file=sys.stderr)
     else:
-        print(f"[bench-runtime-compare] running {runtime}", file=sys.stderr)
+        print(f"[bench-runtime-compare] running {label}", file=sys.stderr)
     proc = subprocess.run(
         command,
         cwd=root,
@@ -136,12 +148,32 @@ def run_command_samples(
     timeout: int,
     samples: int,
     policy: str,
+    case: str | None = None,
 ) -> list[BenchRow]:
     sample_rows = [
-        run_command(root, runtime, command, env, timeout, sample + 1, samples)
+        run_command(root, runtime, command, env, timeout, sample + 1, samples, case)
         for sample in range(samples)
     ]
     return select_sample_rows(sample_rows, policy)
+
+
+def run_isolated_cases(
+    root: pathlib.Path,
+    runtime: str,
+    command: list[str],
+    base_env: dict[str, str],
+    timeout: int,
+    samples: int,
+    policy: str,
+    cases: list[str],
+) -> list[BenchRow]:
+    rows: list[BenchRow] = []
+
+    for case in cases:
+        env = base_env.copy()
+        env["LLAM_BENCH_ONLY"] = case
+        rows.extend(run_command_samples(root, runtime, command, env, timeout, samples, policy, case))
+    return rows
 
 
 def llam_bench_command(root: pathlib.Path, no_build: bool) -> list[str]:
@@ -295,6 +327,17 @@ def main() -> int:
     parser.add_argument("--runtime", choices=["all", "llam", "go", "tokio"], default="all")
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument(
+        "--cases",
+        nargs="+",
+        default=None,
+        help="comma separated, quoted whitespace separated, or repeated benchmark cases to run",
+    )
+    parser.add_argument(
+        "--isolate-cases",
+        action="store_true",
+        help="run each benchmark case in a fresh process to avoid cross-case scheduler/CPU-state noise",
+    )
+    parser.add_argument(
         "--samples",
         type=int,
         default=int(os.environ.get("LLAM_BENCH_COMPARE_SAMPLES", "3")),
@@ -309,6 +352,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be at least 1")
+    cases = DEFAULT_CASES if args.cases is None else parse_cases(" ".join(args.cases))
+    if not cases:
+        parser.error("--cases must contain at least one case")
 
     root = pathlib.Path(__file__).resolve().parent.parent
     out_dir = root / args.out_dir
@@ -346,62 +392,105 @@ def main() -> int:
     rows: list[BenchRow] = []
     if "LLAM" in selected_runtimes:
         assert llam_command is not None
-        rows.extend(
-            run_command_samples(
-                root,
-                "LLAM",
-                llam_command,
-                env,
-                args.timeout,
-                args.samples,
-                args.sample_policy,
+        if args.isolate_cases:
+            rows.extend(
+                run_isolated_cases(
+                    root,
+                    "LLAM",
+                    llam_command,
+                    env,
+                    args.timeout,
+                    args.samples,
+                    args.sample_policy,
+                    cases,
+                )
             )
-        )
+        else:
+            rows.extend(
+                run_command_samples(
+                    root,
+                    "LLAM",
+                    llam_command,
+                    env,
+                    args.timeout,
+                    args.samples,
+                    args.sample_policy,
+                )
+            )
     if "Goroutine" in selected_runtimes:
         go_script = "scripts/bench_go_windows_compare.go" if os.name == "nt" else "scripts/bench_go_compare.go"
-        rows.extend(
-            run_command_samples(
-                root,
-                "Goroutine",
-                ["go", "run", go_script],
-                env,
-                args.timeout,
-                args.samples,
-                args.sample_policy,
+        if args.isolate_cases:
+            rows.extend(
+                run_isolated_cases(
+                    root,
+                    "Goroutine",
+                    ["go", "run", go_script],
+                    env,
+                    args.timeout,
+                    args.samples,
+                    args.sample_policy,
+                    cases,
+                )
             )
-        )
+        else:
+            rows.extend(
+                run_command_samples(
+                    root,
+                    "Goroutine",
+                    ["go", "run", go_script],
+                    env,
+                    args.timeout,
+                    args.samples,
+                    args.sample_policy,
+                )
+            )
     if "Tokio" in selected_runtimes:
-        rows.extend(
-            run_command_samples(
-                root,
-                "Tokio",
-                [
-                    "cargo",
-                    "run",
-                    "--release",
-                    "--quiet",
-                    "--manifest-path",
-                    "scripts/bench_tokio_compare/Cargo.toml",
-                    "--bin",
-                    "bench_tokio_compare",
-                ],
-                env,
-                args.timeout,
-                args.samples,
-                args.sample_policy,
+        tokio_command = [
+            "cargo",
+            "run",
+            "--release",
+            "--quiet",
+            "--manifest-path",
+            "scripts/bench_tokio_compare/Cargo.toml",
+            "--bin",
+            "bench_tokio_compare",
+        ]
+        if args.isolate_cases:
+            rows.extend(
+                run_isolated_cases(
+                    root,
+                    "Tokio",
+                    tokio_command,
+                    env,
+                    args.timeout,
+                    args.samples,
+                    args.sample_policy,
+                    cases,
+                )
             )
-        )
+        else:
+            rows.extend(
+                run_command_samples(
+                    root,
+                    "Tokio",
+                    tokio_command,
+                    env,
+                    args.timeout,
+                    args.samples,
+                    args.sample_policy,
+                )
+            )
 
     csv_path = out_dir / "runtime_compare.csv"
     graph_path = out_dir / "runtime_compare.png"
     graph_written = False
     write_csv(csv_path, rows)
     if selected_runtimes == ["LLAM", "Goroutine", "Tokio"]:
-        plot_graph(graph_path, rows, DEFAULT_CASES)
+        plot_graph(graph_path, rows, cases)
         graph_written = plt is not None
     else:
         print("[bench-runtime-compare] graph requires --runtime all; skipping graph", file=sys.stderr)
-    print_summary(rows, DEFAULT_CASES)
+    print_summary(rows, cases)
     print(f"\nCSV: {csv_path}")
     if graph_written:
         print(f"Graph: {graph_path}")
