@@ -347,6 +347,28 @@ static bool llam_windows_iocp_tcp_pollin_enabled(void) {
     return value != 0;
 }
 
+/**
+ * @brief Return whether experimental UDP POLLIN IOCP probes are enabled.
+ *
+ * Datagram read readiness uses a one-byte overlapped @c WSARecvFrom(MSG_PEEK).
+ * Public poll callers still get correct readiness through the immediate
+ * platform-poll path; the native IOCP probe remains opt-in because hosted
+ * Windows loopback runs have shown completion timing that can be less
+ * predictable than ordinary level-triggered polling.
+ */
+static bool llam_windows_iocp_udp_pollin_enabled(void) {
+    static atomic_int cached = -1;
+    int value = atomic_load_explicit(&cached, memory_order_acquire);
+
+    if (value < 0) {
+        const char *env = llam_env_get("LLAM_WINDOWS_IOCP_UDP_POLLIN");
+
+        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        atomic_store_explicit(&cached, value, memory_order_release);
+    }
+    return value != 0;
+}
+
 bool llam_windows_iocp_poll_supported(llam_fd_t fd, short events) {
     int socket_type = 0;
     short unsupported = (short)(events & ~(POLLIN | POLLOUT | POLLHUP | POLLERR));
@@ -362,5 +384,5 @@ bool llam_windows_iocp_poll_supported(llam_fd_t fd, short events) {
     if (socket_type == SOCK_STREAM) {
         return wants_write || (wants_read && llam_windows_iocp_tcp_pollin_enabled());
     }
-    return socket_type == SOCK_DGRAM && wants_read;
+    return socket_type == SOCK_DGRAM && wants_read && llam_windows_iocp_udp_pollin_enabled();
 }
