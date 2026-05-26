@@ -80,6 +80,9 @@ int llam_broker_ring_map_fd(int fd, bool take_ownership, llam_broker_ring_mappin
     struct stat st;
     size_t bytes = sizeof(llam_broker_ring_t);
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(fd < 0 || out_mapping == NULL)) {
         errno = EINVAL;
         return -1;
@@ -118,6 +121,9 @@ int llam_broker_ring_create_shm(const char *name, llam_broker_ring_mapping_t *ou
     int fd;
     size_t bytes = sizeof(llam_broker_ring_t);
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_name_valid(name) || out_mapping == NULL)) {
         errno = EINVAL;
         return -1;
@@ -157,6 +163,9 @@ int llam_broker_ring_create_private_fd(llam_broker_ring_mapping_t *out_mapping) 
     char name[sizeof(((llam_broker_ring_mapping_t *)0)->name)];
     size_t attempt;
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(out_mapping == NULL)) {
         errno = EINVAL;
         return -1;
@@ -220,6 +229,9 @@ int llam_broker_ring_open_shm(const char *name, llam_broker_ring_mapping_t *out_
     struct stat st;
     size_t bytes = sizeof(llam_broker_ring_t);
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_name_valid(name) || out_mapping == NULL)) {
         errno = EINVAL;
         return -1;

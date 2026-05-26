@@ -82,11 +82,13 @@ int llam_broker_transport_subject(llam_broker_t *broker,
      * connection so helpers that drive one request at a time do not accidentally
      * invalidate tokens between adjacent requests.
      */
+    if (out_subject_id != NULL) {
+        *out_subject_id = 0U;
+    }
     if (LLAM_UNLIKELY(broker == NULL || out_subject_id == NULL)) {
         errno = EINVAL;
         return -1;
     }
-    *out_subject_id = 0U;
     if (llam_broker_lock(broker) != 0) {
         return -1;
     }

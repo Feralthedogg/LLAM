@@ -134,7 +134,9 @@ int llam_broker_register_fd(llam_broker_t *broker,
     (void)fd;
     (void)rights;
     (void)close_on_destroy;
-    (void)out_token;
+    if (out_token != NULL) {
+        memset(out_token, 0, sizeof(*out_token));
+    }
     errno = ENOTSUP;
     return -1;
 #else
@@ -158,6 +160,9 @@ int llam_broker_register_handle(llam_broker_t *broker,
                       rights == 0U ||
                       out_token == NULL)) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_broker_validate_object_rights(LLAM_BROKER_CAP_FAMILY_DESCRIPTOR, rights) != 0) {
         return -1;
     }
     if (llam_broker_descriptor_set_cloexec(handle) != 0) {

@@ -26,6 +26,7 @@
 #include "runtime_broker.h"
 #include "runtime_broker_ring.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static void llam_broker_response_init(const llam_broker_t *broker, llam_broker_wire_response_t *response) {
@@ -36,9 +37,55 @@ static void llam_broker_response_init(const llam_broker_t *broker, llam_broker_w
     response->revocation_epoch = llam_broker_revocation_epoch(broker);
 }
 
-static void llam_broker_response_error(llam_broker_wire_response_t *response, int error_code) {
+void llam_broker_mark_response_failure_clear_outputs(llam_broker_wire_response_t *response, int error_code) {
+    if (response == NULL) {
+        return;
+    }
+
     response->status = -1;
-    response->error_code = error_code != 0 ? error_code : EINVAL;
+    response->error_code = error_code != 0 ? error_code : EIO;
+    response->result0 = 0U;
+    response->result1 = 0U;
+    response->result2 = 0U;
+    memset(&response->token, 0, sizeof(response->token));
+    memset(response->data, 0, sizeof(response->data));
+}
+
+void llam_broker_normalize_response_failure_outputs(llam_broker_wire_response_t *response) {
+    int error_code;
+
+    if (response == NULL || response->status == 0) {
+        return;
+    }
+    /*
+     * A failed response must never carry object authority.  This is a defense
+     * against faulty or hostile broker peers that set status != 0 while leaving
+     * token/result/data fields populated.
+     */
+    error_code = response->error_code != 0 ? response->error_code : EIO;
+    llam_broker_mark_response_failure_clear_outputs(response, error_code);
+}
+
+int llam_broker_validate_response_frame_or_clear(llam_broker_wire_response_t *response) {
+    if (LLAM_UNLIKELY(response == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (LLAM_UNLIKELY(response->magic != LLAM_BROKER_WIRE_MAGIC ||
+                      response->version != LLAM_BROKER_WIRE_VERSION)) {
+        /*
+         * Malformed response framing means none of the payload can be trusted,
+         * even if status claims success. Clear the full response rather than
+         * preserving attacker-controlled token/result/data fields.
+         */
+        return llam_broker_fail_clear_output(response, sizeof(*response), EINVAL);
+    }
+    llam_broker_normalize_response_failure_outputs(response);
+    return 0;
+}
+
+static void llam_broker_response_error(llam_broker_wire_response_t *response, int error_code) {
+    llam_broker_mark_response_failure_clear_outputs(response, error_code != 0 ? error_code : EINVAL);
 }
 
 static void llam_broker_close_unclaimed_descriptor(llam_handle_t descriptor_handle) {
@@ -100,6 +147,7 @@ static bool llam_broker_wire_length_valid(uint64_t length) {
 static int llam_broker_transport_join_task(llam_broker_t *broker,
                                            const llam_capability_token_t *token,
                                            uint64_t *out_result0) {
+    bool drive_allowed = false;
     int saved_errno;
 
     if (llam_broker_join_task(broker, token, out_result0) == 0) {
@@ -114,8 +162,18 @@ static int llam_broker_transport_join_task(llam_broker_t *broker,
      * The local control transport is a simple request/response path, not the
      * high-throughput broker worker loop. Drive the broker runtime here so a
      * client can spawn a predefined command and synchronously join it without
-     * gaining access to raw function pointers or runtime internals.
+     * gaining access to raw function pointers or runtime internals. Long
+     * sleeping commands are excluded so one client cannot pin the broker serve
+     * thread for an attacker-selected sleep duration; clients should retry
+     * those joins after receiving EAGAIN.
      */
+    if (llam_broker_task_join_runtime_drive_allowed(broker, token, &drive_allowed) != 0) {
+        return -1;
+    }
+    if (!drive_allowed) {
+        errno = EAGAIN;
+        return -1;
+    }
     if (LLAM_UNLIKELY(broker == NULL || broker->runtime == NULL)) {
         errno = EAGAIN;
         return -1;
@@ -162,6 +220,153 @@ void llam_broker_process_request_with_descriptor(llam_broker_t *broker,
                                                  out_should_close,
                                                  descriptor_handle,
                                                  NULL);
+}
+
+static void llam_broker_rollback_response_token_locked(llam_broker_t *broker,
+                                                       const llam_capability_token_t *token,
+                                                       llam_task_t **out_task_to_detach) {
+    size_t i;
+
+    if (broker == NULL || token == NULL) {
+        return;
+    }
+    switch (token->family) {
+    case LLAM_BROKER_CAP_FAMILY_BUFFER:
+        for (i = 0U; i < LLAM_BROKER_BUFFER_SLOTS; ++i) {
+            llam_broker_buffer_slot_t *slot = &broker->buffers[i];
+
+            if (slot->active && slot->id == token->slot && slot->generation == token->generation) {
+                free(slot->data);
+                memset(slot, 0, sizeof(*slot));
+                return;
+            }
+        }
+        break;
+    case LLAM_BROKER_CAP_FAMILY_CHANNEL:
+        if (broker->channels == NULL) {
+            return;
+        }
+        for (i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
+            llam_broker_channel_slot_t *slot = &broker->channels[i];
+
+            if (slot->active && slot->id == token->slot && slot->generation == token->generation) {
+                memset(slot, 0, sizeof(*slot));
+                return;
+            }
+        }
+        break;
+    case LLAM_BROKER_CAP_FAMILY_DESCRIPTOR:
+        for (i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+            llam_broker_descriptor_slot_t *slot = &broker->descriptors[i];
+
+            if (slot->active && slot->id == token->slot && slot->generation == token->generation) {
+                if (slot->close_on_destroy) {
+#if LLAM_PLATFORM_WINDOWS
+                    if (!LLAM_HANDLE_IS_INVALID(slot->handle)) {
+                        llam_broker_close_handle(slot->handle);
+                    }
+#else
+                    if (slot->fd >= 0) {
+                        llam_broker_close_handle((llam_handle_t)slot->fd);
+                    }
+#endif
+                }
+                memset(slot, 0, sizeof(*slot));
+#if LLAM_PLATFORM_WINDOWS
+                slot->handle = LLAM_INVALID_HANDLE;
+#else
+                slot->fd = -1;
+#endif
+                return;
+            }
+        }
+        break;
+    case LLAM_BROKER_CAP_FAMILY_TASK:
+        for (i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
+            llam_broker_task_slot_t *slot = &broker->tasks[i];
+
+            if (slot->active && slot->id == token->slot && slot->generation == token->generation) {
+                for (;;) {
+                    uint32_t state = atomic_load_explicit(&slot->state, memory_order_acquire);
+
+                    if (slot->task == NULL) {
+                        return;
+                    }
+                    if (state == LLAM_BROKER_TASK_STATE_COMPLETED) {
+                        if (out_task_to_detach != NULL) {
+                            *out_task_to_detach = slot->task;
+                        }
+                        memset(slot, 0, sizeof(*slot));
+                        atomic_init(&slot->state, LLAM_BROKER_TASK_STATE_EMPTY);
+                        return;
+                    }
+                    if (state == LLAM_BROKER_TASK_STATE_SPAWNED) {
+                        uint32_t expected = LLAM_BROKER_TASK_STATE_SPAWNED;
+
+                        /*
+                         * Task completion writes COMPLETED without taking the
+                         * broker lock. Claim the live spawned state with a CAS
+                         * so rollback cannot overwrite a concurrent completion
+                         * with DETACHED and leave the slot permanently active.
+                         * The running task observes DETACHED in its trampoline
+                         * and detaches itself before slot reset; doing that from
+                         * the transport thread races task exit/reclaim on some
+                         * scheduler interleavings.
+                         */
+                        if (!atomic_compare_exchange_weak_explicit(&slot->state,
+                                                                   &expected,
+                                                                   LLAM_BROKER_TASK_STATE_DETACHED,
+                                                                   memory_order_acq_rel,
+                                                                   memory_order_acquire)) {
+                            continue;
+                        }
+                        slot->rights = 0U;
+                        return;
+                    }
+                    return;
+                }
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void llam_broker_rollback_created_response(llam_broker_t *broker,
+                                           const llam_broker_wire_request_t *request,
+                                           const llam_broker_wire_response_t *response,
+                                           uint64_t subject_id) {
+    llam_task_t *task_to_detach = NULL;
+
+    if (broker == NULL || request == NULL || response == NULL || response->status != 0) {
+        return;
+    }
+    if (request->op == (uint32_t)LLAM_BROKER_WIRE_OP_CREATE_RING && response->result2 != 0U) {
+        (void)llam_broker_ring_forget_session(broker, response->result2, subject_id);
+        return;
+    }
+    switch ((llam_broker_wire_op_t)request->op) {
+    case LLAM_BROKER_WIRE_OP_CREATE_BUFFER:
+    case LLAM_BROKER_WIRE_OP_CREATE_CHANNEL:
+    case LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR:
+    case LLAM_BROKER_WIRE_OP_TASK_SPAWN:
+        /*
+         * The broker creates these grants before writing the response. If the
+         * transport write fails, the client never receives the token, so keeping
+         * the slot live would leak broker-owned authority until destroy.
+         */
+        if (llam_broker_lock(broker) == 0) {
+            llam_broker_rollback_response_token_locked(broker, &response->token, &task_to_detach);
+            llam_broker_unlock(broker);
+        }
+        if (task_to_detach != NULL) {
+            (void)llam_detach(task_to_detach);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 void llam_broker_process_request_with_descriptors(llam_broker_t *broker,

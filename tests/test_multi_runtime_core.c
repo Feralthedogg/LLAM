@@ -1601,9 +1601,17 @@ static int test_cross_runtime_allocator_returns_are_remote(void) {
 
     allocator = &runtime_b->shards[0].allocator;
     errno = 0;
-    if (atomic_load_explicit(&allocator->task_remote_free, memory_order_acquire) == NULL) {
-        rc = test_fail_errno("foreign runtime task object bypassed remote-free queue");
-        goto cleanup;
+    {
+        bool task_returned_to_external_cache;
+
+        llam_allocator_lock(allocator);
+        task_returned_to_external_cache = allocator->task_external_free != NULL;
+        llam_allocator_unlock(allocator);
+        if (!task_returned_to_external_cache &&
+            atomic_load_explicit(&allocator->task_remote_free, memory_order_acquire) == NULL) {
+            rc = test_fail_errno("foreign runtime task object bypassed safe non-local return path");
+            goto cleanup;
+        }
     }
     if (atomic_load_explicit(&allocator->wait_remote_free, memory_order_acquire) == NULL) {
         rc = test_fail_errno("foreign runtime wait node bypassed remote-free queue");

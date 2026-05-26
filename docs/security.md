@@ -66,14 +66,30 @@ broker-control foundation:
 - Client-visible validation requires a nonzero requested-rights mask. Zero-right
   validation fails with `EINVAL`, so broker transports cannot be used as a
   rightless live-token oracle.
-- Failed attenuation and object-revocation calls clear non-aliased output token
-  storage. Treat a nonzero return as owning no fresh serialized authority.
+- Raw capability issuance and validation reject slot zero with `EINVAL`. Broker
+  object slots are nonzero, so slot zero cannot become a structurally valid
+  authority outside live-object table checks.
+- Direct broker object creation and direct object-token minting use the same
+  family-specific rights allowlist as the transport path. Buffer, descriptor,
+  channel, and predefined-task tokens cannot carry rights from another family or
+  future-reserved bits.
+- Direct broker buffer registration uses the same bounded grant limit as the
+  transport path. Buffer grants larger than `LLAM_BROKER_BUFFER_MAX_BYTES` fail
+  with `EINVAL` before allocation.
+- Unsupported platform compatibility stubs that would otherwise return broker
+  authority, such as Windows `llam_broker_register_fd()`, clear token outputs
+  before reporting `ENOTSUP`.
+- Failed attenuation and object-revocation calls clear output token storage,
+  including in-place `token == out_token` calls. Treat a nonzero return as
+  owning no fresh serialized authority.
 - Object-specific revocation is atomic with respect to replacement-token
   issuance. If nonce entropy is unavailable, revocation fails with `EIO` and
   leaves the old object generation valid.
 - `test_security_capability` verifies rights checks, tamper rejection,
   broker-owned attenuation, wrong-key rejection, foreign-runtime rejection,
-  zero-right validation rejection, failed-output token clearing,
+  family-rights allowlist rejection, zero-slot issuance rejection,
+  zero-right validation rejection,
+  failed-output token clearing,
   secure-entropy fail-closed key creation, atomic object-specific revocation,
   POSIX shared-memory ring mapping,
   broker-side ring capability validation/attenuation/revocation,
@@ -88,8 +104,12 @@ broker-control foundation:
 - POSIX broker listen paths do not remove pre-existing filesystem entries:
   regular files, directories, symlinks, and stale socket nodes fail with
   `EEXIST` and are left intact. Newly bound broker sockets are chmod'd to
-  owner-only `0600`, and serve-once cleanup unlinks only the same socket inode
-  it created.
+  owner-only `0600` using a no-symlink-following permission change when the
+  platform exposes one. Platforms without that primitive fail closed rather
+  than applying `chmod()` through a potentially swapped path. Cleanup records
+  the filesystem socket identity immediately after bind and unlinks only that
+  same path identity; this avoids relying on non-portable AF_UNIX fd inode
+  comparisons.
 - Windows broker named pipes are created with an explicit DACL for the current
   user, LocalSystem, and Administrators, plus `PIPE_REJECT_REMOTE_CLIENTS`.
   The broker fails closed if it cannot build that security descriptor instead
@@ -148,6 +168,22 @@ broker-control foundation:
   but before the fd/HANDLE response can be delivered, the broker reclaims that
   session immediately. POSIX transport writes use no-SIGPIPE send paths so this
   is reported as a local transport failure instead of terminating the broker.
+  On Windows, the response HANDLE is duplicated into the named-pipe peer before
+  the response bytes are written; if that write fails, the broker closes the
+  peer-process duplicate with `DUPLICATE_CLOSE_SOURCE` before rolling back the
+  ring session so an unreachable peer-local HANDLE cannot remain as authority.
+- If a control connection drops after the broker creates a buffer, channel,
+  descriptor, predefined task, or ring grant but before the response can be
+  delivered, the transport rolls back the just-created broker-owned authority.
+  A disconnecting peer therefore cannot strand unreachable fd/HANDLE slots,
+  heap buffers, channel slots, task slots, or ring sessions as a resource leak.
+  Task rollback atomically claims a spawned slot and clears client-visible
+  rights, then the predefined task detaches itself from inside its trampoline
+  before broker-slot reset. This prevents both permanent detached-but-active
+  broker slots and host-thread detach races with task exit/reclaim.
+  Client-visible predefined task detach uses the same atomic claim: if a task
+  completes concurrently, detach observes the completed state and consumes the
+  handle from that path instead of overwriting it with a stale detached state.
 - `LLAM_BROKER_RING_OP_BUFFER_READ` and
   `LLAM_BROKER_RING_OP_BUFFER_WRITE` copy through a bounded shared data window
   only after broker-side capability validation and broker-owned buffer bounds
@@ -177,6 +213,17 @@ broker-control foundation:
   operation remain valid during this drain phase. This prevents a ring server
   from publishing a completion into broker-private state after a concurrent
   destroy has invalidated it.
+- Broker destroy requests cooperative runtime stop before draining predefined
+  broker task slots. A client that leaves a long `SLEEP_NS_RETURN_U64` command
+  unjoined therefore cannot keep shutdown blocked until that sleep naturally
+  expires; the task is cancelled while its broker-owned slot storage is still
+  valid for the trampoline.
+- Byte-stream control transports also avoid completion-driving joins whenever a
+  long sleep command is pending in the broker runtime. `LLAM_BROKER_WIRE_OP_TASK_JOIN`
+  returns `EAGAIN` for an uncompleted `SLEEP_NS_RETURN_U64` task and also for
+  otherwise quick joins that would have to drain a peer session's pending sleep.
+  This prevents one client from pinning the broker serve thread by hiding a
+  client-selected delay behind another session's short control request.
 - Broker teardown also scrubs broker-local authority state after the drain:
   capability MAC keys, revocation epoch, object id counters, transport subject
   sessions, and ring subject sessions are cleared before the caller-owned broker
@@ -215,6 +262,45 @@ broker-control foundation:
   caller output on failure. Successful short receives/reads also clear the
   unused suffix of the requested output window, matching the shared-ring stale
   output policy for direct broker helper calls.
+- Direct broker helpers that return authority or status outputs clear those
+  outputs before validation. Failed ring serving, transport ring creation,
+  direct token minting, task join, and shared-memory ring create/open/import
+  calls therefore leave no stale served count, minted token, task result,
+  fd/HANDLE, session id, or mapping handle for an FFI caller to accidentally
+  reuse after observing a nonzero return.
+- Broker transport failure responses clear client-visible token, result, and
+  data output fields after any response-failure rollback and again when client
+  request helpers receive a semantically failed response. The response still
+  carries framing metadata such as magic, version, runtime id, revocation epoch,
+  failed status, and error code, but it cannot leak stale success authority to
+  clients that mishandle `status < 0`.
+- POSIX response-descriptor helpers treat an fd attached to a failed response as
+  malformed authority. The helper closes the received `SCM_RIGHTS` fd, clears
+  the descriptor output to `-1`, and scrubs token/result/data fields while
+  preserving the failed response status and error code.
+- Broker client request helpers clear response storage on invalid arguments,
+  request-write failure, malformed response framing, and authority-bearing
+  fields in successfully read failure responses. Malformed success responses
+  are rejected with `EINVAL` and fully scrubbed, and response-descriptor helpers
+  also close any attached `SCM_RIGHTS` fd before returning. This includes plain
+  POSIX requests, descriptor-bearing POSIX requests, response-descriptor
+  requests, Windows HANDLE request helpers, and unsupported Windows fd stubs.
+- Broker shared-ring private-name generation and local endpoint helper failures
+  scrub their output parameters before returning an error. Short name buffers
+  do not retain truncated high-entropy rendezvous names, and failed listen,
+  connect, accept, or unsupported endpoint helpers do not leave stale fd/HANDLE
+  authority in caller-provided output storage.
+- POSIX broker socket identity capture clears its output before validation.
+  A failed capture therefore cannot leave stale cleanup identity that a caller
+  might accidentally reuse for chmod/unlink guards.
+- Broker transport subject lookup, ring-session registration, ring stats
+  collection, and ring submission/completion drain helpers zero their output
+  storage on invalid-input or empty-ring failures. Subject ids, session ids,
+  diagnostic counters, and completion payloads therefore do not survive across
+  failed control-plane calls. Completion-drain helpers reject element counts
+  whose byte size would overflow with `EOVERFLOW` before multiplying; because
+  such a count cannot be trusted as the real output length, only the first
+  completion slot is scrubbed as a stale-authority sentinel.
 - Windows named-pipe control sessions grant HANDLEs through the same register
   operation only after the broker asks the kernel for the connected peer
   process id and duplicates that peer's HANDLE with `DuplicateHandle`. The wire
@@ -250,6 +336,10 @@ broker-control foundation:
   join/detach authority. The ring path rejects task command ids outside the
   32-bit predefined enum range before casting, so high-bit values cannot
   truncate into a valid broker command.
+- Pending task joins on both transports are non-authoritative progress hints.
+  Ring joins publish `EAGAIN` until the task has completed; the byte-stream
+  transport may drive short predefined commands for request/response smoke paths,
+  but long sleep commands remain retry-only to avoid control-plane starvation.
 - Global revocation remains a trusted in-process broker-management API. The
   local control transport rejects `LLAM_BROKER_WIRE_OP_REVOKE_ALL` with
   `EACCES`; client-visible revocation must present object-specific destroy

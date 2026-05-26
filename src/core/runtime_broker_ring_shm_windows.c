@@ -67,6 +67,9 @@ int llam_broker_ring_map_handle(llam_handle_t handle,
                                 llam_broker_ring_mapping_t *out_mapping) {
     HANDLE mapped_handle = (HANDLE)handle;
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(LLAM_HANDLE_IS_INVALID(handle) || out_mapping == NULL)) {
         errno = EINVAL;
         return -1;
@@ -107,6 +110,9 @@ int llam_broker_ring_create_shm(const char *name, llam_broker_ring_mapping_t *ou
     size_t bytes = sizeof(llam_broker_ring_t);
     llam_broker_windows_security_t security;
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_name_valid(name) || out_mapping == NULL)) {
         errno = EINVAL;
         return -1;
@@ -152,6 +158,9 @@ int llam_broker_ring_create_private_handle(llam_broker_ring_mapping_t *out_mappi
     size_t bytes = sizeof(llam_broker_ring_t);
     llam_broker_windows_security_t security;
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(out_mapping == NULL)) {
         errno = EINVAL;
         return -1;
@@ -197,6 +206,9 @@ int llam_broker_ring_create_private_handle(llam_broker_ring_mapping_t *out_mappi
 int llam_broker_ring_open_shm(const char *name, llam_broker_ring_mapping_t *out_mapping) {
     HANDLE handle;
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_name_valid(name) || out_mapping == NULL)) {
         errno = EINVAL;
         return -1;

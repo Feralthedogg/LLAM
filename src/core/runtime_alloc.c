@@ -489,6 +489,7 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
     shard->allocator.slab_grows += 1U;
     for (i = 0; i < LLAM_TASK_SLAB_COUNT; ++i) {
         items[i].alloc_owner_shard = shard->id;
+        items[i].alloc_external_pool = false;
         items[i].alloc_next = shard->allocator.task_free;
         shard->allocator.task_free = &items[i];
         shard->allocator.task_allocs += 1U;

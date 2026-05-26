@@ -127,16 +127,23 @@ static bool llam_runtime_drained(llam_runtime_t *rt) {
  */
 static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     llam_task_t *task = g_llam_tls_task;
+    bool watchdog_may_sample_current =
+        shard != NULL && shard->runtime != NULL && shard->runtime->preempt_mode >= LLAM_PREEMPT_AUTO;
 
-    if (run_ns == 0U) {
+    if (run_ns == 0U && !watchdog_may_sample_current) {
         atomic_store_explicit(&shard->current, NULL, memory_order_release);
         g_llam_tls_task = NULL;
         return;
     }
 
+    /*
+     * Auto-preemption watchdog samples shard->current while holding shard->lock.
+     * Even when run timing is disabled, clear current under the same lock so a
+     * completed task cannot be recycled while the watchdog is still inspecting it.
+     */
     pthread_mutex_lock(&shard->lock);
     atomic_store_explicit(&shard->current, NULL, memory_order_release);
-    if (task != NULL) {
+    if (task != NULL && run_ns != 0U) {
         uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&task->task_class, memory_order_acquire));
 
         task->last_run_ns = run_ns;
@@ -154,7 +161,9 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
             shard->metrics.slice_overruns += 1U;
         }
     }
-    shard->metrics.total_run_ns += run_ns;
+    if (run_ns != 0U) {
+        shard->metrics.total_run_ns += run_ns;
+    }
     pthread_mutex_unlock(&shard->lock);
     g_llam_tls_task = NULL;
 }

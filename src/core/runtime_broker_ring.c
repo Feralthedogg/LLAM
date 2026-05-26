@@ -21,6 +21,7 @@
 #include "runtime_internal.h"
 #include "runtime_broker_ring.h"
 
+#include <stdint.h>
 #include <string.h>
 
 static llam_broker_ring_session_t *llam_broker_ring_session_get(llam_broker_t *broker,
@@ -68,6 +69,9 @@ static int llam_broker_ring_begin_locked_owned_session(llam_broker_t *broker,
                                                        llam_broker_ring_session_t **out_session) {
     llam_broker_ring_session_t *session;
 
+    if (out_session != NULL) {
+        *out_session = NULL;
+    }
     if (LLAM_UNLIKELY(session_id == 0U || session_id > LLAM_BROKER_RING_SESSIONS || out_session == NULL)) {
         errno = EINVAL;
         return -1;
@@ -110,6 +114,9 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
     llam_broker_ring_session_t *session;
     size_t session_index;
 
+    if (out_session_id != NULL) {
+        *out_session_id = 0U;
+    }
     if (LLAM_UNLIKELY(broker == NULL ||
                       mapping == NULL ||
                       out_session_id == NULL ||
@@ -117,7 +124,6 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
-    *out_session_id = 0U;
     if (llam_broker_lock(broker) != 0) {
         return -1;
     }
@@ -278,6 +284,9 @@ int llam_broker_ring_submit_pop(llam_broker_ring_t *ring, llam_broker_ring_submi
     uint64_t head;
     uint64_t tail;
 
+    if (out_entry != NULL) {
+        memset(out_entry, 0, sizeof(*out_entry));
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring) || out_entry == NULL)) {
         errno = EINVAL;
         return -1;
@@ -325,6 +334,9 @@ int llam_broker_ring_complete_push(llam_broker_ring_t *ring, const llam_broker_r
 int llam_broker_ring_complete_pop(llam_broker_ring_t *ring, llam_broker_ring_completion_t *out_entry) {
     size_t count;
 
+    if (out_entry != NULL) {
+        memset(out_entry, 0, sizeof(*out_entry));
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring) || out_entry == NULL)) {
         errno = EINVAL;
         return -1;
@@ -349,13 +361,28 @@ int llam_broker_ring_complete_drain(llam_broker_ring_t *ring,
     size_t count;
     size_t i;
 
+    if (out_count != NULL) {
+        *out_count = 0U;
+    }
+    if (out_entries != NULL && max_entries > 0U) {
+        if (LLAM_UNLIKELY(max_entries > SIZE_MAX / sizeof(*out_entries))) {
+            /*
+             * The caller's element count is not trustworthy. Clear one
+             * completion as a stale-authority sentinel, then fail before the
+             * byte-count multiplication can wrap.
+             */
+            memset(out_entries, 0, sizeof(*out_entries));
+            errno = EOVERFLOW;
+            return -1;
+        }
+        memset(out_entries, 0, sizeof(*out_entries) * max_entries);
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring) ||
                       out_count == NULL ||
                       (max_entries > 0U && out_entries == NULL))) {
         errno = EINVAL;
         return -1;
     }
-    *out_count = 0U;
     if (max_entries == 0U) {
         return 0;
     }
@@ -414,11 +441,13 @@ int llam_broker_ring_serve_batch_subject(llam_broker_t *broker,
                                          size_t *out_served) {
     llam_broker_ring_session_t *session;
 
+    if (out_served != NULL) {
+        *out_served = 0U;
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring) || out_served == NULL)) {
         errno = EINVAL;
         return -1;
     }
-    *out_served = 0U;
     if (llam_broker_begin_op_subject(broker, subject_id) != 0) {
         return -1;
     }

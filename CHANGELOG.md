@@ -49,9 +49,23 @@
   Client-visible broker validation now rejects zero-right validation with
   `EINVAL`, closing a rightless live-token oracle while keeping internal
   attenuation validation broker-only.
+  Raw capability issuance and validation now reject object slot zero with
+  `EINVAL`, matching the nonzero broker live-object id space and preventing a
+  slot-0 token from becoming structurally valid outside live-table checks.
+  Direct broker object creation and direct object-token minting now enforce the
+  same family-specific rights allowlist as the transport path, so buffer,
+  descriptor, channel, and predefined-task tokens cannot carry out-of-family or
+  future-reserved rights.
+  Direct broker buffer registration also enforces the same 1MiB bounded grant
+  limit as the transport path, preventing trusted-helper misuse from reserving
+  unexpectedly large broker-local buffers.
+  The unsupported Windows `llam_broker_register_fd()` compatibility stub now
+  clears token output before returning `ENOTSUP`, matching other broker
+  authority-returning failure paths.
   Failed capability attenuation and broker object-revocation helpers now clear
-  non-aliased output tokens, so callers cannot accidentally reuse stale
-  serialized authority after an `EACCES`/`EINVAL` failure.
+  output tokens even for in-place `token == out_token` calls, so destructive
+  narrowing/revocation attempts cannot accidentally keep stale serialized
+  authority after an `EACCES`/`EINVAL` failure.
   Object-specific revocation now issues the replacement token before committing
   the live slot generation, so entropy failure reports `EIO` without invalidating
   the caller's existing token.
@@ -228,6 +242,18 @@
   operation keep using its existing broker authority instead of failing as new
   external work.
 
+* bound broker destroy latency for predefined broker tasks. Broker teardown now
+  requests cooperative runtime stop before draining task slots, so a client that
+  leaves a long `SLEEP_NS_RETURN_U64` command unjoined cannot delay broker
+  shutdown until the sleep duration naturally expires.
+
+* prevent byte-stream broker `TASK_JOIN` from becoming a delay primitive for
+  long sleeping broker commands. Pending `SLEEP_NS_RETURN_U64` joins now return
+  `EAGAIN` promptly instead of driving the broker runtime until the
+  client-selected sleep duration completes; otherwise quick joins also return
+  `EAGAIN` while any peer sleep command is still pending, because driving the
+  broker runtime would drain that sleep too.
+
 * scrub broker authority residue during teardown: capability MAC keys,
   revocation epoch, object id counters, transport subject sessions, and ring
   subject sessions are cleared after accepted broker operations drain.
@@ -292,9 +318,22 @@
   broker-owned ring. If response fd/HANDLE delivery fails after session
   creation, the broker now tears down the just-created ring session so a
   disconnecting client cannot strand private mappings or exhaust the ring
-  session table. POSIX broker response writes use no-SIGPIPE send paths,
-  turning closed-peer writes into ordinary `EPIPE`/`ECONNRESET` failures
-  instead of process termination.
+  session table. Control-transport response failure now also rolls back
+  just-created buffer, channel, descriptor, and predefined-task grants, so a
+  disconnecting client cannot strand unreachable broker-owned heap, fd/HANDLE,
+  channel, or task authority. Predefined-task rollback now claims the spawned
+  slot with a CAS, clears client-visible rights, and lets the task detach
+  itself from its trampoline before broker-slot reset. This prevents both a
+  permanent detached state and a host-thread detach race with task exit/reclaim.
+  Client-visible broker task detach now uses the same CAS claim before marking
+  a spawned task detached, preventing a racing task completion from leaving an
+  active `DETACHED` slot with no task handle to reclaim it.
+  Windows named-pipe `CREATE_RING` response failure now closes any peer-process
+  duplicated response HANDLE with `DUPLICATE_CLOSE_SOURCE`, preventing an
+  unreachable remote mapping HANDLE from remaining in the client process.
+  POSIX broker response
+  writes use no-SIGPIPE send paths, turning closed-peer writes into ordinary
+  `EPIPE`/`ECONNRESET` failures instead of process termination.
 
 * reject global `LLAM_BROKER_WIRE_OP_REVOKE_ALL` on the untrusted local control
   transport with `EACCES`. Global epoch revocation remains available only as a
@@ -321,6 +360,45 @@
   Direct broker-owned buffer reads, channel receives, and descriptor/HANDLE
   reads now clear caller output on failure and zero the unused suffix after
   successful short reads/receives, matching the shared-ring stale-output policy.
+  Broker transport failure responses now also clear token, result, and data
+  outputs after rolling back just-created authority, so a client that ignores
+  `status < 0` cannot reuse stale success fields from a failed response.
+  Plain POSIX request helpers, POSIX descriptor-request helpers, and Windows
+  HANDLE request helpers now also normalize successfully read failure responses,
+  preserving `status`/`error_code` while clearing token/result/data authority
+  fields supplied by a faulty or hostile broker peer.
+  The same helpers now reject malformed response framing with `EINVAL`, clear
+  the full response payload, and close any attached response descriptor before
+  returning, so a forged success frame with bad magic/version cannot expose
+  token, result, data, fd, or HANDLE authority to a lax caller.
+  POSIX response-descriptor reads now also close and suppress any `SCM_RIGHTS`
+  fd attached to an error response, so malformed descriptor-bearing failures
+  cannot expose fd authority alongside a failed status.
+  Broker client request helpers now clear response storage on invalid input or
+  request-write failure before a response can be read, covering closed-peer
+  control sockets, descriptor-bearing requests, response-descriptor requests,
+  Windows HANDLE request helpers, and unsupported Windows fd stubs.
+  Broker shared-ring private-name generation now clears the name buffer before
+  returning `ENAMETOOLONG`, and local endpoint helper failures now clear fd or
+  HANDLE outputs to `-1`/`LLAM_INVALID_HANDLE`. This prevents callers that
+  mishandle a failing return code from reusing stale rendezvous names or stale
+  descriptor authority.
+  Broker transport subject lookup, ring-session registration, ring stats
+  collection, and ring submission/completion drain helpers now also clear their
+  output storage before returning invalid-input or empty-ring errors, preventing
+  stale subject ids, session ids, diagnostic counters, or completion payloads
+  from surviving failed control-plane calls. Completion-drain helpers also
+  reject impossible element counts with `EOVERFLOW` before size multiplication
+  can wrap; the first completion slot is scrubbed as a stale-authority sentinel
+  before the fail-closed return. Broker ring serve helpers, ring transport
+  creation, task join result output, and shared-memory ring create/open/import
+  helpers now follow the same fail-closed output rule, so failed direct broker
+  calls cannot leave stale served counts, task results, fd/HANDLE descriptors,
+  session ids, or mapping handles in caller-owned storage. Direct broker token
+  mint helpers now also clear token output before invalid-broker failures, and
+  POSIX broker socket identity capture clears cleanup identity output before
+  invalid path failures so stale endpoint identity cannot be reused after a
+  failed capture.
 
 * reject oversized broker ring task command ids before narrowing to the
   predefined 32-bit command enum. This keeps high-bit shared-memory submissions
@@ -402,6 +480,13 @@
 * add disconnected-`CREATE_RING` coverage proving a client that closes before
   receiving the private ring fd cannot leave an unreachable broker-owned ring
   session behind.
+
+* add Windows named-pipe `CREATE_RING` response-failure coverage proving a
+  closed client pipe cannot strand a peer-local duplicated mapping HANDLE.
+
+* add predefined broker task detach race coverage proving a concurrently
+  completing task cannot strand an active detached slot after its public detach
+  token is consumed.
 
 * add ABI layout and single-evaluation predicate checks for `reserved0`,
   `LLAM_FD_IS_INVALID()`, and `LLAM_HANDLE_IS_INVALID()`.

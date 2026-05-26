@@ -62,6 +62,7 @@ int llam_broker_ring_private_name(char *out_name, size_t out_name_len) {
         errno = EINVAL;
         return -1;
     }
+    memset(out_name, 0, out_name_len);
     if (LLAM_UNLIKELY(!llam_public_slot_entropy_from_os(&a) ||
                       !llam_public_slot_entropy_from_os(&b) ||
                       (a | b) == 0U)) {
@@ -84,6 +85,7 @@ int llam_broker_ring_private_name(char *out_name, size_t out_name_len) {
                        (unsigned long long)a);
 #endif
     if (LLAM_UNLIKELY(written < 0 || (size_t)written >= out_name_len)) {
+        memset(out_name, 0, out_name_len);
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -103,6 +105,9 @@ int llam_broker_ring_create_private_shm(llam_broker_ring_mapping_t *out_mapping)
     char name[sizeof(((llam_broker_ring_mapping_t *)0)->name)];
     size_t attempt;
 
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
     if (LLAM_UNLIKELY(out_mapping == NULL)) {
         errno = EINVAL;
         return -1;

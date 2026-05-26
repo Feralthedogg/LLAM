@@ -58,6 +58,9 @@ static int llam_broker_open_unix_endpoint(const char *path, struct sockaddr_un *
     size_t path_len;
     int fd;
 
+    if (out_fd != NULL) {
+        *out_fd = -1;
+    }
     if (LLAM_UNLIKELY(path == NULL || addr == NULL || out_fd == NULL)) {
         errno = EINVAL;
         return -1;
@@ -87,9 +90,14 @@ static int llam_broker_open_unix_endpoint(const char *path, struct sockaddr_un *
 
 int llam_broker_listen_unix(const char *path, int *out_fd) {
     struct sockaddr_un addr;
+    llam_broker_socket_identity_t identity;
     struct stat existing;
     int fd;
+    bool identity_valid = false;
 
+    if (out_fd != NULL) {
+        *out_fd = -1;
+    }
     if (llam_broker_open_unix_endpoint(path, &addr, &fd) != 0) {
         return -1;
     }
@@ -111,11 +119,14 @@ int llam_broker_listen_unix(const char *path, int *out_fd) {
         return -1;
     }
     if (bind(fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0 ||
-        chmod(path, S_IRUSR | S_IWUSR) != 0 ||
+        llam_broker_capture_owned_socket(path, &identity) != 0 ||
+        (identity_valid = true, llam_broker_restrict_owned_socket(path, &identity) != 0) ||
         listen(fd, 16) != 0) {
         int saved_errno = errno;
 
-        llam_broker_unlink_owned_socket(path, fd);
+        if (identity_valid) {
+            llam_broker_unlink_owned_socket(path, &identity);
+        }
         close(fd);
         errno = saved_errno;
         return -1;
@@ -128,6 +139,9 @@ int llam_broker_connect_unix(const char *path, int *out_fd) {
     struct sockaddr_un addr;
     int fd;
 
+    if (out_fd != NULL) {
+        *out_fd = -1;
+    }
     if (llam_broker_open_unix_endpoint(path, &addr, &fd) != 0) {
         return -1;
     }
@@ -145,6 +159,9 @@ int llam_broker_connect_unix(const char *path, int *out_fd) {
 int llam_broker_accept_one(int listen_fd, int *out_fd) {
     int fd;
 
+    if (out_fd != NULL) {
+        *out_fd = -1;
+    }
     if (LLAM_UNLIKELY(listen_fd < 0 || out_fd == NULL)) {
         errno = EINVAL;
         return -1;
@@ -174,14 +191,18 @@ void llam_broker_close_fd(int fd) {
 
 int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
     (void)name;
-    (void)out_handle;
+    if (out_handle != NULL) {
+        *out_handle = LLAM_INVALID_HANDLE;
+    }
     errno = ENOTSUP;
     return -1;
 }
 
 int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {
     (void)name;
-    (void)out_handle;
+    if (out_handle != NULL) {
+        *out_handle = LLAM_INVALID_HANDLE;
+    }
     errno = ENOTSUP;
     return -1;
 }

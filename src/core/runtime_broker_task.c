@@ -88,6 +88,29 @@ static void llam_broker_task_slot_reset(llam_broker_task_slot_t *slot) {
     atomic_init(&slot->state, LLAM_BROKER_TASK_STATE_EMPTY);
 }
 
+static bool llam_broker_has_pending_sleep_task_locked(const llam_broker_t *broker) {
+    size_t i;
+
+    if (broker == NULL) {
+        return false;
+    }
+    for (i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
+        const llam_broker_task_slot_t *slot = &broker->tasks[i];
+        uint32_t state;
+
+        if (!slot->active ||
+            slot->kind != LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64) {
+            continue;
+        }
+        state = atomic_load_explicit(&slot->state, memory_order_acquire);
+        if (state == LLAM_BROKER_TASK_STATE_SPAWNED ||
+            state == LLAM_BROKER_TASK_STATE_DETACHED) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void llam_broker_task_trampoline(void *arg) {
     llam_broker_task_slot_t *slot = (llam_broker_task_slot_t *)arg;
     uint32_t expected;
@@ -133,6 +156,17 @@ static void llam_broker_task_trampoline(void *arg) {
     }
     if (expected == LLAM_BROKER_TASK_STATE_DETACHED) {
         llam_broker_t *owner = slot->owner;
+        llam_task_t *task = slot->task;
+
+        /*
+         * A failed transport response may have revoked the client-visible task
+         * token while this command was already runnable. Detach from the task
+         * itself instead of from the transport thread so final reclamation
+         * happens only after the fiber has returned to the scheduler.
+         */
+        if (task != NULL) {
+            (void)llam_detach(task);
+        }
 
         /* Detached task slots remain private until the command actually
          * completes, preventing slot reuse while the runtime still holds this
@@ -184,8 +218,11 @@ int llam_broker_spawn_task(llam_broker_t *broker,
     }
     if (LLAM_UNLIKELY(broker == NULL ||
                       out_token == NULL ||
-                      (rights & (LLAM_CAP_RIGHT_JOIN | LLAM_CAP_RIGHT_DETACH)) == 0U)) {
+                      rights == 0U)) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_broker_validate_object_rights(LLAM_BROKER_CAP_FAMILY_TASK, rights) != 0) {
         return -1;
     }
     if (LLAM_UNLIKELY(!llam_broker_task_kind_valid(kind))) {
@@ -256,18 +293,68 @@ int llam_broker_spawn_task(llam_broker_t *broker,
     return 0;
 }
 
+int llam_broker_task_join_runtime_drive_allowed(llam_broker_t *broker,
+                                                const llam_capability_token_t *token,
+                                                bool *out_allowed) {
+    llam_broker_task_slot_t *slot;
+    uint32_t state;
+
+    if (out_allowed != NULL) {
+        *out_allowed = false;
+    }
+    if (LLAM_UNLIKELY(out_allowed == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_broker_begin_op(broker) != 0) {
+        return -1;
+    }
+    if (llam_broker_lock(broker) != 0) {
+        llam_broker_end_op(broker);
+        return -1;
+    }
+    slot = llam_broker_find_task(broker, token, LLAM_CAP_RIGHT_JOIN);
+    if (slot == NULL) {
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
+        return -1;
+    }
+    state = atomic_load_explicit(&slot->state, memory_order_acquire);
+    /*
+     * The byte-stream transport is a broker control-plane request handler. It
+     * may opportunistically drive short predefined commands so spawn+join smoke
+     * paths remain one round-trip, but runtime_run_handle drains all broker
+     * work, not just the requested task. If any live sleep command is pending,
+     * even joining an unrelated quick task would wait out a client-selected
+     * duration. Ring clients already receive EAGAIN for pending joins and can
+     * retry; keep the wire transport equivalent whenever drain is unsafe.
+     */
+    *out_allowed = state != LLAM_BROKER_TASK_STATE_SPAWNED ||
+                   (slot->kind != LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64 &&
+                    !llam_broker_has_pending_sleep_task_locked(broker));
+    llam_broker_unlock(broker);
+    llam_broker_end_op(broker);
+    return 0;
+}
+
 int llam_broker_join_task(llam_broker_t *broker,
                           const llam_capability_token_t *token,
                           uint64_t *out_result0) {
     llam_broker_task_slot_t *slot;
     llam_task_t *task;
     uint64_t result0;
+    int task_error;
     uint32_t state;
 
     if (LLAM_UNLIKELY(out_result0 == NULL)) {
         errno = EINVAL;
         return -1;
     }
+    /*
+     * Join publishes task output. Clear it before every validation step so a
+     * failed join cannot leave a stale successful result in FFI-visible memory.
+     */
+    *out_result0 = 0U;
     if (llam_broker_begin_op(broker) != 0) {
         return -1;
     }
@@ -295,14 +382,9 @@ int llam_broker_join_task(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
-    if (slot->error_code != 0) {
-        llam_broker_unlock(broker);
-        llam_broker_end_op(broker);
-        errno = slot->error_code;
-        return -1;
-    }
     task = slot->task;
     result0 = slot->result0;
+    task_error = slot->error_code;
     slot->task = NULL;
     slot->active = false;
     atomic_store_explicit(&slot->state, LLAM_BROKER_TASK_STATE_JOINED, memory_order_release);
@@ -314,6 +396,11 @@ int llam_broker_join_task(llam_broker_t *broker,
         return -1;
     }
 
+    if (task_error != 0) {
+        errno = task_error;
+        llam_broker_end_op(broker);
+        return -1;
+    }
     *out_result0 = result0;
     llam_broker_end_op(broker);
     return 0;
@@ -321,7 +408,7 @@ int llam_broker_join_task(llam_broker_t *broker,
 
 int llam_broker_detach_task(llam_broker_t *broker, const llam_capability_token_t *token) {
     llam_broker_task_slot_t *slot;
-    llam_task_t *task;
+    llam_task_t *task = NULL;
     uint32_t state;
 
     if (llam_broker_begin_op(broker) != 0) {
@@ -338,27 +425,59 @@ int llam_broker_detach_task(llam_broker_t *broker, const llam_capability_token_t
         return -1;
     }
 
-    state = atomic_load_explicit(&slot->state, memory_order_acquire);
-    if ((state != LLAM_BROKER_TASK_STATE_SPAWNED && state != LLAM_BROKER_TASK_STATE_COMPLETED) ||
-        slot->task == NULL) {
+    for (;;) {
+        state = atomic_load_explicit(&slot->state, memory_order_acquire);
+        if (state == LLAM_BROKER_TASK_STATE_COMPLETED) {
+            if (slot->task == NULL) {
+                llam_broker_unlock(broker);
+                llam_broker_end_op(broker);
+                errno = EINVAL;
+                return -1;
+            }
+            task = slot->task;
+            slot->task = NULL;
+            llam_broker_task_slot_reset(slot);
+            break;
+        }
+        if (state == LLAM_BROKER_TASK_STATE_SPAWNED) {
+            uint32_t expected = LLAM_BROKER_TASK_STATE_SPAWNED;
+
+            if (slot->task == NULL) {
+                llam_broker_unlock(broker);
+                llam_broker_end_op(broker);
+                errno = EINVAL;
+                return -1;
+            }
+            /*
+             * Task completion publishes COMPLETED without taking the broker
+             * lock. Claim SPAWNED with a CAS so detach cannot overwrite a
+             * concurrently completed task with DETACHED after the trampoline
+             * has already returned. For live tasks, keep slot->task intact; the
+             * trampoline observes DETACHED, detaches the LLAM task handle, and
+             * resets the broker slot once it is no longer used as the argument.
+             */
+            if (!atomic_compare_exchange_weak_explicit(&slot->state,
+                                                       &expected,
+                                                       LLAM_BROKER_TASK_STATE_DETACHED,
+                                                       memory_order_acq_rel,
+                                                       memory_order_acquire)) {
+                continue;
+            }
+            slot->rights = 0U;
+            break;
+        }
         llam_broker_unlock(broker);
         llam_broker_end_op(broker);
         errno = EINVAL;
         return -1;
     }
-    task = slot->task;
-    slot->task = NULL;
-    slot->rights = 0U;
-    if (state == LLAM_BROKER_TASK_STATE_COMPLETED) {
-        llam_broker_task_slot_reset(slot);
-    } else {
-        atomic_store_explicit(&slot->state, LLAM_BROKER_TASK_STATE_DETACHED, memory_order_release);
-    }
     llam_broker_unlock(broker);
 
-    if (llam_detach(task) != 0) {
-        llam_broker_end_op(broker);
-        return -1;
+    if (task != NULL) {
+        if (llam_detach(task) != 0) {
+            llam_broker_end_op(broker);
+            return -1;
+        }
     }
     llam_broker_end_op(broker);
     return 0;

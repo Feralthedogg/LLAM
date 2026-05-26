@@ -143,17 +143,53 @@ static int llam_broker_duplicate_pipe_client_handle(HANDLE pipe,
     return 0;
 }
 
+static void llam_broker_close_pipe_client_duplicate(HANDLE client_process, uint64_t client_handle_value) {
+    HANDLE local_duplicate = NULL;
+
+    if (client_process == NULL ||
+        client_handle_value == 0U ||
+        client_handle_value > (uint64_t)UINTPTR_MAX ||
+        (uintptr_t)client_handle_value == (uintptr_t)INVALID_HANDLE_VALUE) {
+        return;
+    }
+    /*
+     * CREATE_RING duplicates a mapping HANDLE into the pipe peer before the
+     * response bytes are written. If the pipe write then fails, the peer never
+     * learns the numeric HANDLE value, so the broker must close the source in
+     * the peer handle table to avoid leaking authority into a hostile client.
+     */
+    if (DuplicateHandle(client_process,
+                        (HANDLE)(uintptr_t)client_handle_value,
+                        GetCurrentProcess(),
+                        &local_duplicate,
+                        0U,
+                        FALSE,
+                        DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE)) {
+        if (local_duplicate != NULL) {
+            CloseHandle(local_duplicate);
+        }
+    }
+}
+
 static int llam_broker_duplicate_handle_to_pipe_client(HANDLE pipe,
                                                        llam_handle_t broker_handle,
+                                                       HANDLE *out_client_process,
                                                        uint64_t *out_client_handle_value) {
     HANDLE client_process, client_handle = NULL;
     DWORD client_pid = 0U;
 
-    if (LLAM_UNLIKELY(llam_handle_is_invalid(broker_handle) || out_client_handle_value == NULL)) {
+    if (out_client_process != NULL) {
+        *out_client_process = NULL;
+    }
+    if (out_client_handle_value != NULL) {
+        *out_client_handle_value = 0U;
+    }
+    if (LLAM_UNLIKELY(llam_handle_is_invalid(broker_handle) ||
+                      out_client_process == NULL ||
+                      out_client_handle_value == NULL)) {
         errno = EINVAL;
         return -1;
     }
-    *out_client_handle_value = 0U;
     if (!GetNamedPipeClientProcessId(pipe, &client_pid)) {
         errno = llam_broker_windows_pipe_errno(GetLastError());
         return -1;
@@ -176,7 +212,7 @@ static int llam_broker_duplicate_handle_to_pipe_client(HANDLE pipe,
         errno = saved_errno;
         return -1;
     }
-    CloseHandle(client_process);
+    *out_client_process = client_process;
     *out_client_handle_value = (uint64_t)(uintptr_t)client_handle;
     return 0;
 }
@@ -189,6 +225,8 @@ static int llam_broker_serve_one_handle_subject(llam_broker_t *broker,
     llam_broker_wire_response_t response;
     llam_handle_t descriptor_handle = LLAM_INVALID_HANDLE;
     llam_handle_t response_descriptor = LLAM_INVALID_HANDLE;
+    HANDLE response_client_process = NULL;
+    uint64_t response_client_handle_value = 0U;
 
     if (out_should_close != NULL) {
         *out_should_close = false;
@@ -218,37 +256,44 @@ static int llam_broker_serve_one_handle_subject(llam_broker_t *broker,
                                                  out_should_close,
                                                  descriptor_handle,
                                                  &response_descriptor);
+    if (response.status != 0) {
+        llam_broker_normalize_response_failure_outputs(&response);
+        if (!llam_handle_is_invalid(response_descriptor)) {
+            llam_broker_close_handle(response_descriptor);
+            response_descriptor = LLAM_INVALID_HANDLE;
+        }
+    }
     if (!llam_handle_is_invalid(response_descriptor)) {
         uint64_t client_handle_value = 0U;
 
         if (llam_broker_duplicate_handle_to_pipe_client((HANDLE)handle,
                                                         response_descriptor,
+                                                        &response_client_process,
                                                         &client_handle_value) == 0) {
             response.result0 = client_handle_value;
+            response_client_handle_value = client_handle_value;
         } else {
             int saved_errno = errno;
 
-            if (request.op == (uint32_t)LLAM_BROKER_WIRE_OP_CREATE_RING &&
-                response.status == 0 &&
-                response.result2 != 0U) {
-                (void)llam_broker_ring_forget_session(broker, response.result2, subject_id);
-            }
-            response.status = -1;
-            response.error_code = saved_errno;
+            llam_broker_rollback_created_response(broker, &request, &response, subject_id);
+            llam_broker_mark_response_failure_clear_outputs(&response, saved_errno);
         }
         llam_broker_close_handle(response_descriptor);
     }
     if (llam_broker_write_exact_handle((HANDLE)handle, &response, sizeof(response)) != 0) {
         int saved_errno = errno;
 
-        if (request.op == (uint32_t)LLAM_BROKER_WIRE_OP_CREATE_RING &&
-            response.status == 0 &&
-            response.result2 != 0U) {
-            (void)llam_broker_ring_forget_session(broker, response.result2, subject_id);
+        llam_broker_close_pipe_client_duplicate(response_client_process, response_client_handle_value);
+        if (response_client_process != NULL) {
+            CloseHandle(response_client_process);
         }
+        llam_broker_rollback_created_response(broker, &request, &response, subject_id);
         llam_broker_end_op(broker);
         errno = saved_errno;
         return -1;
+    }
+    if (response_client_process != NULL) {
+        CloseHandle(response_client_process);
     }
     llam_broker_end_op(broker);
     return 0;
@@ -292,14 +337,22 @@ int llam_broker_serve_handle(llam_broker_t *broker, llam_handle_t handle) {
 int llam_broker_request_handle(llam_handle_t handle,
                                const llam_broker_wire_request_t *request,
                                llam_broker_wire_response_t *response) {
+    int rc;
+
     if (LLAM_UNLIKELY(llam_handle_is_invalid(handle) || request == NULL || response == NULL)) {
-        errno = EINVAL;
-        return -1;
+        return llam_broker_fail_clear_output(response,
+                                             response != NULL ? sizeof(*response) : 0U,
+                                             EINVAL);
     }
+    memset(response, 0, sizeof(*response));
     if (llam_broker_write_exact_handle((HANDLE)handle, request, sizeof(*request)) != 0) {
-        return -1;
+        return llam_broker_fail_clear_output(response, sizeof(*response), errno);
     }
-    return llam_broker_read_exact_handle((HANDLE)handle, response, sizeof(*response));
+    rc = llam_broker_read_exact_handle((HANDLE)handle, response, sizeof(*response));
+    if (rc == 0) {
+        rc = llam_broker_validate_response_frame_or_clear(response);
+    }
+    return rc;
 }
 
 int llam_broker_request_handle_with_descriptor(llam_handle_t handle,
@@ -307,20 +360,27 @@ int llam_broker_request_handle_with_descriptor(llam_handle_t handle,
                                                llam_handle_t descriptor_handle,
                                                llam_broker_wire_response_t *response) {
     llam_broker_wire_request_t local_request;
+    int rc;
 
     if (LLAM_UNLIKELY(llam_handle_is_invalid(handle) ||
                       request == NULL ||
                       llam_handle_is_invalid(descriptor_handle) ||
                       response == NULL)) {
-        errno = EINVAL;
-        return -1;
+        return llam_broker_fail_clear_output(response,
+                                             response != NULL ? sizeof(*response) : 0U,
+                                             EINVAL);
     }
+    memset(response, 0, sizeof(*response));
     local_request = *request;
     local_request.slot = (uint64_t)(uintptr_t)descriptor_handle;
     if (llam_broker_write_exact_handle((HANDLE)handle, &local_request, sizeof(local_request)) != 0) {
-        return -1;
+        return llam_broker_fail_clear_output(response, sizeof(*response), errno);
     }
-    return llam_broker_read_exact_handle((HANDLE)handle, response, sizeof(*response));
+    rc = llam_broker_read_exact_handle((HANDLE)handle, response, sizeof(*response));
+    if (rc == 0) {
+        rc = llam_broker_validate_response_frame_or_clear(response);
+    }
+    return rc;
 }
 
 #endif

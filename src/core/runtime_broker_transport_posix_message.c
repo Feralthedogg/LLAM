@@ -255,7 +255,32 @@ int llam_broker_read_request_fd(int fd, llam_broker_wire_request_t *request, int
 }
 
 int llam_broker_read_response_fd(int fd, llam_broker_wire_response_t *response, int *out_descriptor_fd) {
-    return llam_broker_read_message_fd(fd, response, sizeof(*response), out_descriptor_fd);
+    int rc;
+
+    rc = llam_broker_read_message_fd(fd, response, sizeof(*response), out_descriptor_fd);
+    if (rc != 0) {
+        return rc;
+    }
+    if (llam_broker_validate_response_frame_or_clear(response) != 0) {
+        if (out_descriptor_fd != NULL && *out_descriptor_fd >= 0) {
+            close(*out_descriptor_fd);
+            *out_descriptor_fd = -1;
+        }
+        return -1;
+    }
+    if (response != NULL && response->status != 0) {
+        /*
+         * A descriptor-bearing error response is malformed authority. The
+         * transport read itself succeeded, so keep the response status visible,
+         * but close any attached fd and scrub authority outputs before callers
+         * can accidentally treat them as success payload.
+         */
+        if (out_descriptor_fd != NULL && *out_descriptor_fd >= 0) {
+            close(*out_descriptor_fd);
+            *out_descriptor_fd = -1;
+        }
+    }
+    return 0;
 }
 
 static int llam_broker_write_message_with_descriptor(int fd,
@@ -378,41 +403,61 @@ int llam_broker_write_response_fd(int fd, const llam_broker_wire_response_t *res
 int llam_broker_request_fd(int fd,
                            const llam_broker_wire_request_t *request,
                            llam_broker_wire_response_t *response) {
+    int rc;
+
     if (LLAM_UNLIKELY(fd < 0 || request == NULL || response == NULL)) {
-        errno = EINVAL;
-        return -1;
+        return llam_broker_fail_clear_output(response,
+                                             response != NULL ? sizeof(*response) : 0U,
+                                             EINVAL);
     }
+    memset(response, 0, sizeof(*response));
     if (llam_broker_write_exact(fd, request, sizeof(*request)) != 0) {
-        return -1;
+        return llam_broker_fail_clear_output(response, sizeof(*response), errno);
     }
-    return llam_broker_read_exact(fd, response, sizeof(*response));
+    rc = llam_broker_read_exact(fd, response, sizeof(*response));
+    if (rc == 0) {
+        rc = llam_broker_validate_response_frame_or_clear(response);
+    }
+    return rc;
 }
 
 int llam_broker_request_fd_with_descriptor(int fd,
                                            const llam_broker_wire_request_t *request,
                                            int descriptor_fd,
                                            llam_broker_wire_response_t *response) {
+    int rc;
+
     if (LLAM_UNLIKELY(fd < 0 || request == NULL || descriptor_fd < 0 || response == NULL)) {
-        errno = EINVAL;
-        return -1;
+        return llam_broker_fail_clear_output(response,
+                                             response != NULL ? sizeof(*response) : 0U,
+                                             EINVAL);
     }
+    memset(response, 0, sizeof(*response));
     if (llam_broker_write_request_with_descriptor(fd, request, descriptor_fd) != 0) {
-        return -1;
+        return llam_broker_fail_clear_output(response, sizeof(*response), errno);
     }
-    return llam_broker_read_exact(fd, response, sizeof(*response));
+    rc = llam_broker_read_exact(fd, response, sizeof(*response));
+    if (rc == 0) {
+        rc = llam_broker_validate_response_frame_or_clear(response);
+    }
+    return rc;
 }
 
 int llam_broker_request_fd_with_response_descriptor(int fd,
                                                     const llam_broker_wire_request_t *request,
                                                     llam_broker_wire_response_t *response,
                                                     int *out_descriptor_fd) {
-    if (LLAM_UNLIKELY(fd < 0 || request == NULL || response == NULL || out_descriptor_fd == NULL)) {
-        errno = EINVAL;
-        return -1;
+    if (out_descriptor_fd != NULL) {
+        *out_descriptor_fd = -1;
     }
-    *out_descriptor_fd = -1;
+    if (LLAM_UNLIKELY(fd < 0 || request == NULL || response == NULL || out_descriptor_fd == NULL)) {
+        return llam_broker_fail_clear_output(response,
+                                             response != NULL ? sizeof(*response) : 0U,
+                                             EINVAL);
+    }
+    memset(response, 0, sizeof(*response));
     if (llam_broker_write_exact(fd, request, sizeof(*request)) != 0) {
-        return -1;
+        return llam_broker_fail_clear_output(response, sizeof(*response), errno);
     }
     return llam_broker_read_response_fd(fd, response, out_descriptor_fd);
 }

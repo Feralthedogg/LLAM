@@ -42,12 +42,14 @@ static int llam_broker_pipe_name(const char *path, char *out, size_t out_size) {
         errno = EINVAL;
         return -1;
     }
+    memset(out, 0, out_size);
     if (strncmp(path, "\\\\.\\pipe\\", 9U) == 0) {
         written = snprintf(out, out_size, "%s", path);
     } else {
         written = snprintf(out, out_size, "\\\\.\\pipe\\%s", path);
     }
     if (written < 0 || (size_t)written >= out_size) {
+        memset(out, 0, out_size);
         errno = EINVAL;
         return -1;
     }
@@ -59,6 +61,9 @@ int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
     llam_broker_windows_security_t security;
     HANDLE handle;
 
+    if (out_handle != NULL) {
+        *out_handle = LLAM_INVALID_HANDLE;
+    }
     if (LLAM_UNLIKELY(name == NULL || out_handle == NULL)) {
         errno = EINVAL;
         return -1;
@@ -91,6 +96,9 @@ int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {
     ULONGLONG deadline;
     DWORD mode = PIPE_READMODE_BYTE;
 
+    if (out_handle != NULL) {
+        *out_handle = LLAM_INVALID_HANDLE;
+    }
     if (LLAM_UNLIKELY(name == NULL || out_handle == NULL)) {
         errno = EINVAL;
         return -1;
@@ -98,7 +106,6 @@ int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {
     if (llam_broker_pipe_name(name, pipe_name, sizeof(pipe_name)) != 0) {
         return -1;
     }
-    *out_handle = LLAM_INVALID_HANDLE;
     deadline = GetTickCount64() + 5000U;
     for (;;) {
         HANDLE handle = CreateFileA(pipe_name,

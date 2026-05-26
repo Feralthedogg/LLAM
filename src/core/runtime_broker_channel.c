@@ -90,6 +90,9 @@ int llam_broker_create_channel(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
+    if (llam_broker_validate_object_rights(LLAM_BROKER_CAP_FAMILY_CHANNEL, rights) != 0) {
+        return -1;
+    }
     if (llam_broker_begin_op(broker) != 0) {
         return -1;
     }

@@ -103,6 +103,12 @@ static inline void llam_switch_task_to_task_hot(llam_task_t *from, llam_task_t *
  */
 void llam_allocator_destroy(llam_allocator_t *allocator);
 int llam_allocator_init(llam_allocator_t *allocator);
+int llam_allocator_record_chunk(llam_allocator_t *allocator,
+                                void *storage,
+                                size_t bytes,
+                                bool mmapped,
+                                unsigned item_kind,
+                                unsigned item_count);
 void llam_allocator_quiescent(llam_shard_t *shard);
 int llam_allocator_grow_io_buffer_slab(llam_shard_t *shard);
 int llam_allocator_grow_io_req_slab(llam_shard_t *shard);

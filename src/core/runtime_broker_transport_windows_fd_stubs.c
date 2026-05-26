@@ -30,18 +30,22 @@
 
 int llam_broker_read_request_fd(int fd, llam_broker_wire_request_t *request, int *out_descriptor_fd) {
     (void)fd;
-    (void)request;
-    (void)out_descriptor_fd;
-    errno = ENOTSUP;
-    return -1;
+    if (out_descriptor_fd != NULL) {
+        *out_descriptor_fd = -1;
+    }
+    return llam_broker_fail_clear_output(request,
+                                         request != NULL ? sizeof(*request) : 0U,
+                                         ENOTSUP);
 }
 
 int llam_broker_read_response_fd(int fd, llam_broker_wire_response_t *response, int *out_descriptor_fd) {
     (void)fd;
-    (void)response;
-    (void)out_descriptor_fd;
-    errno = ENOTSUP;
-    return -1;
+    if (out_descriptor_fd != NULL) {
+        *out_descriptor_fd = -1;
+    }
+    return llam_broker_fail_clear_output(response,
+                                         response != NULL ? sizeof(*response) : 0U,
+                                         ENOTSUP);
 }
 
 int llam_broker_write_request_with_descriptor(int fd,
@@ -76,9 +80,9 @@ int llam_broker_request_fd(int fd,
                            llam_broker_wire_response_t *response) {
     (void)fd;
     (void)request;
-    (void)response;
-    errno = ENOTSUP;
-    return -1;
+    return llam_broker_fail_clear_output(response,
+                                         response != NULL ? sizeof(*response) : 0U,
+                                         ENOTSUP);
 }
 
 int llam_broker_request_fd_with_descriptor(int fd,
@@ -88,9 +92,9 @@ int llam_broker_request_fd_with_descriptor(int fd,
     (void)fd;
     (void)request;
     (void)descriptor_fd;
-    (void)response;
-    errno = ENOTSUP;
-    return -1;
+    return llam_broker_fail_clear_output(response,
+                                         response != NULL ? sizeof(*response) : 0U,
+                                         ENOTSUP);
 }
 
 int llam_broker_request_fd_with_response_descriptor(int fd,
@@ -99,29 +103,37 @@ int llam_broker_request_fd_with_response_descriptor(int fd,
                                                     int *out_descriptor_fd) {
     (void)fd;
     (void)request;
-    (void)response;
-    (void)out_descriptor_fd;
-    errno = ENOTSUP;
-    return -1;
+    if (out_descriptor_fd != NULL) {
+        *out_descriptor_fd = -1;
+    }
+    return llam_broker_fail_clear_output(response,
+                                         response != NULL ? sizeof(*response) : 0U,
+                                         ENOTSUP);
 }
 
 int llam_broker_listen_unix(const char *path, int *out_fd) {
     (void)path;
-    (void)out_fd;
+    if (out_fd != NULL) {
+        *out_fd = -1;
+    }
     errno = ENOTSUP;
     return -1;
 }
 
 int llam_broker_connect_unix(const char *path, int *out_fd) {
     (void)path;
-    (void)out_fd;
+    if (out_fd != NULL) {
+        *out_fd = -1;
+    }
     errno = ENOTSUP;
     return -1;
 }
 
 int llam_broker_accept_one(int listen_fd, int *out_fd) {
     (void)listen_fd;
-    (void)out_fd;
+    if (out_fd != NULL) {
+        *out_fd = -1;
+    }
     errno = ENOTSUP;
     return -1;
 }

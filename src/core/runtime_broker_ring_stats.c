@@ -72,12 +72,14 @@ void llam_broker_ring_broker_stat_max(llam_broker_ring_t *ring,
 }
 
 int llam_broker_ring_collect_stats(const llam_broker_ring_t *ring, llam_broker_ring_stats_t *out_stats) {
+    if (out_stats != NULL) {
+        memset(out_stats, 0, sizeof(*out_stats));
+    }
     if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring) || out_stats == NULL)) {
         errno = EINVAL;
         return -1;
     }
 
-    memset(out_stats, 0, sizeof(*out_stats));
     out_stats->client_submit_pushes =
         atomic_load_explicit(&ring->client_stats.values[LLAM_BROKER_RING_CLIENT_STAT_SUBMIT_PUSHES],
                              memory_order_relaxed);

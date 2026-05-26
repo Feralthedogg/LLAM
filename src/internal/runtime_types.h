@@ -591,6 +591,7 @@ typedef struct llam_allocator {
     bool lock_initialized;
     llam_alloc_chunk_t *chunks;
     llam_task_t *task_free;
+    llam_task_t *task_external_free;
     llam_wait_node_t *wait_free;
     llam_timer_node_t *timer_free;
     llam_io_req_t *io_req_free;
@@ -791,6 +792,7 @@ struct llam_task {
     bool cancel_registered;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
+    bool alloc_external_pool;
     uint64_t last_runnable_ns;
     uint64_t last_yield_ns;
     uint64_t last_started_ns;

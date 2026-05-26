@@ -85,9 +85,13 @@ int llam_broker_register_buffer(llam_broker_t *broker,
     }
     if (LLAM_UNLIKELY(broker == NULL ||
                       length == 0U ||
+                      length > LLAM_BROKER_BUFFER_MAX_BYTES ||
                       rights == 0U ||
                       out_token == NULL)) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_broker_validate_object_rights(LLAM_BROKER_CAP_FAMILY_BUFFER, rights) != 0) {
         return -1;
     }
     data = (unsigned char *)calloc(1U, length);

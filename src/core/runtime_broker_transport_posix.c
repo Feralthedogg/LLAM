@@ -89,15 +89,18 @@ static int llam_broker_serve_one_fd_subject(llam_broker_t *broker,
                                                  out_should_close,
                                                  (llam_handle_t)descriptor_fd,
                                                  &response_descriptor);
+    if (response.status != 0) {
+        llam_broker_normalize_response_failure_outputs(&response);
+        if (!llam_handle_is_invalid(response_descriptor)) {
+            close((int)response_descriptor);
+            response_descriptor = LLAM_INVALID_HANDLE;
+        }
+    }
     if (!llam_handle_is_invalid(response_descriptor)) {
         if (llam_broker_write_response_with_descriptor(fd, &response, (int)response_descriptor) != 0) {
             int saved_errno = errno;
 
-            if (request.op == (uint32_t)LLAM_BROKER_WIRE_OP_CREATE_RING &&
-                response.status == 0 &&
-                response.result2 != 0U) {
-                (void)llam_broker_ring_forget_session(broker, response.result2, subject_id);
-            }
+            llam_broker_rollback_created_response(broker, &request, &response, subject_id);
             close((int)response_descriptor);
             llam_broker_end_op(broker);
             errno = saved_errno;
@@ -107,11 +110,7 @@ static int llam_broker_serve_one_fd_subject(llam_broker_t *broker,
     } else if (llam_broker_write_response_fd(fd, &response) != 0) {
         int saved_errno = errno;
 
-        if (request.op == (uint32_t)LLAM_BROKER_WIRE_OP_CREATE_RING &&
-            response.status == 0 &&
-            response.result2 != 0U) {
-            (void)llam_broker_ring_forget_session(broker, response.result2, subject_id);
-        }
+        llam_broker_rollback_created_response(broker, &request, &response, subject_id);
         llam_broker_end_op(broker);
         errno = saved_errno;
         return -1;

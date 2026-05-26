@@ -39,12 +39,16 @@ int llam_broker_transport_create_ring(llam_broker_t *broker,
     llam_handle_t descriptor = LLAM_INVALID_HANDLE;
     int saved_errno;
 
+    if (out_descriptor != NULL) {
+        *out_descriptor = LLAM_INVALID_HANDLE;
+    }
+    if (out_session_id != NULL) {
+        *out_session_id = 0U;
+    }
     if (LLAM_UNLIKELY(broker == NULL || out_descriptor == NULL || out_session_id == NULL)) {
         errno = EINVAL;
         return -1;
     }
-    *out_descriptor = LLAM_INVALID_HANDLE;
-    *out_session_id = 0U;
     memset(&mapping, 0, sizeof(mapping));
     mapping.fd = -1;
     mapping.mapping_handle = LLAM_INVALID_HANDLE;

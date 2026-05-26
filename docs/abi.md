@@ -500,7 +500,10 @@ testing returned descriptors, especially from Windows bindings where
 Owned-buffer read APIs transfer buffer ownership to the caller on success. The
 caller must release the buffer with `llam_io_buffer_release()`. The returned
 wrapper and payload remain valid until release even if the runtime that produced
-the buffer is shut down first.
+the buffer is shut down first. The data pointer returned by
+`llam_io_buffer_data()` is borrowed from the owned buffer; serialize
+`llam_io_buffer_release()` against any raw pointer use if a buffer is shared
+between host threads.
 
 Owned-buffer result rules are fixed for FFI bindings:
 

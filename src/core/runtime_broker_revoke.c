@@ -191,42 +191,51 @@ int llam_broker_revoke_object_cap(llam_broker_t *broker,
                                   const llam_capability_token_t *token,
                                   uint64_t replacement_rights,
                                   llam_capability_token_t *out_token) {
+    llam_capability_token_t source;
     llam_capability_token_t replacement;
-    bool aliases_input;
     int rc = -1;
 
     if (LLAM_UNLIKELY(out_token == NULL)) {
         errno = EINVAL;
         return -1;
     }
-    aliases_input = token == out_token;
-    if (!aliases_input) {
-        memset(out_token, 0, sizeof(*out_token));
+    /*
+     * Revoke rotates object generation and returns replacement authority.
+     * Copy first and clear output unconditionally so in-place invalid revoke
+     * attempts do not leave the caller holding the old token.
+     */
+    memset(&source, 0, sizeof(source));
+    if (token != NULL) {
+        source = *token;
     }
+    memset(out_token, 0, sizeof(*out_token));
     if (LLAM_UNLIKELY(token == NULL || replacement_rights == 0U)) {
         errno = EINVAL;
+        memset(&source, 0, sizeof(source));
         return -1;
     }
     if (llam_broker_begin_op(broker) != 0) {
+        memset(&source, 0, sizeof(source));
         return -1;
     }
     if (llam_broker_lock(broker) != 0) {
         llam_broker_end_op(broker);
+        memset(&source, 0, sizeof(source));
         return -1;
     }
-    if (llam_broker_validate_cap_unlocked(broker, token, LLAM_CAP_RIGHT_DESTROY) != 0) {
+    if (llam_broker_validate_cap_unlocked(broker, &source, LLAM_CAP_RIGHT_DESTROY) != 0) {
         goto done;
     }
     memset(&replacement, 0, sizeof(replacement));
-    switch (token->family) {
+    switch (source.family) {
     case LLAM_BROKER_CAP_FAMILY_BUFFER:
-        rc = llam_broker_revoke_buffer_unlocked(broker, token, replacement_rights, &replacement);
+        rc = llam_broker_revoke_buffer_unlocked(broker, &source, replacement_rights, &replacement);
         break;
     case LLAM_BROKER_CAP_FAMILY_DESCRIPTOR:
-        rc = llam_broker_revoke_descriptor_unlocked(broker, token, replacement_rights, &replacement);
+        rc = llam_broker_revoke_descriptor_unlocked(broker, &source, replacement_rights, &replacement);
         break;
     case LLAM_BROKER_CAP_FAMILY_CHANNEL:
-        rc = llam_broker_revoke_channel_unlocked(broker, token, replacement_rights, &replacement);
+        rc = llam_broker_revoke_channel_unlocked(broker, &source, replacement_rights, &replacement);
         break;
     default:
         errno = EINVAL;
@@ -234,12 +243,11 @@ int llam_broker_revoke_object_cap(llam_broker_t *broker,
     }
     if (rc == 0) {
         *out_token = replacement;
-    } else if (!aliases_input) {
-        memset(out_token, 0, sizeof(*out_token));
     }
     memset(&replacement, 0, sizeof(replacement));
 
 done:
+    memset(&source, 0, sizeof(source));
     llam_broker_unlock(broker);
     llam_broker_end_op(broker);
     return rc;

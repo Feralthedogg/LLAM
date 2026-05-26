@@ -550,6 +550,9 @@ static void root(void *arg) {
 
 The owned-buffer API lets the runtime allocate the I/O buffer. Release it with `llam_io_buffer_release()`.
 EOF or a zero-byte read returns `0` with `buffer == NULL`; failures return `-1`, set `errno`, and also leave `buffer == NULL`.
+`llam_io_buffer_data()` returns a borrowed pointer that is valid only until the
+buffer is released; if another host thread can release the buffer, copy or
+serialize access before using the raw pointer.
 
 ```c
 llam_io_buffer_t *buffer = NULL;
@@ -731,8 +734,8 @@ I/O:
 | `llam_recv_owned` | Receive with flags into a runtime-owned buffer. |
 | `llam_io_buffer_opts_init` / `llam_io_buffer_alloc_ex` | Initialize and allocate owned I/O buffers with explicit capacity, alignment, and flags. |
 | `llam_io_buffer_alloc` / `llam_io_buffer_alloc_aligned` | Allocate default or explicitly aligned owned I/O buffers. |
-| `llam_io_buffer_release` | Release an owned buffer. |
-| `llam_io_buffer_data` | Return the owned buffer data pointer. |
+| `llam_io_buffer_release` | Release an owned buffer and invalidate borrowed data pointers. |
+| `llam_io_buffer_data` | Return a borrowed owned-buffer data pointer valid until release. |
 | `llam_io_buffer_size` | Return the number of bytes read. |
 | `llam_io_buffer_capacity` | Return owned buffer capacity. |
 | `llam_io_buffer_alignment` | Return owned buffer alignment. |

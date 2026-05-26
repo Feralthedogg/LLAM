@@ -298,6 +298,7 @@ int llam_capability_issue(const llam_capability_key_t *key,
                       out_token == NULL ||
                       object->runtime_id == 0U ||
                       object->family == 0U ||
+                      object->slot == 0U ||
                       object->slot == UINT64_MAX ||
                       object->generation == 0U ||
                       rights == 0U)) {
@@ -341,6 +342,7 @@ int llam_capability_validate_subject(const llam_capability_key_t *key,
     if (LLAM_UNLIKELY(token->version != LLAM_CAPABILITY_VERSION ||
                       token->family == 0U ||
                       token->runtime_id == 0U ||
+                      token->slot == 0U ||
                       token->generation == 0U ||
                       token->rights == 0U)) {
         errno = EINVAL;
@@ -371,47 +373,55 @@ int llam_capability_attenuate(const llam_capability_key_t *key,
                               uint64_t current_revocation_epoch,
                               llam_capability_token_t *out_token) {
     llam_capability_object_t object;
+    llam_capability_token_t source;
     llam_capability_token_t issued;
-    bool aliases_input;
     int rc;
 
     if (LLAM_UNLIKELY(out_token == NULL)) {
         errno = EINVAL;
         return -1;
     }
-    aliases_input = token == out_token;
-    if (!aliases_input) {
-        memset(out_token, 0, sizeof(*out_token));
+    /*
+     * Support in-place attenuation without preserving broad authority on
+     * failure. Copy the source token before clearing the output so callers that
+     * pass token == out_token still get fail-closed semantics.
+     */
+    memset(&source, 0, sizeof(source));
+    if (token != NULL) {
+        source = *token;
     }
+    memset(out_token, 0, sizeof(*out_token));
     if (LLAM_UNLIKELY(subset_rights == 0U)) {
         errno = EINVAL;
+        memset(&source, 0, sizeof(source));
         return -1;
     }
     if (llam_capability_validate_subject(key,
-                                         token,
+                                         token != NULL ? &source : NULL,
                                          0U,
                                          current_revocation_epoch,
-                                         token != NULL ? token->subject_id : 0U) != 0) {
+                                         token != NULL ? source.subject_id : 0U) != 0) {
+        memset(&source, 0, sizeof(source));
         return -1;
     }
-    if (LLAM_UNLIKELY((token->rights & subset_rights) != subset_rights)) {
+    if (LLAM_UNLIKELY((source.rights & subset_rights) != subset_rights)) {
         errno = EACCES;
+        memset(&source, 0, sizeof(source));
         return -1;
     }
-    object.runtime_id = token->runtime_id;
-    object.family = token->family;
+    object.runtime_id = source.runtime_id;
+    object.family = source.family;
     object.reserved0 = 0U;
-    object.slot = token->slot;
-    object.generation = token->generation;
-    object.revocation_epoch = token->revocation_epoch;
-    object.subject_id = token->subject_id;
+    object.slot = source.slot;
+    object.generation = source.generation;
+    object.revocation_epoch = source.revocation_epoch;
+    object.subject_id = source.subject_id;
     memset(&issued, 0, sizeof(issued));
     rc = llam_capability_issue(key, &object, subset_rights, &issued);
     if (rc == 0) {
         *out_token = issued;
-    } else if (!aliases_input) {
-        memset(out_token, 0, sizeof(*out_token));
     }
     memset(&issued, 0, sizeof(issued));
+    memset(&source, 0, sizeof(source));
     return rc;
 }

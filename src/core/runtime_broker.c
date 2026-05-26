@@ -66,6 +66,37 @@ static void llam_broker_clear_session_state(llam_broker_t *broker) {
     broker->next_transport_subject_nonce = 0U;
 }
 
+int llam_broker_validate_object_rights(uint32_t family, uint64_t rights) {
+    uint64_t allowed = 0U;
+
+    if (LLAM_UNLIKELY(rights == 0U)) {
+        errno = EINVAL;
+        return -1;
+    }
+    switch (family) {
+        case LLAM_BROKER_CAP_FAMILY_BUFFER:
+            allowed = LLAM_BROKER_BUFFER_TRANSPORT_RIGHTS;
+            break;
+        case LLAM_BROKER_CAP_FAMILY_DESCRIPTOR:
+            allowed = LLAM_BROKER_DESCRIPTOR_TRANSPORT_RIGHTS;
+            break;
+        case LLAM_BROKER_CAP_FAMILY_CHANNEL:
+            allowed = LLAM_BROKER_CHANNEL_TRANSPORT_RIGHTS;
+            break;
+        case LLAM_BROKER_CAP_FAMILY_TASK:
+            allowed = LLAM_BROKER_TASK_TRANSPORT_RIGHTS;
+            break;
+        default:
+            errno = EINVAL;
+            return -1;
+    }
+    if (LLAM_UNLIKELY((rights & ~allowed) != 0U)) {
+        errno = EACCES;
+        return -1;
+    }
+    return 0;
+}
+
 int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
                                           uint32_t family,
                                           uint64_t slot,
@@ -74,8 +105,20 @@ int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
                                           llam_capability_token_t *out_token) {
     llam_capability_object_t object;
 
+    if (out_token != NULL) {
+        /*
+         * This helper is normally reached through create paths that already
+         * clear outputs, but it is also an internal direct mint boundary. Keep
+         * invalid-broker and invalid-right failures fail-closed for tests and
+         * FFI-style embedders that call the internal broker layer directly.
+         */
+        memset(out_token, 0, sizeof(*out_token));
+    }
     if (LLAM_UNLIKELY(broker == NULL || !broker->initialized || broker->runtime == NULL)) {
         errno = EINVAL;
+        return -1;
+    }
+    if (llam_broker_validate_object_rights(family, rights) != 0) {
         return -1;
     }
     memset(&object, 0, sizeof(object));
@@ -188,6 +231,15 @@ void llam_broker_destroy(llam_broker_t *broker) {
     runtime = broker->runtime;
     llam_broker_unlock(broker);
 
+    /*
+     * Broker task slots are trampoline arguments. Request cooperative stop
+     * before draining them so a client cannot keep broker destruction blocked
+     * for an arbitrary LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64 duration.
+     */
+    if (runtime != NULL) {
+        llam_request_stop(runtime);
+    }
+
     /* Keep task slot storage valid until broker-owned trampoline work drains. */
     llam_broker_clear_tasks(broker);
     if (llam_broker_lock(broker) != 0) {
@@ -259,6 +311,9 @@ int llam_broker_issue_object_cap(llam_broker_t *broker,
                                  llam_capability_token_t *out_token) {
     int rc;
 
+    if (out_token != NULL) {
+        memset(out_token, 0, sizeof(*out_token));
+    }
     if (llam_broker_begin_op(broker) != 0) {
         return -1;
     }
@@ -337,28 +392,37 @@ int llam_broker_attenuate_cap(const llam_broker_t *broker,
                               uint64_t subset_rights,
                               llam_capability_token_t *out_token) {
     llam_broker_t *mutable_broker = (llam_broker_t *)broker;
+    llam_capability_token_t source;
     llam_capability_token_t attenuated;
     uint64_t epoch;
-    bool aliases_input;
     int rc;
 
     if (LLAM_UNLIKELY(out_token == NULL)) {
         errno = EINVAL;
         return -1;
     }
-    aliases_input = token == out_token;
-    if (!aliases_input) {
-        memset(out_token, 0, sizeof(*out_token));
+    /*
+     * Broker attenuation is often used to destructively narrow authority.
+     * Preserve a local source copy before clearing the output so in-place
+     * failure cannot accidentally keep the old, broader token live.
+     */
+    memset(&source, 0, sizeof(source));
+    if (token != NULL) {
+        source = *token;
     }
+    memset(out_token, 0, sizeof(*out_token));
     if (LLAM_UNLIKELY(subset_rights == 0U)) {
         errno = EINVAL;
+        memset(&source, 0, sizeof(source));
         return -1;
     }
     if (llam_broker_begin_op(mutable_broker) != 0) {
+        memset(&source, 0, sizeof(source));
         return -1;
     }
     if (llam_broker_lock(mutable_broker) != 0) {
         llam_broker_end_op(mutable_broker);
+        memset(&source, 0, sizeof(source));
         return -1;
     }
     /*
@@ -367,19 +431,17 @@ int llam_broker_attenuate_cap(const llam_broker_t *broker,
      * object check is performed under the broker lock so revoke cannot race
      * the source token validation.
      */
-    rc = llam_broker_validate_cap_unlocked(broker, token, subset_rights);
+    rc = llam_broker_validate_cap_unlocked(broker, token != NULL ? &source : NULL, subset_rights);
     if (rc == 0) {
         epoch = llam_broker_revocation_epoch_unlocked(broker);
         memset(&attenuated, 0, sizeof(attenuated));
-        rc = llam_capability_attenuate(&broker->capability_key, token, subset_rights, epoch, &attenuated);
+        rc = llam_capability_attenuate(&broker->capability_key, &source, subset_rights, epoch, &attenuated);
         if (rc == 0) {
             *out_token = attenuated;
         }
         memset(&attenuated, 0, sizeof(attenuated));
     }
-    if (rc != 0 && !aliases_input) {
-        memset(out_token, 0, sizeof(*out_token));
-    }
+    memset(&source, 0, sizeof(source));
     llam_broker_unlock(mutable_broker);
     llam_broker_end_op(mutable_broker);
     return rc;

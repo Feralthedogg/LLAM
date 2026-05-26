@@ -3,10 +3,12 @@
  * @brief Task object allocation, reuse, and task-id assignment.
  *
  * @details
- * Task objects are owned by the shard allocator that created them. The owner can
- * allocate and recycle tasks from its local free list without locking. Foreign
- * shards return tasks through the owner's atomic remote-free list, which is
- * drained at quiescent scheduler points.
+ * Task objects are owned by the shard allocator that created them. The owner
+ * worker allocates and recycles normal tasks from its local free list without
+ * locking. Host-control spawns use a separate external cache so unmanaged
+ * public runtime handles never race the owner free-list hot path. Foreign
+ * shards return normal tasks through the owner's atomic remote-free list, which
+ * is drained at quiescent scheduler points.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -133,6 +135,64 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
 }
 
 /**
+ * @brief Allocate a task for an unmanaged host-control spawn.
+ *
+ * @details
+ * Host threads can spawn into an explicit live runtime while the owner worker is
+ * concurrently recycling tasks.  To keep the managed-task spawn path lock-free,
+ * host-control tasks use a separate mutex-protected external cache instead of
+ * touching the owner shard's normal task_free list.
+ *
+ * @param shard Target shard whose runtime owns the task.
+ * @return Task object on success, or NULL on allocation failure.
+ */
+static llam_task_t *llam_task_alloc_external(llam_shard_t *shard) {
+    llam_task_t *task;
+    int rc;
+
+    llam_allocator_lock(&shard->allocator);
+    task = shard->allocator.task_external_free;
+    if (task != NULL) {
+        shard->allocator.task_external_free = task->alloc_next;
+        shard->allocator.task_reuses += 1U;
+    }
+    llam_allocator_unlock(&shard->allocator);
+    if (task != NULL) {
+        return task;
+    }
+
+    task = calloc(1, sizeof(*task));
+    if (task == NULL) {
+        return NULL;
+    }
+    rc = pthread_mutex_init(&task->lock, NULL);
+    if (rc != 0) {
+        free(task);
+        errno = rc;
+        return NULL;
+    }
+    task->lock_initialized = true;
+    task->alloc_owner_shard = shard->id;
+    task->alloc_external_pool = true;
+    if (llam_allocator_record_chunk(&shard->allocator,
+                                    task,
+                                    sizeof(*task),
+                                    false,
+                                    LLAM_ALLOC_CHUNK_TASK,
+                                    1U) != 0) {
+        pthread_mutex_destroy(&task->lock);
+        free(task);
+        errno = ENOMEM;
+        return NULL;
+    }
+    llam_task_register_public_slab(task, 1U);
+    llam_allocator_lock(&shard->allocator);
+    shard->allocator.task_allocs += 1U;
+    llam_allocator_unlock(&shard->allocator);
+    return task;
+}
+
+/**
  * @brief Allocate a task object from a shard-local cache.
  *
  * @param shard Shard that should own the returned task object.
@@ -143,44 +203,34 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
  */
 llam_task_t *llam_task_alloc(llam_shard_t *shard) {
     llam_task_t *task = NULL;
+    bool local_owner;
 
     if (shard == NULL) {
         errno = EINVAL;
         return NULL;
     }
 
+    local_owner = g_llam_tls_shard == shard;
+    if (!local_owner) {
+        task = llam_task_alloc_external(shard);
+        if (task == NULL) {
+            return NULL;
+        }
+        llam_task_reset_reused(task, shard->runtime, shard->id);
+        task->alloc_external_pool = true;
+        if (llam_task_activate_public_handle(task) != 0) {
+            llam_task_allocator_free(task);
+            return NULL;
+        }
+        return task;
+    }
+
     for (;;) {
-        if (g_llam_tls_shard == shard) {
-            // Same-shard allocation is the hot path; no other thread mutates the
-            // owner-local free list without taking the slow path lock.
-            task = shard->allocator.task_free;
-            if (task != NULL) {
-                shard->allocator.task_free = task->alloc_next;
-                shard->allocator.task_reuses += 1U;
-                llam_task_reset_reused(task, shard->runtime, shard->id);
-                if (llam_task_activate_public_handle(task) != 0) {
-                    llam_task_allocator_free(task);
-                    return NULL;
-                }
-                return task;
-            }
-        } else {
-            // Cold external/bootstrap allocation. Serialize access to another
-            // shard's local free list rather than using the remote-free queue.
-            llam_allocator_lock(&shard->allocator);
-            task = shard->allocator.task_free;
-            if (task != NULL) {
-                shard->allocator.task_free = task->alloc_next;
-                shard->allocator.task_reuses += 1U;
-                llam_allocator_unlock(&shard->allocator);
-                llam_task_reset_reused(task, shard->runtime, shard->id);
-                if (llam_task_activate_public_handle(task) != 0) {
-                    llam_task_allocator_free(task);
-                    return NULL;
-                }
-                return task;
-            }
-            llam_allocator_unlock(&shard->allocator);
+        task = shard->allocator.task_free;
+        if (task != NULL) {
+            shard->allocator.task_free = task->alloc_next;
+            shard->allocator.task_reuses += 1U;
+            break;
         }
         // Empty cache: grow one slab and retry so callers see normal allocation
         // semantics instead of needing to understand slab management.
@@ -188,6 +238,13 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard) {
             return NULL;
         }
     }
+    llam_task_reset_reused(task, shard->runtime, shard->id);
+    task->alloc_external_pool = false;
+    if (llam_task_activate_public_handle(task) != 0) {
+        llam_task_allocator_free(task);
+        return NULL;
+    }
+    return task;
 }
 
 /**
@@ -207,11 +264,15 @@ void llam_task_allocator_free(llam_task_t *task) {
     llam_task_local_clear(task);
     owner = &rt->shards[task->alloc_owner_shard];
     task->alloc_next = NULL;
+    if (task->alloc_external_pool) {
+        llam_allocator_lock(&owner->allocator);
+        task->alloc_next = owner->allocator.task_external_free;
+        owner->allocator.task_external_free = task;
+        owner->allocator.task_frees += 1U;
+        llam_allocator_unlock(&owner->allocator);
+        return;
+    }
     if (g_llam_tls_shard == owner) {
-        // Owner shard can recycle directly; this is the common task cleanup path
-        // after joined tasks are reclaimed by their home scheduler.  Matching
-        // the shard pointer, not just the shard id, keeps concurrent runtimes
-        // from writing into another runtime's local free list.
         task->alloc_next = owner->allocator.task_free;
         owner->allocator.task_free = task;
         owner->allocator.task_frees += 1U;

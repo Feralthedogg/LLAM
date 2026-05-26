@@ -59,6 +59,7 @@
     (LLAM_CAP_RIGHT_SEND | LLAM_CAP_RIGHT_RECV | LLAM_CAP_RIGHT_CLOSE | LLAM_CAP_RIGHT_DESTROY)
 #define LLAM_BROKER_DESCRIPTOR_TRANSPORT_RIGHTS \
     (LLAM_CAP_RIGHT_READ | LLAM_CAP_RIGHT_WRITE | LLAM_CAP_RIGHT_DESTROY)
+#define LLAM_BROKER_TASK_TRANSPORT_RIGHTS (LLAM_CAP_RIGHT_JOIN | LLAM_CAP_RIGHT_DETACH)
 
 typedef enum llam_broker_task_kind {
     LLAM_BROKER_TASK_KIND_RETURN_U64 = 1,
@@ -74,6 +75,11 @@ typedef enum llam_broker_task_state {
     LLAM_BROKER_TASK_STATE_JOINED = 3,
     LLAM_BROKER_TASK_STATE_DETACHED = 4,
 } llam_broker_task_state_t;
+
+typedef struct llam_broker_socket_identity {
+    uint64_t dev;
+    uint64_t ino;
+} llam_broker_socket_identity_t;
 
 typedef struct llam_broker_buffer_slot {
     unsigned char *data;
@@ -248,6 +254,13 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
                                                   bool *out_should_close,
                                                   llam_handle_t descriptor_handle,
                                                   llam_handle_t *out_response_descriptor);
+void llam_broker_mark_response_failure_clear_outputs(llam_broker_wire_response_t *response, int error_code);
+void llam_broker_normalize_response_failure_outputs(llam_broker_wire_response_t *response);
+int llam_broker_validate_response_frame_or_clear(llam_broker_wire_response_t *response);
+void llam_broker_rollback_created_response(llam_broker_t *broker,
+                                           const llam_broker_wire_request_t *request,
+                                           const llam_broker_wire_response_t *response,
+                                           uint64_t subject_id);
 
 int llam_broker_init(llam_broker_t *broker, const llam_runtime_opts_t *opts, size_t opts_size);
 void llam_broker_destroy(llam_broker_t *broker);
@@ -267,6 +280,7 @@ int llam_broker_issue_object_cap(llam_broker_t *broker,
                                  uint64_t generation,
                                  uint64_t rights,
                                  llam_capability_token_t *out_token);
+int llam_broker_validate_object_rights(uint32_t family, uint64_t rights);
 int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
                                           uint32_t family,
                                           uint64_t slot,
@@ -382,6 +396,9 @@ int llam_broker_spawn_task(llam_broker_t *broker,
                            uint64_t arg0,
                            uint64_t rights,
                            llam_capability_token_t *out_token);
+int llam_broker_task_join_runtime_drive_allowed(llam_broker_t *broker,
+                                                const llam_capability_token_t *token,
+                                                bool *out_allowed);
 int llam_broker_join_task(llam_broker_t *broker,
                           const llam_capability_token_t *token,
                           uint64_t *out_result0);
@@ -432,7 +449,9 @@ int llam_broker_listen_unix(const char *path, int *out_fd);
 int llam_broker_connect_unix(const char *path, int *out_fd);
 int llam_broker_accept_one(int listen_fd, int *out_fd);
 void llam_broker_close_fd(int fd);
-void llam_broker_unlink_owned_socket(const char *path, int fd);
+int llam_broker_capture_owned_socket(const char *path, llam_broker_socket_identity_t *out_identity);
+int llam_broker_restrict_owned_socket(const char *path, const llam_broker_socket_identity_t *identity);
+void llam_broker_unlink_owned_socket(const char *path, const llam_broker_socket_identity_t *identity);
 int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle);
 int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle);
 void llam_broker_close_handle(llam_handle_t handle);

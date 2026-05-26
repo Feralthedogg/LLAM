@@ -272,10 +272,24 @@ LLAM_API ssize_t llam_pread_handle_owned_aligned(llam_handle_t handle,
                                                  size_t alignment,
                                                  llam_io_buffer_t **out);
 
-/** @brief Release a runtime-owned I/O buffer. */
+/**
+ * @brief Release a runtime-owned I/O buffer.
+ *
+ * @details The buffer handle is consumed. Duplicate or stale releases are
+ * ignored, but any data pointer previously returned by ::llam_io_buffer_data is
+ * invalid once release begins. Callers that share a buffer between threads must
+ * serialize release against data-pointer use.
+ */
 LLAM_API void llam_io_buffer_release(llam_io_buffer_t *buffer);
 
-/** @brief Return the data pointer for a runtime-owned I/O buffer. */
+/**
+ * @brief Return the data pointer for a runtime-owned I/O buffer.
+ *
+ * @details The returned pointer is a borrowed view into @p buffer. It remains
+ * valid only while the buffer remains unreleased; LLAM protects the accessor
+ * itself from stale public handles, but it cannot make a raw C pointer safe
+ * after another thread releases the buffer.
+ */
 LLAM_API void *llam_io_buffer_data(llam_io_buffer_t *buffer);
 
 /** @brief Return the number of valid bytes in a runtime-owned I/O buffer. */
