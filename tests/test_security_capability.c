@@ -7588,7 +7588,6 @@ done:
 
 static int test_broker_ring_windows_cross_process_flood(void) {
     char name[128];
-    char ready_event_name[128];
     char exe_path[MAX_PATH];
     char command[1024];
     llam_broker_ring_mapping_t mapping;
@@ -7714,6 +7713,7 @@ done:
 
 static int test_broker_ring_windows_cross_process_session_replay_guard(void) {
     char name[128];
+    char ready_event_name[128];
     char exe_path[MAX_PATH];
     char command[1024];
     llam_broker_ring_mapping_t mapping;
