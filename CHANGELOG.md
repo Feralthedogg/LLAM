@@ -414,7 +414,9 @@
   mint helpers now also clear token output before invalid-broker failures, and
   POSIX broker socket identity capture clears cleanup identity output before
   invalid path failures so stale endpoint identity cannot be reused after a
-  failed capture.
+  failed capture. Broker control dispatch now rejects even `PING` when the
+  broker context is null, uninitialized, destroyed, or missing its runtime, so
+  malformed internal calls cannot make an invalid control plane look healthy.
 
 * reject oversized broker ring task command ids before narrowing to the
   predefined 32-bit command enum. This keeps high-bit shared-memory submissions

@@ -184,6 +184,15 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
         llam_broker_response_error(response, EINVAL);
         return;
     }
+    if (LLAM_UNLIKELY(broker == NULL ||
+                      !broker->initialized ||
+                      broker->runtime == NULL ||
+                      broker->destroying)) {
+        /* PING must not make an invalid broker context look healthy. */
+        llam_broker_close_unclaimed_descriptor(descriptor_handle);
+        llam_broker_response_error(response, EINVAL);
+        return;
+    }
     if (!llam_handle_is_invalid(descriptor_handle) &&
         request->op != (uint32_t)LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR) {
         llam_broker_close_unclaimed_descriptor(descriptor_handle);

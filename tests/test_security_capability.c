@@ -1881,6 +1881,9 @@ static int test_broker_ring_private_name_clears_short_output(void) {
 }
 
 static int test_broker_control_outputs_clear_on_invalid_input(void) {
+    llam_broker_t uninitialized_broker;
+    llam_broker_wire_request_t request;
+    llam_broker_wire_response_t response;
     uint64_t subject_id = UINT64_C(0x1111222233334444);
     uint64_t session_id = UINT64_C(0x5555666677778888);
     uint64_t task_result = UINT64_C(0x9999aaaabbbbcccc);
@@ -1892,6 +1895,39 @@ static int test_broker_control_outputs_clear_on_invalid_input(void) {
     llam_broker_ring_submission_t submission;
     llam_broker_ring_completion_t completion;
     llam_broker_ring_completion_t completions[2];
+
+    request_init(&request, LLAM_BROKER_WIRE_OP_PING);
+    memset(&response, 0x5a, sizeof(response));
+    llam_broker_process_request(NULL, &request, &response, NULL);
+    if (response.magic != LLAM_BROKER_WIRE_MAGIC ||
+        response.version != LLAM_BROKER_WIRE_VERSION ||
+        response.status == 0 ||
+        response.error_code != EINVAL ||
+        response.result0 != 0U ||
+        response.result1 != 0U ||
+        response.result2 != 0U ||
+        !memory_is_byte(&response.token, sizeof(response.token), 0U) ||
+        !memory_is_byte(response.data, sizeof(response.data), 0U)) {
+        fprintf(stderr, "[test_security_capability] invalid broker context accepted control request\n");
+        return -1;
+    }
+
+    memset(&uninitialized_broker, 0, sizeof(uninitialized_broker));
+    request_init(&request, LLAM_BROKER_WIRE_OP_PING);
+    memset(&response, 0x5a, sizeof(response));
+    llam_broker_process_request(&uninitialized_broker, &request, &response, NULL);
+    if (response.magic != LLAM_BROKER_WIRE_MAGIC ||
+        response.version != LLAM_BROKER_WIRE_VERSION ||
+        response.status == 0 ||
+        response.error_code != EINVAL ||
+        response.result0 != 0U ||
+        response.result1 != 0U ||
+        response.result2 != 0U ||
+        !memory_is_byte(&response.token, sizeof(response.token), 0U) ||
+        !memory_is_byte(response.data, sizeof(response.data), 0U)) {
+        fprintf(stderr, "[test_security_capability] uninitialized broker accepted control request\n");
+        return -1;
+    }
 
     errno = 0;
     if (expect_errno(llam_broker_transport_subject(NULL, UINT64_C(1), &subject_id),
@@ -2830,9 +2866,9 @@ static int test_broker_create_response_failure_rolls_back_memory_grants(void) {
      */
     if (broker_send_create_request_then_close(&broker,
                                               LLAM_BROKER_WIRE_OP_CREATE_BUFFER,
-                                              0U,
-                                              0U,
                                               16U,
+                                              0U,
+                                              0U,
                                               LLAM_CAP_RIGHT_READ | LLAM_CAP_RIGHT_WRITE) != 0 ||
         broker_active_buffer_count(&broker) != 0U) {
         fprintf(stderr,
@@ -2842,9 +2878,9 @@ static int test_broker_create_response_failure_rolls_back_memory_grants(void) {
     }
     if (broker_send_create_request_then_close(&broker,
                                               LLAM_BROKER_WIRE_OP_CREATE_CHANNEL,
-                                              0U,
-                                              0U,
                                               4U,
+                                              0U,
+                                              0U,
                                               LLAM_CAP_RIGHT_SEND | LLAM_CAP_RIGHT_RECV) != 0 ||
         broker_active_channel_count(&broker) != 0U) {
         fprintf(stderr,
