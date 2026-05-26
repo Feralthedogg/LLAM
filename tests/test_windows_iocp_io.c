@@ -103,6 +103,20 @@ static void task_fail(windows_iocp_state_t *state, const char *where, int err) {
     }
 }
 
+static void maybe_stop_after_all_tasks(windows_iocp_state_t *state) {
+    if (atomic_load_explicit(&state->server_done, memory_order_acquire) == 1U &&
+        atomic_load_explicit(&state->client_done, memory_order_acquire) == 1U &&
+        atomic_load_explicit(&state->assoc_done, memory_order_acquire) == LLAM_WINDOWS_ASSOC_RACE_TASKS) {
+        /*
+         * The IOCP smoke validates request completion, not the idle-run drain
+         * heuristic.  Request a cooperative stop once every joinable test task
+         * has published completion so hosted runners do not wait on a dormant
+         * completion port after the useful work is already done.
+         */
+        (void)llam_runtime_request_stop();
+    }
+}
+
 static llam_fd_t create_overlapped_tcp_socket(void) {
     SOCKET socket_fd = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
 
@@ -301,6 +315,7 @@ static void assoc_forget_race_task(void *arg) {
     llam_runtime_t *rt = g_llam_tls_shard != NULL ? g_llam_tls_shard->runtime : NULL;
     llam_node_t *node;
 
+    test_note("assoc task start");
     if (rt == NULL || rt->nodes == NULL || rt->active_nodes == 0U) {
         task_fail(state, "assoc race missing runtime node", EINVAL);
         return;
@@ -338,6 +353,8 @@ static void assoc_forget_race_task(void *arg) {
         llam_yield();
     }
     atomic_fetch_add_explicit(&state->assoc_done, 1U, memory_order_relaxed);
+    test_note("assoc task done");
+    maybe_stop_after_all_tasks(state);
 }
 
 static void server_task(void *arg) {
@@ -354,6 +371,7 @@ static void server_task(void *arg) {
                                  native_tcp_pollin[0] != '\0' &&
                                  strcmp(native_tcp_pollin, "0") != 0;
 
+    test_note("server task start");
     accepted = llam_accept(state->listener, NULL, NULL);
     if (LLAM_FD_IS_INVALID(accepted)) {
         task_fail(state, "llam_accept/AcceptEx failed", errno);
@@ -405,6 +423,8 @@ static void server_task(void *arg) {
     }
     closesocket(accepted);
     atomic_fetch_add_explicit(&state->server_done, 1U, memory_order_relaxed);
+    test_note("server task done");
+    maybe_stop_after_all_tasks(state);
 }
 
 static void client_task(void *arg) {
@@ -415,6 +435,7 @@ static void client_task(void *arg) {
     ssize_t nread;
     short revents = 0;
 
+    test_note("client task start");
     if (LLAM_FD_IS_INVALID(client)) {
         task_fail(state, "client socket create failed", errno);
         return;
@@ -460,6 +481,8 @@ static void client_task(void *arg) {
     }
     closesocket(client);
     atomic_fetch_add_explicit(&state->client_done, 1U, memory_order_relaxed);
+    test_note("client task done");
+    maybe_stop_after_all_tasks(state);
 }
 
 int main(void) {
