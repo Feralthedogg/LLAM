@@ -34,6 +34,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -117,6 +118,19 @@ typedef struct timer_heap_overflow_state {
 
 static void ownership_task(void *arg);
 
+static void host_thread_yield(void) {
+#if LLAM_PLATFORM_WINDOWS
+    struct timespec ts = {
+        .tv_sec = 0,
+        .tv_nsec = 1000000L,
+    };
+
+    (void)nanosleep(&ts, NULL);
+#else
+    (void)sched_yield();
+#endif
+}
+
 #if !LLAM_PLATFORM_WINDOWS
 typedef struct io_reorder_state {
     atomic_uint failures;
@@ -135,6 +149,12 @@ typedef struct io_reorder_state {
 static void cancel_destroy_race_wait_start(cancel_destroy_race_state_t *state) {
     atomic_fetch_add_explicit(&state->ready, 1U, memory_order_acq_rel);
     while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+        /*
+         * These are host pthreads, not managed LLAM tasks. Yield to the host
+         * scheduler so slow BSD VMs do not spend the race budget starving the
+         * peer thread before the actual cancel/destroy interleaving begins.
+         */
+        host_thread_yield();
     }
 }
 
@@ -295,6 +315,7 @@ static int test_cancel_token_destroy_race(void) {
         }
 
         while (atomic_load_explicit(&state.ready, memory_order_acquire) != 2U) {
+            host_thread_yield();
         }
         atomic_store_explicit(&state.start, 1U, memory_order_release);
         (void)pthread_join(canceler, NULL);
