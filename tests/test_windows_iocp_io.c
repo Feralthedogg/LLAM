@@ -65,6 +65,11 @@ static int fail_errno(const char *message) {
     return 1;
 }
 
+static void test_note(const char *phase) {
+    printf("[test_windows_iocp_io] %s\n", phase);
+    fflush(stdout);
+}
+
 static int test_invalid_owned_fd_errors(void) {
     llam_io_buffer_t *owned = (llam_io_buffer_t *)(uintptr_t)1U;
 
@@ -324,6 +329,13 @@ static void assoc_forget_race_task(void *arg) {
             task_fail(state, "assoc race llam_close", errno);
             return;
         }
+        /*
+         * The association stress is intentionally CPU/syscall heavy and runs
+         * inside managed tasks.  Yield each iteration so this regression guard
+         * does not starve the accept/connect round-trip tasks on hosted
+         * Windows runners with a small worker count.
+         */
+        llam_yield();
     }
     atomic_fetch_add_explicit(&state->assoc_done, 1U, memory_order_relaxed);
 }
@@ -473,15 +485,18 @@ int main(void) {
     if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return fail_errno("llam_runtime_init_ex failed");
     }
+    test_note("begin invalid fd probes");
     if (test_invalid_owned_fd_errors() != 0) {
         llam_runtime_shutdown();
         return 1;
     }
+    test_note("begin listener setup");
     if (setup_listener(&state) != 0) {
         llam_runtime_shutdown();
         return fail_errno("listener setup failed");
     }
 
+    test_note("begin spawn");
     server = llam_spawn(server_task, &state, NULL);
     client = llam_spawn(client_task, &state, NULL);
     for (unsigned i = 0U; i < LLAM_WINDOWS_ASSOC_RACE_TASKS; ++i) {
@@ -499,11 +514,13 @@ int main(void) {
             return fail_errno("llam_spawn assoc race failed");
         }
     }
+    test_note("begin run");
     if (llam_run() != 0) {
         closesocket(state.listener);
         llam_runtime_shutdown();
         return fail_errno("llam_run failed");
     }
+    test_note("begin join");
     if (llam_join(server) != 0 || llam_join(client) != 0) {
         closesocket(state.listener);
         llam_runtime_shutdown();
