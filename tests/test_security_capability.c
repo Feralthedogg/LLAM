@@ -144,7 +144,17 @@ static uint64_t test_broker_ring_batch_max_p99_us(void) {
 #endif
 }
 
-static size_t broker_active_task_count(const llam_broker_t *broker);
+static size_t broker_active_task_count(const llam_broker_t *broker) {
+    size_t count = 0U;
+
+    if (broker == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
+        count += broker->tasks[i].active ? 1U : 0U;
+    }
+    return count;
+}
 
 static int compare_u64(const void *lhs, const void *rhs) {
     const uint64_t a = *(const uint64_t *)lhs;
@@ -2597,18 +2607,6 @@ static size_t broker_active_channel_count(const llam_broker_t *broker) {
     }
     for (size_t i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
         count += broker->channels[i].active ? 1U : 0U;
-    }
-    return count;
-}
-
-static size_t broker_active_task_count(const llam_broker_t *broker) {
-    size_t count = 0U;
-
-    if (broker == NULL) {
-        return 0U;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
-        count += broker->tasks[i].active ? 1U : 0U;
     }
     return count;
 }
