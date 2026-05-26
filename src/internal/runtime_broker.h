@@ -425,6 +425,7 @@ int llam_broker_read_response_fd(int fd,
                                  llam_broker_wire_response_t *response,
                                  int *out_descriptor_fd);
 int llam_broker_set_cloexec_fd(int fd);
+int llam_broker_dup_cloexec_fd(int fd);
 int llam_broker_write_request_with_descriptor(int fd,
                                               const llam_broker_wire_request_t *request,
                                               int descriptor_fd);

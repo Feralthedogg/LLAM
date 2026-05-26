@@ -265,16 +265,9 @@ static int llam_broker_duplicate_descriptor_unlocked(llam_broker_t *broker,
     }
 #else
     {
-        int duplicate = dup(slot->fd);
+        int duplicate = llam_broker_dup_cloexec_fd(slot->fd);
 
         if (duplicate < 0) {
-            return -1;
-        }
-        if (llam_broker_descriptor_set_cloexec((llam_handle_t)duplicate) != 0) {
-            int saved_errno = errno;
-
-            close(duplicate);
-            errno = saved_errno;
             return -1;
         }
         *out_handle = (llam_handle_t)duplicate;

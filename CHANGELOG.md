@@ -363,7 +363,10 @@
   broker-owned descriptor slots, private ring mapping fds, response fd
   duplicates, and ring mapping duplicates are now marked close-on-exec so
   broker capability transport or data-plane authority is not inherited by later
-  helper `exec` calls.
+  helper `exec` calls. POSIX broker socket creation, descriptor/ring fd
+  duplication, and `SCM_RIGHTS` receive paths now prefer `SOCK_CLOEXEC`,
+  `F_DUPFD_CLOEXEC`, and `MSG_CMSG_CLOEXEC` where available, reducing the
+  fork/exec race window before falling back to `fcntl(FD_CLOEXEC)`.
   Windows broker-registered HANDLEs now clear `HANDLE_FLAG_INHERIT` during
   descriptor registration, matching the POSIX close-on-exec boundary for
   child processes created with handle inheritance enabled.

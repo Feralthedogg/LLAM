@@ -2626,6 +2626,7 @@ static int test_broker_posix_transport_fds_are_cloexec(void) {
     int sockets[2] = {-1, -1};
     int pipe_fds[2] = {-1, -1};
     int broker_owned_pipe[2] = {-1, -1};
+    int cloexec_duplicate = -1;
     int received_fd = -1;
     llam_handle_t response_descriptor = LLAM_INVALID_HANDLE;
     llam_capability_token_t descriptor_token;
@@ -2662,6 +2663,13 @@ static int test_broker_posix_transport_fds_are_cloexec(void) {
     if (llam_broker_accept_one(listen_fd, &server_fd) != 0 ||
         !broker_fd_has_cloexec(server_fd)) {
         fprintf(stderr, "[test_security_capability] broker accepted fd is inheritable across exec\n");
+        goto done;
+    }
+    cloexec_duplicate = llam_broker_dup_cloexec_fd(client_fd);
+    if (cloexec_duplicate < 0 ||
+        cloexec_duplicate == client_fd ||
+        !broker_fd_has_cloexec(cloexec_duplicate)) {
+        fprintf(stderr, "[test_security_capability] broker duplicate fd is inheritable across exec\n");
         goto done;
     }
 
@@ -2718,6 +2726,9 @@ done:
     }
     if (received_fd >= 0) {
         close(received_fd);
+    }
+    if (cloexec_duplicate >= 0) {
+        close(cloexec_duplicate);
     }
     if (pipe_fds[0] >= 0) {
         close(pipe_fds[0]);

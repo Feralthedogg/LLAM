@@ -54,6 +54,71 @@ int llam_broker_set_cloexec_fd(int fd) {
     return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
 }
 
+int llam_broker_dup_cloexec_fd(int fd) {
+    int duplicate;
+
+    if (LLAM_UNLIKELY(fd < 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+#if defined(F_DUPFD_CLOEXEC)
+    /*
+     * Prefer an atomic close-on-exec duplicate.  The fallback exists for older
+     * kernels/libcs that expose the constant but reject it at runtime.
+     */
+    duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (duplicate >= 0) {
+        return duplicate;
+    }
+    if (errno != EINVAL) {
+        return -1;
+    }
+#endif
+    duplicate = dup(fd);
+    if (duplicate < 0) {
+        return -1;
+    }
+    if (llam_broker_set_cloexec_fd(duplicate) != 0) {
+        int saved_errno = errno;
+
+        close(duplicate);
+        errno = saved_errno;
+        return -1;
+    }
+    return duplicate;
+}
+
+static int llam_broker_socket_cloexec(int domain, int type, int protocol) {
+    int fd;
+
+#if defined(SOCK_CLOEXEC)
+    /*
+     * SOCK_CLOEXEC removes the fork/exec inheritance window between socket()
+     * and fcntl(F_SETFD).  Some older targets define the flag but reject it for
+     * a socket family, so fall back only for that compatibility case.
+     */
+    fd = socket(domain, type | SOCK_CLOEXEC, protocol);
+    if (fd >= 0) {
+        return fd;
+    }
+    if (errno != EINVAL && errno != EPROTONOSUPPORT) {
+        return -1;
+    }
+#endif
+    fd = socket(domain, type, protocol);
+    if (fd < 0) {
+        return -1;
+    }
+    if (llam_broker_set_cloexec_fd(fd) != 0) {
+        int saved_errno = errno;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    return fd;
+}
+
 static int llam_broker_open_unix_endpoint(const char *path, struct sockaddr_un *addr, int *out_fd) {
     size_t path_len;
     int fd;
@@ -70,15 +135,8 @@ static int llam_broker_open_unix_endpoint(const char *path, struct sockaddr_un *
         errno = ENAMETOOLONG;
         return -1;
     }
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    fd = llam_broker_socket_cloexec(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        return -1;
-    }
-    if (llam_broker_set_cloexec_fd(fd) != 0) {
-        int saved_errno = errno;
-
-        close(fd);
-        errno = saved_errno;
         return -1;
     }
     memset(addr, 0, sizeof(*addr));

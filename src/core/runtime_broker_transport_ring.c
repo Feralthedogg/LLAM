@@ -78,16 +78,9 @@ int llam_broker_transport_create_ring(llam_broker_t *broker,
     if (llam_broker_ring_create_private_fd(&mapping) != 0) {
         return -1;
     }
-    descriptor = (llam_handle_t)dup(mapping.fd);
+    descriptor = (llam_handle_t)llam_broker_dup_cloexec_fd(mapping.fd);
     if (descriptor < 0) {
         saved_errno = errno;
-        llam_broker_ring_unmap(&mapping);
-        errno = saved_errno;
-        return -1;
-    }
-    if (llam_broker_set_cloexec_fd((int)descriptor) != 0) {
-        saved_errno = errno;
-        llam_broker_close_handle(descriptor);
         llam_broker_ring_unmap(&mapping);
         errno = saved_errno;
         return -1;

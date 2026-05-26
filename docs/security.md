@@ -253,7 +253,10 @@ broker-control foundation:
   broker-owned descriptor slots, private ring mapping fds, duplicated ring
   response fds, and mapped ring fd duplicates. This prevents later helper
   `exec` calls from inheriting broker capability transport or data-plane
-  authority by accident.
+  authority by accident. Where the platform exposes atomic close-on-exec
+  primitives, broker sockets use `SOCK_CLOEXEC`, descriptor/ring duplicates use
+  `F_DUPFD_CLOEXEC`, and received ancillary fds use `MSG_CMSG_CLOEXEC` before
+  falling back to post-creation `fcntl(FD_CLOEXEC)`.
 - Windows broker-registered HANDLEs clear `HANDLE_FLAG_INHERIT` during
   descriptor registration. This mirrors the POSIX close-on-exec rule and keeps
   broker descriptor authority out of child processes created with handle

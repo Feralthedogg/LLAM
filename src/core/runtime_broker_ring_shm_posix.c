@@ -24,6 +24,7 @@
  */
 
 #include "runtime_internal.h"
+#include "runtime_broker.h"
 #include "runtime_broker_ring.h"
 
 #if !LLAM_PLATFORM_WINDOWS
@@ -95,7 +96,7 @@ int llam_broker_ring_map_fd(int fd, bool take_ownership, llam_broker_ring_mappin
         return -1;
     }
     if (!take_ownership) {
-        mapped_fd = dup(fd);
+        mapped_fd = llam_broker_dup_cloexec_fd(fd);
         if (mapped_fd < 0) {
             return -1;
         }

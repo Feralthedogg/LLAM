@@ -151,7 +151,16 @@ static int llam_broker_read_message_fd(int fd, void *message, size_t message_len
         msg.msg_iovlen = 1U;
         msg.msg_control = control;
         msg.msg_controllen = sizeof(control);
+        /*
+         * MSG_CMSG_CLOEXEC atomically marks SCM_RIGHTS descriptors close-on-exec
+         * on platforms that support it.  We still call llam_broker_set_cloexec_fd
+         * below because not every supported POSIX target exposes this flag.
+         */
+#if defined(MSG_CMSG_CLOEXEC)
+        nread = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
+#else
         nread = recvmsg(fd, &msg, 0);
+#endif
         if (nread > 0) {
             if ((msg.msg_flags & MSG_CTRUNC) != 0) {
                 return llam_broker_read_message_fail(message,
