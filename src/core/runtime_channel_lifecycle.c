@@ -250,6 +250,14 @@ llam_channel_t *llam_channel_create(size_t capacity) {
         errno = ENOMEM;
         return NULL;
     }
+    /*
+     * Keep the allocation-size invariant inside LLAM instead of relying on
+     * calloc() to detect nmemb * size overflow on every supported libc.
+     */
+    if (ring_capacity > SIZE_MAX / sizeof(*channel->buffer)) {
+        errno = ENOMEM;
+        return NULL;
+    }
 
     if (capacity == 1U) {
         channel = llam_channel_cache_acquire();

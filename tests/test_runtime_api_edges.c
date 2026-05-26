@@ -560,6 +560,10 @@ static int test_fault_boundary_contracts(void) {
         return fail_msg("channel create zero capacity did not fail with EINVAL");
     }
     errno = 0;
+    if (llam_channel_create((SIZE_MAX / 2U) + 1U) != NULL || errno != ENOMEM) {
+        return fail_msg("channel allocation-overflow boundary did not fail with ENOMEM");
+    }
+    errno = 0;
     if (llam_channel_create((SIZE_MAX / 2U) + 2U) != NULL || errno != ENOMEM) {
         return fail_msg("channel huge capacity did not fail with ENOMEM");
     }
