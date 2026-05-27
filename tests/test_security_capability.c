@@ -3816,6 +3816,157 @@ static int broker_write_request_with_fd_array(int fd,
     return 0;
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static int broker_write_partial_payload_with_fd(int fd,
+                                                const void *payload,
+                                                size_t payload_len,
+                                                int descriptor_fd) {
+    unsigned char control[CMSG_SPACE(sizeof(int))];
+    struct iovec iov;
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+
+    if (fd < 0 || payload == NULL || payload_len == 0U || descriptor_fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(control, 0, sizeof(control));
+    memset(&msg, 0, sizeof(msg));
+    iov.iov_base = (void *)payload;
+    iov.iov_len = payload_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1U;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+    cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &descriptor_fd, sizeof(descriptor_fd));
+    msg.msg_controllen = CMSG_SPACE(sizeof(int));
+    if (sendmsg(fd, &msg, 0) != (ssize_t)payload_len) {
+        return -1;
+    }
+    return 0;
+}
+
+static int test_broker_partial_descriptor_wire_reads_close_received_fd(void) {
+    llam_broker_wire_request_t partial_request;
+    llam_broker_wire_request_t request;
+    llam_broker_wire_response_t partial_response;
+    llam_broker_wire_response_t response;
+    int sockets[2] = {-1, -1};
+    int pipe_fds[2] = {-1, -1};
+    int descriptor_fd = -1;
+    int with_originals;
+    int after_read;
+    int rc = -1;
+
+    request_init(&partial_request, LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR);
+    memset(&request, 0xa5, sizeof(request));
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0 ||
+        pipe(pipe_fds) != 0) {
+        goto done;
+    }
+    with_originals = broker_count_open_fds();
+    /*
+     * The receiving side owns an SCM_RIGHTS duplicate as soon as the first
+     * partial frame is read. EOF must close that duplicate before returning
+     * EPIPE, otherwise a malformed peer can leak broker fds without issuing a
+     * valid broker request.
+     */
+    if (broker_write_partial_payload_with_fd(sockets[0],
+                                             &partial_request,
+                                             sizeof(partial_request) / 2U,
+                                             pipe_fds[0]) != 0) {
+        goto done;
+    }
+    (void)shutdown(sockets[0], SHUT_WR);
+    errno = 0;
+    if (expect_errno(llam_broker_read_request_fd(sockets[1], &request, &descriptor_fd),
+                     EPIPE,
+                     "partial descriptor broker request did not fail closed") != 0 ||
+        descriptor_fd != -1 ||
+        !memory_is_byte(&request, sizeof(request), 0U)) {
+        fprintf(stderr,
+                "[test_security_capability] partial descriptor request left authority or bytes in output\n");
+        goto done;
+    }
+    after_read = broker_count_open_fds();
+    if (after_read != with_originals) {
+        fprintf(stderr,
+                "[test_security_capability] partial descriptor request leaked fd count %d -> %d\n",
+                with_originals,
+                after_read);
+        goto done;
+    }
+    close(sockets[0]);
+    close(sockets[1]);
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
+    sockets[0] = -1;
+    sockets[1] = -1;
+    pipe_fds[0] = -1;
+    pipe_fds[1] = -1;
+
+    memset(&partial_response, 0, sizeof(partial_response));
+    partial_response.magic = LLAM_BROKER_WIRE_MAGIC;
+    partial_response.version = LLAM_BROKER_WIRE_VERSION;
+    partial_response.status = 0;
+    partial_response.result0 = UINT64_C(0xfeedfacecafebeef);
+    memset(&response, 0x5a, sizeof(response));
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0 ||
+        pipe(pipe_fds) != 0) {
+        goto done;
+    }
+    with_originals = broker_count_open_fds();
+    if (broker_write_partial_payload_with_fd(sockets[0],
+                                             &partial_response,
+                                             sizeof(partial_response) / 2U,
+                                             pipe_fds[0]) != 0) {
+        goto done;
+    }
+    (void)shutdown(sockets[0], SHUT_WR);
+    errno = 0;
+    if (expect_errno(llam_broker_read_response_fd(sockets[1], &response, &descriptor_fd),
+                     EPIPE,
+                     "partial descriptor broker response did not fail closed") != 0 ||
+        descriptor_fd != -1 ||
+        !memory_is_byte(&response, sizeof(response), 0U)) {
+        fprintf(stderr,
+                "[test_security_capability] partial descriptor response left authority or bytes in output\n");
+        goto done;
+    }
+    after_read = broker_count_open_fds();
+    if (after_read != with_originals) {
+        fprintf(stderr,
+                "[test_security_capability] partial descriptor response leaked fd count %d -> %d\n",
+                with_originals,
+                after_read);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (descriptor_fd >= 0) {
+        close(descriptor_fd);
+    }
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    if (sockets[1] >= 0) {
+        close(sockets[1]);
+    }
+    if (pipe_fds[0] >= 0) {
+        close(pipe_fds[0]);
+    }
+    if (pipe_fds[1] >= 0) {
+        close(pipe_fds[1]);
+    }
+    return rc;
+}
+#endif
+
 static int test_broker_invalid_register_descriptor_closes_received_fd(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -10119,6 +10270,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_request_helpers_clear_response_on_failure);
     LLAM_RUN_SECURITY_TEST(test_broker_endpoint_helpers_clear_outputs_on_failure);
     LLAM_RUN_SECURITY_TEST(test_broker_direct_failed_outputs_are_cleared);
+    LLAM_RUN_SECURITY_TEST(test_broker_partial_descriptor_wire_reads_close_received_fd);
     LLAM_RUN_SECURITY_TEST(test_broker_invalid_register_descriptor_closes_received_fd);
     LLAM_RUN_SECURITY_TEST(test_broker_overauthorized_descriptor_array_closes_all_received_fds);
     LLAM_RUN_SECURITY_TEST(test_broker_unclaimed_descriptor_is_rejected_and_closed);
