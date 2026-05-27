@@ -237,8 +237,8 @@ static int llam_channel_select_alloc_nodes(llam_shard_t *shard,
         llam_wait_node_t *node;
 
         if (task != NULL &&
-            task->active_wait_node == NULL &&
-            task->active_select_state == NULL &&
+            atomic_load_explicit(&task->active_wait_node, memory_order_acquire) == NULL &&
+            atomic_load_explicit(&task->active_select_state, memory_order_acquire) == NULL &&
             i < LLAM_TASK_EMBEDDED_SELECT_NODES) {
             node = &task->embedded_select_nodes[i];
             llam_wait_node_reset(node, task->owner_runtime, UINT_MAX);
@@ -287,12 +287,12 @@ static void llam_channel_select_set_task_tracking(llam_task_t *task,
      * cannot race on task->active_io_req.
      */
     llam_task_clear_wait_tracking(task);
-    task->active_wait_node = NULL;
-    task->active_wait_queue = NULL;
-    task->active_wait_queue_lock = NULL;
-    task->active_select_state = state;
+    atomic_store_explicit(&task->active_wait_node, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue_lock, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_select_state, state, memory_order_release);
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
-    task->join_target = NULL;
+    atomic_store_explicit(&task->join_target, NULL, memory_order_release);
     task->parked_shard = parked_shard;
     atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
     task->state = LLAM_TASK_STATE_PARKED;
@@ -377,10 +377,11 @@ bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam
     unsigned expected = LLAM_SELECT_PENDING;
     bool should_queue;
 
-    if (task == NULL || task->active_select_state == NULL) {
+    if (task == NULL) { return false; }
+    state = atomic_load_explicit(&task->active_select_state, memory_order_acquire);
+    if (state == NULL) {
         return false;
     }
-    state = task->active_select_state;
     if (!atomic_compare_exchange_strong_explicit(&state->completed,
                                                  &expected,
                                                  LLAM_SELECT_COMPLETING,

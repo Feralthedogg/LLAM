@@ -81,8 +81,8 @@ static bool llam_task_can_rehome_parked_wait(const llam_shard_t *source, const l
      * are quiescent via llam_merge_shard_timers_locked(), including popped but
      * unresolved callbacks.
      */
-    return task->active_wait_node != NULL ||
-           task->join_target != NULL ||
+    return atomic_load_explicit(&task->active_wait_node, memory_order_acquire) != NULL ||
+           atomic_load_explicit(&task->join_target, memory_order_acquire) != NULL ||
            llam_task_active_block_job_load(task) != NULL;
 }
 

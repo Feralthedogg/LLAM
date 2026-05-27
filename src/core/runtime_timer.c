@@ -135,7 +135,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
     case LLAM_WAIT_SLEEP:
         if (task->parked_shard < rt->active_shards) {
             llam_shard_t *shard = &rt->shards[task->parked_shard];
-            llam_wait_node_t *node = task->active_wait_node;
+            llam_wait_node_t *node = atomic_load_explicit(&task->active_wait_node, memory_order_acquire);
 
             pthread_mutex_lock(&shard->lock);
             removed = llam_timer_remove_locked(shard, task);
@@ -166,7 +166,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
         break;
     case LLAM_WAIT_JOIN:
         {
-            llam_task_t *join_target = task->join_target;
+            llam_task_t *join_target = atomic_load_explicit(&task->join_target, memory_order_acquire);
 
             /*
              * Join completion owns target->lock and may clear task->join_target
@@ -195,7 +195,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
     case LLAM_WAIT_COND:
     case LLAM_WAIT_CHANNEL_SEND:
     case LLAM_WAIT_CHANNEL_RECV:
-        if (task->active_select_state != NULL) {
+        if (atomic_load_explicit(&task->active_select_state, memory_order_acquire) != NULL) {
             if (llam_channel_select_abort_task_wait(task, ECANCELED, LLAM_WAIT_CANCEL)) {
                 llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
@@ -206,9 +206,9 @@ void llam_cancel_task_wait(llam_task_t *task) {
             break;
         }
         {
-            llam_wait_queue_t *queue = task->active_wait_queue;
-            pthread_mutex_t *queue_lock = task->active_wait_queue_lock;
-            llam_wait_node_t *node = task->active_wait_node;
+            llam_wait_queue_t *queue = atomic_load_explicit(&task->active_wait_queue, memory_order_acquire);
+            pthread_mutex_t *queue_lock = atomic_load_explicit(&task->active_wait_queue_lock, memory_order_acquire);
+            llam_wait_node_t *node = atomic_load_explicit(&task->active_wait_node, memory_order_acquire);
 
             /*
              * The normal producer wake path may clear task wait ownership while
@@ -394,7 +394,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
     switch (wait_reason) {
     case LLAM_WAIT_SLEEP: {
         llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
-        llam_wait_node_t *node = task->active_wait_node;
+        llam_wait_node_t *node = atomic_load_explicit(&task->active_wait_node, memory_order_acquire);
 
         shard->metrics.timeout_wakes += 1U;
         atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
@@ -412,12 +412,16 @@ void llam_timeout_task_wait(llam_task_t *task) {
         break;
     }
     case LLAM_WAIT_JOIN:
-        if (task->join_target != NULL) {
+        {
+            llam_task_t *join_target = atomic_load_explicit(&task->join_target, memory_order_acquire);
+            if (join_target == NULL) {
+                break;
+            }
             llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
-            pthread_mutex_lock(&task->join_target->lock);
-            removed = llam_join_waiter_remove_locked(task->join_target, task);
-            pthread_mutex_unlock(&task->join_target->lock);
+            pthread_mutex_lock(&join_target->lock);
+            removed = llam_join_waiter_remove_locked(join_target, task);
+            pthread_mutex_unlock(&join_target->lock);
             if (removed) {
                 shard->metrics.timeout_wakes += 1U;
                 atomic_store_explicit(&task->wake_error_code, ETIMEDOUT, memory_order_release);
@@ -429,7 +433,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
     case LLAM_WAIT_COND:
     case LLAM_WAIT_CHANNEL_SEND:
     case LLAM_WAIT_CHANNEL_RECV:
-        if (task->active_select_state != NULL) {
+        if (atomic_load_explicit(&task->active_select_state, memory_order_acquire) != NULL) {
             if (llam_channel_select_abort_task_wait(task, ETIMEDOUT, LLAM_WAIT_TIMEOUT)) {
                 llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
@@ -437,16 +441,21 @@ void llam_timeout_task_wait(llam_task_t *task) {
             }
             break;
         }
-        if (task->active_wait_queue != NULL && task->active_wait_queue_lock != NULL && task->active_wait_node != NULL) {
-            llam_wait_node_t *node = task->active_wait_node;
+        {
+            llam_wait_queue_t *queue = atomic_load_explicit(&task->active_wait_queue, memory_order_acquire);
+            pthread_mutex_t *queue_lock = atomic_load_explicit(&task->active_wait_queue_lock, memory_order_acquire);
+            llam_wait_node_t *node = atomic_load_explicit(&task->active_wait_node, memory_order_acquire);
             llam_shard_t *shard = &rt->shards[task->parked_shard % rt->active_shards];
 
-            pthread_mutex_lock(task->active_wait_queue_lock);
-            removed = llam_wait_queue_remove(task->active_wait_queue, node);
+            if (queue == NULL || queue_lock == NULL || node == NULL) {
+                break;
+            }
+            pthread_mutex_lock(queue_lock);
+            removed = llam_wait_queue_remove(queue, node);
             if (removed) {
                 node->error_code = ETIMEDOUT;
             }
-            pthread_mutex_unlock(task->active_wait_queue_lock);
+            pthread_mutex_unlock(queue_lock);
             if (removed) {
                 shard->metrics.timeout_wakes += 1U;
                 llam_wake_wait_node(node, true, LLAM_WAIT_TIMEOUT);
@@ -598,7 +607,7 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
         task = sleep_head;
         while (task != NULL) {
             llam_task_t *next = task->wait_next;
-            llam_wait_node_t *node = task->active_wait_node;
+            llam_wait_node_t *node = atomic_load_explicit(&task->active_wait_node, memory_order_acquire);
             bool hot;
 
             task->wait_next = NULL;

@@ -106,7 +106,8 @@ llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard) {
     llam_task_t *task = g_llam_tls_task;
     llam_wait_node_t *node;
 
-    if (task != NULL && task->active_wait_node == NULL) {
+    if (task != NULL &&
+        atomic_load_explicit(&task->active_wait_node, memory_order_acquire) == NULL) {
         node = &task->embedded_wait_node;
         llam_wait_node_reset(node, task->owner_runtime, UINT_MAX);
         node->task = task;

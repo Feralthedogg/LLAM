@@ -77,7 +77,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->join_waiters = NULL;
     task->join_waiter_count = 0U;
     atomic_init(&task->join_waiter_hint, 0U);
-    task->join_target = NULL;
+    atomic_init(&task->join_target, NULL);
     task->wait_next = NULL;
     task->cancel_next = NULL;
     task->cancel_prev = NULL;
@@ -85,9 +85,15 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     for (i = 0U; i < LLAM_TASK_EMBEDDED_SELECT_NODES; ++i) {
         llam_wait_node_reset(&task->embedded_select_nodes[i], owner_runtime, UINT_MAX);
     }
-    memset((char *)task + offsetof(llam_task_t, active_wait_node),
-           0,
-           offsetof(llam_task_t, embedded_io_req) - offsetof(llam_task_t, active_wait_node));
+    /*
+     * Wait ownership fields are atomics because runtime stop/cancel and timeout
+     * paths can sample them from other OS threads. Initialize them explicitly;
+     * byte-clearing atomic objects would hide the ownership contract.
+     */
+    atomic_init(&task->active_wait_node, NULL);
+    atomic_init(&task->active_wait_queue, NULL);
+    atomic_init(&task->active_wait_queue_lock, NULL);
+    atomic_init(&task->active_select_state, NULL);
     llam_io_req_reset(&task->embedded_io_req, owner_runtime, UINT_MAX, UINT_MAX);
     /*
      * active_io_req is an atomic ownership boundary between I/O completion and

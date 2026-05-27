@@ -912,7 +912,7 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
      * early timer/cancel completion is consumed inline instead of enqueueing a
      * still-running stack.
      */
-    task->active_wait_node = node;
+    atomic_store_explicit(&task->active_wait_node, node, memory_order_release);
     task->deadline_ns = deadline_ns;
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = LLAM_WAIT_SLEEP;

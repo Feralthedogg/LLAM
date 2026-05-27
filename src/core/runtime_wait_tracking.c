@@ -75,10 +75,10 @@ void llam_task_clear_wait_tracking(llam_task_t *task) {
         return;
     }
 
-    task->active_wait_node = NULL;
-    task->active_wait_queue = NULL;
-    task->active_wait_queue_lock = NULL;
-    task->active_select_state = NULL;
+    atomic_store_explicit(&task->active_wait_node, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue_lock, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_select_state, NULL, memory_order_release);
     /*
      * Completion, cancellation, and dynamic rehome can run on different OS
      * threads.  Use an exchange so only the first resolver that observes the
@@ -91,7 +91,7 @@ void llam_task_clear_wait_tracking(llam_task_t *task) {
      * ownership handoff atomic just like active I/O request tracking.
      */
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
-    task->join_target = NULL;
+    atomic_store_explicit(&task->join_target, NULL, memory_order_release);
     task->parked_shard = task->last_shard;
 }
 
@@ -109,13 +109,13 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
                                            llam_wait_queue_t *queue,
                                            pthread_mutex_t *queue_lock,
                                            unsigned parked_shard) {
-    task->active_wait_node = node;
-    task->active_wait_queue = queue;
-    task->active_wait_queue_lock = queue_lock;
-    task->active_select_state = NULL;
+    atomic_store_explicit(&task->active_wait_node, node, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue, queue, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue_lock, queue_lock, memory_order_release);
+    atomic_store_explicit(&task->active_select_state, NULL, memory_order_release);
     (void)llam_task_swap_active_io_req(task, NULL);
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
-    task->join_target = NULL;
+    atomic_store_explicit(&task->join_target, NULL, memory_order_release);
     task->parked_shard = parked_shard;
     atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
@@ -128,13 +128,13 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
  * @param parked_shard Shard where the waiter parked.
  */
 void llam_task_set_join_tracking(llam_task_t *task, llam_task_t *target, unsigned parked_shard) {
-    task->active_wait_node = NULL;
-    task->active_wait_queue = NULL;
-    task->active_wait_queue_lock = NULL;
-    task->active_select_state = NULL;
+    atomic_store_explicit(&task->active_wait_node, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue_lock, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_select_state, NULL, memory_order_release);
     (void)llam_task_swap_active_io_req(task, NULL);
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
-    task->join_target = target;
+    atomic_store_explicit(&task->join_target, target, memory_order_release);
     task->parked_shard = parked_shard;
     atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
@@ -146,13 +146,13 @@ void llam_task_set_join_tracking(llam_task_t *task, llam_task_t *target, unsigne
  * @param parked_shard Shard where the task parked.
  */
 void llam_task_set_sleep_tracking(llam_task_t *task, unsigned parked_shard) {
-    task->active_wait_node = NULL;
-    task->active_wait_queue = NULL;
-    task->active_wait_queue_lock = NULL;
-    task->active_select_state = NULL;
+    atomic_store_explicit(&task->active_wait_node, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue_lock, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_select_state, NULL, memory_order_release);
     (void)llam_task_swap_active_io_req(task, NULL);
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
-    task->join_target = NULL;
+    atomic_store_explicit(&task->join_target, NULL, memory_order_release);
     task->parked_shard = parked_shard;
     atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
@@ -168,13 +168,13 @@ void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned p
     if (task == NULL) {
         return;
     }
-    task->active_wait_node = NULL;
-    task->active_wait_queue = NULL;
-    task->active_wait_queue_lock = NULL;
-    task->active_select_state = NULL;
+    atomic_store_explicit(&task->active_wait_node, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue_lock, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_select_state, NULL, memory_order_release);
     (void)llam_task_swap_active_io_req(task, req);
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
-    task->join_target = NULL;
+    atomic_store_explicit(&task->join_target, NULL, memory_order_release);
     task->parked_shard = parked_shard;
     atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
@@ -187,13 +187,13 @@ void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned p
  * @param parked_shard Shard where the task parked.
  */
 void llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsigned parked_shard) {
-    task->active_wait_node = NULL;
-    task->active_wait_queue = NULL;
-    task->active_wait_queue_lock = NULL;
-    task->active_select_state = NULL;
+    atomic_store_explicit(&task->active_wait_node, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_wait_queue_lock, NULL, memory_order_release);
+    atomic_store_explicit(&task->active_select_state, NULL, memory_order_release);
     (void)llam_task_swap_active_io_req(task, NULL);
     atomic_store_explicit(&task->active_block_job, job, memory_order_release);
-    task->join_target = NULL;
+    atomic_store_explicit(&task->join_target, NULL, memory_order_release);
     task->parked_shard = parked_shard;
     atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }

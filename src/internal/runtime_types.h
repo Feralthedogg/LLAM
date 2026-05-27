@@ -786,16 +786,23 @@ struct llam_task {
     llam_task_t *join_waiters;
     unsigned join_waiter_count;
     atomic_uint join_waiter_hint;
-    llam_task_t *join_target;
+    _Atomic(llam_task_t *) join_target;
     llam_task_t *wait_next;
     llam_task_t *cancel_next;
     llam_task_t *cancel_prev;
     llam_wait_node_t embedded_wait_node;
     llam_wait_node_t embedded_select_nodes[LLAM_TASK_EMBEDDED_SELECT_NODES];
-    llam_wait_node_t *active_wait_node;
-    llam_wait_queue_t *active_wait_queue;
-    pthread_mutex_t *active_wait_queue_lock;
-    llam_channel_select_state_t *active_select_state;
+    /*
+     * Wait ownership is mutated by the scheduler thread that parked the task
+     * and can be sampled or cleared by runtime-stop, timeout, cancellation, and
+     * diagnostics on other OS threads. The pointed-to wait queues still own
+     * their concrete mutation under their own locks; these atomics only publish
+     * the current owner without creating TSan-visible metadata races.
+     */
+    _Atomic(llam_wait_node_t *) active_wait_node;
+    _Atomic(llam_wait_queue_t *) active_wait_queue;
+    _Atomic(pthread_mutex_t *) active_wait_queue_lock;
+    _Atomic(llam_channel_select_state_t *) active_select_state;
     llam_io_req_t embedded_io_req;
     _Atomic(llam_io_req_t *) active_io_req;
     _Atomic(llam_block_job_t *) active_block_job;
