@@ -125,7 +125,7 @@ void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns) {
                                LLAM_TASK_STATE_RUNNING,
                                LLAM_TASK_STATE_RUNNING,
                                LLAM_WAIT_NONE);
-                if (pthread_kill(shard->thread, LLAM_PREEMPT_SIGNAL) == 0) {
+                if (pthread_kill(shard->preempt_thread, LLAM_PREEMPT_SIGNAL) == 0) {
                     shard->metrics.preempt_signals += 1U;
                 }
             }

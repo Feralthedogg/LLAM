@@ -1886,6 +1886,7 @@ ASAN_TEST_TARGETS = \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
 	asan-test_multi_runtime_core \
+	asan-test_runtime_fuzz \
 	asan-test_security_capability
 
 NOOWNER_TEST_TARGETS = \
@@ -1895,6 +1896,7 @@ TSAN_TEST_TARGETS = \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_multi_runtime_core \
+	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
 
 test-asan:
@@ -1911,6 +1913,8 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
+	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
+		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
 	: "Keep the ASan broker task-race probe short; full-strength coverage stays in normal test."; \
 	LLAM_SECURITY_TASK_DETACH_RACE_ROUNDS=16 \
 		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability
@@ -1943,6 +1947,8 @@ test-tsan:
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
+	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
+		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability
 
 analyze-cppcheck:
@@ -2063,6 +2069,9 @@ asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: $(RUNTI
 
 asan-test_multi_runtime_core tsan-test_multi_runtime_core: $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
+
+asan-test_runtime_fuzz tsan-test_runtime_fuzz: $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS) $(LDLIBS)
 
 asan-test_security_capability tsan-test_security_capability: $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)

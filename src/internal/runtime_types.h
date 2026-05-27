@@ -878,6 +878,12 @@ struct llam_shard {
     atomic_uint steal_pause_ack;
     bool thread_started;
     pthread_t thread;
+    /*
+     * Mutable watchdog target.  The run thread handle above is owned by
+     * pthread_create()/pthread_join(); opaque-block compensation may redirect
+     * preemption signals to a helper thread, so keep that target separate.
+     */
+    pthread_t preempt_thread;
     int event_fd;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint event_pending;
     pthread_mutex_t lock;

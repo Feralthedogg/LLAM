@@ -67,6 +67,20 @@ static int llam_scheduler_try_install_signal_stack(llam_shard_t *shard) {
     return -1;
 }
 
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+static void llam_shard_publish_preempt_thread(llam_shard_t *shard, pthread_t thread) {
+    /*
+     * The join handle in shard->thread is written by pthread_create() and read by
+     * pthread_join().  The watchdog signal target is mutable while opaque-block
+     * helper compensation is active, so publish it under shard->lock instead of
+     * reusing the join handle and racing the run thread.
+     */
+    pthread_mutex_lock(&shard->lock);
+    shard->preempt_thread = thread;
+    pthread_mutex_unlock(&shard->lock);
+}
+#endif
+
 /**
  * @brief Mark a task as running on a shard and update dispatch metrics.
  *
@@ -295,7 +309,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = &shard->scheduler_ctx;
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-    shard->thread = pthread_self();
+    llam_shard_publish_preempt_thread(shard, pthread_self());
 #endif
     shard->primary_thread = pthread_self();
     llam_bind_current_thread_to_cpu(shard->cpu_id);
@@ -441,7 +455,7 @@ void *llam_opaque_helper_main(void *arg) {
                 shard->opaque_helper_active = false;
                 atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-                shard->thread = shard->primary_thread;
+                llam_shard_publish_preempt_thread(shard, shard->primary_thread);
 #endif
                 llam_opaque_wake_signal(shard);
             }
@@ -451,7 +465,7 @@ void *llam_opaque_helper_main(void *arg) {
             shard->opaque_helper_active = false;
             atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-            shard->thread = shard->primary_thread;
+            llam_shard_publish_preempt_thread(shard, shard->primary_thread);
 #endif
             llam_opaque_wake_signal(shard);
             pthread_mutex_unlock(&shard->opaque_lock);
@@ -460,7 +474,7 @@ void *llam_opaque_helper_main(void *arg) {
         shard->opaque_helper_active = true;
         atomic_store_explicit(&shard->opaque_helper_active_hint, 1U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-        shard->thread = pthread_self();
+        llam_shard_publish_preempt_thread(shard, pthread_self());
 #endif
         llam_opaque_wake_signal(shard);
         pthread_mutex_unlock(&shard->opaque_lock);
@@ -512,7 +526,7 @@ void *llam_opaque_helper_main(void *arg) {
                     shard->opaque_helper_active = false;
                     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-                    shard->thread = shard->primary_thread;
+                    llam_shard_publish_preempt_thread(shard, shard->primary_thread);
 #endif
                     llam_opaque_wake_signal(shard);
                     pthread_mutex_unlock(&shard->opaque_lock);
@@ -553,7 +567,7 @@ void *llam_opaque_helper_main(void *arg) {
                 shard->opaque_helper_active = false;
                 atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-                shard->thread = shard->primary_thread;
+                llam_shard_publish_preempt_thread(shard, shard->primary_thread);
 #endif
                 llam_opaque_wake_signal(shard);
                 pthread_mutex_unlock(&shard->opaque_lock);
@@ -575,7 +589,7 @@ out:
     shard->opaque_helper_active = false;
     atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
-    shard->thread = shard->primary_thread;
+    llam_shard_publish_preempt_thread(shard, shard->primary_thread);
 #endif
     llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
