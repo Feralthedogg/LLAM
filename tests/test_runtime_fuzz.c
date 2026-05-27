@@ -30,15 +30,21 @@
 #include <string.h>
 
 #ifndef LLAM_TEST_NO_SANITIZE_THREAD
+#ifndef __has_feature
+#define __has_feature(x) 0
+#define LLAM_TEST_UNDEF_HAS_FEATURE 1
+#endif
 #if defined(__SANITIZE_THREAD__)
 #define LLAM_TEST_TSAN_BUILD 1
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
+#elif __has_feature(thread_sanitizer)
 #define LLAM_TEST_TSAN_BUILD 1
 #endif
+#if defined(LLAM_TEST_UNDEF_HAS_FEATURE)
+#undef __has_feature
+#undef LLAM_TEST_UNDEF_HAS_FEATURE
 #endif
-#if defined(LLAM_TEST_TSAN_BUILD)
 #if defined(__has_attribute)
+#if defined(LLAM_TEST_TSAN_BUILD)
 #if __has_attribute(no_sanitize)
 #define LLAM_TEST_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
 #elif __has_attribute(no_sanitize_thread)
