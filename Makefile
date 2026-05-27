@@ -12,6 +12,7 @@ SHARED_OBJDIR ?= $(OBJDIR)-pic
 PICFLAGS ?= -fPIC
 LLAM_ABI_MAJOR ?= 2
 LLAM_VERSION ?= 2.0.0
+SANITIZER_TARGETS_ENABLED ?= 0
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
 CLEAN_DIRS = \
@@ -61,11 +62,13 @@ CLEAN_FILES = \
 	asan-test_io_buffers \
 	asan-test_runtime_shutdown_internal \
 	asan-test_multi_runtime_core \
+	asan-test_runtime_fuzz \
 	asan-test_security_capability \
 	noowner-test_runtime_select_edges \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_multi_runtime_core \
+	tsan-test_runtime_fuzz \
 	tsan-test_security_capability \
 	libllam_runtime.a \
 	demo.exe \
@@ -551,6 +554,13 @@ LINK_TARGETS = \
 
 .PHONY: all clean static shared test test-asan test-no-owner test-tsan analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
+
+define REQUIRE_SANITIZER_TARGET
+	@if [ "$(SANITIZER_TARGETS_ENABLED)" != "1" ]; then \
+		echo "error: build sanitizer test binaries through 'make test-asan' or 'make test-tsan' so OBJDIR/CFLAGS/LDLIBS are sanitizer-scoped" >&2; \
+		exit 1; \
+	fi
+endef
 
 ifeq ($(HOST_PLATFORM),windows)
 
@@ -1906,6 +1916,7 @@ test-asan:
 	cleanup; \
 	$(MAKE) $(ASAN_TEST_TARGETS) \
 		OBJDIR=object-asan \
+		SANITIZER_TARGETS_ENABLED=1 \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
 		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_api_edges; \
@@ -1942,6 +1953,7 @@ test-tsan:
 	rm -f "$$tsan_probe"; \
 	$(MAKE) $(TSAN_TEST_TARGETS) \
 		OBJDIR=object-tsan \
+		SANITIZER_TARGETS_ENABLED=1 \
 		CFLAGS="$$tsan_cflags" \
 		LDLIBS="$(LDLIBS) -fsanitize=thread"; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
@@ -2053,27 +2065,34 @@ test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS) $(LDLIBS)
 
 asan-test_runtime_api_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS)
+	$(REQUIRE_SANITIZER_TARGET)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_API_EDGES_OBJS) $(LDLIBS)
 
 asan-test_runtime_core tsan-test_runtime_core: $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS)
+	$(REQUIRE_SANITIZER_TARGET)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_CORE_OBJS) $(LDLIBS)
 
 noowner-test_runtime_select_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_OBJS) $(LDLIBS)
 
 asan-test_io_buffers: $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
+	$(REQUIRE_SANITIZER_TARGET)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS) $(LDLIBS)
 
 asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
+	$(REQUIRE_SANITIZER_TARGET)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
 
 asan-test_multi_runtime_core tsan-test_multi_runtime_core: $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
+	$(REQUIRE_SANITIZER_TARGET)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
 
 asan-test_runtime_fuzz tsan-test_runtime_fuzz: $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
+	$(REQUIRE_SANITIZER_TARGET)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS) $(LDLIBS)
 
 asan-test_security_capability tsan-test_security_capability: $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
+	$(REQUIRE_SANITIZER_TARGET)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
 
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
