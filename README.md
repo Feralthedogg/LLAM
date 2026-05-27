@@ -770,7 +770,17 @@ Time, debug, and platform:
 
 ## Runtime Options
 
-Pass `NULL` to `llam_runtime_init()` for the default runtime configuration. Pass `llam_runtime_opts_t` when you need explicit tuning. Dynamic loaders and language bindings should initialize option structs with `llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE)` and `llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE)`, then call `llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE)`, `llam_spawn_ex(fn, arg, &opts, LLAM_SPAWN_OPTS_CURRENT_SIZE)`, and `llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE)`.
+Pass `NULL` to `llam_runtime_init()` for the default runtime configuration. Pass
+`llam_runtime_opts_t` when you need explicit tuning. Embedders that need
+independent scheduler instances should initialize options the same way and pass
+them to `llam_runtime_create()`. Dynamic loaders and language bindings should
+initialize option structs with
+`llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE)` and
+`llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE)`, then call the
+size-aware lifecycle and spawn APIs: `llam_runtime_init_ex()` or
+`llam_runtime_create()` for runtime setup, `llam_spawn_ex()` or
+`llam_runtime_spawn_ex()` for task creation, and
+`llam_runtime_collect_stats_ex()` for stats snapshots.
 
 Public option and stats structs use fixed-width integer storage for ABI-facing
 scalar fields. Enum constants remain available for C readability, but FFI
@@ -1121,6 +1131,11 @@ and backend state, public-handle hardening, and the optional broker/process
 boundary used when an embedder needs stronger isolation than in-process opaque
 handles can provide.
 
+Runtime scheduler, cache, blocking, and backend state is runtime-owned. Public
+handle slot tables are process-wide family registries with sealed generations
+and owner-runtime tags; they reject stale handles and cross-runtime misuse but
+are not a process sandbox.
+
 ```mermaid
 flowchart TB
     App["C application or embedding host"] --> PublicAPI["include/llam/runtime.h\nstable public C ABI"]
@@ -1139,14 +1154,12 @@ flowchart TB
         subgraph RuntimeAState["runtime A owned state"]
             direction TB
             LifecycleA["lifecycle gate\ncreate -> run -> request_stop -> drain -> destroy"]
-            RegistryA["public handle registries\nfamily tags / sealed generations\nowner-runtime checks / active-op pins"]
             ShardsA["scheduler shards\nhot_q / norm_q / inject_q\ntimer heap / worker wake"]
             CachesA["runtime and shard caches\ntasks / stacks / wait nodes / I/O reqs / buffers"]
             NodesA["I/O backend nodes\nsubmit queues / control queues\nwatch tables / fd identity"]
             BlockA["blocking subsystem\nopaque helper compensation\nblocking worker pool"]
             DebugA["diagnostics\nstats JSON / state dump\nwake, shutdown, I/O ownership"]
-            LifecycleA --> RegistryA
-            RegistryA --> ShardsA
+            LifecycleA --> ShardsA
             ShardsA <--> CachesA
             ShardsA <--> NodesA
             ShardsA <--> BlockA
@@ -1156,19 +1169,17 @@ flowchart TB
 
         subgraph RuntimeBState["runtime B owned state"]
             direction TB
-            RegistryB["separate registries"]
             ShardsB["independent shards and caches"]
             NodesB["independent I/O backend"]
-            RegistryB --> ShardsB
             ShardsB <--> NodesB
         end
 
-        RuntimeA --> RegistryA
-        RuntimeB --> RegistryB
-        RegistryA -. "foreign runtime object" .-> EXDEV["-1 / EXDEV"]
-        RegistryB -. "foreign runtime object" .-> EXDEV
-        RegistryA -. "stale or consumed handle" .-> EINVAL["-1 / EINVAL"]
-        RegistryA -. "active public op during destroy" .-> EBUSY["-1 / EBUSY"]
+        PublicSlots["process-wide public handle tables\nfamily tags / sealed generations\nowner-runtime tags / active-op pins"]
+        RuntimeA --> PublicSlots
+        RuntimeB --> PublicSlots
+        PublicSlots -. "foreign runtime object" .-> EXDEV["-1 / EXDEV"]
+        PublicSlots -. "stale or consumed handle" .-> EINVAL["-1 / EINVAL"]
+        PublicSlots -. "active public op during destroy" .-> EBUSY["-1 / EBUSY"]
     end
 
     subgraph BrokerBoundary["optional broker process boundary"]

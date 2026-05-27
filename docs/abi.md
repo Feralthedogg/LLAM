@@ -290,17 +290,21 @@ Windows stress, shared-library export, IOCP smoke, and HANDLE I/O gates pass.
 
 ## Runtime Lifecycle
 
-`llam_runtime_init_ex()` initializes one process-wide runtime instance with an
-explicit option size. `llam_runtime_init()` is a C convenience wrapper. One of
-them must complete successfully before managed tasks or runtime-aware
-synchronization objects are used.
+`llam_runtime_init_ex()` initializes the legacy process-default runtime with an
+explicit option size. `llam_runtime_init()` is a C convenience wrapper for that
+same default runtime. Embedders that need independent scheduler instances should
+prefer `llam_runtime_create()`, `llam_runtime_spawn_ex()`,
+`llam_runtime_run_handle()`, and `llam_runtime_destroy()`. A runtime must be
+created or initialized successfully before managed tasks or runtime-aware
+synchronization objects can be owned by it.
 
-`llam_run()` drives scheduled work until all live tasks complete, the runtime
-requests stop, or a fatal runtime error is observed. A cooperative stop request
-is a successful scheduler outcome: `llam_run()` returns `0` after the runtime
-observes `llam_runtime_request_stop()` and all live tasks have exited or become
-irrelevant to the drained runtime. Backend or fatal runtime failures return
-`-1` with `errno` set.
+`llam_run()` drives the process-default runtime. `llam_runtime_run_handle()`
+drives an explicit runtime handle. Both run until all live tasks complete, the
+target runtime requests stop, or a fatal runtime error is observed. A
+cooperative stop request is a successful scheduler outcome: the run call returns
+`0` after the target runtime observes `llam_runtime_request_stop()` and all live
+tasks have exited or become irrelevant to the drained runtime. Backend or fatal
+runtime failures return `-1` with `errno` set.
 
 `llam_runtime_request_stop()` requests cooperative stop and wakes scheduler,
 I/O, and blocking workers. It does not forcibly kill live tasks; `llam_run()`
@@ -308,17 +312,19 @@ still waits for live tasks to exit or observe cancellation through user code.
 Unmanaged callers target the process-default runtime. Managed callers target
 their current task's owner runtime.
 
-`llam_runtime_shutdown()` is idempotent and may be called after a failed or
-partial initialization. It requests cooperative stop, joins runtime-owned OS
+`llam_runtime_shutdown()` is the idempotent legacy-default cleanup wrapper and
+may be called after a failed or partial default-runtime initialization.
+`llam_runtime_destroy()` performs the same lifecycle cleanup for an explicit
+runtime handle. Cleanup requests cooperative stop, joins runtime-owned OS
 threads that were started, and releases backend resources. It is not a task-join
-API: callers that need a graceful task drain should call
-`llam_runtime_request_stop()`, drive `llam_run()`, and then call shutdown. After
-shutdown, task handles are no longer joinable, blocking runtime-aware operations
-that require a managed task fail by contract, and backend I/O ownership is gone.
-Public cleanup handles keep the exceptions documented by their APIs: owned
-buffers remain valid until `llam_io_buffer_release()`, and already-buffered
-channel values may be drained with `llam_channel_try_recv_result()` before
-destroy.
+API: callers that need a graceful task drain should request stop, drive
+`llam_run()` or `llam_runtime_run_handle()` for the target runtime, and then
+clean it up. After cleanup, task handles owned by that runtime are no longer
+joinable, blocking runtime-aware operations that require a managed task fail by
+contract, and backend I/O ownership is gone. Public cleanup handles keep the
+exceptions documented by their APIs: owned buffers remain valid until
+`llam_io_buffer_release()`, and already-buffered channel values may be drained
+with `llam_channel_try_recv_result()` before destroy.
 
 From a managed LLAM task or scheduler frame, shutdown performs only the
 stop-request portion. This avoids freeing scheduler, stack, or I/O state while

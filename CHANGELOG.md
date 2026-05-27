@@ -215,9 +215,11 @@
   `ENOTSUP`, while HANDLE APIs use overlapped `ReadFile`/`WriteFile` with the
   requested offset.
 
-* runtime-owned registries, caches, I/O buffers, blocking jobs, and scheduler
-  paths are routed through explicit owner runtime state rather than implicit
-  singleton state where an object owner is known.
+* runtime-owned caches, I/O buffers, blocking jobs, and scheduler paths are
+  routed through explicit owner runtime state rather than implicit singleton
+  state where an object owner is known. Public handle slot tables remain
+  process-wide family registries with sealed generations and owner-runtime
+  checks.
 
 * channel lifecycle, public slot helpers, owned I/O buffer accessors, and
   lifecycle locking were split out of oversized translation units without
