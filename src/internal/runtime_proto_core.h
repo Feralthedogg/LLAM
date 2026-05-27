@@ -81,6 +81,34 @@ void llam_switch_task_to_scheduler(llam_task_t *task, llam_ctx_t *scheduler_ctx)
 void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task);
 void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
 
+#ifndef LLAM_NO_SANITIZE_THREAD
+#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+#if defined(__has_attribute)
+#if __has_attribute(no_sanitize)
+#define LLAM_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
+#elif __has_attribute(no_sanitize_thread)
+#define LLAM_NO_SANITIZE_THREAD __attribute__((no_sanitize_thread))
+#endif
+#endif
+#endif
+#ifndef LLAM_NO_SANITIZE_THREAD
+#define LLAM_NO_SANITIZE_THREAD
+#endif
+#endif
+
+/*
+ * TSan does not model LLAM's stackful fiber switches.  Keep the real shared
+ * task state instrumented, but hide POSIX errno TLS loads/stores at switch
+ * boundaries so sanitizer runs do not report races on thread-local storage.
+ */
+static inline LLAM_NO_SANITIZE_THREAD int llam_thread_errno_load(void) {
+    return errno;
+}
+
+static inline LLAM_NO_SANITIZE_THREAD void llam_thread_errno_store(int value) {
+    errno = value;
+}
+
 /**
  * @brief Inline task-to-task switch for validated hot handoff paths.
  *
@@ -91,10 +119,10 @@ void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
  * errno semantics.
  */
 static inline void llam_switch_task_to_task_hot(llam_task_t *from, llam_task_t *to) {
-    from->saved_errno = errno;
-    errno = to->saved_errno;
+    from->saved_errno = llam_thread_errno_load();
+    llam_thread_errno_store(to->saved_errno);
     llam_ctx_switch(&from->ctx, &to->ctx);
-    errno = from->saved_errno;
+    llam_thread_errno_store(from->saved_errno);
 }
 
 /*

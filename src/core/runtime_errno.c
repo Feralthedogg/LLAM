@@ -34,7 +34,7 @@
  */
 void llam_task_save_errno(llam_task_t *task) {
     if (task != NULL) {
-        task->saved_errno = errno;
+        task->saved_errno = llam_thread_errno_load();
     }
 }
 
@@ -44,7 +44,7 @@ void llam_task_save_errno(llam_task_t *task) {
  * @param task Task whose logical errno state should become thread-local state.
  */
 void llam_task_restore_errno(const llam_task_t *task) {
-    errno = task != NULL ? task->saved_errno : 0;
+    llam_thread_errno_store(task != NULL ? task->saved_errno : 0);
 }
 
 /**
@@ -76,10 +76,10 @@ void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task)
         abort();
     }
 
-    scheduler_errno = errno;
+    scheduler_errno = llam_thread_errno_load();
     llam_task_restore_errno(task);
     llam_ctx_switch(scheduler_ctx, &task->ctx);
-    errno = scheduler_errno;
+    llam_thread_errno_store(scheduler_errno);
 }
 
 /**

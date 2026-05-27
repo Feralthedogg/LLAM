@@ -29,6 +29,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef LLAM_TEST_NO_SANITIZE_THREAD
+#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+#if defined(__has_attribute)
+#if __has_attribute(no_sanitize)
+#define LLAM_TEST_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
+#elif __has_attribute(no_sanitize_thread)
+#define LLAM_TEST_NO_SANITIZE_THREAD __attribute__((no_sanitize_thread))
+#endif
+#endif
+#endif
+#ifndef LLAM_TEST_NO_SANITIZE_THREAD
+#define LLAM_TEST_NO_SANITIZE_THREAD
+#endif
+#endif
+
+/*
+ * The fuzz test intentionally pounds stackful fiber switches under TSan.
+ * Access errno through tiny no-TSan wrappers so sanitizer noise stays focused
+ * on LLAM shared state instead of implementation-defined errno TLS storage.
+ */
+static inline LLAM_TEST_NO_SANITIZE_THREAD int fuzz_errno_load(void) {
+    return errno;
+}
+
+static inline LLAM_TEST_NO_SANITIZE_THREAD void fuzz_errno_store(int value) {
+    errno = value;
+}
+
 #if LLAM_PLATFORM_POSIX
 #include <pthread.h>
 #elif LLAM_PLATFORM_WINDOWS
@@ -141,18 +169,18 @@ static void multi_task_fail(multi_fuzz_state_t *state, const char *where, int er
 static void *multi_run_runtime_thread(void *arg) {
     multi_fuzz_runner_t *runner = arg;
 
-    errno = 0;
+    fuzz_errno_store(0);
     runner->rc = llam_runtime_run_handle(runner->runtime);
-    runner->err = errno;
+    runner->err = fuzz_errno_load();
     return NULL;
 }
 #elif LLAM_PLATFORM_WINDOWS
 static DWORD WINAPI multi_run_runtime_thread(LPVOID arg) {
     multi_fuzz_runner_t *runner = arg;
 
-    errno = 0;
+    fuzz_errno_store(0);
     runner->rc = llam_runtime_run_handle(runner->runtime);
-    runner->err = errno;
+    runner->err = fuzz_errno_load();
     return 0;
 }
 #endif
@@ -171,23 +199,23 @@ static int multi_run_two_runtimes(llam_runtime_t *runtime_a, llam_runtime_t *run
     runner_b.runtime = runtime_b;
     rc = pthread_create(&thread_a, NULL, multi_run_runtime_thread, &runner_a);
     if (rc != 0) {
-        errno = rc;
+        fuzz_errno_store(rc);
         return -1;
     }
     rc = pthread_create(&thread_b, NULL, multi_run_runtime_thread, &runner_b);
     if (rc != 0) {
         (void)pthread_join(thread_a, NULL);
-        errno = rc;
+        fuzz_errno_store(rc);
         return -1;
     }
     (void)pthread_join(thread_a, NULL);
     (void)pthread_join(thread_b, NULL);
     if (runner_a.rc != 0) {
-        errno = runner_a.err;
+        fuzz_errno_store(runner_a.err);
         return -1;
     }
     if (runner_b.rc != 0) {
-        errno = runner_b.err;
+        fuzz_errno_store(runner_b.err);
         return -1;
     }
     return 0;
@@ -203,14 +231,14 @@ static int multi_run_two_runtimes(llam_runtime_t *runtime_a, llam_runtime_t *run
     runner_b.runtime = runtime_b;
     thread_a = CreateThread(NULL, 0U, multi_run_runtime_thread, &runner_a, 0U, NULL);
     if (thread_a == NULL) {
-        errno = EAGAIN;
+        fuzz_errno_store(EAGAIN);
         return -1;
     }
     thread_b = CreateThread(NULL, 0U, multi_run_runtime_thread, &runner_b, 0U, NULL);
     if (thread_b == NULL) {
         (void)WaitForSingleObject(thread_a, INFINITE);
         (void)CloseHandle(thread_a);
-        errno = EAGAIN;
+        fuzz_errno_store(EAGAIN);
         return -1;
     }
     (void)WaitForSingleObject(thread_a, INFINITE);
@@ -218,11 +246,11 @@ static int multi_run_two_runtimes(llam_runtime_t *runtime_a, llam_runtime_t *run
     (void)CloseHandle(thread_a);
     (void)CloseHandle(thread_b);
     if (runner_a.rc != 0) {
-        errno = runner_a.err;
+        fuzz_errno_store(runner_a.err);
         return -1;
     }
     if (runner_b.rc != 0) {
-        errno = runner_b.err;
+        fuzz_errno_store(runner_b.err);
         return -1;
     }
     return 0;
@@ -248,7 +276,7 @@ static void multi_channel_setup_task(void *arg) {
 
     state->local_channel = llam_channel_create(state->capacity);
     if (state->local_channel == NULL) {
-        multi_task_fail(state, "multi channel create", errno);
+        multi_task_fail(state, "multi channel create", fuzz_errno_load());
     }
 }
 
@@ -257,7 +285,7 @@ static void multi_channel_sender_task(void *arg) {
 
     for (uintptr_t i = 1U; i <= state->messages; ++i) {
         if (llam_channel_send(state->local_channel, (void *)i) != 0) {
-            multi_task_fail(state, "multi channel send", errno);
+            multi_task_fail(state, "multi channel send", fuzz_errno_load());
             return;
         }
         atomic_fetch_add_explicit(&state->sent, 1U, memory_order_relaxed);
@@ -274,7 +302,7 @@ static void multi_channel_receiver_task(void *arg) {
         void *out = NULL;
 
         if (llam_channel_recv_result(state->local_channel, &out) != 0) {
-            multi_task_fail(state, "multi channel recv", errno);
+            multi_task_fail(state, "multi channel recv", fuzz_errno_load());
             return;
         }
         if (out != (void *)i) {
@@ -292,23 +320,23 @@ static void multi_cross_channel_probe_task(void *arg) {
     void *out = NULL;
     size_t selected = SIZE_MAX;
 
-    errno = 0;
-    if (llam_channel_try_send(state->foreign_channel, &payload) != -1 || errno != EXDEV) {
-        multi_task_fail(state, "multi foreign channel send", errno);
+    fuzz_errno_store(0);
+    if (llam_channel_try_send(state->foreign_channel, &payload) != -1 || fuzz_errno_load() != EXDEV) {
+        multi_task_fail(state, "multi foreign channel send", fuzz_errno_load());
         return;
     }
-    errno = 0;
-    if (llam_channel_try_recv_result(state->foreign_channel, &out) != -1 || errno != EXDEV) {
-        multi_task_fail(state, "multi foreign channel recv", errno);
+    fuzz_errno_store(0);
+    if (llam_channel_try_recv_result(state->foreign_channel, &out) != -1 || fuzz_errno_load() != EXDEV) {
+        multi_task_fail(state, "multi foreign channel recv", fuzz_errno_load());
         return;
     }
     memset(&op, 0, sizeof(op));
     op.kind = LLAM_SELECT_OP_RECV;
     op.channel = state->foreign_channel;
     op.recv_out = &out;
-    errno = 0;
-    if (llam_channel_select(&op, 1U, 0U, &selected) != -1 || errno != EXDEV) {
-        multi_task_fail(state, "multi foreign channel select", errno);
+    fuzz_errno_store(0);
+    if (llam_channel_select(&op, 1U, 0U, &selected) != -1 || fuzz_errno_load() != EXDEV) {
+        multi_task_fail(state, "multi foreign channel select", fuzz_errno_load());
         return;
     }
     atomic_fetch_add_explicit(&state->cross_checked, 1U, memory_order_relaxed);
@@ -328,7 +356,7 @@ static void channel_sender_task(void *arg) {
 
     for (uintptr_t i = 1U; i <= pair->messages; ++i) {
         if (llam_channel_send(pair->channel, (void *)i) != 0) {
-            task_fail(pair->state, "channel send", errno);
+            task_fail(pair->state, "channel send", fuzz_errno_load());
             return;
         }
         atomic_fetch_add_explicit(&pair->sent, 1U, memory_order_relaxed);
@@ -345,7 +373,7 @@ static void channel_receiver_task(void *arg) {
         void *value = llam_channel_recv(pair->channel);
 
         if (value != (void *)i) {
-            task_fail(pair->state, "channel recv payload", errno);
+            task_fail(pair->state, "channel recv payload", fuzz_errno_load());
             return;
         }
         atomic_fetch_add_explicit(&pair->received, 1U, memory_order_relaxed);
@@ -356,9 +384,9 @@ static void cancel_waiter_task(void *arg) {
     fuzz_state_t *state = arg;
 
     atomic_fetch_add_explicit(&state->waiting_count, 1U, memory_order_release);
-    errno = 0;
-    if (llam_sleep_ns(60ULL * 1000ULL * 1000ULL * 1000ULL) != -1 || errno != ECANCELED) {
-        task_fail(state, "cancel waiter sleep", errno);
+    fuzz_errno_store(0);
+    if (llam_sleep_ns(60ULL * 1000ULL * 1000ULL * 1000ULL) != -1 || fuzz_errno_load() != ECANCELED) {
+        task_fail(state, "cancel waiter sleep", fuzz_errno_load());
         return;
     }
     atomic_fetch_add_explicit(&state->canceled_count, 1U, memory_order_relaxed);
@@ -371,7 +399,7 @@ static void cancel_task(void *arg) {
         llam_yield();
     }
     if (llam_cancel_token_cancel(state->cancel_token) != 0) {
-        task_fail(state, "cancel token cancel", errno);
+        task_fail(state, "cancel token cancel", fuzz_errno_load());
     }
 }
 

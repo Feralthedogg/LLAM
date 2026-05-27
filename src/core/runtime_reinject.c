@@ -178,7 +178,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_task_t *current = g_llam_tls_task;
     llam_task_state_id_t task_from;
     bool effective_hot;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
 
     if (rt == NULL || task == NULL || current == NULL || rt->active_shards == 0U ||
         target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
@@ -238,7 +238,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             target->metrics.ctx_switches += 1U;
             (void)kind;
             (void)task_from;
-            errno = caller_errno;
+            llam_thread_errno_store(caller_errno);
             llam_switch_task_to_task_hot(current, task);
             return true;
         }
@@ -286,7 +286,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_trace_shard(target, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&target->lock);
 
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, task);
     return true;
 }

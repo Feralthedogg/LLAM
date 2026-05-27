@@ -197,7 +197,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     llam_task_t *next;
     llam_runtime_t *rt;
     bool push_failed = false;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
         if (fail_reason != NULL) {
@@ -267,7 +267,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     shard->metrics.yields += 1U;
     shard->metrics.ctx_switches += 1U;
     shard->direct_handoff_streak += 1U;
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
 #else
@@ -321,7 +321,7 @@ void llam_yield(void) {
     llam_task_t *task = g_llam_tls_task;
     llam_runtime_t *rt;
     unsigned direct_mode;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || task == NULL) {
         return;
@@ -349,7 +349,7 @@ void llam_yield(void) {
     pthread_mutex_unlock(&shard->lock);
 
     llam_task_sample_live_stack(task);
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
 }
 
@@ -386,7 +386,7 @@ bool llam_yield_to_local_runnable(void) {
 #if !LLAM_DIRECT_OWNER_HANDOFF
     llam_task_t *current = g_llam_tls_task;
     llam_task_t *next = NULL;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || current == NULL || shard->runtime == NULL) {
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_CONTEXT);
@@ -454,7 +454,7 @@ bool llam_yield_to_local_runnable(void) {
     }
     pthread_mutex_unlock(&shard->lock);
 
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
 #endif
@@ -475,7 +475,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
 #if LLAM_DIRECT_OWNER_HANDOFF
     llam_task_t *next;
     llam_runtime_t *rt;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
         return false;
@@ -515,12 +515,12 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
 
     shard->metrics.ctx_switches += 1U;
     shard->direct_handoff_streak += 1U;
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
 #else
     llam_task_t *next = NULL;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
 
     if (shard == NULL || current == NULL || shard->runtime == NULL) {
         return false;
@@ -565,7 +565,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     }
     pthread_mutex_unlock(&shard->lock);
 
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
 #endif
@@ -620,7 +620,7 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
     llam_runtime_t *rt = NULL;
     llam_runtime_t *pinned_runtime = NULL;
     bool task_pinned = false;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
 
     if (llam_task_claim_join_public_handle(task_handle, self, &task, &rt, &task_pinned) != 0) {
         return -1;
@@ -667,12 +667,12 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
         llam_task_end_public_op(task);
         llam_try_reclaim_joined_task(rt, task);
         llam_runtime_end_public_op(pinned_runtime);
-        errno = caller_errno;
+        llam_thread_errno_store(caller_errno);
         return 0;
     }
 
     if (llam_join_try_completed_fast(rt, task)) {
-        errno = caller_errno;
+        llam_thread_errno_store(caller_errno);
         return 0;
     }
 
@@ -686,7 +686,7 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
     if (atomic_load_explicit(&task->completed, memory_order_acquire) != 0U) {
         pthread_mutex_unlock(&task->lock);
         llam_try_reclaim_joined_task(rt, task);
-        errno = caller_errno;
+        llam_thread_errno_store(caller_errno);
         return 0;
     }
     if (task->join_waiter_count > 0U) {
@@ -732,7 +732,7 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
     g_llam_tls_shard->metrics.parks += 1U;
     llam_trace_shard(g_llam_tls_shard, self, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_JOIN);
     llam_task_sample_live_stack(self);
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     if (!has_deadline && self->cancel_token == NULL && llam_join_try_local_handoff(g_llam_tls_shard, self)) {
         /* Resumed by the scheduler after the join target wakes this parked task. */
     } else {
@@ -756,7 +756,7 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
         }
     }
     llam_try_reclaim_joined_task(rt, task);
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     return 0;
 }
 
@@ -841,7 +841,7 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     llam_shard_t *shard = g_llam_tls_shard;
     llam_wait_node_t *node = NULL;
     llam_runtime_t *pinned_runtime = NULL;
-    int caller_errno = errno;
+    int caller_errno = llam_thread_errno_load();
     int rc;
     int node_error;
     bool traced_sleep = false;
@@ -868,14 +868,14 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
 
             have_now_ns = false;
             if (deadline_ns <= current_ns) {
-                errno = caller_errno;
+                llam_thread_errno_store(caller_errno);
                 return 0;
             }
             ts.tv_sec = (time_t)((deadline_ns - current_ns) / 1000000000ULL);
             ts.tv_nsec = (long)((deadline_ns - current_ns) % 1000000000ULL);
             rc = nanosleep(&ts, NULL);
             if (rc == 0) {
-                errno = caller_errno;
+                llam_thread_errno_store(caller_errno);
                 return 0;
             }
             if (errno != EINTR) {
@@ -894,7 +894,7 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     }
 
     if (deadline_ns <= llam_now_ns()) {
-        errno = caller_errno;
+        llam_thread_errno_store(caller_errno);
         return 0;
     }
 
@@ -982,7 +982,7 @@ sleep_wait_ready:
 
     if (llam_wait_node_should_park(node)) {
         llam_task_sample_live_stack(task);
-        errno = caller_errno;
+        llam_thread_errno_store(caller_errno);
         llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
     }
     llam_cancel_token_unregister_task(task);
@@ -1003,7 +1003,7 @@ sleep_wait_ready:
         errno = ECANCELED;
         return -1;
     }
-    errno = caller_errno;
+    llam_thread_errno_store(caller_errno);
     return 0;
 }
 
