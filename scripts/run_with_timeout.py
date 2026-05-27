@@ -159,8 +159,6 @@ def main() -> int:
                 log.write(message)
                 log.flush()
                 request_runtime_dump(proc, log, args.dump_on_timeout, args.dump_grace)
-                if proc.poll() is not None:
-                    break
                 timeout_action = interrupt_process(proc)
                 try:
                     proc.wait(timeout=args.kill_grace)
@@ -172,6 +170,14 @@ def main() -> int:
                     log.flush()
                     kill_process(proc)
                     proc.wait()
+                else:
+                    # A dump signal may terminate an unhandled wrapper while
+                    # the real runtime child keeps running.  Always perform a
+                    # final best-effort tree cleanup after timeout shutdown,
+                    # even when the direct child already exited.
+                    kill_process(proc)
+                    if timeout_action == "interrupt":
+                        timeout_action = "interrupt_cleanup"
                 break
             time.sleep(0.1)
 

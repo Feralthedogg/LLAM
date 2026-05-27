@@ -148,6 +148,8 @@
 * send `run_with_timeout.py --dump-on-timeout` signals to the POSIX child
   process group so wrapper scripts cannot hide the actual runtime process from
   rare-hang dump collection.
+* ensure timeout cleanup still kills descendant processes when a POSIX dump
+  signal terminates the direct wrapper before the final interrupt/kill phase.
 
 ### Tests
 
