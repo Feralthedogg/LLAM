@@ -12,6 +12,7 @@ import subprocess
 import sys
 from typing import Any
 
+from process_utils import ProcessTimeoutError, run_capture
 from safe_output import write_text_safely
 
 
@@ -90,15 +91,19 @@ def run_profile(root: pathlib.Path, profile_name: str, env_overrides: dict[str, 
     env["LLAM_BENCH_ROUNDS"] = str(rounds)
     env.update(env_overrides)
 
-    proc = subprocess.run(
-        [os.environ.get("SHELL", "/bin/sh"), "-lc", "./bench"],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout_sec,
-        check=False,
-    )
+    command = [os.environ.get("SHELL", "/bin/sh"), "-lc", "./bench"]
+    try:
+        proc = run_capture(command, cwd=root, env=env, timeout=timeout_sec)
+    except ProcessTimeoutError as exc:
+        return {
+            "profile": profile_name,
+            "env": env_overrides,
+            "stdout": exc.stdout,
+            "stderr": exc.stderr,
+            "returncode": 124,
+            "status": "failed",
+            "error": f"timeout after {timeout_sec}s",
+        }
     result: dict[str, Any] = {
         "profile": profile_name,
         "env": env_overrides,

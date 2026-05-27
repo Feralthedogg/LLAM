@@ -10,10 +10,10 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
+from process_utils import ProcessTimeoutError, print_captured_output, run_capture
 from safe_output import write_text_safely
 
 
@@ -82,22 +82,23 @@ def run_case(bench: Path, case: str, args: argparse.Namespace) -> tuple[float, s
             "LLAM_BENCH_OPAQUE_SCOPES": str(args.opaque_scopes),
         }
     )
-    proc = subprocess.run(
-        [str(bench)],
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=args.timeout,
-    )
-    print(proc.stdout, end="")
+    try:
+        proc = run_capture(
+            [str(bench)],
+            env=env,
+            timeout=args.timeout,
+            stderr_to_stdout=True,
+        )
+    except ProcessTimeoutError as exc:
+        print_captured_output(exc.stdout, exc.stderr)
+        raise RuntimeError(f"{case}: benchmark timed out after {args.timeout:.3f}s") from None
+    print_captured_output(proc.stdout, proc.stderr)
     if proc.returncode != 0:
         raise RuntimeError(f"{case}: benchmark exited with rc={proc.returncode}")
     parsed = parse_bench_output(proc.stdout)
     if case not in parsed:
         raise RuntimeError(f"{case}: benchmark output did not contain ops_per_sec")
     return parsed[case], proc.stdout
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -126,7 +127,11 @@ def main() -> int:
     if not bench_path.exists():
         raise SystemExit(f"bench binary not found: {args.bench}")
     for case in cases:
-        ops, _output = run_case(bench_path, case, args)
+        try:
+            ops, _output = run_case(bench_path, case, args)
+        except RuntimeError as exc:
+            print(f"[bench-guard] fail: {exc}", file=sys.stderr)
+            return 1
         minimum = min_ops.get(case, 0.0)
         ok = ops >= minimum
         results[case] = {

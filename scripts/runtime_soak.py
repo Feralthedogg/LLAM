@@ -9,12 +9,12 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
-import signal
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from process_utils import ProcessTimeoutError, print_captured_output, run_capture
 
 
 UINT64_MASK = (1 << 64) - 1
@@ -61,48 +61,17 @@ def check_executable(path: str) -> None:
         raise PermissionError(f"test binary is not executable: {path}")
 
 
-def print_process_output(output: str | bytes | None) -> None:
-    if output is None:
-        return
-    if isinstance(output, bytes):
-        text = output.decode(errors="replace")
-    else:
-        text = output
-    if text:
-        print(text, end="", flush=True)
-
-
-def kill_process_group(proc: subprocess.Popen[str]) -> None:
-    if os.name == "nt":
-        proc.kill()
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-
 def run_command(command: SoakCommand, timeout: float) -> int:
     env = os.environ.copy()
     env.update(command.env)
     print(f"[runtime_soak] begin {command.name}: {shlex.join(command.argv)}", flush=True)
-    proc = subprocess.Popen(
-        command.argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=env,
-        start_new_session=(os.name != "nt"),
-    )
     try:
-        stdout, _stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        kill_process_group(proc)
-        stdout, _stderr = proc.communicate()
-        print_process_output(stdout)
+        proc = run_capture(command.argv, env=env, timeout=timeout, stderr_to_stdout=True)
+    except ProcessTimeoutError as exc:
+        print_captured_output(exc.stdout, exc.stderr)
         print(f"[runtime_soak] timeout {command.name} after {timeout:.3f}s", file=sys.stderr)
         return 124
-    print_process_output(stdout)
+    print_captured_output(proc.stdout, proc.stderr)
     rc = proc.returncode
     print(f"[runtime_soak] end {command.name}: rc={rc}", flush=True)
     return rc

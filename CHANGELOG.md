@@ -125,6 +125,10 @@
   group, preventing orphaned helper processes from polluting later soak cycles
   or CI jobs after a hung test.
 
+* add shared CI process helpers and apply process-group timeout cleanup to
+  benchmark guard, benchmark comparison, and benchmark matrix runners, so
+  timed-out wrapper commands cannot leave workload grandchildren behind.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,

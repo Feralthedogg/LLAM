@@ -11,6 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from process_utils import ProcessTimeoutError, print_captured_output, run_capture
 from safe_output import open_binary_for_write, open_text_for_write
 
 try:
@@ -107,15 +108,15 @@ def run_command(
         print(f"[bench-runtime-compare] running {label} sample {sample}/{samples}", file=sys.stderr)
     else:
         print(f"[bench-runtime-compare] running {label}", file=sys.stderr)
-    proc = subprocess.run(
-        command,
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        proc = run_capture(command, cwd=root, env=env, timeout=timeout)
+    except ProcessTimeoutError as exc:
+        print_captured_output(exc.stdout, exc.stderr)
+        print(
+            f"[bench-runtime-compare] {label} timed out after {timeout}s",
+            file=sys.stderr,
+        )
+        raise SystemExit(124) from None
     if proc.returncode != 0:
         sys.stderr.write(proc.stdout)
         sys.stderr.write(proc.stderr)
