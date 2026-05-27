@@ -134,15 +134,21 @@ static bool llam_stack_sampling_enabled(const llam_task_t *task) {
  */
 void llam_task_sample_stack_rsp(llam_task_t *task, uintptr_t rsp) {
     size_t used;
+    size_t peak;
 
     if (task == NULL || !llam_stack_sampling_enabled(task)) {
         return;
     }
 
     used = llam_task_stack_used_from_rsp(task, rsp);
-    task->last_stack_used = used;
-    if (used > task->stack_high_water) {
-        task->stack_high_water = used;
+    atomic_store_explicit(&task->last_stack_used, used, memory_order_release);
+    peak = atomic_load_explicit(&task->stack_high_water, memory_order_acquire);
+    while (used > peak &&
+           !atomic_compare_exchange_weak_explicit(&task->stack_high_water,
+                                                  &peak,
+                                                  used,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
     }
 }
 
@@ -171,7 +177,7 @@ const char *llam_stack_profile_hint(const llam_task_t *task) {
         return "unknown";
     }
 
-    peak = task->stack_high_water;
+    peak = atomic_load_explicit(&task->stack_high_water, memory_order_acquire);
     if (peak == 0U) {
         return "cold";
     }

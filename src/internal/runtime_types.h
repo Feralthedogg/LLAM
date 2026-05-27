@@ -833,8 +833,8 @@ struct llam_task {
     bool opaque_uses_redirect;
     unsigned safepoint_tick;
     unsigned preempt_poll_tick;
-    size_t last_stack_used;
-    size_t stack_high_water;
+    _Atomic size_t last_stack_used;
+    _Atomic size_t stack_high_water;
     llam_timer_node_t embedded_timer_node;
     llam_timer_node_t *active_timer;
     atomic_uint preempt_requested;

@@ -123,8 +123,8 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->opaque_uses_redirect = false;
     task->safepoint_tick = 0U;
     task->preempt_poll_tick = 0U;
-    task->last_stack_used = 0U;
-    task->stack_high_water = 0U;
+    atomic_init(&task->last_stack_used, 0U);
+    atomic_init(&task->stack_high_water, 0U);
     memset(&task->embedded_timer_node, 0, sizeof(task->embedded_timer_node));
     task->embedded_timer_node.owner_runtime = owner_runtime;
     task->active_timer = NULL;

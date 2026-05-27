@@ -794,21 +794,41 @@ void llam_task_release_stack(llam_task_t *task) {
     void *stack_base;
     size_t stack_size;
     llam_shard_t *cache_shard = NULL;
+    pthread_mutex_t *diagnostic_lock = NULL;
     llam_runtime_t *rt;
 
-    if (task == NULL || task->stack_mapping == NULL || task->mapping_size == 0U || task->stack_base == NULL || task->stack_size == 0U) {
+    if (task == NULL) {
         return;
     }
 
+    rt = task->owner_runtime;
+    if (rt != NULL && task->alloc_owner_shard < rt->active_shards) {
+        /*
+         * Runtime dumps walk alloc-owner diagnostic lists under this lock. Keep
+         * stack pointer/size detachment serialized with those snapshots; the
+         * cache insertion itself happens after unlock to avoid nesting cache
+         * locks under the diagnostic list lock.
+         */
+        diagnostic_lock = &rt->shards[task->alloc_owner_shard].lock;
+        pthread_mutex_lock(diagnostic_lock);
+    }
+    if (task->stack_mapping == NULL || task->mapping_size == 0U || task->stack_base == NULL || task->stack_size == 0U) {
+        if (diagnostic_lock != NULL) {
+            pthread_mutex_unlock(diagnostic_lock);
+        }
+        return;
+    }
     mapping = task->stack_mapping;
     mapping_size = task->mapping_size;
     stack_base = task->stack_base;
     stack_size = task->stack_size;
-    rt = task->owner_runtime;
     task->stack_mapping = NULL;
     task->mapping_size = 0U;
     task->stack_base = NULL;
     task->stack_size = 0U;
+    if (diagnostic_lock != NULL) {
+        pthread_mutex_unlock(diagnostic_lock);
+    }
     if (rt != NULL && task->home_shard < rt->active_shards) {
         cache_shard = &rt->shards[task->home_shard];
     } else {
