@@ -548,6 +548,25 @@ static int test_positional_io_and_aligned_buffers(void) {
 }
 
 #if defined(__linux__)
+static int open_write_only_temp_fd(void) {
+    char path[] = "/tmp/llam-owned-writeonly-XXXXXX";
+    int created_fd;
+    int fd;
+    int saved_errno;
+
+    created_fd = mkstemp(path);
+    if (created_fd < 0) {
+        return -1;
+    }
+    (void)close(created_fd);
+
+    fd = open(path, O_WRONLY);
+    saved_errno = errno;
+    (void)unlink(path);
+    errno = saved_errno;
+    return fd;
+}
+
 static int test_read_owned_invalid_fd_before_allocation(void) {
     pid_t pid;
     int status = 0;
@@ -601,6 +620,128 @@ static int test_read_owned_invalid_fd_before_allocation(void) {
     }
 }
 
+static int test_read_owned_write_only_fd_before_allocation(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("write-only owned-read fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        struct rlimit limit;
+        ssize_t bytes;
+        int fd;
+
+        /*
+         * A write-only descriptor is valid but cannot be read.  Owned reads
+         * must surface the native EBADF before reserving a caller-controlled
+         * destination size, otherwise EBADF is masked as ENOMEM.
+         */
+        fd = open_write_only_temp_fd();
+        if (fd < 0) {
+            _exit(11);
+        }
+        limit.rlim_cur = 128U * 1024U * 1024U;
+        limit.rlim_max = 128U * 1024U * 1024U;
+        if (setrlimit(RLIMIT_AS, &limit) != 0) {
+            close(fd);
+            _exit(10);
+        }
+        errno = 0;
+        bytes = llam_read_owned((llam_fd_t)fd, 256U * 1024U * 1024U, &buffer);
+        close(fd);
+        if (bytes == -1 && errno == EBADF && buffer == NULL) {
+            _exit(0);
+        }
+        if (bytes == -1 && errno == ENOMEM) {
+            _exit(2);
+        }
+        _exit(3);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("write-only owned-read waitpid failed");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("write-only owned-read child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 2:
+        return test_fail("llam_read_owned write-only fd allocated before returning EBADF");
+    case 10:
+        return test_fail("write-only owned-read RLIMIT_AS setup failed");
+    case 11:
+        return test_fail("write-only owned-read temp fd setup failed");
+    default:
+        return test_fail("llam_read_owned write-only fd returned an unexpected result");
+    }
+}
+
+static int test_read_owned_directory_fd_before_allocation(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("directory owned-read fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        struct rlimit limit;
+        ssize_t bytes;
+        int fd;
+
+        /*
+         * POSIX read(2) reports EISDIR for directory descriptors.  Owned reads
+         * must preserve that descriptor error before reserving attacker-sized
+         * storage.
+         */
+        fd = open(".", O_RDONLY | O_DIRECTORY);
+        if (fd < 0) {
+            _exit(11);
+        }
+        limit.rlim_cur = 128U * 1024U * 1024U;
+        limit.rlim_max = 128U * 1024U * 1024U;
+        if (setrlimit(RLIMIT_AS, &limit) != 0) {
+            close(fd);
+            _exit(10);
+        }
+        errno = 0;
+        bytes = llam_read_owned((llam_fd_t)fd, 256U * 1024U * 1024U, &buffer);
+        close(fd);
+        if (bytes == -1 && errno == EISDIR && buffer == NULL) {
+            _exit(0);
+        }
+        if (bytes == -1 && errno == ENOMEM) {
+            _exit(2);
+        }
+        _exit(3);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("directory owned-read waitpid failed");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("directory owned-read child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 2:
+        return test_fail("llam_read_owned directory fd allocated before returning EISDIR");
+    case 10:
+        return test_fail("directory owned-read RLIMIT_AS setup failed");
+    case 11:
+        return test_fail("directory owned-read fd setup failed");
+    default:
+        return test_fail("llam_read_owned directory fd returned an unexpected result");
+    }
+}
+
 static int test_pread_owned_invalid_fd_before_allocation(void) {
     pid_t pid;
     int status = 0;
@@ -611,21 +752,30 @@ static int test_pread_owned_invalid_fd_before_allocation(void) {
     }
     if (pid == 0) {
         llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        int pipe_fds[2] = {-1, -1};
+        int closed_fd;
         struct rlimit limit;
         ssize_t bytes;
 
         /*
          * Positional owned reads allocate their destination buffer before the
-         * syscall unless invalid descriptors are rejected first. Keep this as
-         * a regression guard so a hostile count cannot mask EBADF as ENOMEM.
+         * syscall unless invalid descriptors are rejected first. Use a closed
+         * positive fd, not only LLAM_INVALID_FD, so this catches the path where
+         * EBADF would otherwise be discovered only after a hostile allocation.
          */
+        if (pipe(pipe_fds) != 0) {
+            _exit(11);
+        }
+        closed_fd = pipe_fds[0];
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
         limit.rlim_cur = 128U * 1024U * 1024U;
         limit.rlim_max = 128U * 1024U * 1024U;
         if (setrlimit(RLIMIT_AS, &limit) != 0) {
             _exit(10);
         }
         errno = 0;
-        bytes = llam_pread_owned_aligned(LLAM_INVALID_FD, 256U * 1024U * 1024U, 0U, 0U, &buffer);
+        bytes = llam_pread_owned_aligned((llam_fd_t)closed_fd, 256U * 1024U * 1024U, 0U, 0U, &buffer);
         if (bytes == -1 && errno == EBADF && buffer == NULL) {
             _exit(0);
         }
@@ -648,8 +798,194 @@ static int test_pread_owned_invalid_fd_before_allocation(void) {
         return test_fail("llam_pread_owned_aligned invalid fd allocated before returning EBADF");
     case 10:
         return test_fail("invalid-fd owned-pread RLIMIT_AS setup failed");
+    case 11:
+        return test_fail("invalid-fd owned-pread pipe setup failed");
     default:
         return test_fail("llam_pread_owned_aligned invalid fd returned an unexpected result");
+    }
+}
+
+static int test_pread_owned_nonseekable_fd_before_allocation(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("nonseekable owned-pread fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        int pipe_fds[2] = {-1, -1};
+        struct rlimit limit;
+        ssize_t bytes;
+
+        /*
+         * pread(2) reports ESPIPE for pipes and sockets.  The owned variant
+         * should prove seekability before allocation so ESPIPE is not hidden by
+         * a large destination request.
+         */
+        if (pipe(pipe_fds) != 0) {
+            _exit(11);
+        }
+        limit.rlim_cur = 128U * 1024U * 1024U;
+        limit.rlim_max = 128U * 1024U * 1024U;
+        if (setrlimit(RLIMIT_AS, &limit) != 0) {
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+            _exit(10);
+        }
+        errno = 0;
+        bytes = llam_pread_owned_aligned((llam_fd_t)pipe_fds[0], 256U * 1024U * 1024U, 0U, 0U, &buffer);
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        if (bytes == -1 && errno == ESPIPE && buffer == NULL) {
+            _exit(0);
+        }
+        if (bytes == -1 && errno == ENOMEM) {
+            _exit(2);
+        }
+        _exit(3);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("nonseekable owned-pread waitpid failed");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("nonseekable owned-pread child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 2:
+        return test_fail("llam_pread_owned_aligned nonseekable fd allocated before returning ESPIPE");
+    case 10:
+        return test_fail("nonseekable owned-pread RLIMIT_AS setup failed");
+    case 11:
+        return test_fail("nonseekable owned-pread pipe setup failed");
+    default:
+        return test_fail("llam_pread_owned_aligned nonseekable fd returned an unexpected result");
+    }
+}
+
+static int test_pread_owned_directory_fd_before_allocation(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("directory owned-pread fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        struct rlimit limit;
+        ssize_t bytes;
+        int fd;
+
+        /*
+         * Directory descriptors can be seekable enough for lseek probes on some
+         * platforms, but pread(2) still rejects reading their contents.  Keep
+         * EISDIR visible before owned-buffer allocation.
+         */
+        fd = open(".", O_RDONLY | O_DIRECTORY);
+        if (fd < 0) {
+            _exit(11);
+        }
+        limit.rlim_cur = 128U * 1024U * 1024U;
+        limit.rlim_max = 128U * 1024U * 1024U;
+        if (setrlimit(RLIMIT_AS, &limit) != 0) {
+            close(fd);
+            _exit(10);
+        }
+        errno = 0;
+        bytes = llam_pread_owned_aligned((llam_fd_t)fd, 256U * 1024U * 1024U, 0U, 0U, &buffer);
+        close(fd);
+        if (bytes == -1 && errno == EISDIR && buffer == NULL) {
+            _exit(0);
+        }
+        if (bytes == -1 && errno == ENOMEM) {
+            _exit(2);
+        }
+        _exit(3);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("directory owned-pread waitpid failed");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("directory owned-pread child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 2:
+        return test_fail("llam_pread_owned_aligned directory fd allocated before returning EISDIR");
+    case 10:
+        return test_fail("directory owned-pread RLIMIT_AS setup failed");
+    case 11:
+        return test_fail("directory owned-pread fd setup failed");
+    default:
+        return test_fail("llam_pread_owned_aligned directory fd returned an unexpected result");
+    }
+}
+
+static int test_pread_owned_write_only_fd_before_allocation(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("write-only owned-pread fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *buffer = (llam_io_buffer_t *)&status;
+        struct rlimit limit;
+        ssize_t bytes;
+        int fd;
+
+        /*
+         * Positional owned reads take the same allocation-first shape as
+         * llam_read_owned().  Probe write-only descriptors before allocation so
+         * a hostile count cannot turn EBADF into ENOMEM.
+         */
+        fd = open_write_only_temp_fd();
+        if (fd < 0) {
+            _exit(11);
+        }
+        limit.rlim_cur = 128U * 1024U * 1024U;
+        limit.rlim_max = 128U * 1024U * 1024U;
+        if (setrlimit(RLIMIT_AS, &limit) != 0) {
+            close(fd);
+            _exit(10);
+        }
+        errno = 0;
+        bytes = llam_pread_owned_aligned((llam_fd_t)fd, 256U * 1024U * 1024U, 0U, 0U, &buffer);
+        close(fd);
+        if (bytes == -1 && errno == EBADF && buffer == NULL) {
+            _exit(0);
+        }
+        if (bytes == -1 && errno == ENOMEM) {
+            _exit(2);
+        }
+        _exit(3);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("write-only owned-pread waitpid failed");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("write-only owned-pread child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 2:
+        return test_fail("llam_pread_owned_aligned write-only fd allocated before returning EBADF");
+    case 10:
+        return test_fail("write-only owned-pread RLIMIT_AS setup failed");
+    case 11:
+        return test_fail("write-only owned-pread temp fd setup failed");
+    default:
+        return test_fail("llam_pread_owned_aligned write-only fd returned an unexpected result");
     }
 }
 #endif
@@ -1368,6 +1704,34 @@ cleanup:
     return rc;
 }
 
+static int test_owned_buffer_raw_release_rejects_public_handle(void) {
+    llam_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *handle = NULL;
+    int rc = 0;
+
+    buffer = allocate_internal_test_buffer("pub", &handle);
+    if (buffer == NULL) {
+        return test_fail_errno("owned-buffer raw-release public-handle allocation failed");
+    }
+
+    /*
+     * Raw release is an internal cleanup path for live wrapper addresses before
+     * the public handle escapes. Passing an encoded public handle here must be a
+     * no-op; otherwise an internal error path can accidentally consume caller
+     * ownership using the wrong release primitive.
+     */
+    llam_io_buffer_release_raw(handle);
+    if (llam_io_buffer_size(handle) != 3U ||
+        memcmp(llam_io_buffer_data(handle), "pub", 3U) != 0) {
+        rc = test_fail("raw owned-buffer release accepted an encoded public handle");
+    }
+
+    if (llam_io_buffer_size(handle) != 0U) {
+        llam_io_buffer_release(handle);
+    }
+    return rc;
+}
+
 static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
@@ -1723,7 +2087,12 @@ int main(void) {
         test_positional_io_and_aligned_buffers() != 0 ||
 #if defined(__linux__)
         test_read_owned_invalid_fd_before_allocation() != 0 ||
+        test_read_owned_write_only_fd_before_allocation() != 0 ||
+        test_read_owned_directory_fd_before_allocation() != 0 ||
         test_pread_owned_invalid_fd_before_allocation() != 0 ||
+        test_pread_owned_nonseekable_fd_before_allocation() != 0 ||
+        test_pread_owned_directory_fd_before_allocation() != 0 ||
+        test_pread_owned_write_only_fd_before_allocation() != 0 ||
 #endif
         test_managed_io_paths() != 0 ||
         test_owned_buffer_release_after_shutdown() != 0 ||
@@ -1731,6 +2100,7 @@ int main(void) {
         test_owned_buffer_stale_release_reuse_guard() != 0 ||
         test_owned_buffer_public_handle_corrupt_slot_guard() != 0 ||
         test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
+        test_owned_buffer_raw_release_rejects_public_handle() != 0 ||
         test_public_owned_buffer_alloc_and_positional_io() != 0 ||
         test_provided_owned_buffer_detaches_on_runtime_destroy() != 0 ||
         test_provided_owned_buffer_data_accessor_detaches_storage() != 0 ||

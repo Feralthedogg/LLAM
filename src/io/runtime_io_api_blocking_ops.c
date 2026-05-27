@@ -27,6 +27,10 @@
 
 #include "runtime_io_api_internal.h"
 
+#if LLAM_PLATFORM_POSIX
+#include <sys/stat.h>
+#endif
+
 /**
  * @brief Run an owned-buffer blocking fallback through the unambiguous API.
  */
@@ -58,6 +62,41 @@ static size_t llam_owned_read_count_max(void) {
     return SIZE_MAX >> 1U;
 #endif
 #endif
+}
+
+static int llam_owned_read_validate_readable_fd_before_alloc(llam_fd_t fd) {
+#if LLAM_PLATFORM_POSIX
+    int saved_errno = errno;
+    struct stat st;
+    int flags;
+
+    /*
+     * Owned reads reserve caller-sized storage before issuing read(2).  A
+     * descriptor can pass socket probing and still fail read(2) immediately
+     * (for example write-only files or directories). Detect those native
+     * descriptor errors before allocation so hostile sizes cannot hide them
+     * behind ENOMEM.
+     */
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if ((flags & O_ACCMODE) == O_WRONLY) {
+        errno = EBADF;
+        return -1;
+    }
+    if (fstat(fd, &st) != 0) {
+        return -1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        errno = EISDIR;
+        return -1;
+    }
+    errno = saved_errno;
+#else
+    (void)fd;
+#endif
+    return 0;
 }
 
 /**
@@ -288,6 +327,9 @@ ssize_t llam_read_owned_impl(llam_fd_t fd,
          * descriptor is normalized to ENOTSOCK.
          */
         errno = socket_probe_errno == EBADF ? EBADF : ENOTSOCK;
+        return -1;
+    }
+    if (!socket_recv && llam_owned_read_validate_readable_fd_before_alloc(fd) != 0) {
         return -1;
     }
 

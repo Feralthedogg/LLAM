@@ -91,8 +91,9 @@ static bool llam_io_buffer_public_decode_handle_locked(const llam_io_buffer_t *h
          * Internal setup/error paths pass the real wrapper address before the
          * encoded public handle escapes. Check that live-list membership first:
          * a large long-running slot table can make a normal heap pointer decode
-         * to an in-range slot number, and that must not turn raw cleanup into a
-         * silent leak. Public callers never set allow_raw_internal.
+         * to an in-range slot number, and an encoded public handle is also a
+         * pointer-sized value. Raw cleanup must therefore accept only the live
+         * wrapper address and must never fall through to public-handle decode.
          */
         buffer = (llam_io_buffer_t *)handle;
         if (llam_io_buffer_public_is_live_locked(buffer)) {
@@ -101,6 +102,7 @@ static bool llam_io_buffer_public_decode_handle_locked(const llam_io_buffer_t *h
             }
             return true;
         }
+        return false;
     }
 
     buffer = llam_public_slot_resolve_encoded(&g_llam_io_buffer_public_slots,

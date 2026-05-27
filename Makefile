@@ -1911,7 +1911,9 @@ test-asan:
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
 	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability
+	: "Keep the ASan broker task-race probe short; full-strength coverage stays in normal test."; \
+	LLAM_SECURITY_TASK_DETACH_RACE_ROUNDS=16 \
+		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability
 
 test-no-owner:
 	@set -e; \

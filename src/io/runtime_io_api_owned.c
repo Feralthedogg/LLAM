@@ -25,6 +25,12 @@
 
 #include "runtime_io_api_internal.h"
 
+#if LLAM_PLATFORM_POSIX
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 static bool llam_io_buffer_alignment_valid(size_t alignment) {
     return alignment == 0U || (alignment >= sizeof(void *) && (alignment & (alignment - 1U)) == 0U);
 }
@@ -288,6 +294,74 @@ size_t llam_io_buffer_alignment(const llam_io_buffer_t *buffer) {
     return alignment;
 }
 
+static int llam_pread_owned_validate_target_before_alloc(bool handle_mode, llam_handle_t handle, llam_fd_t fd) {
+#if LLAM_PLATFORM_POSIX
+    int saved_errno = errno;
+    llam_fd_t probe_fd = handle_mode ? (llam_fd_t)handle : fd;
+    struct stat st;
+    off_t current;
+    int flags;
+
+    /*
+     * Positional owned reads allocate the destination up front. Probe descriptor
+     * access and seekability first so fd errors report their native errno
+     * instead of being masked by a hostile allocation request.
+     */
+    flags = fcntl(probe_fd, F_GETFL, 0);
+    if (flags < 0) {
+        return -1;
+    }
+    if ((flags & O_ACCMODE) == O_WRONLY) {
+        errno = EBADF;
+        return -1;
+    }
+    if (fstat(probe_fd, &st) != 0) {
+        return -1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        errno = EISDIR;
+        return -1;
+    }
+    current = lseek(probe_fd, 0, SEEK_CUR);
+    if (current == (off_t)-1) {
+        return -1;
+    }
+    errno = saved_errno;
+    return 0;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
+    DWORD file_type;
+    DWORD error_code;
+    int saved_errno = errno;
+
+    if (!handle_mode) {
+        /*
+         * Windows positional file I/O is exposed through llam_handle_t.  Reject
+         * the fd-flavoured API before allocation instead of allocating and then
+         * returning ENOTSUP from the backend shim.
+         */
+        (void)fd;
+        errno = ENOTSUP;
+        return -1;
+    }
+    file_type = GetFileType((HANDLE)handle);
+    if (file_type == FILE_TYPE_UNKNOWN) {
+        error_code = GetLastError();
+        if (error_code != NO_ERROR) {
+            errno = llam_windows_system_error_to_errno(error_code);
+            return -1;
+        }
+    }
+    errno = saved_errno;
+    return 0;
+#else
+    (void)handle;
+    (void)handle_mode;
+    (void)fd;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
 static ssize_t llam_pread_owned_aligned_impl(bool handle_mode,
                                              llam_handle_t handle,
                                              llam_fd_t fd,
@@ -329,6 +403,9 @@ static ssize_t llam_pread_owned_aligned_impl(bool handle_mode,
 #else
         errno = EINVAL;
 #endif
+        return -1;
+    }
+    if (llam_pread_owned_validate_target_before_alloc(handle_mode, handle, fd) != 0) {
         return -1;
     }
     buffer = llam_io_buffer_alloc_detached(max_count, alignment, 0U);
