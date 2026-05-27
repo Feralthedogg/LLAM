@@ -154,6 +154,9 @@
   interrupt/kill the whole process tree during cleanup. Wrapper-style test
   servers can no longer leave real server descendants running after startup or
   connection failures.
+* bound `stress_server_composite.py` child phase commands with process-tree
+  timeout cleanup and explicit timeout diagnostics, preventing hung flood
+  wrappers from stalling the composite suite until the outer CI job timeout.
 
 ### Tests
 
@@ -187,6 +190,8 @@
   the sanitizer build while Clang-based hosts keep their previous flags.
 * add process-helper regression coverage for `stress_server.py` and
   `stress_server_composite.py` wrapper-server cleanup paths.
+* add process-helper regression coverage for hung composite flood wrappers,
+  proving timeout diagnostics are emitted and flood descendants are reaped.
 
 * add pre-init stats/JSON snapshot assertions plus host-init race coverage for
   `llam_dump_runtime_state()`, `llam_runtime_write_stats_json()`, and unmanaged

@@ -456,6 +456,60 @@ def test_stress_server_composite_cleans_wrapper_descendant() -> None:
                 kill_process(pid)
 
 
+def test_stress_server_composite_times_out_wrapper_flood_descendant() -> None:
+    if os.name == "nt":
+        return
+
+    with tempfile.TemporaryDirectory(prefix="llam-stress-composite-flood-timeout-test-") as tmp:
+        tmp_path = Path(tmp)
+        fake_flood = tmp_path / "fake_flood.py"
+        pidfile = tmp_path / "child.pid"
+        write_fake_server_wrapper(fake_flood)
+
+        env = os.environ.copy()
+        env["LLAM_FAKE_SERVER_CHILD_PID"] = str(pidfile)
+        script = Path(__file__).resolve().with_name("stress_server_composite.py")
+        proc = run_capture(
+            [
+                Path(sys.executable),
+                script,
+                "--server",
+                fake_flood,
+                "--server-flood",
+                fake_flood,
+                "--host",
+                "127.0.0.1",
+                "--skip-correctness",
+                "--skip-edge",
+                "--flood-duration",
+                "0.1",
+                "--payload-flood-duration",
+                "0.1",
+                "--shutdown-timeout",
+                "0.5",
+                "--command-timeout-padding",
+                "0.5",
+            ],
+            env=env,
+            timeout=10.0,
+            stderr_to_stdout=True,
+        )
+        if proc.returncode == 0:
+            fail("stress_server_composite unexpectedly succeeded with hanging fake flood")
+        if "class=command_timeout" not in proc.stdout:
+            fail(f"fake flood timeout did not produce command timeout diagnostic: {proc.stdout!r}")
+        if not pidfile.exists():
+            fail(f"fake flood child pidfile was not written: {proc.stdout!r}")
+
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+        try:
+            if not wait_for_exit(pid, 5.0):
+                fail(f"stress_server_composite fake flood descendant survived timeout cleanup: pid={pid}")
+        finally:
+            if process_alive(pid):
+                kill_process(pid)
+
+
 def main() -> int:
     test_path_command_capture()
     test_timeout_kills_descendant()
@@ -464,6 +518,7 @@ def main() -> int:
     test_run_with_timeout_cleans_after_dump_kills_wrapper()
     test_stress_server_cleans_wrapper_descendant()
     test_stress_server_composite_cleans_wrapper_descendant()
+    test_stress_server_composite_times_out_wrapper_flood_descendant()
     print("[test_process_utils] ok")
     return 0
 

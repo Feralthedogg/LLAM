@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from process_utils import interrupt_process_tree, kill_process_tree
+from process_utils import ProcessTimeoutError, interrupt_process_tree, kill_process_tree, run_capture
 from safe_output import prepare_output_path
 
 
@@ -398,21 +398,35 @@ def diagnose_checked_result(label: str, rc: int, stdout: str, stderr: str) -> st
     return None
 
 
-def run_checked(cmd: list[str], label: str) -> None:
+def run_checked(cmd: list[str], label: str, timeout_sec: float) -> None:
     print(f"[{label}] {' '.join(cmd)}", flush=True)
     started = time.monotonic()
-    proc = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        proc = run_capture(cmd, timeout=timeout_sec)
+        returncode = proc.returncode
+        stdout = proc.stdout
+        stderr = proc.stderr
+    except ProcessTimeoutError as exc:
+        returncode = 124
+        stdout = exc.stdout
+        stderr = exc.stderr
     elapsed = time.monotonic() - started
-    if proc.stdout:
-        print(proc.stdout.rstrip())
-    if proc.stderr:
-        print(proc.stderr.rstrip(), file=sys.stderr)
-    diagnostic = diagnose_checked_result(label, proc.returncode, proc.stdout, proc.stderr)
+    if stdout:
+        print(stdout.rstrip())
+    if stderr:
+        print(stderr.rstrip(), file=sys.stderr)
+    if returncode == 124:
+        diagnostic = (
+            f"diagnostic: phase={label.replace(' ', ':')} class=command_timeout "
+            f"rc=124 reason=phase_timeout timeout_sec={timeout_sec:.3f}"
+        )
+    else:
+        diagnostic = diagnose_checked_result(label, returncode, stdout, stderr)
     if diagnostic is not None:
-        print(diagnostic, file=sys.stderr if proc.returncode != 0 else sys.stdout, flush=True)
-    if proc.returncode != 0:
+        print(diagnostic, file=sys.stderr if returncode != 0 else sys.stdout, flush=True)
+    if returncode != 0:
         suffix = f"; {diagnostic}" if diagnostic is not None else ""
-        raise RuntimeError(f"{label} failed with rc={proc.returncode}{suffix}")
+        raise RuntimeError(f"{label} failed with rc={returncode}{suffix}")
     print(f"[{label}] ok elapsed={elapsed:.3f}s", flush=True)
 
 
@@ -465,6 +479,7 @@ def phase_correctness(args: argparse.Namespace, script_path: Path) -> None:
                 str(args.seed + 1000 + index),
             ],
             f"correctness clients={clients} payload={payload_bytes}",
+            args.correctness_timeout + args.command_timeout_padding,
         )
 
 
@@ -604,7 +619,7 @@ def phase_flood(args: argparse.Namespace) -> None:
             cmd.append("--allow-forced-stop")
         else:
             cmd.append("--fail-on-forced-stop")
-        run_checked(cmd, f"flood {label}")
+        run_checked(cmd, f"flood {label}", duration + args.shutdown_timeout + args.command_timeout_padding)
 
 
 def random_payload(prefix: str, payload_bytes: int) -> bytes:
@@ -959,6 +974,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slow-threads", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_SLOW_THREADS", "4")))
     parser.add_argument("--resource-interval", type=float, default=1.0)
     parser.add_argument("--shutdown-timeout", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_SHUTDOWN_TIMEOUT", "30")))
+    parser.add_argument(
+        "--command-timeout-padding",
+        type=float,
+        default=float(os.getenv("LLAM_SERVER_COMPOSITE_COMMAND_TIMEOUT_PADDING", "30")),
+        help="extra seconds added to bounded child command timeouts before process-tree cleanup",
+    )
     parser.add_argument("--max-rss-mb", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_RSS_MB", "2048")))
     parser.add_argument("--max-fds", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_FDS", "4096")))
     parser.add_argument(
@@ -1010,6 +1031,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--churn-threads and --slow-threads must be >= 0")
     if args.shutdown_timeout <= 0.0:
         raise SystemExit("--shutdown-timeout must be > 0")
+    if args.command_timeout_padding <= 0.0:
+        raise SystemExit("--command-timeout-padding must be > 0")
     if args.max_unexpected_client_errors < -1:
         raise SystemExit("--max-unexpected-client-errors must be >= -1")
     if args.flood_min_delivery_ratio < 0.0 or args.flood_min_delivery_ratio > 1.0:
