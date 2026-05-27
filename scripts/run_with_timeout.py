@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from process_utils import kill_process_tree
+from process_utils import interrupt_process_tree, kill_process_tree
 from safe_output import open_text_for_write, prepare_output_path
 
 
@@ -57,12 +57,9 @@ def interrupt_process(proc: subprocess.Popen[str]) -> str:
         # Windows use taskkill tree mode immediately when the deadline expires.
         kill_process_tree(proc)
         return "kill_tree"
-    try:
-        # POSIX children run in their own session, so an interrupt reaches any
-        # helper processes the stress command spawned before the timeout.
-        os.killpg(proc.pid, signal.SIGINT)
-    except ProcessLookupError:
-        pass
+    # POSIX children run in their own session, so an interrupt reaches any
+    # helper processes the stress command spawned before the timeout.
+    interrupt_process_tree(proc)
     return "interrupt"
 
 

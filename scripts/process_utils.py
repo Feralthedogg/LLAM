@@ -31,6 +31,18 @@ class ProcessTimeoutError(RuntimeError):
         self.stderr = stderr
 
 
+def interrupt_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Request cooperative termination for a process tree when supported."""
+
+    if os.name == "nt":
+        proc.terminate()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass
+
+
 def kill_process_tree(proc: subprocess.Popen[str]) -> None:
     """Forcefully terminate a process and any descendants we can address.
 

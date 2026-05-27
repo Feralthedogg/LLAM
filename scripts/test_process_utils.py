@@ -339,12 +339,131 @@ def test_run_with_timeout_cleans_after_dump_kills_wrapper() -> None:
                 kill_process(pid)
 
 
+def write_fake_server_wrapper(path: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env python3",
+                "import os",
+                "import subprocess",
+                "import sys",
+                "import time",
+                "from pathlib import Path",
+                "pidfile = Path(os.environ['LLAM_FAKE_SERVER_CHILD_PID'])",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])",
+                "pidfile.write_text(str(child.pid), encoding='utf-8')",
+                "print(f'fake-server-child pid={child.pid}', flush=True)",
+                "time.sleep(30)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def test_stress_server_cleans_wrapper_descendant() -> None:
+    if os.name == "nt":
+        return
+
+    with tempfile.TemporaryDirectory(prefix="llam-stress-server-cleanup-test-") as tmp:
+        tmp_path = Path(tmp)
+        fake_server = tmp_path / "fake_server.py"
+        pidfile = tmp_path / "child.pid"
+        write_fake_server_wrapper(fake_server)
+
+        env = os.environ.copy()
+        env["LLAM_FAKE_SERVER_CHILD_PID"] = str(pidfile)
+        script = Path(__file__).resolve().with_name("stress_server.py")
+        proc = run_capture(
+            [
+                Path(sys.executable),
+                script,
+                "--server",
+                fake_server,
+                "--host",
+                "127.0.0.1",
+                "--clients",
+                "2",
+                "--messages",
+                "1",
+                "--timeout",
+                "0.5",
+            ],
+            env=env,
+            timeout=10.0,
+            stderr_to_stdout=True,
+        )
+        if proc.returncode == 0:
+            fail("stress_server unexpectedly succeeded with fake non-listening server")
+        if not pidfile.exists():
+            fail(f"fake stress_server child pidfile was not written: {proc.stdout!r}")
+
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+        try:
+            if not wait_for_exit(pid, 5.0):
+                fail(f"stress_server fake server descendant survived cleanup: pid={pid}")
+        finally:
+            if process_alive(pid):
+                kill_process(pid)
+
+
+def test_stress_server_composite_cleans_wrapper_descendant() -> None:
+    if os.name == "nt":
+        return
+
+    with tempfile.TemporaryDirectory(prefix="llam-stress-composite-cleanup-test-") as tmp:
+        tmp_path = Path(tmp)
+        fake_server = tmp_path / "fake_server.py"
+        pidfile = tmp_path / "child.pid"
+        write_fake_server_wrapper(fake_server)
+
+        env = os.environ.copy()
+        env["LLAM_FAKE_SERVER_CHILD_PID"] = str(pidfile)
+        script = Path(__file__).resolve().with_name("stress_server_composite.py")
+        proc = run_capture(
+            [
+                Path(sys.executable),
+                script,
+                "--server",
+                fake_server,
+                "--server-flood",
+                fake_server,
+                "--host",
+                "127.0.0.1",
+                "--correctness-timeout",
+                "0.5",
+                "--correctness-matrix",
+                "2:1:1",
+                "--skip-flood",
+                "--skip-edge",
+            ],
+            env=env,
+            timeout=10.0,
+            stderr_to_stdout=True,
+        )
+        if proc.returncode == 0:
+            fail("stress_server_composite unexpectedly succeeded with fake non-listening server")
+        if not pidfile.exists():
+            fail(f"fake composite child pidfile was not written: {proc.stdout!r}")
+
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+        try:
+            if not wait_for_exit(pid, 5.0):
+                fail(f"stress_server_composite fake server descendant survived cleanup: pid={pid}")
+        finally:
+            if process_alive(pid):
+                kill_process(pid)
+
+
 def main() -> int:
     test_path_command_capture()
     test_timeout_kills_descendant()
     test_run_with_timeout_kills_descendant()
     test_run_with_timeout_dump_signal_reaches_descendant()
     test_run_with_timeout_cleans_after_dump_kills_wrapper()
+    test_stress_server_cleans_wrapper_descendant()
+    test_stress_server_composite_cleans_wrapper_descendant()
     print("[test_process_utils] ok")
     return 0
 

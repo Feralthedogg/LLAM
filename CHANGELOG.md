@@ -150,6 +150,10 @@
   rare-hang dump collection.
 * ensure timeout cleanup still kills descendant processes when a POSIX dump
   signal terminates the direct wrapper before the final interrupt/kill phase.
+* start server stress harness children in isolated POSIX process groups and
+  interrupt/kill the whole process tree during cleanup. Wrapper-style test
+  servers can no longer leave real server descendants running after startup or
+  connection failures.
 
 ### Tests
 
@@ -181,6 +185,8 @@
 * keep Linux GCC ThreadSanitizer coverage enabled by probing support for
   `-Wno-error=tsan`; GCC's `atomic_thread_fence` TSan warning no longer breaks
   the sanitizer build while Clang-based hosts keep their previous flags.
+* add process-helper regression coverage for `stress_server.py` and
+  `stress_server_composite.py` wrapper-server cleanup paths.
 
 * add pre-init stats/JSON snapshot assertions plus host-init race coverage for
   `llam_dump_runtime_state()`, `llam_runtime_write_stats_json()`, and unmanaged

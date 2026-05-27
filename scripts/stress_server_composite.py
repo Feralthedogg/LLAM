@@ -12,7 +12,6 @@ import os
 import random
 import re
 import shutil
-import signal
 import socket
 import string
 import struct
@@ -23,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from process_utils import interrupt_process_tree, kill_process_tree
 from safe_output import prepare_output_path
 
 
@@ -182,6 +182,7 @@ def start_server(server_path: Path, host: str, timeout_sec: float) -> RunningSer
         text=True,
         bufsize=1,
         env=env,
+        start_new_session=(os.name != "nt"),
     )
     server = RunningServer(proc=proc, port=port)
     if proc.stdout is not None:
@@ -210,11 +211,11 @@ def stop_server(server: RunningServer, timeout_sec: float = 30.0) -> bool:
     killed = False
 
     if server.proc.poll() is None:
-        server.proc.send_signal(signal.SIGINT)
+        interrupt_process_tree(server.proc)
         try:
             server.proc.wait(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
-            server.proc.kill()
+            kill_process_tree(server.proc)
             server.proc.wait(timeout=5.0)
             killed = True
     server.stop_drains.set()

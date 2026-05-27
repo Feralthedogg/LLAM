@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import os
 import random
-import signal
 import socket
 import string
 import subprocess
@@ -18,6 +17,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from process_utils import interrupt_process_tree, kill_process_tree
 
 
 @dataclass
@@ -183,6 +184,7 @@ def main() -> int:
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        start_new_session=(os.name != "nt"),
     )
     stdout_thread = threading.Thread(target=drain_stream, args=(proc.stdout, server_stdout, stop_drains), daemon=True)
     stderr_thread = threading.Thread(target=drain_stream, args=(proc.stderr, server_stderr, stop_drains), daemon=True)
@@ -241,11 +243,11 @@ def main() -> int:
         for thread in reader_threads:
             thread.join(timeout=1.0)
         if proc.poll() is None:
-            proc.send_signal(signal.SIGINT)
+            interrupt_process_tree(proc)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                kill_process_tree(proc)
                 proc.wait(timeout=5)
         stop_drains.set()
         stdout_thread.join(timeout=1.0)
