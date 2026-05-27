@@ -373,6 +373,7 @@ security hardening merges:
 make analyze-cppcheck
 make audit-deps
 make test-fuzz-heavy
+make test-runtime-soak
 make test-hardening
 ```
 
@@ -382,9 +383,12 @@ preprocessor time. `make audit-deps` audits the locked Rust comparison-harness
 dependencies; LLAM's C runtime does not vendor those crates.
 `make test-fuzz-heavy` runs the deterministic runtime fuzz suite at maximum
 built-in single-runtime and multi-runtime scenario counts. `make
-test-hardening` is the one-command local hardening gate for release candidates:
-it runs static analysis, dependency audit, ASan/UBSan, TSan, and the heavy fuzz
-profile.
+test-runtime-soak` repeats direct LLAM core tests for a configurable time window
+without the example server policy in the loop; use `RUNTIME_SOAK_SECONDS`,
+`RUNTIME_SOAK_SEED`, `RUNTIME_SOAK_FUZZ_SCENARIOS`, and
+`RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS` to scale it. `make test-hardening` is the
+one-command local hardening gate for release candidates: it runs static
+analysis, dependency audit, ASan/UBSan, TSan, and the heavy fuzz profile.
 
 The current direct runtime tests are intended to catch bugs independent of the
 example chat server policy: lifecycle races, task handle ownership, cancellation
@@ -451,14 +455,16 @@ Before tagging a release build, require:
   deterministic runtime fuzz, conservative scheduler/channel/select/I/O
   benchmark guardrails, ASan/UBSan
   quick gate, and experimental TSan diagnostics.
-- `Weekly Soak` hour-long server composite on Linux x86_64 and macOS arm64.
-  This profile is the long-running stability/accounting gate: it keeps the
-  high-rate best-effort flood load, but absolute delivery-MPS regression checks
-  belong to `Stress`, `Nightly Deep CI`, and scheduled benchmark jobs. The soak
-  still fails on zero traffic, missing stats, accounting gaps, closed-outbox
-  drops, forced server stop, resource-limit violations, or unexpected edge
-  client errors. Require this gate before claiming long-running server
-  stability.
+- `Weekly Soak` direct runtime soak plus hour-long server composite on Linux
+  x86_64 and macOS arm64. The direct runtime soak repeats fuzz,
+  multi-runtime ownership/isolation, runtime stress, shutdown, and owned-buffer
+  tests with changing seeds. The server profile is the long-running
+  stability/accounting gate: it keeps the high-rate best-effort flood load, but
+  absolute delivery-MPS regression checks belong to `Stress`, `Nightly Deep CI`,
+  and scheduled benchmark jobs. The soak still fails on zero traffic, missing
+  stats, accounting gaps, closed-outbox drops, forced server stop,
+  resource-limit violations, or unexpected edge client errors. Require this
+  gate before claiming long-running runtime/server stability.
 - `python3 scripts/stress_server_composite.py --quick --seed 1234` on at least one POSIX
   platform. Quick mode is a hosted-runner smoke gate and uses a lower absolute
   flood delivery threshold than standard mode; delivery ratio must still remain

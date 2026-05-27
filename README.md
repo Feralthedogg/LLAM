@@ -233,6 +233,11 @@ make test
 `make test-soak` runs API/ABI tests plus the hour-long soak profile.
 `make test-fuzz-heavy` runs the deterministic runtime fuzz suite at its
 maximum built-in scenario counts for single-runtime and multi-runtime cases.
+`make test-runtime-soak` runs a time-bounded direct LLAM core soak loop over
+runtime fuzz, multi-runtime ownership/isolation, runtime stress, shutdown, and
+owned-buffer tests without involving the example chat server. Override
+`RUNTIME_SOAK_SECONDS`, `RUNTIME_SOAK_SEED`, and the `RUNTIME_SOAK_*SCENARIOS`
+variables to scale local or CI coverage.
 `make test-hardening` runs the release-candidate hardening gate: C static
 analysis, dependency audit, ASan/UBSan, TSan, and heavy runtime fuzz.
 
@@ -241,7 +246,7 @@ GitHub Actions is split by cost and depth:
 - `linux`, `macos`, and `Stress` are PR/push gates.
 - `Stress` repeats `test_runtime_stress`, pins/reports server stress seeds, streams long stress logs through `scripts/run_with_timeout.py`, and uploads diagnostics logs on failure or timeout.
 - `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental TSan, and benchmark guardrails from `.github/workflows/nightly.yml`.
-- `Weekly Soak` runs the hour-long stability/accounting composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
+- `Weekly Soak` runs direct runtime soak plus the hour-long stability/accounting composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
 - `Runtime Benchmarks` runs scheduled LLAM/Go/Tokio benchmark comparisons and uploads graphs/results.
 
 Current reliability coverage is split between direct runtime tests and the
@@ -276,7 +281,7 @@ Build outputs:
 - `test_runtime_group_local_edges`: focused task-local isolation and structured task-group join/cancel/destroy ownership coverage.
 - `test_runtime_shutdown_internal`: focused shutdown-internal coverage for partial initialization, stop-time wakeup, and internal resource cleanup.
 - `test_runtime_stress`: direct LLAM scheduler, cancel, channel, condvar, nested spawn, and I/O cancel stress.
-- `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios; `make test-fuzz-heavy` raises it to the maximum built-in scenario counts.
+- `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios; `make test-fuzz-heavy` raises it to the maximum built-in scenario counts, while `make test-runtime-soak` repeats it with changing seeds alongside direct multi-runtime/stress/shutdown/I/O tests.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
 - `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
 - `test_windows_policy`: Windows 10/11 policy selection and environment override checks.

@@ -101,6 +101,22 @@ jobs:
             ./build/soak/test_runtime_stress
           done 2>&1 | tee "$OUT_DIR/test_runtime_stress_repeat.log"
 
+      - name: Direct runtime soak
+        run: |
+          set -o pipefail
+          python3 scripts/runtime_soak.py \
+            --duration 600 \
+            --timeout 180 \
+            --seed "$SOAK_SEED" \
+            --fuzz-scenarios 128 \
+            --multi-fuzz-scenarios 64 \
+            --runtime-fuzz ./build/soak/test_runtime_fuzz \
+            --multi-runtime-core ./build/soak/test_multi_runtime_core \
+            --runtime-stress ./build/soak/test_runtime_stress \
+            --runtime-shutdown ./build/soak/test_runtime_shutdown_internal \
+            --io-buffers ./build/soak/test_io_buffers \
+            2>&1 | tee "$OUT_DIR/runtime_soak.log"
+
       - name: One-hour server composite soak
         run: |
           set -o pipefail

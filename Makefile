@@ -552,7 +552,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared test test-asan test-no-owner test-tsan test-fuzz-heavy test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared test test-asan test-no-owner test-tsan test-fuzz-heavy test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -621,7 +621,7 @@ package: windows-cmake-build
 bench-matrix: bench
 	python scripts/bench_matrix.py
 
-server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+test-asan test-no-owner test-tsan test-fuzz-heavy test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -1910,6 +1910,11 @@ TSAN_TEST_TARGETS = \
 
 FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 512
 FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 128
+RUNTIME_SOAK_SECONDS ?= 300
+RUNTIME_SOAK_TIMEOUT ?= 180
+RUNTIME_SOAK_SEED ?= 0x4c4c414d534f414b
+RUNTIME_SOAK_FUZZ_SCENARIOS ?= 128
+RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS ?= 64
 
 test-asan:
 	@set -e; \
@@ -1978,6 +1983,14 @@ test-fuzz-heavy: test_runtime_fuzz
 	LLAM_RUNTIME_FUZZ_SCENARIOS=$(FUZZ_HEAVY_RUNTIME_SCENARIOS) \
 	LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=$(FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS) \
 		./test_runtime_fuzz
+
+test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress test_runtime_shutdown_internal test_io_buffers
+	python3 scripts/runtime_soak.py \
+		--duration $(RUNTIME_SOAK_SECONDS) \
+		--timeout $(RUNTIME_SOAK_TIMEOUT) \
+		--seed $(RUNTIME_SOAK_SEED) \
+		--fuzz-scenarios $(RUNTIME_SOAK_FUZZ_SCENARIOS) \
+		--multi-fuzz-scenarios $(RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS)
 
 test-hardening: analyze-cppcheck audit-deps test-asan test-tsan test-fuzz-heavy
 
