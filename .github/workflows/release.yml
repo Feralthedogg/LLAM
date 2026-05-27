@@ -309,6 +309,7 @@ jobs:
 
       - name: Start BSD VM
         uses: cross-platform-actions/action@v1.1.0
+        timeout-minutes: 10
         with:
           operating_system: ${{ matrix.os }}
           version: ${{ matrix.version }}

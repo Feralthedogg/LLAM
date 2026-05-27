@@ -140,6 +140,8 @@
 * add a process-helper regression test and include it in `make test-hardening`,
   permanently checking that timeout cleanup removes descendant processes rather
   than only terminating the direct wrapper command.
+* bound BSD VM startup in CI/release workflows and keep DragonFly BSD
+  infrastructure stalls from blocking the required BSD gate indefinitely.
 
 ### Tests
 
