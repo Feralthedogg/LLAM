@@ -681,7 +681,7 @@ static int exercise_linux_wait_cqe_interrupt_policy(void) {
 }
 
 static int exercise_completion_drops_stale_cancel_control(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_node_t *node;
     llam_io_req_t req;
     int lock_rc;
@@ -725,10 +725,14 @@ static int exercise_completion_drops_stale_cancel_control(void) {
     /*
      * This models natural I/O completion winning before the queued cancel
      * control is processed. Completion must unlink that control before the
-     * waiting task can resume and release the request storage.
+     * waiting task can resume and release the request storage. On Linux this
+     * also prevents a stale io_uring cancel SQE from targeting a later request
+     * that reuses the same embedded request address.
      */
 #if LLAM_RUNTIME_BACKEND_DARWIN
     llam_io_complete_req(node, &req, 0, false);
+#elif LLAM_RUNTIME_BACKEND_LINUX
+    llam_io_complete_req(node, &req, 0, 0U, false);
 #else
     llam_windows_complete_req(node, &req, 0, false);
 #endif

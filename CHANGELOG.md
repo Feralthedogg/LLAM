@@ -157,10 +157,11 @@
 * bound `stress_server_composite.py` child phase commands with process-tree
   timeout cleanup and explicit timeout diagnostics, preventing hung flood
   wrappers from stalling the composite suite until the outer CI job timeout.
-* drop queued Darwin kqueue and Windows IOCP cancel-control records when a
-  request completes naturally before the queued cancel control is processed.
-  This prevents late backend control handling from dereferencing request
-  storage that may already have been returned to the owning task.
+* drop queued Linux io_uring, Darwin kqueue, and Windows IOCP cancel-control
+  records when a request completes naturally before the queued cancel control is
+  processed. This prevents late backend control handling from dereferencing
+  request storage or canceling a later request that reuses the same embedded
+  request address.
 * use the declared Windows `RtlGenRandom()` entry point for public-slot sealing
   entropy instead of casting a dynamically resolved `FARPROC`, fixing MinGW
   `-Werror=cast-function-type` builds while keeping the secure entropy path
@@ -213,8 +214,8 @@
   slot/generation handle layouts.
 
 * add internal shutdown regression coverage for the completion-before-cancel
-  backend race on Darwin and Windows, proving stale cancel-control records are
-  removed before request ownership can return to user code.
+  backend race on Linux, Darwin, and Windows, proving stale cancel-control
+  records are removed before request ownership can return to user code.
 
 ### Performance
 
