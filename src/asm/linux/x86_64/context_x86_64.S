@@ -33,6 +33,7 @@
      */
     .text
     .globl llam_ctx_switch
+    .hidden llam_ctx_switch
     .type llam_ctx_switch, @function
 llam_ctx_switch:
     .cfi_startproc
@@ -110,6 +111,7 @@ llam_ctx_switch:
     .cfi_endproc
 
     .globl llam_fiber_bootstrap
+    .hidden llam_fiber_bootstrap
     .type llam_fiber_bootstrap, @function
 llam_fiber_bootstrap:
     /*

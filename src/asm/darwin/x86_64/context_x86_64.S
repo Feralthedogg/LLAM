@@ -34,6 +34,7 @@
      */
     .text
     .globl _llam_ctx_switch
+    .private_extern _llam_ctx_switch
     .p2align 4, 0x90
 _llam_ctx_switch:
     .cfi_startproc
@@ -93,6 +94,7 @@ Lllam_ctx_restored:
     .cfi_endproc
 
     .globl _llam_fiber_bootstrap
+    .private_extern _llam_fiber_bootstrap
     .p2align 4, 0x90
 _llam_fiber_bootstrap:
     /*

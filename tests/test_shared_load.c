@@ -83,6 +83,29 @@ static int require_symbols(void *handle, const char *const *symbols, size_t coun
     return 0;
 }
 
+static int require_absent_symbol(void *handle, const char *name) {
+    void *symbol;
+
+    (void)dlerror();
+    symbol = dlsym(handle, name);
+    if (symbol != NULL) {
+        fprintf(stderr, "[test_shared_load] internal symbol is exported: %s\n", name);
+        return 1;
+    }
+    return 0;
+}
+
+static int require_absent_symbols(void *handle, const char *const *symbols, size_t count) {
+    size_t i;
+
+    for (i = 0U; i < count; ++i) {
+        if (require_absent_symbol(handle, symbols[i]) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     static const char *const llam_symbols[] = {
         "llam_abi_version",
@@ -180,6 +203,19 @@ int main(int argc, char **argv) {
         "llam_task_class",
         "llam_current_task",
     };
+    static const char *const internal_symbols[] = {
+        "llam_ctx_switch",
+        "llam_fiber_bootstrap",
+        "llam_eventfd_try_claim",
+        "llam_linux_futex_wait_private",
+        "llam_linux_futex_wait_private_timeout",
+        "llam_linux_futex_wake_private",
+        "llam_capability_test_force_entropy_failure",
+        "llam_broker_test_force_subject_entropy_failure",
+        "llam_broker_client_self_test_exchange",
+        "llam_broker_client_self_test_local",
+        "llam_broker_client_self_test_unix",
+    };
     const char *path = argc > 1 ? argv[1] : LLAM_TEST_DEFAULT_SHARED_PATH;
     char expected_version[32];
     abi_version_fn llam_abi_version_ptr = NULL;
@@ -200,6 +236,14 @@ int main(int argc, char **argv) {
     LOAD_FN(handle, "llam_abi_get_info", llam_abi_get_info_ptr);
     LOAD_FN(handle, "llam_connect", llam_connect_ptr);
     if (require_symbols(handle, llam_symbols, sizeof(llam_symbols) / sizeof(llam_symbols[0])) != 0) {
+        (void)dlclose(handle);
+        return 1;
+    }
+    /*
+     * The shared library may link these helpers internally, but they are not
+     * part of the stable C ABI and must not be reachable through dlsym().
+     */
+    if (require_absent_symbols(handle, internal_symbols, sizeof(internal_symbols) / sizeof(internal_symbols[0])) != 0) {
         (void)dlclose(handle);
         return 1;
     }

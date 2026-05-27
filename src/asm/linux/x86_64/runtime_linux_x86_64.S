@@ -32,6 +32,7 @@
     .text
 
     .globl llam_eventfd_try_claim
+    .hidden llam_eventfd_try_claim
     .type llam_eventfd_try_claim, @function
 llam_eventfd_try_claim:
     .cfi_startproc
@@ -44,6 +45,7 @@ llam_eventfd_try_claim:
     .cfi_endproc
 
     .globl llam_linux_futex_wait_private
+    .hidden llam_linux_futex_wait_private
     .type llam_linux_futex_wait_private, @function
 llam_linux_futex_wait_private:
     /* syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, NULL, NULL, 0) */
@@ -59,6 +61,7 @@ llam_linux_futex_wait_private:
     .cfi_endproc
 
     .globl llam_linux_futex_wait_private_timeout
+    .hidden llam_linux_futex_wait_private_timeout
     .type llam_linux_futex_wait_private_timeout, @function
 llam_linux_futex_wait_private_timeout:
     /* syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, expected, timeout, NULL, 0) */
@@ -74,6 +77,7 @@ llam_linux_futex_wait_private_timeout:
     .cfi_endproc
 
     .globl llam_linux_futex_wake_private
+    .hidden llam_linux_futex_wake_private
     .type llam_linux_futex_wake_private, @function
 llam_linux_futex_wake_private:
     /* syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, count, NULL, NULL, 0) */

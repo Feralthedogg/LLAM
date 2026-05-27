@@ -264,6 +264,21 @@ typedef struct llam_ctx {
 #define LLAM_NORETURN __attribute__((noreturn))
 #endif
 
+/*
+ * Internal helper visibility.
+ *
+ * LLAM_API is reserved for the supported C ABI. Internal test hooks and broker
+ * helpers may still need cross-translation-unit linkage inside tests, but they
+ * must not become dynamic-library entry points on ELF/Mach-O builds.
+ */
+#if defined(_WIN32)
+#define LLAM_INTERNAL_API
+#elif defined(__GNUC__) || defined(__clang__)
+#define LLAM_INTERNAL_API __attribute__((visibility("hidden")))
+#else
+#define LLAM_INTERNAL_API
+#endif
+
 void llam_ctx_switch(llam_ctx_t *from, const llam_ctx_t *to);
 void llam_fiber_bootstrap(void);
 LLAM_NORETURN void llam_fiber_alignment_violation(uint64_t rsp);

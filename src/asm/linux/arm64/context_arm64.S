@@ -26,6 +26,7 @@
     .text
     .align 2
     .globl llam_ctx_switch
+    .hidden llam_ctx_switch
     .type llam_ctx_switch, %function
 llam_ctx_switch:
     /*
@@ -79,6 +80,7 @@ llam_ctx_switch:
     .size llam_ctx_switch, .-llam_ctx_switch
 
     .globl llam_fiber_bootstrap
+    .hidden llam_fiber_bootstrap
     .type llam_fiber_bootstrap, %function
 llam_fiber_bootstrap:
     /*

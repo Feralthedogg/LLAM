@@ -26,6 +26,7 @@
     .text
     .align 2
     .globl _llam_ctx_switch
+    .private_extern _llam_ctx_switch
 _llam_ctx_switch:
     /*
      * x0 = context to save
@@ -77,6 +78,7 @@ _llam_ctx_switch:
     ret
 
     .globl _llam_fiber_bootstrap
+    .private_extern _llam_fiber_bootstrap
 _llam_fiber_bootstrap:
     /*
      * llam_ctx_make_task seeds x19 with llam_task_t*. Enter C bootstrap, then jump

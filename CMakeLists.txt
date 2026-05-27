@@ -271,6 +271,7 @@ set_target_properties(llam_runtime_shared
         VERSION ${LLAM_LIBRARY_VERSION}
         SOVERSION ${LLAM_ABI_VERSION_MAJOR}
         POSITION_INDEPENDENT_CODE ON
+        C_VISIBILITY_PRESET hidden
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")

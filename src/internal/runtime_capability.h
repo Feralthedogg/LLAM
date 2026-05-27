@@ -78,7 +78,7 @@ typedef struct llam_capability_token {
 
 int llam_capability_key_init(llam_capability_key_t *key, const void *scope, uint64_t seed);
 void llam_capability_key_clear(llam_capability_key_t *key);
-void llam_capability_test_force_entropy_failure(bool enabled);
+LLAM_INTERNAL_API void llam_capability_test_force_entropy_failure(bool enabled);
 
 int llam_capability_issue(const llam_capability_key_t *key,
                           const llam_capability_object_t *object,

@@ -9,7 +9,8 @@ LDLIBS ?= -pthread -luring
 SERVER_FLOOD_LDLIBS ?= -pthread
 OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
-PICFLAGS ?= -fPIC
+SHARED_CPPFLAGS ?= $(CPPFLAGS) -DLLAM_BUILD_SHARED
+PICFLAGS ?= -fPIC -fvisibility=hidden
 LLAM_ABI_MAJOR ?= 2
 LLAM_VERSION ?= 2.0.0
 SANITIZER_TARGETS_ENABLED ?= 0
@@ -657,6 +658,7 @@ $(BUILD_SIGNATURE): FORCE
 	{ \
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
+		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'OBJDIR=%s\n' '$(OBJDIR)'; \
@@ -675,6 +677,7 @@ $(SHARED_BUILD_SIGNATURE): FORCE
 	{ \
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
+		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
 		printf 'PICFLAGS=%s\n' '$(PICFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
@@ -2140,7 +2143,7 @@ $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 
 $(SHARED_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
@@ -2148,7 +2151,7 @@ $(OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 
 $(SHARED_OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
@@ -2156,7 +2159,7 @@ $(OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 
 $(SHARED_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
@@ -2164,7 +2167,7 @@ $(OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 
 $(SHARED_OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/engine/runtime_watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
@@ -2176,7 +2179,7 @@ $(OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_i
 
 $(SHARED_OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
@@ -2184,7 +2187,7 @@ $(OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/llam_int
 
 $(SHARED_OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
@@ -2192,7 +2195,7 @@ $(OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/llam_i
 
 $(SHARED_OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
@@ -2200,7 +2203,7 @@ $(OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam
 
 $(SHARED_OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
@@ -2208,7 +2211,7 @@ $(OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/ll
 
 $(SHARED_OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo.o: examples/demo.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
