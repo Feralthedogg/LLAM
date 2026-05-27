@@ -33,6 +33,20 @@ static sigset_t g_stress_dump_old_signal_set;
 static bool g_stress_dump_old_signal_set_valid;
 static char g_stress_dump_path[512];
 
+static void stress_ignore_late_signal_dump_requests(void) {
+    struct sigaction action;
+
+    /*
+     * Parent harnesses may send SIGUSR2 repeatedly while the stress process is
+     * already draining.  Once the sigwait thread is gone, a late SIGUSR2 would
+     * otherwise hit the default disposition after we restore the caller's mask.
+     */
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_IGN;
+    sigemptyset(&action.sa_mask);
+    (void)sigaction(SIGUSR2, &action, NULL);
+}
+
 static void stress_write_signal_dump(void) {
     int fd = llam_example_open_append_regular(g_stress_dump_path);
 
@@ -107,6 +121,7 @@ void stress_teardown_signal_dump(void) {
     (void)pthread_kill(g_stress_dump_thread, SIGUSR2);
     (void)pthread_join(g_stress_dump_thread, NULL);
     g_stress_dump_thread_started = false;
+    stress_ignore_late_signal_dump_requests();
     if (g_stress_dump_old_signal_set_valid) {
         (void)pthread_sigmask(SIG_SETMASK, &g_stress_dump_old_signal_set, NULL);
         g_stress_dump_old_signal_set_valid = false;

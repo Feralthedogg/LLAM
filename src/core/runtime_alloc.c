@@ -149,14 +149,23 @@ int llam_allocator_record_chunk(llam_allocator_t *allocator,
 
     {
         int rc = pthread_mutex_trylock(&allocator->lock);
+        bool contended = false;
 
         if (rc == 0) {
             allocator->lock_acquires += 1U;
         } else {
             if (rc == EBUSY) {
-                allocator->lock_contentions += 1U;
+                contended = true;
             }
             pthread_mutex_lock(&allocator->lock);
+            /*
+             * Keep allocator telemetry under the allocator lock.  The counters
+             * are diagnostic only, but concurrent host-thread slab growth can
+             * otherwise race while the protected chunk list remains correct.
+             */
+            if (contended) {
+                allocator->lock_contentions += 1U;
+            }
             allocator->lock_acquires += 1U;
         }
     }
