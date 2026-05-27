@@ -202,7 +202,9 @@ static uintptr_t public_handle_slot(const void *handle) {
 }
 
 static uint32_t public_handle_generation(const void *handle) {
-    return (uint32_t)(uintptr_t)handle;
+    uintptr_t raw = (uintptr_t)handle;
+
+    return (uint32_t)raw;
 }
 
 static int check_task_failures(edge_state_t *state) {
