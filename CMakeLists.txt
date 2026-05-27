@@ -12,6 +12,7 @@ set(LLAM_LIBRARY_VERSION "${LLAM_ABI_VERSION_MAJOR}.${LLAM_ABI_VERSION_MINOR}.0"
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CheckSymbolExists)
+find_package(Python3 COMPONENTS Interpreter)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -662,6 +663,13 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_runtime_io_dump COMMAND test_runtime_io_dump)
     add_test(NAME test_io_buffers COMMAND test_io_buffers)
     add_test(NAME test_shared_load COMMAND test_shared_load $<TARGET_FILE:llam_runtime_shared>)
+    if(Python3_FOUND)
+        add_test(NAME audit_shared_exports
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_shared_exports.py
+                         $<TARGET_FILE:llam_runtime_shared>
+                         --root ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
 endif()
 
 set(LLAM_PC_PRIVATE_LIBS "-pthread")
