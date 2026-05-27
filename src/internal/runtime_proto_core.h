@@ -82,7 +82,14 @@ void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task)
 void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
 
 #ifndef LLAM_NO_SANITIZE_THREAD
-#if defined(__SANITIZE_THREAD__) || (defined(__has_feature) && __has_feature(thread_sanitizer))
+#if defined(__SANITIZE_THREAD__)
+#define LLAM_TSAN_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define LLAM_TSAN_BUILD 1
+#endif
+#endif
+#if defined(LLAM_TSAN_BUILD)
 #if defined(__has_attribute)
 #if __has_attribute(no_sanitize)
 #define LLAM_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
@@ -94,6 +101,7 @@ void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
 #ifndef LLAM_NO_SANITIZE_THREAD
 #define LLAM_NO_SANITIZE_THREAD
 #endif
+#undef LLAM_TSAN_BUILD
 #endif
 
 /*
