@@ -304,6 +304,73 @@ cleanup:
     return failed;
 }
 
+static int test_host_close_handle_purges_peer_runtime_assoc(void) {
+    windows_handle_state_t pipe_state;
+    llam_runtime_t *assoc_runtime = NULL;
+    llam_runtime_opts_t opts;
+    llam_handle_t closed_handle = LLAM_INVALID_HANDLE;
+    int failed = 0;
+
+    memset(&pipe_state, 0, sizeof(pipe_state));
+    pipe_state.pipe_reader = LLAM_INVALID_HANDLE;
+    pipe_state.pipe_writer = LLAM_INVALID_HANDLE;
+    pipe_state.event_handle = LLAM_INVALID_HANDLE;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("host close handle opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &assoc_runtime) != 0) {
+        failed = fail_errno("host close handle runtime create failed");
+        goto cleanup;
+    }
+    if (assoc_runtime == NULL || assoc_runtime->nodes == NULL || assoc_runtime->active_nodes == 0U) {
+        fprintf(stderr, "[test_windows_handle_io] host close assoc runtime has no IOCP node\n");
+        failed = 1;
+        goto cleanup;
+    }
+    if (setup_pipe(&pipe_state) != 0) {
+        failed = fail_errno("host close handle pipe setup failed");
+        goto cleanup;
+    }
+    if (llam_windows_associate_handle(&assoc_runtime->nodes[0], pipe_state.pipe_reader) != 0) {
+        failed = fail_errno("host close handle associate failed");
+        goto cleanup;
+    }
+    if (!runtime_assoc_contains_handle(assoc_runtime, pipe_state.pipe_reader)) {
+        fprintf(stderr, "[test_windows_handle_io] host close associate did not publish metadata\n");
+        failed = 1;
+        goto cleanup;
+    }
+
+    /*
+     * Embedders can close HANDLEs from unmanaged host threads.  That path must
+     * purge all runtime-owned IOCP association metadata before the kernel can
+     * recycle the HANDLE value into an unrelated object.
+     */
+    closed_handle = pipe_state.pipe_reader;
+    if (llam_close_handle(closed_handle) != 0) {
+        failed = fail_errno("host llam_close_handle failed");
+        goto cleanup;
+    }
+    pipe_state.pipe_reader = LLAM_INVALID_HANDLE;
+    if (runtime_assoc_contains_handle(assoc_runtime, closed_handle)) {
+        fprintf(stderr, "[test_windows_handle_io] host close left stale HANDLE association\n");
+        failed = 1;
+        goto cleanup;
+    }
+
+cleanup:
+    if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_reader)) {
+        CloseHandle((HANDLE)pipe_state.pipe_reader);
+    }
+    if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_writer)) {
+        CloseHandle((HANDLE)pipe_state.pipe_writer);
+    }
+    llam_runtime_destroy(assoc_runtime);
+    return failed;
+}
+
 int main(void) {
     windows_handle_state_t state;
     llam_runtime_opts_t opts;
@@ -323,7 +390,8 @@ int main(void) {
     atomic_init(&state.poller_done, 0U);
     atomic_init(&state.signaler_done, 0U);
 
-    if (test_managed_close_handle_purges_peer_runtime_assoc() != 0) {
+    if (test_host_close_handle_purges_peer_runtime_assoc() != 0 ||
+        test_managed_close_handle_purges_peer_runtime_assoc() != 0) {
         return 1;
     }
 
