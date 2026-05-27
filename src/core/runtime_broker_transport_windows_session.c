@@ -30,6 +30,37 @@
 
 #include <windows.h>
 
+static bool llam_broker_pipe_listen_retryable_errno(int error_code) {
+    return error_code == EACCES || error_code == EAGAIN || error_code == EIO;
+}
+
+static int llam_broker_listen_pipe_session(const char *path,
+                                           llam_handle_t *out_pipe,
+                                           size_t served_sessions) {
+    ULONGLONG deadline;
+
+    /*
+     * CreateNamedPipeA(FILE_FLAG_FIRST_PIPE_INSTANCE) can briefly fail after a
+     * just-closed instance while the pipe namespace retires the previous kernel
+     * object. Only retry after this broker has already accepted at least one
+     * session; an initial collision still means the requested endpoint is not
+     * exclusively ours and must fail closed.
+     */
+    if (served_sessions == 0U) {
+        return llam_broker_listen_pipe(path, out_pipe);
+    }
+    deadline = GetTickCount64() + 500U;
+    for (;;) {
+        if (llam_broker_listen_pipe(path, out_pipe) == 0) {
+            return 0;
+        }
+        if (!llam_broker_pipe_listen_retryable_errno(errno) || GetTickCount64() >= deadline) {
+            return -1;
+        }
+        Sleep(5U);
+    }
+}
+
 int llam_broker_serve_unix_once(llam_broker_t *broker, const char *path) {
     return llam_broker_serve_local_once(broker, path);
 }
@@ -51,7 +82,7 @@ int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t ma
     }
     while (served < max_connections) {
         pipe = LLAM_INVALID_HANDLE;
-        if (llam_broker_listen_pipe(path, &pipe) != 0) {
+        if (llam_broker_listen_pipe_session(path, &pipe, served) != 0) {
             if (served > 0U && successful > 0U) {
                 return 0;
             }

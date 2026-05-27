@@ -9049,7 +9049,12 @@ static int test_broker_pipe_serve_local_n_survives_malformed_session(void) {
         return -1;
     }
     broker_initialized = 1;
-    snprintf(name, sizeof(name), "llam-broker-malformed-%lu", (unsigned long)GetCurrentProcessId());
+    snprintf(name,
+             sizeof(name),
+             "llam-broker-malformed-%lu-%lu-%llu",
+             (unsigned long)GetCurrentProcessId(),
+             (unsigned long)GetCurrentThreadId(),
+             (unsigned long long)GetTickCount64());
     memset(&state, 0, sizeof(state));
     state.broker = &broker;
     state.name = name;
@@ -9066,10 +9071,16 @@ static int test_broker_pipe_serve_local_n_survives_malformed_session(void) {
      * long-running broker process or poison the next session's subject id.
      */
     if (broker_pipe_connect_and_close(name) != 0) {
+        fprintf(stderr,
+                "[test_security_capability] malformed pipe client connect-close failed errno=%d\n",
+                errno);
         goto done;
     }
     Sleep(100U);
     if (llam_broker_client_self_test_local(name) != 0) {
+        fprintf(stderr,
+                "[test_security_capability] malformed pipe follow-up self-test failed errno=%d\n",
+                errno);
         goto done;
     }
     rc = 0;
