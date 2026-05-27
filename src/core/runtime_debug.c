@@ -186,15 +186,9 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
 }
 
 /**
- * @brief Collect a flat runtime statistics snapshot with a caller size.
+ * @brief Collect a size-aware flat runtime statistics snapshot.
  *
- * Benchmarks consume this format so they do not need to scrape the human dump.
- * Dynamic loaders and FFI bindings should call this form so future stats fields
- * appended at the tail cannot overflow an older caller's smaller struct.
- *
- * @param stats Destination snapshot.
- * @param stats_size Size of the caller's stats struct.
- * @return 0 on success, -1 with @c errno set on invalid arguments.
+ * @p stats_size bounds tail-added fields for older FFI bindings.
  */
 int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size) {
     llam_runtime_t *pinned_runtime = NULL;
@@ -214,24 +208,30 @@ int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *s
 
     memset(&full_stats, 0, sizeof(full_stats));
     saved_errno = errno;
-    /* Default pre-init stats return an empty snapshot before handle publication. */
-    if (rt == llam_runtime_default_storage() &&
-        !atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
-        !atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
-        errno = saved_errno;
-    } else {
-        if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
-            return -1;
-        }
-        if (llam_runtime_lifecycle_trylock() == 0) {
-            llam_runtime_collect_stats_full(pinned_runtime, &full_stats);
-            llam_runtime_lifecycle_unlock();
-        } else {
-            /* Race-safe monitoring returns an empty snapshot instead of walking teardown. */
+
+    /* Pin before touching storage; unregistered default stats are pre-init. */
+    if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
+        if (rt == llam_runtime_default_storage() && errno == EINVAL) {
             errno = saved_errno;
+            goto copy_snapshot;
         }
-        llam_runtime_end_public_op(pinned_runtime);
+        return -1;
     }
+    if (llam_runtime_lifecycle_trylock() == 0) {
+        if (pinned_runtime == llam_runtime_default_storage() &&
+            !atomic_load_explicit(&pinned_runtime->initialized, memory_order_acquire) &&
+            !atomic_load_explicit(&pinned_runtime->exec_started, memory_order_acquire)) {
+            errno = saved_errno;
+        } else {
+            llam_runtime_collect_stats_full(pinned_runtime, &full_stats);
+        }
+        llam_runtime_lifecycle_unlock();
+    } else {
+        /* Race-safe monitoring returns an empty snapshot instead of walking teardown. */
+        errno = saved_errno;
+    }
+    llam_runtime_end_public_op(pinned_runtime);
+copy_snapshot:
     copy_size = stats_size < sizeof(full_stats) ? stats_size : sizeof(full_stats);
     memcpy(stats, &full_stats, copy_size);
     return 0;
@@ -256,6 +256,7 @@ int llam_runtime_collect_stats(llam_runtime_stats_t *stats) {
 /** @brief Write a human-readable runtime dump to an fd. */
 void llam_dump_runtime_state(int fd) {
     llam_runtime_t *rt = llam_runtime_default_storage();
+    llam_runtime_t *pinned_runtime = NULL;
     llam_shard_t *shards;
     llam_node_t *nodes;
     unsigned i;
@@ -272,18 +273,18 @@ void llam_dump_runtime_state(int fd) {
     unsigned pressure;
     const char *profile;
 
-    /*
-     * Like stats collection, pre-init dumps must not briefly occupy the
-     * lifecycle gate and turn a concurrent legitimate init into EBUSY.
-     */
-    if ((!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
-         !atomic_load_explicit(&rt->exec_started, memory_order_acquire)) ||
+    /* Pin before diagnostics read storage that init/shutdown may rewrite. */
+    if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0 ||
         llam_runtime_lifecycle_trylock() != 0) {
         dprintf(fd,
                 "runtime:\n"
                 "  lifecycle_lock=busy diagnostics_unavailable=partial_init_or_shutdown\n");
+        if (pinned_runtime != NULL) {
+            llam_runtime_end_public_op(pinned_runtime);
+        }
         return;
     }
+    rt = pinned_runtime;
 
     shards = rt->shards;
     nodes = rt->nodes;
@@ -744,4 +745,5 @@ void llam_dump_runtime_state(int fd) {
         pthread_mutex_unlock(&shard->lock);
     }
     llam_runtime_lifecycle_unlock();
+    llam_runtime_end_public_op(rt);
 }

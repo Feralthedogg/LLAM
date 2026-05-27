@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if LLAM_PLATFORM_POSIX
+#include <fcntl.h>
 #include <pthread.h>
 #include <unistd.h>
 #endif
@@ -482,6 +483,46 @@ static int test_preinit_contracts(void) {
     if (llam_runtime_write_stats_json(-1) != -1 || errno != EINVAL) {
         return test_fail("llam_runtime_write_stats_json invalid fd did not fail with EINVAL");
     }
+    memset(&stats, 0xA5, sizeof(stats));
+    errno = ECHILD;
+    if (llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0 ||
+        errno != ECHILD ||
+        stats.ctx_switches != 0U ||
+        stats.active_workers != 0U ||
+        stats.active_nodes != 0U) {
+        return test_fail("pre-init default stats did not return an empty errno-preserving snapshot");
+    }
+#if LLAM_PLATFORM_POSIX
+    {
+        int pipe_fds[2];
+        char json[8192];
+        ssize_t nread;
+
+        if (pipe(pipe_fds) != 0) {
+            return test_fail_errno("pipe for pre-init stats json failed");
+        }
+        if (llam_runtime_write_stats_json(pipe_fds[1]) != 0) {
+            int saved_errno = errno;
+
+            close(pipe_fds[0]);
+            close(pipe_fds[1]);
+            errno = saved_errno;
+            return test_fail_errno("pre-init stats json failed");
+        }
+        close(pipe_fds[1]);
+        nread = read(pipe_fds[0], json, sizeof(json) - 1U);
+        close(pipe_fds[0]);
+        if (nread <= 0) {
+            return test_fail("pre-init stats json produced no data");
+        }
+        json[nread] = '\0';
+        if (json[0] != '{' ||
+            strstr(json, "\"ctx_switches\":0") == NULL ||
+            strstr(json, "\"active_workers\":0") == NULL) {
+            return test_fail("pre-init stats json was not an empty snapshot");
+        }
+    }
+#endif
     memset(&stats, 0xA5, sizeof(stats));
     errno = 0;
     if (llam_runtime_init_ex((const llam_runtime_opts_t *)(const void *)&stats, 0U) != -1 ||
@@ -1843,6 +1884,52 @@ static void *init_stats_race_stats_thread(void *arg) {
     return NULL;
 }
 
+static void *init_stats_race_dump_thread(void *arg) {
+    init_stats_race_state_t *state = arg;
+    int fd;
+
+    while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+    }
+    fd = open("/dev/null", O_WRONLY);
+    if (fd < 0) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        return NULL;
+    }
+    while (atomic_load_explicit(&state->stop, memory_order_acquire) == 0U) {
+        /*
+         * Human/JSON diagnostics are allowed during host-side init monitoring.
+         * They must not read default-runtime fields before the runtime has been
+         * registered or lifecycle-serialized.
+         */
+        llam_dump_runtime_state(fd);
+        if (llam_runtime_write_stats_json(fd) != 0) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            continue;
+        }
+        atomic_fetch_add_explicit(&state->snapshots, 1U, memory_order_relaxed);
+        usleep(100);
+    }
+    close(fd);
+    return NULL;
+}
+
+static void *init_stats_race_sleep_thread(void *arg) {
+    init_stats_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+    }
+    while (atomic_load_explicit(&state->stop, memory_order_acquire) == 0U) {
+        errno = 0;
+        if (llam_sleep_ns(0U) != 0 && errno != EINVAL) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        } else {
+            atomic_fetch_add_explicit(&state->snapshots, 1U, memory_order_relaxed);
+        }
+        usleep(100);
+    }
+    return NULL;
+}
+
 static int run_profile_yield_stats(uint32_t profile, llam_runtime_stats_t *stats) {
     core_state_t state;
     llam_runtime_opts_t opts;
@@ -2315,6 +2402,132 @@ static int test_concurrent_init_stats_contract(void) {
     return 0;
 }
 
+static int test_concurrent_init_dump_contract(void) {
+    char *saved_timer_prewarm = test_dup_env_value("LLAM_TIMER_HEAP_PREWARM");
+    char *saved_stack_prewarm = test_dup_env_value("LLAM_STACK_CACHE_PREWARM");
+
+    if (setenv("LLAM_TIMER_HEAP_PREWARM", "8192", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "128", 1) != 0) {
+        test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+        test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+        return test_fail_errno("setenv for init/dump race failed");
+    }
+
+    for (unsigned round = 0U; round < 64U; ++round) {
+        init_stats_race_state_t state;
+        llam_runtime_opts_t opts;
+        pthread_t dump_thread;
+        int thread_rc;
+
+        memset(&state, 0, sizeof(state));
+        memset(&opts, 0, sizeof(opts));
+        atomic_init(&state.start, 0U);
+        atomic_init(&state.stop, 0U);
+        atomic_init(&state.failures, 0U);
+        atomic_init(&state.snapshots, 0U);
+        opts.deterministic = 0U;
+        opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+
+        thread_rc = pthread_create(&dump_thread, NULL, init_stats_race_dump_thread, &state);
+        if (thread_rc != 0) {
+            errno = thread_rc;
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return test_fail_errno("pthread_create for init/dump race failed");
+        }
+        atomic_store_explicit(&state.start, 1U, memory_order_release);
+        if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            atomic_store_explicit(&state.stop, 1U, memory_order_release);
+            pthread_join(dump_thread, NULL);
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return test_fail_errno("llam_runtime_init for init/dump race failed");
+        }
+        atomic_store_explicit(&state.stop, 1U, memory_order_release);
+        pthread_join(dump_thread, NULL);
+        if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+            fprintf(stderr,
+                    "[test_runtime_core] init/dump race round=%u dump_failures=%u snapshots=%u\n",
+                    round,
+                    atomic_load_explicit(&state.failures, memory_order_relaxed),
+                    atomic_load_explicit(&state.snapshots, memory_order_relaxed));
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return 1;
+        }
+        llam_runtime_shutdown();
+    }
+
+    test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+    test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+    return 0;
+}
+
+static int test_concurrent_init_sleep_contract(void) {
+    char *saved_timer_prewarm = test_dup_env_value("LLAM_TIMER_HEAP_PREWARM");
+    char *saved_stack_prewarm = test_dup_env_value("LLAM_STACK_CACHE_PREWARM");
+
+    if (setenv("LLAM_TIMER_HEAP_PREWARM", "8192", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "128", 1) != 0) {
+        test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+        test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+        return test_fail_errno("setenv for init/sleep race failed");
+    }
+
+    for (unsigned round = 0U; round < 64U; ++round) {
+        init_stats_race_state_t state;
+        llam_runtime_opts_t opts;
+        pthread_t sleep_thread;
+        int thread_rc;
+
+        memset(&state, 0, sizeof(state));
+        memset(&opts, 0, sizeof(opts));
+        atomic_init(&state.start, 0U);
+        atomic_init(&state.stop, 0U);
+        atomic_init(&state.failures, 0U);
+        atomic_init(&state.snapshots, 0U);
+        opts.deterministic = 0U;
+        opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+
+        thread_rc = pthread_create(&sleep_thread, NULL, init_stats_race_sleep_thread, &state);
+        if (thread_rc != 0) {
+            errno = thread_rc;
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return test_fail_errno("pthread_create for init/sleep race failed");
+        }
+        atomic_store_explicit(&state.start, 1U, memory_order_release);
+        if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            atomic_store_explicit(&state.stop, 1U, memory_order_release);
+            pthread_join(sleep_thread, NULL);
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return test_fail_errno("llam_runtime_init for init/sleep race failed");
+        }
+        atomic_store_explicit(&state.stop, 1U, memory_order_release);
+        pthread_join(sleep_thread, NULL);
+        if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+            fprintf(stderr,
+                    "[test_runtime_core] init/sleep race round=%u sleep_failures=%u snapshots=%u\n",
+                    round,
+                    atomic_load_explicit(&state.failures, memory_order_relaxed),
+                    atomic_load_explicit(&state.snapshots, memory_order_relaxed));
+            llam_runtime_shutdown();
+            test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+            test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+            return 1;
+        }
+        llam_runtime_shutdown();
+    }
+
+    test_restore_env_value("LLAM_TIMER_HEAP_PREWARM", saved_timer_prewarm);
+    test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+    return 0;
+}
+
 static int test_concurrent_trace_ring_contract(void) {
     /*
      * Trace events can be emitted by peer wake paths, I/O completions,
@@ -2543,6 +2756,8 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_concurrent_runtime_init_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_shutdown_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_stats_contract);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_init_dump_contract);
+    RUN_RUNTIME_CORE_TEST(test_concurrent_init_sleep_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_trace_ring_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_run_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_spawn_contract);

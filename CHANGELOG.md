@@ -81,6 +81,19 @@
   leak POSIX descriptors or Windows kernel HANDLEs after validation or mapping
   failure.
 
+* make `llam_runtime_collect_stats_ex_rt()` safe against default-runtime
+  init/destroy races by pinning the runtime before reading runtime-owned state.
+  Pre-init default stats still return an empty size-aware snapshot without
+  publishing a spurious error.
+
+* make `llam_dump_runtime_state()` use the same registry-pin/lifecycle gate as
+  stats collection, so human diagnostics cannot inspect default-runtime storage
+  while another host thread is still constructing or tearing it down.
+
+* make unmanaged `llam_sleep_*()` calls validate the default runtime through a
+  public-op registry pin instead of reading default-runtime storage directly
+  during host-thread init/shutdown races.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
@@ -103,6 +116,14 @@
   explicit child readiness event before rewinding public cursors, avoiding a
   hosted Windows 2022 scheduling race where the process wait timeout could be
   charged before the replay check began.
+
+* keep Linux GCC ThreadSanitizer coverage enabled by probing support for
+  `-Wno-error=tsan`; GCC's `atomic_thread_fence` TSan warning no longer breaks
+  the sanitizer build while Clang-based hosts keep their previous flags.
+
+* add pre-init stats/JSON snapshot assertions plus host-init race coverage for
+  `llam_dump_runtime_state()`, `llam_runtime_write_stats_json()`, and unmanaged
+  `llam_sleep_*()` alongside the existing stats race guard.
 
 ### Performance
 

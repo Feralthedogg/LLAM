@@ -1930,9 +1930,15 @@ test-tsan:
 	cleanup() { rm -f $(TSAN_TEST_TARGETS); }; \
 	trap cleanup EXIT; \
 	cleanup; \
+	tsan_cflags="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread"; \
+	tsan_probe="$$(mktemp "$${TMPDIR:-/tmp}/llam-tsan-probe.XXXXXX.o")"; \
+	if printf 'int main(void){return 0;}\n' | $(CC) $$tsan_cflags -Wno-error=tsan -x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
+		tsan_cflags="$$tsan_cflags -Wno-error=tsan"; \
+	fi; \
+	rm -f "$$tsan_probe"; \
 	$(MAKE) $(TSAN_TEST_TARGETS) \
 		OBJDIR=object-tsan \
-		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
+		CFLAGS="$$tsan_cflags" \
 		LDLIBS="$(LDLIBS) -fsanitize=thread"; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_core; \
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_shutdown_internal; \

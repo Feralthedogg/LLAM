@@ -840,6 +840,7 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     llam_task_t *task = g_llam_tls_task;
     llam_shard_t *shard = g_llam_tls_shard;
     llam_wait_node_t *node = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
     int caller_errno = errno;
     int rc;
     int node_error;
@@ -850,10 +851,17 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     llam_task_safepoint();
 
     if (task == NULL) {
-        if (!atomic_load_explicit(&llam_runtime_default_storage()->initialized, memory_order_acquire)) {
+        /* Pin the default runtime long enough to avoid init/shutdown storage races. */
+        if (llam_runtime_begin_public_op(llam_runtime_default_storage(), &pinned_runtime) != 0) {
             errno = EINVAL;
             return -1;
         }
+        if (!atomic_load_explicit(&pinned_runtime->initialized, memory_order_acquire)) {
+            llam_runtime_end_public_op(pinned_runtime);
+            errno = EINVAL;
+            return -1;
+        }
+        llam_runtime_end_public_op(pinned_runtime);
         for (;;) {
             uint64_t current_ns = have_now_ns ? now_ns : llam_now_ns();
             struct timespec ts;
