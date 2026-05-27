@@ -470,6 +470,18 @@ int llam_channel_select(llam_select_op_t *ops,
              * Fallback means a queued peer waiter is involved.  Preserve the
              * existing public-operation path for that uncommon case.
              */
+        } else {
+            int selected = llam_channel_select_try_ready_large(ops, op_count, start, selected_index);
+
+            if (selected < 0) {
+                return -1;
+            }
+            if (selected == LLAM_SELECT_TRY_SELECTED) {
+                return 0;
+            }
+            if (selected == LLAM_SELECT_TRY_NOT_READY) {
+                goto select_not_ready;
+            }
         }
         if (start == 0U) {
             for (i = 0U; i < op_count; ++i) {

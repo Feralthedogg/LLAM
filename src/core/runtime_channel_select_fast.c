@@ -25,6 +25,8 @@
 
 #include "runtime_internal.h"
 
+static int llam_channel_select_try_one_resolved(llam_select_op_t *op, llam_channel_t *channel);
+
 int llam_channel_select_validate_op(const llam_select_op_t *op) {
     if (op == NULL || op->channel == NULL) {
         errno = EINVAL;
@@ -42,6 +44,64 @@ int llam_channel_select_validate_op(const llam_select_op_t *op) {
     }
     errno = EINVAL;
     return -1;
+}
+
+int llam_channel_select_try_ready_large(llam_select_op_t *ops,
+                                        size_t op_count,
+                                        size_t start,
+                                        size_t *selected_index) {
+    llam_channel_t **channels;
+    size_t i;
+    int rc = LLAM_SELECT_TRY_NOT_READY;
+
+    /*
+     * Large selects cannot use the fixed inline array. Resolve and pin every
+     * operand before any ready probe has side effects, then keep those pins
+     * until the whole immediate pass finishes. This mirrors the inline batch
+     * contract and keeps destroy from reclaiming a tail operand while an early
+     * ready/fallback operation is still being evaluated.
+     */
+    channels = calloc(op_count, sizeof(*channels));
+    if (channels == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    if (llam_channel_resolve_public_handles_for_select(ops, op_count, channels) != 0) {
+        free(channels);
+        return -1;
+    }
+
+    for (i = 0U; i < op_count; ++i) {
+        size_t index = start + i;
+        int selected;
+
+        if (index >= op_count) {
+            index -= op_count;
+        }
+
+        selected = llam_channel_select_try_one_resolved(&ops[index], channels[index]);
+        if (selected == LLAM_SELECT_TRY_FALLBACK) {
+            /*
+             * Peer-waiter transfers need the public try operation, but the
+             * whole select set stays pinned while it runs so a concurrent
+             * destroy cannot invalidate a not-yet-scanned operand.
+             */
+            selected = llam_channel_select_try_one(&ops[index]);
+        }
+        if (selected < 0) {
+            rc = -1;
+            break;
+        }
+        if (selected > 0) {
+            *selected_index = index;
+            rc = LLAM_SELECT_TRY_SELECTED;
+            break;
+        }
+    }
+
+    llam_channel_end_public_select_ops(channels, op_count);
+    free(channels);
+    return rc;
 }
 
 static int llam_channel_select_try_one_resolved(llam_select_op_t *op, llam_channel_t *channel) {

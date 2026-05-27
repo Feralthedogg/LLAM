@@ -151,6 +151,10 @@ bool llam_wait_node_completed(const llam_wait_node_t *node);
 bool llam_wait_node_should_park(llam_wait_node_t *node);
 void llam_channel_waiter_consumed(llam_channel_t *channel);
 int llam_channel_select_validate_op(const llam_select_op_t *op);
+int llam_channel_select_try_ready_large(llam_select_op_t *ops,
+                                        size_t op_count,
+                                        size_t start,
+                                        size_t *selected_index);
 int llam_channel_select_try_ready_batch(llam_select_op_t *ops,
                                         size_t op_count,
                                         size_t start,

@@ -900,6 +900,7 @@ static void stale_channel_handle_task(void *arg) {
     }
     {
         size_t selected = SIZE_MAX;
+        void *ready = (void *)(uintptr_t)0x51E7EC7U;
         llam_select_op_t ops[2] = {
             {
                 .kind = LLAM_SELECT_OP_RECV,
@@ -914,15 +915,287 @@ static void stale_channel_handle_task(void *arg) {
         };
 
         /*
-         * The select fast path batch-resolves public channel handles.  If a
-         * later operand is stale, any earlier operand that was already pinned
-         * must be unpinned before returning EINVAL; otherwise destroying the
-         * valid channel below would fail with a false EBUSY.
+         * The select fast path validates every public handle before consuming
+         * any ready operation. A stale later operand must reject the whole call,
+         * leave a ready earlier operand buffered, and release any valid handle
+         * pin before returning. Otherwise forged/stale handles could influence
+         * select results or make the valid channel below fail destroy with a
+         * false EBUSY.
          */
+        if (llam_channel_try_send(state->secondary, ready) != 0) {
+            task_fail(state, "stale channel select ready fixture send", errno);
+            return;
+        }
         errno = 0;
         out = NULL;
         if (llam_channel_select(ops, 2U, 0U, &selected) != -1 || errno != EINVAL) {
             task_fail(state, "stale channel select accepted", errno);
+            return;
+        }
+        if (llam_channel_try_recv_result(state->secondary, &out) != 0 || out != ready) {
+            task_fail(state, "stale channel select consumed ready operand", errno);
+            return;
+        }
+    }
+    {
+        size_t selected = SIZE_MAX;
+        void *ready = (void *)(uintptr_t)0x51E7EC8U;
+        llam_select_op_t ops[2] = {
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->primary,
+                .recv_out = &out,
+            },
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->secondary,
+                .recv_out = &out,
+            },
+        };
+
+        /*
+         * Invalid-first ordering must also fail before later ready operations
+         * are examined. This guards future fast-path rewrites that might scan
+         * for readiness before validating every public handle in the batch.
+         */
+        if (llam_channel_try_send(state->secondary, ready) != 0) {
+            task_fail(state, "stale-first select ready fixture send", errno);
+            return;
+        }
+        errno = 0;
+        out = NULL;
+        if (llam_channel_select(ops, 2U, 0U, &selected) != -1 || errno != EINVAL) {
+            task_fail(state, "stale-first channel select accepted", errno);
+            return;
+        }
+        if (llam_channel_try_recv_result(state->secondary, &out) != 0 || out != ready) {
+            task_fail(state, "stale-first channel select consumed ready operand", errno);
+            return;
+        }
+    }
+    {
+        size_t selected = SIZE_MAX;
+        void *sentinel = (void *)(uintptr_t)0x5E11DADU;
+        llam_select_op_t ops[2] = {
+            {
+                .kind = LLAM_SELECT_OP_SEND,
+                .channel = state->secondary,
+                .send_value = sentinel,
+            },
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->primary,
+                .recv_out = &out,
+            },
+        };
+
+        /*
+         * The same validation-before-effect rule applies to send-ready ops.
+         * A later stale handle must not let select enqueue a payload into an
+         * earlier valid channel before the call fails.
+         */
+        errno = 0;
+        out = NULL;
+        if (llam_channel_select(ops, 2U, 0U, &selected) != -1 || errno != EINVAL) {
+            task_fail(state, "stale channel select send-ready accepted", errno);
+            return;
+        }
+        if (llam_channel_try_recv_result(state->secondary, &out) != -1 || errno != EAGAIN || out != NULL) {
+            task_fail(state, "stale channel select inserted send-ready payload", errno);
+            return;
+        }
+    }
+    {
+        llam_mutex_t *wrong_family = llam_mutex_create();
+        size_t selected = SIZE_MAX;
+        void *ready = (void *)(uintptr_t)0xFA117A6U;
+        llam_select_op_t ops[2] = {
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->secondary,
+                .recv_out = &out,
+            },
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = (llam_channel_t *)(void *)wrong_family,
+                .recv_out = &out,
+            },
+        };
+
+        if (wrong_family == NULL) {
+            task_fail(state, "wrong-family select mutex fixture", errno);
+            return;
+        }
+        /*
+         * Wrong-family opaque handles must fail before any ready operation has
+         * effects. This pins the real channel/mutex family tags to the select
+         * fast path instead of only exercising the standalone slot helper.
+         */
+        if (llam_channel_try_send(state->secondary, ready) != 0) {
+            (void)llam_mutex_destroy(wrong_family);
+            task_fail(state, "wrong-family select ready fixture send", errno);
+            return;
+        }
+        errno = 0;
+        out = NULL;
+        if (llam_channel_select(ops, 2U, 0U, &selected) != -1 || errno != EINVAL) {
+            (void)llam_mutex_destroy(wrong_family);
+            task_fail(state, "wrong-family channel select accepted", errno);
+            return;
+        }
+        if (llam_channel_try_recv_result(state->secondary, &out) != 0 || out != ready) {
+            (void)llam_mutex_destroy(wrong_family);
+            task_fail(state, "wrong-family channel select consumed ready operand", errno);
+            return;
+        }
+        if (llam_mutex_destroy(wrong_family) != 0) {
+            task_fail(state, "wrong-family select mutex destroy", errno);
+            return;
+        }
+    }
+    {
+        llam_mutex_t *wrong_family = llam_mutex_create();
+        size_t selected = SIZE_MAX;
+        void *ready = (void *)(uintptr_t)0xFA117A7U;
+        llam_select_op_t ops[2] = {
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = (llam_channel_t *)(void *)wrong_family,
+                .recv_out = &out,
+            },
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->secondary,
+                .recv_out = &out,
+            },
+        };
+
+        if (wrong_family == NULL) {
+            task_fail(state, "wrong-family-first select mutex fixture", errno);
+            return;
+        }
+        if (llam_channel_try_send(state->secondary, ready) != 0) {
+            (void)llam_mutex_destroy(wrong_family);
+            task_fail(state, "wrong-family-first select ready fixture send", errno);
+            return;
+        }
+        errno = 0;
+        out = NULL;
+        if (llam_channel_select(ops, 2U, 0U, &selected) != -1 || errno != EINVAL) {
+            (void)llam_mutex_destroy(wrong_family);
+            task_fail(state, "wrong-family-first channel select accepted", errno);
+            return;
+        }
+        if (llam_channel_try_recv_result(state->secondary, &out) != 0 || out != ready) {
+            (void)llam_mutex_destroy(wrong_family);
+            task_fail(state, "wrong-family-first channel select consumed ready operand", errno);
+            return;
+        }
+        if (llam_mutex_destroy(wrong_family) != 0) {
+            task_fail(state, "wrong-family-first select mutex destroy", errno);
+            return;
+        }
+    }
+    {
+        llam_channel_t *tertiary = llam_channel_create(1U);
+        size_t selected = SIZE_MAX;
+        void *ready = (void *)(uintptr_t)0xBA7C4EDU;
+        void *sentinel = (void *)(uintptr_t)0xBA7C5EADU;
+        llam_select_op_t ops[3] = {
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->secondary,
+                .recv_out = &out,
+            },
+            {
+                .kind = LLAM_SELECT_OP_SEND,
+                .channel = tertiary,
+                .send_value = sentinel,
+            },
+            {
+                .kind = LLAM_SELECT_OP_RECV,
+                .channel = state->primary,
+                .recv_out = &out,
+            },
+        };
+
+        if (tertiary == NULL) {
+            task_fail(state, "three-op select tertiary fixture", errno);
+            return;
+        }
+        /*
+         * op_count > 2 uses the generic batch resolver instead of the two-op
+         * registry fast path. Keep the same validation-before-effect invariant
+         * covered there: a later stale handle must not consume an earlier ready
+         * receive or enqueue an earlier ready send, and any temporary active-op
+         * pins must be released before destroy.
+         */
+        if (llam_channel_try_send(state->secondary, ready) != 0) {
+            (void)llam_channel_destroy(tertiary);
+            task_fail(state, "three-op stale select ready fixture send", errno);
+            return;
+        }
+        errno = 0;
+        out = NULL;
+        if (llam_channel_select(ops, 3U, 0U, &selected) != -1 || errno != EINVAL) {
+            (void)llam_channel_destroy(tertiary);
+            task_fail(state, "three-op stale channel select accepted", errno);
+            return;
+        }
+        if (llam_channel_try_recv_result(state->secondary, &out) != 0 || out != ready) {
+            (void)llam_channel_destroy(tertiary);
+            task_fail(state, "three-op stale channel select consumed ready operand", errno);
+            return;
+        }
+        out = NULL;
+        errno = 0;
+        if (llam_channel_try_recv_result(tertiary, &out) != -1 || errno != EAGAIN || out != NULL) {
+            (void)llam_channel_destroy(tertiary);
+            task_fail(state, "three-op stale channel select inserted send-ready payload", errno);
+            return;
+        }
+        if (llam_channel_destroy(tertiary) != 0) {
+            task_fail(state, "three-op select tertiary destroy", errno);
+            return;
+        }
+    }
+    {
+        size_t selected = SIZE_MAX;
+        void *ready = (void *)(uintptr_t)0x5E1EC75U;
+        llam_select_op_t ops[LLAM_CHANNEL_SELECT_INLINE_OPS + 1U];
+        size_t i;
+
+        /*
+         * Large selects skip the inline batch fast path. They must still
+         * validate every public handle before probing readiness; otherwise a
+         * forged/stale tail operand can be hidden behind an earlier ready op.
+         */
+        for (i = 0U; i < LLAM_CHANNEL_SELECT_INLINE_OPS; ++i) {
+            ops[i].kind = LLAM_SELECT_OP_RECV;
+            ops[i].channel = state->secondary;
+            ops[i].recv_out = &out;
+            ops[i].send_value = NULL;
+            ops[i].result_errno = 0;
+        }
+        ops[LLAM_CHANNEL_SELECT_INLINE_OPS].kind = LLAM_SELECT_OP_RECV;
+        ops[LLAM_CHANNEL_SELECT_INLINE_OPS].channel = state->primary;
+        ops[LLAM_CHANNEL_SELECT_INLINE_OPS].recv_out = &out;
+        ops[LLAM_CHANNEL_SELECT_INLINE_OPS].send_value = NULL;
+        ops[LLAM_CHANNEL_SELECT_INLINE_OPS].result_errno = 0;
+
+        if (llam_channel_try_send(state->secondary, ready) != 0) {
+            task_fail(state, "large stale select ready fixture send", errno);
+            return;
+        }
+        errno = 0;
+        out = NULL;
+        if (llam_channel_select(ops, LLAM_CHANNEL_SELECT_INLINE_OPS + 1U, 0U, &selected) != -1 ||
+            errno != EINVAL) {
+            task_fail(state, "large stale channel select accepted", errno);
+            return;
+        }
+        if (llam_channel_try_recv_result(state->secondary, &out) != 0 || out != ready) {
+            task_fail(state, "large stale channel select consumed ready operand", errno);
             return;
         }
     }
