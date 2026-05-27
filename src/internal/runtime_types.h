@@ -615,8 +615,12 @@ typedef struct llam_allocator {
     _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_io_buffer_t *) io_buffer_remote_free;
     atomic_uint_fast64_t local_epoch;
     uint64_t task_allocs;
+    /* Owner-local and host-control task caches are updated under different
+     * synchronization domains, so their reuse/free counters stay split. */
     uint64_t task_reuses;
+    uint64_t task_external_reuses;
     uint64_t task_frees;
+    uint64_t task_external_frees;
     uint64_t task_remote_frees;
     uint64_t task_remote_drains;
     uint64_t wait_allocs;

@@ -160,7 +160,7 @@ static llam_task_t *llam_task_alloc_external(llam_shard_t *shard) {
     task = shard->allocator.task_external_free;
     if (task != NULL) {
         shard->allocator.task_external_free = task->alloc_next;
-        shard->allocator.task_reuses += 1U;
+        shard->allocator.task_external_reuses += 1U;
     }
     llam_allocator_unlock(&shard->allocator);
     if (task != NULL) {
@@ -274,7 +274,7 @@ void llam_task_allocator_free(llam_task_t *task) {
         llam_allocator_lock(&owner->allocator);
         task->alloc_next = owner->allocator.task_external_free;
         owner->allocator.task_external_free = task;
-        owner->allocator.task_frees += 1U;
+        owner->allocator.task_external_frees += 1U;
         llam_allocator_unlock(&owner->allocator);
         return;
     }
