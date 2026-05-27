@@ -372,12 +372,19 @@ security hardening merges:
 ```bash
 make analyze-cppcheck
 make audit-deps
+make test-fuzz-heavy
+make test-hardening
 ```
 
 `make analyze-cppcheck` pins cppcheck to a 64-bit platform model because the
 public handle ABI intentionally rejects 32-bit `uintptr_t` builds at
 preprocessor time. `make audit-deps` audits the locked Rust comparison-harness
 dependencies; LLAM's C runtime does not vendor those crates.
+`make test-fuzz-heavy` runs the deterministic runtime fuzz suite at maximum
+built-in single-runtime and multi-runtime scenario counts. `make
+test-hardening` is the one-command local hardening gate for release candidates:
+it runs static analysis, dependency audit, ASan/UBSan, TSan, and the heavy fuzz
+profile.
 
 The current direct runtime tests are intended to catch bugs independent of the
 example chat server policy: lifecycle races, task handle ownership, cancellation

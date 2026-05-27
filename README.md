@@ -231,6 +231,10 @@ make test
 `make test-quick` runs API/ABI tests plus the quick composite server suite.
 `make test-full` runs API/ABI tests plus the standard composite suite.
 `make test-soak` runs API/ABI tests plus the hour-long soak profile.
+`make test-fuzz-heavy` runs the deterministic runtime fuzz suite at its
+maximum built-in scenario counts for single-runtime and multi-runtime cases.
+`make test-hardening` runs the release-candidate hardening gate: C static
+analysis, dependency audit, ASan/UBSan, TSan, and heavy runtime fuzz.
 
 GitHub Actions is split by cost and depth:
 
@@ -272,7 +276,7 @@ Build outputs:
 - `test_runtime_group_local_edges`: focused task-local isolation and structured task-group join/cancel/destroy ownership coverage.
 - `test_runtime_shutdown_internal`: focused shutdown-internal coverage for partial initialization, stop-time wakeup, and internal resource cleanup.
 - `test_runtime_stress`: direct LLAM scheduler, cancel, channel, condvar, nested spawn, and I/O cancel stress.
-- `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios.
+- `test_runtime_fuzz`: deterministic randomized scheduler/cancel/channel scenarios; `make test-fuzz-heavy` raises it to the maximum built-in scenario counts.
 - `test_sync_primitives`: mutex, condition variable, channel, timeout, and close semantics.
 - `test_io_buffers`: direct and managed poll/read/write, owned buffers, and `MSG_PEEK`.
 - `test_windows_policy`: Windows 10/11 policy selection and environment override checks.

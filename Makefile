@@ -552,7 +552,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared test test-asan test-no-owner test-tsan require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared test test-asan test-no-owner test-tsan test-fuzz-heavy test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -1908,6 +1908,9 @@ TSAN_TEST_TARGETS = \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
 
+FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 512
+FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 128
+
 test-asan:
 	@set -e; \
 	cleanup() { rm -f $(ASAN_TEST_TARGETS); }; \
@@ -1970,6 +1973,13 @@ analyze-cppcheck:
 
 audit-deps:
 	cd scripts/bench_tokio_compare && cargo audit
+
+test-fuzz-heavy: test_runtime_fuzz
+	LLAM_RUNTIME_FUZZ_SCENARIOS=$(FUZZ_HEAVY_RUNTIME_SCENARIOS) \
+	LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=$(FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS) \
+		./test_runtime_fuzz
+
+test-hardening: analyze-cppcheck audit-deps test-asan test-tsan test-fuzz-heavy
 
 test-quick: test server-stress-composite-quick
 
