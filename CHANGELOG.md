@@ -94,6 +94,25 @@
   public-op registry pin instead of reading default-runtime storage directly
   during host-thread init/shutdown races.
 
+* clear `llam_runtime_collect_stats_ex_handle(NULL, ...)` output snapshots before
+  returning `EINVAL`, so FFI callers cannot accidentally reuse stale worker or
+  context-switch counters from an earlier successful collection.
+
+* clear every `llam_channel_select()` operation's `result_errno` before managed
+  context and per-operation validation. Reused FFI operation arrays no longer
+  retain stale close/cancel/timeout status when select fails before choosing an
+  operation.
+
+* fix task-local key allocation after capacity growth. Unissued future key slots
+  are no longer treated as reusable deleted keys, preventing duplicate key
+  issuance, preserving the full 65,535-key budget, and ensuring real exhaustion
+  reports `ENOSPC`.
+
+* make internal public-slot handle encode/decode helpers fail closed for
+  zero-width generation fields and correctly round-trip narrow generation shifts.
+  This keeps future opaque-handle families from accepting non-canonical
+  slot/generation bit layouts outside the current 64-bit shift-32 path.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
@@ -124,6 +143,13 @@
 * add pre-init stats/JSON snapshot assertions plus host-init race coverage for
   `llam_dump_runtime_state()`, `llam_runtime_write_stats_json()`, and unmanaged
   `llam_sleep_*()` alongside the existing stats race guard.
+
+* add regression coverage for select-operation errno clearing, NULL runtime
+  stats handle output clearing, and task-local key exhaustion clearing
+  `out_key` to `LLAM_TASK_LOCAL_INVALID_KEY`.
+
+* add public-slot shift-bound regression coverage for zero-width and narrow
+  slot/generation handle layouts.
 
 ### Performance
 

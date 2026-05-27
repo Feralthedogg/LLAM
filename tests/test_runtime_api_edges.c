@@ -546,6 +546,17 @@ static int test_fault_boundary_contracts(void) {
     }
     memset(&stats, 0xA5, sizeof(stats));
     errno = 0;
+    if (llam_runtime_collect_stats_ex_handle(NULL,
+                                             &stats,
+                                             LLAM_RUNTIME_STATS_CURRENT_SIZE) != -1 ||
+        errno != EINVAL ||
+        stats.active_workers != 0U ||
+        stats.online_workers != 0U ||
+        stats.ctx_switches != 0U) {
+        return fail_msg("NULL stats handle did not fail closed");
+    }
+    memset(&stats, 0xA5, sizeof(stats));
+    errno = 0;
     if (llam_runtime_collect_stats_ex_handle((llam_runtime_t *)(uintptr_t)0x1234U,
                                              &stats,
                                              LLAM_RUNTIME_STATS_CURRENT_SIZE) != -1 ||
@@ -1520,6 +1531,38 @@ static void channel_close_select_task(void *arg) {
         task_fail(state, "channel select ready recv kept stale result errno", errno);
         return;
     }
+    {
+        llam_select_op_t invalid_ops[3];
+
+        /*
+         * Reused FFI operation arrays often preserve old per-op errno fields.
+         * Validation failure is not a selected terminal operation, so select
+         * must clear every result_errno before returning instead of leaving a
+         * stale tail status for bindings to misinterpret.
+         */
+        memset(invalid_ops, 0, sizeof(invalid_ops));
+        invalid_ops[0].kind = LLAM_SELECT_OP_RECV;
+        invalid_ops[0].channel = state->primary;
+        invalid_ops[0].recv_out = &received;
+        invalid_ops[0].result_errno = EPIPE;
+        invalid_ops[1].kind = LLAM_SELECT_OP_RECV;
+        invalid_ops[1].channel = state->primary;
+        invalid_ops[1].recv_out = NULL;
+        invalid_ops[1].result_errno = ECANCELED;
+        invalid_ops[2].kind = LLAM_SELECT_OP_SEND;
+        invalid_ops[2].channel = state->primary;
+        invalid_ops[2].send_value = state;
+        invalid_ops[2].result_errno = ETIMEDOUT;
+        errno = 0;
+        if (llam_channel_select(invalid_ops, 3U, UINT64_MAX, &selected) != -1 ||
+            errno != EINVAL ||
+            invalid_ops[0].result_errno != 0 ||
+            invalid_ops[1].result_errno != 0 ||
+            invalid_ops[2].result_errno != 0) {
+            task_fail(state, "channel select validation failure kept stale result errno", errno);
+            return;
+        }
+    }
 
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
@@ -2113,10 +2156,13 @@ static int test_unmanaged_boundary_contracts(void) {
     ops[0].kind = LLAM_SELECT_OP_RECV;
     ops[0].channel = channel;
     ops[0].recv_out = &out;
+    ops[0].result_errno = ECANCELED;
     errno = 0;
-    if (llam_channel_select(ops, 1U, 0U, &selected) != -1 || errno != ENOTSUP) {
+    if (llam_channel_select(ops, 1U, 0U, &selected) != -1 ||
+        errno != ENOTSUP ||
+        ops[0].result_errno != 0) {
         llam_runtime_shutdown();
-        return fail_msg("unmanaged channel select did not fail with ENOTSUP");
+        return fail_msg("unmanaged channel select did not clear stale result errno");
     }
     errno = 0;
     if (llam_task_local_get(key) != NULL || errno != ENOTSUP) {
@@ -4430,6 +4476,18 @@ static int test_public_slot_shift_bounds(void) {
      * them. Invalid shift values must fail closed instead of invoking C shift
      * UB, because sanitizer-only UB in a helper can mask the real caller fault.
      */
+    encoded = llam_public_slot_encode_handle(0U, 1U, 0U);
+    if (encoded != 0U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] zero public slot shift encoded handle=%" PRIuPTR "\n",
+                      encoded);
+        return 1;
+    }
+    if (llam_public_slot_decode_handle((uintptr_t)1U, 0U, &decoded_slot, &decoded_generation)) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] zero public slot shift decoded successfully\n");
+        return 1;
+    }
+
     encoded = llam_public_slot_encode_handle(0U, 1U, word_bits);
     if (encoded != 0U) {
         (void)fprintf(stderr,
@@ -4457,6 +4515,23 @@ static int test_public_slot_shift_bounds(void) {
             (void)fprintf(stderr,
                           "[test_runtime_api_edges] unencodable public slot encoded handle=%" PRIuPTR "\n",
                           encoded);
+            return 1;
+        }
+    }
+    if (word_bits > 16U) {
+        decoded_slot = 0U;
+        decoded_generation = 0U;
+        encoded = llam_public_slot_encode_handle(2U, 0x1234U, 16U);
+        if (encoded == 0U ||
+            !llam_public_slot_decode_handle(encoded, 16U, &decoded_slot, &decoded_generation) ||
+            decoded_slot != 2U ||
+            decoded_generation != 0x1234U) {
+            (void)fprintf(stderr,
+                          "[test_runtime_api_edges] narrow public slot shift roundtrip failed: "
+                          "encoded=%" PRIuPTR " slot=%zu generation=%u\n",
+                          encoded,
+                          decoded_slot,
+                          decoded_generation);
             return 1;
         }
     }

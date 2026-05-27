@@ -83,6 +83,7 @@ static inline uintptr_t llam_public_slot_encode_handle(size_t slot, uint32_t gen
     uintptr_t slot_word = (uintptr_t)slot + 1U;
 
     if (LLAM_UNLIKELY(generation == 0U ||
+                      shift == 0U ||
                       shift >= LLAM_PUBLIC_SLOT_WORD_BITS ||
                       slot_word == 0U ||
                       (shift > 0U && slot_word > (UINTPTR_MAX >> shift)) ||
@@ -97,16 +98,22 @@ static inline bool llam_public_slot_decode_handle(uintptr_t raw,
                                                   size_t *out_slot,
                                                   uint32_t *out_generation) {
     uintptr_t slot_word;
+    uintptr_t generation_bits;
     uint32_t generation;
 
     if (LLAM_UNLIKELY(out_slot == NULL || out_generation == NULL)) {
         return false;
     }
-    if (LLAM_UNLIKELY(shift >= LLAM_PUBLIC_SLOT_WORD_BITS)) {
+    if (LLAM_UNLIKELY(shift == 0U || shift >= LLAM_PUBLIC_SLOT_WORD_BITS)) {
         return false;
     }
     slot_word = raw >> shift;
-    generation = (uint32_t)raw;
+    generation_bits = shift < 32U ? raw & (((uintptr_t)1U << shift) - 1U) : raw & (uintptr_t)UINT32_MAX;
+    if (LLAM_UNLIKELY(shift > 32U &&
+                      (raw & ((((uintptr_t)1U << shift) - 1U) & ~(uintptr_t)UINT32_MAX)) != 0U)) {
+        return false;
+    }
+    generation = (uint32_t)generation_bits;
     if (LLAM_UNLIKELY(slot_word == 0U || generation == 0U)) {
         return false;
     }

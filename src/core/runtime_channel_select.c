@@ -440,6 +440,10 @@ int llam_channel_select(llam_select_op_t *ops,
         errno = EINVAL;
         return -1;
     }
+    /* Clear stale per-op status before any bounded-array failure path. */
+    for (i = 0U; i < op_count; ++i) {
+        ops[i].result_errno = 0;
+    }
     if (llam_require_task_context() != 0) {
         return -1;
     }
@@ -447,7 +451,6 @@ int llam_channel_select(llam_select_op_t *ops,
         if (llam_channel_select_validate_op(&ops[i]) != 0) {
             return -1;
         }
-        ops[i].result_errno = 0;
     }
 
     task = g_llam_tls_task;

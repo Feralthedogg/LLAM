@@ -25,7 +25,7 @@
 
 #include "runtime_internal.h"
 
-/** Maximum task-local keys reserved by the 1.x implementation. */
+/** Maximum process-wide task-local keys exposed through the fixed-width ABI. */
 #define LLAM_TASK_LOCAL_MAX_KEYS 65535U
 
 static pthread_mutex_t g_llam_task_local_key_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -97,9 +97,12 @@ static bool llam_task_local_find_reusable_key_locked(uint32_t *out_key) {
     if (out_key == NULL || g_llam_task_local_key_active == NULL) {
         return false;
     }
-    limit = g_llam_task_local_key_capacity < (size_t)LLAM_TASK_LOCAL_MAX_KEYS
+    limit = g_llam_task_local_key_capacity < (size_t)g_llam_task_local_next_key
         ? g_llam_task_local_key_capacity
-        : (size_t)LLAM_TASK_LOCAL_MAX_KEYS;
+        : (size_t)g_llam_task_local_next_key;
+    if (limit > (size_t)LLAM_TASK_LOCAL_MAX_KEYS + 1U) {
+        limit = (size_t)LLAM_TASK_LOCAL_MAX_KEYS + 1U;
+    }
     for (key = 1U; key < limit; ++key) {
         /*
          * Deleted keys can remain present in live tasks until those tasks clear
@@ -146,10 +149,11 @@ int llam_task_local_key_create(llam_task_local_key_t *out_key) {
         errno = EINVAL;
         return -1;
     }
+    *out_key = LLAM_TASK_LOCAL_INVALID_KEY;
 
     pthread_mutex_lock(&g_llam_task_local_key_lock);
     if (!llam_task_local_find_reusable_key_locked(&key)) {
-        if (g_llam_task_local_next_key >= LLAM_TASK_LOCAL_MAX_KEYS) {
+        if (g_llam_task_local_next_key > LLAM_TASK_LOCAL_MAX_KEYS) {
             pthread_mutex_unlock(&g_llam_task_local_key_lock);
             errno = ENOSPC;
             return -1;

@@ -185,11 +185,7 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     }
 }
 
-/**
- * @brief Collect a size-aware flat runtime statistics snapshot.
- *
- * @p stats_size bounds tail-added fields for older FFI bindings.
- */
+/** @brief Collect a size-aware flat runtime statistics snapshot. */
 int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size) {
     llam_runtime_t *pinned_runtime = NULL;
     llam_runtime_stats_t full_stats;
@@ -243,6 +239,9 @@ int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size
 
 int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime, llam_runtime_stats_t *stats, size_t stats_size) {
     if (runtime == NULL) {
+        if (stats != NULL && stats_size != 0U) {
+            memset(stats, 0, stats_size);
+        }
         errno = EINVAL;
         return -1;
     }

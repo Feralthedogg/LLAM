@@ -25,6 +25,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct group_local_state {
@@ -362,6 +363,66 @@ static int test_task_local_key_reuse_after_delete(void) {
     return 0;
 }
 
+static int test_task_local_key_create_enospc_clears_output(void) {
+    enum {
+        expected_key_budget = 65535U,
+        key_cap = 70000U
+    };
+    llam_task_local_key_t *keys;
+    llam_task_local_key_t stale_key = (llam_task_local_key_t)0x12345678U;
+    unsigned created = 0U;
+    int rc = 1;
+
+    keys = calloc(key_cap, sizeof(*keys));
+    if (keys == NULL) {
+        return fail_errno("task local ENOSPC fixture allocation failed");
+    }
+    for (created = 0U; created < key_cap; ++created) {
+        keys[created] = LLAM_TASK_LOCAL_INVALID_KEY;
+        errno = 0;
+        if (llam_task_local_key_create(&keys[created]) != 0) {
+            if (errno != ENOSPC || keys[created] != LLAM_TASK_LOCAL_INVALID_KEY) {
+                rc = fail_errno("task local key exhaustion failed unexpectedly");
+                goto cleanup;
+            }
+            break;
+        }
+    }
+
+    /*
+     * Exhaustion must fail closed.  FFI callers commonly reuse output storage;
+     * leaving a previous key there can make cleanup code delete the wrong key.
+     */
+    if (created == key_cap) {
+        rc = fail_errno("task local key exhaustion did not reach ENOSPC");
+        goto cleanup;
+    }
+    if (created != expected_key_budget) {
+        errno = EINVAL;
+        rc = fail_errno("task local key exhaustion happened before documented key budget");
+        goto cleanup;
+    }
+    errno = 0;
+    if (llam_task_local_key_create(&stale_key) != -1 ||
+        errno != ENOSPC ||
+        stale_key != LLAM_TASK_LOCAL_INVALID_KEY) {
+        rc = fail_errno("task local ENOSPC did not clear output key");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    while (created > 0U) {
+        --created;
+        if (keys[created] != LLAM_TASK_LOCAL_INVALID_KEY &&
+            llam_task_local_key_delete(keys[created]) != 0) {
+            rc = 1;
+        }
+    }
+    free(keys);
+    return rc;
+}
+
 static int test_task_local_key_reuse_ignores_stale_entries(void) {
     group_local_state_t state;
     llam_task_t *task;
@@ -587,6 +648,9 @@ cleanup_group:
 }
 
 int main(void) {
+    if (test_task_local_key_create_enospc_clears_output() != 0) {
+        return 1;
+    }
     if (test_task_local_isolation() != 0) {
         return 1;
     }

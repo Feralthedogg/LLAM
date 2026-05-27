@@ -831,6 +831,8 @@ LLAM_API uint32_t llam_task_flags(const llam_task_t *task);
 
 /**
  * @brief Allocate a task-local storage key.
+ *
+ * @details On failure, @p out_key is set to ::LLAM_TASK_LOCAL_INVALID_KEY.
  */
 LLAM_API int llam_task_local_key_create(llam_task_local_key_t *out_key);
 
