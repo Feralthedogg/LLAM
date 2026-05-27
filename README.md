@@ -270,7 +270,7 @@ Build outputs:
 - `server_lossless`: the same chat backend built with lossless outbox backpressure enabled by default.
 - `server_flood`: native nonblocking throughput flood driver for the chat server.
 - `scripts/bench_guard.py`: conservative hard-fail regression guard for scheduler, channel, select, I/O echo, and poll-wake throughput.
-- `scripts/run_with_timeout.py`: CI-safe long-process runner that preserves partial logs before interrupting/killing hung stress jobs and their descendant processes.
+- `scripts/run_with_timeout.py`: CI-safe long-process runner that preserves partial logs, broadcasts POSIX dump signals to wrapped runtimes, and cleans up hung stress jobs plus descendants.
 - `scripts/stress_server.py`: TCP fanout stress test for the chat server.
 - `scripts/stress_server_composite.py`: long-running composite server stability suite.
 - `test_abi_contract`: ABI metadata and size handshakes.

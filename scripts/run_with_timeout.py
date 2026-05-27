@@ -79,7 +79,13 @@ def request_runtime_dump(proc: subprocess.Popen[str], log, dump_path: Path | Non
     print(message, end="", file=sys.stderr)
     log.write(message)
     log.flush()
-    proc.send_signal(signal.SIGUSR2)
+    try:
+        # Children run in their own session. Signal the whole group so a
+        # wrapper process does not hide the actual LLAM runtime that owns the
+        # signal-driven dump handler.
+        os.killpg(proc.pid, signal.SIGUSR2)
+    except ProcessLookupError:
+        return
     deadline = time.monotonic() + dump_grace
     while proc.poll() is None and time.monotonic() < deadline:
         time.sleep(0.05)

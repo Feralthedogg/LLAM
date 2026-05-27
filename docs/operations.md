@@ -285,7 +285,8 @@ Use structured stats for automation and human dumps for incidents:
 - `LLAM_TRACE_EVENTS=1` and `LLAM_WAKE_LATENCY_METRICS=1` only when diagnosing
   tail latency, because they add measurement overhead.
 - `scripts/run_with_timeout.py` for long CI stress commands that must preserve
-  partial output before the runner interrupts or kills a hung process tree.
+  partial output, broadcast POSIX dump signals to wrapped runtime processes,
+  and then interrupt or kill a hung process tree.
 
 The human dump is the incident artifact to attach when a rare hang is reported.
 It intentionally includes lifecycle state (`initialized`, `exec_started`,

@@ -145,6 +145,9 @@
 * make `scripts/run_with_timeout.py` use process-tree cleanup on Windows too,
   and extend the process-helper regression test to cover streamed timeout
   wrappers, not only captured subprocess helpers.
+* send `run_with_timeout.py --dump-on-timeout` signals to the POSIX child
+  process group so wrapper scripts cannot hide the actual runtime process from
+  rare-hang dump collection.
 
 ### Tests
 

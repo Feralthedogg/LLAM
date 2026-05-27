@@ -175,10 +175,88 @@ def test_run_with_timeout_kills_descendant() -> None:
                 kill_process(pid)
 
 
+def test_run_with_timeout_dump_signal_reaches_descendant() -> None:
+    if os.name == "nt" or not hasattr(signal, "SIGUSR2"):
+        return
+
+    with tempfile.TemporaryDirectory(prefix="llam-run-timeout-dump-test-") as tmp:
+        tmp_path = Path(tmp)
+        dumpfile = tmp_path / "runtime.dump"
+        logfile = tmp_path / "run-with-timeout.log"
+        child = tmp_path / "child.py"
+        parent = tmp_path / "parent.py"
+        child.write_text(
+            "\n".join(
+                [
+                    "import signal",
+                    "import sys",
+                    "import time",
+                    "from pathlib import Path",
+                    "dump = Path(sys.argv[1])",
+                    "def handle(signum, frame):",
+                    "    dump.write_text('descendant-dump-ok', encoding='utf-8')",
+                    "signal.signal(signal.SIGUSR2, handle)",
+                    "print('child-ready', flush=True)",
+                    "time.sleep(30)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        parent.write_text(
+            "\n".join(
+                [
+                    "import signal",
+                    "import subprocess",
+                    "import sys",
+                    "import time",
+                    "signal.signal(signal.SIGUSR2, signal.SIG_IGN)",
+                    "child = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])",
+                    "print(f'parent-started child={child.pid}', flush=True)",
+                    "time.sleep(30)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        wrapper = Path(__file__).resolve().with_name("run_with_timeout.py")
+        proc = run_capture(
+            [
+                Path(sys.executable),
+                wrapper,
+                "--timeout",
+                "0.5",
+                "--kill-grace",
+                "0.5",
+                "--dump-grace",
+                "1.0",
+                "--dump-on-timeout",
+                dumpfile,
+                "--log",
+                logfile,
+                "--",
+                Path(sys.executable),
+                parent,
+                child,
+                dumpfile,
+            ],
+            timeout=10.0,
+            stderr_to_stdout=True,
+        )
+        if proc.returncode != 124:
+            fail(f"dump run_with_timeout returned {proc.returncode}, expected 124")
+        if not dumpfile.exists():
+            fail(f"dump signal did not reach descendant: {proc.stdout!r}")
+        if dumpfile.read_text(encoding="utf-8") != "descendant-dump-ok":
+            fail("dump signal wrote unexpected descendant dump content")
+
+
 def main() -> int:
     test_path_command_capture()
     test_timeout_kills_descendant()
     test_run_with_timeout_kills_descendant()
+    test_run_with_timeout_dump_signal_reaches_descendant()
     print("[test_process_utils] ok")
     return 0
 
