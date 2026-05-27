@@ -4681,6 +4681,34 @@ static int expect_forged_task_group_rejected(uintptr_t raw_handle, const char *l
     return 0;
 }
 
+static int expect_forged_task_rejected(uintptr_t raw_handle, const char *label) {
+    const llam_task_t *task = (const llam_task_t *)raw_handle;
+
+    /*
+     * Introspection has no errno channel.  A forged task handle must therefore
+     * resolve exactly like an unknown/consumed handle before any consuming path
+     * is tried.
+     */
+    if (llam_task_id(task) != 0U ||
+        strcmp(llam_task_state_name(task), "UNKNOWN") != 0 ||
+        llam_task_flags(task) != 0U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged task handle inspected live state at %s\n",
+                      label);
+        return 1;
+    }
+
+    errno = 0;
+    if (llam_detach((llam_task_t *)raw_handle) != -1 || errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged task handle detach accepted at %s errno=%d\n",
+                      label,
+                      errno);
+        return 1;
+    }
+    return 0;
+}
+
 static int probe_family_forged_handles(const char *name,
                                        size_t real_slot,
                                        uint32_t real_generation,
@@ -4795,6 +4823,60 @@ cleanup:
     return rc;
 }
 
+static int test_public_task_forged_initial_handle_rejected(void) {
+    edge_state_t state;
+    llam_task_t *task = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    if (llam_runtime_init(NULL) != 0) {
+        return fail_errno("forged task handle runtime init failed");
+    }
+
+    task = llam_spawn(ownership_task, &state, NULL);
+    if (task == NULL) {
+        rc = fail_errno("forged task handle fixture spawn failed");
+        goto cleanup;
+    }
+
+    if (probe_family_forged_handles("task",
+                                    public_handle_slot(task),
+                                    public_handle_generation(task),
+                                    LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                    expect_forged_task_rejected) != 0) {
+        goto cleanup;
+    }
+
+    /*
+     * The forged probes must not consume the live task handle.  If detach/join
+     * claiming ever accepts a guessed generation, this final join either fails
+     * or observes the wrong task lifecycle.
+     */
+    if (llam_run() != 0 ||
+        check_task_failures(&state) != 0 ||
+        atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        rc = fail_errno("forged task handle changed real task lifecycle");
+        goto cleanup;
+    }
+    if (llam_join(task) != 0) {
+        rc = fail_errno("forged task handle real join failed");
+        goto cleanup;
+    }
+    task = NULL;
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+        (void)llam_runtime_request_stop();
+        (void)llam_run();
+    }
+    llam_runtime_shutdown();
+    return rc;
+}
+
 static int run_edge_case(const char *name, edge_case_fn fn) {
     /*
      * CI repeats this binary as a race detector.  Emit case boundaries to stderr
@@ -4848,6 +4930,10 @@ int main(void) {
     }
     if (run_edge_case("public_sync_forged_initial_handles_rejected",
                       test_public_sync_forged_initial_handles_rejected) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_task_forged_initial_handle_rejected",
+                      test_public_task_forged_initial_handle_rejected) != 0) {
         return 1;
     }
     if (run_edge_case("cancel_token_destroy_race", test_cancel_token_destroy_race) != 0) {
