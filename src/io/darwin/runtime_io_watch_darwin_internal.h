@@ -110,7 +110,7 @@ bool llam_accept_watch_push_ready_owned(llam_accept_watch_t *watch, int fd);
 void llam_accept_watch_push_ready(llam_accept_watch_t *watch, int fd);
 llam_io_req_t *llam_recv_watch_pop_waiter(llam_recv_watch_t *watch);
 bool llam_recv_watch_push_ready_copy(llam_recv_watch_t *watch, const unsigned char *data, size_t size);
-bool llam_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino);
+bool llam_capture_fd_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino);
 llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short events);
 llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd);
 llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t st_dev, ino_t st_ino);

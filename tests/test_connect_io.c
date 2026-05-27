@@ -48,6 +48,24 @@ typedef struct invalid_accept_state {
     int observed_errno;
 } invalid_accept_state_t;
 
+typedef struct accept_reuse_state {
+    int listener_fd;
+    struct sockaddr_storage addr;
+    socklen_t addrlen;
+    int client_fds[8];
+    int first_accepted_fd;
+    int second_accept_fd;
+    atomic_uint accept_started;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[96];
+} accept_reuse_state_t;
+
+typedef struct accept_reuse_client_arg {
+    accept_reuse_state_t *state;
+    unsigned index;
+} accept_reuse_client_arg_t;
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_connect_io] %s\n", message);
     return 1;
@@ -66,6 +84,13 @@ static void close_if_valid(int *fd) {
 }
 
 static void task_fail(connect_state_t *state, const char *where, int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err;
+        (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static void accept_reuse_fail(accept_reuse_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
         state->first_errno = err;
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
@@ -246,6 +271,69 @@ static void invalid_accept_task(void *arg) {
         state->observed_errno = errno;
         atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
     }
+}
+
+static void accept_reuse_first_task(void *arg) {
+    accept_reuse_state_t *state = arg;
+    int fd;
+
+    atomic_store_explicit(&state->accept_started, 1U, memory_order_release);
+    fd = llam_accept(state->listener_fd, NULL, NULL);
+    if (fd < 0) {
+        accept_reuse_fail(state, "first llam_accept", errno);
+        return;
+    }
+    state->first_accepted_fd = fd;
+}
+
+static void accept_reuse_client_task(void *arg) {
+    accept_reuse_client_arg_t *client = arg;
+    accept_reuse_state_t *state = client->state;
+    int fd;
+
+    while (atomic_load_explicit(&state->accept_started, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        accept_reuse_fail(state, "reuse client socket", errno);
+        return;
+    }
+    if (llam_connect(fd, (const struct sockaddr *)(const void *)&state->addr, state->addrlen) != 0) {
+        int saved_errno = errno;
+
+        close_if_valid(&fd);
+        accept_reuse_fail(state, "reuse client connect", saved_errno);
+        return;
+    }
+    state->client_fds[client->index] = fd;
+}
+
+static void accept_reuse_second_task(void *arg) {
+    accept_reuse_state_t *state = arg;
+    int fd;
+
+    fd = llam_accept(state->listener_fd, NULL, NULL);
+    if (fd >= 0) {
+        state->second_accept_fd = fd;
+        /*
+         * No client ever connects to the replacement listener in this phase.
+         * Success means the accept watch leaked a ready fd from the old listener.
+         */
+        accept_reuse_fail(state, "replacement listener accepted stale fd", EPROTO);
+        return;
+    }
+    if (errno != ECANCELED) {
+        accept_reuse_fail(state, "replacement accept unexpected errno", errno);
+    }
+}
+
+static void accept_reuse_stop_task(void *arg) {
+    (void)arg;
+
+    (void)llam_sleep_ns(20000000ULL);
+    (void)llam_runtime_request_stop();
 }
 
 static int test_invalid_direct_connect(void) {
@@ -437,11 +525,121 @@ static int test_managed_connect_success_and_invalid(void) {
     return 0;
 }
 
+static int test_managed_accept_watch_rejects_reused_listener_fd(void) {
+#if defined(__APPLE__)
+    accept_reuse_state_t state;
+    accept_reuse_client_arg_t client_args[8];
+    llam_runtime_opts_t opts;
+    llam_task_t *first_accept_task;
+    llam_task_t *client_tasks[8];
+    llam_task_t *second_accept_task;
+    llam_task_t *stop_task;
+    int old_listener_fd;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    state.listener_fd = -1;
+    state.first_accepted_fd = -1;
+    state.second_accept_fd = -1;
+    for (size_t i = 0U; i < sizeof(state.client_fds) / sizeof(state.client_fds[0]); ++i) {
+        state.client_fds[i] = -1;
+    }
+    atomic_init(&state.accept_started, 0U);
+    atomic_init(&state.failures, 0U);
+
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("accept-reuse runtime init failed");
+    }
+
+    if (make_loopback_listener(&state.listener_fd, &state.addr, &state.addrlen) != 0) {
+        rc = test_fail_errno("accept-reuse listener setup failed");
+        goto done;
+    }
+    old_listener_fd = state.listener_fd;
+
+    first_accept_task = llam_spawn(accept_reuse_first_task, &state, NULL);
+    if (first_accept_task == NULL) {
+        rc = test_fail_errno("accept-reuse first accept spawn failed");
+        goto done;
+    }
+    for (size_t i = 0U; i < sizeof(client_tasks) / sizeof(client_tasks[0]); ++i) {
+        client_args[i].state = &state;
+        client_args[i].index = (unsigned)i;
+        client_tasks[i] = llam_spawn(accept_reuse_client_task, &client_args[i], NULL);
+        if (client_tasks[i] == NULL) {
+            rc = test_fail_errno("accept-reuse client spawn failed");
+            goto done;
+        }
+    }
+    if (llam_run() != 0) {
+        rc = test_fail_errno("accept-reuse first run failed");
+        goto done;
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        rc = test_fail("accept-reuse setup phase failed");
+        goto done;
+    }
+
+    /*
+     * Keep every old accepted/client fd open, close only the listener, then open a
+     * new listener.  The kernel should reuse the just-freed listener fd; if LLAM's
+     * accept watch is keyed only by fd number, the next managed accept can consume
+     * a buffered connection from the old listener without any new client.
+     */
+    close_if_valid(&state.listener_fd);
+    if (make_loopback_listener(&state.listener_fd, &state.addr, &state.addrlen) != 0) {
+        rc = test_fail_errno("accept-reuse replacement listener setup failed");
+        goto done;
+    }
+    if (state.listener_fd != old_listener_fd) {
+        rc = test_fail("accept-reuse replacement listener did not reuse fd");
+        goto done;
+    }
+
+    atomic_store_explicit(&state.accept_started, 0U, memory_order_release);
+    second_accept_task = llam_spawn(accept_reuse_second_task, &state, NULL);
+    stop_task = llam_spawn(accept_reuse_stop_task, NULL, NULL);
+    if (second_accept_task == NULL || stop_task == NULL) {
+        rc = test_fail_errno("accept-reuse second phase spawn failed");
+        goto done;
+    }
+    if (llam_run() != 0) {
+        rc = test_fail_errno("accept-reuse second run failed");
+        goto done;
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_connect_io] accept-reuse failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        rc = 1;
+    }
+
+done:
+    llam_runtime_shutdown();
+    close_if_valid(&state.second_accept_fd);
+    close_if_valid(&state.first_accepted_fd);
+    close_if_valid(&state.listener_fd);
+    for (size_t i = 0U; i < sizeof(state.client_fds) / sizeof(state.client_fds[0]); ++i) {
+        close_if_valid(&state.client_fds[i]);
+    }
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 int main(void) {
     if (test_invalid_direct_connect() != 0 ||
         test_invalid_direct_accept_address_pair() != 0 ||
         test_direct_connect_success() != 0 ||
-        test_managed_connect_success_and_invalid() != 0) {
+        test_managed_connect_success_and_invalid() != 0 ||
+        test_managed_accept_watch_rejects_reused_listener_fd() != 0) {
         return 1;
     }
     printf("[test_connect_io] ok\n");

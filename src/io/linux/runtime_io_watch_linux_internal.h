@@ -86,7 +86,7 @@ bool llam_recv_watch_push_ready(llam_recv_watch_t *watch,
                               unsigned char *copy_data,
                               size_t copy_capacity);
 
-bool llam_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino);
+bool llam_capture_fd_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino);
 llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short events);
 llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd);
 llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t st_dev, ino_t st_ino);

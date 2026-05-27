@@ -536,9 +536,20 @@ struct llam_poll_watch {
     llam_poll_watch_t *next;
 };
 
-/** @brief Accept watch with a ready queue for accepted sockets and a waiter queue. */
+/**
+ * @brief Accept watch with listener identity, ready accepted sockets, and waiters.
+ *
+ * Device/inode plus local socket address protect against listener fd reuse.
+ * Some socket implementations expose weak fstat identity, so the bound address
+ * is part of the key for accept watches.
+ */
 struct llam_accept_watch {
     llam_fd_t fd;
+    dev_t st_dev;
+    ino_t st_ino;
+    struct sockaddr_storage local_addr;
+    socklen_t local_addrlen;
+    bool has_local_addr;
     unsigned migrate_target_node_index;
     bool live_transferred;
     bool active;

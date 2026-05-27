@@ -3,11 +3,10 @@
  * @brief Shared watch lookup, creation, and common destruction helpers.
  *
  * @details
- * Linux and Darwin watch backends both protect fd reuse by recording the
- * descriptor's device/inode identity when a watch is created.  Keeping that
- * lookup policy in one file prevents the two native backends from drifting
- * apart while leaving backend-specific receive-ready release logic in the
- * platform files.
+ * Linux and Darwin watch backends both protect fd reuse by recording descriptor
+ * device/inode identity when a watch is created.  Keeping that lookup policy in
+ * one file prevents the two native backends from drifting apart while leaving
+ * backend-specific readiness release logic in the platform files.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -37,7 +36,7 @@
  * @param st_ino Optional inode id output.
  * @return true on successful @c fstat.
  */
-bool llam_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
+bool llam_capture_fd_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
     struct stat st;
 
     if (fstat(fd, &st) != 0) {
@@ -50,6 +49,55 @@ bool llam_capture_recv_watch_identity(int fd, dev_t *st_dev, ino_t *st_ino) {
         *st_ino = st.st_ino;
     }
     return true;
+}
+
+static bool llam_capture_accept_watch_identity(int fd,
+                                               dev_t *st_dev,
+                                               ino_t *st_ino,
+                                               struct sockaddr_storage *local_addr,
+                                               socklen_t *local_addrlen,
+                                               bool *has_local_addr) {
+    socklen_t len;
+
+    if (!llam_capture_fd_watch_identity(fd, st_dev, st_ino)) {
+        return false;
+    }
+    if (local_addr == NULL || local_addrlen == NULL || has_local_addr == NULL) {
+        return true;
+    }
+
+    memset(local_addr, 0, sizeof(*local_addr));
+    len = (socklen_t)sizeof(*local_addr);
+    if (getsockname(fd, (struct sockaddr *)(void *)local_addr, &len) == 0 &&
+        len <= (socklen_t)sizeof(*local_addr)) {
+        *local_addrlen = len;
+        *has_local_addr = true;
+    } else {
+        *local_addrlen = 0U;
+        *has_local_addr = false;
+    }
+    return true;
+}
+
+static bool llam_accept_watch_identity_matches(const llam_accept_watch_t *watch,
+                                               int fd,
+                                               dev_t st_dev,
+                                               ino_t st_ino,
+                                               const struct sockaddr_storage *local_addr,
+                                               socklen_t local_addrlen,
+                                               bool has_local_addr) {
+    if (watch == NULL ||
+        watch->fd != fd ||
+        watch->st_dev != st_dev ||
+        watch->st_ino != st_ino ||
+        watch->has_local_addr != has_local_addr) {
+        return false;
+    }
+    if (!has_local_addr) {
+        return true;
+    }
+    return watch->local_addrlen == local_addrlen &&
+           memcmp(&watch->local_addr, local_addr, (size_t)local_addrlen) == 0;
 }
 
 /**
@@ -65,7 +113,7 @@ llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short 
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (node == NULL || !llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (node == NULL || !llam_capture_fd_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
 
@@ -88,14 +136,31 @@ llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short 
  */
 llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd) {
     llam_accept_watch_t *watch;
+    dev_t st_dev = 0;
+    ino_t st_ino = 0;
+    struct sockaddr_storage local_addr;
+    socklen_t local_addrlen = 0U;
+    bool has_local_addr = false;
 
-    if (node == NULL) {
+    if (node == NULL ||
+        !llam_capture_accept_watch_identity(fd,
+                                            &st_dev,
+                                            &st_ino,
+                                            &local_addr,
+                                            &local_addrlen,
+                                            &has_local_addr)) {
         return NULL;
     }
 
     watch = node->accept_watches;
     while (watch != NULL) {
-        if (watch->fd == fd) {
+        if (llam_accept_watch_identity_matches(watch,
+                                               fd,
+                                               st_dev,
+                                               st_ino,
+                                               &local_addr,
+                                               local_addrlen,
+                                               has_local_addr)) {
             return watch;
         }
         watch = watch->next;
@@ -142,7 +207,7 @@ llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int f
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (node == NULL || !llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (node == NULL || !llam_capture_fd_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
 
@@ -179,20 +244,51 @@ llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int f
  *
  * @param node Node that will own the watch.
  * @param fd   Listener descriptor.
- * @return Watch on success, NULL on allocation failure.
+ * @return Watch on success, NULL on fstat/allocation failure.
  */
 llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, int fd) {
-    llam_accept_watch_t *watch = llam_find_accept_watch_locked(node, fd);
+    llam_accept_watch_t *watch;
+    dev_t st_dev = 0;
+    ino_t st_ino = 0;
+    struct sockaddr_storage local_addr;
+    socklen_t local_addrlen = 0U;
+    bool has_local_addr = false;
 
-    if (watch != NULL) {
-        return watch;
+    if (node == NULL ||
+        !llam_capture_accept_watch_identity(fd,
+                                            &st_dev,
+                                            &st_ino,
+                                            &local_addr,
+                                            &local_addrlen,
+                                            &has_local_addr)) {
+        return NULL;
     }
 
+    watch = node->accept_watches;
+    while (watch != NULL) {
+        if (llam_accept_watch_identity_matches(watch,
+                                               fd,
+                                               st_dev,
+                                               st_ino,
+                                               &local_addr,
+                                               local_addrlen,
+                                               has_local_addr)) {
+            return watch;
+        }
+        watch = watch->next;
+    }
     watch = calloc(1, sizeof(*watch));
     if (watch == NULL) {
         return NULL;
     }
     watch->fd = fd;
+    watch->st_dev = st_dev;
+    watch->st_ino = st_ino;
+    if (has_local_addr) {
+        memcpy(&watch->local_addr, &local_addr, sizeof(watch->local_addr));
+    }
+    watch->local_addrlen = local_addrlen;
+    watch->has_local_addr = has_local_addr;
     watch->migrate_target_node_index = UINT_MAX;
     watch->live_transferred = false;
     watch->next = node->accept_watches;
@@ -212,7 +308,7 @@ llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int f
     dev_t st_dev = 0;
     ino_t st_ino = 0;
 
-    if (node == NULL || !llam_capture_recv_watch_identity(fd, &st_dev, &st_ino)) {
+    if (node == NULL || !llam_capture_fd_watch_identity(fd, &st_dev, &st_ino)) {
         return NULL;
     }
 
