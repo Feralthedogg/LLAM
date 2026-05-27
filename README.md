@@ -233,6 +233,9 @@ make test
 `make test-soak` runs API/ABI tests plus the hour-long soak profile.
 `make test-fuzz-heavy` runs the deterministic runtime fuzz suite at its
 maximum built-in scenario counts for single-runtime and multi-runtime cases.
+`make test-process-utils` verifies the CI process wrapper helpers, including
+timeout cleanup of descendant processes so hung benchmark or soak wrappers do
+not pollute later jobs.
 `make test-runtime-soak` runs a time-bounded direct LLAM core soak loop over
 runtime fuzz, multi-runtime ownership/isolation, runtime stress, shutdown, and
 owned-buffer tests without involving the example chat server. Override

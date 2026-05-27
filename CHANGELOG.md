@@ -137,6 +137,10 @@
   timeouts and normalize path-like command arguments before spawning, matching
   the descendant cleanup guarantees already used on POSIX process groups.
 
+* add a process-helper regression test and include it in `make test-hardening`,
+  permanently checking that timeout cleanup removes descendant processes rather
+  than only terminating the direct wrapper command.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,

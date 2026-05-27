@@ -373,6 +373,7 @@ security hardening merges:
 make analyze-cppcheck
 make audit-deps
 make test-fuzz-heavy
+make test-process-utils
 make test-runtime-soak
 make test-hardening
 ```
@@ -383,12 +384,15 @@ preprocessor time. `make audit-deps` audits the locked Rust comparison-harness
 dependencies; LLAM's C runtime does not vendor those crates.
 `make test-fuzz-heavy` runs the deterministic runtime fuzz suite at maximum
 built-in single-runtime and multi-runtime scenario counts. `make
-test-runtime-soak` repeats direct LLAM core tests for a configurable time window
-without the example server policy in the loop; use `RUNTIME_SOAK_SECONDS`,
+test-process-utils` verifies CI helper timeout cleanup, including descendant
+process cleanup for hung benchmark/soak wrappers. `make test-runtime-soak`
+repeats direct LLAM core tests for a configurable time window without the
+example server policy in the loop; use `RUNTIME_SOAK_SECONDS`,
 `RUNTIME_SOAK_SEED`, `RUNTIME_SOAK_FUZZ_SCENARIOS`, and
 `RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS` to scale it. `make test-hardening` is the
 one-command local hardening gate for release candidates: it runs static
-analysis, dependency audit, ASan/UBSan, TSan, and the heavy fuzz profile.
+analysis, dependency audit, process-helper regression tests, ASan/UBSan, TSan,
+and the heavy fuzz profile.
 
 The current direct runtime tests are intended to catch bugs independent of the
 example chat server policy: lifecycle races, task handle ownership, cancellation
