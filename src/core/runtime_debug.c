@@ -690,7 +690,7 @@ void llam_dump_runtime_state(int fd) {
                     (unsigned long long)task->deadline_ns,
                     (void *)task->cancel_token,
                     task->cancel_registered ? 1U : 0U,
-                    task->wake_error_code,
+                    atomic_load_explicit(&task->wake_error_code, memory_order_acquire),
                     atomic_load_explicit(&task->completed, memory_order_acquire),
                     atomic_load_explicit(&task->join_claimed, memory_order_acquire),
                     atomic_load_explicit(&task->detached, memory_order_acquire),

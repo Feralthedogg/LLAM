@@ -111,7 +111,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->blocking_result = NULL;
     task->saved_errno = 0;
     task->blocking_errno = 0;
-    task->wake_error_code = 0;
+    atomic_init(&task->wake_error_code, 0);
     atomic_init(&task->opaque_blocking_depth, 0U);
     task->opaque_uses_helper = false;
     task->opaque_uses_redirect = false;

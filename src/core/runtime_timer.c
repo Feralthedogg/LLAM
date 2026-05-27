@@ -144,7 +144,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
             }
             pthread_mutex_unlock(&shard->lock);
             if (removed) {
-                task->wake_error_code = ECANCELED;
+                atomic_store_explicit(&task->wake_error_code, ECANCELED, memory_order_release);
                 if (node != NULL) {
                     node->error_code = ECANCELED;
                 }
@@ -185,7 +185,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
                 pthread_mutex_lock(&shard->lock);
                 shard->metrics.cancel_wakes += 1U;
                 pthread_mutex_unlock(&shard->lock);
-                task->wake_error_code = ECANCELED;
+                atomic_store_explicit(&task->wake_error_code, ECANCELED, memory_order_release);
                 // Preserve join/deadline ownership until generic reinject disarms it.
                 llam_reinject_task(rt, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_CANCEL);
             }
@@ -255,7 +255,7 @@ void llam_cancel_task_wait(llam_task_t *task) {
                     shard->metrics.cancel_wakes += 1U;
                     pthread_mutex_unlock(&shard->lock);
                 }
-                task->wake_error_code = ECANCELED;
+                atomic_store_explicit(&task->wake_error_code, ECANCELED, memory_order_release);
                 if (job->wait_node != NULL) {
                     job->wait_node->error_code = ECANCELED;
                 }
@@ -397,7 +397,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
         llam_wait_node_t *node = task->active_wait_node;
 
         shard->metrics.timeout_wakes += 1U;
-        task->wake_error_code = 0;
+        atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
         if (node != NULL) {
             node->error_code = 0;
         }
@@ -420,7 +420,7 @@ void llam_timeout_task_wait(llam_task_t *task) {
             pthread_mutex_unlock(&task->join_target->lock);
             if (removed) {
                 shard->metrics.timeout_wakes += 1U;
-                task->wake_error_code = ETIMEDOUT;
+                atomic_store_explicit(&task->wake_error_code, ETIMEDOUT, memory_order_release);
                 llam_reinject_task(rt, task, true, LLAM_TRACE_WAKE, LLAM_WAIT_TIMEOUT);
             }
         }
@@ -603,7 +603,7 @@ void llam_fire_expired_timers(llam_shard_t *shard) {
 
             task->wait_next = NULL;
             shard->metrics.timeout_wakes += 1U;
-            task->wake_error_code = 0;
+            atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
             if (node != NULL) {
                 node->error_code = 0;
             }

@@ -238,6 +238,7 @@ jobs:
           set -o pipefail
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           make clean all CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/build.log"
+          make test-asan CC=gcc 2>&1 | tee "$OUT_DIR/make_test_asan.log"
           make test CC=gcc CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" 2>&1 | tee "$OUT_DIR/make_test.log"
           env LLAM_RUNTIME_FUZZ_SCENARIOS=96 ./test_runtime_fuzz 2>&1 | tee "$OUT_DIR/runtime_fuzz.log"
           env LLAM_RUNTIME_INVARIANT_SCENARIOS=96 ./test_runtime_invariants 2>&1 | tee "$OUT_DIR/runtime_invariants.log"
@@ -297,6 +298,8 @@ jobs:
         run: |
           set -o pipefail
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
+          make clean
+          make test-tsan CC=clang 2>&1 | tee "$OUT_DIR/make_test_tsan.log"
           make clean test_runtime_stress \
             test_runtime_invariants \
             CC=clang \

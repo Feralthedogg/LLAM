@@ -127,7 +127,7 @@ void *llam_block_worker_main(void *arg) {
                  * the worker is still touching it.
                  */
                 if (expected == LLAM_BLOCK_JOB_ABORTED) {
-                    job->task->wake_error_code = ECANCELED;
+                    atomic_store_explicit(&job->task->wake_error_code, ECANCELED, memory_order_release);
                     if (job->wait_node != NULL) {
                         job->wait_node->error_code = ECANCELED;
                     }

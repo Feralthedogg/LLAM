@@ -816,7 +816,11 @@ struct llam_task {
     void *blocking_result;
     int saved_errno;
     int blocking_errno;
-    int wake_error_code;
+    /*
+     * Wake errors can be published by timer/cancel/blocking helper threads while
+     * the task itself consumes them or diagnostics samples live task state.
+     */
+    atomic_int wake_error_code;
     atomic_uint opaque_blocking_depth;
     bool opaque_uses_helper;
     bool opaque_uses_redirect;

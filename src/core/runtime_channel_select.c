@@ -294,7 +294,7 @@ static void llam_channel_select_set_task_tracking(llam_task_t *task,
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
-    task->wake_error_code = 0;
+    atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
     task->state = LLAM_TASK_STATE_PARKED;
     task->wait_reason = reason;
 }
@@ -393,7 +393,7 @@ bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam
     state->selected_value = NULL;
     state->error_code = error_code;
     llam_channel_select_cleanup_nodes(state);
-    task->wake_error_code = error_code;
+    atomic_store_explicit(&task->wake_error_code, error_code, memory_order_release);
     should_queue = atomic_load_explicit(&state->wake_armed, memory_order_acquire) != 0U &&
                    task->state == LLAM_TASK_STATE_PARKED;
     if (should_queue) {

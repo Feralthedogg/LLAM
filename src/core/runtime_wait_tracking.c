@@ -117,7 +117,7 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
-    task->wake_error_code = 0;
+    atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
 
 /**
@@ -136,7 +136,7 @@ void llam_task_set_join_tracking(llam_task_t *task, llam_task_t *target, unsigne
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = target;
     task->parked_shard = parked_shard;
-    task->wake_error_code = 0;
+    atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
 
 /**
@@ -154,7 +154,7 @@ void llam_task_set_sleep_tracking(llam_task_t *task, unsigned parked_shard) {
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
-    task->wake_error_code = 0;
+    atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
 
 /**
@@ -176,7 +176,7 @@ void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned p
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
-    task->wake_error_code = 0;
+    atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
 
 /**
@@ -195,7 +195,7 @@ void llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsi
     atomic_store_explicit(&task->active_block_job, job, memory_order_release);
     task->join_target = NULL;
     task->parked_shard = parked_shard;
-    task->wake_error_code = 0;
+    atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
 }
 
 /**
@@ -397,8 +397,7 @@ int llam_consume_task_wake_error(llam_task_t *task) {
         return 0;
     }
 
-    error_code = task->wake_error_code;
-    task->wake_error_code = 0;
+    error_code = atomic_exchange_explicit(&task->wake_error_code, 0, memory_order_acq_rel);
     return error_code;
 }
 
