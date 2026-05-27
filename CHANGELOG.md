@@ -71,6 +71,11 @@
   task slots, broker byte channels, descriptor/HANDLE grants, or stale doorbell
   waits after response failures, disconnects, or concurrent destroy.
 
+* keep Windows named-pipe broker servers alive when a malformed client connects
+  and closes before `ConnectNamedPipe()` completes. The broken session now
+  consumes only its own accept budget instead of failing the long-running local
+  broker loop.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
@@ -81,6 +86,9 @@
   doorbell/flood paths, predefined task detach races, Windows named-pipe
   response-failure cleanup, BSD timeouts/package bootstrap, stress diagnostics,
   and hosted-runner performance guardrails.
+
+* added broker cleanup coverage for partially initialized POSIX ring mappings
+  whose fixed-size names are not NUL-terminated before unmap/reset.
 
 * made the Windows cross-process broker ring session-replay guard wait for an
   explicit child readiness event before rewinding public cursors, avoiding a

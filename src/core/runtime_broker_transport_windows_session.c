@@ -64,6 +64,18 @@ int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t ma
             DWORD error_code = GetLastError();
 
             if (error_code != ERROR_PIPE_CONNECTED) {
+                if (error_code == ERROR_NO_DATA || error_code == ERROR_BROKEN_PIPE) {
+                    /*
+                     * A client may connect and close before the broker reaches
+                     * ConnectNamedPipe. Treat that as a malformed one-session
+                     * failure, not as failure of the long-running broker.
+                     */
+                    last_session_errno = EPIPE;
+                    (void)DisconnectNamedPipe((HANDLE)pipe);
+                    llam_broker_close_handle(pipe);
+                    served++;
+                    continue;
+                }
                 errno = llam_broker_windows_pipe_errno(error_code);
                 llam_broker_close_handle(pipe);
                 return -1;

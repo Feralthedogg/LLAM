@@ -1880,6 +1880,29 @@ static int test_broker_ring_private_name_clears_short_output(void) {
     return 0;
 }
 
+static int test_broker_ring_unmap_handles_unterminated_name(void) {
+#if !LLAM_PLATFORM_WINDOWS
+    llam_broker_ring_mapping_t mapping;
+
+    memset(&mapping, 0, sizeof(mapping));
+    mapping.fd = -1;
+    mapping.mapping_handle = LLAM_INVALID_HANDLE;
+    mapping.owner = false;
+    memset(mapping.name, 'x', sizeof(mapping.name));
+
+    /*
+     * Cleanup paths must treat the fixed-size name as bounded storage. A
+     * partially initialized mapping may not contain a trailing NUL byte.
+     */
+    llam_broker_ring_unmap(&mapping);
+    if (!broker_ring_mapping_is_reset(&mapping)) {
+        fprintf(stderr, "[test_security_capability] ring unmap did not reset unterminated mapping\n");
+        return -1;
+    }
+#endif
+    return 0;
+}
+
 static int test_broker_control_outputs_clear_on_invalid_input(void) {
     llam_broker_t uninitialized_broker;
     llam_broker_wire_request_t request;
@@ -8843,6 +8866,10 @@ done:
 
             CloseHandle(server_thread);
             if (wait_rc != WAIT_OBJECT_0 || state.rc != 0) {
+                fprintf(stderr,
+                        "[test_security_capability] malformed pipe local server rc=%d wait=%lu\n",
+                        state.rc,
+                        (unsigned long)wait_rc);
                 rc = -1;
             }
         }
@@ -9995,6 +10022,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_capability_revoke_op);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_failed_output_windows_are_cleared);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_buffer_data_plane);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_unmap_handles_unterminated_name);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_channel_data_plane);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_task_data_plane);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_subject_bound_session);
