@@ -133,6 +133,10 @@
   scripts, replacing raw `subprocess.run(timeout=...)` calls that could leave
   helper descendants alive after a timed-out verify command.
 
+* extend the shared CI process helper to use Windows `taskkill /T /F` on
+  timeouts and normalize path-like command arguments before spawning, matching
+  the descendant cleanup guarantees already used on POSIX process groups.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,

@@ -24,7 +24,7 @@ class CapturedProcess:
 
 class ProcessTimeoutError(RuntimeError):
     def __init__(self, args: Sequence[str], timeout: float, stdout: str, stderr: str) -> None:
-        super().__init__(f"command timed out after {timeout:.3f}s: {' '.join(args)}")
+        super().__init__(f"command timed out after {timeout:.3f}s: {' '.join(str(arg) for arg in args)}")
         self.args_list = args
         self.timeout = timeout
         self.stdout = stdout
@@ -33,7 +33,16 @@ class ProcessTimeoutError(RuntimeError):
 
 def _kill_process_group(proc: subprocess.Popen[str]) -> None:
     if os.name == "nt":
-        proc.kill()
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            proc.kill()
         return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -57,16 +66,18 @@ def run_capture(
     timeout: float | None = None,
     stderr_to_stdout: bool = False,
 ) -> CapturedProcess:
-    """Run a command and kill its POSIX process group on timeout.
+    """Run a command and kill its process tree/group on timeout.
 
     ``subprocess.run(..., timeout=...)`` kills only the direct child. Several LLAM
     CI helpers launch wrappers such as ``cargo run`` or shell scripts that spawn
-    the actual workload, so timeout cleanup must cover descendants too.
+    the actual workload, so timeout cleanup must cover descendants too. POSIX
+    callers get a new session/process group; Windows callers use ``taskkill /T``.
     """
 
+    command_args = [str(arg) for arg in command]
     stderr = subprocess.STDOUT if stderr_to_stdout else subprocess.PIPE
     proc = subprocess.Popen(
-        list(command),
+        command_args,
         cwd=cwd,
         env=None if env is None else dict(env),
         stdout=subprocess.PIPE,
@@ -80,14 +91,14 @@ def run_capture(
         _kill_process_group(proc)
         stdout, captured_stderr = proc.communicate()
         raise ProcessTimeoutError(
-            list(command),
+            command_args,
             0.0 if timeout is None else float(timeout),
             _decode_output(stdout or exc.stdout),
             "" if stderr_to_stdout else _decode_output(captured_stderr or exc.stderr),
         ) from None
 
     return CapturedProcess(
-        args=list(command),
+        args=command_args,
         returncode=proc.returncode,
         stdout=_decode_output(stdout),
         stderr="" if stderr_to_stdout else _decode_output(captured_stderr),
