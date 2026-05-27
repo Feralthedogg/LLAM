@@ -777,17 +777,12 @@ int llam_close_handle(llam_handle_t handle) {
         errno = EBADF;
         return -1;
     }
-    {
-        /*
-         * HANDLE skip-completion metadata is runtime-local.  Host callers fall
-         * back to the default runtime; managed callers use their owning runtime.
-         */
-        llam_runtime_t *rt = llam_runtime_current_owner();
-
-        if (rt != NULL) {
-            llam_windows_forget_fd_assoc(rt, (llam_fd_t)(uintptr_t)handle);
-        }
-    }
+    /*
+     * HANDLE values are process-global just like SOCKET values.  A HANDLE can
+     * be closed by any managed runtime or host thread while another runtime has
+     * IOCP skip-completion metadata cached for the same numeric value.
+     */
+    llam_forget_closed_fd_state((llam_fd_t)(uintptr_t)handle);
     if (!CloseHandle((HANDLE)handle)) {
         errno = llam_windows_system_error_to_errno(GetLastError());
         return -1;

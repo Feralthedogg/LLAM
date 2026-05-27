@@ -22,6 +22,8 @@ int main(void) {
 }
 #else
 
+#include "../src/io/windows/runtime_io_watch_windows_internal.h"
+
 #include <windows.h>
 
 typedef struct windows_handle_state {
@@ -165,6 +167,143 @@ static void signaler_task(void *arg) {
     atomic_fetch_add_explicit(&state->signaler_done, 1U, memory_order_relaxed);
 }
 
+typedef struct cross_runtime_close_handle_state {
+    llam_handle_t handle;
+    int rc;
+    int err;
+} cross_runtime_close_handle_state_t;
+
+static void cross_runtime_close_handle_task(void *arg) {
+    cross_runtime_close_handle_state_t *state = arg;
+
+    if (state == NULL) {
+        return;
+    }
+    state->rc = llam_close_handle(state->handle);
+    state->err = errno;
+}
+
+static bool runtime_assoc_contains_handle(llam_runtime_t *runtime, llam_handle_t handle) {
+    uintptr_t key = (uintptr_t)handle;
+
+    if (runtime == NULL || runtime->nodes == NULL) {
+        return false;
+    }
+    for (unsigned i = 0U; i < runtime->active_nodes; ++i) {
+        llam_node_t *node = &runtime->nodes[i];
+        llam_windows_fd_assoc_t *assoc;
+        bool found = false;
+
+        pthread_mutex_lock(&node->windows_assoc_lock);
+        assoc = (llam_windows_fd_assoc_t *)node->windows_fd_assoc_head;
+        while (assoc != NULL) {
+            if ((uintptr_t)assoc->fd == key) {
+                found = true;
+                break;
+            }
+            assoc = assoc->next;
+        }
+        pthread_mutex_unlock(&node->windows_assoc_lock);
+        if (found) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int test_managed_close_handle_purges_peer_runtime_assoc(void) {
+    windows_handle_state_t pipe_state;
+    cross_runtime_close_handle_state_t close_state;
+    llam_runtime_t *closer_runtime = NULL;
+    llam_runtime_t *assoc_runtime = NULL;
+    llam_task_t *closer_task = NULL;
+    llam_runtime_opts_t opts;
+    int failed = 0;
+
+    memset(&pipe_state, 0, sizeof(pipe_state));
+    pipe_state.pipe_reader = LLAM_INVALID_HANDLE;
+    pipe_state.pipe_writer = LLAM_INVALID_HANDLE;
+    pipe_state.event_handle = LLAM_INVALID_HANDLE;
+    memset(&close_state, 0, sizeof(close_state));
+    close_state.handle = LLAM_INVALID_HANDLE;
+    close_state.rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("cross-runtime close handle opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &closer_runtime) != 0 ||
+        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &assoc_runtime) != 0) {
+        failed = fail_errno("cross-runtime close handle runtime create failed");
+        goto cleanup;
+    }
+    if (assoc_runtime == NULL || assoc_runtime->nodes == NULL || assoc_runtime->active_nodes == 0U) {
+        fprintf(stderr, "[test_windows_handle_io] cross-runtime assoc runtime has no IOCP node\n");
+        failed = 1;
+        goto cleanup;
+    }
+    if (setup_pipe(&pipe_state) != 0) {
+        failed = fail_errno("cross-runtime close handle pipe setup failed");
+        goto cleanup;
+    }
+    if (llam_windows_associate_handle(&assoc_runtime->nodes[0], pipe_state.pipe_reader) != 0) {
+        failed = fail_errno("cross-runtime close handle associate failed");
+        goto cleanup;
+    }
+    if (!runtime_assoc_contains_handle(assoc_runtime, pipe_state.pipe_reader)) {
+        fprintf(stderr, "[test_windows_handle_io] cross-runtime associate did not publish metadata\n");
+        failed = 1;
+        goto cleanup;
+    }
+
+    /*
+     * HANDLE values are process-global.  A managed task in one runtime can
+     * close an embedder-owned HANDLE while another runtime has idle IOCP
+     * association metadata for that value.  close-boundary cleanup must scan
+     * every live runtime before Windows can recycle the HANDLE value.
+     */
+    close_state.handle = pipe_state.pipe_reader;
+    closer_task = llam_runtime_spawn_ex(closer_runtime,
+                                        cross_runtime_close_handle_task,
+                                        &close_state,
+                                        NULL,
+                                        0U);
+    if (closer_task == NULL ||
+        llam_runtime_run_handle(closer_runtime) != 0 ||
+        llam_join(closer_task) != 0) {
+        failed = fail_errno("cross-runtime close handle task failed");
+        closer_task = NULL;
+        goto cleanup;
+    }
+    closer_task = NULL;
+    pipe_state.pipe_reader = LLAM_INVALID_HANDLE;
+    if (close_state.rc != 0) {
+        errno = close_state.err;
+        failed = fail_errno("cross-runtime llam_close_handle failed");
+        goto cleanup;
+    }
+    if (runtime_assoc_contains_handle(assoc_runtime, close_state.handle)) {
+        fprintf(stderr,
+                "[test_windows_handle_io] cross-runtime close left stale HANDLE association\n");
+        failed = 1;
+        goto cleanup;
+    }
+
+cleanup:
+    if (closer_task != NULL) {
+        (void)llam_join(closer_task);
+    }
+    if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_reader)) {
+        CloseHandle((HANDLE)pipe_state.pipe_reader);
+    }
+    if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_writer)) {
+        CloseHandle((HANDLE)pipe_state.pipe_writer);
+    }
+    llam_runtime_destroy(assoc_runtime);
+    llam_runtime_destroy(closer_runtime);
+    return failed;
+}
+
 int main(void) {
     windows_handle_state_t state;
     llam_runtime_opts_t opts;
@@ -183,6 +322,10 @@ int main(void) {
     atomic_init(&state.writer_done, 0U);
     atomic_init(&state.poller_done, 0U);
     atomic_init(&state.signaler_done, 0U);
+
+    if (test_managed_close_handle_purges_peer_runtime_assoc() != 0) {
+        return 1;
+    }
 
     if (setup_pipe(&state) != 0) {
         return fail_errno("setup_pipe failed");
