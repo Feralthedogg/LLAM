@@ -15,15 +15,24 @@ make -j"$JOBS" all test
 
 python3 - <<'PY'
 import os
-import subprocess
 import sys
+
+sys.path.insert(0, "scripts")
+
+from process_utils import ProcessTimeoutError, print_captured_output, run_capture
 
 
 def run(cmd, timeout, env=None):
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    proc = subprocess.run(cmd, env=merged_env, timeout=timeout)
+    try:
+        proc = run_capture(cmd, env=merged_env, timeout=timeout, stderr_to_stdout=True)
+    except ProcessTimeoutError as exc:
+        print_captured_output(exc.stdout, exc.stderr)
+        print(f"verify_linux.sh: command timed out after {timeout}s: {' '.join(cmd)}", file=sys.stderr)
+        sys.exit(124)
+    print_captured_output(proc.stdout, proc.stderr)
     if proc.returncode != 0:
         sys.exit(proc.returncode)
 

@@ -129,6 +129,10 @@
   benchmark guard, benchmark comparison, and benchmark matrix runners, so
   timed-out wrapper commands cannot leave workload grandchildren behind.
 
+* apply the same process-group timeout cleanup to Linux and macOS verification
+  scripts, replacing raw `subprocess.run(timeout=...)` calls that could leave
+  helper descendants alive after a timed-out verify command.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
