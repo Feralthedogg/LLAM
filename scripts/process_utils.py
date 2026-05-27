@@ -31,7 +31,14 @@ class ProcessTimeoutError(RuntimeError):
         self.stderr = stderr
 
 
-def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+def kill_process_tree(proc: subprocess.Popen[str]) -> None:
+    """Forcefully terminate a process and any descendants we can address.
+
+    POSIX callers are expected to create the child in a new session so the
+    process group is isolated from the invoking shell. Windows has no portable
+    Python process-group equivalent, so use taskkill's tree mode.
+    """
+
     if os.name == "nt":
         try:
             subprocess.run(
@@ -88,7 +95,7 @@ def run_capture(
     try:
         stdout, captured_stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        _kill_process_group(proc)
+        kill_process_tree(proc)
         stdout, captured_stderr = proc.communicate()
         raise ProcessTimeoutError(
             command_args,

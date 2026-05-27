@@ -19,6 +19,7 @@ import threading
 import time
 from pathlib import Path
 
+from process_utils import kill_process_tree
 from safe_output import open_text_for_write, prepare_output_path
 
 
@@ -49,26 +50,24 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def interrupt_process(proc: subprocess.Popen[str]) -> None:
+def interrupt_process(proc: subprocess.Popen[str]) -> str:
     if os.name == "nt":
-        proc.terminate()
-        return
+        # TerminateProcess only kills the direct child. The stress wrappers this
+        # script supervises may launch the real workload below that child, so on
+        # Windows use taskkill tree mode immediately when the deadline expires.
+        kill_process_tree(proc)
+        return "kill_tree"
     try:
         # POSIX children run in their own session, so an interrupt reaches any
         # helper processes the stress command spawned before the timeout.
         os.killpg(proc.pid, signal.SIGINT)
     except ProcessLookupError:
         pass
+    return "interrupt"
 
 
 def kill_process(proc: subprocess.Popen[str]) -> None:
-    if os.name == "nt":
-        proc.kill()
-        return
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    kill_process_tree(proc)
 
 
 def request_runtime_dump(proc: subprocess.Popen[str], log, dump_path: Path | None, dump_grace: float) -> None:
@@ -156,8 +155,7 @@ def main() -> int:
                 request_runtime_dump(proc, log, args.dump_on_timeout, args.dump_grace)
                 if proc.poll() is not None:
                     break
-                timeout_action = "interrupt"
-                interrupt_process(proc)
+                timeout_action = interrupt_process(proc)
                 try:
                     proc.wait(timeout=args.kill_grace)
                 except subprocess.TimeoutExpired:

@@ -117,9 +117,68 @@ def test_timeout_kills_descendant() -> None:
                 kill_process(pid)
 
 
+def test_run_with_timeout_kills_descendant() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-run-timeout-test-") as tmp:
+        tmp_path = Path(tmp)
+        pidfile = tmp_path / "child.pid"
+        logfile = tmp_path / "run-with-timeout.log"
+        parent = tmp_path / "parent.py"
+        parent.write_text(
+            "\n".join(
+                [
+                    "import subprocess",
+                    "import sys",
+                    "import time",
+                    "from pathlib import Path",
+                    "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])",
+                    "Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')",
+                    "print(f'child-started pid={child.pid}', flush=True)",
+                    "time.sleep(30)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        wrapper = Path(__file__).resolve().with_name("run_with_timeout.py")
+        proc = run_capture(
+            [
+                Path(sys.executable),
+                wrapper,
+                "--timeout",
+                "0.5",
+                "--kill-grace",
+                "0.5",
+                "--log",
+                logfile,
+                "--",
+                Path(sys.executable),
+                parent,
+                pidfile,
+            ],
+            timeout=10.0,
+            stderr_to_stdout=True,
+        )
+        if proc.returncode != 124:
+            fail(f"run_with_timeout returned {proc.returncode}, expected 124")
+        if "deadline_exceeded" not in proc.stdout:
+            fail(f"run_with_timeout did not report timeout diagnosis: {proc.stdout!r}")
+        if not pidfile.exists():
+            fail("run_with_timeout child pidfile was not written before timeout")
+
+        pid = int(pidfile.read_text(encoding="utf-8").strip())
+        try:
+            if not wait_for_exit(pid, 5.0):
+                fail(f"run_with_timeout descendant survived timeout cleanup: pid={pid}")
+        finally:
+            if process_alive(pid):
+                kill_process(pid)
+
+
 def main() -> int:
     test_path_command_capture()
     test_timeout_kills_descendant()
+    test_run_with_timeout_kills_descendant()
     print("[test_process_utils] ok")
     return 0
 

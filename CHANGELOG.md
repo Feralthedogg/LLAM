@@ -142,6 +142,9 @@
   than only terminating the direct wrapper command.
 * bound BSD VM startup in CI/release workflows and keep DragonFly BSD
   infrastructure stalls from blocking the required BSD gate indefinitely.
+* make `scripts/run_with_timeout.py` use process-tree cleanup on Windows too,
+  and extend the process-helper regression test to cover streamed timeout
+  wrappers, not only captured subprocess helpers.
 
 ### Tests
 
