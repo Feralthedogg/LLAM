@@ -207,10 +207,12 @@ static llam_io_buffer_t *llam_io_buffer_public_unregister_impl(llam_io_buffer_t 
             buffer->public_registry_next = NULL;
             while (llam_public_active_op_count(&buffer->public_active_ops) != 0U) {
                 /*
-                 * Accessors pin the wrapper only while copying scalar fields.
-                 * Release is a cold path, so wait outside the registry lock to
-                 * let in-flight accessors drop their pins before the wrapper is
-                 * recycled or freed.
+                 * Scalar accessors pin the wrapper while copying fields.  The
+                 * data accessor returns a borrowed pointer under the registry
+                 * lock and the public contract requires users to serialize raw
+                 * pointer use against release. Release is a cold path, so wait
+                 * outside the registry lock for pinned scalar accessors before
+                 * the wrapper is recycled or freed.
                  */
                 (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
                 ts.tv_sec = 0;

@@ -5,7 +5,9 @@
  * @details
  * Owned-buffer APIs are grouped away from descriptor read/write entry points so
  * their registry lifetime rules stay visible: public handles are consumed by
- * release and pinned by accessors before buffer storage is inspected.
+ * release, scalar accessors pin the wrapper while copying fields, and the data
+ * accessor returns a borrowed pointer that callers must serialize against
+ * release when sharing a buffer between threads.
  *
  * @copyright Copyright 2026 Feralthedogg
  *

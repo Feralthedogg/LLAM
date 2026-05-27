@@ -49,6 +49,7 @@
 #define OWNED_BUFFER_RACE_THREADS 4
 #define OWNED_BUFFER_RACE_ITERS 4096
 #define OWNED_BUFFER_RAW_RELEASE_MAX_COLLISION_SLOTS 131072U
+#define OWNED_BUFFER_PUBLIC_HANDLE_SHIFT 32U
 
 #if defined(__linux__) && !defined(MAP_NORESERVE)
 #define MAP_NORESERVE 0
@@ -1637,6 +1638,78 @@ static int test_owned_buffer_public_handle_corrupt_slot_guard(void) {
     return rc;
 }
 
+static int test_owned_buffer_forged_initial_handle_rejected(void) {
+    llam_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *forged = NULL;
+    uintptr_t real_raw;
+    size_t real_slot;
+    uint32_t real_generation;
+    int rc = 1;
+
+    if (make_native_owned_buffer("real", &buffer) != 0) {
+        return test_fail_errno("owned-buffer forged-handle fixture allocation failed");
+    }
+    real_raw = (uintptr_t)buffer;
+    real_slot = owned_buffer_slot_handle(buffer);
+    real_generation = (uint32_t)real_raw;
+
+    /*
+     * Owned-buffer handles use their own public registry.  A caller that guesses
+     * "first slot + family id" or scans monotonic family epochs must not get a
+     * readable borrowed pointer to the live buffer.
+     */
+    forged = (llam_io_buffer_t *)llam_public_slot_encode_handle(0U,
+                                                                LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER,
+                                                                OWNED_BUFFER_PUBLIC_HANDLE_SHIFT);
+    if (llam_io_buffer_data(forged) != NULL ||
+        llam_io_buffer_size(forged) != 0U ||
+        llam_io_buffer_capacity(forged) != 0U) {
+        rc = test_fail("forged initial owned-buffer handle was observable");
+        goto cleanup;
+    }
+
+    forged = (llam_io_buffer_t *)llam_public_slot_encode_handle(
+        real_slot,
+        llam_public_slot_family_generation(1U, LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER),
+        OWNED_BUFFER_PUBLIC_HANDLE_SHIFT);
+    if ((uint32_t)(uintptr_t)forged != real_generation &&
+        (llam_io_buffer_data(forged) != NULL ||
+         llam_io_buffer_size(forged) != 0U ||
+         llam_io_buffer_capacity(forged) != 0U)) {
+        rc = test_fail("naive epoch-one owned-buffer handle was observable");
+        goto cleanup;
+    }
+
+    for (uint32_t epoch = 2U; epoch <= 4096U; ++epoch) {
+        uint32_t guessed_generation =
+            llam_public_slot_family_generation(epoch, LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER);
+
+        if (guessed_generation == real_generation) {
+            continue;
+        }
+        forged = (llam_io_buffer_t *)llam_public_slot_encode_handle(real_slot,
+                                                                    guessed_generation,
+                                                                    OWNED_BUFFER_PUBLIC_HANDLE_SHIFT);
+        if (llam_io_buffer_data(forged) != NULL ||
+            llam_io_buffer_size(forged) != 0U ||
+            llam_io_buffer_capacity(forged) != 0U) {
+            rc = test_fail("sequential forged owned-buffer handle was observable");
+            goto cleanup;
+        }
+    }
+
+    if (llam_io_buffer_size(buffer) != 4U ||
+        memcmp(llam_io_buffer_data(buffer), "real", 4U) != 0) {
+        rc = test_fail("forged owned-buffer probes changed the live buffer");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_io_buffer_release(buffer);
+    return rc;
+}
+
 static int test_owned_buffer_raw_release_decodable_pointer_guard(void) {
     llam_io_buffer_t *target = NULL;
     llam_io_buffer_t *target_handle = NULL;
@@ -2099,6 +2172,7 @@ int main(void) {
         test_owned_buffer_accessor_release_race() != 0 ||
         test_owned_buffer_stale_release_reuse_guard() != 0 ||
         test_owned_buffer_public_handle_corrupt_slot_guard() != 0 ||
+        test_owned_buffer_forged_initial_handle_rejected() != 0 ||
         test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
         test_owned_buffer_raw_release_rejects_public_handle() != 0 ||
         test_public_owned_buffer_alloc_and_positional_io() != 0 ||
