@@ -303,6 +303,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_debug_stats_json.o \
 	$(OBJDIR)/src/core/runtime_debug.o \
 	$(OBJDIR)/src/io/runtime_io_watch.o \
+	$(OBJDIR)/src/io/runtime_io_watch_close.o \
 	$(OBJDIR)/src/io/runtime_io_watch_lookup.o \
 	$(OBJDIR)/src/io/runtime_io_watch_migration.o \
 	$(OBJDIR)/src/io/runtime_io_watch_queue.o \

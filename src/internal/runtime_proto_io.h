@@ -85,6 +85,7 @@ void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch)
 void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch);
 void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
 void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
+void llam_forget_closed_fd_watch_state(llam_runtime_t *rt, llam_fd_t fd);
 void llam_accept_watch_splice_ready(llam_accept_watch_t *target, llam_accept_watch_t *source);
 void llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *source);
 

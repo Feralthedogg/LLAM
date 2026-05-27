@@ -159,6 +159,7 @@ set(LLAM_RUNTIME_SOURCES
     src/io/runtime_io_api_public.c
     src/io/runtime_io_engine.c
     src/io/runtime_io_watch.c
+    src/io/runtime_io_watch_close.c
     src/io/runtime_io_watch_lookup.c
     src/io/runtime_io_watch_migration.c
     src/io/runtime_io_watch_queue.c

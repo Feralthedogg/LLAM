@@ -34,6 +34,12 @@
 
 #include <errno.h>
 #include <limits.h>
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +63,43 @@ static int init_runtime(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
+
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+static void close_if_valid(int *fd) {
+    if (fd != NULL && *fd >= 0) {
+        (void)close(*fd);
+        *fd = -1;
+    }
+}
+
+static int make_loopback_listener(int *listener_out) {
+    struct sockaddr_in addr;
+    int fd;
+    int one = 1;
+
+    if (listener_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, (socklen_t)sizeof(one));
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(0U);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(fd, (const struct sockaddr *)(const void *)&addr, (socklen_t)sizeof(addr)) != 0 ||
+        listen(fd, 16) != 0) {
+        close_if_valid(&fd);
+        return -1;
+    }
+    *listener_out = fd;
+    return 0;
+}
+#endif
 
 static int exercise_recv_ready_copy_payload_shutdown(void) {
     llam_recv_watch_t *watch;
@@ -162,6 +205,88 @@ static int exercise_recv_ready_pop_without_transfer(void) {
 #endif
     return 0;
 }
+
+static int exercise_close_purges_accept_watch_ready_fds(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+    llam_node_t *node;
+    llam_accept_watch_t *watch;
+    int listener = -1;
+    int ready_pipe[2] = {-1, -1};
+    int watch_ready_fd = -1;
+    int lock_rc;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for close watch purge");
+    }
+    if (g_llam_runtime.nodes == NULL || g_llam_runtime.active_nodes == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without an I/O node for close watch purge");
+    }
+    if (make_loopback_listener(&listener) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("listener setup failed for close watch purge");
+    }
+    if (pipe(ready_pipe) != 0) {
+        close_if_valid(&listener);
+        llam_runtime_shutdown();
+        return fail_errno("ready fd setup failed for close watch purge");
+    }
+
+    node = &g_llam_runtime.nodes[0];
+    lock_rc = pthread_mutex_lock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        close_if_valid(&ready_pipe[0]);
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_shutdown();
+        return fail_errno("watch lock failed for close watch purge");
+    }
+    watch = llam_get_or_create_accept_watch_locked(node, listener);
+    if (watch == NULL || !llam_accept_watch_push_ready_owned(watch, ready_pipe[0])) {
+        (void)pthread_mutex_unlock(&node->watch_lock);
+        close_if_valid(&ready_pipe[0]);
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_shutdown();
+        return fail_errno("accept watch ready setup failed for close watch purge");
+    }
+    /*
+     * The watch owns ready_pipe[0] from this point.  The close-boundary cleanup
+     * must release it before the runtime reaches full shutdown.
+     */
+    watch_ready_fd = ready_pipe[0];
+    ready_pipe[0] = -1;
+    lock_rc = pthread_mutex_unlock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_shutdown();
+        return fail_errno("watch unlock failed for close watch purge");
+    }
+
+    if (llam_close(listener) != 0) {
+        close_if_valid(&ready_pipe[1]);
+        listener = -1;
+        llam_runtime_shutdown();
+        return fail_errno("llam_close failed during close watch purge");
+    }
+    listener = -1;
+    errno = 0;
+    if (fcntl(watch_ready_fd, F_GETFD) != -1 || errno != EBADF) {
+        close_if_valid(&watch_ready_fd);
+        close_if_valid(&ready_pipe[1]);
+        llam_runtime_shutdown();
+        return fail_msg("llam_close did not purge accept-watch ready fd");
+    }
+
+    close_if_valid(&ready_pipe[1]);
+    llam_runtime_shutdown();
+#endif
+    return 0;
+}
+
 #if LLAM_RUNTIME_BACKEND_LINUX
 static bool io_uring_unavailable_for_direct_internal_test(int rc) {
     int err = -rc;
@@ -344,6 +469,9 @@ int main(void) {
         return 1;
     }
     if (exercise_recv_ready_pop_without_transfer() != 0) {
+        return 1;
+    }
+    if (exercise_close_purges_accept_watch_ready_fds() != 0) {
         return 1;
     }
     if (exercise_linux_oversized_submit_preserves_sq_tail() != 0) {

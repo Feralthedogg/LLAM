@@ -726,6 +726,8 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
 }
 
 static void llam_forget_closed_fd_state(llam_fd_t fd) {
+    int saved_errno = errno;
+
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t *rt = NULL;
 
@@ -744,8 +746,27 @@ static void llam_forget_closed_fd_state(llam_fd_t fd) {
         llam_windows_forget_fd_assoc(rt, fd);
     }
 #else
-    (void)fd;
+    {
+        llam_runtime_t *rt = NULL;
+
+        if (g_llam_tls_task != NULL && g_llam_tls_task->owner_runtime != NULL) {
+            rt = g_llam_tls_task->owner_runtime;
+        } else if (g_llam_tls_shard != NULL) {
+            rt = g_llam_tls_shard->runtime;
+        } else {
+            rt = llam_runtime_default_storage();
+        }
+        if (rt != NULL && atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+            /*
+             * POSIX watches can own sticky readiness and buffered accepted or
+             * received data.  Purge idle watch state before close(2) releases
+             * the fd number to the kernel reuse pool.
+             */
+            llam_forget_closed_fd_watch_state(rt, fd);
+        }
+    }
 #endif
+    errno = saved_errno;
 }
 
 int llam_close(llam_fd_t fd) {
