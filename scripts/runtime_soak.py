@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -67,27 +69,40 @@ def print_process_output(output: str | bytes | None) -> None:
     else:
         text = output
     if text:
-        print(text, end="")
+        print(text, end="", flush=True)
+
+
+def kill_process_group(proc: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        proc.kill()
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def run_command(command: SoakCommand, timeout: float) -> int:
     env = os.environ.copy()
     env.update(command.env)
-    print(f"[runtime_soak] begin {command.name}: {' '.join(command.argv)}", flush=True)
+    print(f"[runtime_soak] begin {command.name}: {shlex.join(command.argv)}", flush=True)
+    proc = subprocess.Popen(
+        command.argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        start_new_session=(os.name != "nt"),
+    )
     try:
-        proc = subprocess.run(
-            command.argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        print_process_output(exc.stdout)
+        stdout, _stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_process_group(proc)
+        stdout, _stderr = proc.communicate()
+        print_process_output(stdout)
         print(f"[runtime_soak] timeout {command.name} after {timeout:.3f}s", file=sys.stderr)
         return 124
-    print_process_output(proc.stdout)
+    print_process_output(stdout)
     rc = proc.returncode
     print(f"[runtime_soak] end {command.name}: rc={rc}", flush=True)
     return rc

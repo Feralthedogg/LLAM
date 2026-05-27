@@ -121,6 +121,10 @@
   Python versions that expose captured timeout output as bytes, and fail early
   when a configured test path is missing, non-file, or non-executable.
 
+* make direct runtime soak timeouts terminate the whole POSIX child process
+  group, preventing orphaned helper processes from polluting later soak cycles
+  or CI jobs after a hung test.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
