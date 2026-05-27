@@ -725,7 +725,6 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
     return total;
 }
 
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
 static void llam_forget_closed_fd_state_for_runtime(llam_runtime_t *rt, void *arg) {
     llam_fd_t fd;
 
@@ -734,61 +733,30 @@ static void llam_forget_closed_fd_state_for_runtime(llam_runtime_t *rt, void *ar
     }
     fd = *(const llam_fd_t *)arg;
     if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        /*
+         * Windows descriptor caches are keyed by the kernel handle value.
+         * Purge every runtime before closesocket/_close can let the OS reuse
+         * that value for a different socket or CRT fd.
+         */
+        llam_windows_socket_nonblocking_forget(rt, fd);
+        llam_windows_forget_fd_assoc(rt, fd);
+#else
         llam_forget_closed_fd_watch_state(rt, fd);
+#endif
     }
 }
-#endif
 
 static void llam_forget_closed_fd_state(llam_fd_t fd) {
     int saved_errno = errno;
 
-#if LLAM_RUNTIME_BACKEND_WINDOWS
-    llam_runtime_t *rt = NULL;
-
-    if (g_llam_tls_task != NULL && g_llam_tls_task->owner_runtime != NULL) {
-        rt = g_llam_tls_task->owner_runtime;
-    } else if (g_llam_tls_shard != NULL) {
-        rt = g_llam_tls_shard->runtime;
-    }
-    if (rt != NULL) {
-        /*
-         * These caches are keyed only by the kernel handle value. Drop the
-         * entries before closesocket so a later SOCKET reuse cannot inherit
-         * nonblocking or skip-completion assumptions from the previous object.
-         */
-        llam_windows_socket_nonblocking_forget(rt, fd);
-        llam_windows_forget_fd_assoc(rt, fd);
-    }
-#else
-    {
-        llam_runtime_t *rt = NULL;
-
-        if (g_llam_tls_task != NULL && g_llam_tls_task->owner_runtime != NULL) {
-            rt = g_llam_tls_task->owner_runtime;
-        } else if (g_llam_tls_shard != NULL) {
-            rt = g_llam_tls_shard->runtime;
-        } else {
-            rt = llam_runtime_default_storage();
-        }
-        if (rt != NULL && atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
-            /*
-             * POSIX watches can own sticky readiness and buffered accepted or
-             * received data.  Purge idle watch state before close(2) releases
-             * the fd number to the kernel reuse pool.
-             */
-            llam_forget_closed_fd_watch_state(rt, fd);
-        }
-        if (g_llam_tls_task == NULL && g_llam_tls_shard == NULL) {
-            /*
-             * Host-thread close has no owner cursor. Explicit runtime handles
-             * can still own idle watch state for the descriptor, so scan all
-             * live runtimes under active-op pins before close(2) enables fd
-             * number reuse.
-             */
-            (void)llam_runtime_for_each_live(llam_forget_closed_fd_state_for_runtime, &fd);
-        }
-    }
-#endif
+    /*
+     * fd/socket numbers are process-global, not runtime-owned capabilities.
+     * A managed task in runtime A or an unmanaged host thread can close a
+     * descriptor that runtime B has idle readiness/cache state for.  Scan all
+     * live runtimes under active-op pins before the OS can recycle the value.
+     */
+    (void)llam_runtime_for_each_live(llam_forget_closed_fd_state_for_runtime, &fd);
     errno = saved_errno;
 }
 

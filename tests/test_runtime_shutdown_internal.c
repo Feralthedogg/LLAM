@@ -370,6 +370,137 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     return 0;
 }
 
+typedef struct managed_close_state {
+    int fd;
+    int rc;
+    int error;
+} managed_close_state_t;
+
+static void managed_close_task(void *arg) {
+    managed_close_state_t *state = arg;
+
+    if (state == NULL) {
+        return;
+    }
+    state->rc = llam_close(state->fd);
+    state->error = errno;
+}
+
+static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+    llam_runtime_t *closer_runtime = NULL;
+    llam_runtime_t *watch_runtime = NULL;
+    llam_node_t *node;
+    llam_accept_watch_t *watch;
+    llam_task_t *task = NULL;
+    managed_close_state_t close_state;
+    int listener = -1;
+    int ready_pipe[2] = {-1, -1};
+    int watch_ready_fd = -1;
+    int lock_rc;
+
+    memset(&close_state, 0, sizeof(close_state));
+    close_state.fd = -1;
+    close_state.rc = -1;
+    if (llam_runtime_create(NULL, 0U, &closer_runtime) != 0 ||
+        llam_runtime_create(NULL, 0U, &watch_runtime) != 0) {
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("explicit runtime init failed for managed peer close purge");
+    }
+    if (watch_runtime == NULL || watch_runtime->nodes == NULL || watch_runtime->active_nodes == 0U) {
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_msg("explicit watch runtime initialized without an I/O node for managed peer close purge");
+    }
+    if (make_loopback_listener(&listener) != 0) {
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("listener setup failed for managed peer close purge");
+    }
+    if (pipe(ready_pipe) != 0) {
+        close_if_valid(&listener);
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("ready fd setup failed for managed peer close purge");
+    }
+
+    node = &watch_runtime->nodes[0];
+    lock_rc = pthread_mutex_lock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        close_if_valid(&ready_pipe[0]);
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("watch lock failed for managed peer close purge");
+    }
+    watch = llam_get_or_create_accept_watch_locked(node, listener);
+    if (watch == NULL || !llam_accept_watch_push_ready_owned(watch, ready_pipe[0])) {
+        (void)pthread_mutex_unlock(&node->watch_lock);
+        close_if_valid(&ready_pipe[0]);
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("accept watch ready setup failed for managed peer close purge");
+    }
+    /*
+     * The fd namespace is process-wide.  A managed task in one runtime can
+     * close an embedder-owned descriptor while another runtime still has idle
+     * readiness cached for that descriptor number.  close-boundary cleanup must
+     * therefore cover every live runtime, not just the task's owner runtime.
+     */
+    watch_ready_fd = ready_pipe[0];
+    ready_pipe[0] = -1;
+    lock_rc = pthread_mutex_unlock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("watch unlock failed for managed peer close purge");
+    }
+
+    close_state.fd = listener;
+    task = llam_runtime_spawn_ex(closer_runtime, managed_close_task, &close_state, NULL, 0U);
+    if (task == NULL ||
+        llam_runtime_run_handle(closer_runtime) != 0 ||
+        llam_join(task) != 0) {
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("managed close task failed for peer close purge");
+    }
+    task = NULL;
+    listener = -1;
+    if (close_state.rc != 0) {
+        errno = close_state.error;
+        close_if_valid(&ready_pipe[1]);
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("managed llam_close failed for peer close purge");
+    }
+
+    errno = 0;
+    if (fcntl(watch_ready_fd, F_GETFD) != -1 || errno != EBADF) {
+        close_if_valid(&watch_ready_fd);
+        close_if_valid(&ready_pipe[1]);
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_msg("managed llam_close did not purge peer-runtime accept-watch ready fd");
+    }
+
+    close_if_valid(&ready_pipe[1]);
+    llam_runtime_destroy(watch_runtime);
+    llam_runtime_destroy(closer_runtime);
+#endif
+    return 0;
+}
+
 #if LLAM_RUNTIME_BACKEND_LINUX
 static bool io_uring_unavailable_for_direct_internal_test(int rc) {
     int err = -rc;
@@ -558,6 +689,9 @@ int main(void) {
         return 1;
     }
     if (exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds() != 0) {
+        return 1;
+    }
+    if (exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds() != 0) {
         return 1;
     }
     if (exercise_linux_oversized_submit_preserves_sq_tail() != 0) {
