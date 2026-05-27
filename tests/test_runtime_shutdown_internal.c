@@ -30,6 +30,8 @@
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
 #elif LLAM_RUNTIME_BACKEND_LINUX
 #include "io/linux/runtime_io_watch_linux_internal.h"
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
+#include "io/windows/runtime_io_watch_windows_internal.h"
 #endif
 
 #include <errno.h>
@@ -678,6 +680,87 @@ static int exercise_linux_wait_cqe_interrupt_policy(void) {
     return 0;
 }
 
+static int exercise_completion_drops_stale_cancel_control(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_node_t *node;
+    llam_io_req_t req;
+    int lock_rc;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for cancel-control completion race");
+    }
+    if (g_llam_runtime.nodes == NULL || g_llam_runtime.active_nodes == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without an I/O node for cancel-control completion race");
+    }
+
+    node = &g_llam_runtime.nodes[0];
+    memset(&req, 0, sizeof(req));
+    req.kind = LLAM_IO_KIND_READ;
+    req.owner_runtime = &g_llam_runtime;
+    req.owner_shard = UINT_MAX;
+    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
+    atomic_init(&req.inflight_owner_shard, UINT_MAX);
+    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req.cancel_queued, 1U);
+
+    lock_rc = pthread_mutex_lock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        llam_runtime_shutdown();
+        return fail_errno("watch lock failed for cancel-control completion race");
+    }
+    if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_REQ_CANCEL, &req) != 0) {
+        (void)pthread_mutex_unlock(&node->watch_lock);
+        llam_runtime_shutdown();
+        return fail_errno("queue cancel control failed for completion race");
+    }
+    lock_rc = pthread_mutex_unlock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        llam_runtime_shutdown();
+        return fail_errno("watch unlock failed for cancel-control completion race");
+    }
+
+    /*
+     * This models natural I/O completion winning before the queued cancel
+     * control is processed. Completion must unlink that control before the
+     * waiting task can resume and release the request storage.
+     */
+#if LLAM_RUNTIME_BACKEND_DARWIN
+    llam_io_complete_req(node, &req, 0, false);
+#else
+    llam_windows_complete_req(node, &req, 0, false);
+#endif
+
+    lock_rc = pthread_mutex_lock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        llam_runtime_shutdown();
+        return fail_errno("watch relock failed for cancel-control completion race");
+    }
+    if (node->control_head != NULL || node->control_tail != NULL) {
+        (void)pthread_mutex_unlock(&node->watch_lock);
+        llam_runtime_shutdown();
+        return fail_msg("completion left a stale cancel control queued");
+    }
+    lock_rc = pthread_mutex_unlock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        llam_runtime_shutdown();
+        return fail_errno("watch final unlock failed for cancel-control completion race");
+    }
+    if (atomic_load_explicit(&req.cancel_queued, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&req.wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
+        llam_runtime_shutdown();
+        return fail_msg("completion did not clear cancel/wait ownership");
+    }
+
+    llam_runtime_shutdown();
+#endif
+    return 0;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
@@ -704,6 +787,9 @@ int main(void) {
         return 1;
     }
     if (exercise_linux_wait_cqe_interrupt_policy() != 0) {
+        return 1;
+    }
+    if (exercise_completion_drops_stale_cancel_control() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");

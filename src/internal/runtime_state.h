@@ -1,10 +1,11 @@
 /**
  * @file src/internal/runtime_state.h
- * @brief Global runtime state layout and worker/node/shard state ownership rules.
+ * @brief Default runtime storage, TLS cursors, and state ownership rules.
  *
  * @details
- * This header exposes the process-global runtime object and scheduler TLS used
- * across implementation files. No public API should include this file directly.
+ * This header exposes the legacy process-default runtime object and scheduler
+ * TLS used across implementation files. Explicit runtime handles allocate their
+ * own state; no public API should include this file directly.
  *
  * @copyright Copyright 2026 Feralthedogg
  *

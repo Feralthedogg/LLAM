@@ -1143,10 +1143,12 @@ and backend state, public-handle hardening, and the optional broker/process
 boundary used when an embedder needs stronger isolation than in-process opaque
 handles can provide.
 
-Runtime scheduler, cache, blocking, and backend state is runtime-owned. Public
-handle slot tables are process-wide family registries with sealed generations
-and owner-runtime tags; they reject stale handles and cross-runtime misuse but
-are not a process sandbox.
+Runtime scheduler, active allocation caches, blocking workers, and backend state
+are runtime-owned. Cold process-wide reusable-storage caches may hold
+owner-poisoned idle objects, but acquisition restamps the current owner before
+an object becomes public again. Public handle slot tables are process-wide
+family registries with sealed generations and owner-runtime tags; they reject
+stale handles and cross-runtime misuse but are not a process sandbox.
 
 ```mermaid
 flowchart TB
@@ -1431,7 +1433,7 @@ Helper thread:
   3. When the primary calls llam_leave_blocking(), relinquish control
 ```
 
-**Blocking thread pool**: a separate pool of `block_worker_count` threads handles `llam_call_blocking` jobs via a global FIFO job queue (`block_head`/`block_tail`). Jobs transition through `QUEUED → RUNNING → FINISHED/ABORTED`.
+**Blocking thread pool**: each runtime owns a separate pool of `block_worker_count` threads for `llam_call_blocking` jobs. Jobs are queued through that runtime's FIFO (`block_head`/`block_tail`) and transition through `QUEUED → RUNNING → FINISHED/ABORTED`.
 
 The connect fallback (`llam_blocking_connect_impl`) drives a nonblocking `connect()` + `poll(POLLOUT, 10ms)` loop with `SO_ERROR` verification, running in the blocking pool rather than pinning a scheduler worker.
 

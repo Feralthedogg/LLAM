@@ -326,7 +326,7 @@ LLAM_API int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size)
 LLAM_API int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size);
 
 /**
- * @brief Initialize global runtime state with an explicit option size.
+ * @brief Initialize the process-default runtime with an explicit option size.
  *
  * @details
  * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
@@ -341,7 +341,7 @@ LLAM_API int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size);
 LLAM_API int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size);
 
 /**
- * @brief Initialize global runtime state.
+ * @brief Initialize the process-default runtime.
  * @param opts Optional runtime options; pass NULL for defaults.
  * @details Convenience wrapper around ::llam_runtime_init_ex.
  * @return 0 on success, -1 on failure with errno set.
@@ -422,7 +422,7 @@ LLAM_API int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime,
 LLAM_API int llam_runtime_collect_stats(llam_runtime_stats_t *stats);
 
 /**
- * @brief Return the process-global runtime handle.
+ * @brief Return the process-default runtime handle.
  *
  * @details
  * This handle names the legacy process-default runtime used by

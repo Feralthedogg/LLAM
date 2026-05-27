@@ -1064,9 +1064,12 @@ struct llam_node {
 };
 
 /**
- * @brief Global runtime state.  The runtime object is initialized once, then owns all
- * shards, I/O nodes, helper threads, global task lists, overflow queues, and
- * process-wide signal/affinity state until shutdown.
+ * @brief Runtime instance state.
+ *
+ * Each explicit runtime owns its shards, I/O nodes, helper threads, task lists,
+ * overflow queues, caches, and blocking pool until destruction. Process-wide
+ * signal and affinity hooks are coordinated separately so peer runtimes do not
+ * inherit or tear down each other's scheduler state.
  */
 struct llam_runtime {
     llam_runtime_t *registry_next;

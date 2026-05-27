@@ -48,6 +48,16 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
+    if (atomic_load_explicit(&req->cancel_queued, memory_order_acquire) != 0U) {
+        /*
+         * A real IOCP packet can beat a queued cancel control. Remove the stale
+         * control while the request is still owned by this completion path; the
+         * task may release the request immediately after it is reinjected.
+         */
+        pthread_mutex_lock(&node->watch_lock);
+        (void)llam_drop_node_control_locked(node, LLAM_IO_CONTROL_REQ_CANCEL, req);
+        pthread_mutex_unlock(&node->watch_lock);
+    }
     atomic_store(&req->cancel_queued, 0U);
     req->platform_data = NULL;
     req->poll_watch = NULL;

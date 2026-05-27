@@ -1,6 +1,6 @@
 /**
  * @file src/core/runtime_shutdown.c
- * @brief Runtime shutdown, worker teardown, and global state cleanup.
+ * @brief Runtime shutdown, worker teardown, and shared process hook cleanup.
  *
  * @details
  * Shutdown is intentionally conservative: request runtime stop, join worker

@@ -1,6 +1,6 @@
 /**
  * @file src/core/runtime.c
- * @brief Defines global runtime storage and core runtime invariants shared by subsystems.
+ * @brief Defines default runtime storage and core runtime invariants.
  *
  * @details
  * The runtime keeps a process-default instance for legacy convenience APIs and

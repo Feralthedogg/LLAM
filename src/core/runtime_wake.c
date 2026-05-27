@@ -977,7 +977,7 @@ void llam_wake_all_nodes(llam_runtime_t *rt) {
 }
 
 /**
- * @brief Request global runtime stop and wake all sleeping workers.
+ * @brief Request stop for one runtime and wake its sleeping workers.
  *
  * @param rt Runtime to stop.
  */

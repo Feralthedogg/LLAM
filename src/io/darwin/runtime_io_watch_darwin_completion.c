@@ -81,6 +81,17 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
+    if (atomic_load_explicit(&req->cancel_queued, memory_order_acquire) != 0U) {
+        /*
+         * A real kevent can win the race against a queued cancel control.  Drop
+         * that stale control before waking the task; after reinjection the task
+         * may release the request storage, and the later control pass must not
+         * dereference it.
+         */
+        pthread_mutex_lock(&node->watch_lock);
+        (void)llam_drop_node_control_locked(node, LLAM_IO_CONTROL_REQ_CANCEL, req);
+        pthread_mutex_unlock(&node->watch_lock);
+    }
     atomic_store(&req->cancel_queued, 0U);
     req->poll_watch = NULL;
     req->accept_watch = NULL;

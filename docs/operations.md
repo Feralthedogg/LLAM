@@ -197,9 +197,11 @@ runtime handle. Legacy host-thread lifecycle calls remain wrappers for the
 process-default runtime, while managed task spawn/stop/shutdown wrappers use
 the current task's owner runtime.
 
-Explicit runtime handles own their scheduler state, caches, blocking helper
-pool, and platform backend routing. Public handles are still backed by
-process-wide family-tagged slot tables; each object is owner-tagged so
+Explicit runtime handles own their scheduler state, active allocation caches,
+blocking helper pool, and platform backend routing. Cold process-wide reusable
+storage may exist only for owner-poisoned idle objects; acquisition restamps the
+current owner before returning a public handle. Public handles are still backed
+by process-wide family-tagged slot tables; each object is owner-tagged so
 cross-runtime managed use fails with `EXDEV` instead of silently crossing queues
 or wait lists. The slot tables use sealed generation tokens derived from a
 runtime/table secret, slot id, internal epoch, and per-slot nonce, so trivial

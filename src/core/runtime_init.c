@@ -3,13 +3,12 @@
  * @brief Runtime initialization, option parsing, worker/node allocation, and environment policy setup.
  *
  * @details
- * Runtime initialization builds the process-wide scheduler state in a strict
- * order:
+ * Runtime initialization builds one runtime instance in a strict order:
  *  - parse caller options and environment overrides,
  *  - discover the allowed CPU set and optional SQPOLL reservation,
  *  - allocate shards, per-shard synchronization objects, stacks, and contexts,
  *  - allocate I/O nodes and start their watcher/worker threads when supported,
- *  - initialize global task/blocking/overflow infrastructure,
+ *  - initialize runtime-local task, blocking, and overflow infrastructure,
  *  - install diagnostics/signal handling, and finally start the controller.
  *
  * Failure handling is intentionally centralized through ::llam_runtime_shutdown
@@ -420,13 +419,13 @@ static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_i
 }
 
 /**
- * @brief Initialize the process-wide LLAM runtime.
+ * @brief Initialize one LLAM runtime instance.
  *
- * The runtime may be initialized only once at a time. This function consumes
- * caller options, applies environment overrides, allocates scheduler shards and
- * I/O nodes, starts background workers, and installs process diagnostics. The
- * final @c initialized flag is published only after all required subsystems are
- * ready.
+ * Each runtime instance may be initialized only once at a time. This function
+ * consumes caller options, applies environment overrides, allocates scheduler
+ * shards and I/O nodes, starts runtime-owned background workers, and references
+ * process diagnostics shared by peer runtimes. The final @c initialized flag is
+ * published only after all required subsystems are ready.
  *
  * @param opts Optional runtime options. Passing @c NULL uses deterministic
  *             balanced defaults with environment overrides still honored.

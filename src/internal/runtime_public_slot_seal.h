@@ -30,6 +30,10 @@
 #error "include runtime_public_slot.h instead"
 #endif
 
+#if LLAM_PLATFORM_WINDOWS
+#include <ntsecapi.h>
+#endif
+
 static inline uint64_t llam_public_slot_mix64(uint64_t value) {
     uint64_t x = value;
 
@@ -73,22 +77,8 @@ static inline bool llam_public_slot_entropy_from_os(uint64_t *out_secret) {
     }
 #endif
 #elif LLAM_PLATFORM_WINDOWS
-    {
-        typedef BOOLEAN(WINAPI *llam_public_slot_rtl_gen_random_fn)(PVOID, ULONG);
-        HMODULE advapi = LoadLibraryA("advapi32.dll");
-
-        if (advapi != NULL) {
-            llam_public_slot_rtl_gen_random_fn rtl_gen_random =
-                (llam_public_slot_rtl_gen_random_fn)GetProcAddress(advapi, "SystemFunction036");
-
-            if (rtl_gen_random != NULL &&
-                rtl_gen_random(out_secret, (ULONG)sizeof(*out_secret)) &&
-                *out_secret != 0U) {
-                FreeLibrary(advapi);
-                return true;
-            }
-            FreeLibrary(advapi);
-        }
+    if (RtlGenRandom(out_secret, (ULONG)sizeof(*out_secret)) && *out_secret != 0U) {
+        return true;
     }
 #endif
     return false;
