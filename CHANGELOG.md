@@ -76,6 +76,11 @@
   consumes only its own accept budget instead of failing the long-running local
   broker loop.
 
+* consume broker ring fd/HANDLE ownership on failed imported-ring mapping.
+  Malformed or non-ring authorities passed with `take_ownership=true` no longer
+  leak POSIX descriptors or Windows kernel HANDLEs after validation or mapping
+  failure.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
@@ -89,6 +94,10 @@
 
 * added broker cleanup coverage for partially initialized POSIX ring mappings
   whose fixed-size names are not NUL-terminated before unmap/reset.
+
+* added broker ring import regression coverage proving failed owned imports
+  close the transferred fd/HANDLE authority and leave the caller mapping output
+  reset.
 
 * made the Windows cross-process broker ring session-replay guard wait for an
   explicit child readiness event before rewinding public cursors, avoiding a

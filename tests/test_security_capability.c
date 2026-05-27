@@ -244,6 +244,17 @@ static int expect_errno_either(int rc, int first_errno, int second_errno, const 
     }
     return 0;
 }
+
+static bool broker_fd_is_closed(int fd) {
+    int saved_errno;
+
+    errno = 0;
+    if (fcntl(fd, F_GETFD) >= 0) {
+        return false;
+    }
+    saved_errno = errno;
+    return saved_errno == EBADF;
+}
 #endif
 
 static int test_broker_destroy_scrubs_authority_state(void) {
@@ -2041,6 +2052,63 @@ static int test_broker_control_outputs_clear_on_invalid_input(void) {
         fprintf(stderr, "[test_security_capability] failed ring mapping import left stale mapping output\n");
         return -1;
     }
+
+#if LLAM_PLATFORM_WINDOWS
+    {
+        HANDLE event_handle = CreateEventA(NULL, TRUE, FALSE, NULL);
+        bool leaked = false;
+
+        if (event_handle == NULL) {
+            fprintf(stderr, "[test_security_capability] failed to create invalid mapping handle fixture\n");
+            return -1;
+        }
+        memset(&mapping, 0x5a, sizeof(mapping));
+        errno = 0;
+        if (expect_errno(llam_broker_ring_map_handle((llam_handle_t)event_handle, true, &mapping),
+                         EINVAL,
+                         "owned invalid broker ring handle mapping did not fail with EINVAL") != 0 ||
+            !broker_ring_mapping_is_reset(&mapping)) {
+            CloseHandle(event_handle);
+            return -1;
+        }
+        if (WaitForSingleObject(event_handle, 0U) != WAIT_FAILED ||
+            GetLastError() != ERROR_INVALID_HANDLE) {
+            leaked = true;
+            CloseHandle(event_handle);
+        }
+        if (leaked) {
+            fprintf(stderr, "[test_security_capability] failed owned ring mapping left HANDLE open\n");
+            return -1;
+        }
+    }
+#else
+    {
+        char path[] = "/tmp/llam-broker-ring-small-XXXXXX";
+        int fd = mkstemp(path);
+        bool leaked = false;
+
+        if (fd < 0) {
+            fprintf(stderr, "[test_security_capability] failed to create invalid mapping fd fixture\n");
+            return -1;
+        }
+        (void)unlink(path);
+        memset(&mapping, 0x5a, sizeof(mapping));
+        errno = 0;
+        if (expect_errno(llam_broker_ring_map_fd(fd, true, &mapping),
+                         EINVAL,
+                         "owned invalid broker ring fd mapping did not fail with EINVAL") != 0 ||
+            !broker_ring_mapping_is_reset(&mapping)) {
+            close(fd);
+            return -1;
+        }
+        leaked = !broker_fd_is_closed(fd);
+        if (leaked) {
+            close(fd);
+            fprintf(stderr, "[test_security_capability] failed owned ring mapping left fd open\n");
+            return -1;
+        }
+    }
+#endif
 
     memset(&stats, 0x5a, sizeof(stats));
     errno = 0;

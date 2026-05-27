@@ -89,9 +89,18 @@ int llam_broker_ring_map_fd(int fd, bool take_ownership, llam_broker_ring_mappin
         return -1;
     }
     if (fstat(fd, &st) != 0) {
+        int saved_errno = errno;
+
+        if (take_ownership) {
+            close(fd);
+        }
+        errno = saved_errno;
         return -1;
     }
     if (st.st_size < 0 || (uint64_t)st.st_size < (uint64_t)bytes) {
+        if (take_ownership) {
+            close(fd);
+        }
         errno = EINVAL;
         return -1;
     }
@@ -104,9 +113,12 @@ int llam_broker_ring_map_fd(int fd, bool take_ownership, llam_broker_ring_mappin
     if (llam_broker_ring_map_posix_fd("", mapped_fd, false, out_mapping) != 0) {
         int saved_errno = errno;
 
-        if (!take_ownership || mapped_fd != fd) {
-            close(mapped_fd);
-        }
+        /*
+         * take_ownership transfers fd lifetime to this import call even when
+         * validation or mmap fails. Otherwise a malformed broker response can
+         * force the caller to leak descriptors on repeated failed imports.
+         */
+        close(mapped_fd);
         errno = saved_errno;
         return -1;
     }

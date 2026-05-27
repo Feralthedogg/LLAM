@@ -89,9 +89,12 @@ int llam_broker_ring_map_handle(llam_handle_t handle,
     if (llam_broker_ring_map_windows_handle("", mapped_handle, false, out_mapping) != 0) {
         int saved_errno = errno;
 
-        if (!take_ownership || mapped_handle != (HANDLE)handle) {
-            CloseHandle(mapped_handle);
-        }
+        /*
+         * take_ownership consumes the HANDLE even when MapViewOfFile rejects
+         * it. This keeps malformed broker responses from leaking kernel
+         * handles by repeatedly sending non-mapping HANDLE authorities.
+         */
+        CloseHandle(mapped_handle);
         errno = saved_errno;
         return -1;
     }
