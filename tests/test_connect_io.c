@@ -48,6 +48,7 @@ typedef struct invalid_accept_state {
     int observed_errno;
 } invalid_accept_state_t;
 
+#if defined(__APPLE__)
 typedef struct accept_reuse_state {
     int listener_fd;
     struct sockaddr_storage addr;
@@ -65,6 +66,7 @@ typedef struct accept_reuse_client_arg {
     accept_reuse_state_t *state;
     unsigned index;
 } accept_reuse_client_arg_t;
+#endif
 
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_connect_io] %s\n", message);
@@ -90,12 +92,14 @@ static void task_fail(connect_state_t *state, const char *where, int err) {
     }
 }
 
+#if defined(__APPLE__)
 static void accept_reuse_fail(accept_reuse_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
         state->first_errno = err;
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
     }
 }
+#endif
 
 static int make_loopback_listener(int *listener_out, struct sockaddr_storage *addr_out, socklen_t *addrlen_out) {
     struct sockaddr_in addr;
@@ -273,6 +277,7 @@ static void invalid_accept_task(void *arg) {
     }
 }
 
+#if defined(__APPLE__)
 static void accept_reuse_first_task(void *arg) {
     accept_reuse_state_t *state = arg;
     int fd;
@@ -335,6 +340,7 @@ static void accept_reuse_stop_task(void *arg) {
     (void)llam_sleep_ns(20000000ULL);
     (void)llam_runtime_request_stop();
 }
+#endif
 
 static int test_invalid_direct_connect(void) {
     struct sockaddr_in addr;
