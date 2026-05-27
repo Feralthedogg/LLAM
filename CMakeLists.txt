@@ -105,6 +105,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_cond.c
     src/core/runtime_handle.c
     src/core/runtime_owner.c
+    src/core/runtime_registry.c
     src/core/runtime_mutex_lifecycle.c
     src/core/runtime_mutex.c
     src/core/runtime_names.c

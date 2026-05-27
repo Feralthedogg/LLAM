@@ -228,9 +228,11 @@ llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt);
 void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job);
 int llam_consume_task_wake_error(llam_task_t *task);
 llam_runtime_t *llam_runtime_default_storage(void);
+typedef void (*llam_runtime_live_iter_fn)(llam_runtime_t *rt, void *arg);
 int llam_runtime_check_handle(const llam_runtime_t *runtime);
 int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_runtime);
 void llam_runtime_end_public_op(llam_runtime_t *runtime);
+int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg);
 int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,
                          size_t opts_size,

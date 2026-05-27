@@ -287,6 +287,89 @@ static int exercise_close_purges_accept_watch_ready_fds(void) {
     return 0;
 }
 
+static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+    llam_runtime_t *runtime = NULL;
+    llam_node_t *node;
+    llam_accept_watch_t *watch;
+    int listener = -1;
+    int ready_pipe[2] = {-1, -1};
+    int watch_ready_fd = -1;
+    int lock_rc;
+
+    if (llam_runtime_create(NULL, 0U, &runtime) != 0) {
+        return fail_errno("explicit runtime init failed for host close watch purge");
+    }
+    if (runtime == NULL || runtime->nodes == NULL || runtime->active_nodes == 0U) {
+        llam_runtime_destroy(runtime);
+        return fail_msg("explicit runtime initialized without an I/O node for host close watch purge");
+    }
+    if (make_loopback_listener(&listener) != 0) {
+        llam_runtime_destroy(runtime);
+        return fail_errno("listener setup failed for explicit host close watch purge");
+    }
+    if (pipe(ready_pipe) != 0) {
+        close_if_valid(&listener);
+        llam_runtime_destroy(runtime);
+        return fail_errno("ready fd setup failed for explicit host close watch purge");
+    }
+
+    node = &runtime->nodes[0];
+    lock_rc = pthread_mutex_lock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        close_if_valid(&ready_pipe[0]);
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_destroy(runtime);
+        return fail_errno("watch lock failed for explicit host close watch purge");
+    }
+    watch = llam_get_or_create_accept_watch_locked(node, listener);
+    if (watch == NULL || !llam_accept_watch_push_ready_owned(watch, ready_pipe[0])) {
+        (void)pthread_mutex_unlock(&node->watch_lock);
+        close_if_valid(&ready_pipe[0]);
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_destroy(runtime);
+        return fail_errno("accept watch ready setup failed for explicit host close watch purge");
+    }
+    /*
+     * This models an embedder-owned fd closed from a host thread.  There is no
+     * TLS task/shard cursor, so close-boundary cleanup must scan live explicit
+     * runtimes instead of only the legacy default runtime.
+     */
+    watch_ready_fd = ready_pipe[0];
+    ready_pipe[0] = -1;
+    lock_rc = pthread_mutex_unlock(&node->watch_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        close_if_valid(&ready_pipe[1]);
+        close_if_valid(&listener);
+        llam_runtime_destroy(runtime);
+        return fail_errno("watch unlock failed for explicit host close watch purge");
+    }
+
+    if (llam_close(listener) != 0) {
+        close_if_valid(&ready_pipe[1]);
+        listener = -1;
+        llam_runtime_destroy(runtime);
+        return fail_errno("llam_close failed during explicit host close watch purge");
+    }
+    listener = -1;
+    errno = 0;
+    if (fcntl(watch_ready_fd, F_GETFD) != -1 || errno != EBADF) {
+        close_if_valid(&watch_ready_fd);
+        close_if_valid(&ready_pipe[1]);
+        llam_runtime_destroy(runtime);
+        return fail_msg("host llam_close did not purge explicit-runtime accept-watch ready fd");
+    }
+
+    close_if_valid(&ready_pipe[1]);
+    llam_runtime_destroy(runtime);
+#endif
+    return 0;
+}
+
 #if LLAM_RUNTIME_BACKEND_LINUX
 static bool io_uring_unavailable_for_direct_internal_test(int rc) {
     int err = -rc;
@@ -472,6 +555,9 @@ int main(void) {
         return 1;
     }
     if (exercise_close_purges_accept_watch_ready_fds() != 0) {
+        return 1;
+    }
+    if (exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds() != 0) {
         return 1;
     }
     if (exercise_linux_oversized_submit_preserves_sq_tail() != 0) {

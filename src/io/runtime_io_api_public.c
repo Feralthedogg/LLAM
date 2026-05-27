@@ -725,6 +725,20 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
     return total;
 }
 
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+static void llam_forget_closed_fd_state_for_runtime(llam_runtime_t *rt, void *arg) {
+    llam_fd_t fd;
+
+    if (rt == NULL || arg == NULL) {
+        return;
+    }
+    fd = *(const llam_fd_t *)arg;
+    if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+        llam_forget_closed_fd_watch_state(rt, fd);
+    }
+}
+#endif
+
 static void llam_forget_closed_fd_state(llam_fd_t fd) {
     int saved_errno = errno;
 
@@ -763,6 +777,15 @@ static void llam_forget_closed_fd_state(llam_fd_t fd) {
              * the fd number to the kernel reuse pool.
              */
             llam_forget_closed_fd_watch_state(rt, fd);
+        }
+        if (g_llam_tls_task == NULL && g_llam_tls_shard == NULL) {
+            /*
+             * Host-thread close has no owner cursor. Explicit runtime handles
+             * can still own idle watch state for the descriptor, so scan all
+             * live runtimes under active-op pins before close(2) enables fd
+             * number reuse.
+             */
+            (void)llam_runtime_for_each_live(llam_forget_closed_fd_state_for_runtime, &fd);
         }
     }
 #endif

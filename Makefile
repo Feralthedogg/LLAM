@@ -284,6 +284,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_channel_select.o \
 	$(OBJDIR)/src/core/runtime_handle.o \
 	$(OBJDIR)/src/core/runtime_owner.o \
+	$(OBJDIR)/src/core/runtime_registry.o \
 	$(OBJDIR)/src/core/runtime_task_group.o \
 	$(OBJDIR)/src/core/runtime_task_local.o \
 	$(OBJDIR)/src/io/runtime_io_api.o \
