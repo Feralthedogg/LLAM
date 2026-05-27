@@ -53,6 +53,21 @@ def check_executable(path: str) -> None:
     candidate = Path(path)
     if not candidate.exists():
         raise FileNotFoundError(f"missing test binary: {path}")
+    if not candidate.is_file():
+        raise IsADirectoryError(f"test binary path is not a file: {path}")
+    if not os.access(candidate, os.X_OK):
+        raise PermissionError(f"test binary is not executable: {path}")
+
+
+def print_process_output(output: str | bytes | None) -> None:
+    if output is None:
+        return
+    if isinstance(output, bytes):
+        text = output.decode(errors="replace")
+    else:
+        text = output
+    if text:
+        print(text, end="")
 
 
 def run_command(command: SoakCommand, timeout: float) -> int:
@@ -69,12 +84,10 @@ def run_command(command: SoakCommand, timeout: float) -> int:
             timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        if exc.stdout:
-            print(exc.stdout, end="")
+        print_process_output(exc.stdout)
         print(f"[runtime_soak] timeout {command.name} after {timeout:.3f}s", file=sys.stderr)
         return 124
-    if proc.stdout:
-        print(proc.stdout, end="")
+    print_process_output(proc.stdout)
     rc = proc.returncode
     print(f"[runtime_soak] end {command.name}: rc={rc}", flush=True)
     return rc

@@ -18,6 +18,10 @@
   Windows IOCP, BSD kqueue, and server-stress regression coverage for the
   post-2.0.0 hardening queue.
 
+* a direct runtime soak gate for repeated LLAM core fuzz, multi-runtime
+  ownership/isolation, runtime stress, shutdown, and owned-buffer coverage
+  without depending on the example chat server policy.
+
 ### Changed
 
 * server composite stress policy now separates throughput guardrails from
@@ -113,11 +117,19 @@
   This keeps future opaque-handle families from accepting non-canonical
   slot/generation bit layouts outside the current 64-bit shift-32 path.
 
+* make the direct runtime soak runner preserve timeout diagnostics even on
+  Python versions that expose captured timeout output as bytes, and fail early
+  when a configured test path is missing, non-file, or non-executable.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
   BSD VM smoke coverage, Windows stress/build coverage through the Stress
   matrix, and package-shape checks.
+
+* Weekly Soak now runs a direct runtime soak before the hour-long server
+  composite, giving long-running coverage for core scheduler, multi-runtime,
+  shutdown, and owned-buffer paths independently from sample-server behavior.
 
 * added and stabilized edge-case coverage for broker replay guards, ring
   doorbell/flood paths, predefined task detach races, Windows named-pipe
