@@ -201,6 +201,10 @@ static uintptr_t public_handle_slot(const void *handle) {
     return (raw >> 32U) != 0U ? (raw >> 32U) - 1U : UINTPTR_MAX;
 }
 
+static uint32_t public_handle_generation(const void *handle) {
+    return (uint32_t)(uintptr_t)handle;
+}
+
 static int check_task_failures(edge_state_t *state) {
     if (atomic_load_explicit(&state->failures, memory_order_relaxed) == 0U) {
         return 0;
@@ -4627,6 +4631,170 @@ cleanup:
     return rc;
 }
 
+typedef int (*forged_handle_probe_fn)(uintptr_t raw_handle, const char *label);
+
+static int expect_forged_mutex_rejected(uintptr_t raw_handle, const char *label) {
+    errno = 0;
+    if (llam_mutex_trylock((llam_mutex_t *)raw_handle) != -1 || errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged mutex handle accepted at %s errno=%d\n",
+                      label,
+                      errno);
+        return 1;
+    }
+    return 0;
+}
+
+static int expect_forged_cond_rejected(uintptr_t raw_handle, const char *label) {
+    errno = 0;
+    if (llam_cond_signal((llam_cond_t *)raw_handle) != -1 || errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged cond handle accepted at %s errno=%d\n",
+                      label,
+                      errno);
+        return 1;
+    }
+    return 0;
+}
+
+static int expect_forged_cancel_token_rejected(uintptr_t raw_handle, const char *label) {
+    errno = 0;
+    if (llam_cancel_token_cancel((llam_cancel_token_t *)raw_handle) != -1 || errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged cancel-token handle accepted at %s errno=%d\n",
+                      label,
+                      errno);
+        return 1;
+    }
+    return 0;
+}
+
+static int expect_forged_task_group_rejected(uintptr_t raw_handle, const char *label) {
+    errno = 0;
+    if (llam_task_group_cancel((llam_task_group_t *)raw_handle) != -1 || errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] forged task-group handle accepted at %s errno=%d\n",
+                      label,
+                      errno);
+        return 1;
+    }
+    return 0;
+}
+
+static int probe_family_forged_handles(const char *name,
+                                       size_t real_slot,
+                                       uint32_t real_generation,
+                                       uint32_t family,
+                                       forged_handle_probe_fn probe) {
+    uintptr_t forged;
+
+    /*
+     * Exercise the attacker's cheapest guess first: slot zero plus the public
+     * family tag.  This used to be predictable before per-runtime sealing was
+     * added to public slot generation.
+     */
+    forged = llam_public_slot_encode_handle(0U, family, 32U);
+    if (probe(forged, name) != 0) {
+        return 1;
+    }
+
+    /*
+     * Then try the low-cost sequential guesses for the real slot.  The actual
+     * live generation is skipped; the test is only proving forged handles fail
+     * closed without mutating the live object.
+     */
+    for (uint32_t epoch = 1U; epoch <= 4096U; ++epoch) {
+        uint32_t guessed_generation = llam_public_slot_family_generation(epoch, family);
+
+        if (guessed_generation == real_generation) {
+            continue;
+        }
+        forged = llam_public_slot_encode_handle(real_slot, guessed_generation, 32U);
+        if (probe(forged, name) != 0) {
+            (void)fprintf(stderr,
+                          "[test_runtime_api_edges] sequential forged %s handle accepted "
+                          "slot=%zu epoch=%u generation=%u real=%u\n",
+                          name,
+                          real_slot,
+                          epoch,
+                          guessed_generation,
+                          real_generation);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int test_public_sync_forged_initial_handles_rejected(void) {
+    llam_mutex_t *mutex = NULL;
+    llam_cond_t *cond = NULL;
+    llam_cancel_token_t *token = NULL;
+    llam_task_group_t *group = NULL;
+    int rc = 1;
+
+    if (llam_runtime_init(NULL) != 0) {
+        return fail_errno("forged sync/control handle runtime init failed");
+    }
+
+    mutex = llam_mutex_create();
+    cond = llam_cond_create();
+    token = llam_cancel_token_create();
+    group = llam_task_group_create();
+    if (mutex == NULL || cond == NULL || token == NULL || group == NULL) {
+        rc = fail_errno("forged sync/control handle fixture allocation failed");
+        goto cleanup;
+    }
+
+    if (probe_family_forged_handles("mutex",
+                                    public_handle_slot(mutex),
+                                    public_handle_generation(mutex),
+                                    LLAM_PUBLIC_HANDLE_FAMILY_MUTEX,
+                                    expect_forged_mutex_rejected) != 0 ||
+        probe_family_forged_handles("cond",
+                                    public_handle_slot(cond),
+                                    public_handle_generation(cond),
+                                    LLAM_PUBLIC_HANDLE_FAMILY_COND,
+                                    expect_forged_cond_rejected) != 0 ||
+        probe_family_forged_handles("cancel-token",
+                                    public_handle_slot(token),
+                                    public_handle_generation(token),
+                                    LLAM_PUBLIC_HANDLE_FAMILY_CANCEL_TOKEN,
+                                    expect_forged_cancel_token_rejected) != 0 ||
+        probe_family_forged_handles("task-group",
+                                    public_handle_slot(group),
+                                    public_handle_generation(group),
+                                    LLAM_PUBLIC_HANDLE_FAMILY_TASK_GROUP,
+                                    expect_forged_task_group_rejected) != 0) {
+        goto cleanup;
+    }
+
+    /*
+     * Forged probes must not cancel, lock, or otherwise consume the live
+     * objects.  Successful destroy on all fixtures is the final state check.
+     */
+    if (llam_cancel_token_is_cancelled(token) != 0) {
+        (void)fprintf(stderr, "[test_runtime_api_edges] forged cancel-token probe cancelled token\n");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (mutex != NULL && llam_mutex_destroy(mutex) != 0) {
+        rc = fail_errno("forged sync/control mutex cleanup failed");
+    }
+    if (cond != NULL && llam_cond_destroy(cond) != 0) {
+        rc = fail_errno("forged sync/control cond cleanup failed");
+    }
+    if (token != NULL && llam_cancel_token_destroy(token) != 0) {
+        rc = fail_errno("forged sync/control token cleanup failed");
+    }
+    if (group != NULL && llam_task_group_destroy(group) != 0) {
+        rc = fail_errno("forged sync/control group cleanup failed");
+    }
+    llam_runtime_shutdown();
+    return rc;
+}
+
 static int run_edge_case(const char *name, edge_case_fn fn) {
     /*
      * CI repeats this binary as a race detector.  Emit case boundaries to stderr
@@ -4676,6 +4844,10 @@ int main(void) {
     }
     if (run_edge_case("public_channel_forged_initial_handle_rejected",
                       test_public_channel_forged_initial_handle_rejected) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_sync_forged_initial_handles_rejected",
+                      test_public_sync_forged_initial_handles_rejected) != 0) {
         return 1;
     }
     if (run_edge_case("cancel_token_destroy_race", test_cancel_token_destroy_race) != 0) {
