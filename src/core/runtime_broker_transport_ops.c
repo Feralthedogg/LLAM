@@ -56,8 +56,13 @@ static void llam_broker_close_unclaimed_descriptor(llam_handle_t descriptor_hand
 }
 
 static int llam_broker_transport_rights(uint64_t requested, uint64_t allowed, uint64_t *out_rights) {
-    uint64_t rights = requested != 0U ? requested : allowed;
+    uint64_t rights = requested;
 
+    /*
+     * Client-writable grant requests must be explicit. Treating rights==0 as
+     * "all allowed rights" makes a zero-initialized or truncated request mint
+     * maximum authority instead of failing closed.
+     */
     if (LLAM_UNLIKELY(out_rights == NULL || rights == 0U || (rights & ~allowed) != 0U)) {
         errno = EACCES;
         return -1;

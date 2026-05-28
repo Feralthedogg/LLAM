@@ -971,6 +971,127 @@ done:
     return rc;
 }
 
+static int test_broker_transport_grants_require_explicit_rights(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_wire_request_t request;
+    llam_broker_wire_response_t response;
+    llam_handle_t response_descriptor = LLAM_INVALID_HANDLE;
+#if LLAM_PLATFORM_WINDOWS
+    HANDLE pipe_read = INVALID_HANDLE_VALUE;
+    HANDLE pipe_write = INVALID_HANDLE_VALUE;
+#else
+    int pipe_fds[2] = {-1, -1};
+#endif
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    /*
+     * Wire grants cross an untrusted transport boundary.  A zero rights field
+     * must mean "invalid request", not "mint all allowed rights" for a
+     * zero-initialized or truncated client request.
+     */
+    request_init(&request, LLAM_BROKER_WIRE_OP_CREATE_BUFFER);
+    request.slot = 16U;
+    llam_broker_process_request_with_descriptors(&broker,
+                                                 &request,
+                                                 &response,
+                                                 NULL,
+                                                 LLAM_INVALID_HANDLE,
+                                                 &response_descriptor);
+    if (response.status == 0 || response.error_code != EACCES) {
+        fprintf(stderr,
+                "[test_security_capability] zero-right CREATE_BUFFER minted authority status=%d errno=%d\n",
+                response.status,
+                response.error_code);
+        goto done;
+    }
+
+    request_init(&request, LLAM_BROKER_WIRE_OP_CREATE_CHANNEL);
+    request.slot = 2U;
+    llam_broker_process_request_with_descriptors(&broker,
+                                                 &request,
+                                                 &response,
+                                                 NULL,
+                                                 LLAM_INVALID_HANDLE,
+                                                 &response_descriptor);
+    if (response.status == 0 || response.error_code != EACCES) {
+        fprintf(stderr,
+                "[test_security_capability] zero-right CREATE_CHANNEL minted authority status=%d errno=%d\n",
+                response.status,
+                response.error_code);
+        goto done;
+    }
+
+#if LLAM_PLATFORM_WINDOWS
+    if (!CreatePipe(&pipe_read, &pipe_write, NULL, 0U)) {
+        goto done;
+    }
+    request_init(&request, LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR);
+    llam_broker_process_request_with_descriptors(&broker,
+                                                 &request,
+                                                 &response,
+                                                 NULL,
+                                                 (llam_handle_t)pipe_read,
+                                                 &response_descriptor);
+    pipe_read = INVALID_HANDLE_VALUE;
+#else
+    if (pipe(pipe_fds) != 0) {
+        goto done;
+    }
+    request_init(&request, LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR);
+    llam_broker_process_request_with_descriptors(&broker,
+                                                 &request,
+                                                 &response,
+                                                 NULL,
+                                                 (llam_handle_t)pipe_fds[0],
+                                                 &response_descriptor);
+    pipe_fds[0] = -1;
+#endif
+    if (response.status == 0 || response.error_code != EACCES) {
+        fprintf(stderr,
+                "[test_security_capability] zero-right REGISTER_DESCRIPTOR minted authority status=%d errno=%d\n",
+                response.status,
+                response.error_code);
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+#if LLAM_PLATFORM_WINDOWS
+    if (pipe_read != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe_read);
+    }
+    if (pipe_write != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe_write);
+    }
+#else
+    if (pipe_fds[0] >= 0) {
+        close(pipe_fds[0]);
+    }
+    if (pipe_fds[1] >= 0) {
+        close(pipe_fds[1]);
+    }
+#endif
+    if (!llam_handle_is_invalid(response_descriptor)) {
+        llam_broker_close_handle(response_descriptor);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
 static int test_broker_direct_issue_clears_output_on_invalid_input(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -10372,6 +10493,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_capability_issue_clears_output_on_invalid_input);
     LLAM_RUN_SECURITY_TEST(test_broker_issue_validate_and_revoke);
     LLAM_RUN_SECURITY_TEST(test_broker_create_paths_clear_output_on_invalid_input);
+    LLAM_RUN_SECURITY_TEST(test_broker_transport_grants_require_explicit_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_direct_issue_clears_output_on_invalid_input);
     LLAM_RUN_SECURITY_TEST(test_broker_validate_requires_nonzero_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_scrubs_authority_state);

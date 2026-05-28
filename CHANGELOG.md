@@ -85,6 +85,11 @@
   match broker-visible validation by requiring callers to prove a concrete
   authority bit instead of using validation as a rightless live-token oracle.
 
+* reject zero-right client grant requests on the broker control transport.
+  `CREATE_BUFFER`, `CREATE_CHANNEL`, and `REGISTER_DESCRIPTOR` now require an
+  explicit nonzero rights mask instead of treating an omitted rights field as
+  the maximum rights allowed for that object family.
+
 * prevent broker teardown and transport races from stranding shared-memory ring
   sessions, duplicated response fds/HANDLEs, predefined task grants, detached
   task slots, broker byte channels, descriptor/HANDLE grants, or stale doorbell
@@ -209,6 +214,9 @@
 
 * added raw capability regression coverage for zero-right validation rejection,
   including subject-bound validation.
+
+* added broker transport regression coverage proving zero-right grant requests
+  fail closed for buffer, channel, and descriptor/HANDLE authority.
 
 * made the Windows named-pipe malformed-session regression tolerate transient
   `EPIPE`/busy/not-found states while a just-broken pipe instance is retired,

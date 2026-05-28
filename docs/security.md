@@ -73,6 +73,10 @@ broker-control foundation:
   family-specific rights allowlist as the transport path. Buffer, descriptor,
   channel, and predefined-task tokens cannot carry rights from another family or
   future-reserved bits.
+- Client-writable broker grant requests must also carry an explicit nonzero
+  rights mask. Zero-right `CREATE_BUFFER`, `CREATE_CHANNEL`, and
+  `REGISTER_DESCRIPTOR` requests fail with `EACCES` instead of defaulting to the
+  maximum rights allowed for that object family.
 - Direct broker buffer registration uses the same bounded grant limit as the
   transport path. Buffer grants larger than `LLAM_BROKER_BUFFER_MAX_BYTES` fail
   with `EINVAL` before allocation.
@@ -89,6 +93,7 @@ broker-control foundation:
   broker-owned attenuation, wrong-key rejection, foreign-runtime rejection,
   family-rights allowlist rejection, zero-slot issuance rejection,
   zero-right validation rejection,
+  explicit-rights grant rejection,
   failed-output token clearing,
   secure-entropy fail-closed key creation, atomic object-specific revocation,
   POSIX shared-memory ring mapping,
