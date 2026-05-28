@@ -9320,6 +9320,19 @@ static int test_broker_ring_shared_memory_mapping(void) {
         peer.owner) {
         goto done;
     }
+#if !LLAM_PLATFORM_WINDOWS
+    /*
+     * Named POSIX ring mappings are also broker data-plane authority.  The fd
+     * must be close-on-exec both for the creator and for later named imports.
+     */
+    if (owner.fd < 0 ||
+        peer.fd < 0 ||
+        !broker_fd_has_cloexec(owner.fd) ||
+        !broker_fd_has_cloexec(peer.fd)) {
+        fprintf(stderr, "[test_security_capability] named ring shm fd is inheritable across exec\n");
+        goto done;
+    }
+#endif
 
     memset(&submission, 0, sizeof(submission));
     submission.request_id = 123U;

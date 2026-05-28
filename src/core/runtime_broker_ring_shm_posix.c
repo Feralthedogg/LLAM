@@ -35,6 +35,26 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+static int llam_broker_ring_shm_open_cloexec(const char *name, int oflag, mode_t mode) {
+    int fd;
+
+#if defined(O_CLOEXEC)
+    /*
+     * Ring mappings can carry data-plane authority.  Prefer atomic close-on-exec
+     * creation/open so multi-threaded embedders do not expose a transient
+     * inheritable shm fd between shm_open() and the fallback fcntl() guard.
+     */
+    fd = shm_open(name, oflag | O_CLOEXEC, mode);
+    if (fd >= 0) {
+        return fd;
+    }
+    if (errno != EINVAL) {
+        return -1;
+    }
+#endif
+    return shm_open(name, oflag, mode);
+}
+
 static int llam_broker_ring_set_cloexec_fd(int fd) {
     int flags;
 
@@ -142,7 +162,7 @@ int llam_broker_ring_create_shm(const char *name, llam_broker_ring_mapping_t *ou
         return -1;
     }
 
-    fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+    fd = llam_broker_ring_shm_open_cloexec(name, O_CREAT | O_EXCL | O_RDWR, 0600);
     if (fd < 0) {
         return -1;
     }
@@ -195,7 +215,7 @@ int llam_broker_ring_create_private_fd(llam_broker_ring_mapping_t *out_mapping) 
         if (llam_broker_ring_private_name(name, sizeof(name)) != 0) {
             return -1;
         }
-        fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+        fd = llam_broker_ring_shm_open_cloexec(name, O_CREAT | O_EXCL | O_RDWR, 0600);
         if (fd < 0) {
             if (errno == EEXIST) {
                 continue;
@@ -250,7 +270,7 @@ int llam_broker_ring_open_shm(const char *name, llam_broker_ring_mapping_t *out_
         return -1;
     }
 
-    fd = shm_open(name, O_RDWR, 0600);
+    fd = llam_broker_ring_shm_open_cloexec(name, O_RDWR, 0600);
     if (fd < 0) {
         return -1;
     }
