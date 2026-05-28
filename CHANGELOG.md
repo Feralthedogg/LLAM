@@ -210,6 +210,10 @@
 * added raw capability regression coverage for zero-right validation rejection,
   including subject-bound validation.
 
+* made the Windows named-pipe malformed-session regression tolerate transient
+  `EPIPE`/busy/not-found states while a just-broken pipe instance is retired,
+  while still failing protocol and authority errors immediately.
+
 * added broker ring import regression coverage proving failed owned imports
   close the transferred fd/HANDLE authority and leave the caller mapping output
   reset.

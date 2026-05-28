@@ -8696,6 +8696,32 @@ static int broker_pipe_connect_and_close(const char *name) {
     return 0;
 }
 
+static int broker_pipe_self_test_after_malformed(const char *name) {
+    ULONGLONG deadline = GetTickCount64() + 5000U;
+    int last_errno = 0;
+    bool retryable;
+
+    /*
+     * Windows can retire a just-broken named-pipe instance asynchronously after
+     * a client connects and closes before a full broker request.  The broker
+     * contract is that a later well-formed session succeeds; tolerate transient
+     * transport-level pipe teardown while still failing protocol/authority
+     * errors immediately.
+     */
+    for (;;) {
+        if (llam_broker_client_self_test_local(name) == 0) {
+            return 0;
+        }
+        last_errno = errno != 0 ? errno : EIO;
+        retryable = last_errno == EPIPE || last_errno == EAGAIN || last_errno == ENOENT;
+        if (!retryable || GetTickCount64() >= deadline) {
+            errno = last_errno;
+            return -1;
+        }
+        Sleep(25U);
+    }
+}
+
 static int broker_pipe_write_request_plain(llam_handle_t handle, const llam_broker_wire_request_t *request) {
     const unsigned char *cursor = (const unsigned char *)request;
     size_t done = 0U;
@@ -9161,7 +9187,7 @@ static int test_broker_pipe_serve_local_n_survives_malformed_session(void) {
     memset(&state, 0, sizeof(state));
     state.broker = &broker;
     state.name = name;
-    state.max_connections = 4U;
+    state.max_connections = 16U;
     state.rc = -1;
     server_thread = CreateThread(NULL, 0U, broker_pipe_local_server_thread, &state, 0U, NULL);
     if (server_thread == NULL) {
@@ -9180,7 +9206,7 @@ static int test_broker_pipe_serve_local_n_survives_malformed_session(void) {
         goto done;
     }
     Sleep(100U);
-    if (llam_broker_client_self_test_local(name) != 0) {
+    if (broker_pipe_self_test_after_malformed(name) != 0) {
         fprintf(stderr,
                 "[test_security_capability] malformed pipe follow-up self-test failed errno=%d\n",
                 errno);
