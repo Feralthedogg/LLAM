@@ -535,6 +535,7 @@ static int exercise_linux_oversized_submit_preserves_sq_tail(void) {
     atomic_init(&node.pending_ops, 1U);
     req.kind = LLAM_IO_KIND_WRITE;
     req.count = (size_t)UINT_MAX + 1U;
+    req.owner_runtime = &runtime;
     req.owner_shard = UINT_MAX;
     atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_NONE);
     atomic_init(&req.inflight_owner_shard, UINT_MAX);
@@ -584,6 +585,7 @@ static int exercise_linux_invalid_request_preserves_sq_tail(void) {
     node.runtime = &runtime;
     atomic_init(&node.pending_ops, 1U);
     req.kind = (llam_io_kind_t)UINT_MAX;
+    req.owner_runtime = &runtime;
     req.owner_shard = UINT_MAX;
     atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_NONE);
     atomic_init(&req.inflight_owner_shard, UINT_MAX);
