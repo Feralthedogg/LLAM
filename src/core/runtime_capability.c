@@ -346,7 +346,7 @@ int llam_capability_validate_subject(const llam_capability_key_t *key,
                                      uint64_t expected_subject_id) {
     uint8_t expected[LLAM_CAPABILITY_MAC_BYTES];
 
-    if (LLAM_UNLIKELY(!llam_cap_key_valid(key) || token == NULL)) {
+    if (LLAM_UNLIKELY(!llam_cap_key_valid(key) || token == NULL || required_rights == 0U)) {
         errno = EINVAL;
         return -1;
     }
@@ -410,7 +410,7 @@ int llam_capability_attenuate(const llam_capability_key_t *key,
     }
     if (llam_capability_validate_subject(key,
                                          token != NULL ? &source : NULL,
-                                         0U,
+                                         subset_rights,
                                          current_revocation_epoch,
                                          token != NULL ? source.subject_id : 0U) != 0) {
         memset(&source, 0, sizeof(source));

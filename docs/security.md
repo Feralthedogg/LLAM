@@ -63,9 +63,9 @@ broker-control foundation:
 - Broker validation binds every token to the live broker runtime id after MAC
   validation. A structurally valid token for a different runtime fails closed
   even if internal test code signs it with the same key material.
-- Client-visible validation requires a nonzero requested-rights mask. Zero-right
-  validation fails with `EINVAL`, so broker transports cannot be used as a
-  rightless live-token oracle.
+- Raw and client-visible validation require a nonzero requested-rights mask.
+  Zero-right validation fails with `EINVAL`, so broker transports and direct
+  helpers cannot be used as a rightless live-token oracle.
 - Raw capability issuance and validation reject slot zero with `EINVAL`. Broker
   object slots are nonzero, so slot zero cannot become a structurally valid
   authority outside live-object table checks.

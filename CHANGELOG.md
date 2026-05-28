@@ -81,6 +81,10 @@
   internal token helpers can no longer mint authority that validates against a
   destroyed or never-initialized epoch sentinel.
 
+* reject zero-right raw capability validation. Direct capability helpers now
+  match broker-visible validation by requiring callers to prove a concrete
+  authority bit instead of using validation as a rightless live-token oracle.
+
 * prevent broker teardown and transport races from stranding shared-memory ring
   sessions, duplicated response fds/HANDLEs, predefined task grants, detached
   task slots, broker byte channels, descriptor/HANDLE grants, or stale doorbell
@@ -202,6 +206,9 @@
 
 * added broker capability regression coverage for zero-epoch token issuance and
   validation rejection, including stale-output clearing on failed issue.
+
+* added raw capability regression coverage for zero-right validation rejection,
+  including subject-bound validation.
 
 * added broker ring import regression coverage proving failed owned imports
   close the transferred fd/HANDLE authority and leave the caller mapping output

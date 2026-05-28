@@ -452,6 +452,41 @@ static int test_token_validation_and_rights(void) {
     return 0;
 }
 
+static int test_raw_capability_validate_requires_nonzero_rights(void) {
+    llam_capability_key_t key = test_key();
+    llam_capability_object_t object = test_object();
+    llam_capability_token_t token;
+
+    if (llam_capability_issue(&key, &object, LLAM_CAP_RIGHT_SEND, &token) != 0) {
+        return -1;
+    }
+
+    /*
+     * Raw helpers are still internal, but accepting a zero-right validation
+     * makes them a live-token oracle for future direct users. Broker-visible
+     * paths already reject this; keep the primitive fail-closed too.
+     */
+    errno = 0;
+    if (expect_errno(llam_capability_validate(&key, &token, 0U, object.revocation_epoch),
+                     EINVAL,
+                     "raw capability accepted rightless validation") != 0) {
+        return -1;
+    }
+
+    object.subject_id = 42U;
+    if (llam_capability_issue(&key, &object, LLAM_CAP_RIGHT_SEND, &token) != 0) {
+        return -1;
+    }
+    errno = 0;
+    return expect_errno(llam_capability_validate_subject(&key,
+                                                        &token,
+                                                        0U,
+                                                        object.revocation_epoch,
+                                                        object.subject_id),
+                        EINVAL,
+                        "subject capability accepted rightless validation");
+}
+
 static int test_token_tamper_rejected(void) {
     llam_capability_key_t key = test_key();
     llam_capability_object_t object = test_object();
@@ -10300,6 +10335,7 @@ int main(int argc, char **argv) {
 #endif
 
     LLAM_RUN_SECURITY_TEST(test_token_validation_and_rights);
+    LLAM_RUN_SECURITY_TEST(test_raw_capability_validate_requires_nonzero_rights);
     LLAM_RUN_SECURITY_TEST(test_token_tamper_rejected);
     LLAM_RUN_SECURITY_TEST(test_token_subject_binding);
     LLAM_RUN_SECURITY_TEST(test_attenuation_cannot_expand_rights);
