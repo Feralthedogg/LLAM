@@ -173,6 +173,7 @@ int llam_cancel_token_retain_task_ref_for_runtime(llam_cancel_token_t *token,
                                                   llam_runtime_t *owner_runtime,
                                                   llam_cancel_token_t **out_token);
 void llam_cancel_token_release_task_ref(llam_cancel_token_t *token);
+bool llam_task_cancel_token_is_cancelled(const llam_task_t *task);
 bool llam_deadline_passed(uint64_t deadline_ns);
 void llam_disarm_task_wait_deadline(llam_task_t *task);
 void llam_fire_expired_timers(llam_shard_t *shard);

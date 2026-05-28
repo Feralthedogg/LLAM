@@ -1003,6 +1003,16 @@ int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
     if (result != 0 || timeout_ms == 0) {
         return result;
     }
+    /*
+     * Cancellation can win before the poll request is published to a backend
+     * watch.  Check after immediate readiness probes so zero-time/nonblocking
+     * poll semantics stay intact, but before any path that could park forever
+     * waiting for a cancellation wake that was never registered.
+     */
+    if (timeout_ms != 0 && llam_task_cancel_token_is_cancelled(g_llam_tls_task)) {
+        errno = ECANCELED;
+        return -1;
+    }
     llam_task_safepoint();
     ready_yield_limit = llam_io_poll_ready_yields();
     if (!llam_io_poll_extra_yield_enabled() && ready_yield_limit > 1U) {
@@ -1024,6 +1034,10 @@ int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *revents) {
         if (result != 0 || timeout_ms == 0) {
             return result;
         }
+    }
+    if (timeout_ms != 0 && llam_task_cancel_token_is_cancelled(g_llam_tls_task)) {
+        errno = ECANCELED;
+        return -1;
     }
     result = llam_try_direct_blocking_poll(fd, events, timeout_ms, revents);
     if (result != INT_MIN) {

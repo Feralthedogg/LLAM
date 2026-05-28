@@ -1825,6 +1825,26 @@ static void precancel_wait_task(void *arg) {
         return;
     }
     atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+
+    errno = 0;
+    revents = 0;
+    /*
+     * Infinite poll/read waits use shared backend watch paths on POSIX.  A
+     * token that is already cancelled before the request is armed must fail
+     * inline instead of relying on a cancellation wake that was never queued.
+     */
+    if (llam_poll_fd(state->io_fds[0], POLLIN, -1, &revents) != -1 || errno != ECANCELED) {
+        task_fail(state, "pre-cancel infinite poll", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
+
+    errno = 0;
+    if (llam_read_when_ready(state->io_fds[0], &byte, 1U, -1) != -1 || errno != ECANCELED) {
+        task_fail(state, "pre-cancel read when ready", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
 #endif
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
@@ -3634,7 +3654,7 @@ static int test_precancel_wait_edges(void) {
 #if LLAM_PLATFORM_WINDOWS
             5U
 #else
-            7U
+            9U
 #endif
     ) {
         goto cleanup_runtime;

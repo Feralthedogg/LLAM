@@ -365,6 +365,32 @@ void llam_cancel_token_release_task_ref(llam_cancel_token_t *token) {
 }
 
 /**
+ * @brief Check whether a task's retained cancellation token is already set.
+ *
+ * @details
+ * Task spawn retains @c task->cancel_token for the task lifetime, so internal
+ * wait setup can inspect the raw token under its lock without going through the
+ * public handle registry. This is used immediately before parking paths publish
+ * a wait: if cancellation won just before registration, the wait should fail
+ * inline with @c ECANCELED instead of depending on a backend wake that may never
+ * be armed.
+ */
+bool llam_task_cancel_token_is_cancelled(const llam_task_t *task) {
+    llam_cancel_token_t *token;
+    bool cancelled;
+
+    if (task == NULL || task->cancel_token == NULL) {
+        return false;
+    }
+
+    token = task->cancel_token;
+    pthread_mutex_lock(&token->lock);
+    cancelled = token->cancelled;
+    pthread_mutex_unlock(&token->lock);
+    return cancelled;
+}
+
+/**
  * @brief Cancel a token and wake all currently registered waiters.
  *
  * Waiters are detached while holding the token lock, then cancelled after the
