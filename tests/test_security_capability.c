@@ -4679,6 +4679,40 @@ static int test_broker_ring_and_buffer_grants(void) {
                      "buffer grant accepted out-of-bounds range") != 0) {
         return -1;
     }
+    errno = 0;
+    if (expect_errno(llam_broker_buffer_grant_init(&grant,
+                                                   2U,
+                                                   1U,
+                                                   UINT64_MAX - 8U,
+                                                   16U,
+                                                   LLAM_CAP_RIGHT_READ,
+                                                   3U),
+                     EINVAL,
+                     "buffer grant accepted overflowing absolute range") != 0) {
+        return -1;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_buffer_grant_init(&grant,
+                                                   2U,
+                                                   1U,
+                                                   0U,
+                                                   16U,
+                                                   LLAM_CAP_RIGHT_ADMIN,
+                                                   3U),
+                     EACCES,
+                     "buffer grant accepted non-buffer rights") != 0) {
+        return -1;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_buffer_grant_validate(&grant,
+                                                       LLAM_CAP_RIGHT_READ,
+                                                       UINT64_MAX,
+                                                       2U,
+                                                       3U),
+                     EINVAL,
+                     "buffer grant accepted overflowing relative range") != 0) {
+        return -1;
+    }
     return 0;
 }
 

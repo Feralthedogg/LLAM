@@ -70,6 +70,11 @@
   broker fds with close-on-exec protections, and clear inherited Windows HANDLE
   authority.
 
+* reject overflowing absolute ranges and non-buffer authority bits when minting
+  internal broker buffer grants. Buffer-grant validation already rejected
+  relative overflow; creation now fails closed before storing impossible grant
+  ranges or unknown rights for future data-plane users.
+
 * prevent broker teardown and transport races from stranding shared-memory ring
   sessions, duplicated response fds/HANDLEs, predefined task grants, detached
   task slots, broker byte channels, descriptor/HANDLE grants, or stale doorbell
@@ -184,6 +189,9 @@
 
 * added broker cleanup coverage for partially initialized POSIX ring mappings
   whose fixed-size names are not NUL-terminated before unmap/reset.
+
+* added broker buffer-grant regression coverage for absolute range overflow,
+  non-buffer rights, and relative range overflow at the internal grant boundary.
 
 * added broker ring import regression coverage proving failed owned imports
   close the transferred fd/HANDLE authority and leave the caller mapping output

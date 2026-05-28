@@ -28,8 +28,23 @@ int llam_broker_buffer_grant_init(llam_broker_buffer_grant_t *grant,
                                   uint64_t length,
                                   uint64_t rights,
                                   uint64_t revocation_epoch) {
+    uint64_t end;
+
     if (LLAM_UNLIKELY(grant == NULL || grant_id == 0U || generation == 0U || length == 0U || rights == 0U)) {
         errno = EINVAL;
+        return -1;
+    }
+    end = offset + length;
+    if (LLAM_UNLIKELY(end < offset)) {
+        errno = EINVAL;
+        return -1;
+    }
+    /*
+     * Grants are internal broker authority. Reject non-buffer rights at the
+     * mint boundary so future users cannot accidentally validate unknown bits
+     * just because a caller stored them in the grant.
+     */
+    if (llam_broker_validate_object_rights(LLAM_BROKER_CAP_FAMILY_BUFFER, rights) != 0) {
         return -1;
     }
     grant->grant_id = grant_id;
