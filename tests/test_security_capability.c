@@ -423,6 +423,27 @@ static void request_init(llam_broker_wire_request_t *request, llam_broker_wire_o
     request->op = (uint32_t)op;
 }
 
+static bool broker_failure_authority_outputs_are_clear(const llam_broker_wire_response_t *response) {
+    return response != NULL &&
+           response->status != 0 &&
+           response->error_code != 0 &&
+           response->result0 == 0U &&
+           response->result1 == 0U &&
+           response->result2 == 0U &&
+           memory_is_byte(&response->token, sizeof(response->token), 0U) &&
+           memory_is_byte(response->data, sizeof(response->data), 0U);
+}
+
+static uint64_t broker_malformed_fuzz_next(uint64_t *state) {
+    uint64_t x = *state;
+
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x != 0U ? x : UINT64_C(0x9e3779b97f4a7c15);
+    return *state;
+}
+
 static int test_token_validation_and_rights(void) {
     llam_capability_key_t key = test_key();
     llam_capability_object_t object = test_object();
@@ -1086,6 +1107,129 @@ done:
     if (!llam_handle_is_invalid(response_descriptor)) {
         llam_broker_close_handle(response_descriptor);
     }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
+static int test_broker_transport_malformed_requests_fail_closed(void) {
+    static const uint32_t ops[] = {
+        LLAM_BROKER_WIRE_OP_ISSUE_CAP,
+        LLAM_BROKER_WIRE_OP_VALIDATE_CAP,
+        LLAM_BROKER_WIRE_OP_REVOKE_ALL,
+        LLAM_BROKER_WIRE_OP_ATTENUATE_CAP,
+        LLAM_BROKER_WIRE_OP_REVOKE_CAP,
+        LLAM_BROKER_WIRE_OP_CREATE_BUFFER,
+        LLAM_BROKER_WIRE_OP_CREATE_CHANNEL,
+        LLAM_BROKER_WIRE_OP_BUFFER_READ,
+        LLAM_BROKER_WIRE_OP_BUFFER_WRITE,
+        LLAM_BROKER_WIRE_OP_CHANNEL_SEND,
+        LLAM_BROKER_WIRE_OP_CHANNEL_RECV,
+        LLAM_BROKER_WIRE_OP_CHANNEL_CLOSE,
+        LLAM_BROKER_WIRE_OP_TASK_SPAWN,
+        LLAM_BROKER_WIRE_OP_TASK_JOIN,
+        LLAM_BROKER_WIRE_OP_TASK_DETACH,
+        LLAM_BROKER_WIRE_OP_DESCRIPTOR_READ,
+        LLAM_BROKER_WIRE_OP_DESCRIPTOR_WRITE,
+        LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR,
+        LLAM_BROKER_WIRE_OP_CREATE_RING,
+        LLAM_BROKER_WIRE_OP_SERVE_RING,
+        UINT32_C(0xfffffff0),
+        UINT32_C(0xffffffff),
+    };
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    bool broker_initialized = false;
+    uint64_t rng = UINT64_C(0x2d3c4b5a69788796);
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    for (size_t i = 0U; i < 512U; ++i) {
+        llam_broker_wire_request_t request;
+        llam_broker_wire_response_t response;
+        bool should_close = true;
+        uint64_t a = broker_malformed_fuzz_next(&rng);
+        uint64_t b = broker_malformed_fuzz_next(&rng);
+        uint64_t c = broker_malformed_fuzz_next(&rng);
+
+        /*
+         * Keep framing valid so every case reaches the dispatcher body, then
+         * make the operation-specific authority inputs malformed. This guards
+         * future op handlers against accidentally publishing stale token/result
+         * fields on request validation failures.
+         */
+        memset(&request, 0, sizeof(request));
+        request.magic = LLAM_BROKER_WIRE_MAGIC;
+        request.version = LLAM_BROKER_WIRE_VERSION;
+        request.op = ops[i % (sizeof(ops) / sizeof(ops[0]))];
+        request.slot = a;
+        request.generation = b;
+        request.rights = (i & 1U) != 0U ? 0U : LLAM_CAP_RIGHT_ADMIN;
+        request.required_rights = (i & 2U) != 0U ? 0U : LLAM_CAP_RIGHT_ADMIN;
+        request.offset = b;
+        request.length = (i & 4U) != 0U ? 0U : ((uint64_t)LLAM_BROKER_WIRE_DATA_BYTES + 1U + (c & 7U));
+
+        switch ((llam_broker_wire_op_t)request.op) {
+        case LLAM_BROKER_WIRE_OP_CREATE_BUFFER:
+            request.slot = (i & 8U) != 0U ? 0U : ((uint64_t)LLAM_BROKER_BUFFER_MAX_BYTES + 1U);
+            break;
+        case LLAM_BROKER_WIRE_OP_CREATE_CHANNEL:
+            request.slot = (i & 8U) != 0U ? 0U : ((uint64_t)LLAM_BROKER_CHANNEL_CAPACITY + 1U);
+            break;
+        case LLAM_BROKER_WIRE_OP_TASK_SPAWN:
+            request.slot = (i & 8U) != 0U
+                ? ((uint64_t)UINT32_MAX + 1U)
+                : (uint64_t)LLAM_BROKER_TASK_KIND_RETURN_U64;
+            break;
+        case LLAM_BROKER_WIRE_OP_REGISTER_DESCRIPTOR:
+            request.rights = (i & 8U) != 0U ? LLAM_BROKER_DESCRIPTOR_TRANSPORT_RIGHTS : 0U;
+            break;
+        case LLAM_BROKER_WIRE_OP_CREATE_RING:
+            request.length = 0U;
+            break;
+        case LLAM_BROKER_WIRE_OP_SERVE_RING:
+            request.slot = (i & 8U) != 0U ? 0U : ((uint64_t)LLAM_BROKER_RING_SESSIONS + 1U);
+            request.length = (uint64_t)LLAM_BROKER_RING_SERVE_BATCH_MAX + 1U;
+            break;
+        default:
+            break;
+        }
+
+        memset(&response, 0x5a, sizeof(response));
+        llam_broker_process_request_with_descriptors(&broker,
+                                                     &request,
+                                                     &response,
+                                                     &should_close,
+                                                     LLAM_INVALID_HANDLE,
+                                                     NULL);
+        if (response.magic != LLAM_BROKER_WIRE_MAGIC ||
+            response.version != LLAM_BROKER_WIRE_VERSION ||
+            should_close ||
+            !broker_failure_authority_outputs_are_clear(&response)) {
+            fprintf(stderr,
+                    "[test_security_capability] malformed broker op %u leaked authority "
+                    "status=%d errno=%d should_close=%d iter=%zu\n",
+                    request.op,
+                    response.status,
+                    response.error_code,
+                    should_close ? 1 : 0,
+                    i);
+            goto done;
+        }
+    }
+
+    rc = 0;
+
+done:
     if (broker_initialized) {
         llam_broker_destroy(&broker);
     }
@@ -10494,6 +10638,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_issue_validate_and_revoke);
     LLAM_RUN_SECURITY_TEST(test_broker_create_paths_clear_output_on_invalid_input);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_grants_require_explicit_rights);
+    LLAM_RUN_SECURITY_TEST(test_broker_transport_malformed_requests_fail_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_direct_issue_clears_output_on_invalid_input);
     LLAM_RUN_SECURITY_TEST(test_broker_validate_requires_nonzero_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_scrubs_authority_state);

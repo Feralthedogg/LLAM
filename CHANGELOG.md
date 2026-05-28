@@ -218,6 +218,10 @@
 * added broker transport regression coverage proving zero-right grant requests
   fail closed for buffer, channel, and descriptor/HANDLE authority.
 
+* added deterministic malformed broker control-dispatch coverage proving
+  failed request validation cannot publish stale token, result, descriptor, or
+  data authority fields.
+
 * made the Windows named-pipe malformed-session regression tolerate transient
   `EPIPE`/busy/not-found states while a just-broken pipe instance is retired,
   while still failing protocol and authority errors immediately.
