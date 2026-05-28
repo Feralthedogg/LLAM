@@ -55,7 +55,7 @@ static void llam_cond_waiter_popped(llam_cond_t *cond, llam_wait_node_t *node) {
         node->scalar_value = 1;
     }
     if (cond != NULL) {
-        atomic_fetch_add_explicit(&cond->inflight_waiters, 1U, memory_order_acq_rel);
+        (void)llam_sync_note_inflight_waiter(cond->owner_runtime, &cond->inflight_waiters, 1U);
     }
 }
 
@@ -64,7 +64,7 @@ static void llam_cond_waiter_popped(llam_cond_t *cond, llam_wait_node_t *node) {
  */
 static void llam_cond_waiter_consumed(llam_cond_t *cond, llam_wait_node_t *node) {
     if (cond != NULL && node != NULL && node->scalar_value != 0) {
-        atomic_fetch_sub_explicit(&cond->inflight_waiters, 1U, memory_order_acq_rel);
+        (void)llam_sync_complete_inflight_waiter(cond->owner_runtime, &cond->inflight_waiters, 1U);
     }
 }
 

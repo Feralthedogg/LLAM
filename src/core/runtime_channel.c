@@ -162,7 +162,7 @@ static void llam_channel_waiter_popped(llam_channel_t *channel, llam_wait_node_t
         node->scalar_value = 1;
     }
     if (channel != NULL) {
-        atomic_fetch_add_explicit(&channel->inflight_waiters, 1U, memory_order_acq_rel);
+        (void)llam_sync_note_inflight_waiter(channel->owner_runtime, &channel->inflight_waiters, 1U);
     }
 }
 
@@ -173,7 +173,7 @@ static void llam_channel_waiter_popped(llam_channel_t *channel, llam_wait_node_t
  */
 void llam_channel_waiter_consumed(llam_channel_t *channel) {
     if (channel != NULL) {
-        atomic_fetch_sub_explicit(&channel->inflight_waiters, 1U, memory_order_acq_rel);
+        (void)llam_sync_complete_inflight_waiter(channel->owner_runtime, &channel->inflight_waiters, 1U);
     }
 }
 

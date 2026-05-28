@@ -146,6 +146,8 @@ void llam_task_set_wait_node_tracking(llam_task_t *task,
 llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard);
 void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node);
 void llam_wait_node_reset(llam_wait_node_t *node, llam_runtime_t *owner_runtime, unsigned owner_shard);
+bool llam_sync_note_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter, unsigned amount);
+bool llam_sync_complete_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter, unsigned amount);
 bool llam_wait_node_prepare_wake(llam_wait_node_t *node);
 bool llam_wait_node_completed(const llam_wait_node_t *node);
 bool llam_wait_node_should_park(llam_wait_node_t *node);

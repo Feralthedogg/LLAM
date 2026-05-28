@@ -93,6 +93,101 @@ void llam_wait_node_reset(llam_wait_node_t *node, llam_runtime_t *owner_runtime,
 }
 
 /**
+ * @brief Add a popped-waiter destroy guard without unsigned wraparound.
+ *
+ * @details
+ * Channel close and condition signal/broadcast remove waiters from their FIFO
+ * queues before those waiters resume and consume the result.  The owning object
+ * therefore keeps a small in-flight counter so destroy fails with @c EBUSY
+ * while a popped waiter still holds a lifetime reference.  Saturation is a
+ * corrupted-invariant condition: preserve the non-zero counter and mark the
+ * runtime fatal instead of wrapping to zero and letting destroy recycle the
+ * object underneath the waiter.
+ *
+ * @param rt      Runtime that owns the guarded object.
+ * @param counter In-flight waiter counter to increment.
+ * @param amount  Number of waiters to add.
+ *
+ * @return @c true on success, @c false with @c errno set on invalid input or
+ *         saturation.
+ */
+bool llam_sync_note_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter, unsigned amount) {
+    unsigned current;
+
+    if (amount == 0U) {
+        return true;
+    }
+    if (rt == NULL || counter == NULL) {
+        errno = EINVAL;
+        if (rt != NULL) {
+            llam_record_fatal(rt, EINVAL);
+        }
+        return false;
+    }
+
+    current = atomic_load_explicit(counter, memory_order_acquire);
+    for (;;) {
+        if (UINT_MAX - current < amount) {
+            llam_record_fatal(rt, EOVERFLOW);
+            errno = EOVERFLOW;
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(counter,
+                                                  &current,
+                                                  current + amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+/**
+ * @brief Drop a popped-waiter destroy guard without unsigned underflow.
+ *
+ * @details
+ * A completion without a matching in-flight waiter means a stale waiter cleanup
+ * or corrupted primitive state reached the consume path.  Preserve the counter
+ * and record a fatal diagnostic rather than wrapping to @c UINT_MAX.
+ *
+ * @param rt      Runtime that owns the guarded object.
+ * @param counter In-flight waiter counter to decrement.
+ * @param amount  Number of waiters to remove.
+ *
+ * @return @c true on success, @c false with @c errno set on invalid input or
+ *         underflow.
+ */
+bool llam_sync_complete_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter, unsigned amount) {
+    unsigned current;
+
+    if (amount == 0U) {
+        return true;
+    }
+    if (rt == NULL || counter == NULL) {
+        errno = EINVAL;
+        if (rt != NULL) {
+            llam_record_fatal(rt, EINVAL);
+        }
+        return false;
+    }
+
+    current = atomic_load_explicit(counter, memory_order_acquire);
+    while (current >= amount) {
+        if (atomic_compare_exchange_weak_explicit(counter,
+                                                  &current,
+                                                  current - amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+
+    llam_record_fatal(rt, EINVAL);
+    errno = EINVAL;
+    return false;
+}
+
+/**
  * @brief Acquire a wait node for a synchronization primitive.
  *
  * The current task's embedded wait node is used when it is free. Otherwise a

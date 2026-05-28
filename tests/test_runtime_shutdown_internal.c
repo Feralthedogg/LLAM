@@ -1075,6 +1075,171 @@ static int exercise_block_worker_rejects_active_counter_overflow(void) {
     return 0;
 }
 
+static int exercise_channel_inflight_waiter_counter_overflow_is_rejected(void) {
+    llam_channel_t *handle;
+    llam_channel_t *channel;
+    llam_wait_node_t node;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for channel inflight overflow check");
+    }
+
+    handle = llam_channel_create(1U);
+    if (handle == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("channel create failed for inflight overflow check");
+    }
+    channel = llam_channel_resolve_public_handle(handle);
+    if (channel == NULL) {
+        llam_channel_destroy(handle);
+        llam_runtime_shutdown();
+        return fail_errno("channel resolve failed for inflight overflow check");
+    }
+
+    memset(&node, 0, sizeof(node));
+    llam_wait_node_reset(&node, channel->owner_runtime, UINT_MAX);
+    node.error_code = 0;
+
+    pthread_mutex_lock(&channel->lock);
+    llam_wait_queue_push_tail(&channel->recv_waiters, &node);
+    atomic_store_explicit(&channel->inflight_waiters, UINT_MAX, memory_order_release);
+    pthread_mutex_unlock(&channel->lock);
+    llam_channel_end_public_op(channel);
+
+    /*
+     * This forces the normal close path to pop a waiter while the destroy guard
+     * is saturated.  Raw unsigned increment used to wrap the guard to zero,
+     * allowing destroy to recycle a channel with an unconsumed popped waiter.
+     */
+    errno = 0;
+    if (llam_channel_close(handle) != 0) {
+        int saved_errno = errno;
+
+        atomic_store_explicit(&channel->inflight_waiters, 0U, memory_order_release);
+        (void)llam_channel_destroy(handle);
+        llam_runtime_shutdown();
+        errno = saved_errno;
+        return fail_errno("channel close failed for inflight overflow check");
+    }
+    errno = 0;
+    if (llam_channel_destroy(handle) == 0 || errno != EBUSY) {
+        llam_runtime_shutdown();
+        return fail_msg("channel inflight waiter overflow did not keep destroy busy");
+    }
+
+    atomic_store_explicit(&channel->inflight_waiters, 0U, memory_order_release);
+    if (llam_channel_destroy(handle) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("channel cleanup destroy failed after inflight overflow check");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static int exercise_channel_inflight_waiter_counter_underflow_is_rejected(void) {
+    llam_channel_t *handle;
+    llam_channel_t *channel;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for channel inflight underflow check");
+    }
+
+    handle = llam_channel_create(1U);
+    if (handle == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("channel create failed for inflight underflow check");
+    }
+    channel = llam_channel_resolve_public_handle(handle);
+    if (channel == NULL) {
+        llam_channel_destroy(handle);
+        llam_runtime_shutdown();
+        return fail_errno("channel resolve failed for inflight underflow check");
+    }
+
+    /*
+     * A stale waiter-consume path must not wrap the destroy guard to UINT_MAX.
+     * Preserve zero and record a fatal invariant violation instead.
+     */
+    errno = 0;
+    llam_channel_waiter_consumed(channel);
+    if (atomic_load_explicit(&channel->inflight_waiters, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        llam_channel_end_public_op(channel);
+        llam_channel_destroy(handle);
+        llam_runtime_shutdown();
+        return fail_msg("channel inflight waiter underflow was not rejected");
+    }
+
+    llam_channel_end_public_op(channel);
+    if (llam_channel_destroy(handle) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("channel cleanup destroy failed after inflight underflow check");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static int exercise_cond_inflight_waiter_counter_overflow_is_rejected(void) {
+    llam_cond_t *handle;
+    llam_cond_t *cond;
+    llam_wait_node_t node;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for cond inflight overflow check");
+    }
+
+    handle = llam_cond_create();
+    if (handle == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("cond create failed for inflight overflow check");
+    }
+    cond = llam_cond_resolve_public_handle(handle);
+    if (cond == NULL) {
+        llam_cond_destroy(handle);
+        llam_runtime_shutdown();
+        return fail_errno("cond resolve failed for inflight overflow check");
+    }
+
+    memset(&node, 0, sizeof(node));
+    llam_wait_node_reset(&node, cond->owner_runtime, UINT_MAX);
+    node.error_code = 0;
+
+    pthread_mutex_lock(&cond->lock);
+    llam_wait_queue_push_tail(&cond->waiters, &node);
+    atomic_store_explicit(&cond->inflight_waiters, UINT_MAX, memory_order_release);
+    pthread_mutex_unlock(&cond->lock);
+    llam_cond_end_public_op(cond);
+
+    /*
+     * Signal has the same lifetime window as channel close: the waiter is no
+     * longer on the queue but has not returned from wait yet.  The in-flight
+     * guard must fail closed if saturation is detected.
+     */
+    errno = 0;
+    if (llam_cond_signal(handle) != 0) {
+        int saved_errno = errno;
+
+        atomic_store_explicit(&cond->inflight_waiters, 0U, memory_order_release);
+        (void)llam_cond_destroy(handle);
+        llam_runtime_shutdown();
+        errno = saved_errno;
+        return fail_errno("cond signal failed for inflight overflow check");
+    }
+    errno = 0;
+    if (llam_cond_destroy(handle) == 0 || errno != EBUSY) {
+        llam_runtime_shutdown();
+        return fail_msg("cond inflight waiter overflow did not keep destroy busy");
+    }
+
+    atomic_store_explicit(&cond->inflight_waiters, 0U, memory_order_release);
+    if (llam_cond_destroy(handle) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("cond cleanup destroy failed after inflight overflow check");
+    }
+    llam_runtime_shutdown();
+    return 0;
+}
+
 static int exercise_inflight_waiter_counter_underflow_is_rejected(void) {
     if (init_runtime() != 0) {
         return fail_errno("runtime init failed for inflight waiter underflow check");
@@ -1169,6 +1334,15 @@ int main(void) {
         return 1;
     }
     if (exercise_block_worker_rejects_active_counter_overflow() != 0) {
+        return 1;
+    }
+    if (exercise_channel_inflight_waiter_counter_overflow_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_channel_inflight_waiter_counter_underflow_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_cond_inflight_waiter_counter_overflow_is_rejected() != 0) {
         return 1;
     }
     if (exercise_inflight_waiter_counter_underflow_is_rejected() != 0) {
