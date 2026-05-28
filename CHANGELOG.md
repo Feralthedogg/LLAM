@@ -70,7 +70,8 @@
   broker fds with close-on-exec protections, and clear inherited Windows HANDLE
   authority.
 
-* reject overflowing absolute ranges and non-buffer authority bits when minting
+* reject overflowing absolute ranges, ranges beyond
+  `LLAM_BROKER_BUFFER_MAX_BYTES`, and non-buffer authority bits when minting
   internal broker buffer grants. Buffer-grant validation already rejected
   relative overflow; creation now fails closed before storing impossible grant
   ranges or unknown rights for future data-plane users.
@@ -191,7 +192,8 @@
   whose fixed-size names are not NUL-terminated before unmap/reset.
 
 * added broker buffer-grant regression coverage for absolute range overflow,
-  non-buffer rights, and relative range overflow at the internal grant boundary.
+  maximum-buffer bound overflow, non-buffer rights, and relative range overflow
+  at the internal grant boundary.
 
 * added broker ring import regression coverage proving failed owned imports
   close the transferred fd/HANDLE authority and leave the caller mapping output

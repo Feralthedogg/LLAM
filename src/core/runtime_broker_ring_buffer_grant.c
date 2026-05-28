@@ -35,7 +35,7 @@ int llam_broker_buffer_grant_init(llam_broker_buffer_grant_t *grant,
         return -1;
     }
     end = offset + length;
-    if (LLAM_UNLIKELY(end < offset)) {
+    if (LLAM_UNLIKELY(end < offset || end > (uint64_t)LLAM_BROKER_BUFFER_MAX_BYTES)) {
         errno = EINVAL;
         return -1;
     }

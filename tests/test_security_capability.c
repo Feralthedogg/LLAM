@@ -4695,6 +4695,18 @@ static int test_broker_ring_and_buffer_grants(void) {
     if (expect_errno(llam_broker_buffer_grant_init(&grant,
                                                    2U,
                                                    1U,
+                                                   (uint64_t)LLAM_BROKER_BUFFER_MAX_BYTES - 8U,
+                                                   16U,
+                                                   LLAM_CAP_RIGHT_READ,
+                                                   3U),
+                     EINVAL,
+                     "buffer grant accepted range beyond broker buffer maximum") != 0) {
+        return -1;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_buffer_grant_init(&grant,
+                                                   2U,
+                                                   1U,
                                                    0U,
                                                    16U,
                                                    LLAM_CAP_RIGHT_ADMIN,
