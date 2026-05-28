@@ -224,6 +224,23 @@ int llam_broker_accept_one(int listen_fd, int *out_fd) {
         errno = EINVAL;
         return -1;
     }
+#if defined(__linux__) && defined(SOCK_CLOEXEC)
+    /*
+     * accept()+fcntl(FD_CLOEXEC) leaves a narrow fork/exec inheritance window
+     * in multi-threaded embedders.  Linux exposes an atomic close-on-exec accept
+     * path; fall back only when the kernel/libc rejects the flag path.
+     */
+    do {
+        fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC);
+    } while (fd < 0 && errno == EINTR);
+    if (fd >= 0) {
+        *out_fd = fd;
+        return 0;
+    }
+    if (errno != ENOSYS && errno != EINVAL) {
+        return -1;
+    }
+#endif
     do {
         fd = accept(listen_fd, NULL, NULL);
     } while (fd < 0 && errno == EINTR);

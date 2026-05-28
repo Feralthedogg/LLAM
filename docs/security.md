@@ -254,7 +254,8 @@ broker-control foundation:
   response fds, and mapped ring fd duplicates. This prevents later helper
   `exec` calls from inheriting broker capability transport or data-plane
   authority by accident. Where the platform exposes atomic close-on-exec
-  primitives, broker sockets use `SOCK_CLOEXEC`, descriptor/ring duplicates use
+  primitives, broker sockets use `SOCK_CLOEXEC`, accepted control sockets use
+  `accept4(SOCK_CLOEXEC)` on Linux, descriptor/ring duplicates use
   `F_DUPFD_CLOEXEC`, and received ancillary fds use `MSG_CMSG_CLOEXEC` before
   falling back to post-creation `fcntl(FD_CLOEXEC)`.
 - Windows broker-registered HANDLEs clear `HANDLE_FLAG_INHERIT` during
