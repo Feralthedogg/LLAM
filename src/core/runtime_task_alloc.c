@@ -57,7 +57,7 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     task->flags = 0U;
     task->home_shard = 0U;
     task->live_shard = 0U;
-    task->last_shard = 0U;
+    atomic_init(&task->last_shard, 0U);
     task->parked_shard = 0U;
     atomic_init(&task->task_class, (unsigned)LLAM_TASK_CLASS_DEFAULT);
     atomic_init(&task->base_task_class, (unsigned)LLAM_TASK_CLASS_DEFAULT);

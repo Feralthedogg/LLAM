@@ -255,6 +255,7 @@ endif()
 
 add_library(llam_runtime STATIC ${LLAM_RUNTIME_SOURCES})
 add_library(llam_runtime_shared SHARED ${LLAM_RUNTIME_SOURCES})
+add_library(llam_runtime_testhooks STATIC ${LLAM_RUNTIME_SOURCES})
 add_library(llam::runtime ALIAS llam_runtime)
 add_library(llam::runtime_shared ALIAS llam_runtime_shared)
 
@@ -275,6 +276,12 @@ set_target_properties(llam_runtime_shared
         C_VISIBILITY_PRESET hidden
 )
 
+set_target_properties(llam_runtime_testhooks
+    PROPERTIES
+        OUTPUT_NAME llam_runtime_testhooks
+        POSITION_INDEPENDENT_CODE ON
+)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set_target_properties(llam_runtime_shared
         PROPERTIES
@@ -284,7 +291,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     )
 endif()
 
-foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
+foreach(LLAM_TARGET llam_runtime llam_runtime_shared llam_runtime_testhooks)
     target_include_directories(${LLAM_TARGET}
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -316,20 +323,25 @@ foreach(LLAM_TARGET llam_runtime llam_runtime_shared)
 endforeach()
 
 target_compile_definitions(llam_runtime_shared PRIVATE LLAM_BUILD_SHARED=1)
+target_compile_definitions(llam_runtime_testhooks PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
 
 find_package(Threads REQUIRED)
 target_link_libraries(llam_runtime PUBLIC Threads::Threads)
 target_link_libraries(llam_runtime_shared PUBLIC Threads::Threads)
+target_link_libraries(llam_runtime_testhooks PUBLIC Threads::Threads)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(llam_runtime PUBLIC uring m)
     target_link_libraries(llam_runtime_shared PUBLIC uring m)
+    target_link_libraries(llam_runtime_testhooks PUBLIC uring m)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
     target_link_libraries(llam_runtime PUBLIC rt)
     target_link_libraries(llam_runtime_shared PUBLIC rt)
+    target_link_libraries(llam_runtime_testhooks PUBLIC rt)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_link_libraries(llam_runtime PUBLIC ws2_32 mswsock synchronization advapi32)
     target_link_libraries(llam_runtime_shared PUBLIC ws2_32 mswsock synchronization advapi32)
+    target_link_libraries(llam_runtime_testhooks PUBLIC ws2_32 mswsock synchronization advapi32)
 endif()
 
 set(LLAM_POSIX_EXAMPLE_EXCLUDE)
@@ -561,7 +573,8 @@ target_link_libraries(test_windows_runtime_smoke PRIVATE llam_runtime)
 add_executable(test_security_capability
     tests/test_security_capability.c
 )
-target_link_libraries(test_security_capability PRIVATE llam_runtime)
+target_compile_definitions(test_security_capability PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+target_link_libraries(test_security_capability PRIVATE llam_runtime_testhooks)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_executable(test_windows_iocp_io

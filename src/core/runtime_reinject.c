@@ -226,7 +226,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
             task->enqueue_hot = effective_hot ? 1U : 0U;
-            task->last_shard = target->id;
+            atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
             task->last_started_ns = 0U;
             atomic_store_explicit(&target->current, task, memory_order_release);
             g_llam_tls_task = task;
@@ -272,7 +272,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     task->state = LLAM_TASK_STATE_RUNNING;
     task->wait_reason = LLAM_WAIT_NONE;
     task->enqueue_hot = effective_hot ? 1U : 0U;
-    task->last_shard = target->id;
+    atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
     task->last_started_ns = 0U;
     atomic_store_explicit(&target->current, task, memory_order_release);
     g_llam_tls_task = task;

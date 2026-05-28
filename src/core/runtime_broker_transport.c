@@ -28,11 +28,21 @@
 
 #include <string.h>
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_bool g_llam_broker_force_subject_entropy_failure;
+
+static bool llam_broker_subject_entropy_forced_failure(void) {
+    return atomic_load_explicit(&g_llam_broker_force_subject_entropy_failure, memory_order_relaxed);
+}
 
 void llam_broker_test_force_subject_entropy_failure(bool enabled) {
     atomic_store_explicit(&g_llam_broker_force_subject_entropy_failure, enabled, memory_order_relaxed);
 }
+#else
+static bool llam_broker_subject_entropy_forced_failure(void) {
+    return false;
+}
+#endif
 
 static int llam_broker_new_transport_subject(llam_broker_t *broker,
                                              uintptr_t transport_id,
@@ -45,8 +55,7 @@ static int llam_broker_new_transport_subject(llam_broker_t *broker,
         return -1;
     }
     *out_subject = 0U;
-    if (LLAM_UNLIKELY(atomic_load_explicit(&g_llam_broker_force_subject_entropy_failure,
-                                           memory_order_relaxed) ||
+    if (LLAM_UNLIKELY(llam_broker_subject_entropy_forced_failure() ||
                       !llam_public_slot_entropy_from_os(&subject))) {
         /*
          * Transport subjects are the audience binding for serialized broker

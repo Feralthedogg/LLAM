@@ -327,7 +327,7 @@ static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,
     task->forced_yield_budget = rt->forced_yield_every;
     task->home_shard = shard_id;
     task->live_shard = shard_id;
-    task->last_shard = shard_id;
+    atomic_store_explicit(&task->last_shard, shard_id, memory_order_relaxed);
     atomic_store_explicit(&task->preempt_requested, 0U, memory_order_relaxed);
     atomic_store_explicit(&task->completed, 0U, memory_order_relaxed);
     atomic_store_explicit(&task->reclaim_ready, 0U, memory_order_relaxed);

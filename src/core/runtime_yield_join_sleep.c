@@ -259,7 +259,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
-    next->last_shard = shard->id;
+    atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
     next->last_started_ns = 0U;
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
@@ -440,7 +440,7 @@ bool llam_yield_to_local_runnable(void) {
     current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
-    next->last_shard = shard->id;
+    atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
     next->last_started_ns = 0U;
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
@@ -508,7 +508,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
 
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
-    next->last_shard = shard->id;
+    atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
     next->last_started_ns = 0U;
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
@@ -554,7 +554,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
 
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
-    next->last_shard = shard->id;
+    atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
     next->last_started_ns = 0U;
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;

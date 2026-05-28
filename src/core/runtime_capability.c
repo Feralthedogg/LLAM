@@ -30,7 +30,21 @@
 
 #define LLAM_CAPABILITY_CANONICAL_BYTES 72U
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_bool g_llam_capability_force_entropy_failure;
+
+static bool llam_cap_entropy_forced_failure(void) {
+    return atomic_load_explicit(&g_llam_capability_force_entropy_failure, memory_order_relaxed);
+}
+
+void llam_capability_test_force_entropy_failure(bool enabled) {
+    atomic_store_explicit(&g_llam_capability_force_entropy_failure, enabled, memory_order_relaxed);
+}
+#else
+static bool llam_cap_entropy_forced_failure(void) {
+    return false;
+}
+#endif
 
 static uint64_t llam_cap_read64_le(const uint8_t *bytes) {
     return ((uint64_t)bytes[0]) |
@@ -228,14 +242,10 @@ static bool llam_cap_entropy_word(uint64_t *out_word) {
     if (LLAM_UNLIKELY(out_word == NULL)) {
         return false;
     }
-    if (LLAM_UNLIKELY(atomic_load_explicit(&g_llam_capability_force_entropy_failure, memory_order_relaxed))) {
+    if (LLAM_UNLIKELY(llam_cap_entropy_forced_failure())) {
         return false;
     }
     return llam_public_slot_entropy_from_os(out_word) && *out_word != 0U;
-}
-
-void llam_capability_test_force_entropy_failure(bool enabled) {
-    atomic_store_explicit(&g_llam_capability_force_entropy_failure, enabled, memory_order_relaxed);
 }
 
 int llam_capability_key_init(llam_capability_key_t *key, const void *scope, uint64_t seed) {

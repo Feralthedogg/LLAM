@@ -207,12 +207,15 @@ unsigned llam_pick_runnable_shard(llam_runtime_t *rt, llam_task_t *task) {
         return 0U;
     }
 
-    home_id = task->home_shard < rt->active_shards ? task->home_shard : task->last_shard % rt->active_shards;
+    home_id = task->home_shard < rt->active_shards
+                  ? task->home_shard
+                  : atomic_load_explicit(&task->last_shard, memory_order_relaxed) % rt->active_shards;
     if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U || rt->active_shards < 2U) {
         return home_id;
     }
 
-    last_id = task->last_shard < rt->active_shards ? task->last_shard : home_id;
+    last_id = atomic_load_explicit(&task->last_shard, memory_order_relaxed);
+    last_id = last_id < rt->active_shards ? last_id : home_id;
     origin_id = home_id;
     // TLS shard ids are runtime-local; only reuse them as locality hints for
     // tasks owned by the same runtime.

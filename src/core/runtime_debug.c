@@ -678,8 +678,8 @@ void llam_dump_runtime_state(int fd) {
                     task->flags,
                     task->home_shard,
                     task->live_shard,
-                    task->last_shard,
-                    task->parked_shard,
+                    atomic_load_explicit(&task->last_shard, memory_order_relaxed),
+                    atomic_load_explicit(&task->parked_shard, memory_order_relaxed),
                     llam_wait_reason_name(
                         (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire)),
                     llam_task_wait_owner_name_diag(task),

@@ -92,7 +92,9 @@ void llam_task_clear_wait_tracking(llam_task_t *task) {
      */
     atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
     atomic_store_explicit(&task->join_target, NULL, memory_order_release);
-    task->parked_shard = task->last_shard;
+    atomic_store_explicit(&task->parked_shard,
+                          atomic_load_explicit(&task->last_shard, memory_order_relaxed),
+                          memory_order_relaxed);
 }
 
 /**
@@ -224,7 +226,7 @@ static llam_shard_t *llam_task_deadline_shard(llam_task_t *task) {
      * defensive rather than authoritative.  last_shard still maps the task to a
      * valid shard for timer cleanup.
      */
-    return &rt->shards[task->last_shard % rt->active_shards];
+    return &rt->shards[atomic_load_explicit(&task->last_shard, memory_order_relaxed) % rt->active_shards];
 }
 
 /**

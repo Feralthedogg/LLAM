@@ -764,7 +764,7 @@ struct llam_task {
     unsigned flags;
     unsigned home_shard;
     unsigned live_shard;
-    unsigned last_shard;
+    atomic_uint last_shard;
     atomic_uint parked_shard;
     atomic_uint task_class;
     atomic_uint base_task_class;

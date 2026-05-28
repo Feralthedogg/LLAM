@@ -105,7 +105,7 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     atomic_store_explicit(&shard->current, task, memory_order_release);
 
     g_llam_tls_task = task;
-    task->last_shard = shard->id;
+    atomic_store_explicit(&task->last_shard, shard->id, memory_order_relaxed);
     task->state = LLAM_TASK_STATE_RUNNING;
     task->last_started_ns = now_ns;
     if (wake_timing && now_ns >= task->last_runnable_ns) {

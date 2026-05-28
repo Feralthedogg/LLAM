@@ -9,6 +9,7 @@ LDLIBS ?= -pthread -luring
 SERVER_FLOOD_LDLIBS ?= -pthread
 OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
+TESTHOOK_OBJDIR ?= $(OBJDIR)-testhooks
 SHARED_CPPFLAGS ?= $(CPPFLAGS) -DLLAM_BUILD_SHARED
 PICFLAGS ?= -fPIC -fvisibility=hidden
 LLAM_ABI_MAJOR ?= 2
@@ -16,6 +17,7 @@ LLAM_VERSION ?= 2.0.0
 SANITIZER_TARGETS_ENABLED ?= 0
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
+TESTHOOK_BUILD_SIGNATURE = $(TESTHOOK_OBJDIR)/.build-signature
 CLEAN_DIRS = \
 	$(OBJDIR) \
 	$(SHARED_OBJDIR) \
@@ -408,6 +410,15 @@ endif
 endif
 endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
+TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
+	$(TESTHOOK_OBJDIR)/src/core/runtime_capability.o \
+	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_transport.o
+RUNTIME_TESTHOOK_OBJS = \
+	$(filter-out \
+		$(OBJDIR)/src/core/runtime_capability.o \
+		$(OBJDIR)/src/core/runtime_broker_transport.o, \
+		$(RUNTIME_OBJS)) \
+	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 DEMO_OBJS = \
 	$(OBJDIR)/examples/demo.o \
 	$(OBJDIR)/examples/demo_tasks.o \
@@ -553,7 +564,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports test test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -622,7 +633,7 @@ package: windows-cmake-build
 bench-matrix: bench
 	python scripts/bench_matrix.py
 
-audit-shared-exports test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+audit-shared-exports audit-production-test-hooks test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -691,9 +702,29 @@ $(SHARED_BUILD_SIGNATURE): FORCE
 		mv "$$tmp" "$@"; \
 	fi
 
+$(TESTHOOK_BUILD_SIGNATURE): FORCE
+	@mkdir -p $(dir $@)
+	@tmp="$@.$$$$.tmp"; \
+	{ \
+		printf 'CC=%s\n' '$(CC)'; \
+		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1'; \
+		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
+		printf 'TESTHOOK_OBJDIR=%s\n' '$(TESTHOOK_OBJDIR)'; \
+		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
+		printf 'UNAME_M=%s\n' '$(UNAME_M)'; \
+	} > "$$tmp"; \
+	if test -f "$@" && cmp -s "$$tmp" "$@"; then \
+		rm -f "$$tmp"; \
+	else \
+		mv "$$tmp" "$@"; \
+	fi
+
 $(BUILD_OBJS): $(BUILD_SIGNATURE)
 
 $(SHARED_RUNTIME_OBJS): $(SHARED_BUILD_SIGNATURE)
+
+$(TESTHOOK_RUNTIME_OVERRIDE_OBJS): $(TESTHOOK_BUILD_SIGNATURE)
 
 $(LINK_TARGETS): %: %.link-signature
 
@@ -732,7 +763,16 @@ shared: $(SHLIB_LINK)
 audit-shared-exports: shared
 	python3 scripts/audit_shared_exports.py ./$(SHLIB_REAL)
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports
+audit-production-test-hooks: static
+	@if command -v nm >/dev/null 2>&1; then \
+		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_force_.*entropy_failure' >/dev/null; then \
+			echo "production static runtime exports test fault-injection hooks" >&2; \
+			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_force_.*entropy_failure' >&2; \
+			exit 1; \
+		fi; \
+	fi
+
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -2116,8 +2156,8 @@ asan-test_multi_runtime_core tsan-test_multi_runtime_core: require-sanitizer-tar
 asan-test_runtime_fuzz tsan-test_runtime_fuzz: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS) $(LDLIBS)
 
-asan-test_security_capability tsan-test_security_capability: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
+asan-test_security_capability tsan-test_security_capability: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
 
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)
@@ -2134,8 +2174,8 @@ test_windows_iocp_dump: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS)
 test_windows_handle_io: $(RUNTIME_OBJS) $(TEST_WINDOWS_HANDLE_IO_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_HANDLE_IO_OBJS) $(LDLIBS)
 
-test_security_capability: $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
+test_security_capability: $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
@@ -2143,6 +2183,10 @@ test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(TESTHOOK_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
@@ -2310,6 +2354,10 @@ $(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/
 $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 
 clean:
 	rm -rf $(CLEAN_DIRS)
