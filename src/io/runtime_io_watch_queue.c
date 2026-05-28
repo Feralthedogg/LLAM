@@ -27,17 +27,51 @@
 #include "runtime_internal.h"
 
 void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta) {
+    atomic_uint *counter;
+    unsigned amount;
+    unsigned current;
+
     if (rt == NULL || delta == 0 || owner_shard >= rt->active_shards) {
         return;
     }
+    counter = &rt->shards[owner_shard].inflight_io_waiters;
     if (delta > 0) {
-        atomic_fetch_add_explicit(&rt->shards[owner_shard].inflight_io_waiters,
-                                  (unsigned)delta,
-                                  memory_order_acq_rel);
-    } else {
-        atomic_fetch_sub_explicit(&rt->shards[owner_shard].inflight_io_waiters,
-                                  (unsigned)(-delta),
-                                  memory_order_acq_rel);
+        amount = (unsigned)delta;
+        current = atomic_load_explicit(counter, memory_order_acquire);
+        for (;;) {
+            if (UINT_MAX - current < amount) {
+                llam_record_fatal(rt, EOVERFLOW);
+                return;
+            }
+            if (atomic_compare_exchange_weak_explicit(counter,
+                                                      &current,
+                                                      current + amount,
+                                                      memory_order_acq_rel,
+                                                      memory_order_acquire)) {
+                return;
+            }
+        }
+    }
+
+    amount = delta == INT_MIN ? ((unsigned)INT_MAX + 1U) : (unsigned)(-delta);
+    current = atomic_load_explicit(counter, memory_order_acquire);
+    for (;;) {
+        if (current < amount) {
+            /*
+             * In-flight waiter counters are diagnostics and scale guards, not
+             * ownership themselves.  Clamp by refusing the stale decrement
+             * instead of wrapping to UINT_MAX and poisoning later decisions.
+             */
+            llam_record_fatal(rt, EINVAL);
+            return;
+        }
+        if (atomic_compare_exchange_weak_explicit(counter,
+                                                  &current,
+                                                  current - amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return;
+        }
     }
 }
 

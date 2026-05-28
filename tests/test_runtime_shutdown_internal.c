@@ -916,6 +916,53 @@ static int exercise_submit_queue_rejects_foreign_runtime_request(void) {
     return 0;
 }
 
+static int exercise_inflight_waiter_counter_underflow_is_rejected(void) {
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for inflight waiter underflow check");
+    }
+    if (g_llam_runtime.active_shards == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without a shard for inflight waiter underflow check");
+    }
+
+    /*
+     * Backend completion and rehome paths maintain shard pressure counters by
+     * paired +/- calls.  A stale completion or corrupted ownership transition
+     * must not wrap the unsigned counter to UINT_MAX, otherwise diagnostics and
+     * scaling decisions can believe the shard has permanent I/O pressure.
+     */
+    llam_shard_note_inflight_io_waiter(&g_llam_runtime, 0U, -1);
+    if (atomic_load_explicit(&g_llam_runtime.shards[0].inflight_io_waiters, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        llam_runtime_shutdown();
+        return fail_msg("inflight waiter underflow was not rejected");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static int exercise_inflight_waiter_counter_overflow_is_rejected(void) {
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for inflight waiter overflow check");
+    }
+    if (g_llam_runtime.active_shards == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without a shard for inflight waiter overflow check");
+    }
+
+    atomic_store_explicit(&g_llam_runtime.shards[0].inflight_io_waiters, UINT_MAX, memory_order_release);
+    llam_shard_note_inflight_io_waiter(&g_llam_runtime, 0U, 1);
+    if (atomic_load_explicit(&g_llam_runtime.shards[0].inflight_io_waiters, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        llam_runtime_shutdown();
+        return fail_msg("inflight waiter overflow was not rejected");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
@@ -954,6 +1001,12 @@ int main(void) {
         return 1;
     }
     if (exercise_submit_queue_rejects_foreign_runtime_request() != 0) {
+        return 1;
+    }
+    if (exercise_inflight_waiter_counter_underflow_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_inflight_waiter_counter_overflow_is_rejected() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");
