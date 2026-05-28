@@ -22,14 +22,16 @@
 
 void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool decrement_pending) {
     llam_io_abort_reason_t abort_reason;
+    llam_runtime_t *rt;
     llam_wait_reason_t wake_reason = LLAM_WAIT_IO;
     unsigned inflight_owner = UINT_MAX;
     unsigned completion_owner = UINT_MAX;
     unsigned wait_mode;
 
-    if (decrement_pending) {
-        atomic_fetch_sub(&node->pending_ops, 1U);
+    if (!llam_io_completion_begin(node, req, decrement_pending)) {
+        return;
     }
+    rt = req->owner_runtime;
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
     if (wait_mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
         /*
@@ -38,8 +40,8 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
          * after it successfully transferred this atomic in-flight owner.
          */
         inflight_owner = atomic_exchange_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_acq_rel);
-        if (inflight_owner < node->runtime->active_shards) {
-            llam_shard_note_inflight_io_waiter(req->owner_runtime, inflight_owner, -1);
+        if (inflight_owner < rt->active_shards) {
+            llam_shard_note_inflight_io_waiter(rt, inflight_owner, -1);
             completion_owner = inflight_owner;
         }
     } else {
@@ -87,8 +89,8 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
         }
     }
 
-    if (completion_owner < node->runtime->active_shards) {
-        llam_shard_t *shard = &node->runtime->shards[completion_owner];
+    if (completion_owner < rt->active_shards) {
+        llam_shard_t *shard = &rt->shards[completion_owner];
         uint64_t now_ns = llam_now_ns();
 
         pthread_mutex_lock(&shard->lock);
@@ -104,7 +106,7 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
         pthread_mutex_unlock(&shard->lock);
     }
 
-    llam_reinject_task_on_shard(node->runtime,
+    llam_reinject_task_on_shard(rt,
                               req->task,
                               completion_owner,
                               true,

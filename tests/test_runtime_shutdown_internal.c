@@ -765,6 +765,155 @@ static int exercise_completion_drops_stale_cancel_control(void) {
     return 0;
 }
 
+static int exercise_completion_rejects_foreign_runtime_request(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_runtime_t foreign_runtime;
+    llam_node_t *node;
+    llam_io_req_t req;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for foreign completion owner check");
+    }
+    if (g_llam_runtime.nodes == NULL || g_llam_runtime.active_nodes == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without an I/O node for foreign completion owner check");
+    }
+
+    memset(&foreign_runtime, 0, sizeof(foreign_runtime));
+    node = &g_llam_runtime.nodes[0];
+    memset(&req, 0, sizeof(req));
+    req.kind = LLAM_IO_KIND_READ;
+    req.owner_runtime = &foreign_runtime;
+    req.owner_shard = 0U;
+    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_NONE);
+    atomic_init(&req.inflight_owner_shard, UINT_MAX);
+    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req.cancel_queued, 0U);
+
+    /*
+     * A backend completion must never route a request through a node owned by
+     * another runtime.  This models stale completion/user-data corruption and
+     * must fail closed before any wakeup is attempted on the wrong scheduler.
+     */
+#if LLAM_RUNTIME_BACKEND_DARWIN
+    llam_io_complete_req(node, &req, 0, false);
+#elif LLAM_RUNTIME_BACKEND_LINUX
+    llam_io_complete_req(node, &req, 0, 0U, false);
+#else
+    llam_windows_complete_req(node, &req, 0, false);
+#endif
+
+    if (atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EXDEV) {
+        llam_runtime_shutdown();
+        return fail_msg("foreign-runtime completion did not record EXDEV fatal");
+    }
+
+    llam_runtime_shutdown();
+#endif
+    return 0;
+}
+
+static int exercise_completion_rejects_unmatched_pending_decrement(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_node_t *node;
+    llam_io_req_t req;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for unmatched completion pending check");
+    }
+    if (g_llam_runtime.nodes == NULL || g_llam_runtime.active_nodes == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without an I/O node for unmatched completion pending check");
+    }
+
+    node = &g_llam_runtime.nodes[0];
+    memset(&req, 0, sizeof(req));
+    req.kind = LLAM_IO_KIND_READ;
+    req.owner_runtime = &g_llam_runtime;
+    req.owner_shard = 0U;
+    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_NONE);
+    atomic_init(&req.inflight_owner_shard, UINT_MAX);
+    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req.cancel_queued, 0U);
+
+    /*
+     * A one-shot backend completion must have a matching pending op.  A stale
+     * or forged packet with decrement_pending=true used to underflow the node
+     * counter before validation; it must now fail closed without mutating it.
+     */
+#if LLAM_RUNTIME_BACKEND_DARWIN
+    llam_io_complete_req(node, &req, 0, true);
+#elif LLAM_RUNTIME_BACKEND_LINUX
+    llam_io_complete_req(node, &req, 0, 0U, true);
+#else
+    llam_windows_complete_req(node, &req, 0, true);
+#endif
+
+    if (atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EINVAL ||
+        atomic_load_explicit(&node->pending_ops, memory_order_acquire) != 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("unmatched completion pending decrement was not rejected");
+    }
+
+    llam_runtime_shutdown();
+#endif
+    return 0;
+}
+
+static int exercise_submit_queue_rejects_foreign_runtime_request(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_runtime_t foreign_runtime;
+    llam_node_t *node;
+    llam_io_req_t req;
+    int lock_rc;
+    bool queued;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for foreign submit owner check");
+    }
+    if (g_llam_runtime.nodes == NULL || g_llam_runtime.active_nodes == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without an I/O node for foreign submit owner check");
+    }
+
+    memset(&foreign_runtime, 0, sizeof(foreign_runtime));
+    node = &g_llam_runtime.nodes[0];
+    memset(&req, 0, sizeof(req));
+    req.kind = LLAM_IO_KIND_READ;
+    req.owner_runtime = &foreign_runtime;
+    req.owner_shard = 0U;
+    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_SUBMIT_QUEUE);
+    atomic_init(&req.inflight_owner_shard, UINT_MAX);
+    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req.cancel_queued, 0U);
+
+    lock_rc = pthread_mutex_lock(&node->submit_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        llam_runtime_shutdown();
+        return fail_errno("submit lock failed for foreign submit owner check");
+    }
+    queued = llam_queue_node_submit_locked(node, &req);
+    lock_rc = pthread_mutex_unlock(&node->submit_lock);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        llam_runtime_shutdown();
+        return fail_errno("submit unlock failed for foreign submit owner check");
+    }
+
+    if (queued ||
+        atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EXDEV ||
+        node->submit_head != NULL ||
+        node->submit_tail != NULL) {
+        llam_runtime_shutdown();
+        return fail_msg("foreign-runtime submit request was accepted by node queue");
+    }
+
+    llam_runtime_shutdown();
+#endif
+    return 0;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
@@ -794,6 +943,15 @@ int main(void) {
         return 1;
     }
     if (exercise_completion_drops_stale_cancel_control() != 0) {
+        return 1;
+    }
+    if (exercise_completion_rejects_foreign_runtime_request() != 0) {
+        return 1;
+    }
+    if (exercise_completion_rejects_unmatched_pending_decrement() != 0) {
+        return 1;
+    }
+    if (exercise_submit_queue_rejects_foreign_runtime_request() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");

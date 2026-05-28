@@ -5,9 +5,8 @@
  * @details
  * This is the handoff point between task-facing I/O APIs and the backend:
  * task bootstrap/exit, wait setup/cleanup, shared watch paths, and one-shot
- * submit-queue issue. Watch operations recheck readiness before parking so
- * level-triggered readiness cannot be missed between CQE delivery and waiter
- * insertion.
+ * queue issue. Watch operations recheck readiness before parking to avoid
+ * missing level-triggered events between CQE delivery and waiter insertion.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -26,7 +25,6 @@
  */
 
 #include "runtime_io_api_internal.h"
-
 /**
  * @brief Resolve the runtime that owns an I/O request.
  *
@@ -939,10 +937,12 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
         return -1;
     }
 
-    pthread_mutex_lock(&node->submit_lock);
-    atomic_fetch_add(&node->pending_ops, 1U);
-    llam_queue_node_submit_locked(node, req);
-    pthread_mutex_unlock(&node->submit_lock);
+    if (!llam_node_submit_io_req(node, req)) {
+        int saved_errno = errno;
+
+        llam_cleanup_io_wait_setup(task, req);
+        return llam_fail_io_setup_req(req, saved_errno);
+    }
     if (llam_park_io_req(req, has_deadline, deadline_ns, node) != 0) {
         return -1;
     }

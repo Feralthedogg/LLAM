@@ -96,7 +96,7 @@ typedef struct llam_darwin_recv_completion {
 /* Shared queue/watch helpers also used by Linux-side common code. */
 uint64_t llam_hash_watch_identity_u64(uint64_t value);
 void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard, int delta);
-void llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
+bool llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 llam_io_req_t *llam_take_node_submissions(llam_node_t *node);
 void llam_poll_watch_enqueue_waiter(llam_poll_watch_t *watch, llam_io_req_t *req);
