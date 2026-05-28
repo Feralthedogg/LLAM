@@ -56,6 +56,15 @@ static int fail_msg(const char *message) {
     return 1;
 }
 
+static void *count_block_callback(void *arg) {
+    atomic_uint *calls = arg;
+
+    if (calls != NULL) {
+        atomic_fetch_add_explicit(calls, 1U, memory_order_relaxed);
+    }
+    return arg;
+}
+
 static int init_runtime(void) {
     llam_runtime_opts_t opts;
 
@@ -1004,6 +1013,68 @@ static int exercise_block_worker_rejects_pending_counter_underflow(void) {
     return 0;
 }
 
+static int exercise_block_worker_rejects_active_counter_overflow(void) {
+    llam_runtime_t runtime;
+    llam_block_job_t job;
+    llam_task_t task;
+    llam_wait_node_t node;
+    atomic_uint callback_calls;
+    int lock_rc;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&job, 0, sizeof(job));
+    memset(&task, 0, sizeof(task));
+    memset(&node, 0, sizeof(node));
+
+    lock_rc = pthread_mutex_init(&runtime.block_lock, NULL);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        return fail_errno("block lock init failed for active overflow check");
+    }
+
+    atomic_init(&runtime.block_pending, 1U);
+    atomic_init(&runtime.block_active, UINT_MAX);
+    atomic_init(&runtime.block_active_peak, UINT_MAX);
+    atomic_init(&runtime.block_job_free, NULL);
+    atomic_init(&runtime.shutdown_requested, true);
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&task.wake_error_code, 0);
+    atomic_init(&node.wake_armed, 0U);
+    atomic_init(&node.wake_completed, 0U);
+    atomic_init(&node.wake_queued, 0U);
+    atomic_init(&callback_calls, 0U);
+
+    /*
+     * A saturated active-worker counter used to wrap through zero and still run
+     * user code.  The worker must fail closed before invoking the callback,
+     * preserve the active counter, and consume the queued pending credit.
+     */
+    node.task = &task;
+    job.fn = count_block_callback;
+    job.arg = &callback_calls;
+    job.task = &task;
+    job.wait_node = &node;
+    atomic_init(&job.result, NULL);
+    atomic_init(&job.error_code, 0);
+    atomic_init(&job.state, LLAM_BLOCK_JOB_QUEUED);
+    runtime.block_head = &job;
+    runtime.block_tail = &job;
+
+    (void)llam_block_worker_main(&runtime);
+    if (atomic_load_explicit(&callback_calls, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.block_active, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&runtime.block_pending, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW ||
+        atomic_load_explicit(&task.wake_error_code, memory_order_acquire) != EOVERFLOW ||
+        atomic_load_explicit(&job.state, memory_order_acquire) != LLAM_BLOCK_JOB_ABORTED) {
+        (void)pthread_mutex_destroy(&runtime.block_lock);
+        return fail_msg("block worker active counter overflow was not rejected");
+    }
+
+    (void)pthread_mutex_destroy(&runtime.block_lock);
+    return 0;
+}
+
 static int exercise_inflight_waiter_counter_underflow_is_rejected(void) {
     if (init_runtime() != 0) {
         return fail_errno("runtime init failed for inflight waiter underflow check");
@@ -1095,6 +1166,9 @@ int main(void) {
         return 1;
     }
     if (exercise_block_worker_rejects_pending_counter_underflow() != 0) {
+        return 1;
+    }
+    if (exercise_block_worker_rejects_active_counter_overflow() != 0) {
         return 1;
     }
     if (exercise_inflight_waiter_counter_underflow_is_rejected() != 0) {

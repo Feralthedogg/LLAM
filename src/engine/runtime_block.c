@@ -91,6 +91,71 @@ bool llam_runtime_complete_block_pending(llam_runtime_t *rt, unsigned amount) {
     return false;
 }
 
+bool llam_runtime_note_block_active(llam_runtime_t *rt, unsigned amount) {
+    unsigned active;
+
+    if (amount == 0U) {
+        return true;
+    }
+    if (rt == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+
+    active = atomic_load_explicit(&rt->block_active, memory_order_acquire);
+    for (;;) {
+        if (UINT_MAX - active < amount) {
+            /*
+             * Active blocking workers are sampled by diagnostics and watchdog
+             * scaling.  Saturation indicates corrupted accounting; reject the
+             * job before running user code so the counter cannot wrap to zero.
+             */
+            llam_record_fatal(rt, EOVERFLOW);
+            errno = EOVERFLOW;
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(&rt->block_active,
+                                                  &active,
+                                                  active + amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            llam_atomic_update_peak(&rt->block_active_peak, active + amount);
+            return true;
+        }
+    }
+}
+
+bool llam_runtime_complete_block_active(llam_runtime_t *rt, unsigned amount) {
+    unsigned active;
+
+    if (amount == 0U) {
+        return true;
+    }
+    if (rt == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+
+    active = atomic_load_explicit(&rt->block_active, memory_order_acquire);
+    while (active >= amount) {
+        if (atomic_compare_exchange_weak_explicit(&rt->block_active,
+                                                  &active,
+                                                  active - amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+
+    /*
+     * A completion without an active-worker credit means a stale completion
+     * raced through the worker path or the active counter was corrupted.
+     */
+    llam_record_fatal(rt, EINVAL);
+    errno = EINVAL;
+    return false;
+}
+
 /**
  * @brief Main loop for a blocking-worker thread.
  *
@@ -164,10 +229,33 @@ void *llam_block_worker_main(void *arg) {
             }
         }
 
-        {
-            unsigned active = atomic_fetch_add(&rt->block_active, 1U) + 1U;
+        if (!llam_runtime_note_block_active(rt, 1U)) {
+            int error_code = errno != 0 ? errno : EOVERFLOW;
 
-            llam_atomic_update_peak(&rt->block_active_peak, active);
+            (void)llam_runtime_complete_block_pending(rt, 1U);
+            atomic_store_explicit(&job->result, NULL, memory_order_release);
+            atomic_store_explicit(&job->error_code, error_code, memory_order_release);
+            atomic_store_explicit(&job->state, LLAM_BLOCK_JOB_ABORTED, memory_order_release);
+            if (job->task != NULL) {
+                job->task->blocking_result = NULL;
+                job->task->blocking_errno = error_code;
+                atomic_store_explicit(&job->task->wake_error_code, error_code, memory_order_release);
+            }
+            if (job->wait_node != NULL) {
+                job->wait_node->error_code = error_code;
+            }
+            if (job->task != NULL &&
+                (job->wait_node == NULL || llam_wait_node_prepare_wake(job->wait_node))) {
+                llam_reinject_task_on_shard(rt,
+                                          job->task,
+                                          job->task->parked_shard,
+                                          true,
+                                          LLAM_TRACE_WAKE,
+                                          LLAM_WAIT_BLOCKING);
+            }
+            llam_block_job_release(rt, job);
+            errno = error_code;
+            continue;
         }
         errno = 0;
         /*
@@ -177,7 +265,7 @@ void *llam_block_worker_main(void *arg) {
          */
         atomic_store_explicit(&job->result, job->fn(job->arg), memory_order_release);
         atomic_store_explicit(&job->error_code, errno, memory_order_release);
-        atomic_fetch_sub(&rt->block_active, 1U);
+        (void)llam_runtime_complete_block_active(rt, 1U);
         (void)llam_runtime_complete_block_pending(rt, 1U);
 
         {
