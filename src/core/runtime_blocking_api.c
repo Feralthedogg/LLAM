@@ -314,6 +314,34 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     }
 
     pthread_mutex_lock(&rt->block_lock);
+    if (!llam_runtime_note_block_pending(rt, 1U)) {
+        int saved_errno = errno;
+
+        pthread_mutex_unlock(&rt->block_lock);
+        if (token != NULL) {
+            if (task->cancel_registered) {
+                if (task->cancel_prev != NULL) {
+                    task->cancel_prev->cancel_next = task->cancel_next;
+                } else {
+                    token->waiters = task->cancel_next;
+                }
+                if (task->cancel_next != NULL) {
+                    task->cancel_next->cancel_prev = task->cancel_prev;
+                }
+                task->cancel_prev = NULL;
+                task->cancel_next = NULL;
+                task->cancel_registered = false;
+            }
+            pthread_mutex_unlock(&token->lock);
+        }
+        task->state = LLAM_TASK_STATE_RUNNING;
+        task->wait_reason = LLAM_WAIT_NONE;
+        llam_task_clear_wait_tracking(task);
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        llam_block_job_release(rt, job);
+        errno = saved_errno;
+        return -1;
+    }
     job->next = NULL;
     if (rt->block_tail != NULL) {
         rt->block_tail->next = job;
@@ -321,7 +349,6 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
         rt->block_head = job;
     }
     rt->block_tail = job;
-    atomic_fetch_add(&rt->block_pending, 1U);
     /* Queue state still lives under the mutex; futex only handles worker sleep/wake. */
     atomic_fetch_add_explicit(&rt->block_wake_seq, 1U, memory_order_release);
 #if !defined(__linux__) && !LLAM_PLATFORM_WINDOWS

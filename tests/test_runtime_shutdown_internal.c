@@ -963,6 +963,47 @@ static int exercise_submit_queue_rejects_pending_counter_overflow(void) {
     return 0;
 }
 
+static int exercise_block_worker_rejects_pending_counter_underflow(void) {
+    llam_runtime_t runtime;
+    llam_block_job_t job;
+    int lock_rc;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&job, 0, sizeof(job));
+
+    lock_rc = pthread_mutex_init(&runtime.block_lock, NULL);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        return fail_errno("block lock init failed for pending underflow check");
+    }
+
+    atomic_init(&runtime.block_pending, 0U);
+    atomic_init(&runtime.block_active, 0U);
+    atomic_init(&runtime.block_active_peak, 0U);
+    atomic_init(&runtime.block_job_free, NULL);
+    atomic_init(&runtime.shutdown_requested, true);
+    atomic_init(&runtime.fatal_errno, 0);
+
+    /*
+     * This models a stale/cancelled block job found on the worker queue without
+     * a matching pending-job credit.  The worker must fail closed and preserve
+     * the counter instead of wrapping it to UINT_MAX.
+     */
+    atomic_init(&job.state, LLAM_BLOCK_JOB_ABORTED);
+    runtime.block_head = &job;
+    runtime.block_tail = &job;
+
+    (void)llam_block_worker_main(&runtime);
+    if (atomic_load_explicit(&runtime.block_pending, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        (void)pthread_mutex_destroy(&runtime.block_lock);
+        return fail_msg("block worker pending counter underflow was not rejected");
+    }
+
+    (void)pthread_mutex_destroy(&runtime.block_lock);
+    return 0;
+}
+
 static int exercise_inflight_waiter_counter_underflow_is_rejected(void) {
     if (init_runtime() != 0) {
         return fail_errno("runtime init failed for inflight waiter underflow check");
@@ -1051,6 +1092,9 @@ int main(void) {
         return 1;
     }
     if (exercise_submit_queue_rejects_pending_counter_overflow() != 0) {
+        return 1;
+    }
+    if (exercise_block_worker_rejects_pending_counter_underflow() != 0) {
         return 1;
     }
     if (exercise_inflight_waiter_counter_underflow_is_rejected() != 0) {

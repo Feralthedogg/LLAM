@@ -26,6 +26,71 @@
 
 #include "runtime_internal.h"
 
+bool llam_runtime_note_block_pending(llam_runtime_t *rt, unsigned amount) {
+    unsigned pending;
+
+    if (amount == 0U) {
+        return true;
+    }
+    if (rt == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+
+    pending = atomic_load_explicit(&rt->block_pending, memory_order_acquire);
+    for (;;) {
+        if (UINT_MAX - pending < amount) {
+            /*
+             * block_pending drives compensation pressure and shutdown drain
+             * diagnostics.  A saturated counter must reject new jobs instead
+             * of wrapping to zero and hiding queued blocking work.
+             */
+            llam_record_fatal(rt, EOVERFLOW);
+            errno = EOVERFLOW;
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(&rt->block_pending,
+                                                  &pending,
+                                                  pending + amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+bool llam_runtime_complete_block_pending(llam_runtime_t *rt, unsigned amount) {
+    unsigned pending;
+
+    if (amount == 0U) {
+        return true;
+    }
+    if (rt == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+
+    pending = atomic_load_explicit(&rt->block_pending, memory_order_acquire);
+    while (pending >= amount) {
+        if (atomic_compare_exchange_weak_explicit(&rt->block_pending,
+                                                  &pending,
+                                                  pending - amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+
+    /*
+     * A completion without a matching pending credit means a stale worker entry
+     * or corrupted queue state reached the blocking pool.  Preserve the counter
+     * so later diagnostics still see the original state.
+     */
+    llam_record_fatal(rt, EINVAL);
+    errno = EINVAL;
+    return false;
+}
+
 /**
  * @brief Main loop for a blocking-worker thread.
  *
@@ -93,7 +158,7 @@ void *llam_block_worker_main(void *arg) {
             unsigned expected = LLAM_BLOCK_JOB_QUEUED;
 
             if (!atomic_compare_exchange_strong(&job->state, &expected, LLAM_BLOCK_JOB_RUNNING)) {
-                atomic_fetch_sub(&rt->block_pending, 1U);
+                (void)llam_runtime_complete_block_pending(rt, 1U);
                 llam_block_job_release(rt, job);
                 continue;
             }
@@ -113,7 +178,7 @@ void *llam_block_worker_main(void *arg) {
         atomic_store_explicit(&job->result, job->fn(job->arg), memory_order_release);
         atomic_store_explicit(&job->error_code, errno, memory_order_release);
         atomic_fetch_sub(&rt->block_active, 1U);
-        atomic_fetch_sub(&rt->block_pending, 1U);
+        (void)llam_runtime_complete_block_pending(rt, 1U);
 
         {
             unsigned expected = LLAM_BLOCK_JOB_RUNNING;

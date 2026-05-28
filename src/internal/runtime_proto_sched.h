@@ -42,6 +42,8 @@ void *llam_opaque_helper_main(void *arg);
  * Worker loops and idle handling.
  */
 void *llam_block_worker_main(void *arg);
+bool llam_runtime_note_block_pending(llam_runtime_t *rt, unsigned amount);
+bool llam_runtime_complete_block_pending(llam_runtime_t *rt, unsigned amount);
 void *llam_ctrl_worker_main(void *arg);
 void llam_idle_wait(llam_shard_t *shard);
 void llam_scheduler_loop(llam_shard_t *shard);
