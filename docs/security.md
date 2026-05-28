@@ -405,6 +405,8 @@ storage that might be mistaken for a newly issued authority.
 
 The broker tracks a global revocation epoch. Tokens include the epoch at
 issuance time. When the broker advances the epoch, older tokens fail validation.
+Epoch `0` is reserved for cleared or uninitialized broker state; token issue
+and validation reject it with `EINVAL`.
 
 Broker-owned buffers, descriptors, and byte channels also support
 object-specific revocation by rotating the object's generation. Existing tokens

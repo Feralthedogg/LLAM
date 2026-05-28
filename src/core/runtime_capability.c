@@ -311,6 +311,7 @@ int llam_capability_issue(const llam_capability_key_t *key,
                       object->slot == 0U ||
                       object->slot == UINT64_MAX ||
                       object->generation == 0U ||
+                      object->revocation_epoch == 0U ||
                       rights == 0U)) {
         errno = EINVAL;
         return -1;
@@ -354,6 +355,7 @@ int llam_capability_validate_subject(const llam_capability_key_t *key,
                       token->runtime_id == 0U ||
                       token->slot == 0U ||
                       token->generation == 0U ||
+                      token->revocation_epoch == 0U ||
                       token->rights == 0U)) {
         errno = EINVAL;
         return -1;

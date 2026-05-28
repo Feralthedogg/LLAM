@@ -76,6 +76,11 @@
   relative overflow; creation now fails closed before storing impossible grant
   ranges or unknown rights for future data-plane users.
 
+* reject zero revocation epochs when issuing or validating broker capability
+  tokens. Epoch zero is reserved for cleared/uninitialized broker state, so raw
+  internal token helpers can no longer mint authority that validates against a
+  destroyed or never-initialized epoch sentinel.
+
 * prevent broker teardown and transport races from stranding shared-memory ring
   sessions, duplicated response fds/HANDLEs, predefined task grants, detached
   task slots, broker byte channels, descriptor/HANDLE grants, or stale doorbell
@@ -194,6 +199,9 @@
 * added broker buffer-grant regression coverage for absolute range overflow,
   maximum-buffer bound overflow, non-buffer rights, and relative range overflow
   at the internal grant boundary.
+
+* added broker capability regression coverage for zero-epoch token issuance and
+  validation rejection, including stale-output clearing on failed issue.
 
 * added broker ring import regression coverage proving failed owned imports
   close the transferred fd/HANDLE authority and leave the caller mapping output

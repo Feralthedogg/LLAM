@@ -477,6 +477,14 @@ static int test_token_tamper_rejected(void) {
         return -1;
     }
     token.rights &= ~LLAM_CAP_RIGHT_DESTROY;
+    token.revocation_epoch = 0U;
+    errno = 0;
+    if (expect_errno(llam_capability_validate(&key, &token, LLAM_CAP_RIGHT_SEND, object.revocation_epoch),
+                     EINVAL,
+                     "zero-epoch token accepted") != 0) {
+        return -1;
+    }
+    token.revocation_epoch = object.revocation_epoch;
     token.mac[0] ^= 0x80U;
     errno = 0;
     if (expect_errno(llam_capability_validate(&key, &token, LLAM_CAP_RIGHT_SEND, object.revocation_epoch),
@@ -732,6 +740,20 @@ static int test_capability_issue_clears_output_on_invalid_input(void) {
     }
     if (!memory_is_byte(&token, sizeof(token), 0U)) {
         fprintf(stderr, "[test_security_capability] zero-generation issue left stale output token\n");
+        return -1;
+    }
+
+    memset(&token, 0xa5, sizeof(token));
+    object = test_object();
+    object.revocation_epoch = 0U;
+    errno = 0;
+    if (expect_errno(llam_capability_issue(&key, &object, LLAM_CAP_RIGHT_READ, &token),
+                     EINVAL,
+                     "capability issue accepted zero revocation epoch") != 0) {
+        return -1;
+    }
+    if (!memory_is_byte(&token, sizeof(token), 0U)) {
+        fprintf(stderr, "[test_security_capability] zero-epoch issue left stale output token\n");
         return -1;
     }
     return 0;
