@@ -461,8 +461,10 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
     pthread_mutex_unlock(&first->submit_lock);
 
     if (migrated > 0U) {
-        atomic_fetch_sub_explicit(&source_node->pending_ops, migrated, memory_order_acq_rel);
-        atomic_fetch_add_explicit(&target_node->pending_ops, migrated, memory_order_acq_rel);
+        if (!llam_node_complete_pending_ops(source_node, migrated) ||
+            !llam_node_note_pending_ops(target_node, migrated)) {
+            return false;
+        }
         source_shard->metrics.migrations += migrated;
     }
     if (migrated_out != NULL) {

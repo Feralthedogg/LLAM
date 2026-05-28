@@ -57,7 +57,7 @@ void llam_darwin_handle_poll_watch_event(llam_node_t *node, llam_poll_watch_t *w
     pthread_mutex_unlock(&node->watch_lock);
 
     if (release_pending) {
-        atomic_fetch_sub(&node->pending_ops, 1U);
+        (void)llam_node_complete_pending_ops(node, 1U);
     }
     if (llam_darwin_poll_watch_change(node, watch, EV_DELETE) != 0 &&
         llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
@@ -174,7 +174,7 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
     pthread_mutex_unlock(&node->watch_lock);
 
     if (release_pending) {
-        atomic_fetch_sub(&node->pending_ops, 1U);
+        (void)llam_node_complete_pending_ops(node, 1U);
     }
 
     if (accept_error != 0) {
@@ -210,7 +210,7 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
             watch->wait_tail = NULL;
             if (watch->active) {
                 watch->active = false;
-                atomic_fetch_sub(&node->pending_ops, 1U);
+                (void)llam_node_complete_pending_ops(node, 1U);
             }
             pthread_mutex_unlock(&node->watch_lock);
             while (waiters != NULL) {
@@ -342,7 +342,7 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
     pthread_mutex_unlock(&node->watch_lock);
 
     if (release_pending) {
-        atomic_fetch_sub(&node->pending_ops, 1U);
+        (void)llam_node_complete_pending_ops(node, 1U);
     }
 
     if (recv_error != 0) {
@@ -377,7 +377,7 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
             watch->wait_tail = NULL;
             if (watch->active) {
                 watch->active = false;
-                atomic_fetch_sub(&node->pending_ops, 1U);
+                (void)llam_node_complete_pending_ops(node, 1U);
             }
             pthread_mutex_unlock(&node->watch_lock);
             while (waiters != NULL) {

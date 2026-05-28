@@ -75,18 +75,59 @@ void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard
     }
 }
 
-static bool llam_node_complete_pending_op(llam_node_t *node, llam_runtime_t *rt) {
+bool llam_node_note_pending_ops(llam_node_t *node, unsigned amount) {
+    llam_runtime_t *rt = node != NULL ? node->runtime : NULL;
     unsigned pending;
 
+    if (amount == 0U) {
+        return true;
+    }
     if (node == NULL) {
+        errno = EINVAL;
         return false;
     }
 
     pending = atomic_load_explicit(&node->pending_ops, memory_order_acquire);
-    while (pending != 0U) {
+    for (;;) {
+        if (UINT_MAX - pending < amount) {
+            /*
+             * pending_ops is both a worker wake/sleep gate and a shutdown
+             * diagnostic.  Saturated counters must reject new ownership
+             * instead of wrapping to zero while work remains queued.
+             */
+            if (rt != NULL) {
+                llam_record_fatal(rt, EOVERFLOW);
+            }
+            errno = EOVERFLOW;
+            return false;
+        }
         if (atomic_compare_exchange_weak_explicit(&node->pending_ops,
                                                   &pending,
-                                                  pending - 1U,
+                                                  pending + amount,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+bool llam_node_complete_pending_ops(llam_node_t *node, unsigned amount) {
+    llam_runtime_t *rt = node != NULL ? node->runtime : NULL;
+    unsigned pending;
+
+    if (amount == 0U) {
+        return true;
+    }
+    if (node == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+
+    pending = atomic_load_explicit(&node->pending_ops, memory_order_acquire);
+    while (pending >= amount) {
+        if (atomic_compare_exchange_weak_explicit(&node->pending_ops,
+                                                  &pending,
+                                                  pending - amount,
                                                   memory_order_acq_rel,
                                                   memory_order_acquire)) {
             return true;
@@ -96,6 +137,7 @@ static bool llam_node_complete_pending_op(llam_node_t *node, llam_runtime_t *rt)
     if (rt != NULL) {
         llam_record_fatal(rt, EINVAL);
     }
+    errno = EINVAL;
     return false;
 }
 
@@ -119,7 +161,7 @@ bool llam_io_completion_begin(llam_node_t *node, llam_io_req_t *req, bool decrem
         llam_record_fatal(node_runtime, EXDEV);
         return false;
     }
-    if (decrement_pending && !llam_node_complete_pending_op(node, node_runtime)) {
+    if (decrement_pending && !llam_node_complete_pending_ops(node, 1U)) {
         return false;
     }
     return true;
@@ -193,14 +235,17 @@ bool llam_node_submit_io_req(llam_node_t *node, llam_io_req_t *req) {
     }
 
     pthread_mutex_lock(&node->submit_lock);
-    atomic_fetch_add(&node->pending_ops, 1U);
+    if (!llam_node_note_pending_ops(node, 1U)) {
+        pthread_mutex_unlock(&node->submit_lock);
+        return false;
+    }
     if (llam_queue_node_submit_locked(node, req)) {
         pthread_mutex_unlock(&node->submit_lock);
         return true;
     }
 
     saved_errno = errno;
-    atomic_fetch_sub(&node->pending_ops, 1U);
+    (void)llam_node_complete_pending_ops(node, 1U);
     pthread_mutex_unlock(&node->submit_lock);
     errno = saved_errno;
     return false;

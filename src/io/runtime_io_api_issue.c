@@ -188,7 +188,7 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
             removed = llam_remove_node_submit_locked(node, req);
             pthread_mutex_unlock(&node->submit_lock);
             if (removed) {
-                atomic_fetch_sub(&node->pending_ops, 1U);
+                (void)llam_node_complete_pending_ops(node, 1U);
             }
         } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
             pthread_mutex_lock(&node->watch_lock);
@@ -317,7 +317,7 @@ static bool llam_abort_published_io_setup(llam_io_req_t *req,
         }
         pthread_mutex_unlock(&node->submit_lock);
         if (removed) {
-            atomic_fetch_sub(&node->pending_ops, 1U);
+            (void)llam_node_complete_pending_ops(node, 1U);
         }
     } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
         pthread_mutex_lock(&node->watch_lock);

@@ -43,7 +43,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
             watch->active = true;
             watch->activating = false;
             watch->deactivate_queued = false;
-            atomic_fetch_add(&node->pending_ops, 1U);
+            (void)llam_node_note_pending_ops(node, 1U);
         } else {
             watch->active = false;
             watch->activating = false;
@@ -72,7 +72,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         watch->deactivate_queued = false;
         if (watch->active) {
             watch->active = false;
-            atomic_fetch_sub(&node->pending_ops, 1U);
+            (void)llam_node_complete_pending_ops(node, 1U);
         }
         if (watch->migrate_target_node_index != UINT_MAX) {
             migrate_target = watch->migrate_target_node_index;
@@ -99,7 +99,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
             watch->active = true;
             watch->activating = false;
             watch->deactivate_queued = false;
-            atomic_fetch_add(&node->pending_ops, 1U);
+            (void)llam_node_note_pending_ops(node, 1U);
         } else {
             watch->active = false;
             watch->activating = false;
@@ -129,7 +129,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         watch->deactivate_queued = false;
         if (watch->active) {
             watch->active = false;
-            atomic_fetch_sub(&node->pending_ops, 1U);
+            (void)llam_node_complete_pending_ops(node, 1U);
         }
         if (watch->migrate_target_node_index != UINT_MAX) {
             migrate_target = watch->migrate_target_node_index;
@@ -156,7 +156,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
             watch->active = true;
             watch->activating = false;
             watch->deactivate_queued = false;
-            atomic_fetch_add(&node->pending_ops, 1U);
+            (void)llam_node_note_pending_ops(node, 1U);
         } else {
             watch->active = false;
             watch->activating = false;
@@ -186,7 +186,7 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         watch->deactivate_queued = false;
         if (watch->active) {
             watch->active = false;
-            atomic_fetch_sub(&node->pending_ops, 1U);
+            (void)llam_node_complete_pending_ops(node, 1U);
         }
         if (watch->migrate_target_node_index != UINT_MAX) {
             migrate_target = watch->migrate_target_node_index;

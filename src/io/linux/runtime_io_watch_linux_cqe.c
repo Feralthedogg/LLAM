@@ -154,7 +154,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             pthread_mutex_unlock(&node->watch_lock);
 
             if (release_pending) {
-                atomic_fetch_sub(&node->pending_ops, 1U);
+                (void)llam_node_complete_pending_ops(node, 1U);
             }
             if (queue_activate) {
                 llam_kick_node(node);
@@ -253,7 +253,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             pthread_mutex_unlock(&node->watch_lock);
 
             if (release_pending) {
-                atomic_fetch_sub(&node->pending_ops, 1U);
+                (void)llam_node_complete_pending_ops(node, 1U);
             }
             if (live_target != UINT_MAX) {
                 if (llam_forward_live_accept_watch_ready(node, live_fd, live_target, res)) {
@@ -381,7 +381,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             pthread_mutex_unlock(&node->watch_lock);
 
             if (release_pending) {
-                atomic_fetch_sub(&node->pending_ops, 1U);
+                (void)llam_node_complete_pending_ops(node, 1U);
             }
             if (live_target != UINT_MAX) {
                 if (!llam_forward_live_recv_watch_ready(node,
@@ -459,7 +459,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                         watch->deactivate_queued = false;
                         if (watch->active) {
                             watch->active = false;
-                            atomic_fetch_sub(&node->pending_ops, 1U);
+                            (void)llam_node_complete_pending_ops(node, 1U);
                         }
                         if (watch->migrate_target_node_index != UINT_MAX) {
                             poll_migrate_target = watch->migrate_target_node_index;
@@ -474,7 +474,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                         watch->deactivate_queued = false;
                         if (watch->active) {
                             watch->active = false;
-                            atomic_fetch_sub(&node->pending_ops, 1U);
+                            (void)llam_node_complete_pending_ops(node, 1U);
                         }
                         if (watch->migrate_target_node_index != UINT_MAX) {
                             accept_migrate_target = watch->migrate_target_node_index;
@@ -489,7 +489,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                         watch->deactivate_queued = false;
                         if (watch->active) {
                             watch->active = false;
-                            atomic_fetch_sub(&node->pending_ops, 1U);
+                            (void)llam_node_complete_pending_ops(node, 1U);
                         }
                         if (watch->migrate_target_node_index != UINT_MAX) {
                             recv_migrate_target = watch->migrate_target_node_index;

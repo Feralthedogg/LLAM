@@ -538,7 +538,7 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
         }
         pthread_mutex_unlock(&node->submit_lock);
         if (removed) {
-            atomic_fetch_sub(&node->pending_ops, 1U);
+            (void)llam_node_complete_pending_ops(node, 1U);
         }
     } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
         pthread_mutex_lock(&node->watch_lock);

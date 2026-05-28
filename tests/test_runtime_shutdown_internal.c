@@ -916,6 +916,53 @@ static int exercise_submit_queue_rejects_foreign_runtime_request(void) {
     return 0;
 }
 
+static int exercise_submit_queue_rejects_pending_counter_overflow(void) {
+#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_req_t req;
+    int lock_rc;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&req, 0, sizeof(req));
+
+    lock_rc = pthread_mutex_init(&node.submit_lock, NULL);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        return fail_errno("submit lock init failed for pending counter overflow check");
+    }
+
+    node.runtime = &runtime;
+    atomic_init(&node.pending_ops, UINT_MAX);
+    req.kind = LLAM_IO_KIND_READ;
+    req.owner_runtime = &runtime;
+    req.owner_shard = 0U;
+    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_SUBMIT_QUEUE);
+    atomic_init(&req.inflight_owner_shard, UINT_MAX);
+    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req.cancel_queued, 0U);
+
+    /*
+     * pending_ops gates worker sleep, shutdown diagnostics, and rehome
+     * decisions.  A saturated counter must fail closed rather than wrapping to
+     * zero while a request is linked into the submit queue.
+     */
+    errno = 0;
+    if (llam_node_submit_io_req(&node, &req) ||
+        errno != EOVERFLOW ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != UINT_MAX ||
+        node.submit_head != NULL ||
+        node.submit_tail != NULL) {
+        (void)pthread_mutex_destroy(&node.submit_lock);
+        return fail_msg("submit queue pending counter overflow was not rejected");
+    }
+
+    (void)pthread_mutex_destroy(&node.submit_lock);
+#endif
+    return 0;
+}
+
 static int exercise_inflight_waiter_counter_underflow_is_rejected(void) {
     if (init_runtime() != 0) {
         return fail_errno("runtime init failed for inflight waiter underflow check");
@@ -1001,6 +1048,9 @@ int main(void) {
         return 1;
     }
     if (exercise_submit_queue_rejects_foreign_runtime_request() != 0) {
+        return 1;
+    }
+    if (exercise_submit_queue_rejects_pending_counter_overflow() != 0) {
         return 1;
     }
     if (exercise_inflight_waiter_counter_underflow_is_rejected() != 0) {

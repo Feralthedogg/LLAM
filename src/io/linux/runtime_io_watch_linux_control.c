@@ -357,7 +357,7 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         watch->activating = false;
         watch->deactivate_queued = false;
         pthread_mutex_unlock(&node->watch_lock);
-        atomic_fetch_add(&node->pending_ops, 1U);
+        (void)llam_node_note_pending_ops(node, 1U);
         free(op);
         return;
     }
@@ -378,7 +378,7 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         watch->activating = false;
         watch->deactivate_queued = false;
         pthread_mutex_unlock(&node->watch_lock);
-        atomic_fetch_add(&node->pending_ops, 1U);
+        (void)llam_node_note_pending_ops(node, 1U);
         free(op);
         return;
     }
@@ -403,7 +403,7 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         watch->activating = false;
         watch->deactivate_queued = false;
         pthread_mutex_unlock(&node->watch_lock);
-        atomic_fetch_add(&node->pending_ops, 1U);
+        (void)llam_node_note_pending_ops(node, 1U);
         free(op);
         return;
     }
