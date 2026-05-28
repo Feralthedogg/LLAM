@@ -173,6 +173,12 @@ typedef struct cross_runtime_close_handle_state {
     int err;
 } cross_runtime_close_handle_state_t;
 
+typedef struct pending_handle_cancel_state {
+    windows_handle_state_t pipe;
+    llam_cancel_token_t *token;
+    atomic_uint canceller_done;
+} pending_handle_cancel_state_t;
+
 static void cross_runtime_close_handle_task(void *arg) {
     cross_runtime_close_handle_state_t *state = arg;
 
@@ -181,6 +187,40 @@ static void cross_runtime_close_handle_task(void *arg) {
     }
     state->rc = llam_close_handle(state->handle);
     state->err = errno;
+}
+
+static void pending_handle_cancel_reader_task(void *arg) {
+    pending_handle_cancel_state_t *state = arg;
+    char buf[4];
+    ssize_t nread;
+
+    nread = llam_read_handle(state->pipe.pipe_reader, buf, sizeof(buf));
+    if (nread != -1 || errno != ECANCELED) {
+        task_fail(&state->pipe,
+                  "pending llam_read_handle did not cancel",
+                  nread == -1 && errno != 0 ? errno : EIO);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->pipe.reader_done, 1U, memory_order_relaxed);
+}
+
+static void pending_handle_cancel_trigger_task(void *arg) {
+    pending_handle_cancel_state_t *state = arg;
+
+    /*
+     * Let the reader publish an overlapped ReadFile first.  The exact race still
+     * remains valid if the cancel wins early: pre-cancelled waits must also fail
+     * with ECANCELED rather than parking forever.
+     */
+    if (llam_sleep_ns(100000000ULL) != 0) {
+        task_fail(&state->pipe, "sleep before pending handle cancel", errno != 0 ? errno : EIO);
+        return;
+    }
+    if (llam_cancel_token_cancel(state->token) != 0) {
+        task_fail(&state->pipe, "cancel pending handle read", errno != 0 ? errno : EIO);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->canceller_done, 1U, memory_order_relaxed);
 }
 
 static bool runtime_assoc_contains_handle(llam_runtime_t *runtime, llam_handle_t handle) {
@@ -371,6 +411,127 @@ cleanup:
     return failed;
 }
 
+static void init_handle_state(windows_handle_state_t *state) {
+    memset(state, 0, sizeof(*state));
+    state->pipe_reader = LLAM_INVALID_HANDLE;
+    state->pipe_writer = LLAM_INVALID_HANDLE;
+    state->event_handle = LLAM_INVALID_HANDLE;
+    atomic_init(&state->failures, 0U);
+    atomic_init(&state->reader_done, 0U);
+    atomic_init(&state->writer_done, 0U);
+    atomic_init(&state->poller_done, 0U);
+    atomic_init(&state->signaler_done, 0U);
+}
+
+static int test_pending_handle_read_cancel(void) {
+    pending_handle_cancel_state_t state;
+    llam_runtime_opts_t opts;
+    llam_spawn_opts_t spawn_opts;
+    llam_task_t *reader = NULL;
+    llam_task_t *canceller = NULL;
+    int failed = 0;
+
+    memset(&state, 0, sizeof(state));
+    init_handle_state(&state.pipe);
+    atomic_init(&state.canceller_done, 0U);
+
+    if (setup_pipe(&state.pipe) != 0) {
+        return fail_errno("pending cancel pipe setup failed");
+    }
+    state.token = llam_cancel_token_create();
+    if (state.token == NULL ||
+        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0 ||
+        llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        failed = fail_errno("pending cancel init failed");
+        goto cleanup;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    spawn_opts.cancel_token = state.token;
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        failed = fail_errno("pending cancel runtime init failed");
+        goto cleanup;
+    }
+
+    reader = llam_spawn(pending_handle_cancel_reader_task, &state, &spawn_opts);
+    canceller = llam_spawn(pending_handle_cancel_trigger_task, &state, NULL);
+    if (reader == NULL || canceller == NULL) {
+        failed = fail_errno("pending cancel spawn failed");
+        if (reader != NULL) {
+            (void)llam_detach(reader);
+            reader = NULL;
+        }
+        if (canceller != NULL) {
+            (void)llam_detach(canceller);
+            canceller = NULL;
+        }
+        goto shutdown;
+    }
+    if (llam_run() != 0) {
+        failed = fail_errno("pending cancel runtime run failed");
+        if (reader != NULL) {
+            (void)llam_detach(reader);
+            reader = NULL;
+        }
+        if (canceller != NULL) {
+            (void)llam_detach(canceller);
+            canceller = NULL;
+        }
+        goto shutdown;
+    }
+    if (llam_join(reader) != 0) {
+        failed = fail_errno("pending cancel join failed");
+        (void)llam_detach(reader);
+        reader = NULL;
+        goto shutdown;
+    }
+    reader = NULL;
+    if (llam_join(canceller) != 0) {
+        failed = fail_errno("pending cancel join failed");
+        (void)llam_detach(canceller);
+        canceller = NULL;
+        goto shutdown;
+    }
+    canceller = NULL;
+    if (atomic_load_explicit(&state.pipe.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_windows_handle_io] pending cancel failed at %s errno=%d\n",
+                state.pipe.first_case,
+                state.pipe.first_errno);
+        failed = 1;
+    } else if (atomic_load_explicit(&state.pipe.reader_done, memory_order_relaxed) != 1U ||
+               atomic_load_explicit(&state.canceller_done, memory_order_relaxed) != 1U) {
+        fprintf(stderr, "[test_windows_handle_io] pending cancel missing completion\n");
+        failed = 1;
+    }
+
+shutdown:
+    if (reader != NULL) {
+        (void)llam_join(reader);
+    }
+    if (canceller != NULL) {
+        (void)llam_join(canceller);
+    }
+    if (state.token != NULL && reader == NULL && canceller == NULL) {
+        if (llam_cancel_token_destroy(state.token) != 0) {
+            failed = fail_errno("pending cancel token destroy failed");
+        } else {
+            state.token = NULL;
+        }
+    }
+    llam_runtime_shutdown();
+cleanup:
+    if (state.token != NULL && llam_cancel_token_destroy(state.token) != 0) {
+        failed = fail_errno("pending cancel token destroy failed");
+    }
+    if (!LLAM_HANDLE_IS_INVALID(state.pipe.pipe_writer)) {
+        CloseHandle((HANDLE)state.pipe.pipe_writer);
+    }
+    if (!LLAM_HANDLE_IS_INVALID(state.pipe.pipe_reader)) {
+        CloseHandle((HANDLE)state.pipe.pipe_reader);
+    }
+    return failed;
+}
+
 int main(void) {
     windows_handle_state_t state;
     llam_runtime_opts_t opts;
@@ -380,18 +541,11 @@ int main(void) {
     llam_task_t *signaler;
     int failed = 0;
 
-    memset(&state, 0, sizeof(state));
-    state.pipe_reader = LLAM_INVALID_HANDLE;
-    state.pipe_writer = LLAM_INVALID_HANDLE;
-    state.event_handle = LLAM_INVALID_HANDLE;
-    atomic_init(&state.failures, 0U);
-    atomic_init(&state.reader_done, 0U);
-    atomic_init(&state.writer_done, 0U);
-    atomic_init(&state.poller_done, 0U);
-    atomic_init(&state.signaler_done, 0U);
+    init_handle_state(&state);
 
     if (test_host_close_handle_purges_peer_runtime_assoc() != 0 ||
-        test_managed_close_handle_purges_peer_runtime_assoc() != 0) {
+        test_managed_close_handle_purges_peer_runtime_assoc() != 0 ||
+        test_pending_handle_read_cancel() != 0) {
         return 1;
     }
 
