@@ -109,6 +109,11 @@
   cleared the descriptor active marker. This prevents partially invalidated
   broker descriptor slots from leaking POSIX fds or Windows HANDLEs.
 
+* reclaim stale broker-owned descriptor/HANDLE authority before reusing an
+  inactive descriptor slot. A partially invalidated slot can no longer be
+  overwritten by a later registration while silently stranding the old fd or
+  HANDLE in the broker process.
+
 * keep Windows named-pipe broker servers alive when a malformed client connects
   and closes before `ConnectNamedPipe()` completes. The broken session now
   consumes only its own accept budget instead of failing the long-running local

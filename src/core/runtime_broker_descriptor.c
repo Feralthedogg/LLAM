@@ -73,6 +73,33 @@ static bool llam_broker_descriptor_handle_invalid(llam_handle_t handle) {
 #endif
 }
 
+static void llam_broker_descriptor_close_owned_slot(llam_broker_descriptor_slot_t *slot) {
+    if (slot == NULL || !slot->close_on_destroy) {
+        return;
+    }
+#if LLAM_PLATFORM_WINDOWS
+    if (!LLAM_HANDLE_IS_INVALID(slot->handle)) {
+        (void)CloseHandle((HANDLE)slot->handle);
+    }
+#else
+    if (slot->fd >= 0) {
+        (void)close(slot->fd);
+    }
+#endif
+}
+
+static void llam_broker_descriptor_reset_slot(llam_broker_descriptor_slot_t *slot) {
+    if (slot == NULL) {
+        return;
+    }
+    memset(slot, 0, sizeof(*slot));
+#if LLAM_PLATFORM_WINDOWS
+    slot->handle = LLAM_INVALID_HANDLE;
+#else
+    slot->fd = -1;
+#endif
+}
+
 void llam_broker_clear_descriptors(llam_broker_t *broker) {
     size_t i;
 
@@ -87,23 +114,8 @@ void llam_broker_clear_descriptors(llam_broker_t *broker) {
          * descriptor/HANDLE. Destroy must still reclaim partially invalidated
          * slots whose active bit was cleared during an interrupted lifecycle.
          */
-        if (slot->close_on_destroy) {
-#if LLAM_PLATFORM_WINDOWS
-            if (!LLAM_HANDLE_IS_INVALID(slot->handle)) {
-                (void)CloseHandle((HANDLE)slot->handle);
-            }
-#else
-            if (slot->fd >= 0) {
-                (void)close(slot->fd);
-            }
-#endif
-        }
-        memset(slot, 0, sizeof(*slot));
-#if LLAM_PLATFORM_WINDOWS
-        slot->handle = LLAM_INVALID_HANDLE;
-#else
-        slot->fd = -1;
-#endif
+        llam_broker_descriptor_close_owned_slot(slot);
+        llam_broker_descriptor_reset_slot(slot);
     }
 }
 
@@ -205,6 +217,13 @@ int llam_broker_register_handle(llam_broker_t *broker,
         errno = ENOSPC;
         return -1;
     }
+    /*
+     * Free-list selection is based on active=false. If a previous internal
+     * lifecycle was interrupted after clearing active, the slot can still own
+     * descriptor authority. Reclaim it before overwriting the fd/HANDLE field.
+     */
+    llam_broker_descriptor_close_owned_slot(slot);
+    llam_broker_descriptor_reset_slot(slot);
 
 #if LLAM_PLATFORM_WINDOWS
     slot->handle = handle;

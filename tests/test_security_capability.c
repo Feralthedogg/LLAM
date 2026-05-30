@@ -8665,6 +8665,105 @@ done:
     }
     return rc;
 }
+
+static int test_broker_descriptor_reuse_reclaims_inactive_owned_slot(void) {
+    llam_runtime_opts_t opts;
+    llam_capability_token_t first_token;
+    llam_capability_token_t second_token;
+    llam_broker_t broker;
+    int first_pipe[2] = {-1, -1};
+    int second_pipe[2] = {-1, -1};
+    int first_registered_fd = -1;
+    int second_registered_fd = -1;
+    bool broker_initialized = false;
+    bool found_slot = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (pipe(first_pipe) != 0 || pipe(second_pipe) != 0) {
+        goto done;
+    }
+    first_registered_fd = first_pipe[0];
+    second_registered_fd = second_pipe[0];
+
+    if (llam_broker_register_fd(&broker,
+                                first_registered_fd,
+                                LLAM_CAP_RIGHT_READ,
+                                true,
+                                &first_token) != 0) {
+        fprintf(stderr, "[test_security_capability] first descriptor reuse setup failed errno=%d\n", errno);
+        goto done;
+    }
+    first_pipe[0] = -1;
+    if (llam_broker_lock(&broker) != 0) {
+        goto done;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        if (broker.descriptors[i].id == first_token.slot &&
+            broker.descriptors[i].generation == first_token.generation) {
+            broker.descriptors[i].active = false;
+            found_slot = true;
+            break;
+        }
+    }
+    llam_broker_unlock(&broker);
+    if (!found_slot) {
+        fprintf(stderr, "[test_security_capability] inactive descriptor reuse slot was not found\n");
+        goto done;
+    }
+
+    /*
+     * Registration reuses inactive slots. If a partially invalidated slot still
+     * owns a descriptor, reuse must close it before overwriting the fd field.
+     */
+    if (llam_broker_register_fd(&broker,
+                                second_registered_fd,
+                                LLAM_CAP_RIGHT_READ,
+                                true,
+                                &second_token) != 0) {
+        fprintf(stderr, "[test_security_capability] second descriptor reuse setup failed errno=%d\n", errno);
+        goto done;
+    }
+    second_pipe[0] = -1;
+    second_registered_fd = -1;
+    if (!broker_fd_is_closed(first_registered_fd)) {
+        fprintf(stderr, "[test_security_capability] inactive owned descriptor was overwritten without close\n");
+        goto done;
+    }
+    first_registered_fd = -1;
+    rc = 0;
+
+done:
+    if (first_registered_fd >= 0 && !broker_fd_is_closed(first_registered_fd)) {
+        close(first_registered_fd);
+    }
+    if (second_registered_fd >= 0 && !broker_fd_is_closed(second_registered_fd)) {
+        close(second_registered_fd);
+    }
+    if (first_pipe[0] >= 0) {
+        close(first_pipe[0]);
+    }
+    if (first_pipe[1] >= 0) {
+        close(first_pipe[1]);
+    }
+    if (second_pipe[0] >= 0) {
+        close(second_pipe[0]);
+    }
+    if (second_pipe[1] >= 0) {
+        close(second_pipe[1]);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
 #endif
 
 #if LLAM_PLATFORM_WINDOWS
@@ -11393,6 +11492,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_named_session_cleanup_unlinks_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_ring_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_descriptor);
+    LLAM_RUN_SECURITY_TEST(test_broker_descriptor_reuse_reclaims_inactive_owned_slot);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);
     LLAM_RUN_SECURITY_TEST(test_broker_create_ring_response_failure_reclaims_session);
     LLAM_RUN_SECURITY_TEST(test_broker_serve_local_n_survives_malformed_session);
