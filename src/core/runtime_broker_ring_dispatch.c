@@ -79,6 +79,36 @@ static void llam_broker_ring_clear_output_suffix(llam_broker_ring_t *ring,
     }
 }
 
+static void llam_broker_ring_clear_submission_output(llam_broker_ring_t *ring,
+                                                     const llam_broker_ring_submission_t *submission) {
+    uint64_t length;
+    size_t ring_offset;
+    size_t range_length;
+
+    if (ring == NULL || submission == NULL) {
+        return;
+    }
+
+    switch ((llam_broker_ring_op_t)submission->op) {
+    case LLAM_BROKER_RING_OP_CAP_ATTENUATE:
+    case LLAM_BROKER_RING_OP_CAP_REVOKE:
+    case LLAM_BROKER_RING_OP_TASK_SPAWN:
+        length = sizeof(llam_capability_token_t);
+        break;
+    case LLAM_BROKER_RING_OP_BUFFER_READ:
+    case LLAM_BROKER_RING_OP_DESCRIPTOR_READ:
+    case LLAM_BROKER_RING_OP_CHANNEL_RECV:
+        length = submission->arg1;
+        break;
+    default:
+        return;
+    }
+
+    if (llam_broker_ring_data_range(submission->arg2, length, &ring_offset, &range_length) == 0) {
+        llam_broker_ring_clear_output(ring, ring_offset, range_length);
+    }
+}
+
 static void llam_broker_ring_completion_fail(llam_broker_ring_completion_t *completion, int error_code) {
     /*
      * Ring completions are the only status channel visible to an untrusted
@@ -384,6 +414,64 @@ static int llam_broker_ring_session_reserve_batch(llam_broker_ring_t *ring,
     return 0;
 }
 
+static int llam_broker_ring_session_validate_publish_locked(const llam_broker_ring_t *ring,
+                                                            const llam_broker_ring_session_t *session,
+                                                            uint64_t completion_tail) {
+    uint64_t published_submit_head;
+    uint64_t published_complete_tail;
+
+    if (LLAM_UNLIKELY(!llam_broker_ring_valid(ring) || session == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    published_submit_head = atomic_load_explicit(&ring->submit_head.value, memory_order_acquire);
+    published_complete_tail = atomic_load_explicit(&ring->complete_tail.value, memory_order_acquire);
+    if (LLAM_UNLIKELY(published_submit_head != session->submit_head ||
+                      published_complete_tail != completion_tail)) {
+        /*
+         * Operations can block outside the broker lock. Re-check broker-owned
+         * published cursors before exposing completions so a client cannot
+         * reset or corrupt the ring while an operation is in flight and then
+         * receive a completion that masks the tampering.
+         */
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+static bool llam_broker_ring_session_poison_locked(llam_broker_ring_session_t *session,
+                                                   llam_broker_ring_mapping_t *out_mapping) {
+    bool unmap_mapping = false;
+
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
+    if (session == NULL) {
+        return false;
+    }
+
+    if (session->active && session->owns_mapping && out_mapping != NULL) {
+        out_mapping->ring = (llam_broker_ring_t *)session->ring;
+        out_mapping->bytes = session->mapping_bytes;
+        out_mapping->fd = session->mapping_fd;
+        out_mapping->mapping_handle = session->mapping_handle;
+        out_mapping->owner = true;
+        unmap_mapping = true;
+    }
+
+    /*
+     * A cursor mismatch after execution means the data plane is no longer
+     * trustworthy. Drop the broker-private session so stale cursors cannot
+     * replay the already-executed submission on a later serve attempt.
+     */
+    memset(session, 0, sizeof(*session));
+    session->mapping_fd = -1;
+    session->mapping_handle = LLAM_INVALID_HANDLE;
+    return unmap_mapping;
+}
+
 int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
                                                 llam_broker_ring_t *ring,
                                                 llam_broker_ring_session_t *session,
@@ -391,6 +479,7 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
                                                 size_t *out_served) {
     llam_broker_ring_submission_t submissions[LLAM_BROKER_RING_SERVE_BATCH_MAX];
     llam_broker_ring_completion_t completions[LLAM_BROKER_RING_SERVE_BATCH_MAX];
+    llam_broker_ring_mapping_t poisoned_mapping;
     uint64_t completion_tail;
     uint64_t serve_start_ns;
     uint64_t serve_end_ns;
@@ -429,6 +518,22 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
 
     if (llam_broker_lock(broker) != 0) {
         llam_broker_end_op(broker);
+        return -1;
+    }
+    if (llam_broker_ring_session_validate_publish_locked(ring, session, completion_tail) != 0) {
+        int saved_errno = errno;
+        bool unmap_mapping;
+
+        for (i = 0U; i < count; ++i) {
+            llam_broker_ring_clear_submission_output(ring, &submissions[i]);
+        }
+        unmap_mapping = llam_broker_ring_session_poison_locked(session, &poisoned_mapping);
+        llam_broker_unlock(broker);
+        if (unmap_mapping) {
+            llam_broker_ring_unmap(&poisoned_mapping);
+        }
+        llam_broker_end_op(broker);
+        errno = saved_errno;
         return -1;
     }
     for (i = 0U; i < count; ++i) {

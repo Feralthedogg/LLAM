@@ -193,6 +193,12 @@
   fresh submissions or expose stale/zeroed completion slots through a
   completion-tail gap.
 
+* reject broker ring publish-time cursor mismatches after blocking in-flight
+  operations. If the shared cursor view changes while the broker is executing a
+  copied submission, the broker now clears any validated output window, poisons
+  the private session, reclaims broker-owned mappings, and returns `EINVAL`
+  without publishing a completion.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
@@ -223,6 +229,10 @@
 
 * added broker transport regression coverage proving zero-right grant requests
   fail closed for buffer, channel, and descriptor/HANDLE authority.
+
+* added broker ring regression coverage for in-flight shared cursor corruption
+  during descriptor reads, proving no completion or stale output is published
+  and that a subsequent ring reset can create a fresh broker-private session.
 
 * added broker subject-frame overflow regression coverage proving nested
   broker operations fail closed with `EOVERFLOW` without changing the active

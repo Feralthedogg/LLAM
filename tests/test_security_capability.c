@@ -8150,6 +8150,137 @@ done:
     return rc;
 }
 
+static int test_broker_ring_publish_cursor_mismatch_fails_closed(void) {
+    static const char inbound[] = "publish mismatch";
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_t ring;
+    llam_capability_token_t read_token;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    broker_ring_serve_thread_state_t serve_state;
+    pthread_t serve_thread;
+    int pipe_fds[2] = {-1, -1};
+    bool broker_initialized = false;
+    bool serve_started = false;
+    size_t i;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (llam_broker_ring_init(&ring) != 0 || pipe(pipe_fds) != 0) {
+        goto done;
+    }
+    if (llam_broker_register_fd(&broker, pipe_fds[0], LLAM_CAP_RIGHT_READ, false, &read_token) != 0) {
+        goto done;
+    }
+
+    memset(&submission, 0, sizeof(submission));
+    submission.request_id = 72U;
+    submission.op = LLAM_BROKER_RING_OP_DESCRIPTOR_READ;
+    submission.arg1 = sizeof(inbound);
+    submission.arg2 = 64U;
+    submission.token = read_token;
+    if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+        goto done;
+    }
+    memset(&serve_state, 0, sizeof(serve_state));
+    serve_state.broker = &broker;
+    serve_state.ring = &ring;
+    serve_state.rc = -1;
+    if (pthread_create(&serve_thread, NULL, broker_ring_serve_thread, &serve_state) != 0) {
+        goto done;
+    }
+    serve_started = true;
+
+    /*
+     * Wait until the broker has copied the submission and is blocked inside
+     * the nested descriptor read. The client-visible ring cursors are shared
+     * memory, so a corrupt client can still modify them before the broker
+     * publishes completions. That must fail closed at publish time.
+     */
+    for (unsigned i = 0U; i < 100000U; ++i) {
+        if (broker_test_active_ops(&broker) >= 2U) {
+            break;
+        }
+        sched_yield();
+    }
+    if (broker_test_active_ops(&broker) < 2U) {
+        goto done;
+    }
+    atomic_store_explicit(&ring.submit_head.value, UINT64_C(123), memory_order_release);
+    if (write(pipe_fds[1], inbound, sizeof(inbound)) != (ssize_t)sizeof(inbound)) {
+        goto done;
+    }
+    (void)pthread_join(serve_thread, NULL);
+    serve_started = false;
+    if (serve_state.rc == 0 || serve_state.error_code != EINVAL) {
+        fprintf(stderr,
+                "[test_security_capability] broker published after cursor corruption rc=%d errno=%d\n",
+                serve_state.rc,
+                serve_state.error_code);
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_complete_pop(&ring, &completion),
+                     EAGAIN,
+                     "cursor-corrupted serve published a completion") != 0) {
+        goto done;
+    }
+    for (i = 0U; i < sizeof(inbound); ++i) {
+        if (ring.data[64U + i] != 0U) {
+            fprintf(stderr, "[test_security_capability] failed serve left output byte %zu visible\n", i);
+            goto done;
+        }
+    }
+
+    /*
+     * The corrupted session must be poisoned rather than left active with stale
+     * private cursors; otherwise resetting the ring would keep failing or could
+     * replay the already executed submission.
+     */
+    if (llam_broker_ring_init(&ring) != 0) {
+        goto done;
+    }
+    memset(&submission, 0, sizeof(submission));
+    submission.request_id = 73U;
+    submission.op = LLAM_BROKER_RING_OP_NOP;
+    if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
+        llam_broker_ring_serve_one(&broker, &ring) != 0 ||
+        llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
+        completion.request_id != submission.request_id ||
+        completion.status != 0) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (pipe_fds[1] >= 0) {
+        if (serve_started) {
+            ssize_t ignored = write(pipe_fds[1], inbound, sizeof(inbound));
+
+            (void)ignored;
+        }
+        close(pipe_fds[1]);
+    }
+    if (serve_started) {
+        (void)pthread_join(serve_thread, NULL);
+    }
+    if (pipe_fds[0] >= 0) {
+        close(pipe_fds[0]);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
+
 static int test_broker_ring_session_forget_rejects_busy_serve(void) {
     static const char inbound[] = "session busy";
     const uint64_t subject_id = UINT64_C(0x7b7b7b7b);
@@ -11011,6 +11142,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_nested_ring_create_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_is_single_owner_under_race);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);
     LLAM_RUN_SECURITY_TEST(test_broker_create_ring_response_failure_reclaims_session);

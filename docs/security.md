@@ -213,6 +213,11 @@ broker-control foundation:
   `EINVAL` rather than resynchronizing from shared memory. This prevents a
   stale session from skipping fresh submissions or publishing a completion-tail
   gap that exposes zeroed or stale completion slots as successful responses.
+  The broker rechecks those cursors again after any in-flight operation returns
+  and before publishing completions; on mismatch it clears any validated output
+  window, invalidates the private session, and reclaims broker-owned mappings
+  instead of exposing a completion for work that ran under a corrupted cursor
+  view.
 - Broker object tables and ring-session state are guarded by broker-local
   locking. Serving the same shared-memory ring concurrently fails with `EBUSY`
   instead of racing broker-private cursors.
