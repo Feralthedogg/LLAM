@@ -104,6 +104,11 @@
   if an interrupted lifecycle has already cleared the session active marker.
   This keeps cleanup fail-closed for partially invalidated broker session state.
 
+* reclaim stale broker-owned ring mappings before reusing an inactive ring
+  session slot. A partially invalidated session can no longer be overwritten by
+  a later shared-ring registration while silently stranding the old named shm
+  rendezvous object in the broker process.
+
 * reclaim broker-owned descriptor/HANDLE authority during destroy from the
   close-on-destroy ownership bit even if an interrupted lifecycle has already
   cleared the descriptor active marker. This prevents partially invalidated
@@ -242,6 +247,9 @@
 * added broker ring cleanup coverage for inactive-but-owned session state so
   destroy cannot strand named shared-memory rendezvous objects after partial
   session invalidation.
+
+* added broker ring reuse coverage for inactive-but-owned session state so slot
+  reuse cannot overwrite named shared-memory rendezvous authority before unlink.
 
 * added broker buffer-grant regression coverage for absolute range overflow,
   maximum-buffer bound overflow, non-buffer rights, and relative range overflow

@@ -26,10 +26,16 @@
 
 static llam_broker_ring_session_t *llam_broker_ring_session_get(llam_broker_t *broker,
                                                                 llam_broker_ring_t *ring,
-                                                                uint64_t subject_id) {
+                                                                uint64_t subject_id,
+                                                                llam_broker_ring_mapping_t *out_reclaimed_mapping) {
     llam_broker_ring_session_t *free_session = NULL;
     size_t i;
 
+    if (LLAM_UNLIKELY(out_reclaimed_mapping == NULL)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    llam_broker_ring_mapping_reset(out_reclaimed_mapping);
     for (i = 0U; i < LLAM_BROKER_RING_SESSIONS; ++i) {
         llam_broker_ring_session_t *session = &broker->ring_sessions[i];
 
@@ -53,8 +59,13 @@ static llam_broker_ring_session_t *llam_broker_ring_session_get(llam_broker_t *b
      * Broker progress cursors live outside the shared mapping. A client can
      * corrupt the visible counters, but it cannot rewind these private cursors
      * to replay a stale submission as fresh broker work.
+     *
+     * Reuse also has to reclaim by ownership, not by the active bit. Recovery
+     * paths can leave a session inactive while it still owns a named mapping;
+     * blindly zeroing the slot would strand the fd/name authority until process
+     * exit and keep the shared-memory object reachable.
      */
-    memset(free_session, 0, sizeof(*free_session));
+    (void)llam_broker_ring_session_take_mapping(free_session, out_reclaimed_mapping);
     free_session->ring = ring;
     free_session->subject_id = subject_id;
     free_session->mapping_fd = -1;
@@ -149,8 +160,10 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
                                       llam_broker_ring_mapping_t *mapping,
                                       uint64_t subject_id,
                                       uint64_t *out_session_id) {
+    llam_broker_ring_mapping_t reclaimed_mapping;
     llam_broker_ring_session_t *session;
     size_t session_index;
+    int saved_errno;
 
     if (out_session_id != NULL) {
         *out_session_id = 0U;
@@ -180,16 +193,25 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
-    session = llam_broker_ring_session_get(broker, mapping->ring, subject_id);
+    session = llam_broker_ring_session_get(broker, mapping->ring, subject_id, &reclaimed_mapping);
     if (session == NULL) {
+        saved_errno = errno;
         llam_broker_unlock(broker);
+        if (reclaimed_mapping.owner) {
+            llam_broker_ring_unmap(&reclaimed_mapping);
+        }
         llam_broker_end_op(broker);
+        errno = saved_errno;
         return -1;
     }
     if (LLAM_UNLIKELY(session->owns_mapping)) {
+        saved_errno = EBUSY;
         llam_broker_unlock(broker);
+        if (reclaimed_mapping.owner) {
+            llam_broker_ring_unmap(&reclaimed_mapping);
+        }
         llam_broker_end_op(broker);
-        errno = EBUSY;
+        errno = saved_errno;
         return -1;
     }
 
@@ -215,6 +237,9 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
     mapping->name[0] = '\0';
 
     llam_broker_unlock(broker);
+    if (reclaimed_mapping.owner) {
+        llam_broker_ring_unmap(&reclaimed_mapping);
+    }
     llam_broker_end_op(broker);
     return 0;
 }
@@ -487,6 +512,7 @@ int llam_broker_ring_serve_batch_subject(llam_broker_t *broker,
                                          uint64_t subject_id,
                                          size_t max_requests,
                                          size_t *out_served) {
+    llam_broker_ring_mapping_t reclaimed_mapping;
     llam_broker_ring_session_t *session;
 
     if (out_served != NULL) {
@@ -503,11 +529,26 @@ int llam_broker_ring_serve_batch_subject(llam_broker_t *broker,
         llam_broker_end_op(broker);
         return -1;
     }
-    session = llam_broker_ring_session_get(broker, ring, subject_id);
+    session = llam_broker_ring_session_get(broker, ring, subject_id, &reclaimed_mapping);
     if (session == NULL) {
+        int saved_errno = errno;
+
         llam_broker_unlock(broker);
+        if (reclaimed_mapping.owner) {
+            llam_broker_ring_unmap(&reclaimed_mapping);
+        }
         llam_broker_end_op(broker);
+        errno = saved_errno;
         return -1;
+    }
+    /*
+     * Direct ring serving is a hot path, but reclaiming an inactive owned
+     * mapping is an exceptional repair path. Keep the initialized session under
+     * the table lock while the old shm object is unlinked so another serve
+     * cannot observe the stale authority between reuse and cleanup.
+     */
+    if (reclaimed_mapping.owner) {
+        llam_broker_ring_unmap(&reclaimed_mapping);
     }
     if (session->busy) {
         llam_broker_unlock(broker);

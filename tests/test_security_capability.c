@@ -8591,6 +8591,98 @@ done:
     return rc;
 }
 
+static int test_broker_ring_reuse_reclaims_inactive_owned_mapping(void) {
+    const uint64_t first_subject = UINT64_C(0x61616161);
+    const uint64_t second_subject = UINT64_C(0x62626262);
+    char first_name[128];
+    char second_name[128];
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_mapping_t first_mapping;
+    llam_broker_ring_mapping_t second_mapping;
+    llam_broker_ring_mapping_t leaked;
+    uint64_t first_session_id = 0U;
+    uint64_t second_session_id = 0U;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    memset(&first_mapping, 0, sizeof(first_mapping));
+    memset(&second_mapping, 0, sizeof(second_mapping));
+    memset(&leaked, 0, sizeof(leaked));
+    first_mapping.fd = -1;
+    second_mapping.fd = -1;
+    leaked.fd = -1;
+
+    snprintf(first_name, sizeof(first_name), "/llam-ir1-%ld", (long)getpid());
+    snprintf(second_name, sizeof(second_name), "/llam-ir2-%ld", (long)getpid());
+    (void)shm_unlink(first_name);
+    (void)shm_unlink(second_name);
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    if (llam_broker_ring_create_shm(first_name, &first_mapping) != 0 ||
+        llam_broker_ring_register_mapping(&broker, &first_mapping, first_subject, &first_session_id) != 0 ||
+        first_session_id == 0U ||
+        first_session_id > LLAM_BROKER_RING_SESSIONS) {
+        fprintf(stderr, "[test_security_capability] ring reuse first setup failed errno=%d\n", errno);
+        goto done;
+    }
+
+    /*
+     * Reproduce an interrupted lifecycle where the slot is available for reuse
+     * but still owns a named mapping. Reuse must reclaim that mapping before
+     * the new session overwrites the private fd/name authority.
+     */
+    if (llam_broker_lock(&broker) != 0) {
+        goto done;
+    }
+    broker.ring_sessions[(size_t)first_session_id - 1U].active = false;
+    llam_broker_unlock(&broker);
+
+    if (llam_broker_ring_create_shm(second_name, &second_mapping) != 0 ||
+        llam_broker_ring_register_mapping(&broker, &second_mapping, second_subject, &second_session_id) != 0 ||
+        second_session_id != first_session_id) {
+        fprintf(stderr, "[test_security_capability] ring reuse second setup failed errno=%d\n", errno);
+        goto done;
+    }
+
+    errno = 0;
+    if (llam_broker_ring_open_shm(first_name, &leaked) == 0) {
+        fprintf(stderr, "[test_security_capability] inactive owned ring mapping was overwritten without unlink\n");
+        llam_broker_ring_unmap(&leaked);
+        (void)shm_unlink(first_name);
+        goto done;
+    }
+    if (errno != ENOENT) {
+        fprintf(stderr,
+                "[test_security_capability] ring reuse cleanup reopen errno=%d expected=%d\n",
+                errno,
+                ENOENT);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    llam_broker_ring_unmap(&leaked);
+    llam_broker_ring_unmap(&first_mapping);
+    llam_broker_ring_unmap(&second_mapping);
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (rc != 0) {
+        (void)shm_unlink(first_name);
+        (void)shm_unlink(second_name);
+    }
+    return rc;
+}
+
 static int test_broker_destroy_reclaims_inactive_owned_descriptor(void) {
     llam_runtime_opts_t opts;
     llam_capability_token_t token;
@@ -11491,6 +11583,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_named_session_cleanup_unlinks_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_ring_mapping);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_reuse_reclaims_inactive_owned_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_descriptor);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_reuse_reclaims_inactive_owned_slot);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);
