@@ -118,7 +118,10 @@ bool llam_broker_ring_session_take_mapping(llam_broker_ring_session_t *session,
         return false;
     }
 
-    if (session->active && session->owns_mapping && out_mapping != NULL) {
+    if (session->owns_mapping) {
+        if (LLAM_UNLIKELY(out_mapping == NULL)) {
+            return false;
+        }
         out_mapping->ring = (llam_broker_ring_t *)session->ring;
         out_mapping->bytes = session->mapping_bytes;
         out_mapping->fd = session->mapping_fd;
@@ -130,8 +133,11 @@ bool llam_broker_ring_session_take_mapping(llam_broker_ring_session_t *session,
     }
 
     /*
-     * Clear the private session before releasing broker state so stale session
-     * ids or direct-ring entries cannot reuse the authority being reclaimed.
+     * Reclaim mapping authority from owns_mapping, not from the active bit:
+     * cleanup paths should still close/unlink broker-owned resources if an
+     * interrupted lifecycle leaves the session inactive. Clear the private
+     * session before releasing broker state so stale session ids or direct-ring
+     * entries cannot reuse the authority being reclaimed.
      */
     memset(session, 0, sizeof(*session));
     session->mapping_fd = -1;

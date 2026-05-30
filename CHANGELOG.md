@@ -100,6 +100,10 @@
   cleanup now unlink named rendezvous objects instead of only closing the
   mapped fd/HANDLE authority.
 
+* reclaim broker-owned ring mappings during destroy from the ownership bit even
+  if an interrupted lifecycle has already cleared the session active marker.
+  This keeps cleanup fail-closed for partially invalidated broker session state.
+
 * keep Windows named-pipe broker servers alive when a malformed client connects
   and closes before `ConnectNamedPipe()` completes. The broken session now
   consumes only its own accept budget instead of failing the long-running local
@@ -224,6 +228,10 @@
 
 * added broker ring cleanup coverage proving POSIX named shared-memory ring
   sessions are unlinked on explicit forget and broker destroy.
+
+* added broker ring cleanup coverage for inactive-but-owned session state so
+  destroy cannot strand named shared-memory rendezvous objects after partial
+  session invalidation.
 
 * added broker buffer-grant regression coverage for absolute range overflow,
   maximum-buffer bound overflow, non-buffer rights, and relative range overflow

@@ -165,7 +165,9 @@ broker-control foundation:
   Broker-owned sessions preserve the complete mapping authority, including the
   POSIX shm name when a named mapping is registered internally, so
   `SERVE_RING` poison, explicit session forget, and broker destroy can unlink
-  named rendezvous objects rather than only closing the fd/HANDLE.
+  named rendezvous objects rather than only closing the fd/HANDLE. Cleanup is
+  keyed by broker-owned authority instead of the active-session marker, so
+  partially invalidated sessions still release their mapped resources.
 - `LLAM_BROKER_WIRE_OP_SERVE_RING` drives submissions from a
   transport-created ring by broker session id. A zero request length keeps the
   original single-request behavior; a nonzero length asks the broker to serve a
