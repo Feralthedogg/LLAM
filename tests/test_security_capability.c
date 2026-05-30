@@ -5192,6 +5192,74 @@ static int test_broker_ring_and_buffer_grants(void) {
     return 0;
 }
 
+static int test_broker_ring_reinit_stale_session_fails_closed(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_t ring;
+    llam_broker_ring_submission_t submission;
+    llam_broker_ring_completion_t completion;
+    llam_broker_ring_completion_t completions[2];
+    size_t drained_count = 0U;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    if (llam_broker_ring_init(&ring) != 0) {
+        goto done;
+    }
+
+    memset(&submission, 0, sizeof(submission));
+    submission.request_id = 1001U;
+    submission.op = LLAM_BROKER_RING_OP_NOP;
+    if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
+        llam_broker_ring_serve_one(&broker, &ring) != 0 ||
+        llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
+        completion.request_id != submission.request_id ||
+        completion.status != 0) {
+        goto done;
+    }
+
+    /*
+     * Reusing the same shared ring address after initialization resets the
+     * client-visible cursors but not the broker's private session cursors. That
+     * must fail closed: otherwise the broker can skip the first new submission
+     * and publish a completion-tail gap containing stale success-looking slots.
+     */
+    if (llam_broker_ring_init(&ring) != 0) {
+        goto done;
+    }
+    submission.request_id = 1002U;
+    if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+        goto done;
+    }
+    submission.request_id = 1003U;
+    if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_ring_serve_one(&broker, &ring),
+                     EINVAL,
+                     "broker ring accepted a reinitialized ring with stale private cursors") != 0) {
+        goto done;
+    }
+    if (llam_broker_ring_complete_drain(&ring, completions, 2U, &drained_count) != 0 ||
+        drained_count != 0U) {
+        fprintf(stderr, "[test_security_capability] stale ring serve published completions after failure\n");
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 typedef struct broker_ring_delayed_submit_state {
     llam_broker_ring_t *ring;
     llam_broker_ring_doorbell_t *doorbell;
@@ -6399,20 +6467,16 @@ static int test_broker_ring_capability_validate_op(void) {
     }
 
     /*
-     * The client can write the shared counters. Broker serving must use
-     * broker-private cursors, otherwise rewinding submit_head would replay the
-     * previous submission.
+     * The client can write shared counters. Broker serving must use private
+     * cursors and reject a broker-published cursor mismatch instead of treating
+     * the corrupted window as an empty queue or replaying a previous request.
      */
     atomic_store_explicit(&ring.submit_head.value, 0U, memory_order_relaxed);
     atomic_store_explicit(&ring.submit_tail.value, 1U, memory_order_relaxed);
     errno = 0;
     if (expect_errno(llam_broker_ring_serve_one(&broker, &ring),
-                     EAGAIN,
-                     "broker replayed stale submission after submit_head rewind") != 0) {
-        goto done;
-    }
-    if (llam_broker_ring_collect_stats(&ring, &stats) != 0 ||
-        stats.broker_submit_empty != 1U) {
+                     EINVAL,
+                     "broker accepted submit_head rewind against private cursor") != 0) {
         goto done;
     }
     atomic_store_explicit(&ring.submit_tail.value, 0U, memory_order_relaxed);
@@ -10900,6 +10964,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_capability_revoke_op);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_failed_output_windows_are_cleared);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_malformed_submissions_fail_closed);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_reinit_stale_session_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_buffer_data_plane);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_unmap_handles_unterminated_name);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_channel_data_plane);

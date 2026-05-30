@@ -300,6 +300,8 @@ static int llam_broker_ring_session_reserve_batch(llam_broker_ring_t *ring,
     uint64_t submit_tail;
     uint64_t complete_head;
     uint64_t complete_tail;
+    uint64_t published_submit_head;
+    uint64_t published_complete_tail;
     uint64_t submit_available;
     uint64_t complete_space;
     size_t count;
@@ -319,6 +321,18 @@ static int llam_broker_ring_session_reserve_batch(llam_broker_ring_t *ring,
     }
 
     submit_head = session->submit_head;
+    published_submit_head = atomic_load_explicit(&ring->submit_head.value, memory_order_acquire);
+    if (LLAM_UNLIKELY(published_submit_head != submit_head)) {
+        /*
+         * Broker progress cursors are private, but the published cursor must
+         * mirror them. A mismatch means the shared mapping was reset or
+         * corrupted; continuing could skip fresh submissions or replay stale
+         * completion slots. Fail closed rather than trying to resynchronize
+         * from client-writable state.
+         */
+        errno = EINVAL;
+        return -1;
+    }
     submit_tail = atomic_load_explicit(&ring->submit_tail.value, memory_order_acquire);
     if (LLAM_UNLIKELY(!llam_broker_ring_window_valid(submit_head, submit_tail))) {
         errno = EINVAL;
@@ -332,6 +346,17 @@ static int llam_broker_ring_session_reserve_batch(llam_broker_ring_t *ring,
     }
 
     complete_tail = session->complete_tail;
+    published_complete_tail = atomic_load_explicit(&ring->complete_tail.value, memory_order_acquire);
+    if (LLAM_UNLIKELY(published_complete_tail != complete_tail)) {
+        /*
+         * The client owns complete_head, but complete_tail is broker-published.
+         * If it no longer matches the broker-private cursor, publishing a new
+         * tail can expose stale or zeroed completion entries as successful
+         * responses.
+         */
+        errno = EINVAL;
+        return -1;
+    }
     complete_head = atomic_load_explicit(&ring->complete_head.value, memory_order_acquire);
     if (LLAM_UNLIKELY(!llam_broker_ring_window_valid(complete_head, complete_tail))) {
         errno = EINVAL;

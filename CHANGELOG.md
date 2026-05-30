@@ -187,6 +187,12 @@
   `-Werror=cast-function-type` builds while keeping the secure entropy path
   fail-closed.
 
+* reject broker ring published-cursor mismatches against broker-private session
+  cursors. Reinitializing or corrupting a shared ring after a broker session is
+  established now fails closed with `EINVAL` instead of letting the broker skip
+  fresh submissions or expose stale/zeroed completion slots through a
+  completion-tail gap.
+
 ### Tests
 
 * latest `dev` CI gates cover Linux sanitizer/security checks, macOS builds,
@@ -257,6 +263,11 @@
 * add pre-init stats/JSON snapshot assertions plus host-init race coverage for
   `llam_dump_runtime_state()`, `llam_runtime_write_stats_json()`, and unmanaged
   `llam_sleep_*()` alongside the existing stats race guard.
+
+* add broker ring stale-session regression coverage proving in-place shared
+  ring reinitialization is rejected before any completion is published, and
+  tighten submit-head rewind coverage to require `EINVAL` on broker-published
+  cursor mismatch.
 
 * add regression coverage for select-operation errno clearing, NULL runtime
   stats handle output clearing, and task-local key exhaustion clearing

@@ -207,6 +207,12 @@ broker-control foundation:
   before reading or writing slots. Corrupt, inverted, or oversized windows fail
   closed instead of letting a client rewind shared counters and replay stale
   ring entries as new work.
+- Broker-published progress cursors must continue to mirror the broker-private
+  session cursors. If a shared ring is reset in place or a client-writable
+  cursor is corrupted after a session is established, serving fails closed with
+  `EINVAL` rather than resynchronizing from shared memory. This prevents a
+  stale session from skipping fresh submissions or publishing a completion-tail
+  gap that exposes zeroed or stale completion slots as successful responses.
 - Broker object tables and ring-session state are guarded by broker-local
   locking. Serving the same shared-memory ring concurrently fails with `EBUSY`
   instead of racing broker-private cursors.
