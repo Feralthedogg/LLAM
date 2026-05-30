@@ -434,6 +434,14 @@ static bool broker_failure_authority_outputs_are_clear(const llam_broker_wire_re
            memory_is_byte(response->data, sizeof(response->data), 0U);
 }
 
+static bool broker_ring_failure_completion_outputs_are_clear(const llam_broker_ring_completion_t *completion) {
+    return completion != NULL &&
+           completion->status != 0 &&
+           completion->error_code != 0 &&
+           completion->result0 == 0U &&
+           completion->result1 == 0U;
+}
+
 static uint64_t broker_malformed_fuzz_next(uint64_t *state) {
     uint64_t x = *state;
 
@@ -6570,6 +6578,100 @@ done:
     return rc;
 }
 
+static int test_broker_ring_malformed_submissions_fail_closed(void) {
+    typedef struct broker_ring_malformed_case {
+        uint32_t op;
+        size_t output_len;
+        uint64_t arg1;
+    } broker_ring_malformed_case_t;
+    static const broker_ring_malformed_case_t cases[] = {
+        {LLAM_BROKER_RING_OP_CAP_VALIDATE, 0U, LLAM_CAP_RIGHT_READ},
+        {LLAM_BROKER_RING_OP_CAP_ATTENUATE, sizeof(llam_capability_token_t), 0U},
+        {LLAM_BROKER_RING_OP_CAP_REVOKE, sizeof(llam_capability_token_t), 0U},
+        {LLAM_BROKER_RING_OP_BUFFER_READ, 16U, 16U},
+        {LLAM_BROKER_RING_OP_BUFFER_WRITE, 0U, 16U},
+        {LLAM_BROKER_RING_OP_DESCRIPTOR_READ, 16U, 16U},
+        {LLAM_BROKER_RING_OP_DESCRIPTOR_WRITE, 0U, 16U},
+        {LLAM_BROKER_RING_OP_CHANNEL_SEND, 0U, 16U},
+        {LLAM_BROKER_RING_OP_CHANNEL_RECV, 16U, 16U},
+        {LLAM_BROKER_RING_OP_CHANNEL_CLOSE, 0U, 0U},
+        {LLAM_BROKER_RING_OP_TASK_SPAWN, sizeof(llam_capability_token_t), 0U},
+        {LLAM_BROKER_RING_OP_TASK_JOIN, 0U, 0U},
+        {LLAM_BROKER_RING_OP_TASK_DETACH, 0U, 0U},
+        {UINT32_C(0xfffffff0), 0U, 0U},
+        {UINT32_C(0xffffffff), 0U, 0U},
+    };
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_t ring;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    if (llam_broker_ring_init(&ring) != 0) {
+        goto done;
+    }
+
+    for (size_t i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        const broker_ring_malformed_case_t *item = &cases[i];
+        llam_broker_ring_submission_t submission;
+        llam_broker_ring_completion_t completion;
+        size_t output_offset = 128U + (i * 128U);
+
+        if (LLAM_UNLIKELY(item->output_len > 0U &&
+                          output_offset + item->output_len > LLAM_BROKER_RING_DATA_BYTES)) {
+            goto done;
+        }
+        /*
+         * Use valid output windows with invalid authority. This proves failure
+         * completions cannot publish stale result fields and output-producing
+         * op handlers clear the exact client-visible window before completion.
+         */
+        if (item->output_len > 0U) {
+            memset(ring.data + output_offset, 0xa5, item->output_len);
+        }
+        memset(&submission, 0, sizeof(submission));
+        submission.request_id = UINT64_C(9000) + (uint64_t)i;
+        submission.op = item->op;
+        submission.arg0 = item->op == LLAM_BROKER_RING_OP_TASK_SPAWN
+            ? ((uint64_t)UINT32_MAX + 1U)
+            : LLAM_CAP_RIGHT_READ;
+        submission.arg1 = item->arg1;
+        submission.arg2 = (uint64_t)output_offset;
+        memset(&completion, 0x5a, sizeof(completion));
+        if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
+            llam_broker_ring_serve_one(&broker, &ring) != 0 ||
+            llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
+            completion.request_id != submission.request_id ||
+            !broker_ring_failure_completion_outputs_are_clear(&completion)) {
+            fprintf(stderr,
+                    "[test_security_capability] malformed ring op %u leaked completion authority iter=%zu\n",
+                    item->op,
+                    i);
+            goto done;
+        }
+        if (item->output_len > 0U &&
+            !memory_is_byte(ring.data + output_offset, item->output_len, 0U)) {
+            fprintf(stderr,
+                    "[test_security_capability] malformed ring op %u left stale output window iter=%zu\n",
+                    item->op,
+                    i);
+            goto done;
+        }
+    }
+
+    rc = 0;
+
+done:
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 static int test_broker_ring_buffer_data_plane(void) {
     static const char initial[] = "hello secure broker";
     static const char patch[] = "ringed";
@@ -10661,6 +10763,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_capability_attenuate_op);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_capability_revoke_op);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_failed_output_windows_are_cleared);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_malformed_submissions_fail_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_buffer_data_plane);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_unmap_handles_unterminated_name);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_channel_data_plane);

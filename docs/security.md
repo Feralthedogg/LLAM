@@ -95,6 +95,7 @@ broker-control foundation:
   zero-right validation rejection,
   explicit-rights grant rejection,
   malformed control-dispatch fail-closed output scrubbing,
+  malformed shared-ring fail-closed completion/output scrubbing,
   failed-output token clearing,
   secure-entropy fail-closed key creation, atomic object-specific revocation,
   POSIX shared-memory ring mapping,

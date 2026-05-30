@@ -222,6 +222,9 @@
   failed request validation cannot publish stale token, result, descriptor, or
   data authority fields.
 
+* added malformed broker shared-ring submission coverage proving failed fast-path
+  completions publish no stale result fields and clear validated output windows.
+
 * made the Windows named-pipe malformed-session regression tolerate transient
   `EPIPE`/busy/not-found states while a just-broken pipe instance is retired,
   while still failing protocol and authority errors immediately.
