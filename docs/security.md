@@ -260,6 +260,10 @@ broker-control foundation:
   descriptor authority. The broker duplicates the descriptor/HANDLE under its
   table lock and performs the blocking read/write on the duplicate, preventing
   slot close/reuse races without holding the broker lock during I/O.
+  Descriptor cleanup is keyed by broker ownership, not only by the live-slot
+  marker: a slot with `close_on_destroy` and a valid fd/HANDLE is reclaimed
+  during broker destroy even if an interrupted internal lifecycle has already
+  cleared the active marker.
 - `LLAM_BROKER_WIRE_OP_DESCRIPTOR_READ` and
   `LLAM_BROKER_WIRE_OP_DESCRIPTOR_WRITE` expose the same descriptor/HANDLE
   authority through the bounded control transport for smoke/control RPC use.

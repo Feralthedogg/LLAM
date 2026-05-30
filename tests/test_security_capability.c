@@ -8590,6 +8590,81 @@ done:
     }
     return rc;
 }
+
+static int test_broker_destroy_reclaims_inactive_owned_descriptor(void) {
+    llam_runtime_opts_t opts;
+    llam_capability_token_t token;
+    llam_broker_t broker;
+    int pipe_fds[2] = {-1, -1};
+    int registered_fd = -1;
+    bool broker_initialized = false;
+    bool found_slot = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (pipe(pipe_fds) != 0) {
+        goto done;
+    }
+    registered_fd = pipe_fds[0];
+    if (llam_broker_register_fd(&broker, registered_fd, LLAM_CAP_RIGHT_READ, true, &token) != 0) {
+        fprintf(stderr, "[test_security_capability] inactive descriptor setup failed errno=%d\n", errno);
+        goto done;
+    }
+    pipe_fds[0] = -1;
+
+    /*
+     * Descriptor ownership is close_on_destroy + a live fd. If an interrupted
+     * internal lifecycle clears active before destroy, the broker must still
+     * reclaim the fd rather than stranding authority in the process table.
+     */
+    if (llam_broker_lock(&broker) != 0) {
+        goto done;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        if (broker.descriptors[i].id == token.slot &&
+            broker.descriptors[i].generation == token.generation) {
+            broker.descriptors[i].active = false;
+            found_slot = true;
+            break;
+        }
+    }
+    llam_broker_unlock(&broker);
+    if (!found_slot) {
+        fprintf(stderr, "[test_security_capability] inactive descriptor slot was not found\n");
+        goto done;
+    }
+
+    llam_broker_destroy(&broker);
+    broker_initialized = false;
+    if (!broker_fd_is_closed(registered_fd)) {
+        fprintf(stderr, "[test_security_capability] inactive owned descriptor remained open\n");
+        goto done;
+    }
+    registered_fd = -1;
+    rc = 0;
+
+done:
+    if (registered_fd >= 0 && !broker_fd_is_closed(registered_fd)) {
+        close(registered_fd);
+    }
+    if (pipe_fds[0] >= 0) {
+        close(pipe_fds[0]);
+    }
+    if (pipe_fds[1] >= 0) {
+        close(pipe_fds[1]);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+}
 #endif
 
 #if LLAM_PLATFORM_WINDOWS
@@ -11317,6 +11392,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_named_session_cleanup_unlinks_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_ring_mapping);
+    LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_descriptor);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);
     LLAM_RUN_SECURITY_TEST(test_broker_create_ring_response_failure_reclaims_session);
     LLAM_RUN_SECURITY_TEST(test_broker_serve_local_n_survives_malformed_session);

@@ -104,6 +104,11 @@
   if an interrupted lifecycle has already cleared the session active marker.
   This keeps cleanup fail-closed for partially invalidated broker session state.
 
+* reclaim broker-owned descriptor/HANDLE authority during destroy from the
+  close-on-destroy ownership bit even if an interrupted lifecycle has already
+  cleared the descriptor active marker. This prevents partially invalidated
+  broker descriptor slots from leaking POSIX fds or Windows HANDLEs.
+
 * keep Windows named-pipe broker servers alive when a malformed client connects
   and closes before `ConnectNamedPipe()` completes. The broken session now
   consumes only its own accept budget instead of failing the long-running local

@@ -82,7 +82,12 @@ void llam_broker_clear_descriptors(llam_broker_t *broker) {
     for (i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
         llam_broker_descriptor_slot_t *slot = &broker->descriptors[i];
 
-        if (slot->active && slot->close_on_destroy) {
+        /*
+         * Ownership is represented by close_on_destroy plus a valid
+         * descriptor/HANDLE. Destroy must still reclaim partially invalidated
+         * slots whose active bit was cleared during an interrupted lifecycle.
+         */
+        if (slot->close_on_destroy) {
 #if LLAM_PLATFORM_WINDOWS
             if (!LLAM_HANDLE_IS_INVALID(slot->handle)) {
                 (void)CloseHandle((HANDLE)slot->handle);
