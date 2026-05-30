@@ -335,7 +335,9 @@ broker-control foundation:
   object identity rather than the fd number alone, so a later connection that
   reuses the same fd does not inherit the old subject. Windows named-pipe
   sessions forget subjects on STOP/error and require that close boundary for
-  one-request serving helpers.
+  one-request serving helpers. Subject allocation also rejects a duplicate live
+  subject inside the broker session table; even a pathological entropy/mixing
+  collision fails closed instead of making two sessions mutually replayable.
 - Nested broker helper calls carry a frame-scoped effective subject. Subject `0`
   preserves the caller's current subject for internal helpers, conflicting
   nonzero nested subjects fail with `EACCES`, and a subject introduced by an

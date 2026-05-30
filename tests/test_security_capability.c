@@ -416,6 +416,68 @@ done:
     return rc;
 }
 
+static int test_broker_transport_subject_collision_fails_closed(void) {
+    const uintptr_t first_transport = UINTPTR_MAX - 101U;
+    const uintptr_t second_transport = UINTPTR_MAX - 102U;
+    const uint64_t forced_subject = UINT64_C(0xfeedfacecafebeef);
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    uint64_t first_subject = 0U;
+    uint64_t second_subject = UINT64_MAX;
+    uint64_t check_subject = 0U;
+    size_t i;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+
+    /*
+     * A transport subject is a capability-token audience. Force a deterministic
+     * collision so the test proves the allocator rejects duplicate live
+     * audiences instead of relying on practical 64-bit collision odds.
+     */
+    llam_broker_test_force_subject_value(true, forced_subject);
+    if (llam_broker_transport_subject(&broker, first_transport, &first_subject) != 0 ||
+        first_subject != forced_subject) {
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_transport_subject(&broker, second_transport, &second_subject),
+                     EIO,
+                     "broker transport subject collision was accepted") != 0 ||
+        second_subject != 0U) {
+        goto done;
+    }
+    for (i = 0U; i < LLAM_BROKER_TRANSPORT_SESSIONS; ++i) {
+        if (broker.transport_sessions[i].active &&
+            broker.transport_sessions[i].transport_id == second_transport) {
+            goto done;
+        }
+    }
+    if (llam_broker_transport_subject(&broker, first_transport, &check_subject) != 0 ||
+        check_subject != first_subject) {
+        goto done;
+    }
+
+    llam_broker_test_force_subject_value(false, 0U);
+    if (llam_broker_transport_subject(&broker, second_transport, &second_subject) != 0 ||
+        second_subject == 0U ||
+        second_subject == first_subject) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    llam_broker_test_force_subject_value(false, 0U);
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 static void request_init(llam_broker_wire_request_t *request, llam_broker_wire_op_t op) {
     memset(request, 0, sizeof(*request));
     request->magic = LLAM_BROKER_WIRE_MAGIC;
@@ -10818,6 +10880,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_scrubs_authority_state);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_subject_rejects_destroying_broker);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_subject_requires_os_entropy);
+    LLAM_RUN_SECURITY_TEST(test_broker_transport_subject_collision_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_attenuate_capability);
     LLAM_RUN_SECURITY_TEST(test_broker_subject_bound_tokens);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_scope_restores_outer);

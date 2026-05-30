@@ -30,6 +30,8 @@
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_bool g_llam_broker_force_subject_entropy_failure;
+static atomic_bool g_llam_broker_force_subject_value_enabled;
+static atomic_uint_fast64_t g_llam_broker_forced_subject_value;
 
 static bool llam_broker_subject_entropy_forced_failure(void) {
     return atomic_load_explicit(&g_llam_broker_force_subject_entropy_failure, memory_order_relaxed);
@@ -38,11 +40,47 @@ static bool llam_broker_subject_entropy_forced_failure(void) {
 void llam_broker_test_force_subject_entropy_failure(bool enabled) {
     atomic_store_explicit(&g_llam_broker_force_subject_entropy_failure, enabled, memory_order_relaxed);
 }
+
+static bool llam_broker_subject_forced_value(uint64_t *out_subject) {
+    if (!atomic_load_explicit(&g_llam_broker_force_subject_value_enabled, memory_order_relaxed)) {
+        return false;
+    }
+    *out_subject = atomic_load_explicit(&g_llam_broker_forced_subject_value, memory_order_relaxed);
+    return true;
+}
+
+void llam_broker_test_force_subject_value(bool enabled, uint64_t subject_id) {
+    atomic_store_explicit(&g_llam_broker_forced_subject_value, subject_id, memory_order_relaxed);
+    atomic_store_explicit(&g_llam_broker_force_subject_value_enabled, enabled, memory_order_relaxed);
+}
 #else
 static bool llam_broker_subject_entropy_forced_failure(void) {
     return false;
 }
+
+static bool llam_broker_subject_forced_value(uint64_t *out_subject) {
+    (void)out_subject;
+    return false;
+}
 #endif
+
+#define LLAM_BROKER_SUBJECT_MINT_ATTEMPTS 8U
+
+static bool llam_broker_transport_subject_in_use_unlocked(const llam_broker_t *broker, uint64_t subject) {
+    size_t i;
+
+    if (broker == NULL || subject == 0U) {
+        return false;
+    }
+    for (i = 0U; i < LLAM_BROKER_TRANSPORT_SESSIONS; ++i) {
+        const llam_broker_transport_session_t *session = &broker->transport_sessions[i];
+
+        if (session->active && session->subject_id == subject) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static int llam_broker_new_transport_subject(llam_broker_t *broker,
                                              uintptr_t transport_id,
@@ -55,6 +93,17 @@ static int llam_broker_new_transport_subject(llam_broker_t *broker,
         return -1;
     }
     *out_subject = 0U;
+    if (llam_broker_subject_forced_value(&subject)) {
+        if (LLAM_UNLIKELY(subject == 0U)) {
+            errno = EIO;
+            return -1;
+        }
+        *out_subject = subject;
+        (void)broker;
+        (void)transport_id;
+        (void)nonce;
+        return 0;
+    }
     if (LLAM_UNLIKELY(llam_broker_subject_entropy_forced_failure() ||
                       !llam_public_slot_entropy_from_os(&subject))) {
         /*
@@ -83,6 +132,7 @@ int llam_broker_transport_subject(llam_broker_t *broker,
                                   uint64_t *out_subject_id) {
     llam_broker_transport_session_t *free_session = NULL;
     uint64_t subject;
+    unsigned attempts;
     size_t i;
 
     /*
@@ -123,23 +173,35 @@ int llam_broker_transport_subject(llam_broker_t *broker,
         errno = ENOSPC;
         return -1;
     }
-    broker->next_transport_subject_nonce++;
-    if (broker->next_transport_subject_nonce == 0U) {
-        broker->next_transport_subject_nonce = 1U;
+    for (attempts = 0U; attempts < LLAM_BROKER_SUBJECT_MINT_ATTEMPTS; ++attempts) {
+        broker->next_transport_subject_nonce++;
+        if (broker->next_transport_subject_nonce == 0U) {
+            broker->next_transport_subject_nonce = 1U;
+        }
+        if (llam_broker_new_transport_subject(broker,
+                                              transport_id,
+                                              broker->next_transport_subject_nonce,
+                                              &subject) != 0) {
+            llam_broker_unlock(broker);
+            return -1;
+        }
+        /*
+         * Subject ids are MAC audiences. Random collision is vanishingly
+         * unlikely, but accepting one would make two live local-control
+         * sessions mutually replayable. Keep allocation fail-closed instead.
+         */
+        if (!llam_broker_transport_subject_in_use_unlocked(broker, subject)) {
+            free_session->transport_id = transport_id;
+            free_session->subject_id = subject;
+            free_session->active = true;
+            *out_subject_id = subject;
+            llam_broker_unlock(broker);
+            return 0;
+        }
     }
-    if (llam_broker_new_transport_subject(broker,
-                                          transport_id,
-                                          broker->next_transport_subject_nonce,
-                                          &subject) != 0) {
-        llam_broker_unlock(broker);
-        return -1;
-    }
-    free_session->transport_id = transport_id;
-    free_session->subject_id = subject;
-    free_session->active = true;
-    *out_subject_id = subject;
     llam_broker_unlock(broker);
-    return 0;
+    errno = EIO;
+    return -1;
 }
 
 void llam_broker_forget_transport_subject(llam_broker_t *broker, uintptr_t transport_id) {

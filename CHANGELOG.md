@@ -222,6 +222,10 @@
   broker operations fail closed with `EOVERFLOW` without changing the active
   subject or poisoning later broker operations.
 
+* added broker transport subject collision coverage and fail-closed allocation
+  logic so two live control sessions cannot share the same subject-bound token
+  audience, even under a forced entropy/mixing collision.
+
 * added deterministic malformed broker control-dispatch coverage proving
   failed request validation cannot publish stale token, result, descriptor, or
   data authority fields.

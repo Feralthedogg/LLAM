@@ -470,6 +470,7 @@ int llam_broker_transport_subject(llam_broker_t *broker,
 void llam_broker_forget_transport_subject(llam_broker_t *broker, uintptr_t transport_id);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 LLAM_INTERNAL_API void llam_broker_test_force_subject_entropy_failure(bool enabled);
+LLAM_INTERNAL_API void llam_broker_test_force_subject_value(bool enabled, uint64_t subject_id);
 #endif
 
 #endif
