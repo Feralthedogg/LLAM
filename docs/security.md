@@ -339,7 +339,9 @@ broker-control foundation:
 - Nested broker helper calls carry a frame-scoped effective subject. Subject `0`
   preserves the caller's current subject for internal helpers, conflicting
   nonzero nested subjects fail with `EACCES`, and a subject introduced by an
-  inner operation is restored when that operation returns.
+  inner operation is restored when that operation returns. The subject frame
+  stack is bounded; an overflow attempt fails with `EOVERFLOW` without changing
+  the current subject or poisoning later broker operations.
 - Shared-memory ring serving also has a subject-bound entry point. Once a broker
   ring is served with a subject id, later attempts to serve the same ring through
   subject `0` or another subject fail with `EACCES` before consuming a pending

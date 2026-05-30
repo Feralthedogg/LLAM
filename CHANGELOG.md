@@ -218,6 +218,10 @@
 * added broker transport regression coverage proving zero-right grant requests
   fail closed for buffer, channel, and descriptor/HANDLE authority.
 
+* added broker subject-frame overflow regression coverage proving nested
+  broker operations fail closed with `EOVERFLOW` without changing the active
+  subject or poisoning later broker operations.
+
 * added deterministic malformed broker control-dispatch coverage proving
   failed request validation cannot publish stale token, result, descriptor, or
   data authority fields.

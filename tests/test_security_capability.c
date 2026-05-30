@@ -1630,6 +1630,78 @@ done_destroy:
     return rc;
 }
 
+static int test_broker_nested_subject_depth_overflow_preserves_scope(void) {
+    const uint64_t subject = 4242U;
+    /*
+     * Keep this mirror explicit so a future broker TLS depth change has to
+     * update the security regression that validates overflow fail-closed state.
+     */
+    const size_t tls_op_depth = 8U;
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    size_t opened = 0U;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+
+    for (opened = 0U; opened < tls_op_depth; ++opened) {
+        if (llam_broker_begin_op_subject(&broker, subject) != 0) {
+            goto done_unwind;
+        }
+        if (llam_broker_current_subject(&broker) != subject) {
+            ++opened;
+            goto done_unwind;
+        }
+    }
+
+    errno = 0;
+    if (expect_errno(llam_broker_begin_op_subject(&broker, subject),
+                     EOVERFLOW,
+                     "broker subject stack overflow was accepted") != 0) {
+        goto done_unwind;
+    }
+    if (llam_broker_current_subject(&broker) != subject) {
+        goto done_unwind;
+    }
+
+    while (opened > 0U) {
+        llam_broker_end_op(&broker);
+        --opened;
+        if (llam_broker_current_subject(&broker) != (opened > 0U ? subject : 0U)) {
+            goto done_unwind;
+        }
+    }
+
+    /*
+     * The failed overflow attempt must not poison the broker TLS slot or leak
+     * active-op state; a new operation should work after the stack is unwound.
+     */
+    if (llam_broker_begin_op_subject(&broker, subject) != 0) {
+        goto done_unwind;
+    }
+    opened = 1U;
+    if (llam_broker_current_subject(&broker) != subject) {
+        goto done_unwind;
+    }
+    llam_broker_end_op(&broker);
+    opened = 0U;
+    rc = 0;
+
+done_unwind:
+    while (opened > 0U) {
+        llam_broker_end_op(&broker);
+        --opened;
+    }
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 static int test_broker_object_revocation_rotates_generation(void) {
     static const char initial[] = "revocable";
     llam_runtime_opts_t opts;
@@ -10750,6 +10822,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_subject_bound_tokens);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_scope_restores_outer);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_conflict_preserves_outer);
+    LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_depth_overflow_preserves_scope);
     LLAM_RUN_SECURITY_TEST(test_broker_object_revocation_rotates_generation);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_drains_unjoined_task_slots);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_cancels_sleeping_task_slots);
