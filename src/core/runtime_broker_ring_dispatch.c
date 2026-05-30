@@ -441,37 +441,6 @@ static int llam_broker_ring_session_validate_publish_locked(const llam_broker_ri
     return 0;
 }
 
-static bool llam_broker_ring_session_poison_locked(llam_broker_ring_session_t *session,
-                                                   llam_broker_ring_mapping_t *out_mapping) {
-    bool unmap_mapping = false;
-
-    if (out_mapping != NULL) {
-        llam_broker_ring_mapping_reset(out_mapping);
-    }
-    if (session == NULL) {
-        return false;
-    }
-
-    if (session->active && session->owns_mapping && out_mapping != NULL) {
-        out_mapping->ring = (llam_broker_ring_t *)session->ring;
-        out_mapping->bytes = session->mapping_bytes;
-        out_mapping->fd = session->mapping_fd;
-        out_mapping->mapping_handle = session->mapping_handle;
-        out_mapping->owner = true;
-        unmap_mapping = true;
-    }
-
-    /*
-     * A cursor mismatch after execution means the data plane is no longer
-     * trustworthy. Drop the broker-private session so stale cursors cannot
-     * replay the already-executed submission on a later serve attempt.
-     */
-    memset(session, 0, sizeof(*session));
-    session->mapping_fd = -1;
-    session->mapping_handle = LLAM_INVALID_HANDLE;
-    return unmap_mapping;
-}
-
 int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
                                                 llam_broker_ring_t *ring,
                                                 llam_broker_ring_session_t *session,
@@ -527,7 +496,12 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
         for (i = 0U; i < count; ++i) {
             llam_broker_ring_clear_submission_output(ring, &submissions[i]);
         }
-        unmap_mapping = llam_broker_ring_session_poison_locked(session, &poisoned_mapping);
+        /*
+         * A cursor mismatch after execution means the data plane is no longer
+         * trustworthy. Drop the broker-private session so stale cursors cannot
+         * replay the already-executed submission on a later serve attempt.
+         */
+        unmap_mapping = llam_broker_ring_session_take_mapping(session, &poisoned_mapping);
         llam_broker_unlock(broker);
         if (unmap_mapping) {
             llam_broker_ring_unmap(&poisoned_mapping);

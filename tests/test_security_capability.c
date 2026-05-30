@@ -8419,6 +8419,100 @@ done:
     }
     return rc;
 }
+
+static int test_broker_ring_named_session_cleanup_unlinks_mapping(void) {
+    const uint64_t subject_id = UINT64_C(0x51515151);
+    char forget_name[128];
+    char destroy_name[128];
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_broker_ring_mapping_t mapping;
+    llam_broker_ring_mapping_t leaked;
+    uint64_t session_id = 0U;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    memset(&mapping, 0, sizeof(mapping));
+    memset(&leaked, 0, sizeof(leaked));
+    mapping.fd = -1;
+    leaked.fd = -1;
+
+    snprintf(forget_name,
+             sizeof(forget_name),
+             "/llam-fc-%ld",
+             (long)getpid());
+    snprintf(destroy_name,
+             sizeof(destroy_name),
+             "/llam-dc-%ld",
+             (long)getpid());
+    (void)shm_unlink(forget_name);
+    (void)shm_unlink(destroy_name);
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+
+    if (llam_broker_ring_create_shm(forget_name, &mapping) != 0 ||
+        llam_broker_ring_register_mapping(&broker, &mapping, subject_id, &session_id) != 0 ||
+        llam_broker_ring_forget_session(&broker, session_id, subject_id) != 0) {
+        fprintf(stderr, "[test_security_capability] forget cleanup setup failed errno=%d\n", errno);
+        goto done;
+    }
+    errno = 0;
+    if (llam_broker_ring_open_shm(forget_name, &leaked) == 0) {
+        fprintf(stderr, "[test_security_capability] forget left named broker ring mapping reachable\n");
+        llam_broker_ring_unmap(&leaked);
+        (void)shm_unlink(forget_name);
+        goto done;
+    }
+    if (errno != ENOENT) {
+        fprintf(stderr,
+                "[test_security_capability] forget cleanup reopen errno=%d expected=%d\n",
+                errno,
+                ENOENT);
+        goto done;
+    }
+
+    if (llam_broker_ring_create_shm(destroy_name, &mapping) != 0 ||
+        llam_broker_ring_register_mapping(&broker, &mapping, subject_id, &session_id) != 0) {
+        fprintf(stderr, "[test_security_capability] destroy cleanup setup failed errno=%d\n", errno);
+        goto done;
+    }
+    llam_broker_destroy(&broker);
+    broker_initialized = false;
+    errno = 0;
+    if (llam_broker_ring_open_shm(destroy_name, &leaked) == 0) {
+        fprintf(stderr, "[test_security_capability] destroy left named broker ring mapping reachable\n");
+        llam_broker_ring_unmap(&leaked);
+        (void)shm_unlink(destroy_name);
+        goto done;
+    }
+    if (errno != ENOENT) {
+        fprintf(stderr,
+                "[test_security_capability] destroy cleanup reopen errno=%d expected=%d\n",
+                errno,
+                ENOENT);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    llam_broker_ring_unmap(&leaked);
+    llam_broker_ring_unmap(&mapping);
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (rc != 0) {
+        (void)shm_unlink(forget_name);
+        (void)shm_unlink(destroy_name);
+    }
+    return rc;
+}
 #endif
 
 #if LLAM_PLATFORM_WINDOWS
@@ -11144,6 +11238,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_named_session_cleanup_unlinks_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);
     LLAM_RUN_SECURITY_TEST(test_broker_create_ring_response_failure_reclaims_session);
     LLAM_RUN_SECURITY_TEST(test_broker_serve_local_n_survives_malformed_session);

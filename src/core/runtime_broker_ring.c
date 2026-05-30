@@ -107,6 +107,38 @@ static int llam_broker_ring_begin_locked_owned_session(llam_broker_t *broker,
     return 0;
 }
 
+bool llam_broker_ring_session_take_mapping(llam_broker_ring_session_t *session,
+                                           llam_broker_ring_mapping_t *out_mapping) {
+    bool has_mapping = false;
+
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
+    if (session == NULL) {
+        return false;
+    }
+
+    if (session->active && session->owns_mapping && out_mapping != NULL) {
+        out_mapping->ring = (llam_broker_ring_t *)session->ring;
+        out_mapping->bytes = session->mapping_bytes;
+        out_mapping->fd = session->mapping_fd;
+        out_mapping->mapping_handle = session->mapping_handle;
+        memcpy(out_mapping->name, session->mapping_name, sizeof(out_mapping->name));
+        out_mapping->name[sizeof(out_mapping->name) - 1U] = '\0';
+        out_mapping->owner = true;
+        has_mapping = true;
+    }
+
+    /*
+     * Clear the private session before releasing broker state so stale session
+     * ids or direct-ring entries cannot reuse the authority being reclaimed.
+     */
+    memset(session, 0, sizeof(*session));
+    session->mapping_fd = -1;
+    session->mapping_handle = LLAM_INVALID_HANDLE;
+    return has_mapping;
+}
+
 int llam_broker_ring_register_mapping(llam_broker_t *broker,
                                       llam_broker_ring_mapping_t *mapping,
                                       uint64_t subject_id,
@@ -163,6 +195,8 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
     session->mapping_bytes = mapping->bytes;
     session->mapping_fd = mapping->fd;
     session->mapping_handle = mapping->mapping_handle;
+    memcpy(session->mapping_name, mapping->name, sizeof(session->mapping_name));
+    session->mapping_name[sizeof(session->mapping_name) - 1U] = '\0';
     session->owns_mapping = true;
     session_index = (size_t)(session - broker->ring_sessions);
     *out_session_id = (uint64_t)session_index + 1U;
@@ -182,6 +216,7 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
 int llam_broker_ring_forget_session(llam_broker_t *broker, uint64_t session_id, uint64_t subject_id) {
     llam_broker_ring_mapping_t mapping;
     llam_broker_ring_session_t *session;
+    bool unmap_mapping;
 
     if (llam_broker_ring_begin_locked_owned_session(broker, session_id, subject_id, &session) != 0) {
         return -1;
@@ -199,17 +234,11 @@ int llam_broker_ring_forget_session(llam_broker_t *broker, uint64_t session_id, 
      * the slot cannot be served, then unmap the private authority outside the
      * table state.
      */
-    memset(&mapping, 0, sizeof(mapping));
-    mapping.ring = (llam_broker_ring_t *)session->ring;
-    mapping.bytes = session->mapping_bytes;
-    mapping.fd = session->mapping_fd;
-    mapping.mapping_handle = session->mapping_handle;
-    mapping.owner = true;
-    memset(session, 0, sizeof(*session));
-    session->mapping_fd = -1;
-    session->mapping_handle = LLAM_INVALID_HANDLE;
+    unmap_mapping = llam_broker_ring_session_take_mapping(session, &mapping);
     llam_broker_unlock(broker);
-    llam_broker_ring_unmap(&mapping);
+    if (unmap_mapping) {
+        llam_broker_ring_unmap(&mapping);
+    }
     llam_broker_end_op(broker);
     return 0;
 }

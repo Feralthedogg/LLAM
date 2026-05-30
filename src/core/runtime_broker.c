@@ -52,13 +52,9 @@ static void llam_broker_clear_session_state(llam_broker_t *broker) {
         if (session->owns_mapping) {
             llam_broker_ring_mapping_t mapping;
 
-            memset(&mapping, 0, sizeof(mapping));
-            mapping.ring = (llam_broker_ring_t *)session->ring;
-            mapping.bytes = session->mapping_bytes;
-            mapping.fd = session->mapping_fd;
-            mapping.mapping_handle = session->mapping_handle;
-            mapping.owner = true;
-            llam_broker_ring_unmap(&mapping);
+            if (llam_broker_ring_session_take_mapping(session, &mapping)) {
+                llam_broker_ring_unmap(&mapping);
+            }
         }
     }
     memset(broker->ring_sessions, 0, sizeof(broker->ring_sessions));

@@ -48,6 +48,7 @@
 #define LLAM_BROKER_CHANNEL_SLOTS 64U
 #define LLAM_BROKER_TASK_SLOTS 64U
 #define LLAM_BROKER_RING_SESSIONS 16U
+#define LLAM_BROKER_RING_MAPPING_NAME_BYTES 128U
 #define LLAM_BROKER_TRANSPORT_SESSIONS 64U
 #define LLAM_BROKER_BUFFER_MAX_BYTES (1024U * 1024U)
 #define LLAM_BROKER_CHANNEL_CAPACITY 64U
@@ -143,6 +144,7 @@ typedef struct llam_broker_ring_session {
     size_t mapping_bytes;
     int mapping_fd;
     llam_handle_t mapping_handle;
+    char mapping_name[LLAM_BROKER_RING_MAPPING_NAME_BYTES];
     bool active;
     bool busy;
     bool owns_mapping;

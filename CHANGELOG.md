@@ -95,6 +95,11 @@
   task slots, broker byte channels, descriptor/HANDLE grants, or stale doorbell
   waits after response failures, disconnects, or concurrent destroy.
 
+* preserve POSIX named shared-memory ring names inside broker-owned ring
+  sessions. Explicit session forget, broker destroy, and poisoned session
+  cleanup now unlink named rendezvous objects instead of only closing the
+  mapped fd/HANDLE authority.
+
 * keep Windows named-pipe broker servers alive when a malformed client connects
   and closes before `ConnectNamedPipe()` completes. The broken session now
   consumes only its own accept budget instead of failing the long-running local
@@ -216,6 +221,9 @@
 
 * added broker cleanup coverage for partially initialized POSIX ring mappings
   whose fixed-size names are not NUL-terminated before unmap/reset.
+
+* added broker ring cleanup coverage proving POSIX named shared-memory ring
+  sessions are unlinked on explicit forget and broker destroy.
 
 * added broker buffer-grant regression coverage for absolute range overflow,
   maximum-buffer bound overflow, non-buffer rights, and relative range overflow

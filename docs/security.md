@@ -162,6 +162,10 @@ broker-control foundation:
   the connected named-pipe peer and return that peer-local HANDLE value. The
   broker retains its own mapping in broker-owned ring-session state, so
   shutdown can unmap it without trusting client-visible ring memory.
+  Broker-owned sessions preserve the complete mapping authority, including the
+  POSIX shm name when a named mapping is registered internally, so
+  `SERVE_RING` poison, explicit session forget, and broker destroy can unlink
+  named rendezvous objects rather than only closing the fd/HANDLE.
 - `LLAM_BROKER_WIRE_OP_SERVE_RING` drives submissions from a
   transport-created ring by broker session id. A zero request length keeps the
   original single-request behavior; a nonzero length asks the broker to serve a

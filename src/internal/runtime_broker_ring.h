@@ -184,7 +184,7 @@ typedef struct llam_broker_ring_mapping {
     int fd;
     llam_handle_t mapping_handle;
     bool owner;
-    char name[128];
+    char name[LLAM_BROKER_RING_MAPPING_NAME_BYTES];
 } llam_broker_ring_mapping_t;
 
 typedef struct llam_broker_buffer_grant {
@@ -261,6 +261,8 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
                                       llam_broker_ring_mapping_t *mapping,
                                       uint64_t subject_id,
                                       uint64_t *out_session_id);
+bool llam_broker_ring_session_take_mapping(llam_broker_ring_session_t *session,
+                                           llam_broker_ring_mapping_t *out_mapping);
 int llam_broker_ring_forget_session(llam_broker_t *broker,
                                     uint64_t session_id,
                                     uint64_t subject_id);
