@@ -192,6 +192,9 @@ broker-control foundation:
   delivered, the transport rolls back the just-created broker-owned authority.
   A disconnecting peer therefore cannot strand unreachable fd/HANDLE slots,
   heap buffers, channel slots, task slots, or ring sessions as a resource leak.
+  Buffer slot reset also reclaims stale broker-owned heap storage before an
+  inactive slot is reused, so partially invalidated buffer grants cannot be
+  overwritten by later registrations.
   Task rollback atomically claims a spawned slot and clears client-visible
   rights, then the predefined task detaches itself from inside its trampoline
   before broker-slot reset. This prevents both permanent detached-but-active

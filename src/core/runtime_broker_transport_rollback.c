@@ -46,8 +46,7 @@ static void llam_broker_rollback_response_token_locked(llam_broker_t *broker,
             llam_broker_buffer_slot_t *slot = &broker->buffers[i];
 
             if (slot->active && slot->id == token->slot && slot->generation == token->generation) {
-                free(slot->data);
-                memset(slot, 0, sizeof(*slot));
+                llam_broker_buffer_slot_reset(slot);
                 return;
             }
         }

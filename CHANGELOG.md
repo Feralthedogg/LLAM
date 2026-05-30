@@ -109,6 +109,10 @@
   a later shared-ring registration while silently stranding the old named shm
   rendezvous object in the broker process.
 
+* reclaim stale broker-owned buffer storage before reusing an inactive buffer
+  slot. A partially invalidated buffer grant can no longer be overwritten by a
+  later buffer registration while silently stranding broker-owned heap storage.
+
 * reclaim broker-owned descriptor/HANDLE authority during destroy from the
   close-on-destroy ownership bit even if an interrupted lifecycle has already
   cleared the descriptor active marker. This prevents partially invalidated
@@ -254,6 +258,10 @@
 * added broker buffer-grant regression coverage for absolute range overflow,
   maximum-buffer bound overflow, non-buffer rights, and relative range overflow
   at the internal grant boundary.
+
+* added broker buffer reuse coverage for inactive-but-owned slot state so
+  buffer registration cannot overwrite stale broker-owned heap storage before
+  reclaiming it.
 
 * added broker capability regression coverage for zero-epoch token issuance and
   validation rejection, including stale-output clearing on failed issue.

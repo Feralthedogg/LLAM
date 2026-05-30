@@ -412,10 +412,12 @@ endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/runtime_capability.o \
+	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_buffer.o \
 	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_transport.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
 		$(OBJDIR)/src/core/runtime_capability.o \
+		$(OBJDIR)/src/core/runtime_broker_buffer.o \
 		$(OBJDIR)/src/core/runtime_broker_transport.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
@@ -765,9 +767,9 @@ audit-shared-exports: shared
 
 audit-production-test-hooks: static
 	@if command -v nm >/dev/null 2>&1; then \
-		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_force_.*entropy_failure' >/dev/null; then \
+		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_(force_.*entropy_failure|buffer_free_count)' >/dev/null; then \
 			echo "production static runtime exports test fault-injection hooks" >&2; \
-			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_force_.*entropy_failure' >&2; \
+			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_(force_.*entropy_failure|buffer_free_count)' >&2; \
 			exit 1; \
 		fi; \
 	fi

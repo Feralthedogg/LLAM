@@ -211,6 +211,8 @@ int main(int argc, char **argv) {
         "llam_linux_futex_wait_private_timeout",
         "llam_linux_futex_wake_private",
         "llam_capability_test_force_entropy_failure",
+        "llam_broker_test_buffer_free_count",
+        "llam_broker_test_buffer_free_count_reset",
         "llam_broker_test_force_subject_entropy_failure",
         "llam_broker_client_self_test_exchange",
         "llam_broker_client_self_test_local",

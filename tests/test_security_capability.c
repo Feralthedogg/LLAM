@@ -8683,6 +8683,80 @@ done:
     return rc;
 }
 
+static int test_broker_buffer_reuse_reclaims_inactive_storage(void) {
+    static const unsigned char replacement[] = {0x51U, 0x52U, 0x53U, 0x54U};
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    unsigned char *stale = NULL;
+    unsigned char out[sizeof(replacement)];
+    uint64_t frees;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    stale = (unsigned char *)calloc(1U, 32U);
+    if (stale == NULL) {
+        goto done;
+    }
+
+    /*
+     * Model a partially invalidated buffer slot: active authority was revoked,
+     * but broker-owned heap storage is still attached. Register reuses inactive
+     * slots, so it must reclaim that storage before publishing replacement
+     * authority or the old allocation is overwritten and leaked.
+     */
+    broker.buffers[0].data = stale;
+    broker.buffers[0].length = 32U;
+    broker.buffers[0].id = 7U;
+    broker.buffers[0].generation = 3U;
+    broker.buffers[0].rights = LLAM_CAP_RIGHT_READ;
+    broker.buffers[0].active = false;
+
+    llam_broker_test_buffer_free_count_reset();
+    if (llam_broker_register_buffer(&broker,
+                                    replacement,
+                                    sizeof(replacement),
+                                    LLAM_CAP_RIGHT_READ,
+                                    &token) != 0) {
+        goto done;
+    }
+    frees = llam_broker_test_buffer_free_count();
+    if (frees == 0U) {
+        fprintf(stderr,
+                "[test_security_capability] inactive buffer storage was overwritten without free\n");
+        /*
+         * The failing implementation no longer owns this pointer after slot
+         * overwrite. Free it here so the reproducer itself stays leak-neutral.
+         */
+        free(stale);
+        stale = NULL;
+        goto done;
+    }
+    stale = NULL;
+    if (llam_broker_read_buffer(&broker, &token, 0U, out, sizeof(out)) != 0 ||
+        memcmp(out, replacement, sizeof(replacement)) != 0) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (stale != NULL && llam_broker_test_buffer_free_count() == 0U) {
+        free(stale);
+    }
+    return rc;
+}
+
 static int test_broker_destroy_reclaims_inactive_owned_descriptor(void) {
     llam_runtime_opts_t opts;
     llam_capability_token_t token;
@@ -11584,6 +11658,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_ring_named_session_cleanup_unlinks_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_ring_mapping);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_reuse_reclaims_inactive_owned_mapping);
+    LLAM_RUN_SECURITY_TEST(test_broker_buffer_reuse_reclaims_inactive_storage);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_reclaims_inactive_owned_descriptor);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_reuse_reclaims_inactive_owned_slot);
     LLAM_RUN_SECURITY_TEST(test_broker_socketpair_transport);

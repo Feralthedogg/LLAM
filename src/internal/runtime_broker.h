@@ -347,6 +347,7 @@ int llam_broker_write_buffer(llam_broker_t *broker,
                              const void *data,
                              size_t length);
 void llam_broker_clear_buffers(llam_broker_t *broker);
+void llam_broker_buffer_slot_reset(llam_broker_buffer_slot_t *slot);
 llam_broker_buffer_slot_t *llam_broker_find_buffer_unlocked(llam_broker_t *broker,
                                                             const llam_capability_token_t *token,
                                                             uint64_t required_rights);
@@ -471,6 +472,8 @@ int llam_broker_transport_subject(llam_broker_t *broker,
                                   uint64_t *out_subject_id);
 void llam_broker_forget_transport_subject(llam_broker_t *broker, uintptr_t transport_id);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+LLAM_INTERNAL_API uint64_t llam_broker_test_buffer_free_count(void);
+LLAM_INTERNAL_API void llam_broker_test_buffer_free_count_reset(void);
 LLAM_INTERNAL_API void llam_broker_test_force_subject_entropy_failure(bool enabled);
 LLAM_INTERNAL_API void llam_broker_test_force_subject_value(bool enabled, uint64_t subject_id);
 #endif

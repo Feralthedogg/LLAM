@@ -29,6 +29,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static atomic_uint_fast64_t g_llam_broker_test_buffer_free_count;
+
+uint64_t llam_broker_test_buffer_free_count(void) {
+    return atomic_load_explicit(&g_llam_broker_test_buffer_free_count, memory_order_relaxed);
+}
+
+void llam_broker_test_buffer_free_count_reset(void) {
+    atomic_store_explicit(&g_llam_broker_test_buffer_free_count, 0U, memory_order_relaxed);
+}
+#endif
+
+static void llam_broker_buffer_free_data(unsigned char *data) {
+    if (data == NULL) {
+        return;
+    }
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    atomic_fetch_add_explicit(&g_llam_broker_test_buffer_free_count, 1U, memory_order_relaxed);
+#endif
+    free(data);
+}
+
+void llam_broker_buffer_slot_reset(llam_broker_buffer_slot_t *slot) {
+    if (slot == NULL) {
+        return;
+    }
+    if (slot->data != NULL) {
+        llam_broker_buffer_free_data(slot->data);
+    }
+    memset(slot, 0, sizeof(*slot));
+}
+
 void llam_broker_clear_buffers(llam_broker_t *broker) {
     size_t i;
 
@@ -36,10 +68,7 @@ void llam_broker_clear_buffers(llam_broker_t *broker) {
         return;
     }
     for (i = 0U; i < LLAM_BROKER_BUFFER_SLOTS; ++i) {
-        if (broker->buffers[i].data != NULL) {
-            free(broker->buffers[i].data);
-        }
-        memset(&broker->buffers[i], 0, sizeof(broker->buffers[i]));
+        llam_broker_buffer_slot_reset(&broker->buffers[i]);
     }
 }
 
@@ -133,6 +162,12 @@ int llam_broker_register_buffer(llam_broker_t *broker,
         return -1;
     }
 
+    /*
+     * Registration reuses inactive slots. Reclaim any stale broker-owned heap
+     * storage first so a partially invalidated slot cannot be overwritten and
+     * leaked before normal destroy cleanup sees it.
+     */
+    llam_broker_buffer_slot_reset(slot);
     slot->data = data;
     slot->length = length;
     slot->id = broker->next_buffer_id++;
@@ -145,8 +180,7 @@ int llam_broker_register_buffer(llam_broker_t *broker,
                                               slot->generation,
                                               rights,
                                               out_token) != 0) {
-        free(data);
-        memset(slot, 0, sizeof(*slot));
+        llam_broker_buffer_slot_reset(slot);
         llam_broker_unlock(broker);
         llam_broker_end_op(broker);
         return -1;
