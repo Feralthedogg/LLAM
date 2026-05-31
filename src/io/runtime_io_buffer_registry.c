@@ -195,6 +195,18 @@ static llam_io_buffer_t *llam_io_buffer_public_unregister_impl(llam_io_buffer_t 
         (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
         return NULL;
     }
+    if (llam_public_active_op_count(&buffer->public_active_ops) >= (SIZE_MAX / 2U)) {
+        /*
+         * SIZE_MAX is the permanent busy sentinel used when public active-op
+         * accounting detects corrupted or exhausted state. Release must fail
+         * closed while the handle is still live; consuming the slot first would
+         * strand the caller in the wait loop below and eventually recycle
+         * storage that accessors still conceptually pin.
+         */
+        errno = EBUSY;
+        (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
+        return NULL;
+    }
     if (buffer->public_handle_slot < g_llam_io_buffer_public_slots.count) {
         llam_public_slot_release(&g_llam_io_buffer_public_slots,
                                  buffer->public_handle_slot,

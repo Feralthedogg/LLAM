@@ -27,16 +27,19 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#if LLAM_PLATFORM_POSIX
+#include <sys/wait.h>
+#endif
 #if defined(__linux__)
 #include <sys/mman.h>
 #include <sys/resource.h>
-#include <sys/wait.h>
 #endif
 #include <unistd.h>
 
@@ -1805,6 +1808,74 @@ static int test_owned_buffer_raw_release_rejects_public_handle(void) {
     return rc;
 }
 
+#if LLAM_PLATFORM_POSIX
+static int test_owned_buffer_release_active_op_sentinel_does_not_hang(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("owned-buffer active-op sentinel fork failed");
+    }
+    if (pid == 0) {
+        llam_io_buffer_t *handle = NULL;
+        llam_io_buffer_t *raw;
+
+        /*
+         * This models corrupted/exhausted public accessor state. Before the
+         * fix, release consumed the public slot and then waited forever for the
+         * permanent busy sentinel to become zero.
+         */
+        (void)alarm(2U);
+        if (llam_io_buffer_alloc(32U, &handle) != 0 || handle == NULL) {
+            _exit(10);
+        }
+        raw = llam_io_buffer_public_begin_op(handle);
+        if (raw == NULL) {
+            _exit(11);
+        }
+        atomic_store_explicit(&raw->public_active_ops, SIZE_MAX, memory_order_relaxed);
+        llam_io_buffer_public_end_op(raw);
+
+        llam_io_buffer_release(handle);
+        if (llam_io_buffer_capacity(handle) == 0U) {
+            /*
+             * Saturated active-op state must fail closed without consuming the
+             * handle. Consuming it would hide the corruption and risk recycling
+             * storage still protected by the permanent busy sentinel.
+             */
+            _exit(12);
+        }
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("owned-buffer active-op sentinel waitpid failed");
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            return test_fail("owned-buffer release hung on active-op sentinel");
+        }
+        return test_fail("owned-buffer active-op sentinel child died from signal");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("owned-buffer active-op sentinel child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        return test_fail("owned-buffer active-op sentinel setup allocation failed");
+    case 11:
+        return test_fail("owned-buffer active-op sentinel raw resolve failed");
+    case 12:
+        return test_fail("owned-buffer active-op sentinel consumed the handle");
+    default:
+        return test_fail("owned-buffer active-op sentinel child returned unexpected status");
+    }
+}
+#endif
+
 static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
@@ -2175,6 +2246,9 @@ int main(void) {
         test_owned_buffer_forged_initial_handle_rejected() != 0 ||
         test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
         test_owned_buffer_raw_release_rejects_public_handle() != 0 ||
+#if LLAM_PLATFORM_POSIX
+        test_owned_buffer_release_active_op_sentinel_does_not_hang() != 0 ||
+#endif
         test_public_owned_buffer_alloc_and_positional_io() != 0 ||
         test_provided_owned_buffer_detaches_on_runtime_destroy() != 0 ||
         test_provided_owned_buffer_data_accessor_detaches_storage() != 0 ||
