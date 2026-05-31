@@ -527,6 +527,92 @@ static int test_task_group_capacity_overflow_guard(void) {
     return 0;
 }
 
+static int test_task_group_active_spawn_overflow_guard(void) {
+    edge_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    llam_task_group_t *group;
+    llam_task_group_t *raw_group;
+    size_t saved_active_spawns;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+
+    if (llam_runtime_opts_init(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("task group active-spawn overflow runtime opts init failed");
+    }
+    runtime_opts.deterministic = 1U;
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        return fail_errno("task group active-spawn overflow runtime init failed");
+    }
+
+    group = llam_task_group_create();
+    if (group == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("task group active-spawn overflow create failed");
+    }
+
+    raw_group = llam_task_group_resolve_public_handle(group);
+    if (raw_group == NULL) {
+        (void)llam_task_group_destroy(group);
+        llam_runtime_shutdown();
+        return fail_errno("task group active-spawn overflow resolve failed");
+    }
+    saved_active_spawns = raw_group->active_spawns;
+    /*
+     * active_spawns blocks group destruction while a spawn is outside
+     * group->lock. If SIZE_MAX wraps to zero, a racing destroy can consume the
+     * group while the spawn path still plans to relock and append the task.
+     */
+    raw_group->active_spawns = SIZE_MAX;
+    llam_task_group_end_public_op(raw_group);
+
+    errno = 0;
+    {
+        llam_task_t *spawned = llam_task_group_spawn(group, ownership_task, &state, NULL);
+
+        if (spawned != NULL || errno != ENOMEM) {
+            raw_group = llam_task_group_resolve_public_handle(group);
+            if (raw_group != NULL) {
+                raw_group->active_spawns = saved_active_spawns;
+                /*
+                 * A broken implementation may have appended @p spawned before
+                 * returning. Remove the test artifact so failure reporting does
+                 * not cascade through group destroy cleanup.
+                 */
+                if (spawned != NULL && raw_group->count > 0U && raw_group->tasks[raw_group->count - 1U] == spawned) {
+                    raw_group->count -= 1U;
+                }
+                llam_task_group_end_public_op(raw_group);
+            }
+            if (spawned != NULL) {
+                (void)llam_detach(spawned);
+            }
+            (void)llam_task_group_destroy(group);
+            llam_runtime_shutdown();
+            return fail_msg("task group active-spawn overflow did not fail with ENOMEM");
+        }
+    }
+
+    raw_group = llam_task_group_resolve_public_handle(group);
+    if (raw_group == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("task group active-spawn overflow restore resolve failed");
+    }
+    raw_group->active_spawns = saved_active_spawns;
+    llam_task_group_end_public_op(raw_group);
+
+    if (llam_task_group_destroy(group) != 0) {
+        llam_runtime_shutdown();
+        return fail_errno("task group active-spawn overflow destroy failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 0U) {
+        return fail_msg("task group active-spawn overflow unexpectedly ran task");
+    }
+    return 0;
+}
+
 static int test_fault_boundary_contracts(void) {
     edge_state_t state;
     llam_runtime_opts_t runtime_opts;
@@ -5143,6 +5229,10 @@ int main(void) {
     }
     if (run_edge_case("task_group_capacity_overflow_guard",
                       test_task_group_capacity_overflow_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("task_group_active_spawn_overflow_guard",
+                      test_task_group_active_spawn_overflow_guard) != 0) {
         return 1;
     }
     if (run_edge_case("fault_boundary_contracts", test_fault_boundary_contracts) != 0) {

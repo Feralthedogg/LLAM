@@ -452,8 +452,9 @@ static inline void llam_public_active_op_begin(_Atomic size_t *active_ops) {
     /*
      * Reaching the high half of size_t is not a valid public-operation count.
      * Treat it as corruption/exhaustion and fail closed by publishing the
-     * permanent busy sentinel. Resolve/destroy paths hold the family registry
-     * lock while beginning pins, so destroy cannot observe the repair window.
+     * permanent busy sentinel. Resolve/destroy paths hold either the family
+     * registry lock or the object's lifecycle lock while beginning pins, so
+     * destroy cannot observe the repair window.
      */
     atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
 }

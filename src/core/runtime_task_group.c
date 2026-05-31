@@ -360,6 +360,17 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
         errno = ENOMEM;
         return NULL;
     }
+    if (group->active_spawns >= (SIZE_MAX / 2U)) {
+        /*
+         * active_spawns is a destruction gate while spawn runs outside
+         * group->lock.  Values this large are not reachable through normal API
+         * use; treat them as corrupted/exhausted state rather than allowing
+         * active_spawns + 1 to wrap to zero and open a destroy race.
+         */
+        pthread_mutex_unlock(&group->lock);
+        errno = ENOMEM;
+        return NULL;
+    }
     if (llam_task_group_reserve_locked(group, group->count + 1U) != 0) {
         pthread_mutex_unlock(&group->lock);
         return NULL;
