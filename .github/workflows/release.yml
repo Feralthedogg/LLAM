@@ -97,7 +97,9 @@ jobs:
           package_version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
           package_version="${package_version#v}"
           archive="target/dist/llam-${package_version}-${{ matrix.target }}.tar.xz"
-          tar -tf "$archive" > package-files.txt
+          if ! tar -tf "$archive" > package-files.txt 2>/dev/null; then
+            xz -dc "$archive" | tar -tf - > package-files.txt
+          fi
           grep '/include/llam/runtime.h$' package-files.txt
           grep '/include/llam/io.h$' package-files.txt
           grep '/examples/server_flood_stats.c$' package-files.txt
@@ -105,7 +107,9 @@ jobs:
           rm -f package-files.txt
           tmp="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-smoke.XXXXXX")"
           trap 'rm -rf "$tmp"' EXIT
-          tar -xf "$archive" -C "$tmp"
+          if ! tar -xf "$archive" -C "$tmp" 2>/dev/null; then
+            xz -dc "$archive" | tar -xf - -C "$tmp"
+          fi
           sh "$tmp/llam-${package_version}-${{ matrix.target }}/install.sh" --dry-run --prefix "$tmp/prefix" |
             grep 'copy .*/include -> .*/include'
           for file in VERSION ABI_MAJOR LIBRARY_VERSION; do
@@ -391,7 +395,9 @@ jobs:
           package_version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
           package_version="${package_version#v}"
           archive="target/dist/llam-${package_version}-${{ matrix.target }}.tar.xz"
-          tar -tf "$archive" > package-files.txt
+          if ! tar -tf "$archive" > package-files.txt 2>/dev/null; then
+            xz -dc "$archive" | tar -tf - > package-files.txt
+          fi
           grep '/include/llam/runtime.h$' package-files.txt
           grep '/include/llam/platform.h$' package-files.txt
           grep '/lib/libllam_runtime.so$' package-files.txt
