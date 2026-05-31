@@ -238,7 +238,12 @@ LLAM_API ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_
  */
 LLAM_API ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out);
 
-/** @brief Initialize I/O buffer allocation options with ABI-safe defaults. */
+/**
+ * @brief Initialize I/O buffer allocation options with ABI-safe defaults.
+ *
+ * @details LLAM writes only the prefix known to the loaded library. Caller-side
+ * tail bytes from newer struct definitions are left untouched.
+ */
 LLAM_API int llam_io_buffer_opts_init(llam_io_buffer_opts_t *opts, size_t opts_size);
 
 /** @brief Allocate a runtime-owned buffer with explicit capacity/alignment options. */

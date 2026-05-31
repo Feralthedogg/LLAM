@@ -50,8 +50,9 @@ const char *llam_version_string(void) {
  *
  * @details
  * The caller provides its struct size so older bindings can pass a shorter
- * prefix safely.  Any bytes beyond the current known prefix are zeroed first,
- * then the compatible default prefix is copied into place.
+ * prefix safely.  LLAM writes only the prefix known to this library; if a newer
+ * binding passes a larger struct, the unknown caller-owned tail is left
+ * untouched because this library cannot know its layout.
  */
 int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
     llam_runtime_opts_t defaults;
@@ -68,8 +69,8 @@ int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
     defaults.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     defaults.preempt_mode = LLAM_PREEMPT_AUTO;
 
-    memset(opts, 0, opts_size);
     copy_size = llam_min_size(opts_size, sizeof(defaults));
+    memset(opts, 0, copy_size);
     memcpy(opts, &defaults, copy_size);
     return 0;
 }
@@ -78,9 +79,9 @@ int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
  * @brief Initialize spawn options with the current library defaults.
  *
  * @details
- * This mirrors ::llam_runtime_opts_init for task creation.  Zeroing the full
- * caller-provided buffer keeps future tail fields deterministic even when the
- * caller was compiled against an older header.
+ * This mirrors ::llam_runtime_opts_init for task creation: only the prefix
+ * known to this library is written, so future caller-side tail fields remain
+ * owned by the caller.
  */
 int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size) {
     llam_spawn_opts_t defaults;
@@ -95,8 +96,8 @@ int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size) {
     defaults.task_class = LLAM_TASK_CLASS_DEFAULT;
     defaults.stack_class = LLAM_STACK_CLASS_DEFAULT;
 
-    memset(opts, 0, opts_size);
     copy_size = llam_min_size(opts_size, sizeof(defaults));
+    memset(opts, 0, copy_size);
     memcpy(opts, &defaults, copy_size);
     return 0;
 }
@@ -106,8 +107,9 @@ int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size) {
  *
  * @details
  * Dynamic loaders use this to verify major/minor ABI compatibility and discover
- * struct sizes before calling the rest of the API.  The function never writes
- * past @p info_size, so old bindings can query newer libraries safely.
+ * struct sizes before calling the rest of the API.  The function writes only
+ * the prefix known to this library, so old bindings and future callers with a
+ * larger local struct can both query safely.
  */
 int llam_abi_get_info(llam_abi_info_t *info, size_t info_size) {
     llam_abi_info_t current;
@@ -132,8 +134,8 @@ int llam_abi_get_info(llam_abi_info_t *info, size_t info_size) {
     current.version_string = LLAM_VERSION_STRING_LITERAL;
     current.platform_name = LLAM_PLATFORM_NAME;
 
-    memset(info, 0, info_size);
     copy_size = llam_min_size(info_size, sizeof(current));
+    memset(info, 0, copy_size);
     memcpy(info, &current, copy_size);
     return 0;
 }

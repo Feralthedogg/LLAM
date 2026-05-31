@@ -266,6 +266,107 @@ static int test_llam_option_initializers(void) {
     return 0;
 }
 
+static int test_llam_option_initializers_preserve_unknown_tail(void) {
+    enum {
+        unknown_tail_size = 32
+    };
+    typedef struct runtime_opts_extended {
+        llam_runtime_opts_t known;
+        unsigned char unknown_tail[unknown_tail_size];
+    } runtime_opts_extended_t;
+    typedef struct spawn_opts_extended {
+        llam_spawn_opts_t known;
+        unsigned char unknown_tail[unknown_tail_size];
+    } spawn_opts_extended_t;
+    typedef struct io_buffer_opts_extended {
+        llam_io_buffer_opts_t known;
+        unsigned char unknown_tail[unknown_tail_size];
+    } io_buffer_opts_extended_t;
+    runtime_opts_extended_t runtime_opts;
+    spawn_opts_extended_t spawn_opts;
+    io_buffer_opts_extended_t buffer_opts;
+
+    memset(&runtime_opts, 0xA5, sizeof(runtime_opts));
+    if (llam_runtime_opts_init(&runtime_opts.known, sizeof(runtime_opts)) != 0) {
+        return test_fail_errno("llam_runtime_opts_init extended-size call failed");
+    }
+    for (size_t i = 0U; i < sizeof(runtime_opts.unknown_tail); ++i) {
+        if (runtime_opts.unknown_tail[i] != 0xA5U) {
+            return test_fail("llam_runtime_opts_init wrote into unknown future tail");
+        }
+    }
+
+    memset(&spawn_opts, 0xA5, sizeof(spawn_opts));
+    if (llam_spawn_opts_init(&spawn_opts.known, sizeof(spawn_opts)) != 0) {
+        return test_fail_errno("llam_spawn_opts_init extended-size call failed");
+    }
+    for (size_t i = 0U; i < sizeof(spawn_opts.unknown_tail); ++i) {
+        if (spawn_opts.unknown_tail[i] != 0xA5U) {
+            return test_fail("llam_spawn_opts_init wrote into unknown future tail");
+        }
+    }
+
+    memset(&buffer_opts, 0xA5, sizeof(buffer_opts));
+    if (llam_io_buffer_opts_init(&buffer_opts.known, sizeof(buffer_opts)) != 0) {
+        return test_fail_errno("llam_io_buffer_opts_init extended-size call failed");
+    }
+    for (size_t i = 0U; i < sizeof(buffer_opts.unknown_tail); ++i) {
+        if (buffer_opts.unknown_tail[i] != 0xA5U) {
+            return test_fail("llam_io_buffer_opts_init wrote into unknown future tail");
+        }
+    }
+    return 0;
+}
+
+static int test_llam_size_aware_outputs_preserve_unknown_tail(void) {
+    enum {
+        unknown_tail_size = 32
+    };
+    typedef struct abi_info_extended {
+        llam_abi_info_t known;
+        unsigned char unknown_tail[unknown_tail_size];
+    } abi_info_extended_t;
+    typedef struct runtime_stats_extended {
+        llam_runtime_stats_t known;
+        unsigned char unknown_tail[unknown_tail_size];
+    } runtime_stats_extended_t;
+    abi_info_extended_t abi_info;
+    runtime_stats_extended_t stats;
+
+    memset(&abi_info, 0xA5, sizeof(abi_info));
+    if (llam_abi_get_info(&abi_info.known, sizeof(abi_info)) != 0) {
+        return test_fail_errno("llam_abi_get_info extended-size call failed");
+    }
+    for (size_t i = 0U; i < sizeof(abi_info.unknown_tail); ++i) {
+        if (abi_info.unknown_tail[i] != 0xA5U) {
+            return test_fail("llam_abi_get_info wrote into unknown future tail");
+        }
+    }
+
+    memset(&stats, 0xA5, sizeof(stats));
+    if (llam_runtime_collect_stats_ex(&stats.known, sizeof(stats)) != 0) {
+        return test_fail_errno("llam_runtime_collect_stats_ex extended-size call failed");
+    }
+    for (size_t i = 0U; i < sizeof(stats.unknown_tail); ++i) {
+        if (stats.unknown_tail[i] != 0xA5U) {
+            return test_fail("llam_runtime_collect_stats_ex wrote into unknown future tail");
+        }
+    }
+
+    memset(&stats, 0xA5, sizeof(stats));
+    errno = 0;
+    if (llam_runtime_collect_stats_ex_handle(NULL, &stats.known, sizeof(stats)) != -1 ||
+        errno != EINVAL) {
+        return test_fail("llam_runtime_collect_stats_ex_handle(NULL) did not fail with EINVAL");
+    }
+    for (size_t i = 0U; i < sizeof(stats.unknown_tail); ++i) {
+        if (stats.unknown_tail[i] != 0xA5U) {
+            return test_fail("llam_runtime_collect_stats_ex_handle(NULL) wrote into unknown future tail");
+        }
+    }
+    return 0;
+}
+
 static int test_preempt_poll_macro_hygiene(void) {
     size_t llam_preempt_poll_counter_ = 0U;
     size_t llam_preempt_poll_interval_ = 2U;
@@ -291,6 +392,8 @@ int main(void) {
     if (test_llam_full_info() != 0 ||
         test_llam_prefix_info() != 0 ||
         test_llam_option_initializers() != 0 ||
+        test_llam_option_initializers_preserve_unknown_tail() != 0 ||
+        test_llam_size_aware_outputs_preserve_unknown_tail() != 0 ||
         test_preempt_poll_macro_hygiene() != 0 ||
         test_platform_fd_contracts() != 0 ||
         test_invalid_arguments() != 0) {

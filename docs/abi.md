@@ -121,6 +121,12 @@ bindings pass smaller option structs to newer libraries when fields are
 appended at the tail. Passing an option pointer with `opts_size == 0` fails
 with `errno = EINVAL`.
 
+The loaded library writes only the ABI prefix it knows. If a newer binding
+passes a larger local option, stats, or ABI-info struct to an older LLAM
+library, bytes beyond the older library's current struct size are left
+untouched rather than zero-filled. Bindings that need deterministic future-tail
+defaults must initialize their own full local struct before calling LLAM.
+
 The non-`_ex` functions are C convenience wrappers that pass
 `sizeof(llam_runtime_opts_t)` or `sizeof(llam_spawn_opts_t)` when options are
 provided. New dynamic bindings should resolve and call the `_ex` symbols.
@@ -135,8 +141,8 @@ LLAM_RUNTIME_STATS_CURRENT_SIZE
 LLAM_IO_BUFFER_OPTS_CURRENT_SIZE
 ```
 
-`llam_runtime_opts_init()` and `llam_spawn_opts_init()` write only the
-caller-provided prefix, so bindings can ask the loaded library for its current
+`llam_runtime_opts_init()` and `llam_spawn_opts_init()` write only the known
+compatible prefix, so bindings can ask the loaded library for its current
 defaults without assuming that all-zero options equal the default policy.
 Current defaults are deterministic balanced runtime startup and default-class,
 default-stack task spawn.

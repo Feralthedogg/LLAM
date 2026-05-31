@@ -302,8 +302,9 @@ typedef struct llam_runtime_stats {
  *
  * @details
  * This is the ABI-stable option initializer preferred by dynamic loaders and
- * FFI bindings. LLAM writes only the overlapping prefix of @p opts and zeroes
- * any caller-side tail beyond the current library's ::llam_runtime_opts_t.
+ * FFI bindings. LLAM writes only the overlapping prefix known to the loaded
+ * library; caller-side tail bytes from newer struct definitions are left
+ * untouched.
  *
  * @param opts Destination options object. Must not be NULL.
  * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
@@ -316,8 +317,9 @@ LLAM_API int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size)
  *
  * @details
  * This is the ABI-stable option initializer preferred by dynamic loaders and
- * FFI bindings. LLAM writes only the overlapping prefix of @p opts and zeroes
- * any caller-side tail beyond the current library's ::llam_spawn_opts_t.
+ * FFI bindings. LLAM writes only the overlapping prefix known to the loaded
+ * library; caller-side tail bytes from newer struct definitions are left
+ * untouched.
  *
  * @param opts Destination options object. Must not be NULL.
  * @param opts_size Size of the caller's ::llam_spawn_opts_t definition.

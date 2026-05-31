@@ -225,7 +225,9 @@ int llam_io_buffer_opts_init(llam_io_buffer_opts_t *opts, size_t opts_size) {
     }
     memset(&defaults, 0, sizeof(defaults));
     copy_size = opts_size < sizeof(defaults) ? opts_size : sizeof(defaults);
-    memset(opts, 0, opts_size);
+    /* Only initialize the ABI prefix known to this library; future tail bytes
+     * belong to the caller's newer struct definition. */
+    memset(opts, 0, copy_size);
     memcpy(opts, &defaults, copy_size);
     return 0;
 }

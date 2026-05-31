@@ -196,8 +196,9 @@ int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *s
         errno = EINVAL;
         return -1;
     }
-    /* Clear before handle validation so failed FFI snapshots cannot look fresh. */
-    memset(stats, 0, stats_size);
+    copy_size = stats_size < sizeof(full_stats) ? stats_size : sizeof(full_stats);
+    /* Clear only the current ABI prefix; future caller-side tail bytes are not ours. */
+    memset(stats, 0, copy_size);
     if (rt == NULL) {
         rt = llam_runtime_default_storage();
     }
@@ -228,7 +229,6 @@ int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *s
     }
     llam_runtime_end_public_op(pinned_runtime);
 copy_snapshot:
-    copy_size = stats_size < sizeof(full_stats) ? stats_size : sizeof(full_stats);
     memcpy(stats, &full_stats, copy_size);
     return 0;
 }
@@ -240,7 +240,9 @@ int llam_runtime_collect_stats_ex(llam_runtime_stats_t *stats, size_t stats_size
 int llam_runtime_collect_stats_ex_handle(llam_runtime_t *runtime, llam_runtime_stats_t *stats, size_t stats_size) {
     if (runtime == NULL) {
         if (stats != NULL && stats_size != 0U) {
-            memset(stats, 0, stats_size);
+            size_t copy_size = stats_size < sizeof(*stats) ? stats_size : sizeof(*stats);
+
+            memset(stats, 0, copy_size);
         }
         errno = EINVAL;
         return -1;
