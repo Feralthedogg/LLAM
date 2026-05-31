@@ -3,9 +3,11 @@
  * @brief Broker shared-memory ring operation dispatcher.
  *
  * @details
- * Session lookup and raw queue primitives live in runtime_broker_ring.c. This
- * file owns execution of one validated submission and publication of its
- * completion, including fail-closed clearing of client-visible output ranges.
+ * Session lookup lives in runtime_broker_ring.c, raw SPSC cursor movement lives
+ * in runtime_broker_ring_queue.c, and per-op authority checks live in
+ * runtime_broker_ring_ops.c. This file only reserves immutable submission
+ * batches, coordinates lock release/reacquire around execution, and publishes
+ * completions after validating broker-private cursors.
  *
  * @copyright Copyright 2026 Feralthedogg
  *

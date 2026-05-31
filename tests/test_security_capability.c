@@ -2355,6 +2355,47 @@ static int test_broker_ring_private_name_clears_short_output(void) {
     return 0;
 }
 
+static int test_broker_ring_long_names_fail_without_mapping_output(void) {
+    llam_broker_ring_mapping_t mapping;
+    char name[LLAM_BROKER_RING_MAPPING_NAME_BYTES + 8U];
+    size_t i;
+
+    memset(&mapping, 0x5a, sizeof(mapping));
+    for (i = 0U; i + 1U < sizeof(name); ++i) {
+        name[i] = i == 0U ? '/' : 'a';
+    }
+    name[sizeof(name) - 1U] = '\0';
+    /*
+     * Mapping names are stored in fixed-size cleanup authority. Overlong names
+     * must fail before any platform backend can truncate the recorded name and
+     * later unlink or close the wrong authority object.
+     */
+    errno = 0;
+    if (expect_errno(llam_broker_ring_create_shm(&name[1], &mapping),
+                     EINVAL,
+                     "relative overlong ring name was accepted") != 0 ||
+        !broker_ring_mapping_is_reset(&mapping)) {
+        return -1;
+    }
+    memset(&mapping, 0x5a, sizeof(mapping));
+    errno = 0;
+    if (expect_errno(llam_broker_ring_create_shm(name, &mapping),
+                     EINVAL,
+                     "absolute overlong ring name was accepted") != 0 ||
+        !broker_ring_mapping_is_reset(&mapping)) {
+        return -1;
+    }
+    memset(&mapping, 0x5a, sizeof(mapping));
+    errno = 0;
+    if (expect_errno(llam_broker_ring_open_shm(name, &mapping),
+                     EINVAL,
+                     "absolute overlong ring open was accepted") != 0 ||
+        !broker_ring_mapping_is_reset(&mapping)) {
+        return -1;
+    }
+    return 0;
+}
+
 static int test_broker_ring_unmap_handles_unterminated_name(void) {
 #if !LLAM_PLATFORM_WINDOWS
     llam_broker_ring_mapping_t mapping;
@@ -11644,6 +11685,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_transport_subject_table_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_failure_marker_clears_authority_outputs);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_private_name_clears_short_output);
+    LLAM_RUN_SECURITY_TEST(test_broker_ring_long_names_fail_without_mapping_output);
     LLAM_RUN_SECURITY_TEST(test_broker_control_outputs_clear_on_invalid_input);
 #if !LLAM_PLATFORM_WINDOWS
     LLAM_RUN_SECURITY_TEST(test_broker_wire_task_join_sleep_returns_eagain);

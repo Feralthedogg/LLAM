@@ -1,6 +1,6 @@
 /**
  * @file src/core/runtime_broker_ring.c
- * @brief Shared-memory-ready broker ring and buffer grant helpers.
+ * @brief Broker ring session ownership and mapping lifecycle helpers.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
