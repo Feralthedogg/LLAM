@@ -1,6 +1,6 @@
 # LLAM ChangeLog
 
-## 2.0.1 - Unreleased
+## 2.0.0 - 2026-05-25
 
 ### Added
 
@@ -16,7 +16,7 @@
 
 * additional multi-runtime, blocking-pool, public-handle, owned-buffer, broker,
   Windows IOCP, BSD kqueue, and server-stress regression coverage for the
-  post-2.0.0 hardening queue.
+  2.0.0 re-release hardening queue.
 
 * a direct runtime soak gate for repeated LLAM core fuzz, multi-runtime
   ownership/isolation, runtime stress, shutdown, and owned-buffer coverage
@@ -67,7 +67,7 @@
   stack `EAGAIN`, Windows IOCP association metadata/locking, Windows IOCP smoke
   completion, and UDP IOCP poll opt-in behavior.
 
-* harden broker capability and transport paths after 2.0.0: reject slot-zero
+* harden broker capability and transport paths for the 2.0.0 re-release: reject slot-zero
   tokens, enforce family-specific rights allowlists, bound direct buffer
   grants, clear output authority on failed attenuation/revocation/transport
   calls, preserve revoke atomicity on entropy failure, serialize concurrent
@@ -89,6 +89,10 @@
 * reject zero-right raw capability validation. Direct capability helpers now
   match broker-visible validation by requiring callers to prove a concrete
   authority bit instead of using validation as a rightless live-token oracle.
+
+* guard timer heap diagnostic accounting against `UINT_MAX -> 0` overflow and
+  `0 -> UINT_MAX` underflow. Corrupted timer accounting now fails closed with
+  fatal diagnostics instead of poisoning scheduler pressure and shutdown state.
 
 * reject zero-right client grant requests on the broker control transport.
   `CREATE_BUFFER`, `CREATE_CHANNEL`, and `REGISTER_DESCRIPTOR` now require an
@@ -343,7 +347,7 @@
   comparisons with `--isolate-cases`; isolated LLAM-only median smoke currently
   shows `spawn_join` around 4M ops/s on the local macOS aarch64 host.
 
-## 2.0.0 - 2026-05-25
+### Initial 2.0.0 Baseline
 
 ### Added
 

@@ -1884,6 +1884,7 @@ static void timer_heap_overflow_task(void *arg) {
         task_fail(&state->edge, "timer heap overflow sleep", state->sleep_errno);
         return;
     }
+
     atomic_fetch_add_explicit(&state->edge.ran, 1U, memory_order_relaxed);
 }
 
@@ -3508,6 +3509,63 @@ cleanup_runtime:
         return fail_errno("timer heap overflow guard failed");
     }
     return rc;
+}
+
+static int test_timer_heap_counter_accounting_guard(void) {
+    llam_runtime_t runtime;
+    llam_shard_t shard;
+    llam_timer_node_t overflow_node;
+    llam_timer_node_t underflow_node;
+    llam_timer_node_t *heap[1];
+    llam_timer_node_t *removed;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&shard, 0, sizeof(shard));
+    memset(&overflow_node, 0, sizeof(overflow_node));
+    memset(&underflow_node, 0, sizeof(underflow_node));
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&runtime.stop_requested, false);
+    atomic_init(&runtime.initialized, false);
+    atomic_init(&runtime.exec_started, false);
+    atomic_init(&shard.timer_count, UINT_MAX);
+    shard.runtime = &runtime;
+    shard.timer_heap = heap;
+    shard.timer_heap_cap = 1U;
+
+    /*
+     * This direct internal test avoids running the scheduler after intentionally
+     * fatal accounting corruption.  The runtime should fail closed and preserve
+     * the diagnostic counter instead of wrapping it through zero.
+     */
+    heap[0] = NULL;
+    errno = 0;
+    if (llam_timer_heap_push_locked(&shard, &overflow_node) ||
+        errno != EOVERFLOW ||
+        shard.timer_heap_len != 0U ||
+        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        return fail_errno("timer heap counter overflow guard failed");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&runtime.stop_requested, false, memory_order_release);
+    atomic_store_explicit(&shard.timer_count, 0U, memory_order_release);
+    underflow_node.heap_index = 0U;
+    heap[0] = &underflow_node;
+    shard.timer_heap_len = 1U;
+    shard.timers = &underflow_node;
+
+    errno = 0;
+    removed = llam_timer_heap_remove_at_locked(&shard, 0U);
+    if (removed != &underflow_node ||
+        errno != EINVAL ||
+        shard.timer_heap_len != 0U ||
+        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        return fail_errno("timer heap counter underflow guard failed");
+    }
+
+    return 0;
 }
 
 static void channel_select_excessive_op_count_task(void *arg) {
@@ -5639,6 +5697,10 @@ int main(void) {
     }
     if (run_edge_case("timer_heap_capacity_overflow_guard",
                       test_timer_heap_capacity_overflow_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("timer_heap_counter_accounting_guard",
+                      test_timer_heap_counter_accounting_guard) != 0) {
         return 1;
     }
     if (run_edge_case("channel_select_excessive_op_count",

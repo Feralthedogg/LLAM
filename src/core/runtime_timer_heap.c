@@ -93,6 +93,53 @@ static bool llam_timer_heap_reserve(llam_shard_t *shard, size_t needed) {
     return true;
 }
 
+static bool llam_timer_count_increment(llam_shard_t *shard) {
+    unsigned count;
+
+    count = atomic_load_explicit(&shard->timer_count, memory_order_acquire);
+    for (;;) {
+        if (LLAM_UNLIKELY(count == UINT_MAX)) {
+            /*
+             * timer_count feeds scheduler pressure and diagnostics.  Refuse
+             * new timers instead of wrapping to zero and hiding pending work.
+             */
+            llam_record_fatal(shard->runtime, EOVERFLOW);
+            errno = EOVERFLOW;
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(&shard->timer_count,
+                                                  &count,
+                                                  count + 1U,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+static void llam_timer_count_decrement(llam_shard_t *shard) {
+    unsigned count;
+
+    count = atomic_load_explicit(&shard->timer_count, memory_order_acquire);
+    while (count > 0U) {
+        if (atomic_compare_exchange_weak_explicit(&shard->timer_count,
+                                                  &count,
+                                                  count - 1U,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return;
+        }
+    }
+
+    /*
+     * Removing a heap entry without a matching accounting credit means a stale
+     * timer or corrupted heap state reached the scheduler.  Keep the counter at
+     * zero so shutdown/pressure checks cannot see UINT_MAX.
+     */
+    llam_record_fatal(shard->runtime, EINVAL);
+    errno = EINVAL;
+}
+
 static void llam_timer_heap_sift_up(llam_shard_t *shard, size_t index) {
     while (index > 0U) {
         size_t parent = llam_timer_heap_parent(index);
@@ -137,6 +184,9 @@ bool llam_timer_heap_push_locked(llam_shard_t *shard, llam_timer_node_t *node) {
     if (!llam_timer_heap_reserve(shard, shard->timer_heap_len + 1U)) {
         return false;
     }
+    if (!llam_timer_count_increment(shard)) {
+        return false;
+    }
     index = shard->timer_heap_len++;
     shard->timer_heap[index] = node;
     node->heap_index = index;
@@ -170,7 +220,7 @@ llam_timer_node_t *llam_timer_heap_remove_at_locked(llam_shard_t *shard, size_t 
     shard->timer_heap[shard->timer_heap_len] = NULL;
     node->heap_index = 0U;
     llam_timer_heap_refresh_root(shard);
-    atomic_fetch_sub_explicit(&shard->timer_count, 1U, memory_order_release);
+    llam_timer_count_decrement(shard);
     return node;
 }
 
