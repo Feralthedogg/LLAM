@@ -112,6 +112,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_mutex_lifecycle.c
     src/core/runtime_mutex.c
     src/core/runtime_names.c
+    src/core/runtime_norm_queue_depth.c
     src/core/runtime_norm_queue.c
     src/core/runtime_platform.c
     src/core/runtime_queue_base.c
