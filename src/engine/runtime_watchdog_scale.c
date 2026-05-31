@@ -298,6 +298,9 @@ void llam_runtime_adjust_online_shards(llam_runtime_t *rt) {
     bool timers_pending;
     bool pressure;
     bool runnable_backlog;
+    bool live_saturated;
+    bool live_pressure;
+    bool idle_capacity;
     bool want_up;
     bool want_down;
 
@@ -338,14 +341,24 @@ void llam_runtime_adjust_online_shards(llam_runtime_t *rt) {
 #endif
     pressure = llam_runtime_pressure_signal(rt);
     runnable_backlog = llam_runtime_has_runnable_backlog(rt);
+    live_saturated = live == UINT_MAX;
+    live_pressure = live_saturated ||
+                    (online <= UINT_MAX / 2U && effective_live > online * 2U);
+    /*
+     * Avoid effective_live + 1 and fail closed on saturated live counts:
+     * diagnostics can intentionally clamp live tasks at UINT_MAX, and wrapping
+     * that value would make the scaler treat unknown/high liveness as idle.
+     */
+    idle_capacity = !live_saturated && online > 0U && effective_live < online - 1U;
     want_up = (pressure ||
-               effective_live > online * 2U ||
+               live_pressure ||
                (active_io_waiters > 0U && runnable_backlog) ||
                online < online_floor) &&
               online < rt->active_shards;
     want_down = !pressure &&
                 online > online_floor &&
-                (effective_live + 1U < online || timers_pending) &&
+                !live_saturated &&
+                (idle_capacity || timers_pending) &&
                 atomic_load(&rt->block_pending) == 0U &&
                 !runnable_backlog &&
                 !llam_runtime_has_opaque_blocking(rt);

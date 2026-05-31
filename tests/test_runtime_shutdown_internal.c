@@ -25,6 +25,7 @@
  */
 
 #include "runtime_internal.h"
+#include "engine/runtime_watchdog_internal.h"
 
 #if LLAM_RUNTIME_BACKEND_DARWIN
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
@@ -1384,6 +1385,75 @@ static int exercise_task_live_counter_overflow_fails_closed(void) {
     return 0;
 }
 
+static int exercise_dynamic_scaler_live_saturation_fails_closed(void) {
+    llam_runtime_t runtime;
+    llam_shard_t shards[2];
+    bool locks_initialized[2] = {false, false};
+    bool opaque_locks_initialized[2] = {false, false};
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(shards, 0, sizeof(shards));
+    runtime.shards = shards;
+    runtime.active_shards = 2U;
+    runtime.active_nodes = 1U;
+    runtime.experimental_dynamic_shards = 1U;
+    runtime.dynamic_online_floor = 1U;
+    runtime.dynamic_scale_cooldown = LLAM_DYNAMIC_SCALE_COOLDOWN_TICKS;
+    atomic_init(&runtime.online_shards, 2U);
+    atomic_init(&runtime.online_shards_min, 2U);
+    atomic_init(&runtime.online_shards_max, 2U);
+    atomic_init(&runtime.block_pending, 0U);
+    atomic_init(&runtime.active_io_waiters, 0U);
+
+    for (unsigned i = 0U; i < 2U; ++i) {
+        shards[i].runtime = &runtime;
+        shards[i].id = i;
+        atomic_init(&shards[i].online, 1U);
+        atomic_init(&shards[i].current, NULL);
+        atomic_init(&shards[i].norm_depth, 0U);
+        atomic_init(&shards[i].timer_callbacks_active, 0U);
+        atomic_init(&shards[i].live_tasks, i == 0U ? UINT_MAX : 0U);
+        if (pthread_mutex_init(&shards[i].lock, NULL) != 0) {
+            goto done;
+        }
+        locks_initialized[i] = true;
+        if (pthread_mutex_init(&shards[i].opaque_lock, NULL) != 0) {
+            goto done;
+        }
+        opaque_locks_initialized[i] = true;
+    }
+
+    /*
+     * Saturated live counts are fail-closed diagnostics.  The scaler must not
+     * treat UINT_MAX + 1 as zero and begin a scale-down streak while liveness is
+     * unknown; doing so can offline workers during a corrupted shutdown state.
+     */
+    llam_runtime_adjust_online_shards(&runtime);
+    if (runtime.dynamic_scale_down_streak != 0U) {
+        rc = fail_msg("dynamic scaler treated saturated live tasks as idle");
+        goto done;
+    }
+    atomic_store_explicit(&shards[0].timer_callbacks_active, 1U, memory_order_release);
+    llam_runtime_adjust_online_shards(&runtime);
+    if (runtime.dynamic_scale_down_streak != 0U) {
+        rc = fail_msg("dynamic scaler scaled down saturated live tasks with timers pending");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    for (unsigned i = 0U; i < 2U; ++i) {
+        if (opaque_locks_initialized[i]) {
+            pthread_mutex_destroy(&shards[i].opaque_lock);
+        }
+        if (locks_initialized[i]) {
+            pthread_mutex_destroy(&shards[i].lock);
+        }
+    }
+    return rc;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
@@ -1452,6 +1522,9 @@ int main(void) {
         return 1;
     }
     if (exercise_task_live_counter_overflow_fails_closed() != 0) {
+        return 1;
+    }
+    if (exercise_dynamic_scaler_live_saturation_fails_closed() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");
