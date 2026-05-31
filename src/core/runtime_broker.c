@@ -242,8 +242,25 @@ void llam_broker_destroy(llam_broker_t *broker) {
         llam_broker_unlock(broker);
         return;
     }
+    if (LLAM_UNLIKELY(broker->active_ops >= LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL)) {
+        /*
+         * A saturated/corrupted active-op counter cannot be drained by any
+         * valid broker operation. Preserve the broker and report busy through
+         * errno rather than consuming authority state or blocking forever.
+         */
+        llam_broker_unlock(broker);
+        errno = EBUSY;
+        return;
+    }
     broker->destroying = true;
     while (broker->active_ops > 0U && broker->idle_cond_initialized) {
+        if (LLAM_UNLIKELY(broker->active_ops >= LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL)) {
+            broker->destroying = false;
+            (void)pthread_cond_broadcast(&broker->idle_cond);
+            llam_broker_unlock(broker);
+            errno = EBUSY;
+            return;
+        }
         (void)pthread_cond_wait(&broker->idle_cond, &broker->lock);
     }
     runtime = broker->runtime;

@@ -177,7 +177,7 @@ int llam_broker_begin_op_subject(llam_broker_t *broker, uint64_t subject_id) {
         errno = EINVAL;
         return -1;
     }
-    if (LLAM_UNLIKELY(broker->active_ops == UINT32_MAX)) {
+    if (LLAM_UNLIKELY(broker->active_ops >= LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL)) {
         llam_broker_unlock(broker);
         errno = EOVERFLOW;
         return -1;

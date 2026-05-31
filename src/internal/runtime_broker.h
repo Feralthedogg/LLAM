@@ -54,6 +54,12 @@
 #define LLAM_BROKER_CHANNEL_CAPACITY 64U
 #define LLAM_BROKER_CHANNEL_MESSAGE_BYTES 256U
 #define LLAM_BROKER_WIRE_DATA_BYTES 256U
+/*
+ * Broker active_ops is a bounded lifecycle gate, not a request counter. The
+ * high half is reserved as corrupted/exhausted state so destroy can fail closed
+ * instead of waiting forever on a value no valid broker operation can drain.
+ */
+#define LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL (UINT32_MAX / 2U)
 #define LLAM_BROKER_BUFFER_TRANSPORT_RIGHTS \
     (LLAM_CAP_RIGHT_READ | LLAM_CAP_RIGHT_WRITE | LLAM_CAP_RIGHT_DESTROY)
 #define LLAM_BROKER_CHANNEL_TRANSPORT_RIGHTS \

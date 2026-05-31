@@ -8080,6 +8080,89 @@ done:
     return rc;
 }
 
+#if LLAM_PLATFORM_POSIX
+static int test_broker_destroy_active_op_sentinel_does_not_hang(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        llam_runtime_opts_t opts;
+        llam_broker_t broker;
+
+        if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(10);
+        }
+        opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+        if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(11);
+        }
+        /*
+         * Broker destroy waits for active_ops to drain before freeing private
+         * runtime and authority state. A saturated/corrupted counter used to
+         * leave destroy blocked forever on a value no valid operation can clear.
+         */
+        if (llam_broker_lock(&broker) != 0) {
+            _exit(12);
+        }
+        broker.active_ops = UINT32_MAX;
+        llam_broker_unlock(&broker);
+        (void)alarm(2U);
+        errno = 0;
+        llam_broker_destroy(&broker);
+        if (errno != EBUSY) {
+            _exit(13);
+        }
+        if (!broker.initialized) {
+            _exit(14);
+        }
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return -1;
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            fprintf(stderr, "[test_security_capability] broker destroy hung on active-op sentinel\n");
+            return -1;
+        }
+        fprintf(stderr,
+                "[test_security_capability] broker active-op sentinel child died from signal %d\n",
+                WTERMSIG(status));
+        return -1;
+    }
+    if (!WIFEXITED(status)) {
+        return -1;
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        fprintf(stderr, "[test_security_capability] broker sentinel opts init failed\n");
+        return -1;
+    case 11:
+        fprintf(stderr, "[test_security_capability] broker sentinel init failed\n");
+        return -1;
+    case 12:
+        fprintf(stderr, "[test_security_capability] broker sentinel lock failed\n");
+        return -1;
+    case 13:
+        fprintf(stderr, "[test_security_capability] broker sentinel destroy did not set EBUSY\n");
+        return -1;
+    case 14:
+        fprintf(stderr, "[test_security_capability] broker sentinel destroy consumed broker\n");
+        return -1;
+    default:
+        fprintf(stderr, "[test_security_capability] broker sentinel child returned %d\n", WEXITSTATUS(status));
+        return -1;
+    }
+}
+#endif
+
 static int test_broker_destroy_waits_for_active_ring_io(void) {
     static const char inbound[] = "destroy waits";
     llam_runtime_opts_t opts;
@@ -11722,6 +11805,9 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_nested_dispatch_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_ring_create_survives_destroy_start);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_is_single_owner_under_race);
+#if LLAM_PLATFORM_POSIX
+    LLAM_RUN_SECURITY_TEST(test_broker_destroy_active_op_sentinel_does_not_hang);
+#endif
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);
