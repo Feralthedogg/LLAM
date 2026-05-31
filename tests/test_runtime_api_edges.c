@@ -402,6 +402,59 @@ static int test_consumed_cancel_token_handle_reuse_guard(void) {
     return 0;
 }
 
+static int test_cancel_token_task_refcount_overflow_guard(void) {
+    llam_cancel_token_t *token;
+    llam_cancel_token_t *raw_token = NULL;
+    llam_cancel_token_t *extra_ref = NULL;
+    unsigned observed_refcount;
+
+    token = llam_cancel_token_create();
+    if (token == NULL) {
+        return fail_errno("cancel token refcount overflow create failed");
+    }
+    if (llam_cancel_token_retain_task_ref(token, &raw_token) != 0 || raw_token == NULL) {
+        (void)llam_cancel_token_destroy(token);
+        return fail_errno("cancel token refcount overflow initial retain failed");
+    }
+
+    pthread_mutex_lock(&raw_token->lock);
+    raw_token->refcount = UINT_MAX;
+    pthread_mutex_unlock(&raw_token->lock);
+
+    /*
+     * A saturated task-reference count is a corrupted/exhausted lifetime
+     * state.  Retain must fail closed instead of wrapping to zero, otherwise a
+     * concurrent destroy could free the token while task state still holds a
+     * retained raw pointer.
+     */
+    errno = 0;
+    if (llam_cancel_token_retain_task_ref(token, &extra_ref) != -1 || errno != EBUSY || extra_ref != NULL) {
+        pthread_mutex_lock(&raw_token->lock);
+        observed_refcount = raw_token->refcount;
+        raw_token->refcount = 0U;
+        pthread_mutex_unlock(&raw_token->lock);
+        (void)llam_cancel_token_destroy(token);
+        fprintf(stderr,
+                "[test_runtime_api_edges] saturated cancel token retain returned success/errno=%d refcount=%u\n",
+                errno,
+                observed_refcount);
+        return 1;
+    }
+
+    pthread_mutex_lock(&raw_token->lock);
+    observed_refcount = raw_token->refcount;
+    raw_token->refcount = 0U;
+    pthread_mutex_unlock(&raw_token->lock);
+    if (observed_refcount != UINT_MAX) {
+        (void)llam_cancel_token_destroy(token);
+        return fail_msg("cancel token saturated refcount was mutated after failed retain");
+    }
+    if (llam_cancel_token_destroy(token) != 0) {
+        return fail_errno("cancel token refcount overflow cleanup destroy failed");
+    }
+    return 0;
+}
+
 static int test_consumed_task_group_handle_reuse_guard(void) {
     llam_task_group_t *old_group;
     uintptr_t old_slot;
@@ -5484,6 +5537,10 @@ int main(void) {
     }
     if (run_edge_case("consumed_cancel_token_handle_reuse_guard",
                       test_consumed_cancel_token_handle_reuse_guard) != 0) {
+        return 1;
+    }
+    if (run_edge_case("cancel_token_task_refcount_overflow_guard",
+                      test_cancel_token_task_refcount_overflow_guard) != 0) {
         return 1;
     }
     if (run_edge_case("consumed_task_group_handle_reuse_guard",

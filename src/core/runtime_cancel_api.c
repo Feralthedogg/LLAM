@@ -28,7 +28,6 @@
 
 static pthread_mutex_t g_llam_cancel_token_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static llam_cancel_token_t *g_llam_cancel_token_registry;
-
 static llam_public_slot_table_t g_llam_cancel_token_public_slots;
 
 /*
@@ -155,6 +154,23 @@ static int llam_cancel_token_begin_op_for_runtime_locked(llam_cancel_token_t *ha
 
 static void llam_cancel_token_end_op(llam_cancel_token_t *token) {
     llam_public_active_op_end(token != NULL ? &token->active_ops : NULL);
+}
+
+static int llam_cancel_token_retain_locked(llam_cancel_token_t *raw_token, llam_cancel_token_t **out_token) {
+    /* Saturated task refs are corrupt/exhausted; never wrap them to zero. */
+    if (LLAM_UNLIKELY(raw_token->refcount == UINT_MAX)) {
+        pthread_mutex_unlock(&raw_token->lock);
+        llam_cancel_token_end_op(raw_token);
+        errno = EBUSY;
+        return -1;
+    }
+    raw_token->refcount += 1U;
+    pthread_mutex_unlock(&raw_token->lock);
+    llam_cancel_token_end_op(raw_token);
+    if (out_token != NULL) {
+        *out_token = raw_token;
+    }
+    return 0;
 }
 
 static void llam_cancel_token_unregister_live_locked(llam_cancel_token_t *token) {
@@ -294,8 +310,7 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
         return -1;
     }
     pthread_mutex_lock(&token->lock);
-    if (token->waiters != NULL ||
-        token->refcount != 0U ||
+    if (token->waiters != NULL || token->refcount != 0U ||
         llam_public_active_op_count(&token->active_ops) != 0U) {
         pthread_mutex_unlock(&token->lock);
         pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
@@ -319,21 +334,13 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
 int llam_cancel_token_retain_task_ref(llam_cancel_token_t *token, llam_cancel_token_t **out_token) {
     llam_cancel_token_t *raw_token = NULL;
 
+    if (out_token != NULL) {
+        *out_token = NULL;
+    }
     if (llam_cancel_token_begin_op_locked(token, &raw_token) != 0) {
         return -1;
     }
-    /*
-     * A spawned task keeps its cancel token alive independently of public
-     * operations.  Destroy checks this count under the same token lock and
-     * reports EBUSY until all task references are released.
-     */
-    raw_token->refcount += 1U;
-    pthread_mutex_unlock(&raw_token->lock);
-    llam_cancel_token_end_op(raw_token);
-    if (out_token != NULL) {
-        *out_token = raw_token;
-    }
-    return 0;
+    return llam_cancel_token_retain_locked(raw_token, out_token);
 }
 
 int llam_cancel_token_retain_task_ref_for_runtime(llam_cancel_token_t *token,
@@ -341,16 +348,13 @@ int llam_cancel_token_retain_task_ref_for_runtime(llam_cancel_token_t *token,
                                                   llam_cancel_token_t **out_token) {
     llam_cancel_token_t *raw_token = NULL;
 
+    if (out_token != NULL) {
+        *out_token = NULL;
+    }
     if (llam_cancel_token_begin_op_for_runtime_locked(token, owner_runtime, &raw_token) != 0) {
         return -1;
     }
-    raw_token->refcount += 1U;
-    pthread_mutex_unlock(&raw_token->lock);
-    llam_cancel_token_end_op(raw_token);
-    if (out_token != NULL) {
-        *out_token = raw_token;
-    }
-    return 0;
+    return llam_cancel_token_retain_locked(raw_token, out_token);
 }
 
 void llam_cancel_token_release_task_ref(llam_cancel_token_t *token) {
