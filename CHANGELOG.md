@@ -486,10 +486,10 @@
   registry that happens to hold the same slot and generation.
 
 * harden family-tagged public handle generations with sealed verifier tokens
-  derived from runtime/table secret material, slot id, internal epoch, and a
-  per-slot nonce. Trivially guessed first handles and monotonic next-generation
-  guesses after slot reuse are rejected. This remains an in-process UAF/FFI
-  hardening layer, not a cryptographic sandbox boundary.
+  derived from table secret material, slot id, per-slot affine seal state, and
+  the internal epoch. Trivially guessed first handles and monotonic
+  next-generation guesses after slot reuse are rejected. This remains an
+  in-process UAF/FFI hardening layer, not a cryptographic sandbox boundary.
 
 * reject `llam_runtime_run_handle(NULL)` with `EINVAL` instead of allowing the
   explicit runtime handle path to dereference a null handle.

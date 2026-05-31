@@ -4793,6 +4793,18 @@ static int test_public_active_op_overflow_fails_closed(void) {
      * operation is active and open a UAF window. The only safe overflow policy
      * is to stay saturated so the object remains EBUSY until process teardown.
      */
+    errno = 0;
+    if (llam_public_active_op_try_begin(&active_ops) != -1 || errno != EBUSY) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not fail saturated counter with EBUSY\n");
+        return 1;
+    }
+    if (llam_public_active_op_count(&active_ops) != SIZE_MAX) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin changed saturated counter to %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
     llam_public_active_op_begin(&active_ops);
     if (llam_public_active_op_count(&active_ops) != SIZE_MAX) {
         (void)fprintf(stderr,
