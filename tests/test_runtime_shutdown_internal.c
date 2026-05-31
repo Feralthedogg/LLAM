@@ -1076,6 +1076,56 @@ static int exercise_block_worker_rejects_active_counter_overflow(void) {
     return 0;
 }
 
+static int exercise_task_scan_ref_counter_saturation_is_rejected(void) {
+    llam_runtime_t runtime;
+    llam_task_t task;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&task, 0, sizeof(task));
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&task.scan_refs, UINT_MAX);
+
+    /*
+     * Shutdown/cancel scans pin raw task pointers after finding them under
+     * shard/token locks.  A saturated counter must not wrap to zero, because
+     * reclaim treats zero as permission to free the task object.
+     */
+    errno = 0;
+    if (llam_task_scan_ref_try_acquire(&runtime, &task) ||
+        errno != EOVERFLOW ||
+        atomic_load_explicit(&task.scan_refs, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        return fail_msg("task scan-ref overflow was not rejected");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&task.scan_refs, 0U, memory_order_release);
+    errno = 0;
+    if (llam_task_scan_ref_release(&runtime, &task) ||
+        errno != EINVAL ||
+        atomic_load_explicit(&task.scan_refs, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        return fail_msg("task scan-ref underflow was not rejected");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&task.scan_refs, UINT_MAX, memory_order_release);
+    errno = 0;
+    if (llam_task_wait_scan_refs_quiescent(&runtime, &task) != -1 ||
+        errno != EOVERFLOW ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        return fail_msg("task scan-ref reclaim wait did not fail closed on saturation");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&task.scan_refs, 0U, memory_order_release);
+    if (llam_task_wait_scan_refs_quiescent(&runtime, &task) != 0 ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != 0) {
+        return fail_msg("task scan-ref quiescent wait rejected zero refs");
+    }
+    return 0;
+}
+
 static int exercise_channel_inflight_waiter_counter_overflow_is_rejected(void) {
     llam_channel_t *handle;
     llam_channel_t *channel;
@@ -1507,6 +1557,9 @@ int main(void) {
         return 1;
     }
     if (exercise_block_worker_rejects_active_counter_overflow() != 0) {
+        return 1;
+    }
+    if (exercise_task_scan_ref_counter_saturation_is_rejected() != 0) {
         return 1;
     }
     if (exercise_channel_inflight_waiter_counter_overflow_is_rejected() != 0) {

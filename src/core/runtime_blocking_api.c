@@ -272,7 +272,14 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
      * reclamation cannot recycle the task object while a helper still owns this
      * raw task pointer.
      */
-    atomic_fetch_add_explicit(&task->scan_refs, 1U, memory_order_acq_rel);
+    if (!llam_task_scan_ref_try_acquire(rt, task)) {
+        int saved_errno = errno;
+
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        llam_block_job_release(rt, job);
+        errno = saved_errno;
+        return -1;
+    }
     job->holds_task_ref = true;
     /*
      * Allocation already initialized the atomic state object.  Publish QUEUED

@@ -2,12 +2,6 @@
  * @file src/core/runtime_cancel_api.c
  * @brief Cancellation token allocation, cancellation, and query operations.
  *
- * @details
- * Cancellation tokens own a lock-protected waiter list of parked tasks. When a
- * token is cancelled, the list is detached under the token lock and each task is
- * resolved through the generic wait cancellation dispatcher. This keeps token
- * state independent from the particular wait primitive that parked the task.
- *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License
@@ -89,12 +83,7 @@ static int llam_cancel_token_begin_op_locked(llam_cancel_token_t *handle, llam_c
         return -1;
     }
 
-    /*
-     * Destroy removes the token from the live registry only while holding this
-     * same registry lock.  Increment active_ops before taking token->lock so a
-     * concurrent destroy sees a live public operation and returns EBUSY instead
-     * of freeing the storage underneath it.
-     */
+    /* Pin before token->lock so destroy observes an active public operation. */
     if (llam_public_active_op_try_begin(&token->active_ops) != 0) {
         pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
         return -1;
@@ -136,12 +125,7 @@ static int llam_cancel_token_begin_op_for_runtime_locked(llam_cancel_token_t *ha
     (void)owner_runtime;
 #endif
 
-    /*
-     * Spawn publishes the token into a task owned by owner_runtime.  Validate
-     * that owner relationship directly instead of using the current TLS owner:
-     * host threads can spawn explicit runtimes and managed tasks can target a
-     * different runtime through the handle API.
-     */
+    /* Spawn validates the explicit owner runtime rather than current TLS. */
     if (llam_public_active_op_try_begin(&token->active_ops) != 0) {
         pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
         return -1;
@@ -437,21 +421,30 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
         llam_cancel_token_end_op(token);
         return -1;
     }
-    token->cancelled = true;
     waiters = token->waiters;
+    for (iter = waiters; iter != NULL; iter = iter->cancel_next) {
+        if (!llam_task_scan_ref_try_acquire(token->owner_runtime, iter)) {
+            int saved_errno = errno;
+            llam_task_t *rollback;
+
+            for (rollback = waiters; rollback != iter; rollback = rollback->cancel_next) {
+                (void)llam_task_scan_ref_release(token->owner_runtime, rollback);
+            }
+            pthread_mutex_unlock(&token->lock);
+            llam_runtime_end_public_op(pinned_runtime);
+            llam_cancel_token_end_op(token);
+            errno = saved_errno;
+            return -1;
+        }
+    }
+    token->cancelled = true;
     token->waiters = NULL;
     for (iter = waiters; iter != NULL; iter = iter->cancel_next) {
         /*
-         * Mark the entire detached chain unregistered while still holding the
-         * token lock.  Otherwise a concurrently completing wait can call
-         * unregister on a node that is no longer in token->waiters and corrupt
-         * either token->waiters or this detached cancellation chain.
-         *
-         * The chain is processed after releasing the token lock. Hold a short
-         * scan reference so a naturally completing detached task cannot be
-         * reclaimed while this cancel call still owns its raw list pointer.
+         * Keep unregister state consistent under the token lock.  Scan refs
+         * were acquired before detaching, so the chain can be processed after
+         * unlock without racing task reclaim.
          */
-        atomic_fetch_add_explicit(&iter->scan_refs, 1U, memory_order_acq_rel);
         iter->cancel_prev = NULL;
         iter->cancel_registered = false;
     }
@@ -462,7 +455,7 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
 
         waiters->cancel_next = NULL;
         llam_cancel_task_wait(waiters);
-        atomic_fetch_sub_explicit(&waiters->scan_refs, 1U, memory_order_acq_rel);
+        (void)llam_task_scan_ref_release(token->owner_runtime, waiters);
         waiters = next;
     }
 

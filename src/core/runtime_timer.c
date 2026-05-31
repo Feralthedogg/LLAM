@@ -351,7 +351,9 @@ void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt) {
                     atomic_load_explicit(&task->reclaim_claimed, memory_order_acquire) != 0U) {
                     continue;
                 }
-                atomic_fetch_add_explicit(&task->scan_refs, 1U, memory_order_acq_rel);
+                if (!llam_task_scan_ref_try_acquire(rt, task)) {
+                    continue;
+                }
                 tasks[count++] = task;
             }
             pthread_mutex_unlock(&owner->lock);
@@ -359,7 +361,7 @@ void llam_runtime_cancel_parked_waiters(llam_runtime_t *rt) {
 
         for (i = 0U; i < count; ++i) {
             llam_cancel_task_wait(tasks[i]);
-            atomic_fetch_sub_explicit(&tasks[i]->scan_refs, 1U, memory_order_acq_rel);
+            (void)llam_task_scan_ref_release(rt, tasks[i]);
         }
 
         if (heap_tasks || count < capacity) {

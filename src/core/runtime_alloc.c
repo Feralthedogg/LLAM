@@ -439,7 +439,7 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
     job->task = NULL;
     job->wait_node = NULL;
     if (release_task_ref && task != NULL) {
-        atomic_fetch_sub_explicit(&task->scan_refs, 1U, memory_order_acq_rel);
+        (void)llam_task_scan_ref_release(rt, task);
     }
 
     pthread_mutex_lock(&rt->block_lock);

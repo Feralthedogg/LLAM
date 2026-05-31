@@ -68,6 +68,94 @@ void llam_add_task_to_list(llam_runtime_t *rt, llam_task_t *task) {
 }
 
 /**
+ * @brief Pin a task while a diagnostic/shutdown scan owns a raw task pointer.
+ *
+ * @details
+ * Scan refs are intentionally short-lived references used after a task has
+ * been found under a shard/token lock but before the scanner can cancel or
+ * complete the wait outside that lock.  Saturation is a corrupted lifetime
+ * state: wrapping to zero would let reclaim free the task while the scanner
+ * still holds the pointer.
+ *
+ * @param rt   Runtime that owns @p task.
+ * @param task Task to pin for a scan.
+ *
+ * @return true on success, false with errno set on invalid input or overflow.
+ */
+bool llam_task_scan_ref_try_acquire(llam_runtime_t *rt, llam_task_t *task) {
+    if (rt == NULL || task == NULL) {
+        errno = EINVAL;
+        if (rt != NULL) {
+            llam_record_fatal(rt, EINVAL);
+        }
+        return false;
+    }
+    return llam_sync_note_inflight_waiter(rt, &task->scan_refs, 1U);
+}
+
+/**
+ * @brief Release a short diagnostic/shutdown scan reference.
+ *
+ * @param rt   Runtime that owns @p task.
+ * @param task Task whose scan pin should be dropped.
+ *
+ * @return true on success, false with errno set on invalid input or underflow.
+ */
+bool llam_task_scan_ref_release(llam_runtime_t *rt, llam_task_t *task) {
+    if (rt == NULL || task == NULL) {
+        errno = EINVAL;
+        if (rt != NULL) {
+            llam_record_fatal(rt, EINVAL);
+        }
+        return false;
+    }
+    return llam_sync_complete_inflight_waiter(rt, &task->scan_refs, 1U);
+}
+
+/**
+ * @brief Wait until all scan refs have drained without spinning on corruption.
+ *
+ * @param rt   Runtime that owns @p task.
+ * @param task Task whose scan refs must reach zero before final reclaim.
+ *
+ * @return 0 when quiescent, -1 with errno set when a saturated scan counter is
+ *         observed.
+ */
+int llam_task_wait_scan_refs_quiescent(llam_runtime_t *rt, llam_task_t *task) {
+    unsigned refs;
+
+    if (rt == NULL || task == NULL) {
+        errno = EINVAL;
+        if (rt != NULL) {
+            llam_record_fatal(rt, EINVAL);
+        }
+        return -1;
+    }
+
+    for (;;) {
+        refs = atomic_load_explicit(&task->scan_refs, memory_order_acquire);
+        if (refs == 0U) {
+            return 0;
+        }
+        if (LLAM_UNLIKELY(refs == UINT_MAX)) {
+            llam_record_fatal(rt, EOVERFLOW);
+            errno = EOVERFLOW;
+            return -1;
+        }
+        if (g_llam_tls_task != NULL) {
+            llam_yield();
+        } else {
+            struct timespec ts = {
+                .tv_sec = 0,
+                .tv_nsec = 100000L,
+            };
+
+            nanosleep(&ts, NULL);
+        }
+    }
+}
+
+/**
  * @brief Decide whether every spawned task should enter diagnostic lists.
  *
  * @details
@@ -179,17 +267,13 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
      * outside the shard-list lock.  Reclaim waits here so those scans cannot
      * race a listed task into use-after-free.
      */
-    while (atomic_load_explicit(&task->scan_refs, memory_order_acquire) != 0U) {
-        if (g_llam_tls_task != NULL) {
-            llam_yield();
-        } else {
-            struct timespec ts = {
-                .tv_sec = 0,
-                .tv_nsec = 100000L,
-            };
-
-            nanosleep(&ts, NULL);
-        }
+    if (llam_task_wait_scan_refs_quiescent(rt, task) != 0) {
+        /*
+         * A saturated scan-ref sentinel means a scanner may still own a raw
+         * task pointer.  The handle is invalidated and the task list entry is
+         * gone, so leak instead of freeing under an untrusted lifetime state.
+         */
+        return;
     }
     if (llam_task_wait_public_ops_quiescent(task) != 0) {
         /*
