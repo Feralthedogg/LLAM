@@ -43,7 +43,23 @@ jobs:
           cargo --version
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        shell: bash
+        env:
+          CARGO_NET_RETRY: "10"
+        run: |
+          if command -v cargo-audit >/dev/null 2>&1; then
+            cargo audit --version
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if cargo install cargo-audit --locked; then
+              cargo audit --version
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          cargo install cargo-audit --locked
+          cargo audit --version
 
       - name: C static analysis
         run: make analyze-cppcheck
