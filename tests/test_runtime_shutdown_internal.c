@@ -1324,6 +1324,66 @@ static int exercise_live_task_sum_saturates_on_overflow(void) {
     return 0;
 }
 
+static int exercise_task_live_counter_overflow_fails_closed(void) {
+    llam_runtime_t runtime;
+    llam_shard_t shard;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&shard, 0, sizeof(shard));
+    runtime.shards = &shard;
+    runtime.active_shards = 1U;
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&shard.live_tasks, UINT_MAX);
+
+    /*
+     * A corrupted or saturated live counter must not wrap to zero when a new
+     * task is marked live.  Zero would make runtime stop/shutdown believe the
+     * runtime or shard is idle and can hide work from cancellation diagnostics.
+     */
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+    atomic_init(&runtime.live_tasks, UINT_MAX);
+    llam_runtime_note_task_live(&runtime, &shard);
+    if (atomic_load_explicit(&runtime.live_tasks, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        return fail_msg("task live counter overflow was not rejected");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&runtime.live_tasks, 0U, memory_order_release);
+    llam_runtime_note_task_live(&runtime, &shard);
+    if (atomic_load_explicit(&runtime.live_tasks, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != 0) {
+        return fail_msg("task live counter normal increment failed");
+    }
+#else
+    atomic_init(&runtime.live_task_shards, 0U);
+    llam_runtime_note_task_live(&runtime, &shard);
+    if (atomic_load_explicit(&shard.live_tasks, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&runtime.live_task_shards, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        return fail_msg("task live counter overflow was not rejected");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&runtime.live_task_shards, 0U, memory_order_release);
+    atomic_store_explicit(&shard.live_tasks, 0U, memory_order_release);
+    llam_runtime_note_task_live(&runtime, &shard);
+    if (atomic_load_explicit(&shard.live_tasks, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.live_task_shards, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != 0) {
+        return fail_msg("task live counter normal zero transition failed");
+    }
+
+    llam_runtime_note_task_live(&runtime, &shard);
+    if (atomic_load_explicit(&shard.live_tasks, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&runtime.live_task_shards, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != 0) {
+        return fail_msg("task live counter normal increment failed");
+    }
+#endif
+    return 0;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
@@ -1389,6 +1449,9 @@ int main(void) {
         return 1;
     }
     if (exercise_live_task_sum_saturates_on_overflow() != 0) {
+        return 1;
+    }
+    if (exercise_task_live_counter_overflow_fails_closed() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");

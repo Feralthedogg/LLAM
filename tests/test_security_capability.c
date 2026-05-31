@@ -10900,6 +10900,7 @@ typedef struct broker_local_server_thread_state {
     llam_broker_t *broker;
     const char *path;
     size_t max_connections;
+    atomic_int done;
     int rc;
 } broker_local_server_thread_state_t;
 
@@ -10914,6 +10915,7 @@ static void *broker_local_server_thread(void *arg) {
     broker_local_server_thread_state_t *state = (broker_local_server_thread_state_t *)arg;
 
     state->rc = llam_broker_serve_local_n(state->broker, state->path, state->max_connections);
+    atomic_store_explicit(&state->done, 1, memory_order_release);
     return NULL;
 }
 
@@ -10966,6 +10968,32 @@ static int broker_client_self_test_unix_retry(const char *path, size_t attempts)
         usleep(20000U * (useconds_t)(i + 1U));
     }
     errno = last_errno != 0 ? last_errno : EIO;
+    return -1;
+}
+
+static int broker_drain_local_server_thread(const char *path,
+                                            broker_local_server_thread_state_t *state) {
+    const size_t attempts = (state->max_connections * 32U) + 32U;
+
+    /*
+     * The local broker server exits after a fixed accepted-session budget.
+     * Under TSan and hosted macOS the malformed close, real self-test, and
+     * cleanup connects can be accepted in a different order, and individual
+     * cleanup connect attempts may transiently lose the race. Keep poking the
+     * socket until the server reports completion instead of assuming a fixed
+     * number of cleanup connects is enough.
+     */
+    for (size_t i = 0U; i < attempts; ++i) {
+        if (atomic_load_explicit(&state->done, memory_order_acquire) != 0) {
+            return 0;
+        }
+        (void)broker_connect_and_close(path);
+        usleep(10000);
+    }
+    if (atomic_load_explicit(&state->done, memory_order_acquire) != 0) {
+        return 0;
+    }
+    errno = ETIMEDOUT;
     return -1;
 }
 
@@ -11594,8 +11622,8 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     pthread_t thread;
     char path[128];
     bool thread_started = false;
+    bool thread_cancelled = false;
     bool broker_initialized = false;
-    size_t i;
     int rc = -1;
 
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
@@ -11612,6 +11640,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     state.broker = &broker;
     state.path = path;
     state.max_connections = 8U;
+    atomic_init(&state.done, 0);
     state.rc = -1;
     if (pthread_create(&thread, NULL, broker_local_server_thread, &state) != 0) {
         goto done;
@@ -11639,19 +11668,25 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
 
 done:
     if (thread_started) {
-        /*
-         * AF_UNIX accept ordering is not guaranteed when the malformed and
-         * well-formed clients race in the listen backlog. Consume the remaining
-         * accepted-session budget if the good client happened to run first.
-         */
-        for (i = 0U; i < state.max_connections; ++i) {
-            (void)broker_connect_and_close(path);
-            usleep(10000);
+        if (broker_drain_local_server_thread(path, &state) != 0) {
+            fprintf(stderr,
+                    "[test_security_capability] malformed local server did not drain errno=%d\n",
+                    errno);
+            rc = -1;
+            /*
+             * This is a test failure path. Cancel only to avoid leaving the
+             * process stuck in pthread_join; do not destroy the broker after a
+             * forced cancellation because the server may have been interrupted
+             * inside broker-owned state.
+             */
+            (void)pthread_cancel(thread);
+            thread_cancelled = true;
+            broker_initialized = false;
         }
     }
     if (thread_started) {
         (void)pthread_join(thread, NULL);
-        if (state.rc != 0) {
+        if (!thread_cancelled && state.rc != 0) {
             rc = -1;
         }
     }

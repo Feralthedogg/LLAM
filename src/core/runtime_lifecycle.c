@@ -178,6 +178,47 @@ bool llam_runtime_has_live_tasks(llam_runtime_t *rt) {
 }
 
 /**
+ * @brief Increment a live-task counter and fail closed on saturation.
+ *
+ * @details
+ * Live counters are scheduler liveness gates.  If corruption or an impossible
+ * workload saturates one of them, wrapping to zero can make shutdown and stop
+ * paths believe work is drained while tasks still exist.  Detect that state,
+ * restore saturation, and mark the runtime fatal.  The saturation edge is not a
+ * supported operational capacity target; it is a corruption/overflow guard.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+static inline __attribute__((always_inline)) bool
+#else
+static inline bool
+#endif
+llam_runtime_try_note_live_counter(llam_runtime_t *rt,
+                                   atomic_uint *counter,
+                                   unsigned *previous_out) {
+    unsigned previous;
+
+    previous = atomic_fetch_add_explicit(counter, 1U, memory_order_acq_rel);
+    if (LLAM_UNLIKELY(previous == UINT_MAX)) {
+        /*
+         * This path only runs after a corrupted/saturated diagnostic counter.
+         * Restore the saturated value so shutdown/drain observers do not keep
+         * a wrapped zero after this edge returns, then mark the runtime fatal.
+         * The common spawn path remains a single atomic increment.
+         */
+        atomic_store_explicit(counter, UINT_MAX, memory_order_release);
+        llam_record_fatal(rt, EOVERFLOW);
+        if (previous_out != NULL) {
+            *previous_out = previous;
+        }
+        return false;
+    }
+    if (previous_out != NULL) {
+        *previous_out = previous;
+    }
+    return true;
+}
+
+/**
  * @brief Mark a task live on its owner shard.
  *
  * Only the 0 -> 1 transition touches the runtime-wide live-shard counter.  This
@@ -188,15 +229,17 @@ void llam_runtime_note_task_live(llam_runtime_t *rt, llam_shard_t *shard) {
         return;
     }
 #if LLAM_RUNTIME_BACKEND_WINDOWS
-    atomic_fetch_add_explicit(&rt->live_tasks, 1U, memory_order_acq_rel);
+    (void)llam_runtime_try_note_live_counter(rt, &rt->live_tasks, NULL);
     (void)shard;
     return;
 #else
     unsigned previous;
 
-    previous = atomic_fetch_add_explicit(&shard->live_tasks, 1U, memory_order_acq_rel);
+    if (!llam_runtime_try_note_live_counter(rt, &shard->live_tasks, &previous)) {
+        return;
+    }
     if (previous == 0U) {
-        atomic_fetch_add_explicit(&rt->live_task_shards, 1U, memory_order_acq_rel);
+        (void)llam_runtime_try_note_live_counter(rt, &rt->live_task_shards, NULL);
     }
 #endif
 }
