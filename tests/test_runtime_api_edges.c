@@ -1819,15 +1819,27 @@ static void precancel_wait_task(void *arg) {
     atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
 
     errno = 0;
-    revents = 0;
+    /*
+     * Seed revents with a non-zero sentinel so the cancelled fast-fail path
+     * proves it does not leak stale readiness bits back to FFI callers.
+     */
+    revents = (short)0x7fff;
     if (llam_poll_fd(state->io_fds[0], POLLIN, 1000, &revents) != -1 || errno != ECANCELED) {
         task_fail(state, "pre-cancel timed poll", errno);
+        return;
+    }
+    if (revents != 0) {
+        task_fail(state, "pre-cancel timed poll stale revents", 0);
         return;
     }
     atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);
 
     errno = 0;
-    revents = 0;
+    /*
+     * The infinite wait path shares backend watch code on POSIX; keep the same
+     * stale-output guard here so both pre-arm cancellation paths are covered.
+     */
+    revents = (short)0x7fff;
     /*
      * Infinite poll/read waits use shared backend watch paths on POSIX.  A
      * token that is already cancelled before the request is armed must fail
@@ -1835,6 +1847,10 @@ static void precancel_wait_task(void *arg) {
      */
     if (llam_poll_fd(state->io_fds[0], POLLIN, -1, &revents) != -1 || errno != ECANCELED) {
         task_fail(state, "pre-cancel infinite poll", errno);
+        return;
+    }
+    if (revents != 0) {
+        task_fail(state, "pre-cancel infinite poll stale revents", 0);
         return;
     }
     atomic_fetch_add_explicit(&state->canceled_waits, 1U, memory_order_relaxed);

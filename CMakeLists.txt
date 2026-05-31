@@ -81,6 +81,8 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_broker_ring_buffer_grant.c
     src/core/runtime_broker_ring_doorbell.c
     src/core/runtime_broker_ring_dispatch.c
+    src/core/runtime_broker_ring_ops.c
+    src/core/runtime_broker_ring_queue.c
     src/core/runtime_broker_ring_stats.c
     src/core/runtime_broker_ring_shm.c
     src/core/runtime_broker_ring_shm_posix.c

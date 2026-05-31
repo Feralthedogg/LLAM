@@ -227,6 +227,8 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_broker_ring_buffer_grant.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_doorbell.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_dispatch.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_ops.o \
+	$(OBJDIR)/src/core/runtime_broker_ring_queue.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_stats.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_shm.o \
 	$(OBJDIR)/src/core/runtime_broker_ring_shm_posix.o \

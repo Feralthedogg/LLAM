@@ -282,6 +282,12 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
                                                 llam_broker_ring_session_t *session,
                                                 size_t max_requests,
                                                 size_t *out_served);
+void llam_broker_ring_clear_submission_output(llam_broker_ring_t *ring,
+                                              const llam_broker_ring_submission_t *submission);
+void llam_broker_ring_execute_submission(llam_broker_t *broker,
+                                         llam_broker_ring_t *ring,
+                                         const llam_broker_ring_submission_t *submission,
+                                         llam_broker_ring_completion_t *completion);
 
 bool llam_broker_ring_mapping_ring_valid(const llam_broker_ring_t *ring);
 bool llam_broker_ring_name_valid(const char *name);
