@@ -215,6 +215,9 @@ bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
     if (shard == NULL || task == NULL) {
         return false;
     }
+    if (!llam_norm_queue_note_enqueue(shard)) {
+        return false;
+    }
 
     if (llam_lockfree_normq_enabled(shard->runtime)) {
         pushed = llam_cldeque_push_bottom(&shard->norm_cldeque, task);
@@ -223,11 +226,11 @@ bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
     }
 
     if (pushed) {
-        atomic_fetch_add_explicit(&shard->norm_depth, 1U, memory_order_release);
         shard->metrics.norm_enqueues += 1U;
         return true;
     }
 
+    (void)llam_norm_queue_note_dequeue(shard);
     if (llam_lockfree_normq_enabled(shard->runtime)) {
         shard->metrics.queue_overflows += 1U;
         // Lock-free deque overflow spills to the runtime overflow queue so the
@@ -254,13 +257,16 @@ bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task)
     if (shard == NULL || task == NULL || !llam_lockfree_normq_enabled(shard->runtime)) {
         return false;
     }
+    if (!llam_norm_queue_note_enqueue(shard)) {
+        return false;
+    }
 
     if (llam_cldeque_push_bottom(&shard->norm_cldeque, task)) {
-        atomic_fetch_add_explicit(&shard->norm_depth, 1U, memory_order_release);
         shard->metrics.norm_enqueues += 1U;
         return true;
     }
 
+    (void)llam_norm_queue_note_dequeue(shard);
     shard->metrics.queue_overflows += 1U;
     llam_enqueue_overflow_task(shard->runtime, task);
     return true;
@@ -288,7 +294,7 @@ llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
         task = llam_queue_pop_head(&shard->norm_q);
     }
     if (task != NULL) {
-        atomic_fetch_sub_explicit(&shard->norm_depth, 1U, memory_order_release);
+        (void)llam_norm_queue_note_dequeue(shard);
     }
     return task;
 }
@@ -309,6 +315,9 @@ bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task) {
     if (!llam_lockfree_normq_enabled(shard->runtime)) {
         return llam_norm_queue_push_owner_locked(shard, task);
     }
+    if (!llam_norm_queue_note_enqueue(shard)) {
+        return false;
+    }
 
     /*
      * Owner pops the Chase-Lev deque LIFO. Yielded tasks need FIFO behavior so
@@ -316,8 +325,9 @@ bool llam_norm_queue_push_yield_locked(llam_shard_t *shard, llam_task_t *task) {
      */
     pushed = llam_queue_push_bounded_locked(shard, &shard->norm_q, LLAM_NORM_QUEUE_CAP, task);
     if (pushed) {
-        atomic_fetch_add_explicit(&shard->norm_depth, 1U, memory_order_release);
         shard->metrics.norm_enqueues += 1U;
+    } else {
+        (void)llam_norm_queue_note_dequeue(shard);
     }
     return pushed;
 }
@@ -341,9 +351,11 @@ bool llam_norm_queue_push_yield_unlocked(llam_shard_t *shard, llam_task_t *task)
     if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
         return false;
     }
+    if (!llam_norm_queue_note_enqueue(shard)) {
+        return false;
+    }
 
     llam_queue_push_tail(&shard->norm_q, task);
-    atomic_fetch_add_explicit(&shard->norm_depth, 1U, memory_order_release);
     shard->metrics.norm_enqueues += 1U;
     return true;
 }
@@ -454,7 +466,7 @@ llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard) {
     }
 
     if (task != NULL) {
-        atomic_fetch_sub_explicit(&shard->norm_depth, 1U, memory_order_release);
+        (void)llam_norm_queue_note_dequeue(shard);
     }
     return task;
 }
@@ -474,7 +486,7 @@ llam_task_t *llam_norm_queue_steal(llam_shard_t *victim) {
 
     task = llam_cldeque_steal_top(&victim->norm_cldeque);
     if (task != NULL) {
-        atomic_fetch_sub_explicit(&victim->norm_depth, 1U, memory_order_release);
+        (void)llam_norm_queue_note_dequeue(victim);
     }
     return task;
 }

@@ -1126,6 +1126,47 @@ static int exercise_task_scan_ref_counter_saturation_is_rejected(void) {
     return 0;
 }
 
+static int exercise_norm_depth_counter_wrap_is_rejected(void) {
+    llam_runtime_t runtime;
+    llam_shard_t shard;
+    llam_task_t task;
+    llam_task_t *popped;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&shard, 0, sizeof(shard));
+    memset(&task, 0, sizeof(task));
+    runtime.active_shards = 1U;
+    runtime.shards = &shard;
+    atomic_init(&runtime.fatal_errno, 0);
+    shard.runtime = &runtime;
+    atomic_init(&shard.norm_depth, UINT_MAX);
+
+    /*
+     * Normal-queue depth feeds stealing, scaling, and drain heuristics.  If a
+     * corrupted/saturated value wraps to zero, those paths can misclassify a
+     * loaded shard as empty.
+     */
+    if (llam_norm_queue_push_owner_locked(&shard, &task) ||
+        atomic_load_explicit(&shard.norm_depth, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        return fail_msg("norm depth enqueue overflow was not rejected");
+    }
+
+    memset(&shard.norm_q, 0, sizeof(shard.norm_q));
+    task.queue_next = NULL;
+    task.queue_prev = NULL;
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&shard.norm_depth, 0U, memory_order_release);
+    llam_queue_push_tail(&shard.norm_q, &task);
+    popped = llam_norm_queue_pop_owner_locked(&shard);
+    if (popped != &task ||
+        atomic_load_explicit(&shard.norm_depth, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        return fail_msg("norm depth dequeue underflow was not rejected");
+    }
+    return 0;
+}
+
 static int exercise_channel_inflight_waiter_counter_overflow_is_rejected(void) {
     llam_channel_t *handle;
     llam_channel_t *channel;
@@ -1560,6 +1601,9 @@ int main(void) {
         return 1;
     }
     if (exercise_task_scan_ref_counter_saturation_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_norm_depth_counter_wrap_is_rejected() != 0) {
         return 1;
     }
     if (exercise_channel_inflight_waiter_counter_overflow_is_rejected() != 0) {

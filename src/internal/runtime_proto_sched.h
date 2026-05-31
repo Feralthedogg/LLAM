@@ -57,6 +57,8 @@ void *llam_shard_worker_main(void *arg);
 void llam_cldeque_init(llam_cldeque_t *deque);
 bool llam_lockfree_normq_enabled(const llam_runtime_t *rt);
 unsigned llam_norm_queue_depth(const llam_shard_t *shard);
+bool llam_norm_queue_note_enqueue(llam_shard_t *shard);
+bool llam_norm_queue_note_dequeue(llam_shard_t *shard);
 llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard);
 llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard);
 bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,

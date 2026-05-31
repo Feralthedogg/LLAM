@@ -126,7 +126,7 @@ unsigned llam_steal_from_victim(llam_shard_t *thief, llam_shard_t *victim) {
             pthread_mutex_lock(&victim->lock);
             task = llam_queue_pop_tail(&victim->norm_q);
             if (task != NULL) {
-                atomic_fetch_sub_explicit(&victim->norm_depth, 1U, memory_order_release);
+                (void)llam_norm_queue_note_dequeue(victim);
             }
             pthread_mutex_unlock(&victim->lock);
         }

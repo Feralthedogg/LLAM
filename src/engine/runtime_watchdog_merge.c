@@ -436,7 +436,7 @@ bool llam_merge_runnable_queues_locked(llam_shard_t *source, llam_shard_t *targe
             if (task == NULL) {
                 break;
             }
-            atomic_fetch_sub_explicit(&source->norm_depth, 1U, memory_order_release);
+            (void)llam_norm_queue_note_dequeue(source);
             (void)llam_merge_task_to_target_locked(source, target, task);
             migrated += 1U;
         }

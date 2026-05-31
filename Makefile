@@ -240,6 +240,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_stack_sample.o \
 	$(OBJDIR)/src/core/runtime_context_portable.o \
 	$(OBJDIR)/src/core/runtime_queue_base.o \
+	$(OBJDIR)/src/core/runtime_norm_queue_depth.o \
 	$(OBJDIR)/src/core/runtime_norm_queue.o \
 	$(OBJDIR)/src/core/runtime_queue.o \
 	$(OBJDIR)/src/core/runtime_alloc.o \
