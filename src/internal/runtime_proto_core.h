@@ -53,10 +53,10 @@ llam_task_t *llam_task_alloc(llam_shard_t *shard);
 void llam_task_allocator_free(llam_task_t *task);
 void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt);
 void llam_task_register_public_slab(llam_task_t *items, unsigned count);
-void llam_task_unregister_public_slab(llam_task_t *items, unsigned count);
+int llam_task_unregister_public_slab(llam_task_t *items, unsigned count);
 llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle);
 void llam_task_end_public_op(llam_task_t *task);
-void llam_task_wait_public_ops_quiescent(llam_task_t *task);
+int llam_task_wait_public_ops_quiescent(llam_task_t *task);
 int llam_task_claim_join_public_handle(const llam_task_t *handle,
                                        llam_task_t *self,
                                        llam_task_t **out_task,

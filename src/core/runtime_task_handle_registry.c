@@ -365,30 +365,45 @@ void llam_task_register_public_slab(llam_task_t *items, unsigned count) {
     pthread_mutex_unlock(&g_llam_task_registry_lock);
 }
 
-void llam_task_unregister_public_slab(llam_task_t *items, unsigned count) {
+int llam_task_unregister_public_slab(llam_task_t *items, unsigned count) {
     unsigned i;
 
     if (items == NULL || count == 0U) {
-        return;
+        return 0;
     }
     for (i = 0U; i < count; ++i) {
         for (;;) {
+            size_t active_ops = 0U;
             bool removed = false;
 
             pthread_mutex_lock(&g_llam_task_registry_lock);
             if (!llam_task_is_live_locked(&items[i])) {
                 removed = true;
-            } else if (llam_public_active_op_count(&items[i].active_ops) == 0U) {
-                llam_task_unregister_live_locked(&items[i]);
-                removed = true;
+            } else {
+                active_ops = llam_public_active_op_count(&items[i].active_ops);
+                if (active_ops == 0U) {
+                    llam_task_unregister_live_locked(&items[i]);
+                    removed = true;
+                }
             }
             pthread_mutex_unlock(&g_llam_task_registry_lock);
             if (removed) {
                 break;
             }
+            if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(active_ops))) {
+                /*
+                 * A saturated counter is the permanent busy sentinel produced
+                 * after active-op corruption/overflow.  Waiting for it to drain
+                 * would hang teardown; callers must keep the slab alive instead
+                 * of freeing storage that may still be externally referenced.
+                 */
+                errno = EBUSY;
+                return -1;
+            }
             llam_pause_cpu();
         }
     }
+    return 0;
 }
 
 llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle) {
@@ -418,15 +433,19 @@ void llam_task_end_public_op(llam_task_t *task) {
     llam_public_active_op_end(&task->active_ops);
 }
 
-void llam_task_wait_public_ops_quiescent(llam_task_t *task) {
+int llam_task_wait_public_ops_quiescent(llam_task_t *task) {
     if (task == NULL) {
-        return;
+        return 0;
     }
     for (;;) {
         size_t active_ops = llam_public_active_op_count(&task->active_ops);
 
         if (active_ops == 0U) {
-            return;
+            return 0;
+        }
+        if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(active_ops))) {
+            errno = EBUSY;
+            return -1;
         }
         llam_pause_cpu();
     }

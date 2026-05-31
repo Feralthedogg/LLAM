@@ -480,4 +480,8 @@ static inline size_t llam_public_active_op_count(const _Atomic size_t *active_op
     return active_ops != NULL ? atomic_load_explicit(active_ops, memory_order_relaxed) : 0U;
 }
 
+static inline bool llam_public_active_op_is_saturated(size_t active_ops) {
+    return active_ops >= (SIZE_MAX / 2U);
+}
+
 #endif

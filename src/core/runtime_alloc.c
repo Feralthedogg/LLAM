@@ -240,18 +240,34 @@ void llam_allocator_destroy(llam_allocator_t *allocator) {
 
     while (chunk != NULL) {
         llam_alloc_chunk_t *next = chunk->next;
+        bool keep_chunk = false;
+
         if (chunk->item_kind == LLAM_ALLOC_CHUNK_TASK && chunk->storage != NULL) {
             llam_task_t *tasks = chunk->storage;
 
-            llam_task_unregister_public_slab(tasks, chunk->item_count);
+            if (llam_task_unregister_public_slab(tasks, chunk->item_count) != 0) {
+                /*
+                 * The task public-op counter is saturated/corrupted.  Freeing
+                 * the slab could turn an outstanding forged/stale handle path
+                 * into UAF, so teardown leaks this chunk instead of hanging or
+                 * releasing unsafe storage.
+                 */
+                keep_chunk = true;
+            }
             // Task locks are initialized when the slab is grown; they must be
             // destroyed even for task objects that never reached user code.
-            for (unsigned i = 0U; i < chunk->item_count; ++i) {
-                if (tasks[i].lock_initialized) {
-                    pthread_mutex_destroy(&tasks[i].lock);
-                    tasks[i].lock_initialized = false;
+            if (!keep_chunk) {
+                for (unsigned i = 0U; i < chunk->item_count; ++i) {
+                    if (tasks[i].lock_initialized) {
+                        pthread_mutex_destroy(&tasks[i].lock);
+                        tasks[i].lock_initialized = false;
+                    }
                 }
             }
+        }
+        if (keep_chunk) {
+            chunk = next;
+            continue;
         }
         llam_release_alloc_storage(chunk->storage, chunk->bytes, chunk->mmapped);
         free(chunk);

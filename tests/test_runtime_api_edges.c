@@ -4810,6 +4810,72 @@ static int test_public_active_op_overflow_fails_closed(void) {
     return 0;
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static int test_task_public_op_sentinel_teardown_does_not_hang(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return fail_errno("task public-op sentinel fork failed");
+    }
+    if (pid == 0) {
+        llam_task_t task;
+        llam_task_t *slab = calloc(1U, sizeof(*slab));
+
+        if (slab == NULL) {
+            _exit(10);
+        }
+        /*
+         * A saturated public-op counter is the fail-closed corruption sentinel.
+         * Teardown must report EBUSY instead of spinning forever on a value no
+         * valid public operation can drain.
+         */
+        memset(&task, 0, sizeof(task));
+        llam_public_active_op_init(&task.active_ops);
+        atomic_store_explicit(&task.active_ops, SIZE_MAX, memory_order_release);
+        (void)alarm(2U);
+        errno = 0;
+        if (llam_task_wait_public_ops_quiescent(&task) == 0 || errno != EBUSY) {
+            _exit(11);
+        }
+
+        llam_task_register_public_slab(slab, 1U);
+        atomic_store_explicit(&slab[0].active_ops, SIZE_MAX, memory_order_release);
+        errno = 0;
+        if (llam_task_unregister_public_slab(slab, 1U) == 0 || errno != EBUSY) {
+            _exit(12);
+        }
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return fail_errno("task public-op sentinel waitpid failed");
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            return fail_msg("task public-op sentinel teardown hung");
+        }
+        return fail_msg("task public-op sentinel child died from signal");
+    }
+    if (!WIFEXITED(status)) {
+        return fail_msg("task public-op sentinel child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        return fail_msg("task public-op sentinel fixture allocation failed");
+    case 11:
+        return fail_msg("task wait public-op sentinel did not fail with EBUSY");
+    case 12:
+        return fail_msg("task slab unregister public-op sentinel did not fail with EBUSY");
+    default:
+        return fail_msg("task public-op sentinel child returned unexpected status");
+    }
+}
+#endif
+
 static int test_public_channel_forged_initial_handle_rejected(void) {
     llam_channel_t *channel = NULL;
     llam_channel_t *forged = NULL;
@@ -5204,6 +5270,12 @@ int main(void) {
                       test_public_active_op_overflow_fails_closed) != 0) {
         return 1;
     }
+#if !LLAM_PLATFORM_WINDOWS
+    if (run_edge_case("task_public_op_sentinel_teardown_does_not_hang",
+                      test_task_public_op_sentinel_teardown_does_not_hang) != 0) {
+        return 1;
+    }
+#endif
     if (run_edge_case("public_channel_forged_initial_handle_rejected",
                       test_public_channel_forged_initial_handle_rejected) != 0) {
         return 1;

@@ -191,7 +191,15 @@ void llam_reclaim_claimed_task(llam_runtime_t *rt, llam_task_t *task) {
             nanosleep(&ts, NULL);
         }
     }
-    llam_task_wait_public_ops_quiescent(task);
+    if (llam_task_wait_public_ops_quiescent(task) != 0) {
+        /*
+         * A saturated active-op sentinel means the task cannot be proven
+         * unreferenced.  The public handle has already been invalidated, so the
+         * least dangerous outcome is a bounded leak instead of UAF or teardown
+         * deadlock.
+         */
+        return;
+    }
     llam_free_task(task);
 }
 
@@ -269,6 +277,9 @@ void llam_free_task(llam_task_t *task) {
     if (task == NULL) {
         return;
     }
+    if (llam_task_wait_public_ops_quiescent(task) != 0) {
+        return;
+    }
 
     if (task->cancel_token != NULL) {
         // A task may still be registered as a cancellation waiter when freed
@@ -294,6 +305,5 @@ void llam_free_task(llam_task_t *task) {
     if (task->stack_mapping != NULL && task->mapping_size != 0U) {
         (void)munmap(task->stack_mapping, task->mapping_size);
     }
-    llam_task_wait_public_ops_quiescent(task);
     llam_task_allocator_free(task);
 }
