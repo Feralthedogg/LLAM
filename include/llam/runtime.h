@@ -386,10 +386,10 @@ LLAM_API void llam_runtime_shutdown(void);
  *
  * @details
  * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
- * LLAM writes only the overlapping prefix of @p stats and zeroes any caller
- * tail beyond the current library's ::llam_runtime_stats_t. If @p stats and
- * @p stats_size are valid, failure paths clear the caller-visible prefix before
- * returning so stale counters are not mistaken for a fresh snapshot.
+ * LLAM writes only the overlapping prefix known to the loaded library; caller
+ * tail bytes from newer struct definitions are left untouched. If @p stats and
+ * @p stats_size are valid, failure paths clear the known caller-visible prefix
+ * before returning so stale counters are not mistaken for a fresh snapshot.
  *
  * @param stats Destination statistics object. Must not be NULL.
  * @param stats_size Size of the caller's ::llam_runtime_stats_t definition.
