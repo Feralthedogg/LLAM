@@ -258,6 +258,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_task_reclaim.o \
 	$(OBJDIR)/src/core/runtime_task_stack.o \
 	$(OBJDIR)/src/core/runtime_reinject.o \
+	$(OBJDIR)/src/core/runtime_wait_accounting.o \
 	$(OBJDIR)/src/core/runtime_wait_tracking.o \
 	$(OBJDIR)/src/core/runtime_timer_heap.o \
 	$(OBJDIR)/src/core/runtime_timer.o \

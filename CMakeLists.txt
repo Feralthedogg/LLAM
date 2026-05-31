@@ -131,6 +131,7 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_task_local.c
     src/core/runtime_task_reclaim.c
     src/core/runtime_task_stack.c
+    src/core/runtime_wait_accounting.c
     src/core/runtime_timer_heap.c
     src/core/runtime_timer.c
     src/core/runtime_time.c

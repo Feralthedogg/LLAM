@@ -82,3 +82,13 @@ uint64_t llam_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
+
+/**
+ * @brief Check whether an absolute monotonic deadline has passed.
+ *
+ * @param deadline_ns Absolute deadline in ::llam_now_ns units.
+ * @return true when the deadline is now or in the past.
+ */
+bool llam_deadline_passed(uint64_t deadline_ns) {
+    return deadline_ns <= llam_now_ns();
+}

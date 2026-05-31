@@ -37,6 +37,7 @@ llam_wait_reason_t llam_io_abort_wait_reason(llam_io_abort_reason_t reason);
 void llam_io_set_abort_result(llam_io_req_t *req, llam_io_abort_reason_t reason);
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard);
 uint64_t llam_hash_watch_identity_u64(uint64_t value);
+bool llam_runtime_note_active_io_waiter(llam_runtime_t *rt, int delta);
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
 void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
 

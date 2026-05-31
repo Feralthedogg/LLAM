@@ -1379,6 +1379,71 @@ static int exercise_inflight_waiter_counter_overflow_is_rejected(void) {
     return 0;
 }
 
+static int exercise_active_io_waiter_counter_overflow_is_rejected(void) {
+    llam_task_t task;
+    llam_io_req_t req;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for active I/O waiter overflow check");
+    }
+
+    memset(&task, 0, sizeof(task));
+    memset(&req, 0, sizeof(req));
+    task.owner_runtime = &g_llam_runtime;
+    atomic_init(&task.active_io_req, NULL);
+    atomic_store_explicit(&g_llam_runtime.active_io_waiters, UINT_MAX, memory_order_release);
+    atomic_store_explicit(&g_llam_runtime.fatal_errno, 0, memory_order_release);
+
+    /*
+     * active_io_waiters is a runtime-wide pressure signal.  A saturated value
+     * must not wrap to zero when a task begins an I/O wait, otherwise shutdown
+     * and scaler diagnostics can temporarily classify the runtime as idle.
+     */
+    llam_task_set_io_tracking(&task, &req, 0U);
+    if (atomic_load_explicit(&g_llam_runtime.active_io_waiters, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EOVERFLOW ||
+        atomic_load_explicit(&task.active_io_req, memory_order_acquire) != NULL) {
+        llam_runtime_shutdown();
+        return fail_msg("active I/O waiter overflow was not rejected");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+
+static int exercise_active_io_waiter_counter_underflow_is_rejected(void) {
+    llam_task_t task;
+    llam_io_req_t req;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for active I/O waiter underflow check");
+    }
+
+    memset(&task, 0, sizeof(task));
+    memset(&req, 0, sizeof(req));
+    task.owner_runtime = &g_llam_runtime;
+    atomic_init(&task.active_io_req, &req);
+    atomic_store_explicit(&g_llam_runtime.active_io_waiters, 0U, memory_order_release);
+    atomic_store_explicit(&g_llam_runtime.fatal_errno, 0, memory_order_release);
+
+    /*
+     * Clearing a stale active I/O owner must not poison the runtime-wide
+     * pressure counter by wrapping it to UINT_MAX.  The owner pointer is still
+     * cleared so teardown can make progress after recording the invariant
+     * violation.
+     */
+    llam_task_clear_wait_tracking(&task);
+    if (atomic_load_explicit(&g_llam_runtime.active_io_waiters, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EINVAL ||
+        atomic_load_explicit(&task.active_io_req, memory_order_acquire) != NULL) {
+        llam_runtime_shutdown();
+        return fail_msg("active I/O waiter underflow was not rejected");
+    }
+
+    llam_runtime_shutdown();
+    return 0;
+}
+
 static int exercise_live_task_sum_saturates_on_overflow(void) {
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t runtime;
@@ -1619,6 +1684,12 @@ int main(void) {
         return 1;
     }
     if (exercise_inflight_waiter_counter_overflow_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_active_io_waiter_counter_overflow_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_active_io_waiter_counter_underflow_is_rejected() != 0) {
         return 1;
     }
     if (exercise_live_task_sum_saturates_on_overflow() != 0) {

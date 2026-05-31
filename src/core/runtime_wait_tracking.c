@@ -34,21 +34,55 @@ static llam_runtime_t *llam_wait_task_runtime(const llam_task_t *task) {
 static llam_io_req_t *llam_task_swap_active_io_req(llam_task_t *task, llam_io_req_t *req) {
     llam_io_req_t *old_req;
     llam_runtime_t *rt = llam_wait_task_runtime(task);
+    bool track_counter;
 
     if (task == NULL) {
         return NULL;
     }
+    track_counter = rt != NULL && atomic_load_explicit(&rt->initialized, memory_order_acquire);
+    if (!track_counter) {
+        return atomic_exchange_explicit(&task->active_io_req, req, memory_order_acq_rel);
+    }
 
-    old_req = atomic_exchange_explicit(&task->active_io_req, req, memory_order_acq_rel);
-    if (rt != NULL && atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
+    old_req = atomic_load_explicit(&task->active_io_req, memory_order_acquire);
+    for (;;) {
+        if (old_req == req) {
+            return old_req;
+        }
         if (old_req == NULL && req != NULL) {
             // active_io_waiters tracks tasks, not request objects.
-            atomic_fetch_add_explicit(&rt->active_io_waiters, 1U, memory_order_acq_rel);
-        } else if (old_req != NULL && req == NULL) {
-            atomic_fetch_sub_explicit(&rt->active_io_waiters, 1U, memory_order_acq_rel);
+            if (!llam_runtime_note_active_io_waiter(rt, 1)) {
+                return NULL;
+            }
+            if (atomic_compare_exchange_weak_explicit(&task->active_io_req,
+                                                      &old_req,
+                                                      req,
+                                                      memory_order_acq_rel,
+                                                      memory_order_acquire)) {
+                return NULL;
+            }
+            (void)llam_runtime_note_active_io_waiter(rt, -1);
+            continue;
+        }
+        if (old_req != NULL && req == NULL) {
+            if (atomic_compare_exchange_weak_explicit(&task->active_io_req,
+                                                      &old_req,
+                                                      NULL,
+                                                      memory_order_acq_rel,
+                                                      memory_order_acquire)) {
+                (void)llam_runtime_note_active_io_waiter(rt, -1);
+                return old_req;
+            }
+            continue;
+        }
+        if (atomic_compare_exchange_weak_explicit(&task->active_io_req,
+                                                  &old_req,
+                                                  req,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            return old_req;
         }
     }
-    return old_req;
 }
 
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task) {
@@ -198,16 +232,6 @@ void llam_task_set_block_tracking(llam_task_t *task, llam_block_job_t *job, unsi
     atomic_store_explicit(&task->join_target, NULL, memory_order_release);
     task->parked_shard = parked_shard;
     atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
-}
-
-/**
- * @brief Check whether an absolute deadline has passed.
- *
- * @param deadline_ns Absolute deadline in ::llam_now_ns units.
- * @return true when the deadline is now or in the past.
- */
-bool llam_deadline_passed(uint64_t deadline_ns) {
-    return deadline_ns <= llam_now_ns();
 }
 
 static llam_shard_t *llam_task_deadline_shard(llam_task_t *task) {
