@@ -57,6 +57,11 @@
   blocking-pool isolation, signal/floating-point global lifetime, provided
   buffer detachment before data access, and concurrent run/watchdog contracts.
 
+* replace truncated public-handle sealed-generation tokens with slot-stable
+  affine epoch permutations. Consumed family-tagged handles no longer repeat
+  within the live epoch window, closing a long-churn stale-handle ABA gap while
+  preserving pointer-sized opaque handles.
+
 * stabilize Linux io_uring interrupted waits, Darwin/BSD kqueue transient
   `EAGAIN` and cleanup errors, BSD poll validation, DragonFly alternate signal
   stack `EAGAIN`, Windows IOCP association metadata/locking, Windows IOCP smoke

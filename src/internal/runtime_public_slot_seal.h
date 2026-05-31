@@ -4,8 +4,8 @@
  *
  * @details
  * This header is included only by runtime_public_slot.h after the slot table
- * types are declared. It keeps entropy, nonce, and sealed-token derivation
- * separate from the table reserve/resolve/release operations.
+ * types are declared. It keeps entropy, affine sealing, and generation-token
+ * derivation separate from the table reserve/resolve/release operations.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -146,47 +146,112 @@ static inline uint64_t llam_public_slot_table_secret(llam_public_slot_table_t *t
     return secret;
 }
 
-static inline uint64_t llam_public_slot_next_nonce(llam_public_slot_table_t *table,
-                                                   const void *object,
-                                                   uint64_t owner_secret,
-                                                   size_t slot,
-                                                   uint32_t family,
-                                                   uint32_t epoch) {
+static inline bool llam_public_slot_affine_multiplier_valid(uint32_t multiplier) {
+    /*
+     * The public token domain is 2^28 - 1. These are its prime factors:
+     * 3 * 5 * 29 * 43 * 113 * 127. A multiplier coprime with that modulus
+     * makes (epoch * multiplier + addend) a permutation over all nonzero
+     * epoch tokens.
+     */
+    return multiplier != 0U &&
+           (multiplier % 3U) != 0U &&
+           (multiplier % 5U) != 0U &&
+           (multiplier % 29U) != 0U &&
+           (multiplier % 43U) != 0U &&
+           (multiplier % 113U) != 0U &&
+           (multiplier % 127U) != 0U;
+}
+
+static inline uint32_t llam_public_slot_mersenne28_reduce(uint64_t value) {
+    uint64_t reduced;
+
+    /*
+     * LLAM_PUBLIC_HANDLE_EPOCH_MASK is 2^28 - 1. Use the Mersenne folding
+     * identity instead of a hardware division so seal setup and test oracles
+     * stay cheap. Hot-path reactivation advances the token by addition below.
+     */
+    reduced = (value & (uint64_t)LLAM_PUBLIC_HANDLE_EPOCH_MASK) + (value >> 28U);
+    reduced = (reduced & (uint64_t)LLAM_PUBLIC_HANDLE_EPOCH_MASK) + (reduced >> 28U);
+    if (reduced >= (uint64_t)LLAM_PUBLIC_HANDLE_EPOCH_MASK) {
+        reduced -= (uint64_t)LLAM_PUBLIC_HANDLE_EPOCH_MASK;
+    }
+    return (uint32_t)reduced;
+}
+
+static inline uint32_t llam_public_slot_choose_affine_multiplier(uint64_t seed) {
+    uint32_t multiplier = llam_public_slot_mersenne28_reduce(seed);
+
+    if (multiplier == 0U) {
+        multiplier = 1U;
+    }
+    while (!llam_public_slot_affine_multiplier_valid(multiplier)) {
+        multiplier += 1U;
+        if (multiplier == 0U || multiplier > LLAM_PUBLIC_HANDLE_EPOCH_MASK) {
+            multiplier = 1U;
+        }
+    }
+    return multiplier;
+}
+
+static inline void llam_public_slot_prepare_affine_seal(llam_public_slot_table_t *table,
+                                                        llam_public_slot_t *entry,
+                                                        size_t slot,
+                                                        const void *object,
+                                                        uint64_t owner_secret) {
     uint64_t key;
-    uint64_t nonce;
+    uint64_t seed;
+
+    if (entry == NULL || entry->seal_multiplier != 0U) {
+        return;
+    }
+    key = llam_public_slot_table_secret(table, object, owner_secret);
+    seed = key ^ llam_public_slot_mix64(((uint64_t)(slot + 1U) << 32U) ^
+                                        (uint64_t)(uintptr_t)table);
+    entry->seal_multiplier = llam_public_slot_choose_affine_multiplier(seed);
+    entry->seal_addend =
+        (uint32_t)(llam_public_slot_mix64(seed ^ UINT64_C(0xa0761d6478bd642f)) %
+                   (uint64_t)LLAM_PUBLIC_HANDLE_EPOCH_MASK);
+}
+
+static inline uint32_t llam_public_slot_affine_epoch_token(uint32_t epoch,
+                                                           uint32_t multiplier,
+                                                           uint32_t addend) {
+    uint64_t index;
 
     if (epoch == 0U) {
         epoch = 1U;
     }
-    key = llam_public_slot_table_secret(table, object, owner_secret);
-    nonce = key ^ llam_public_slot_mix64((uint64_t)(uintptr_t)object);
-    nonce ^= ((uint64_t)(slot + 1U) << 32U) ^ ((uint64_t)epoch << 4U) ^ (uint64_t)family;
-    nonce ^= llam_public_slot_mix64(owner_secret ^ UINT64_C(0x6a09e667f3bcc909));
-    nonce = llam_public_slot_mix64(nonce);
-    return nonce != 0U ? nonce : UINT64_C(0xbf58476d1ce4e5b9);
+    index = (uint64_t)(epoch - 1U);
+    return llam_public_slot_mersenne28_reduce(index * (uint64_t)multiplier + (uint64_t)addend) + 1U;
 }
 
-static inline uint32_t llam_public_slot_sealed_epoch_token(llam_public_slot_table_t *table,
-                                                           size_t slot,
-                                                           const void *object,
-                                                           uint32_t family,
-                                                           uint64_t owner_secret,
-                                                           uint32_t epoch,
-                                                           uint64_t slot_nonce) {
-    uint64_t key;
-    uint64_t mac;
+static inline uint32_t llam_public_slot_next_affine_token(uint32_t previous_generation,
+                                                          uint32_t family,
+                                                          uint32_t seal_multiplier,
+                                                          uint32_t seal_addend) {
     uint32_t token;
+    uint32_t zero_based;
 
-    key = llam_public_slot_table_secret(table, object, owner_secret);
-    mac = key ^ llam_public_slot_mix64(slot_nonce);
-    mac ^= llam_public_slot_mix64(((uint64_t)(slot + 1U) << 32U) ^ (uint64_t)family);
-    mac ^= llam_public_slot_mix64(((uint64_t)epoch << 32U) ^ (owner_secret & UINT64_C(0xffffffff)));
-    mac = llam_public_slot_mix64(mac);
-    token = (uint32_t)(mac & (uint64_t)LLAM_PUBLIC_HANDLE_EPOCH_MASK);
-    if (token == 0U) {
-        token = 1U;
+    if (previous_generation != 0U &&
+        (previous_generation & LLAM_PUBLIC_HANDLE_FAMILY_MASK) == family) {
+        token = previous_generation >> LLAM_PUBLIC_HANDLE_FAMILY_BITS;
+        zero_based = token != 0U ? token - 1U : 0U;
+        zero_based += seal_multiplier;
+        if (zero_based >= LLAM_PUBLIC_HANDLE_EPOCH_MASK) {
+            zero_based -= LLAM_PUBLIC_HANDLE_EPOCH_MASK;
+        }
+        return zero_based + 1U;
     }
-    return token;
+    return seal_addend + 1U;
+}
+
+static inline uint32_t llam_public_slot_next_affine_generation(uint32_t previous_generation,
+                                                               uint32_t family,
+                                                               uint32_t seal_multiplier,
+                                                               uint32_t seal_addend) {
+    return llam_public_slot_family_generation(
+        llam_public_slot_next_affine_token(previous_generation, family, seal_multiplier, seal_addend),
+        family);
 }
 
 static inline uint32_t llam_public_slot_family_generation_for_epoch(llam_public_slot_table_t *table,
@@ -195,9 +260,14 @@ static inline uint32_t llam_public_slot_family_generation_for_epoch(llam_public_
                                                                     uint32_t family,
                                                                     uint64_t owner_secret,
                                                                     uint32_t epoch,
-                                                                    uint64_t slot_nonce) {
+                                                                    uint32_t seal_multiplier,
+                                                                    uint32_t seal_addend) {
+    (void)table;
+    (void)slot;
+    (void)object;
+    (void)owner_secret;
     return llam_public_slot_family_generation(
-        llam_public_slot_sealed_epoch_token(table, slot, object, family, owner_secret, epoch, slot_nonce),
+        llam_public_slot_affine_epoch_token(epoch, seal_multiplier, seal_addend),
         family);
 }
 
@@ -207,7 +277,8 @@ static inline uint32_t llam_public_slot_initial_generation_for_slot(llam_public_
                                                                     uint32_t family,
                                                                     uint64_t owner_secret,
                                                                     uint32_t epoch,
-                                                                    uint64_t slot_nonce) {
+                                                                    uint32_t seal_multiplier,
+                                                                    uint32_t seal_addend) {
     if (family == 0U) {
         return 1U;
     }
@@ -217,7 +288,8 @@ static inline uint32_t llam_public_slot_initial_generation_for_slot(llam_public_
                                                         family,
                                                         owner_secret,
                                                         epoch,
-                                                        slot_nonce);
+                                                        seal_multiplier,
+                                                        seal_addend);
 }
 
 #endif

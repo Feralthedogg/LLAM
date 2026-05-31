@@ -41,11 +41,13 @@ returned by LLAM.
 
 The runtime rejects stale, consumed, wrong-family, and wrong-runtime-owner
 handles before dereferencing object storage. Family-tagged handle generations
-carry a sealed verifier token derived from a runtime/table secret, slot id,
-internal epoch, and per-slot nonce. The first handle in a family and the next
-handle after slot reuse are therefore not the trivial `slot + family` or
-monotonic `generation + 1` values. This protects FFI bindings and accidental
-in-process misuse from turning guessed values into valid objects.
+carry a sealed verifier token produced by a slot-stable affine permutation over
+the internal epoch space. The permutation is derived from table secret material
+and slot identity, so the first handle in a family and the next handle after
+slot reuse are not the trivial `slot + family` or monotonic `generation + 1`
+values, and consumed generations do not repeat before epoch exhaustion. This
+protects FFI bindings and accidental in-process misuse from turning guessed or
+old values into valid objects.
 
 This is not an isolation boundary against malicious code that can read or write
 arbitrary memory inside the same process.  If an attacker can disclose runtime

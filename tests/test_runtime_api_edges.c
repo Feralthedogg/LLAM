@@ -4318,10 +4318,7 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
     uint32_t reuse_second_generation = 0U;
     uint32_t reuse_third_generation = 0U;
     uint32_t naive_next_generation = 0U;
-    uint32_t collision_epoch = 0U;
-    uint32_t collision_generation = 0U;
     uint32_t reused_generation = 0U;
-    uint64_t collision_nonce = 0U;
     size_t reused_slot = 0U;
     int rc = 1;
 
@@ -4410,26 +4407,10 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
     }
 
     /*
-     * Sealed family tokens are narrower than the internal epoch.  Force the
-     * next sealed token to equal the just-consumed handle and verify reserve
-     * burns another epoch instead of reissuing an adjacent ABA alias.
+     * Reuse once more to verify the consumed second handle stays invalid. The
+     * broader injectivity test below covers long windows of old stale handles.
      */
     llam_public_slot_release(&reuse_table, reuse_second_slot, &reuse_second_object, reuse_second_generation);
-    collision_epoch = reuse_table.slots[reuse_slot].epoch + 1U;
-    collision_nonce = llam_public_slot_next_nonce(&reuse_table,
-                                                  &reuse_third_object,
-                                                  0U,
-                                                  reuse_slot,
-                                                  LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
-                                                  collision_epoch);
-    collision_generation = llam_public_slot_family_generation_for_epoch(&reuse_table,
-                                                                        reuse_slot,
-                                                                        &reuse_third_object,
-                                                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
-                                                                        0U,
-                                                                        collision_epoch,
-                                                                        collision_nonce);
-    reuse_table.slots[reuse_slot].generation = collision_generation;
     if (llam_public_slot_reserve_family(&reuse_table,
                                         &reuse_third_object,
                                         1U,
@@ -4440,13 +4421,13 @@ static int test_public_slot_family_tags_reject_wrong_family(void) {
         goto cleanup;
     }
     if (reuse_third_slot != reuse_slot ||
-        reuse_third_generation == collision_generation ||
-        llam_public_slot_resolve(&reuse_table, reuse_slot, collision_generation) != NULL) {
+        reuse_third_generation == reuse_second_generation ||
+        llam_public_slot_resolve(&reuse_table, reuse_slot, reuse_second_generation) != NULL) {
         (void)fprintf(stderr,
-                      "[test_runtime_api_edges] adjacent family generation collision was reissued: "
-                      "slot=%zu colliding=%u new=(%zu,%u)\n",
+                      "[test_runtime_api_edges] consumed family generation was reissued: "
+                      "slot=%zu consumed=%u new=(%zu,%u)\n",
                       reuse_slot,
-                      collision_generation,
+                      reuse_second_generation,
                       reuse_third_slot,
                       reuse_third_generation);
         goto cleanup;
@@ -4489,6 +4470,142 @@ cleanup:
     free(mutex_table.slots);
     free(reuse_table.slots);
     return rc;
+}
+
+static int compare_u32_values(const void *lhs, const void *rhs) {
+    const uint32_t a = *(const uint32_t *)lhs;
+    const uint32_t b = *(const uint32_t *)rhs;
+
+    return (a > b) - (a < b);
+}
+
+static int test_public_slot_family_generation_window_is_injective(void) {
+    enum { generation_count = 131072U };
+    llam_public_slot_table_t table;
+    int object = 1;
+    uint32_t *generations = NULL;
+    size_t slot = 0U;
+    uint32_t generation = 0U;
+    int rc = 1;
+
+    memset(&table, 0, sizeof(table));
+    table.handle_secret = UINT64_C(0x6a3d2b8f19c47e55);
+    generations = malloc((size_t)generation_count * sizeof(*generations));
+    if (generations == NULL) {
+        return fail_errno("family generation window allocation failed");
+    }
+    if (llam_public_slot_reserve_family(&table,
+                                        &object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                        &slot,
+                                        &generation) != 0) {
+        rc = fail_errno("family generation window initial reserve failed");
+        goto cleanup;
+    }
+    if (slot != 0U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] family generation window got unexpected slot=%zu\n",
+                      slot);
+        goto cleanup;
+    }
+    generations[0] = generation;
+    for (uint32_t i = 1U; i < generation_count; ++i) {
+        if (llam_public_slot_reactivate_family(&table,
+                                               slot,
+                                               &object,
+                                               LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
+                                               &generation) != 0) {
+            rc = fail_errno("family generation window reactivation failed");
+            goto cleanup;
+        }
+        generations[i] = generation;
+    }
+
+    /*
+     * Public handles are consumed by generation, so a stale handle from any
+     * earlier task/channel lifetime must not become valid again before the
+     * internal epoch space is exhausted. This catches truncated-MAC token
+     * schemes that only avoid adjacent-generation collisions.
+     */
+    qsort(generations, generation_count, sizeof(*generations), compare_u32_values);
+    for (uint32_t i = 1U; i < generation_count; ++i) {
+        if (generations[i] == generations[i - 1U]) {
+            (void)fprintf(stderr,
+                          "[test_runtime_api_edges] family generation repeated within live epoch window: "
+                          "generation=%u index=%u\n",
+                          generations[i],
+                          i);
+            goto cleanup;
+        }
+    }
+    rc = 0;
+
+cleanup:
+    free(generations);
+    free(table.slots);
+    return rc;
+}
+
+static int test_public_slot_mersenne_reducer_matches_modulus(void) {
+    static const uint64_t values[] = {
+        UINT64_C(0),
+        UINT64_C(1),
+        UINT64_C(268435454),
+        UINT64_C(268435455),
+        UINT64_C(268435456),
+        UINT64_C(72057593769492480),
+        UINT64_C(72057594037927935),
+        UINT64_C(0xffffffffffffffff)
+    };
+
+    /*
+     * Handle issuance uses a division-free Mersenne reducer on the spawn/join
+     * hot path.  Keep a direct modulus oracle here so future tuning cannot
+     * silently weaken stale-handle generation uniqueness.
+     */
+    for (size_t i = 0U; i < sizeof(values) / sizeof(values[0]); ++i) {
+        uint32_t reduced = llam_public_slot_mersenne28_reduce(values[i]);
+        uint32_t expected =
+            (uint32_t)(values[i] % (uint64_t)LLAM_PUBLIC_HANDLE_EPOCH_MASK);
+
+        if (reduced != expected) {
+            (void)fprintf(stderr,
+                          "[test_runtime_api_edges] mersenne reducer mismatch: "
+                          "value=%" PRIu64 " reduced=%u expected=%u\n",
+                          values[i],
+                          reduced,
+                          expected);
+            return 1;
+        }
+    }
+    {
+        uint32_t stride = llam_public_slot_choose_affine_multiplier(UINT64_C(0x4f1bbcdc9a71e947));
+        uint32_t addend = llam_public_slot_mersenne28_reduce(UINT64_C(0x86d1f23a6b9c4e05));
+        uint32_t generation = 0U;
+
+        for (uint32_t epoch = 1U; epoch <= 4096U; ++epoch) {
+            uint32_t token;
+            uint32_t expected_token;
+
+            token = llam_public_slot_next_affine_token(generation,
+                                                       LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                                       stride,
+                                                       addend);
+            expected_token = llam_public_slot_affine_epoch_token(epoch, stride, addend);
+            if (token != expected_token) {
+                (void)fprintf(stderr,
+                              "[test_runtime_api_edges] affine token step mismatch: "
+                              "epoch=%u token=%u expected=%u\n",
+                              epoch,
+                              token,
+                              expected_token);
+                return 1;
+            }
+            generation = llam_public_slot_family_generation(token, LLAM_PUBLIC_HANDLE_FAMILY_TASK);
+        }
+    }
+    return 0;
 }
 
 static int test_public_slot_shift_bounds(void) {
@@ -4940,6 +5057,14 @@ int main(void) {
     }
     if (run_edge_case("public_slot_family_tags_reject_wrong_family",
                       test_public_slot_family_tags_reject_wrong_family) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_slot_family_generation_window_is_injective",
+                      test_public_slot_family_generation_window_is_injective) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_slot_mersenne_reducer_matches_modulus",
+                      test_public_slot_mersenne_reducer_matches_modulus) != 0) {
         return 1;
     }
     if (run_edge_case("public_slot_shift_bounds",

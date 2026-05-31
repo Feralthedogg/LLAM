@@ -203,9 +203,10 @@ storage may exist only for owner-poisoned idle objects; acquisition restamps the
 current owner before returning a public handle. Public handles are still backed
 by process-wide family-tagged slot tables; each object is owner-tagged so
 cross-runtime managed use fails with `EXDEV` instead of silently crossing queues
-or wait lists. The slot tables use sealed generation tokens derived from a
-runtime/table secret, slot id, internal epoch, and per-slot nonce, so trivial
-first-handle guesses and monotonic next-generation guesses do not become valid
+or wait lists. The slot tables use sealed generation tokens from a slot-stable
+affine permutation of the internal epoch space, derived from table secret
+material and slot identity. Trivial first-handle guesses, monotonic
+next-generation guesses, and old consumed generations do not become valid
 handles after object creation or slot reuse. This is an in-process UAF/FFI
 hardening layer, not a cryptographic capability boundary against code that can
 already read or corrupt LLAM memory.

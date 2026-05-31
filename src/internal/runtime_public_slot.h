@@ -53,12 +53,14 @@ typedef struct llam_public_slot {
     void *object;
     /*
      * generation is the sealed public token. epoch is the monotonic internal
-     * counter used for ABA protection and slot_nonce is rotated on each reuse
-     * so adjacent public handles cannot be predicted from a leaked old token.
+     * counter used for ABA protection. The affine seal fields define a
+     * slot-stable permutation over the public token space, so no stale
+     * generation can repeat before the internal epoch is exhausted.
      */
     uint32_t generation;
     uint32_t epoch;
-    uint64_t slot_nonce;
+    uint32_t seal_multiplier;
+    uint32_t seal_addend;
     size_t next_free_plus_one;
 } llam_public_slot_t;
 
@@ -160,30 +162,20 @@ static inline int llam_public_slot_refresh_family_generation(llam_public_slot_ta
         return -1;
     }
     previous_generation = entry->generation;
+    llam_public_slot_prepare_affine_seal(table, entry, slot, object, owner_secret);
     while (entry->epoch < LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH) {
         entry->epoch += 1U;
-        entry->slot_nonce = llam_public_slot_next_nonce(table,
-                                                        object,
-                                                        owner_secret,
-                                                        slot,
-                                                        family,
-                                                        entry->epoch);
-        entry->generation = llam_public_slot_family_generation_for_epoch(table,
-                                                                         slot,
-                                                                         object,
-                                                                         family,
-                                                                         owner_secret,
-                                                                         entry->epoch,
-                                                                         entry->slot_nonce);
+        entry->generation = llam_public_slot_next_affine_generation(previous_generation,
+                                                                    family,
+                                                                    entry->seal_multiplier,
+                                                                    entry->seal_addend);
         if (LLAM_LIKELY(entry->generation != previous_generation)) {
             return 0;
         }
     }
     /*
-     * The sealed token is intentionally narrower than the internal epoch so
-     * public handles stay pointer-sized.  Force at least adjacent-generation
-     * ABA separation: if a sealed token collides with the immediately consumed
-     * handle, burn epochs until the public value changes or the slot is retired.
+     * Family slots use a bijection over the public token domain, so a collision
+     * before epoch exhaustion means the seal state itself is corrupt.
      */
     errno = EOVERFLOW;
     return -1;
@@ -227,7 +219,8 @@ static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
         } else {
             entry->generation = llam_public_slot_next_generation(entry->generation);
             entry->epoch = entry->generation;
-            entry->slot_nonce = 0U;
+            entry->seal_multiplier = 0U;
+            entry->seal_addend = 0U;
         }
         entry->object = object;
         *out_slot = slot;
@@ -266,7 +259,8 @@ static inline int llam_public_slot_reserve_impl(llam_public_slot_table_t *table,
     slot = table->count++;
     table->slots[slot].object = object;
     table->slots[slot].epoch = family != 0U ? 0U : 1U;
-    table->slots[slot].slot_nonce = 0U;
+    table->slots[slot].seal_multiplier = 0U;
+    table->slots[slot].seal_addend = 0U;
     if (family != 0U) {
         if (llam_public_slot_refresh_family_generation(table,
                                                        &table->slots[slot],
@@ -392,7 +386,8 @@ static inline int llam_public_slot_reactivate_impl(llam_public_slot_table_t *tab
     } else {
         entry->generation = llam_public_slot_next_generation(entry->generation);
         entry->epoch = entry->generation;
-        entry->slot_nonce = 0U;
+        entry->seal_multiplier = 0U;
+        entry->seal_addend = 0U;
     }
     *out_generation = entry->generation;
     return 0;

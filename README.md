@@ -1240,7 +1240,7 @@ flowchart LR
 ```mermaid
 flowchart TB
     Caller["public API caller"] --> Decode["decode opaque handle\nfamily + slot + sealed generation"]
-    Decode --> Table["lookup family registry\nslot object + internal epoch + nonce"]
+    Decode --> Table["lookup family registry\nslot object + internal epoch + affine seal"]
     Table --> Owner{"owner runtime matches\ncurrent or explicit runtime?"}
     Owner -- "no" --> Cross["fail -1 / EXDEV\nno object dereference"]
     Owner -- "yes" --> Gen{"sealed generation valid\nand object is live?"}
