@@ -74,7 +74,6 @@ static int llam_channel_select_collect_channels(llam_select_op_t *ops,
 
         if (channel == NULL) {
             llam_channel_select_release_channels(channels, count);
-            errno = EINVAL;
             return -1;
         }
         if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {

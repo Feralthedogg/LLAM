@@ -4823,8 +4823,39 @@ static int test_public_active_op_overflow_fails_closed(void) {
 }
 
 #if !LLAM_PLATFORM_WINDOWS
+typedef struct public_op_sentinel_select_state {
+    llam_channel_t *poisoned;
+    llam_channel_t *peer;
+    _Atomic int result;
+} public_op_sentinel_select_state_t;
+
 static void public_op_sentinel_noop_task(void *arg) {
     (void)arg;
+}
+
+static void public_op_sentinel_select_task(void *arg) {
+    public_op_sentinel_select_state_t *state = arg;
+    void *out = NULL;
+    size_t selected = SIZE_MAX;
+    llam_select_op_t ops[2];
+
+    ops[0].kind = LLAM_SELECT_OP_RECV;
+    ops[0].channel = state->poisoned;
+    ops[0].recv_out = &out;
+    ops[0].send_value = NULL;
+    ops[0].result_errno = 0;
+    ops[1].kind = LLAM_SELECT_OP_RECV;
+    ops[1].channel = state->peer;
+    ops[1].recv_out = &out;
+    ops[1].send_value = NULL;
+    ops[1].result_errno = 0;
+
+    errno = 0;
+    if (llam_channel_select(ops, 2U, 0U, &selected) == -1 && errno == EBUSY) {
+        atomic_store_explicit(&state->result, 0, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->result, errno != 0 ? errno : -1, memory_order_release);
 }
 
 static int test_public_op_sentinel_rejects_new_public_ops(void) {
@@ -4838,6 +4869,7 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
     if (pid == 0) {
         llam_channel_t *channel;
         llam_channel_t *raw_channel;
+        llam_channel_t *select_peer;
         llam_mutex_t *mutex;
         llam_mutex_t *raw_mutex;
         llam_cond_t *cond;
@@ -4846,6 +4878,7 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         llam_task_group_t *raw_group;
         llam_task_t *task;
         llam_task_t *raw_task;
+        public_op_sentinel_select_state_t select_state;
         int value = 7;
 
         (void)alarm(2U);
@@ -4853,11 +4886,12 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
             _exit(10);
         }
         channel = llam_channel_create(1U);
+        select_peer = llam_channel_create(1U);
         mutex = llam_mutex_create();
         cond = llam_cond_create();
         group = llam_task_group_create();
         task = llam_spawn(public_op_sentinel_noop_task, NULL, NULL);
-        if (channel == NULL || mutex == NULL || cond == NULL || group == NULL || task == NULL) {
+        if (channel == NULL || select_peer == NULL || mutex == NULL || cond == NULL || group == NULL || task == NULL) {
             _exit(11);
         }
 
@@ -4907,6 +4941,18 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         if (llam_task_id(task) != 0U || strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
             _exit(17);
         }
+        select_state.poisoned = channel;
+        select_state.peer = select_peer;
+        atomic_init(&select_state.result, EINVAL);
+        if (llam_spawn(public_op_sentinel_select_task, &select_state, NULL) == NULL) {
+            _exit(18);
+        }
+        if (llam_run() != 0) {
+            _exit(19);
+        }
+        if (atomic_load_explicit(&select_state.result, memory_order_acquire) != 0) {
+            _exit(20);
+        }
         _exit(0);
     }
 
@@ -4941,6 +4987,12 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         return fail_msg("task group public op did not fail saturated active-op sentinel with EBUSY");
     case 17:
         return fail_msg("task introspection accepted saturated active-op sentinel");
+    case 18:
+        return fail_msg("public-op sentinel select task spawn failed");
+    case 19:
+        return fail_msg("public-op sentinel select runtime run failed");
+    case 20:
+        return fail_msg("channel select public op did not fail saturated active-op sentinel with EBUSY");
     default:
         return fail_msg("public-op sentinel reject child returned unexpected status");
     }

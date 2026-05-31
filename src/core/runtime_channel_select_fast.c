@@ -221,6 +221,12 @@ static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, si
         return -1;
     }
 #endif
+    if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(
+            llam_public_active_op_count(&first->active_ops)))) {
+        llam_channel_public_registry_unlock();
+        errno = EBUSY;
+        return -1;
+    }
 
     second = llam_channel_resolve_public_handle_locked_unpinned(ops[1].channel);
     if (LLAM_UNLIKELY(second == NULL)) {
@@ -241,6 +247,12 @@ static int llam_channel_select_try_ready_pair_registry(llam_select_op_t *ops, si
         return -1;
     }
 #endif
+    if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(
+            llam_public_active_op_count(&second->active_ops)))) {
+        llam_channel_public_registry_unlock();
+        errno = EBUSY;
+        return -1;
+    }
     if (LLAM_UNLIKELY(first == second)) {
         llam_channel_public_registry_unlock();
         return LLAM_SELECT_TRY_FALLBACK;
