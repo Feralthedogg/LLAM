@@ -147,7 +147,18 @@ unsigned llam_runtime_live_tasks(llam_runtime_t *rt) {
         return 0U;
     }
     for (i = 0; i < rt->active_shards; ++i) {
-        live += atomic_load_explicit(&rt->shards[i].live_tasks, memory_order_acquire);
+        unsigned shard_live = atomic_load_explicit(&rt->shards[i].live_tasks, memory_order_acquire);
+
+        /*
+         * This total feeds diagnostics, watchdog policy, and stop-time parked
+         * waiter cancellation sizing.  It must never wrap to a small value if a
+         * shard counter is corrupted or saturated; fail closed by reporting the
+         * maximum representable live count.
+         */
+        if (LLAM_UNLIKELY(live > UINT_MAX - shard_live)) {
+            return UINT_MAX;
+        }
+        live += shard_live;
     }
     return live;
 #endif

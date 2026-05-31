@@ -1287,6 +1287,43 @@ static int exercise_inflight_waiter_counter_overflow_is_rejected(void) {
     return 0;
 }
 
+static int exercise_live_task_sum_saturates_on_overflow(void) {
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_runtime_t runtime;
+    llam_shard_t shards[2];
+
+    /*
+     * Shutdown diagnostics and parked-waiter cancellation size temporary
+     * snapshots from llam_runtime_live_tasks().  If shard-local counters are
+     * corrupted or extremely high, the diagnostic total must saturate instead
+     * of wrapping to a small value that can hide live parked work.
+     */
+    memset(&runtime, 0, sizeof(runtime));
+    memset(shards, 0, sizeof(shards));
+    runtime.shards = shards;
+    runtime.active_shards = 2U;
+
+    atomic_init(&shards[0].live_tasks, UINT_MAX);
+    atomic_init(&shards[1].live_tasks, 1U);
+    if (llam_runtime_live_tasks(&runtime) != UINT_MAX) {
+        return fail_msg("live task sum wrapped past UINT_MAX");
+    }
+
+    atomic_store_explicit(&shards[0].live_tasks, UINT_MAX - 1U, memory_order_release);
+    atomic_store_explicit(&shards[1].live_tasks, 2U, memory_order_release);
+    if (llam_runtime_live_tasks(&runtime) != UINT_MAX) {
+        return fail_msg("live task sum did not saturate at UINT_MAX");
+    }
+
+    atomic_store_explicit(&shards[0].live_tasks, 17U, memory_order_release);
+    atomic_store_explicit(&shards[1].live_tasks, 23U, memory_order_release);
+    if (llam_runtime_live_tasks(&runtime) != 40U) {
+        return fail_msg("live task sum corrupted normal totals");
+    }
+#endif
+    return 0;
+}
+
 int main(void) {
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
@@ -1349,6 +1386,9 @@ int main(void) {
         return 1;
     }
     if (exercise_inflight_waiter_counter_overflow_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_live_task_sum_saturates_on_overflow() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");
