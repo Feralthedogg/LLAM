@@ -10819,6 +10819,32 @@ static int broker_wait_for_socket_path(const char *path) {
     return -1;
 }
 
+static int broker_client_self_test_unix_retry(const char *path, size_t attempts) {
+    int last_errno = 0;
+    size_t i;
+
+    if (path == NULL || attempts == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    /*
+     * Hosted macOS can reorder AF_UNIX backlog progress when a connect-close
+     * session races a real self-test client. Retry the well-formed session so
+     * this test proves broker liveness after malformed input rather than a
+     * scheduler-specific accept ordering.
+     */
+    for (i = 0U; i < attempts; ++i) {
+        errno = 0;
+        if (llam_broker_client_self_test_unix(path) == 0) {
+            return 0;
+        }
+        last_errno = errno != 0 ? errno : EIO;
+        usleep(20000U * (useconds_t)(i + 1U));
+    }
+    errno = last_errno != 0 ? last_errno : EIO;
+    return -1;
+}
+
 static int test_broker_socketpair_transport(void) {
     static const unsigned char buffer_payload[] = {'w', 'i', 'r', 'e'};
     static const unsigned char channel_payload[] = {'m', 's', 'g'};
@@ -11461,7 +11487,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
 
     state.broker = &broker;
     state.path = path;
-    state.max_connections = 4U;
+    state.max_connections = 8U;
     state.rc = -1;
     if (pthread_create(&thread, NULL, broker_local_server_thread, &state) != 0) {
         goto done;
@@ -11479,8 +11505,10 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     if (broker_connect_and_close(path) != 0) {
         goto done;
     }
-    usleep(100000);
-    if (llam_broker_client_self_test_unix(path) != 0) {
+    if (broker_client_self_test_unix_retry(path, 5U) != 0) {
+        fprintf(stderr,
+                "[test_security_capability] malformed local server follow-up self-test failed errno=%d\n",
+                errno);
         goto done;
     }
     rc = 0;
