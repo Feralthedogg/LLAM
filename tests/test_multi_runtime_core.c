@@ -2570,6 +2570,66 @@ cleanup_runtime:
 #endif
 }
 
+#if LLAM_PLATFORM_POSIX
+static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("runtime active-op sentinel fork failed");
+    }
+    if (pid == 0) {
+        llam_runtime_t *runtime = NULL;
+
+        /*
+         * Runtime active_ops is the host-side handle destruction gate. Before
+         * the fix, a saturated/corrupted counter made destroy spin forever
+         * waiting for the permanent sentinel to become zero.
+         */
+        (void)alarm(2U);
+        if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+            _exit(10);
+        }
+        atomic_store_explicit(&runtime->active_ops, SIZE_MAX, memory_order_release);
+        errno = 0;
+        llam_runtime_destroy(runtime);
+        if (errno != EBUSY) {
+            _exit(12);
+        }
+        if (llam_runtime_check_handle(runtime) != 0) {
+            _exit(11);
+        }
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("runtime active-op sentinel waitpid failed");
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            return test_fail("runtime destroy hung on active-op sentinel");
+        }
+        return test_fail("runtime active-op sentinel child died from signal");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("runtime active-op sentinel child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        return test_fail("runtime active-op sentinel setup failed");
+    case 11:
+        return test_fail("runtime active-op sentinel consumed the handle");
+    case 12:
+        return test_fail("runtime active-op sentinel did not fail with EBUSY");
+    default:
+        return test_fail("runtime active-op sentinel child returned unexpected status");
+    }
+}
+#endif
+
 static int test_runtime_destroy_waits_for_active_run(void) {
 #if LLAM_PLATFORM_POSIX
     llam_runtime_opts_t opts;
@@ -3305,6 +3365,10 @@ int main(void) {
         {"explicit_channel_host_try_races_runtime_destroy", test_explicit_channel_host_try_races_runtime_destroy},
         {"default_channel_host_try_ops_ignore_default_runtime_reinit", test_default_channel_host_try_ops_ignore_default_runtime_reinit},
         {"concurrent_runtime_destroy_is_single_owner", test_concurrent_runtime_destroy_is_single_owner},
+#if LLAM_PLATFORM_POSIX
+        {"runtime_destroy_active_op_sentinel_does_not_hang",
+         test_runtime_destroy_active_op_sentinel_does_not_hang},
+#endif
         {"runtime_destroy_waits_for_active_run", test_runtime_destroy_waits_for_active_run},
         {"unmanaged_join_races_runtime_destroy", test_unmanaged_join_races_runtime_destroy},
         {"runtime_run_start_destroy_race", test_runtime_run_start_destroy_race},

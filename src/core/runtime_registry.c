@@ -104,6 +104,17 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
         errno = EINVAL;
         return -1;
     }
+    active_ops = atomic_load_explicit(&rt->active_ops, memory_order_acquire);
+    if (LLAM_UNLIKELY(active_ops >= (SIZE_MAX / 2U))) {
+        /*
+         * The high half is reserved as corrupted/exhausted active-op state.
+         * Destroy must fail closed before claiming the handle; otherwise it
+         * would spin forever waiting for the permanent sentinel to become zero.
+         */
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        errno = EBUSY;
+        return -1;
+    }
     already_claimed = atomic_exchange_explicit(&rt->destroy_claimed, true, memory_order_acq_rel);
     if (already_claimed) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
@@ -189,6 +200,11 @@ int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_r
         errno = EINVAL;
         return -1;
     }
+    if (LLAM_UNLIKELY(atomic_load_explicit(&registered->active_ops, memory_order_acquire) >= (SIZE_MAX / 2U))) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        errno = EBUSY;
+        return -1;
+    }
     (void)atomic_fetch_add_explicit(&registered->active_ops, 1U, memory_order_acq_rel);
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
     *out_runtime = registered;
@@ -225,6 +241,10 @@ int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
 
         if (atomic_load_explicit(&iter->destroy_claimed, memory_order_acquire)) {
             continue;
+        }
+        if (LLAM_UNLIKELY(atomic_load_explicit(&iter->active_ops, memory_order_acquire) >= (SIZE_MAX / 2U))) {
+            rc = EBUSY;
+            break;
         }
         if (count == capacity) {
             size_t next_capacity = capacity * 2U;
