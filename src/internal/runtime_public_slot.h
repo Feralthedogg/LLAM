@@ -440,7 +440,22 @@ static inline void llam_public_active_op_init(_Atomic size_t *active_ops) {
 }
 
 static inline void llam_public_active_op_begin(_Atomic size_t *active_ops) {
-    (void)atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
+    size_t previous;
+
+    if (active_ops == NULL) {
+        return;
+    }
+    previous = atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
+    if (LLAM_LIKELY(previous < (SIZE_MAX / 2U))) {
+        return;
+    }
+    /*
+     * Reaching the high half of size_t is not a valid public-operation count.
+     * Treat it as corruption/exhaustion and fail closed by publishing the
+     * permanent busy sentinel. Resolve/destroy paths hold the family registry
+     * lock while beginning pins, so destroy cannot observe the repair window.
+     */
+    atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
 }
 
 static inline void llam_public_active_op_end(_Atomic size_t *active_ops) {
@@ -450,9 +465,14 @@ static inline void llam_public_active_op_end(_Atomic size_t *active_ops) {
         return;
     }
     previous = atomic_fetch_sub_explicit(active_ops, 1U, memory_order_relaxed);
-    if (LLAM_UNLIKELY(previous == 0U)) {
-        (void)atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
+    if (LLAM_LIKELY(previous > 0U && previous < (SIZE_MAX / 2U))) {
+        return;
     }
+    if (previous == 0U) {
+        (void)atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
+        return;
+    }
+    atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
 }
 
 static inline size_t llam_public_active_op_count(const _Atomic size_t *active_ops) {

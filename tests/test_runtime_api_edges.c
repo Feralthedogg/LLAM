@@ -4697,6 +4697,33 @@ static int test_public_slot_shift_bounds(void) {
     return 0;
 }
 
+static int test_public_active_op_overflow_fails_closed(void) {
+    _Atomic size_t active_ops;
+
+    atomic_init(&active_ops, SIZE_MAX);
+    /*
+     * active_ops gates public destroy paths. If begin wraps SIZE_MAX to zero,
+     * a corrupted or saturated counter can make destroy believe no public
+     * operation is active and open a UAF window. The only safe overflow policy
+     * is to stay saturated so the object remains EBUSY until process teardown.
+     */
+    llam_public_active_op_begin(&active_ops);
+    if (llam_public_active_op_count(&active_ops) != SIZE_MAX) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op begin wrapped saturated counter to %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+    llam_public_active_op_end(&active_ops);
+    if (llam_public_active_op_count(&active_ops) != SIZE_MAX) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op end released saturated overflow sentinel to %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+    return 0;
+}
+
 static int test_public_channel_forged_initial_handle_rejected(void) {
     llam_channel_t *channel = NULL;
     llam_channel_t *forged = NULL;
@@ -5085,6 +5112,10 @@ int main(void) {
     }
     if (run_edge_case("public_slot_shift_bounds",
                       test_public_slot_shift_bounds) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_active_op_overflow_fails_closed",
+                      test_public_active_op_overflow_fails_closed) != 0) {
         return 1;
     }
     if (run_edge_case("public_channel_forged_initial_handle_rejected",
