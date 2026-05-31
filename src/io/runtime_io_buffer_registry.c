@@ -262,7 +262,9 @@ llam_io_buffer_t *llam_io_buffer_public_begin_op(const llam_io_buffer_t *buffer)
          * Pin under the same registry lock used by unregister so release cannot
          * free the wrapper until the accessor has copied the requested field.
          */
-        llam_public_active_op_begin(&live->public_active_ops);
+        if (llam_public_active_op_try_begin(&live->public_active_ops) != 0) {
+            live = NULL;
+        }
     }
     (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
     return live;

@@ -212,6 +212,12 @@ int llam_task_claim_join_public_handle(const llam_task_t *handle,
         errno = EDEADLK;
         return -1;
     }
+    if (LLAM_UNLIKELY(self == NULL &&
+                      llam_public_active_op_is_saturated(llam_public_active_op_count(&task->active_ops)))) {
+        pthread_mutex_unlock(&g_llam_task_registry_lock);
+        errno = EBUSY;
+        return -1;
+    }
     if (LLAM_UNLIKELY(!atomic_compare_exchange_strong_explicit(&task->join_claimed,
                                                                &expected,
                                                                1U,
@@ -228,7 +234,11 @@ int llam_task_claim_join_public_handle(const llam_task_t *handle,
          * destruction cannot free the slab while the host thread is still
          * validating or timing out the join.
          */
-        llam_public_active_op_begin(&task->active_ops);
+        if (llam_public_active_op_try_begin(&task->active_ops) != 0) {
+            atomic_store_explicit(&task->join_claimed, 0U, memory_order_release);
+            pthread_mutex_unlock(&g_llam_task_registry_lock);
+            return -1;
+        }
         *out_task_pinned = true;
     }
 
@@ -247,6 +257,8 @@ int llam_task_claim_detach_public_handle(const llam_task_t *handle,
     llam_task_t *task;
     llam_runtime_t *rt;
     unsigned expected = 0U;
+    bool host_thread;
+    bool host_pin_taken = false;
 
     if (LLAM_UNLIKELY(out_task == NULL || out_rt == NULL || out_reclaim_after_unlock == NULL || out_task_pinned == NULL)) {
         errno = EINVAL;
@@ -299,6 +311,22 @@ int llam_task_claim_detach_public_handle(const llam_task_t *handle,
         return -1;
     }
 
+    host_thread = g_llam_tls_task == NULL && g_llam_tls_shard == NULL;
+    if (host_thread && atomic_load_explicit(&task->reclaim_ready, memory_order_acquire) != 0U) {
+        /*
+         * Host-side detach may reclaim after dropping the registry lock. Pin
+         * before consuming the public handle so a saturated lifecycle gate can
+         * fail cleanly without leaving the caller with an invalidated handle.
+         */
+        if (llam_public_active_op_try_begin(&task->active_ops) != 0) {
+            atomic_store_explicit(&task->join_claimed, 0U, memory_order_release);
+            pthread_mutex_unlock(&task->lock);
+            pthread_mutex_unlock(&g_llam_task_registry_lock);
+            return -1;
+        }
+        host_pin_taken = true;
+    }
+
     llam_task_invalidate_public_handle_locked(task);
     atomic_store_explicit(&task->detached, 1U, memory_order_release);
     expected = 0U;
@@ -309,15 +337,11 @@ int llam_task_claim_detach_public_handle(const llam_task_t *handle,
                                                 memory_order_acq_rel,
                                                 memory_order_acquire)) {
         *out_reclaim_after_unlock = true;
-        if (g_llam_tls_task == NULL && g_llam_tls_shard == NULL) {
-            /*
-             * Host-side detach may need to reclaim after the registry lock is
-             * released. Hold a short public-op pin so runtime_destroy cannot
-             * free the task slab before detach reaches the reclaim path.
-             */
-            llam_public_active_op_begin(&task->active_ops);
+        if (host_pin_taken) {
             *out_task_pinned = true;
         }
+    } else if (host_pin_taken) {
+        llam_public_active_op_end(&task->active_ops);
     }
     pthread_mutex_unlock(&task->lock);
     pthread_mutex_unlock(&g_llam_task_registry_lock);
@@ -419,8 +443,9 @@ llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle) {
                                             LLAM_TASK_PUBLIC_HANDLE_SHIFT,
                                             NULL,
                                             NULL);
-    if (task != NULL) {
-        llam_public_active_op_begin(&task->active_ops);
+    if (task != NULL &&
+        llam_public_active_op_try_begin(&task->active_ops) != 0) {
+        task = NULL;
     }
     pthread_mutex_unlock(&g_llam_task_registry_lock);
     return task;

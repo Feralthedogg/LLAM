@@ -439,15 +439,15 @@ static inline void llam_public_active_op_init(_Atomic size_t *active_ops) {
     atomic_init(active_ops, 0U);
 }
 
-static inline void llam_public_active_op_begin(_Atomic size_t *active_ops) {
+static inline int llam_public_active_op_try_begin(_Atomic size_t *active_ops) {
     size_t previous;
 
     if (active_ops == NULL) {
-        return;
+        return 0;
     }
     previous = atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
     if (LLAM_LIKELY(previous < (SIZE_MAX / 2U))) {
-        return;
+        return 0;
     }
     /*
      * Reaching the high half of size_t is not a valid public-operation count.
@@ -457,6 +457,12 @@ static inline void llam_public_active_op_begin(_Atomic size_t *active_ops) {
      * destroy cannot observe the repair window.
      */
     atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
+    errno = EBUSY;
+    return -1;
+}
+
+static inline void llam_public_active_op_begin(_Atomic size_t *active_ops) {
+    (void)llam_public_active_op_try_begin(active_ops);
 }
 
 static inline void llam_public_active_op_end(_Atomic size_t *active_ops) {

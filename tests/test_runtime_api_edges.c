@@ -4811,6 +4811,117 @@ static int test_public_active_op_overflow_fails_closed(void) {
 }
 
 #if !LLAM_PLATFORM_WINDOWS
+static void public_op_sentinel_noop_task(void *arg) {
+    (void)arg;
+}
+
+static int test_public_op_sentinel_rejects_new_public_ops(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return fail_errno("public-op sentinel reject fork failed");
+    }
+    if (pid == 0) {
+        llam_channel_t *channel;
+        llam_channel_t *raw_channel;
+        llam_cond_t *cond;
+        llam_cond_t *raw_cond;
+        llam_task_group_t *group;
+        llam_task_group_t *raw_group;
+        llam_task_t *task;
+        llam_task_t *raw_task;
+        int value = 7;
+
+        (void)alarm(2U);
+        if (llam_runtime_init(NULL) != 0) {
+            _exit(10);
+        }
+        channel = llam_channel_create(1U);
+        cond = llam_cond_create();
+        group = llam_task_group_create();
+        task = llam_spawn(public_op_sentinel_noop_task, NULL, NULL);
+        if (channel == NULL || cond == NULL || group == NULL || task == NULL) {
+            _exit(11);
+        }
+
+        raw_channel = llam_channel_resolve_public_handle(channel);
+        raw_cond = llam_cond_resolve_public_handle(cond);
+        raw_group = llam_task_group_resolve_public_handle(group);
+        raw_task = llam_task_resolve_public_handle(task);
+        if (raw_channel == NULL || raw_cond == NULL || raw_group == NULL || raw_task == NULL) {
+            _exit(12);
+        }
+
+        /*
+         * A saturated active-op counter represents corrupted/exhausted
+         * lifecycle accounting. New public operations must fail closed instead
+         * of continuing to mutate the object and leaving destroy permanently
+         * busy. The child exits without cleanup because the fixture is
+         * intentionally poisoned.
+         */
+        atomic_store_explicit(&raw_channel->active_ops, SIZE_MAX, memory_order_release);
+        atomic_store_explicit(&raw_cond->active_ops, SIZE_MAX, memory_order_release);
+        atomic_store_explicit(&raw_group->active_ops, SIZE_MAX, memory_order_release);
+        atomic_store_explicit(&raw_task->active_ops, SIZE_MAX, memory_order_release);
+        llam_channel_end_public_op(raw_channel);
+        llam_cond_end_public_op(raw_cond);
+        llam_task_group_end_public_op(raw_group);
+        llam_task_end_public_op(raw_task);
+
+        errno = 0;
+        if (llam_channel_try_send(channel, &value) == 0) {
+            _exit(13);
+        }
+        errno = 0;
+        if (llam_cond_signal(cond) == 0) {
+            _exit(14);
+        }
+        errno = 0;
+        if (llam_task_group_cancel(group) == 0) {
+            _exit(15);
+        }
+        if (llam_task_id(task) != 0U || strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
+            _exit(16);
+        }
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return fail_errno("public-op sentinel reject waitpid failed");
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            return fail_msg("public-op sentinel reject test hung");
+        }
+        return fail_msg("public-op sentinel reject child died from signal");
+    }
+    if (!WIFEXITED(status)) {
+        return fail_msg("public-op sentinel reject child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        return fail_msg("public-op sentinel reject runtime init failed");
+    case 11:
+        return fail_msg("public-op sentinel reject fixture allocation failed");
+    case 12:
+        return fail_msg("public-op sentinel reject fixture resolve failed");
+    case 13:
+        return fail_msg("channel public op accepted saturated active-op sentinel");
+    case 14:
+        return fail_msg("cond public op accepted saturated active-op sentinel");
+    case 15:
+        return fail_msg("task group public op accepted saturated active-op sentinel");
+    case 16:
+        return fail_msg("task introspection accepted saturated active-op sentinel");
+    default:
+        return fail_msg("public-op sentinel reject child returned unexpected status");
+    }
+}
+
 static int test_task_public_op_sentinel_teardown_does_not_hang(void) {
     pid_t pid;
     int status = 0;
@@ -5273,6 +5384,10 @@ int main(void) {
 #if !LLAM_PLATFORM_WINDOWS
     if (run_edge_case("task_public_op_sentinel_teardown_does_not_hang",
                       test_task_public_op_sentinel_teardown_does_not_hang) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_op_sentinel_rejects_new_public_ops",
+                      test_public_op_sentinel_rejects_new_public_ops) != 0) {
         return 1;
     }
 #endif

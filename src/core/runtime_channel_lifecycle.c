@@ -101,8 +101,9 @@ llam_channel_t *llam_channel_resolve_public_handle(const llam_channel_t *handle)
                                                LLAM_SYNC_PUBLIC_HANDLE_SHIFT,
                                                NULL,
                                                NULL);
-    if (channel != NULL) {
-        llam_public_active_op_begin(&channel->active_ops);
+    if (channel != NULL &&
+        llam_public_active_op_try_begin(&channel->active_ops) != 0) {
+        channel = NULL;
     }
     pthread_mutex_unlock(&g_llam_channel_registry_lock);
     return channel;
@@ -197,7 +198,11 @@ int llam_channel_resolve_public_handles_for_select(llam_select_op_t *ops,
             return -1;
         }
 #endif
-        llam_public_active_op_begin(&channel->active_ops);
+        if (llam_public_active_op_try_begin(&channel->active_ops) != 0) {
+            llam_channel_end_partial_public_select_ops(out_channels, i);
+            pthread_mutex_unlock(&g_llam_channel_registry_lock);
+            return -1;
+        }
         out_channels[i] = channel;
     }
     pthread_mutex_unlock(&g_llam_channel_registry_lock);

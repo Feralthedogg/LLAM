@@ -96,7 +96,10 @@ static int llam_cancel_token_begin_op_locked(llam_cancel_token_t *handle, llam_c
      * concurrent destroy sees a live public operation and returns EBUSY instead
      * of freeing the storage underneath it.
      */
-    llam_public_active_op_begin(&token->active_ops);
+    if (llam_public_active_op_try_begin(&token->active_ops) != 0) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        return -1;
+    }
     pthread_mutex_lock(&token->lock);
     pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
     *out_token = token;
@@ -140,7 +143,10 @@ static int llam_cancel_token_begin_op_for_runtime_locked(llam_cancel_token_t *ha
      * host threads can spawn explicit runtimes and managed tasks can target a
      * different runtime through the handle API.
      */
-    llam_public_active_op_begin(&token->active_ops);
+    if (llam_public_active_op_try_begin(&token->active_ops) != 0) {
+        pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        return -1;
+    }
     pthread_mutex_lock(&token->lock);
     pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
     *out_token = token;

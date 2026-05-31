@@ -1837,14 +1837,19 @@ static int test_owned_buffer_release_active_op_sentinel_does_not_hang(void) {
         atomic_store_explicit(&raw->public_active_ops, SIZE_MAX, memory_order_relaxed);
         llam_io_buffer_public_end_op(raw);
 
+        errno = 0;
         llam_io_buffer_release(handle);
-        if (llam_io_buffer_capacity(handle) == 0U) {
+        if (errno != EBUSY) {
             /*
              * Saturated active-op state must fail closed without consuming the
              * handle. Consuming it would hide the corruption and risk recycling
              * storage still protected by the permanent busy sentinel.
              */
             _exit(12);
+        }
+        errno = 0;
+        if (llam_io_buffer_capacity(handle) != 0U || errno != EBUSY) {
+            _exit(13);
         }
         _exit(0);
     }
@@ -1869,7 +1874,9 @@ static int test_owned_buffer_release_active_op_sentinel_does_not_hang(void) {
     case 11:
         return test_fail("owned-buffer active-op sentinel raw resolve failed");
     case 12:
-        return test_fail("owned-buffer active-op sentinel consumed the handle");
+        return test_fail("owned-buffer active-op sentinel release did not fail with EBUSY");
+    case 13:
+        return test_fail("owned-buffer active-op sentinel accessor did not fail with EBUSY");
     default:
         return test_fail("owned-buffer active-op sentinel child returned unexpected status");
     }

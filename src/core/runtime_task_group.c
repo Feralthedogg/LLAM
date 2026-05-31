@@ -136,7 +136,10 @@ llam_task_group_t *llam_task_group_resolve_public_handle(llam_task_group_t *hand
     if (llam_task_group_lock_live(handle, &group) != 0) {
         return NULL;
     }
-    llam_public_active_op_begin(&group->active_ops);
+    if (llam_public_active_op_try_begin(&group->active_ops) != 0) {
+        pthread_mutex_unlock(&group->lock);
+        return NULL;
+    }
     pthread_mutex_unlock(&group->lock);
     return group;
 }
@@ -417,7 +420,10 @@ int llam_task_group_cancel(llam_task_group_t *group) {
         return -1;
     }
     token = group->cancel_token;
-    llam_public_active_op_begin(&group->active_ops);
+    if (llam_public_active_op_try_begin(&group->active_ops) != 0) {
+        pthread_mutex_unlock(&group->lock);
+        return -1;
+    }
     pthread_mutex_unlock(&group->lock);
 
     if (llam_cancel_token_cancel(token) != 0) {
