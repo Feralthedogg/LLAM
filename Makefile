@@ -892,7 +892,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	} > "$$tmp_dir/malicious_server.py"; \
 	chmod +x "$$tmp_dir/malicious_server.py"; \
 	printf 'server stopped; outbox_full_drops=123456 outbox_closed_drops=0 broadcast_messages_created=1 broadcast_deliveries_attempted=1 broadcast_deliveries_enqueued=1\n' > "$$tmp_dir/outside-stats"; \
-	if ! LLAM_MALICIOUS_STATS_TARGET="$$tmp_dir/outside-stats" ./server_flood --server "$$tmp_dir/malicious_server.py" --clients 2 --duration 0.05 --drain-sec 0.05 --message-bytes 8 --batch 1 --target-mps 0.001 --min-delivery-mps 0 --min-delivery-ratio 0 --allow-forced-stop --allow-missing-stats >"$$tmp_dir/flood.out" 2>&1; then \
+	if ! LLAM_MALICIOUS_STATS_TARGET="$$tmp_dir/outside-stats" ./server_flood --server "$$tmp_dir/malicious_server.py" --clients 2 --duration 0.5 --drain-sec 0.5 --message-bytes 8 --batch 1 --target-mps 0.010 --min-delivery-mps 0 --min-delivery-ratio 0 --allow-forced-stop --allow-missing-stats >"$$tmp_dir/flood.out" 2>&1; then \
 		echo "server_flood symlink stats regression failed unexpectedly" >&2; \
 		cat "$$tmp_dir/flood.out" >&2; \
 		exit 1; \
@@ -963,7 +963,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	chmod +x "$$tmp_dir/malicious_server_parent.py"; \
 	mkdir "$$tmp_dir/outside"; \
 	printf 'server stopped; outbox_full_drops=654321 outbox_closed_drops=0 broadcast_messages_created=1 broadcast_deliveries_attempted=1 broadcast_deliveries_enqueued=1\n' > "$$tmp_dir/outside/stats.txt"; \
-	if ! LLAM_MALICIOUS_STATS_DIR="$$tmp_dir/outside" ./server_flood --server "$$tmp_dir/malicious_server_parent.py" --clients 2 --duration 0.05 --drain-sec 0.05 --message-bytes 8 --batch 1 --target-mps 0.001 --min-delivery-mps 0 --min-delivery-ratio 0 --allow-forced-stop --allow-missing-stats >"$$tmp_dir/flood.out" 2>&1; then \
+	if ! LLAM_MALICIOUS_STATS_DIR="$$tmp_dir/outside" ./server_flood --server "$$tmp_dir/malicious_server_parent.py" --clients 2 --duration 0.5 --drain-sec 0.5 --message-bytes 8 --batch 1 --target-mps 0.010 --min-delivery-mps 0 --min-delivery-ratio 0 --allow-forced-stop --allow-missing-stats >"$$tmp_dir/flood.out" 2>&1; then \
 		echo "server_flood parent symlink stats regression failed unexpectedly" >&2; \
 		cat "$$tmp_dir/flood.out" >&2; \
 		exit 1; \
