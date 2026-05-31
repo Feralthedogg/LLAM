@@ -4838,6 +4838,8 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
     if (pid == 0) {
         llam_channel_t *channel;
         llam_channel_t *raw_channel;
+        llam_mutex_t *mutex;
+        llam_mutex_t *raw_mutex;
         llam_cond_t *cond;
         llam_cond_t *raw_cond;
         llam_task_group_t *group;
@@ -4851,18 +4853,20 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
             _exit(10);
         }
         channel = llam_channel_create(1U);
+        mutex = llam_mutex_create();
         cond = llam_cond_create();
         group = llam_task_group_create();
         task = llam_spawn(public_op_sentinel_noop_task, NULL, NULL);
-        if (channel == NULL || cond == NULL || group == NULL || task == NULL) {
+        if (channel == NULL || mutex == NULL || cond == NULL || group == NULL || task == NULL) {
             _exit(11);
         }
 
         raw_channel = llam_channel_resolve_public_handle(channel);
+        raw_mutex = llam_mutex_resolve_public_handle(mutex);
         raw_cond = llam_cond_resolve_public_handle(cond);
         raw_group = llam_task_group_resolve_public_handle(group);
         raw_task = llam_task_resolve_public_handle(task);
-        if (raw_channel == NULL || raw_cond == NULL || raw_group == NULL || raw_task == NULL) {
+        if (raw_channel == NULL || raw_mutex == NULL || raw_cond == NULL || raw_group == NULL || raw_task == NULL) {
             _exit(12);
         }
 
@@ -4874,28 +4878,34 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
          * intentionally poisoned.
          */
         atomic_store_explicit(&raw_channel->active_ops, SIZE_MAX, memory_order_release);
+        atomic_store_explicit(&raw_mutex->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_cond->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_group->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_task->active_ops, SIZE_MAX, memory_order_release);
         llam_channel_end_public_op(raw_channel);
+        llam_mutex_end_public_op(raw_mutex);
         llam_cond_end_public_op(raw_cond);
         llam_task_group_end_public_op(raw_group);
         llam_task_end_public_op(raw_task);
 
         errno = 0;
-        if (llam_channel_try_send(channel, &value) == 0) {
+        if (llam_channel_try_send(channel, &value) != -1 || errno != EBUSY) {
             _exit(13);
         }
         errno = 0;
-        if (llam_cond_signal(cond) == 0) {
+        if (llam_mutex_trylock(mutex) != -1 || errno != EBUSY) {
             _exit(14);
         }
         errno = 0;
-        if (llam_task_group_cancel(group) == 0) {
+        if (llam_cond_signal(cond) != -1 || errno != EBUSY) {
             _exit(15);
         }
-        if (llam_task_id(task) != 0U || strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
+        errno = 0;
+        if (llam_task_group_cancel(group) != -1 || errno != EBUSY) {
             _exit(16);
+        }
+        if (llam_task_id(task) != 0U || strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
+            _exit(17);
         }
         _exit(0);
     }
@@ -4922,12 +4932,14 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
     case 12:
         return fail_msg("public-op sentinel reject fixture resolve failed");
     case 13:
-        return fail_msg("channel public op accepted saturated active-op sentinel");
+        return fail_msg("channel public op did not fail saturated active-op sentinel with EBUSY");
     case 14:
-        return fail_msg("cond public op accepted saturated active-op sentinel");
+        return fail_msg("mutex public op did not fail saturated active-op sentinel with EBUSY");
     case 15:
-        return fail_msg("task group public op accepted saturated active-op sentinel");
+        return fail_msg("cond public op did not fail saturated active-op sentinel with EBUSY");
     case 16:
+        return fail_msg("task group public op did not fail saturated active-op sentinel with EBUSY");
+    case 17:
         return fail_msg("task introspection accepted saturated active-op sentinel");
     default:
         return fail_msg("public-op sentinel reject child returned unexpected status");

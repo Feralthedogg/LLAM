@@ -84,6 +84,7 @@ llam_cond_t *llam_cond_resolve_public_handle(const llam_cond_t *handle) {
     llam_cond_t *cond = NULL;
 
     if (handle == NULL) {
+        errno = EINVAL;
         return NULL;
     }
 
@@ -98,8 +99,9 @@ llam_cond_t *llam_cond_resolve_public_handle(const llam_cond_t *handle) {
                                             LLAM_SYNC_PUBLIC_HANDLE_SHIFT,
                                             NULL,
                                             NULL);
-    if (cond != NULL &&
-        llam_public_active_op_try_begin(&cond->active_ops) != 0) {
+    if (cond == NULL) {
+        errno = EINVAL;
+    } else if (llam_public_active_op_try_begin(&cond->active_ops) != 0) {
         cond = NULL;
     }
     pthread_mutex_unlock(&g_llam_cond_registry_lock);

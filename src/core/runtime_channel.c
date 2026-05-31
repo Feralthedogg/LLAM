@@ -357,7 +357,6 @@ static int llam_channel_send_impl(llam_channel_t *channel, void *value, bool has
 
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_require_object_owner(channel->owner_runtime) != 0) {
@@ -533,7 +532,6 @@ int llam_channel_try_send(llam_channel_t *channel, void *value) {
 
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_begin_live_object_owner_op(channel->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {
@@ -630,8 +628,6 @@ static int llam_channel_recv_result_impl(llam_channel_t *channel,
     *out = NULL;
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
-        llam_channel_end_public_op(channel);
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_require_object_owner(channel->owner_runtime) != 0) {
@@ -830,8 +826,6 @@ int llam_channel_try_recv_result(llam_channel_t *channel, void **out) {
     *out = NULL;
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
-        llam_channel_end_public_op(channel);
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_check_object_owner_for_cleanup(channel->owner_runtime) != 0) {
@@ -989,7 +983,6 @@ int llam_channel_close(llam_channel_t *channel) {
 
     channel = llam_channel_resolve_public_handle(channel);
     if (channel == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_check_object_owner_for_cleanup(channel->owner_runtime) != 0) {

@@ -97,7 +97,6 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
     if (cond == NULL || mutex == NULL) {
         llam_cond_end_public_op(cond);
         llam_mutex_end_public_op(mutex);
-        errno = EINVAL;
         return -1;
     }
     if (llam_require_task_context() != 0) {
@@ -294,7 +293,6 @@ int llam_cond_signal(llam_cond_t *cond) {
 
     cond = llam_cond_resolve_public_handle(cond);
     if (cond == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_begin_live_object_owner_op(cond->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {
@@ -331,7 +329,6 @@ int llam_cond_broadcast(llam_cond_t *cond) {
 
     cond = llam_cond_resolve_public_handle(cond);
     if (cond == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_begin_live_object_owner_op(cond->owner_runtime, &pinned_runtime, ENOTSUP) != 0) {

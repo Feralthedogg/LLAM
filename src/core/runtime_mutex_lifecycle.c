@@ -89,6 +89,7 @@ llam_mutex_t *llam_mutex_resolve_public_handle(const llam_mutex_t *handle) {
     llam_mutex_t *mutex = NULL;
 
     if (handle == NULL) {
+        errno = EINVAL;
         return NULL;
     }
 
@@ -103,8 +104,9 @@ llam_mutex_t *llam_mutex_resolve_public_handle(const llam_mutex_t *handle) {
                                              LLAM_SYNC_PUBLIC_HANDLE_SHIFT,
                                              NULL,
                                              NULL);
-    if (mutex != NULL &&
-        llam_public_active_op_try_begin(&mutex->active_ops) != 0) {
+    if (mutex == NULL) {
+        errno = EINVAL;
+    } else if (llam_public_active_op_try_begin(&mutex->active_ops) != 0) {
         mutex = NULL;
     }
     pthread_mutex_unlock(&g_llam_mutex_registry_lock);

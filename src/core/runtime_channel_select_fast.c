@@ -169,7 +169,6 @@ int llam_channel_select_try_one_fast(llam_select_op_t *op) {
 
     channel = llam_channel_resolve_public_handle(op->channel);
     if (channel == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_runtime_check_object_owner(channel->owner_runtime) != 0) {

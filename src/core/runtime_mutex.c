@@ -66,7 +66,6 @@ int llam_mutex_trylock(llam_mutex_t *mutex) {
 
     mutex = llam_mutex_resolve_public_handle(mutex);
     if (mutex == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_require_task_context() != 0) {
@@ -236,7 +235,6 @@ int llam_mutex_lock_impl(llam_mutex_t *mutex, bool has_deadline, uint64_t deadli
 
     mutex = llam_mutex_resolve_public_handle(mutex);
     if (mutex == NULL) {
-        errno = EINVAL;
         return -1;
     }
     rc = llam_mutex_lock_resolved_impl(mutex, has_deadline, deadline_ns, register_cancel);
@@ -288,7 +286,6 @@ int llam_mutex_unlock(llam_mutex_t *mutex) {
 
     mutex = llam_mutex_resolve_public_handle(mutex);
     if (mutex == NULL) {
-        errno = EINVAL;
         return -1;
     }
     if (llam_require_task_context() != 0) {

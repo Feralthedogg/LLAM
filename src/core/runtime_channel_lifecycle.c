@@ -87,6 +87,7 @@ llam_channel_t *llam_channel_resolve_public_handle(const llam_channel_t *handle)
     llam_channel_t *channel = NULL;
 
     if (handle == NULL) {
+        errno = EINVAL;
         return NULL;
     }
 
@@ -101,8 +102,9 @@ llam_channel_t *llam_channel_resolve_public_handle(const llam_channel_t *handle)
                                                LLAM_SYNC_PUBLIC_HANDLE_SHIFT,
                                                NULL,
                                                NULL);
-    if (channel != NULL &&
-        llam_public_active_op_try_begin(&channel->active_ops) != 0) {
+    if (channel == NULL) {
+        errno = EINVAL;
+    } else if (llam_public_active_op_try_begin(&channel->active_ops) != 0) {
         channel = NULL;
     }
     pthread_mutex_unlock(&g_llam_channel_registry_lock);

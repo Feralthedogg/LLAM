@@ -252,6 +252,7 @@ llam_io_buffer_t *llam_io_buffer_public_begin_op(const llam_io_buffer_t *buffer)
     llam_io_buffer_t *live = NULL;
 
     if (buffer == NULL) {
+        errno = EINVAL;
         return NULL;
     }
 
@@ -265,6 +266,8 @@ llam_io_buffer_t *llam_io_buffer_public_begin_op(const llam_io_buffer_t *buffer)
         if (llam_public_active_op_try_begin(&live->public_active_ops) != 0) {
             live = NULL;
         }
+    } else {
+        errno = EINVAL;
     }
     (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
     return live;
