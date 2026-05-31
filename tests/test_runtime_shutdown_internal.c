@@ -1400,6 +1400,12 @@ static int exercise_dynamic_scaler_live_saturation_fails_closed(void) {
     runtime.experimental_dynamic_shards = 1U;
     runtime.dynamic_online_floor = 1U;
     runtime.dynamic_scale_cooldown = LLAM_DYNAMIC_SCALE_COOLDOWN_TICKS;
+    /*
+     * Windows keeps the live-task diagnostic total runtime-wide; POSIX sums
+     * shard-local counters.  Set both so the overflow probe exercises the same
+     * saturated scaler contract on every backend.
+     */
+    atomic_init(&runtime.live_tasks, UINT_MAX);
     atomic_init(&runtime.online_shards, 2U);
     atomic_init(&runtime.online_shards_min, 2U);
     atomic_init(&runtime.online_shards_max, 2U);
