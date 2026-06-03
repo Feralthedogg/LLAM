@@ -8163,6 +8163,93 @@ static int test_broker_destroy_active_op_sentinel_does_not_hang(void) {
 }
 #endif
 
+static int test_broker_begin_active_op_sentinel_fails_busy(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    int rc;
+    int saved_errno;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    if (llam_broker_lock(&broker) != 0) {
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+    /*
+     * The slot immediately before the high-half sentinel is the last value
+     * where a naive begin could increment into the reserved range. Beginning a
+     * new op must fail before crossing that boundary.
+     */
+    broker.active_ops = LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL - 1U;
+    llam_broker_unlock(&broker);
+
+    errno = 0;
+    rc = llam_broker_begin_op(&broker);
+    saved_errno = errno;
+    if (rc != -1 || saved_errno != EBUSY) {
+        fprintf(stderr,
+                "[test_security_capability] broker begin near-sentinel rc=%d errno=%d expected EBUSY\n",
+                rc,
+                saved_errno);
+        if (llam_broker_lock(&broker) == 0) {
+            broker.active_ops = 0U;
+            llam_broker_unlock(&broker);
+        }
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+
+    if (llam_broker_lock(&broker) == 0) {
+        /*
+         * The broker active-op high half is a permanent busy/corrupt lifecycle
+         * state. New operations must report EBUSY, matching destroy and public
+         * handle sentinel semantics, rather than exposing it as a generic
+         * counter overflow.
+         */
+        broker.active_ops = LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL;
+        llam_broker_unlock(&broker);
+    }
+    errno = 0;
+    rc = llam_broker_begin_op(&broker);
+    saved_errno = errno;
+    if (rc != -1 || saved_errno != EBUSY) {
+        fprintf(stderr,
+                "[test_security_capability] broker begin sentinel rc=%d errno=%d expected EBUSY\n",
+                rc,
+                saved_errno);
+        if (llam_broker_lock(&broker) == 0) {
+            broker.active_ops = 0U;
+            llam_broker_unlock(&broker);
+        }
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+    llam_broker_end_op(&broker);
+    if (broker_test_active_ops(&broker) != LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL) {
+        fprintf(stderr,
+                "[test_security_capability] broker end decremented sentinel to %" PRIu32 "\n",
+                broker_test_active_ops(&broker));
+        if (llam_broker_lock(&broker) == 0) {
+            broker.active_ops = 0U;
+            llam_broker_unlock(&broker);
+        }
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+
+    if (llam_broker_lock(&broker) == 0) {
+        broker.active_ops = 0U;
+        llam_broker_unlock(&broker);
+    }
+    llam_broker_destroy(&broker);
+    return 0;
+}
+
 static int test_broker_destroy_waits_for_active_ring_io(void) {
     static const char inbound[] = "destroy waits";
     llam_runtime_opts_t opts;
@@ -11843,6 +11930,7 @@ int main(int argc, char **argv) {
 #if LLAM_PLATFORM_POSIX
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_active_op_sentinel_does_not_hang);
 #endif
+    LLAM_RUN_SECURITY_TEST(test_broker_begin_active_op_sentinel_fails_busy);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);

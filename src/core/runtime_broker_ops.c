@@ -177,9 +177,15 @@ int llam_broker_begin_op_subject(llam_broker_t *broker, uint64_t subject_id) {
         errno = EINVAL;
         return -1;
     }
-    if (LLAM_UNLIKELY(broker->active_ops >= LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL)) {
+    if (LLAM_UNLIKELY(broker->active_ops >= LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL - 1U)) {
+        /*
+         * The high half of active_ops is reserved for saturated/corrupt
+         * lifecycle state. Reject before incrementing into that range so
+         * destroy and end paths never have to treat a high-half value as a
+         * valid active-operation count.
+         */
         llam_broker_unlock(broker);
-        errno = EOVERFLOW;
+        errno = EBUSY;
         return -1;
     }
     if (llam_broker_tls_enter_op(broker, subject_id) != 0) {
@@ -199,7 +205,13 @@ void llam_broker_end_op(llam_broker_t *broker) {
     if (llam_broker_lock(broker) != 0) {
         return;
     }
-    if (broker->active_ops > 0U) {
+    if (LLAM_UNLIKELY(broker->active_ops >= LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL)) {
+        /*
+         * Saturated/corrupt counters are permanent busy sentinels. Do not
+         * decrement them: UINT32_MAX - 1 would manufacture a different
+         * high-half value and obscure the fail-closed lifecycle state.
+         */
+    } else if (broker->active_ops > 0U) {
         broker->active_ops -= 1U;
     }
     llam_broker_tls_leave_op(broker);
