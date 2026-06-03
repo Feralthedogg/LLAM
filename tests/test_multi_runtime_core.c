@@ -185,6 +185,13 @@ typedef struct runtime_destroy_race_state {
     bool go;
 } runtime_destroy_race_state_t;
 
+typedef struct runtime_destroy_claim_sentinel_state {
+    llam_runtime_t *runtime;
+    bool heap_allocated;
+    int rc;
+    int err;
+} runtime_destroy_claim_sentinel_state_t;
+
 typedef struct runtime_destroy_running_state {
     atomic_uint entered;
 } runtime_destroy_running_state_t;
@@ -1033,6 +1040,15 @@ static void *destroy_runtime_thread(void *arg) {
     pthread_mutex_unlock(&state->lock);
 
     llam_runtime_destroy(state->runtime);
+    return NULL;
+}
+
+static void *claim_destroy_runtime_thread(void *arg) {
+    runtime_destroy_claim_sentinel_state_t *state = arg;
+
+    errno = 0;
+    state->rc = llam_runtime_claim_destroy_handle(state->runtime, &state->heap_allocated);
+    state->err = errno;
     return NULL;
 }
 
@@ -2751,6 +2767,101 @@ static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
         return test_fail("runtime active-op sentinel child returned unexpected status");
     }
 }
+
+static int test_runtime_destroy_detects_sentinel_after_claim(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("runtime post-claim active-op sentinel fork failed");
+    }
+    if (pid == 0) {
+        runtime_destroy_claim_sentinel_state_t state;
+        llam_runtime_t *runtime = NULL;
+        llam_runtime_t *pinned_runtime = NULL;
+        pthread_t thread;
+        int err;
+
+        /*
+         * Destroy first claims the public handle, then waits for active public
+         * operations to drain. If the counter enters reserved sentinel space
+         * after the claim, destroy must fail closed instead of spinning forever.
+         */
+        (void)alarm(2U);
+        memset(&state, 0, sizeof(state));
+        if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+            _exit(10);
+        }
+        if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0 ||
+            pinned_runtime != runtime) {
+            llam_runtime_destroy(runtime);
+            _exit(11);
+        }
+        state.runtime = runtime;
+        err = pthread_create(&thread, NULL, claim_destroy_runtime_thread, &state);
+        if (err != 0) {
+            atomic_store_explicit(&runtime->active_ops, 1U, memory_order_release);
+            llam_runtime_end_public_op(pinned_runtime);
+            llam_runtime_destroy(runtime);
+            _exit(12);
+        }
+        while (!atomic_load_explicit(&runtime->destroy_claimed, memory_order_acquire)) {
+            llam_pause_cpu();
+        }
+        atomic_store_explicit(&runtime->active_ops, SIZE_MAX, memory_order_release);
+        pthread_join(thread, NULL);
+        if (state.rc == 0) {
+            _exit(13);
+        }
+        if (state.err != EBUSY) {
+            _exit(14);
+        }
+        if (atomic_load_explicit(&runtime->destroy_claimed, memory_order_acquire)) {
+            _exit(15);
+        }
+        if (state.heap_allocated) {
+            _exit(16);
+        }
+        atomic_store_explicit(&runtime->active_ops, 1U, memory_order_release);
+        llam_runtime_end_public_op(pinned_runtime);
+        llam_runtime_destroy(runtime);
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("runtime post-claim active-op sentinel waitpid failed");
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            return test_fail("runtime destroy hung on post-claim active-op sentinel");
+        }
+        return test_fail("runtime post-claim active-op sentinel child died from signal");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("runtime post-claim active-op sentinel child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        return test_fail("runtime post-claim active-op sentinel setup failed");
+    case 11:
+        return test_fail("runtime post-claim public-op pin setup failed");
+    case 12:
+        return test_fail("runtime post-claim destroy thread create failed");
+    case 13:
+        return test_fail("runtime post-claim sentinel destroy succeeded unexpectedly");
+    case 14:
+        return test_fail("runtime post-claim sentinel did not fail with EBUSY");
+    case 15:
+        return test_fail("runtime post-claim sentinel did not release destroy claim");
+    case 16:
+        return test_fail("runtime post-claim sentinel published heap ownership on failure");
+    default:
+        return test_fail("runtime post-claim active-op sentinel child returned unexpected status");
+    }
+}
 #endif
 
 static int test_runtime_begin_active_op_near_sentinel_fails_busy(void) {
@@ -3586,6 +3697,8 @@ int main(void) {
 #if LLAM_PLATFORM_POSIX
         {"runtime_destroy_active_op_sentinel_does_not_hang",
          test_runtime_destroy_active_op_sentinel_does_not_hang},
+        {"runtime_destroy_detects_sentinel_after_claim",
+         test_runtime_destroy_detects_sentinel_after_claim},
 #endif
         {"runtime_begin_active_op_near_sentinel_fails_busy",
          test_runtime_begin_active_op_near_sentinel_fails_busy},

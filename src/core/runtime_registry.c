@@ -111,12 +111,14 @@ int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
 
 int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated) {
     bool already_claimed;
+    bool heap_allocated;
     size_t active_ops;
 
     if (rt == NULL || out_heap_allocated == NULL) {
         errno = EINVAL;
         return -1;
     }
+    *out_heap_allocated = false;
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
     if (!llam_runtime_is_registered_locked(rt)) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
@@ -140,14 +142,26 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
         errno = EINVAL;
         return -1;
     }
-    *out_heap_allocated = rt->heap_allocated;
+    heap_allocated = rt->heap_allocated;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
     do {
         active_ops = atomic_load_explicit(&rt->active_ops, memory_order_acquire);
+        if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(active_ops))) {
+            /*
+             * No new public op can start after destroy_claimed is published, so
+             * sentinel space here means the active-op counter was corrupted while
+             * destroy was waiting. Release the claim and fail closed instead of
+             * burning a host thread forever.
+             */
+            atomic_store_explicit(&rt->destroy_claimed, false, memory_order_release);
+            errno = EBUSY;
+            return -1;
+        }
         if (active_ops != 0U) {
             llam_pause_cpu();
         }
     } while (active_ops != 0U);
+    *out_heap_allocated = heap_allocated;
     return 0;
 }
 
