@@ -283,7 +283,8 @@ int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64_t deadli
  *
  * @param cond Condition variable to signal.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL.
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL, @c EBUSY,
+ *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_cond_signal(llam_cond_t *cond) {
     llam_wait_node_t *node;
@@ -321,7 +322,8 @@ int llam_cond_signal(llam_cond_t *cond) {
  *
  * @param cond Condition variable to broadcast.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL.
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL, @c EBUSY,
+ *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_cond_broadcast(llam_cond_t *cond) {
     llam_wait_node_t *node;

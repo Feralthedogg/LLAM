@@ -434,8 +434,11 @@ because wakeups are not a predicate guarantee. Invalid-argument or wrong-owner
 failures return before releasing the mutex.
 
 `llam_cond_signal()` and `llam_cond_broadcast()` may be called with or without
-the associated mutex held, and may be called outside a managed LLAM task. Invalid
-condition handles fail with `-1/EINVAL`.
+the associated mutex held, and may be called outside a managed LLAM task while
+the owner runtime is live. Invalid condition handles fail with `-1/EINVAL`,
+active teardown/corruption sentinels fail with `-1/EBUSY`, cross-runtime managed
+use fails with `-1/EXDEV`, and unmanaged calls after the owner runtime can no
+longer service waiter wakeups fail with `-1/ENOTSUP`.
 
 Channel receive APIs come in two forms:
 

@@ -998,10 +998,13 @@ LLAM_API int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64
  * @brief Wake one condition-variable waiter.
  *
  * @details May be called with or without the associated mutex held. Calls
- * outside a managed LLAM task are allowed.
+ * outside a managed LLAM task are allowed while the owner runtime is live.
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
- * arguments.
+ * arguments, @c EBUSY when the public handle is already being torn down,
+ * @c EXDEV for cross-runtime managed use, or @c ENOTSUP when an unmanaged host
+ * caller touches a condition whose owner runtime can no longer service waiter
+ * wakeups.
  */
 LLAM_API int llam_cond_signal(llam_cond_t *cond);
 
@@ -1009,10 +1012,13 @@ LLAM_API int llam_cond_signal(llam_cond_t *cond);
  * @brief Wake all condition-variable waiters.
  *
  * @details May be called with or without the associated mutex held. Calls
- * outside a managed LLAM task are allowed.
+ * outside a managed LLAM task are allowed while the owner runtime is live.
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
- * arguments.
+ * arguments, @c EBUSY when the public handle is already being torn down,
+ * @c EXDEV for cross-runtime managed use, or @c ENOTSUP when an unmanaged host
+ * caller touches a condition whose owner runtime can no longer service waiter
+ * wakeups.
  */
 LLAM_API int llam_cond_broadcast(llam_cond_t *cond);
 

@@ -721,8 +721,8 @@ Mutex and condition variables:
 | `llam_cond_create` / `llam_cond_destroy` | Create or destroy a condition variable; destroy returns `EBUSY` while waited on. |
 | `llam_cond_wait` | Wait on a condition variable; caller must own the mutex and wait in a predicate loop. |
 | `llam_cond_wait_until` | Wait on a condition variable until a deadline; reacquires the mutex before returning. |
-| `llam_cond_signal` | Wake one waiter; may be called with or without the mutex and outside a managed task. |
-| `llam_cond_broadcast` | Wake all waiters; may be called with or without the mutex and outside a managed task. |
+| `llam_cond_signal` | Wake one waiter; may be called with or without the mutex, including from an unmanaged host thread while the owner runtime is live. |
+| `llam_cond_broadcast` | Wake all waiters; may be called with or without the mutex, including from an unmanaged host thread while the owner runtime is live. |
 
 Channels:
 

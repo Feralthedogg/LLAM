@@ -773,6 +773,10 @@ static void cross_object_task(void *arg) {
         cross_object_fail(state);
     }
     errno = 0;
+    if (llam_cond_broadcast(state->foreign_cond) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
     if (llam_cancel_token_cancel(state->foreign_token) != -1 || errno != EXDEV) {
         cross_object_fail(state);
     }
