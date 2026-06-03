@@ -1851,6 +1851,10 @@ static int test_owned_buffer_release_active_op_sentinel_does_not_hang(void) {
         if (llam_io_buffer_capacity(handle) != 0U || errno != EBUSY) {
             _exit(13);
         }
+        errno = 0;
+        if (llam_io_buffer_data(handle) != NULL || errno != EBUSY) {
+            _exit(14);
+        }
         _exit(0);
     }
 
@@ -1877,6 +1881,8 @@ static int test_owned_buffer_release_active_op_sentinel_does_not_hang(void) {
         return test_fail("owned-buffer active-op sentinel release did not fail with EBUSY");
     case 13:
         return test_fail("owned-buffer active-op sentinel accessor did not fail with EBUSY");
+    case 14:
+        return test_fail("owned-buffer active-op sentinel data accessor did not fail with EBUSY");
     default:
         return test_fail("owned-buffer active-op sentinel child returned unexpected status");
     }

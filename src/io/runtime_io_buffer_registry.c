@@ -355,6 +355,19 @@ void *llam_io_buffer_public_data(llam_io_buffer_t *buffer) {
 
     (void)pthread_mutex_lock(&g_llam_io_buffer_public_registry_lock);
     if (llam_io_buffer_public_decode_handle_locked(buffer, false, &live)) {
+        if (llam_public_active_op_count(&live->public_active_ops) >= (SIZE_MAX / 2U)) {
+            /*
+             * The data accessor does not pin because it returns a borrowed
+             * pointer whose lifetime is governed by release.  Saturated
+             * active-op state means that release/accessor accounting is
+             * corrupted or exhausted, so exposing a raw pointer would extend
+             * that unsafe state outside LLAM.  Fail closed like scalar
+             * accessors and release.
+             */
+            errno = EBUSY;
+            (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
+            return NULL;
+        }
         /*
          * Public data pointers are documented as valid until release.  Provided
          * buffer rings are runtime-owned, so expose only wrapper-owned storage

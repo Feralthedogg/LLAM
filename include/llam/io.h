@@ -294,7 +294,8 @@ LLAM_API void llam_io_buffer_release(llam_io_buffer_t *buffer);
  * @details The returned pointer is a borrowed view into @p buffer. It remains
  * valid only while the buffer remains unreleased; LLAM protects the accessor
  * itself from stale public handles, but it cannot make a raw C pointer safe
- * after another thread releases the buffer.
+ * after another thread releases the buffer. If lifecycle accounting is
+ * saturated or corrupt, this returns @c NULL with @c errno set to @c EBUSY.
  */
 LLAM_API void *llam_io_buffer_data(llam_io_buffer_t *buffer);
 
