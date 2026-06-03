@@ -930,7 +930,10 @@ python3 scripts/bench_runtime_compare.py --runtime all --isolate-cases
 The comparison script runs three process-level samples per runtime by default
 and reports the median row for each case so one noisy scheduler outlier does
 not dominate the table. Use `--samples 1` for a quick smoke run or
-`--sample-policy best` when locally measuring peak tuning.
+`--sample-policy best` when locally measuring peak tuning. The script also
+writes `runtime_compare_samples.csv` with every raw sample and warns when one
+runtime/case has a large max/min spread; treat those warnings as a signal to
+rerun with `--isolate-cases` before drawing release-quality conclusions.
 
 Release-quality comparison numbers should use isolated case execution so each
 benchmark case starts from a fresh process instead of inheriting worker, timer,

@@ -432,7 +432,11 @@ python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1 --i
 By default the script runs three process-level samples per runtime and reports
 the median row for each benchmark case. This keeps short cases such as
 `spawn_join` from being dominated by a single OS scheduling outlier. Use
-`--samples 1` only for quick smoke checks.
+`--samples 1` only for quick smoke checks. The script writes
+`runtime_compare_samples.csv` beside the selected median CSV and warns when a
+runtime/case has a large max/min sample spread. A spread warning is diagnostic,
+not a failure; rerun with `--isolate-cases` before treating that case as a
+regression.
 
 Use `--isolate-cases` for release-quality numbers so each case runs in a fresh
 process. This avoids cross-case worker-count, timer, cache, and CPU-frequency

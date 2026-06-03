@@ -48,6 +48,16 @@ class BenchRow:
     p99_us: float
 
 
+@dataclass
+class BenchSampleRow:
+    runtime: str
+    case: str
+    sample: int
+    ops_per_sec: float
+    p50_us: float
+    p99_us: float
+
+
 def parse_fields(line: str) -> dict[str, str]:
     return dict(FIELD_RE.findall(line))
 
@@ -141,6 +151,21 @@ def select_sample_rows(samples: list[list[BenchRow]], policy: str) -> list[Bench
     return selected
 
 
+def record_sample_rows(sample_rows: list[BenchSampleRow], samples: list[list[BenchRow]]) -> None:
+    for sample_index, rows in enumerate(samples, start=1):
+        for row in rows:
+            sample_rows.append(
+                BenchSampleRow(
+                    runtime=row.runtime,
+                    case=row.case,
+                    sample=sample_index,
+                    ops_per_sec=row.ops_per_sec,
+                    p50_us=row.p50_us,
+                    p99_us=row.p99_us,
+                )
+            )
+
+
 def run_command_samples(
     root: pathlib.Path,
     runtime: str,
@@ -149,13 +174,15 @@ def run_command_samples(
     timeout: int,
     samples: int,
     policy: str,
+    sample_records: list[BenchSampleRow],
     case: str | None = None,
 ) -> list[BenchRow]:
-    sample_rows = [
+    raw_samples = [
         run_command(root, runtime, command, env, timeout, sample + 1, samples, case)
         for sample in range(samples)
     ]
-    return select_sample_rows(sample_rows, policy)
+    record_sample_rows(sample_records, raw_samples)
+    return select_sample_rows(raw_samples, policy)
 
 
 def run_isolated_cases(
@@ -167,13 +194,14 @@ def run_isolated_cases(
     samples: int,
     policy: str,
     cases: list[str],
+    sample_records: list[BenchSampleRow],
 ) -> list[BenchRow]:
     rows: list[BenchRow] = []
 
     for case in cases:
         env = base_env.copy()
         env["LLAM_BENCH_ONLY"] = case
-        rows.extend(run_command_samples(root, runtime, command, env, timeout, samples, policy, case))
+        rows.extend(run_command_samples(root, runtime, command, env, timeout, samples, policy, sample_records, case))
     return rows
 
 
@@ -215,6 +243,56 @@ def write_csv(path: pathlib.Path, rows: list[BenchRow]) -> None:
         writer.writerow(["runtime", "case", "ops_per_sec", "p50_us", "p99_us"])
         for row in rows:
             writer.writerow([row.runtime, row.case, f"{row.ops_per_sec:.2f}", f"{row.p50_us:.2f}", f"{row.p99_us:.2f}"])
+
+
+def write_samples_csv(path: pathlib.Path, rows: list[BenchSampleRow]) -> None:
+    with open_text_for_write(path, newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["runtime", "case", "sample", "ops_per_sec", "p50_us", "p99_us"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row.runtime,
+                    row.case,
+                    row.sample,
+                    f"{row.ops_per_sec:.2f}",
+                    f"{row.p50_us:.2f}",
+                    f"{row.p99_us:.2f}",
+                ]
+            )
+
+
+def warn_sample_spread(rows: list[BenchSampleRow], ratio_threshold: float, isolate_cases: bool) -> None:
+    if ratio_threshold <= 0.0:
+        return
+
+    grouped: dict[tuple[str, str], list[BenchSampleRow]] = {}
+    for row in rows:
+        grouped.setdefault((row.runtime, row.case), []).append(row)
+
+    for key in sorted(grouped):
+        case_rows = grouped[key]
+        if len(case_rows) < 2:
+            continue
+        min_row = min(case_rows, key=lambda row: row.ops_per_sec)
+        max_row = max(case_rows, key=lambda row: row.ops_per_sec)
+        if min_row.ops_per_sec <= 0.0:
+            continue
+        spread = max_row.ops_per_sec / min_row.ops_per_sec
+        if spread < ratio_threshold:
+            continue
+
+        runtime, case = key
+        suggestion = ""
+        if not isolate_cases:
+            suggestion = "; use --isolate-cases for release-quality numbers"
+        print(
+            "[bench-runtime-compare] warning: "
+            f"{runtime} {case} sample spread {spread:.2f}x "
+            f"(min={min_row.ops_per_sec:.2f}, max={max_row.ops_per_sec:.2f})"
+            f"{suggestion}",
+            file=sys.stderr,
+        )
 
 
 def print_summary(rows: list[BenchRow], cases: list[str]) -> None:
@@ -350,6 +428,12 @@ def main() -> int:
         default=os.environ.get("LLAM_BENCH_COMPARE_SAMPLE_POLICY", "median"),
         help="how to select one row per runtime/case when --samples is greater than 1",
     )
+    parser.add_argument(
+        "--spread-warning-ratio",
+        type=float,
+        default=float(os.environ.get("LLAM_BENCH_COMPARE_SPREAD_WARNING_RATIO", "1.50")),
+        help="warn when max/min ops/s across samples for one runtime/case exceeds this ratio; use 0 to disable",
+    )
     args = parser.parse_args()
     if args.samples < 1:
         parser.error("--samples must be at least 1")
@@ -391,6 +475,7 @@ def main() -> int:
         )
 
     rows: list[BenchRow] = []
+    sample_records: list[BenchSampleRow] = []
     if "LLAM" in selected_runtimes:
         assert llam_command is not None
         if args.isolate_cases:
@@ -404,6 +489,7 @@ def main() -> int:
                     args.samples,
                     args.sample_policy,
                     cases,
+                    sample_records,
                 )
             )
         else:
@@ -416,6 +502,7 @@ def main() -> int:
                     args.timeout,
                     args.samples,
                     args.sample_policy,
+                    sample_records,
                 )
             )
     if "Goroutine" in selected_runtimes:
@@ -431,6 +518,7 @@ def main() -> int:
                     args.samples,
                     args.sample_policy,
                     cases,
+                    sample_records,
                 )
             )
         else:
@@ -443,6 +531,7 @@ def main() -> int:
                     args.timeout,
                     args.samples,
                     args.sample_policy,
+                    sample_records,
                 )
             )
     if "Tokio" in selected_runtimes:
@@ -467,6 +556,7 @@ def main() -> int:
                     args.samples,
                     args.sample_policy,
                     cases,
+                    sample_records,
                 )
             )
         else:
@@ -479,13 +569,21 @@ def main() -> int:
                     args.timeout,
                     args.samples,
                     args.sample_policy,
+                    sample_records,
                 )
             )
 
+    rows = [row for row in rows if row.case in cases]
+    sample_records = [row for row in sample_records if row.case in cases]
+
     csv_path = out_dir / "runtime_compare.csv"
+    samples_csv_path = out_dir / "runtime_compare_samples.csv"
     graph_path = out_dir / "runtime_compare.png"
     graph_written = False
     write_csv(csv_path, rows)
+    if args.samples > 1:
+        write_samples_csv(samples_csv_path, sample_records)
+        warn_sample_spread(sample_records, args.spread_warning_ratio, args.isolate_cases)
     if selected_runtimes == ["LLAM", "Goroutine", "Tokio"]:
         plot_graph(graph_path, rows, cases)
         graph_written = plt is not None
@@ -493,6 +591,8 @@ def main() -> int:
         print("[bench-runtime-compare] graph requires --runtime all; skipping graph", file=sys.stderr)
     print_summary(rows, cases)
     print(f"\nCSV: {csv_path}")
+    if args.samples > 1:
+        print(f"Samples CSV: {samples_csv_path}")
     if graph_written:
         print(f"Graph: {graph_path}")
     return 0
