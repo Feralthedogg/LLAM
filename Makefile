@@ -1970,6 +1970,14 @@ RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS ?= 64
 
 test-asan:
 	@set -e; \
+	if [ -n "$(filter -n n --just-print --dry-run --recon,$(MAKEFLAGS))" ]; then \
+		$(MAKE) $(ASAN_TEST_TARGETS) \
+			OBJDIR=object-asan \
+			SANITIZER_TARGETS_ENABLED=1 \
+			CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
+			LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
+		exit 0; \
+	fi; \
 	cleanup() { rm -f $(ASAN_TEST_TARGETS); }; \
 	trap cleanup EXIT; \
 	cleanup; \
@@ -1991,6 +1999,12 @@ test-asan:
 
 test-no-owner:
 	@set -e; \
+	if [ -n "$(filter -n n --just-print --dry-run --recon,$(MAKEFLAGS))" ]; then \
+		$(MAKE) $(NOOWNER_TEST_TARGETS) \
+			OBJDIR=object-noowner \
+			CPPFLAGS="$(CPPFLAGS) -DLLAM_RUNTIME_DISABLE_OWNER_CHECKS=1"; \
+		exit 0; \
+	fi; \
 	cleanup() { rm -f $(NOOWNER_TEST_TARGETS); }; \
 	trap cleanup EXIT; \
 	cleanup; \
@@ -2001,6 +2015,14 @@ test-no-owner:
 
 test-tsan:
 	@set -e; \
+	if [ -n "$(filter -n n --just-print --dry-run --recon,$(MAKEFLAGS))" ]; then \
+		$(MAKE) $(TSAN_TEST_TARGETS) \
+			OBJDIR=object-tsan \
+			SANITIZER_TARGETS_ENABLED=1 \
+			CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
+			LDLIBS="$(LDLIBS) -fsanitize=thread"; \
+		exit 0; \
+	fi; \
 	cleanup() { rm -f $(TSAN_TEST_TARGETS); }; \
 	trap cleanup EXIT; \
 	cleanup; \
