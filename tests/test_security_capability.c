@@ -994,6 +994,67 @@ static int test_broker_issue_validate_and_revoke(void) {
     return 0;
 }
 
+static int test_broker_revoke_all_epoch_overflow_invalidates_authority(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    uint64_t next_epoch;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    if (llam_broker_create_channel(&broker,
+                                   2U,
+                                   LLAM_CAP_RIGHT_SEND | LLAM_CAP_RIGHT_CLOSE,
+                                   &token) != 0) {
+        goto done;
+    }
+    if (llam_broker_validate_cap(&broker, &token, LLAM_CAP_RIGHT_SEND) != 0) {
+        goto done;
+    }
+
+    /*
+     * Epoch 0 is not a valid capability epoch. If revoke_all wraps UINT64_MAX
+     * back to 1, an old epoch-1 token can become valid again with the same
+     * slot/generation/MAC material. Overflow must instead invalidate authority
+     * and report EOVERFLOW.
+     */
+    atomic_store_explicit(&broker.revocation_epoch, UINT64_MAX, memory_order_release);
+    errno = 0;
+    next_epoch = llam_broker_revoke_all(&broker);
+    if (next_epoch != 0U || errno != EOVERFLOW) {
+        if (llam_broker_validate_cap(&broker, &token, LLAM_CAP_RIGHT_SEND) == 0) {
+            fprintf(stderr, "[test_security_capability] revoke_all overflow reactivated old token\n");
+        } else {
+            fprintf(stderr,
+                    "[test_security_capability] revoke_all overflow returned epoch=%" PRIu64 " errno=%d\n",
+                    next_epoch,
+                    errno);
+        }
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_validate_cap(&broker, &token, LLAM_CAP_RIGHT_SEND),
+                     EACCES,
+                     "overflow-revoked token accepted") != 0) {
+        goto done;
+    }
+    if (llam_broker_revocation_epoch(&broker) != 0U) {
+        fprintf(stderr, "[test_security_capability] overflow revoke did not publish terminal zero epoch\n");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 static int test_broker_create_paths_clear_output_on_invalid_input(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -12088,6 +12149,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_capability_issue_requires_os_entropy);
     LLAM_RUN_SECURITY_TEST(test_capability_issue_clears_output_on_invalid_input);
     LLAM_RUN_SECURITY_TEST(test_broker_issue_validate_and_revoke);
+    LLAM_RUN_SECURITY_TEST(test_broker_revoke_all_epoch_overflow_invalidates_authority);
     LLAM_RUN_SECURITY_TEST(test_broker_create_paths_clear_output_on_invalid_input);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_grants_require_explicit_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_malformed_requests_fail_closed);

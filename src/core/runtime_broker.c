@@ -340,16 +340,41 @@ uint64_t llam_broker_revocation_epoch(const llam_broker_t *broker) {
 }
 
 uint64_t llam_broker_revoke_all(llam_broker_t *broker) {
+    uint64_t current_epoch;
     uint64_t next_epoch;
 
     if (llam_broker_begin_op(broker) != 0) {
         return 0U;
     }
-    next_epoch = atomic_fetch_add_explicit(&broker->revocation_epoch, 1U, memory_order_acq_rel) + 1U;
-    if (next_epoch == 0U) {
-        atomic_store_explicit(&broker->revocation_epoch, 1U, memory_order_release);
-        llam_broker_end_op(broker);
-        return 1U;
+    current_epoch = atomic_load_explicit(&broker->revocation_epoch, memory_order_acquire);
+    for (;;) {
+        if (LLAM_UNLIKELY(current_epoch == 0U || current_epoch == UINT64_MAX)) {
+            /*
+             * Epoch 0 is intentionally invalid for all tokens. Wrapping
+             * UINT64_MAX back to 1 would make very old epoch-1 capabilities
+             * valid again if the object slot/generation is still live. Publish
+             * terminal zero instead so every outstanding token fails closed.
+             */
+            if (current_epoch == UINT64_MAX &&
+                !atomic_compare_exchange_weak_explicit(&broker->revocation_epoch,
+                                                       &current_epoch,
+                                                       0U,
+                                                       memory_order_acq_rel,
+                                                       memory_order_acquire)) {
+                continue;
+            }
+            llam_broker_end_op(broker);
+            errno = EOVERFLOW;
+            return 0U;
+        }
+        next_epoch = current_epoch + 1U;
+        if (atomic_compare_exchange_weak_explicit(&broker->revocation_epoch,
+                                                  &current_epoch,
+                                                  next_epoch,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            break;
+        }
     }
     llam_broker_end_op(broker);
     return next_epoch;
