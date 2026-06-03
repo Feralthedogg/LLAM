@@ -325,22 +325,34 @@ jobs:
       - name: Install BSD packages
         run: |
           set -eu
+          retry() {
+            attempts=0
+            max_attempts="${LLAM_BSD_PKG_RETRIES:-10}"
+            delay_seconds="${LLAM_BSD_PKG_RETRY_DELAY:-30}"
+            while ! "$@"; do
+              attempts=$((attempts + 1))
+              if [ "$attempts" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep "$delay_seconds"
+            done
+          }
           case "$(uname -s)" in
             FreeBSD|DragonFly)
-              command -v gmake >/dev/null 2>&1 || sudo pkg install -y gmake
-              command -v cmake >/dev/null 2>&1 || sudo pkg install -y cmake
-              command -v xz >/dev/null 2>&1 || sudo pkg install -y xz
+              command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
+              command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
+              command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
               ;;
             OpenBSD)
               sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
-              command -v gmake >/dev/null 2>&1 || sudo pkg_add gmake
-              command -v cmake >/dev/null 2>&1 || sudo pkg_add cmake
-              command -v xz >/dev/null 2>&1 || sudo pkg_add xz
+              command -v gmake >/dev/null 2>&1 || retry sudo pkg_add gmake
+              command -v cmake >/dev/null 2>&1 || retry sudo pkg_add cmake
+              command -v xz >/dev/null 2>&1 || retry sudo pkg_add xz
               ;;
             NetBSD)
-              command -v gmake >/dev/null 2>&1 || sudo pkgin -y install gmake
-              command -v cmake >/dev/null 2>&1 || sudo pkgin -y install cmake
-              command -v xz >/dev/null 2>&1 || sudo pkgin -y install xz
+              command -v gmake >/dev/null 2>&1 || retry sudo pkgin -y install gmake
+              command -v cmake >/dev/null 2>&1 || retry sudo pkgin -y install cmake
+              command -v xz >/dev/null 2>&1 || retry sudo pkgin -y install xz
               ;;
           esac
 
