@@ -141,6 +141,15 @@ llam_cond_t *llam_cond_create(void) {
     return llam_cond_public_handle(cond);
 }
 
+/**
+ * @brief Destroy an idle condition variable public handle.
+ *
+ * @details The public slot registry rejects stale handles before object memory
+ * is touched. Managed cross-runtime cleanup attempts fail with EXDEV, and live
+ * waiters or active public operations keep the handle busy.
+ *
+ * @return 0 on success, or -1 with errno set to EINVAL, EBUSY, or EXDEV.
+ */
 int llam_cond_destroy(llam_cond_t *cond) {
     uintptr_t handle = (uintptr_t)cond;
     size_t slot;

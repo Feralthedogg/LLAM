@@ -269,7 +269,8 @@ llam_cancel_token_t *llam_cancel_token_create(void) {
  *
  * @param token Token to destroy.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL, @c EBUSY, or
+ *         @c EXDEV for managed cross-runtime cleanup attempts.
  */
 int llam_cancel_token_destroy(llam_cancel_token_t *token) {
     uintptr_t handle = (uintptr_t)token;
@@ -393,7 +394,8 @@ bool llam_task_cancel_token_is_cancelled(const llam_task_t *task) {
  *
  * @param token Token to cancel.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL.
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL, @c EBUSY,
+ *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_cancel_token_cancel(llam_cancel_token_t *token) {
     llam_task_t *waiters;
@@ -470,7 +472,7 @@ int llam_cancel_token_cancel(llam_cancel_token_t *token) {
  * @param token Token to inspect.
  *
  * @return 1 if cancelled, 0 if not cancelled, or -1 with @c errno set to
- *         @c EINVAL for @c NULL input.
+ *         @c EINVAL, @c EBUSY, or @c EXDEV.
  */
 int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token) {
     int cancelled;

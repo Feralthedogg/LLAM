@@ -91,7 +91,7 @@ with `errno` set on failure.
 | Lifecycle | `llam_runtime_opts_init`, `llam_runtime_init_ex`, `llam_runtime_init`, `llam_runtime_create`, `llam_runtime_default`, `llam_runtime_run_handle`, `llam_runtime_request_stop`, `llam_run`, `llam_runtime_destroy`, `llam_runtime_shutdown` | Explicit runtime handles are the canonical embedding boundary. Legacy host-thread lifecycle calls operate on `llam_runtime_default()`; managed task spawn/stop/shutdown wrappers target the current owner runtime and cannot cross-stop peer runtimes. Shutdown releases backend resources while public cleanup handles keep their documented post-shutdown behavior. FFI bindings should prefer `_ex` and option initializers. |
 | Tasks | `llam_spawn_opts_init`, `llam_spawn_ex`, `llam_spawn`, `llam_runtime_spawn_ex`, `llam_join`, `llam_join_until`, `llam_detach`, `llam_yield`, `llam_task_safepoint`, `LLAM_PREEMPT_POLL`, `LLAM_PREEMPT_POLL_EVERY`, `llam_current_task` | Task handles are opaque and runtime-owned. One successful join or detach consumes the task handle. Embedders with explicit runtimes should spawn with `llam_runtime_spawn_ex()`. FFI bindings should prefer `_ex` and option initializers. |
 | Time | `llam_now_ns`, `llam_sleep_ns`, `llam_sleep_until` | Monotonic nanosecond clock. Deadline APIs use absolute `llam_now_ns()` units. |
-| Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. |
+| Cancellation | `llam_cancel_token_create`, `llam_cancel_token_destroy`, `llam_cancel_token_cancel`, `llam_cancel_token_is_cancelled` | Cancellation tokens are explicit handles. Destroy fails with `EBUSY` while live waiters or task/I/O observers still hold references. Managed cross-runtime token operations fail with `EXDEV`. |
 | Mutex/cond | `llam_mutex_*`, `llam_cond_*` | Runtime-aware waits park managed tasks; external-thread use is limited to nonblocking or explicitly documented calls. Destroy returns `EBUSY` while owners, waiters, in-flight wake returns, or public operations remain. |
 | Channels | `llam_channel_*` | Pointer-valued bounded channel. Capacity must be at least `1`; `llam_channel_create(0)` fails with `EINVAL`. Destroy returns `EBUSY` while buffered values, waiters, close-woken returns, or public operations remain. Use result-style receive APIs when `NULL` is a valid payload. |
 | Blocking | `llam_call_blocking_result`, `llam_call_blocking`, `llam_enter_blocking`, `llam_leave_blocking` | Prevents long blocking work from pinning scheduler workers. `llam_call_blocking_result` is the unambiguous FFI-safe form. Blocking callback return value is user-owned. |
@@ -425,6 +425,8 @@ LLAM mutexes are non-recursive. `llam_mutex_lock()` and
 already owns the mutex. Mutex try-lock returns `-1/EBUSY` when the mutex is
 already locked. Mutex unlock returns `-1/EPERM` when the current managed task
 does not own the mutex.
+Managed cross-runtime mutex use or destroy attempts return `-1/EXDEV`; active
+owners, waiters, or public-operation pins make destroy return `-1/EBUSY`.
 
 Condition waits follow condition-variable style rules. The caller must own the
 associated mutex on entry. LLAM atomically releases it while waiting and
@@ -439,6 +441,9 @@ the owner runtime is live. Invalid condition handles fail with `-1/EINVAL`,
 active teardown/corruption sentinels fail with `-1/EBUSY`, cross-runtime managed
 use fails with `-1/EXDEV`, and unmanaged calls after the owner runtime can no
 longer service waiter wakeups fail with `-1/ENOTSUP`.
+Condition destroy follows the same owner contract: managed cross-runtime
+destroy returns `-1/EXDEV`, and live waiters, selected-but-not-returned waiters,
+or active public-operation pins return `-1/EBUSY`.
 
 Channel receive APIs come in two forms:
 

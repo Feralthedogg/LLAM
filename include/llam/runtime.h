@@ -878,7 +878,8 @@ LLAM_API llam_cancel_token_t *llam_cancel_token_create(void);
  * token with active observers fails with @c EBUSY; it does not invalidate
  * active observers behind the caller's back. Destroy also fails with @c EBUSY
  * while another thread is cancelling, querying, or retaining the token for a
- * new task; calls that race with a completed destroy fail with @c EINVAL.
+ * new task. Calls that race with a completed destroy fail with @c EINVAL, and
+ * managed cross-runtime destroy attempts fail with @c EXDEV.
  */
 LLAM_API int llam_cancel_token_destroy(llam_cancel_token_t *token);
 
@@ -886,7 +887,10 @@ LLAM_API int llam_cancel_token_destroy(llam_cancel_token_t *token);
  * @brief Request cancellation for all current and future observers of token.
  *
  * @details Calls racing with a completed destroy fail with @c EINVAL instead
- * of dereferencing reclaimed token storage.
+ * of dereferencing reclaimed token storage. Managed cross-runtime cancellation
+ * fails with @c EXDEV. Unmanaged host calls that need to wake waiters require a
+ * live owner runtime and fail with @c ENOTSUP after the owner runtime can no
+ * longer service wakeups.
  */
 LLAM_API int llam_cancel_token_cancel(llam_cancel_token_t *token);
 
@@ -894,7 +898,8 @@ LLAM_API int llam_cancel_token_cancel(llam_cancel_token_t *token);
  * @brief Return non-zero when token has been cancelled.
  *
  * @details Calls racing with a completed destroy fail with @c EINVAL instead
- * of dereferencing reclaimed token storage.
+ * of dereferencing reclaimed token storage. Managed cross-runtime queries fail
+ * with @c EXDEV.
  */
 LLAM_API int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token);
 
@@ -912,6 +917,7 @@ LLAM_API llam_mutex_t *llam_mutex_create(void);
  * @details
  * Destroy fails with @c EBUSY while a task owns or waits on the mutex, or while
  * another public mutex operation is still pinned inside the handle registry.
+ * Managed cross-runtime destroy attempts fail with @c EXDEV.
  */
 LLAM_API int llam_mutex_destroy(llam_mutex_t *mutex);
 
@@ -967,6 +973,7 @@ LLAM_API llam_cond_t *llam_cond_create(void);
  * condition, including the interval after signal/broadcast has selected the
  * waiter but before that task has returned from llam_cond_wait(), or while
  * another public condition operation is still pinned inside the handle registry.
+ * Managed cross-runtime destroy attempts fail with @c EXDEV.
  */
 LLAM_API int llam_cond_destroy(llam_cond_t *cond);
 

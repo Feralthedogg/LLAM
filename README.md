@@ -706,19 +706,19 @@ Cancellation:
 | API | Purpose |
 | --- | --- |
 | `llam_cancel_token_create` | Create a cancellation token. |
-| `llam_cancel_token_destroy` | Destroy a cancellation token; live observers make it fail with `EBUSY`. |
-| `llam_cancel_token_cancel` | Request cancellation. |
-| `llam_cancel_token_is_cancelled` | Check cancellation state. |
+| `llam_cancel_token_destroy` | Destroy a cancellation token; live observers make it fail with `EBUSY`, and managed cross-runtime destroy fails with `EXDEV`. |
+| `llam_cancel_token_cancel` | Request cancellation; managed cross-runtime cancellation fails with `EXDEV`. |
+| `llam_cancel_token_is_cancelled` | Check cancellation state; managed cross-runtime queries fail with `EXDEV`. |
 
 Mutex and condition variables:
 
 | API | Purpose |
 | --- | --- |
-| `llam_mutex_create` / `llam_mutex_destroy` | Create or destroy a mutex; destroy returns `EBUSY` while owned or waited on. |
-| `llam_mutex_lock` / `llam_mutex_unlock` | Lock or unlock a non-recursive mutex; self-lock returns `EDEADLK`, non-owner unlock returns `EPERM`. |
+| `llam_mutex_create` / `llam_mutex_destroy` | Create or destroy a mutex; destroy returns `EBUSY` while owned or waited on, and managed cross-runtime destroy returns `EXDEV`. |
+| `llam_mutex_lock` / `llam_mutex_unlock` | Lock or unlock a non-recursive mutex; self-lock returns `EDEADLK`, non-owner unlock returns `EPERM`, and managed cross-runtime use returns `EXDEV`. |
 | `llam_mutex_lock_until` | Wait for a mutex until a deadline; self-lock returns `EDEADLK`. |
 | `llam_mutex_trylock` | Try to lock immediately; returns `EBUSY` when already locked. |
-| `llam_cond_create` / `llam_cond_destroy` | Create or destroy a condition variable; destroy returns `EBUSY` while waited on. |
+| `llam_cond_create` / `llam_cond_destroy` | Create or destroy a condition variable; destroy returns `EBUSY` while waited on, and managed cross-runtime destroy returns `EXDEV`. |
 | `llam_cond_wait` | Wait on a condition variable; caller must own the mutex and wait in a predicate loop. |
 | `llam_cond_wait_until` | Wait on a condition variable until a deadline; reacquires the mutex before returning. |
 | `llam_cond_signal` | Wake one waiter; may be called with or without the mutex, including from an unmanaged host thread while the owner runtime is live. |

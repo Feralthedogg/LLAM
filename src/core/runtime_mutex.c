@@ -57,7 +57,8 @@ static void llam_mutex_donate_priority(uintptr_t owner_value, const llam_task_t 
  *
  * @param mutex Mutex to acquire.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL, @c EBUSY,
+ *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_mutex_trylock(llam_mutex_t *mutex) {
     uintptr_t expected = 0U;
@@ -276,7 +277,8 @@ int llam_mutex_lock_until(llam_mutex_t *mutex, uint64_t deadline_ns) {
  *
  * @param mutex Mutex to release.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EPERM.
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL, @c EPERM,
+ *         @c EXDEV, or @c ENOTSUP.
  */
 int llam_mutex_unlock(llam_mutex_t *mutex) {
     llam_wait_node_t *node;

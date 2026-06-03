@@ -161,7 +161,8 @@ llam_mutex_t *llam_mutex_create(void) {
  *
  * @param mutex Mutex to destroy.
  *
- * @return 0 on success, or -1 with @c errno set to @c EINVAL or @c EBUSY.
+ * @return 0 on success, or -1 with @c errno set to @c EINVAL, @c EBUSY, or
+ *         @c EXDEV for managed cross-runtime cleanup attempts.
  */
 int llam_mutex_destroy(llam_mutex_t *mutex) {
     uintptr_t handle = (uintptr_t)mutex;

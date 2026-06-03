@@ -769,6 +769,18 @@ static void cross_object_task(void *arg) {
         cross_object_fail(state);
     }
     errno = 0;
+    if (llam_mutex_lock(state->foreign_mutex) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
+    if (llam_mutex_lock_until(state->foreign_mutex, 0U) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
+    if (llam_mutex_unlock(state->foreign_mutex) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
     if (llam_cond_signal(state->foreign_cond) != -1 || errno != EXDEV) {
         cross_object_fail(state);
     }
@@ -778,6 +790,10 @@ static void cross_object_task(void *arg) {
     }
     errno = 0;
     if (llam_cancel_token_cancel(state->foreign_token) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
+    if (llam_cancel_token_is_cancelled(state->foreign_token) != -1 || errno != EXDEV) {
         cross_object_fail(state);
     }
     errno = 0;
