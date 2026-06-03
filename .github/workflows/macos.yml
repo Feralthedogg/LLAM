@@ -19,6 +19,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +43,7 @@ jobs:
         run: |
           cmake -S . -B build/macos -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang
           cmake --build build/macos
-          ctest --test-dir build/macos --output-on-failure
+          ctest --test-dir build/macos --output-on-failure --timeout 180
 
       - name: Benchmark smoke
         run: |
