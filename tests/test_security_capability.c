@@ -8237,6 +8237,94 @@ static int test_broker_destroy_active_op_sentinel_does_not_hang(void) {
 }
 #endif
 
+static int test_broker_destroy_from_active_op_does_not_hang(void) {
+#if LLAM_PLATFORM_POSIX
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        llam_runtime_opts_t opts;
+        llam_broker_t broker;
+
+        if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(10);
+        }
+        opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+        if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(11);
+        }
+        if (llam_broker_begin_op(&broker) != 0) {
+            llam_broker_destroy(&broker);
+            _exit(12);
+        }
+        /*
+         * Destroy from the same active broker operation cannot drain active_ops:
+         * the only thread that can call end_op is blocked inside destroy. It must
+         * therefore fail closed with EBUSY and leave the broker initialized.
+         */
+        (void)alarm(2U);
+        errno = 0;
+        llam_broker_destroy(&broker);
+        if (errno != EBUSY) {
+            _exit(13);
+        }
+        if (!broker.initialized) {
+            _exit(14);
+        }
+        llam_broker_end_op(&broker);
+        llam_broker_destroy(&broker);
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return -1;
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            fprintf(stderr, "[test_security_capability] broker destroy hung from active op\n");
+            return -1;
+        }
+        fprintf(stderr,
+                "[test_security_capability] broker active-op destroy child died from signal %d\n",
+                WTERMSIG(status));
+        return -1;
+    }
+    if (!WIFEXITED(status)) {
+        return -1;
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy opts init failed\n");
+        return -1;
+    case 11:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy init failed\n");
+        return -1;
+    case 12:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy begin_op failed\n");
+        return -1;
+    case 13:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy did not set EBUSY\n");
+        return -1;
+    case 14:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy consumed broker\n");
+        return -1;
+    default:
+        fprintf(stderr,
+                "[test_security_capability] broker active-op destroy child returned %d\n",
+                WEXITSTATUS(status));
+        return -1;
+    }
+#else
+    return 0;
+#endif
+}
+
 static int test_broker_begin_active_op_sentinel_fails_busy(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -12005,6 +12093,7 @@ int main(int argc, char **argv) {
 #if LLAM_PLATFORM_POSIX
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_active_op_sentinel_does_not_hang);
 #endif
+    LLAM_RUN_SECURITY_TEST(test_broker_destroy_from_active_op_does_not_hang);
     LLAM_RUN_SECURITY_TEST(test_broker_begin_active_op_sentinel_fails_busy);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);

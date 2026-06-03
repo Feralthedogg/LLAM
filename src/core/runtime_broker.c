@@ -220,6 +220,17 @@ void llam_broker_destroy(llam_broker_t *broker) {
         llam_broker_unlock(broker);
         return;
     }
+    if (LLAM_UNLIKELY(llam_broker_current_thread_has_op(broker))) {
+        /*
+         * The current thread owns an active broker operation. Waiting for
+         * active_ops to drain would wait for this same thread to call end_op,
+         * turning an API misuse into a self-deadlock. Preserve the broker and
+         * report the lifecycle conflict.
+         */
+        llam_broker_unlock(broker);
+        errno = EBUSY;
+        return;
+    }
     if (broker->destroying) {
         /*
          * Destroy is externally idempotent, but teardown is not reentrant: it

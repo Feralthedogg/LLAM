@@ -47,7 +47,7 @@ typedef struct llam_broker_tls_op {
  */
 static _Thread_local llam_broker_tls_op_t g_llam_broker_tls_ops[LLAM_BROKER_TLS_OP_DEPTH];
 
-static bool llam_broker_tls_has_op(const llam_broker_t *broker) {
+bool llam_broker_current_thread_has_op(const llam_broker_t *broker) {
     size_t i;
 
     if (broker == NULL) {
@@ -169,7 +169,7 @@ int llam_broker_begin_op_subject(llam_broker_t *broker, uint64_t subject_id) {
     if (llam_broker_lock(broker) != 0) {
         return -1;
     }
-    nested = llam_broker_tls_has_op(broker);
+    nested = llam_broker_current_thread_has_op(broker);
     if (LLAM_UNLIKELY(!broker->initialized ||
                       broker->runtime == NULL ||
                       (broker->destroying && !nested))) {

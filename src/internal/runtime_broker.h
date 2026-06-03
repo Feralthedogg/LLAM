@@ -279,6 +279,7 @@ void llam_broker_end_op(llam_broker_t *broker);
 int llam_broker_lock(llam_broker_t *broker);
 void llam_broker_unlock(llam_broker_t *broker);
 uint64_t llam_broker_current_subject(const llam_broker_t *broker);
+bool llam_broker_current_thread_has_op(const llam_broker_t *broker);
 
 uint64_t llam_broker_revocation_epoch(const llam_broker_t *broker);
 uint64_t llam_broker_revoke_all(llam_broker_t *broker);
