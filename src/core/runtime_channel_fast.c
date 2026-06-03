@@ -72,6 +72,19 @@ int llam_channel_try_send_buffered_fast(llam_channel_t *handle, void *value) {
         return LLAM_CHANNEL_FAST_ERROR;
     }
 #endif
+    if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(
+            llam_public_active_op_count(&channel->active_ops)))) {
+        /*
+         * The unpinned fast path is safe for ordinary live operations because
+         * the registry lock keeps destroy from reclaiming the channel during
+         * the short buffered probe.  A saturated active-op counter is different:
+         * it represents corrupted/exhausted lifecycle state, so fail closed
+         * instead of mutating channel storage without a public-op pin.
+         */
+        llam_channel_public_registry_unlock();
+        errno = EBUSY;
+        return LLAM_CHANNEL_FAST_ERROR;
+    }
 
     pthread_mutex_lock(&channel->lock);
     if (LLAM_UNLIKELY(channel->closed)) {

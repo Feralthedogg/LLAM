@@ -4940,8 +4940,25 @@ typedef struct public_op_sentinel_select_state {
     _Atomic int result;
 } public_op_sentinel_select_state_t;
 
+typedef struct public_op_sentinel_channel_send_state {
+    llam_channel_t *poisoned;
+    int value;
+    _Atomic int result;
+} public_op_sentinel_channel_send_state_t;
+
 static void public_op_sentinel_noop_task(void *arg) {
     (void)arg;
+}
+
+static void public_op_sentinel_channel_send_task(void *arg) {
+    public_op_sentinel_channel_send_state_t *state = arg;
+
+    errno = 0;
+    if (llam_channel_send(state->poisoned, &state->value) == -1 && errno == EBUSY) {
+        atomic_store_explicit(&state->result, 0, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->result, errno != 0 ? errno : -1, memory_order_release);
 }
 
 static void public_op_sentinel_select_task(void *arg) {
@@ -4991,6 +5008,7 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         llam_task_group_t *raw_group;
         llam_task_t *task;
         llam_task_t *raw_task;
+        public_op_sentinel_channel_send_state_t send_state;
         public_op_sentinel_select_state_t select_state;
         int value = 7;
         void *out = NULL;
@@ -5053,6 +5071,10 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         llam_task_group_end_public_op(raw_group);
         llam_task_end_public_op(raw_task);
 
+        errno = 0;
+        if (llam_channel_send(channel, &value) != -1 || errno != EBUSY) {
+            _exit(37);
+        }
         errno = 0;
         if (llam_channel_try_send(channel, &value) != -1 || errno != EBUSY) {
             _exit(13);
@@ -5132,6 +5154,12 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         if (llam_task_id(task) != 0U || strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
             _exit(17);
         }
+        send_state.poisoned = channel;
+        send_state.value = 11;
+        atomic_init(&send_state.result, EINVAL);
+        if (llam_spawn(public_op_sentinel_channel_send_task, &send_state, NULL) == NULL) {
+            _exit(38);
+        }
         select_state.poisoned = channel;
         select_state.peer = select_peer;
         atomic_init(&select_state.result, EINVAL);
@@ -5143,6 +5171,9 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         }
         if (atomic_load_explicit(&select_state.result, memory_order_acquire) != 0) {
             _exit(20);
+        }
+        if (atomic_load_explicit(&send_state.result, memory_order_acquire) != 0) {
+            _exit(39);
         }
         _exit(0);
     }
@@ -5216,6 +5247,12 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         return fail_msg("task group timed join did not fail saturated active-op sentinel with EBUSY");
     case 36:
         return fail_msg("task group destroy did not fail saturated active-op sentinel with EBUSY");
+    case 37:
+        return fail_msg("channel send did not fail saturated active-op sentinel with EBUSY");
+    case 38:
+        return fail_msg("public-op sentinel managed channel-send task spawn failed");
+    case 39:
+        return fail_msg("managed channel send did not fail saturated active-op sentinel with EBUSY");
     default:
         return fail_msg("public-op sentinel reject child returned unexpected status");
     }
