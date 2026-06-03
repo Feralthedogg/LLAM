@@ -112,10 +112,15 @@ int llam_broker_create_channel(llam_broker_t *broker,
             break;
         }
     }
-    if (slot == NULL || broker->next_channel_id == 0U) {
+    if (slot == NULL) {
         llam_broker_unlock(broker);
         llam_broker_end_op(broker);
         errno = ENOSPC;
+        return -1;
+    }
+    if (llam_broker_validate_next_object_id(broker->next_channel_id) != 0) {
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
         return -1;
     }
 

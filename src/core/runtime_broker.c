@@ -93,6 +93,23 @@ int llam_broker_validate_object_rights(uint32_t family, uint64_t rights) {
     return 0;
 }
 
+int llam_broker_validate_next_object_id(uint64_t next_id) {
+    if (LLAM_UNLIKELY(next_id == 0U)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    if (LLAM_UNLIKELY(next_id == UINT64_MAX)) {
+        /*
+         * Capability tokens reserve slot UINT64_MAX as invalid authority.
+         * Reject before assigning the ID so the counter cannot wrap to the
+         * terminal zero state while reporting a generic token-issue EINVAL.
+         */
+        errno = EOVERFLOW;
+        return -1;
+    }
+    return 0;
+}
+
 int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
                                           uint32_t family,
                                           uint64_t slot,

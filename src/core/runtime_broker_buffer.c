@@ -154,11 +154,17 @@ int llam_broker_register_buffer(llam_broker_t *broker,
             break;
         }
     }
-    if (slot == NULL || broker->next_buffer_id == 0U) {
+    if (slot == NULL) {
         llam_broker_unlock(broker);
         llam_broker_end_op(broker);
         free(data);
         errno = ENOSPC;
+        return -1;
+    }
+    if (llam_broker_validate_next_object_id(broker->next_buffer_id) != 0) {
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
+        free(data);
         return -1;
     }
 

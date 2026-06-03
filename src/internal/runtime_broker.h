@@ -291,6 +291,7 @@ int llam_broker_issue_object_cap(llam_broker_t *broker,
                                  uint64_t rights,
                                  llam_capability_token_t *out_token);
 int llam_broker_validate_object_rights(uint32_t family, uint64_t rights);
+int llam_broker_validate_next_object_id(uint64_t next_id);
 int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
                                           uint32_t family,
                                           uint64_t slot,

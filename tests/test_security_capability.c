@@ -230,6 +230,42 @@ static size_t broker_active_task_count(const llam_broker_t *broker) {
     return count;
 }
 
+static size_t broker_active_buffer_count(const llam_broker_t *broker) {
+    size_t count = 0U;
+
+    if (broker == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_BUFFER_SLOTS; ++i) {
+        count += broker->buffers[i].active ? 1U : 0U;
+    }
+    return count;
+}
+
+static size_t broker_active_descriptor_count(const llam_broker_t *broker) {
+    size_t count = 0U;
+
+    if (broker == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        count += broker->descriptors[i].active ? 1U : 0U;
+    }
+    return count;
+}
+
+static size_t broker_active_channel_count(const llam_broker_t *broker) {
+    size_t count = 0U;
+
+    if (broker == NULL || broker->channels == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
+        count += broker->channels[i].active ? 1U : 0U;
+    }
+    return count;
+}
+
 static int compare_u64(const void *lhs, const void *rhs) {
     const uint64_t a = *(const uint64_t *)lhs;
     const uint64_t b = *(const uint64_t *)rhs;
@@ -1186,6 +1222,145 @@ static int test_broker_create_paths_clear_output_on_invalid_input(void) {
 
 done:
 #if !LLAM_PLATFORM_WINDOWS
+    if (pipe_fds[0] >= 0) {
+        close(pipe_fds[0]);
+    }
+    if (pipe_fds[1] >= 0) {
+        close(pipe_fds[1]);
+    }
+#endif
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
+static int test_broker_object_id_max_fails_before_wrap(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    const unsigned char payload[1] = {0x41U};
+#if LLAM_PLATFORM_WINDOWS
+    HANDLE pipe_read = INVALID_HANDLE_VALUE;
+    HANDLE pipe_write = INVALID_HANDLE_VALUE;
+#else
+    int pipe_fds[2] = {-1, -1};
+#endif
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+
+    /*
+     * UINT64_MAX is not a valid token slot. Creation must reject it before
+     * mutating the broker ID counter or activating a slot; otherwise the first
+     * failing call wraps the counter to 0 and reports the wrong contract errno.
+     */
+    broker.next_buffer_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_register_buffer(&broker,
+                                                 payload,
+                                                 sizeof(payload),
+                                                 LLAM_CAP_RIGHT_READ,
+                                                 &token),
+                     EOVERFLOW,
+                     "broker buffer id max did not fail before wrap") != 0 ||
+        broker.next_buffer_id != UINT64_MAX ||
+        broker_active_buffer_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_buffer_id = 1U;
+
+    broker.next_channel_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_create_channel(&broker,
+                                                1U,
+                                                LLAM_CAP_RIGHT_SEND,
+                                                &token),
+                     EOVERFLOW,
+                     "broker channel id max did not fail before wrap") != 0 ||
+        broker.next_channel_id != UINT64_MAX ||
+        broker_active_channel_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_channel_id = 1U;
+
+#if LLAM_PLATFORM_WINDOWS
+    if (!CreatePipe(&pipe_read, &pipe_write, NULL, 0U)) {
+        goto done;
+    }
+    broker.next_descriptor_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_register_handle(&broker,
+                                                 (llam_handle_t)pipe_read,
+                                                 LLAM_CAP_RIGHT_READ,
+                                                 false,
+                                                 &token),
+                     EOVERFLOW,
+                     "broker descriptor id max did not fail before wrap") != 0 ||
+        broker.next_descriptor_id != UINT64_MAX ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_descriptor_id = 1U;
+#else
+    if (pipe(pipe_fds) != 0) {
+        goto done;
+    }
+    broker.next_descriptor_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_register_fd(&broker,
+                                             pipe_fds[0],
+                                             LLAM_CAP_RIGHT_READ,
+                                             false,
+                                             &token),
+                     EOVERFLOW,
+                     "broker descriptor id max did not fail before wrap") != 0 ||
+        broker.next_descriptor_id != UINT64_MAX ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_descriptor_id = 1U;
+#endif
+
+    broker.next_task_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_spawn_task(&broker,
+                                            LLAM_BROKER_TASK_KIND_RETURN_U64,
+                                            1U,
+                                            LLAM_CAP_RIGHT_JOIN,
+                                            &token),
+                     EOVERFLOW,
+                     "broker task id max did not fail before wrap") != 0 ||
+        broker.next_task_id != UINT64_MAX ||
+        broker_active_task_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+#if LLAM_PLATFORM_WINDOWS
+    if (pipe_read != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe_read);
+    }
+    if (pipe_write != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe_write);
+    }
+#else
     if (pipe_fds[0] >= 0) {
         close(pipe_fds[0]);
     }
@@ -3340,42 +3515,6 @@ static bool broker_fd_has_cloexec(int fd) {
     }
     flags = fcntl(fd, F_GETFD);
     return flags >= 0 && (flags & FD_CLOEXEC) != 0;
-}
-
-static size_t broker_active_descriptor_count(const llam_broker_t *broker) {
-    size_t count = 0U;
-
-    if (broker == NULL) {
-        return 0U;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
-        count += broker->descriptors[i].active ? 1U : 0U;
-    }
-    return count;
-}
-
-static size_t broker_active_buffer_count(const llam_broker_t *broker) {
-    size_t count = 0U;
-
-    if (broker == NULL) {
-        return 0U;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_BUFFER_SLOTS; ++i) {
-        count += broker->buffers[i].active ? 1U : 0U;
-    }
-    return count;
-}
-
-static size_t broker_active_channel_count(const llam_broker_t *broker) {
-    size_t count = 0U;
-
-    if (broker == NULL || broker->channels == NULL) {
-        return 0U;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
-        count += broker->channels[i].active ? 1U : 0U;
-    }
-    return count;
 }
 
 static int broker_write_request_plain(int fd, const llam_broker_wire_request_t *request);
@@ -12151,6 +12290,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_issue_validate_and_revoke);
     LLAM_RUN_SECURITY_TEST(test_broker_revoke_all_epoch_overflow_invalidates_authority);
     LLAM_RUN_SECURITY_TEST(test_broker_create_paths_clear_output_on_invalid_input);
+    LLAM_RUN_SECURITY_TEST(test_broker_object_id_max_fails_before_wrap);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_grants_require_explicit_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_malformed_requests_fail_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_direct_issue_clears_output_on_invalid_input);
