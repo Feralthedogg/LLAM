@@ -121,6 +121,7 @@ jobs:
               fi
               ;;
             OpenBSD)
+              sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
               if ! command -v gmake >/dev/null 2>&1; then
                 retry sudo pkg_add gmake
               fi

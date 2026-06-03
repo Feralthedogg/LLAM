@@ -332,6 +332,7 @@ jobs:
               command -v xz >/dev/null 2>&1 || sudo pkg install -y xz
               ;;
             OpenBSD)
+              sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
               command -v gmake >/dev/null 2>&1 || sudo pkg_add gmake
               command -v cmake >/dev/null 2>&1 || sudo pkg_add cmake
               command -v xz >/dev/null 2>&1 || sudo pkg_add xz
