@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from process_utils import ProcessTimeoutError, run_capture
+from safe_output import prepare_output_dir, write_text_safely
 
 
 def fail(message: str) -> None:
@@ -55,6 +56,16 @@ def kill_process(pid: int) -> None:
         pass
 
 
+def try_symlink(target: Path, link: Path) -> bool:
+    """Create a symlink when the host permits it; Windows may deny this."""
+
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
 def wait_for_exit(pid: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -74,6 +85,71 @@ def test_path_command_capture() -> None:
         fail(f"normal command returned {proc.returncode}")
     if proc.stdout.strip() != "process-utils-normal-ok":
         fail(f"normal command output mismatch: {proc.stdout!r}")
+
+
+def test_safe_output_rejects_symlink_leaf() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-safe-output-leaf-test-") as tmp:
+        tmp_path = Path(tmp)
+        outside = tmp_path / "outside.txt"
+        link = tmp_path / "result.txt"
+        outside.write_text("outside-before", encoding="utf-8")
+        if not try_symlink(outside, link):
+            return
+
+        try:
+            write_text_safely(link, "unsafe")
+        except RuntimeError as exc:
+            if "refusing symlink output path" not in str(exc):
+                fail(f"safe_output reported unexpected symlink leaf error: {exc}")
+        else:
+            fail("safe_output followed a symlink output leaf")
+        if outside.read_text(encoding="utf-8") != "outside-before":
+            fail("safe_output modified a symlink target")
+
+
+def test_safe_output_rejects_hardlinked_leaf() -> None:
+    if not hasattr(os, "link"):
+        return
+
+    with tempfile.TemporaryDirectory(prefix="llam-safe-output-hardlink-test-") as tmp:
+        tmp_path = Path(tmp)
+        outside = tmp_path / "outside.txt"
+        hardlink = tmp_path / "result.txt"
+        outside.write_text("outside-before", encoding="utf-8")
+        try:
+            os.link(outside, hardlink)
+        except OSError:
+            return
+
+        try:
+            write_text_safely(hardlink, "unsafe")
+        except RuntimeError as exc:
+            if "refusing hard-linked output path" not in str(exc):
+                fail(f"safe_output reported unexpected hardlink error: {exc}")
+        else:
+            fail("safe_output overwrote a hard-linked output leaf")
+        if outside.read_text(encoding="utf-8") != "outside-before":
+            fail("safe_output modified a hard-linked target")
+
+
+def test_safe_output_rejects_symlink_parent_prepare_dir() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-safe-output-parent-test-") as tmp:
+        tmp_path = Path(tmp)
+        outside = tmp_path / "outside"
+        link = tmp_path / "link-dir"
+        outside.mkdir()
+        if not try_symlink(outside, link):
+            return
+
+        try:
+            prepare_output_dir(link / "artifacts")
+        except RuntimeError as exc:
+            if "refusing symlink output directory" not in str(exc):
+                fail(f"safe_output reported unexpected symlink parent error: {exc}")
+        else:
+            fail("safe_output followed a symlink output parent")
+        if (outside / "artifacts").exists():
+            fail("safe_output created a directory through a symlink parent")
 
 
 def test_timeout_kills_descendant() -> None:
@@ -512,6 +588,9 @@ def test_stress_server_composite_times_out_wrapper_flood_descendant() -> None:
 
 def main() -> int:
     test_path_command_capture()
+    test_safe_output_rejects_symlink_leaf()
+    test_safe_output_rejects_hardlinked_leaf()
+    test_safe_output_rejects_symlink_parent_prepare_dir()
     test_timeout_kills_descendant()
     test_run_with_timeout_kills_descendant()
     test_run_with_timeout_dump_signal_reaches_descendant()
