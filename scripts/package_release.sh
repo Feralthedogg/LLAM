@@ -356,12 +356,15 @@ cp "$root_dir/libllam_runtime.a" "$stage/lib/"
 case "$host_os" in
     Darwin)
         cp "$root_dir/libllam_runtime.$abi_major.dylib" "$stage/lib/"
-        cp -P "$root_dir/libllam_runtime.dylib" "$stage/lib/"
+        ln -s "libllam_runtime.$abi_major.dylib" "$stage/lib/libllam_runtime.dylib"
+        validate_expected_symlink_target "$stage/lib/libllam_runtime.dylib" "libllam_runtime.$abi_major.dylib"
         ;;
     Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
         cp "$root_dir/libllam_runtime.so.$library_version" "$stage/lib/"
-        cp -P "$root_dir/libllam_runtime.so.$abi_major" "$stage/lib/"
-        cp -P "$root_dir/libllam_runtime.so" "$stage/lib/"
+        ln -s "libllam_runtime.so.$library_version" "$stage/lib/libllam_runtime.so.$abi_major"
+        ln -s "libllam_runtime.so.$abi_major" "$stage/lib/libllam_runtime.so"
+        validate_expected_symlink_target "$stage/lib/libllam_runtime.so.$abi_major" "libllam_runtime.so.$library_version"
+        validate_expected_symlink_target "$stage/lib/libllam_runtime.so" "libllam_runtime.so.$abi_major"
         ;;
     *)
         echo "unsupported release packaging host: $host_os" >&2
