@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,22 @@ typedef struct task_group_destroy_race_state {
     int destroy_rc;
     int destroy_errno;
 } task_group_destroy_race_state_t;
+
+typedef struct task_group_spawn_mark_race_state {
+    atomic_uint keepalive_started;
+    atomic_uint stop_keepalive;
+    atomic_uint child_ran;
+    atomic_uint child_detach_succeeded;
+    atomic_uint unexpected_child_errno;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[128];
+} task_group_spawn_mark_race_state_t;
+
+typedef struct task_group_run_thread_state {
+    int rc;
+    int err;
+} task_group_run_thread_state_t;
 
 static int fail_errno(const char *message) {
     fprintf(stderr, "[test_runtime_group_local_edges] %s: errno=%d (%s)\n", message, errno, strerror(errno));
@@ -87,6 +104,21 @@ static int init_runtime(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+}
+
+static void *task_group_run_thread(void *arg) {
+    task_group_run_thread_state_t *state = arg;
+
+    state->rc = llam_run();
+    state->err = errno;
+    return NULL;
+}
+
+static void task_group_spawn_mark_fail(task_group_spawn_mark_race_state_t *state, const char *where, int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err;
+        (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
 }
 
 static void task_local_isolation_task(void *arg) {
@@ -538,6 +570,258 @@ cleanup_group:
     return rc;
 }
 
+static int test_task_group_borrowed_child_handle_not_consumable(void) {
+    group_local_state_t state;
+    llam_task_group_t *group;
+    llam_task_t *borrowed;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+
+    group = llam_task_group_create();
+    if (group == NULL) {
+        return fail_errno("task group create for borrowed child guard failed");
+    }
+    if (init_runtime() != 0) {
+        goto cleanup_group;
+    }
+    borrowed = llam_task_group_spawn(group, group_counter_task, &state, NULL);
+    if (borrowed == NULL) {
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 || check_task_failures(&state) != 0) {
+        goto cleanup_runtime;
+    }
+
+    /*
+     * Group spawns return a borrowed diagnostics handle.  If regular join/detach
+     * can consume it, the group keeps a stale child handle and can no longer join
+     * or destroy cleanly.  Treat that as a public lifetime bug, not just misuse.
+     */
+    errno = 0;
+    if (llam_join(borrowed) != -1 || errno != EBUSY) {
+        goto cleanup_runtime;
+    }
+    errno = 0;
+    if (llam_detach(borrowed) != -1 || errno != EBUSY) {
+        goto cleanup_runtime;
+    }
+    if (llam_task_group_join(group) != 0) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+cleanup_group:
+    if (llam_task_group_destroy(group) != 0) {
+        rc = 1;
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("task group borrowed child handle guard failed");
+    }
+    return rc;
+}
+
+static int test_task_group_join_until_completed_children_wins_over_expired_deadline(void) {
+    group_local_state_t state;
+    llam_task_group_t *group;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+
+    group = llam_task_group_create();
+    if (group == NULL) {
+        return fail_errno("task group create for completed join_until failed");
+    }
+    if (init_runtime() != 0) {
+        goto cleanup_group;
+    }
+    for (unsigned i = 0U; i < 2U; ++i) {
+        if (llam_task_group_spawn(group, group_counter_task, &state, NULL) == NULL) {
+            goto cleanup_runtime;
+        }
+    }
+    if (llam_run() != 0 || check_task_failures(&state) != 0) {
+        goto cleanup_runtime;
+    }
+    /*
+     * Match llam_join_until(): completion wins over an already-expired deadline
+     * because no waiter has to be parked. A regression here strands completed
+     * borrowed child handles in the group and turns later destroy into EBUSY.
+     */
+    errno = 0;
+    if (llam_task_group_join_until(group, 0U) != 0) {
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.ran, memory_order_relaxed) != 2U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    llam_runtime_shutdown();
+cleanup_group:
+    if (llam_task_group_destroy(group) != 0) {
+        rc = 1;
+    }
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("task group completed join_until contract failed");
+    }
+    return rc;
+}
+
+static void task_group_spawn_mark_keepalive_task(void *arg) {
+    task_group_spawn_mark_race_state_t *state = arg;
+
+    atomic_store_explicit(&state->keepalive_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->stop_keepalive, memory_order_acquire) == 0U) {
+        if (llam_sleep_ns(1000000ULL) != 0) {
+            task_group_spawn_mark_fail(state, "spawn mark keepalive sleep failed", errno);
+            return;
+        }
+    }
+}
+
+static void task_group_spawn_mark_self_detach_task(void *arg) {
+    task_group_spawn_mark_race_state_t *state = arg;
+    llam_task_t *self = llam_current_task();
+
+    atomic_fetch_add_explicit(&state->child_ran, 1U, memory_order_relaxed);
+    errno = 0;
+    if (llam_detach(self) == 0) {
+        /*
+         * Group-owned children must be marked before they can execute.  A
+         * successful self-detach means the child observed itself as an ordinary
+         * public task and consumed the handle outside the owning group.
+         */
+        atomic_fetch_add_explicit(&state->child_detach_succeeded, 1U, memory_order_relaxed);
+        return;
+    }
+    if (errno != EBUSY) {
+        atomic_fetch_add_explicit(&state->unexpected_child_errno, 1U, memory_order_relaxed);
+        task_group_spawn_mark_fail(state, "group-owned child self-detach errno", errno);
+    }
+}
+
+static int test_task_group_spawn_marks_child_before_execution(void) {
+#if LLAM_PLATFORM_POSIX
+    enum { rounds = 20000U };
+    task_group_spawn_mark_race_state_t state;
+    task_group_run_thread_state_t run_state;
+    llam_task_group_t *group = NULL;
+    llam_task_t *keepalive = NULL;
+    pthread_t run_thread;
+    bool run_thread_started = false;
+    int err;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    memset(&run_state, 0, sizeof(run_state));
+    atomic_init(&state.keepalive_started, 0U);
+    atomic_init(&state.stop_keepalive, 0U);
+    atomic_init(&state.child_ran, 0U);
+    atomic_init(&state.child_detach_succeeded, 0U);
+    atomic_init(&state.unexpected_child_errno, 0U);
+    atomic_init(&state.failures, 0U);
+
+    if (init_runtime() != 0) {
+        return fail_errno("spawn mark race runtime init failed");
+    }
+    group = llam_task_group_create();
+    keepalive = llam_spawn(task_group_spawn_mark_keepalive_task, &state, NULL);
+    if (group == NULL || keepalive == NULL) {
+        goto cleanup;
+    }
+    err = pthread_create(&run_thread, NULL, task_group_run_thread, &run_state);
+    if (err != 0) {
+        errno = err;
+        goto cleanup;
+    }
+    run_thread_started = true;
+
+    while (atomic_load_explicit(&state.keepalive_started, memory_order_acquire) == 0U) {
+        if (llam_sleep_ns(1000000ULL) != 0) {
+            goto cleanup;
+        }
+    }
+
+    for (unsigned i = 0U; i < rounds; ++i) {
+        errno = 0;
+        if (llam_task_group_spawn(group, task_group_spawn_mark_self_detach_task, &state, NULL) == NULL) {
+            fprintf(stderr,
+                    "[test_runtime_group_local_edges] group spawn mark race failed at round=%u errno=%d (%s)\n",
+                    i,
+                    errno,
+                    strerror(errno));
+            goto cleanup;
+        }
+    }
+
+    atomic_store_explicit(&state.stop_keepalive, 1U, memory_order_release);
+    pthread_join(run_thread, NULL);
+    run_thread_started = false;
+    if (run_state.rc != 0) {
+        errno = run_state.err;
+        goto cleanup;
+    }
+    if (llam_join(keepalive) != 0) {
+        keepalive = NULL;
+        goto cleanup;
+    }
+    keepalive = NULL;
+    if (llam_task_group_join(group) != 0) {
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.child_detach_succeeded, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.unexpected_child_errno, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.child_ran, memory_order_relaxed) != rounds) {
+        fprintf(stderr,
+                "[test_runtime_group_local_edges] spawn mark race result: ran=%u detach_success=%u "
+                "unexpected_errno=%u failures=%u first=%s errno=%d (%s)\n",
+                atomic_load_explicit(&state.child_ran, memory_order_relaxed),
+                atomic_load_explicit(&state.child_detach_succeeded, memory_order_relaxed),
+                atomic_load_explicit(&state.unexpected_child_errno, memory_order_relaxed),
+                atomic_load_explicit(&state.failures, memory_order_relaxed),
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        errno = EINVAL;
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&state.stop_keepalive, 1U, memory_order_release);
+    if (run_thread_started) {
+        pthread_join(run_thread, NULL);
+    }
+    if (keepalive != NULL) {
+        (void)llam_detach(keepalive);
+    }
+    if (group != NULL) {
+        (void)llam_task_group_cancel(group);
+        (void)llam_task_group_join(group);
+        (void)llam_task_group_destroy(group);
+    }
+    llam_runtime_shutdown();
+    if (rc != 0) {
+        return fail_errno("task group child mark-before-execution race failed");
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
 static int test_task_group_cancel(void) {
     group_local_state_t state;
     llam_task_group_t *group;
@@ -667,6 +951,15 @@ int main(void) {
         return 1;
     }
     if (test_task_group_join_and_destroy() != 0) {
+        return 1;
+    }
+    if (test_task_group_borrowed_child_handle_not_consumable() != 0) {
+        return 1;
+    }
+    if (test_task_group_join_until_completed_children_wins_over_expired_deadline() != 0) {
+        return 1;
+    }
+    if (test_task_group_spawn_marks_child_before_execution() != 0) {
         return 1;
     }
     if (test_task_group_cancel() != 0) {

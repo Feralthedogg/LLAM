@@ -366,17 +366,29 @@ with `errno = EBUSY` before the handle is consumed. `llam_detach()` fails with
 run to completion and remain counted as live runtime work until their entry
 function returns.
 
+Unmanaged host calls to legacy `llam_spawn*()` target the default runtime. They
+pin that runtime's public-operation gate before allocating or publishing a task,
+so a concurrent default-runtime shutdown cannot tear down scheduler storage under
+spawn. If the default runtime is missing, already destroying, or in a saturated
+lifecycle state, spawn fails closed with the runtime gate's `errno` rather than
+publishing work.
+
 Task groups own the child task handles spawned through the group. Group
 cancellation cancels only the group's automatically attached cancellation token;
 children spawned with an explicit caller-owned token remain controlled by that
-token. Destroying a task group with live children, active spawn/cancel
-operations, or an in-progress join fails with `EBUSY`. Calls racing with a
-completed group destroy fail with `EINVAL` instead of dereferencing reclaimed
-group storage. Child tasks are spawned on the group's owner runtime, including
-host-thread calls that are not currently running inside a managed task. If the
-group's public-operation lifecycle counter reaches its saturated sentinel, new
-group operations fail closed with `EBUSY` instead of spawning or consuming
-children while teardown safety cannot be proven.
+token. The child task pointer returned by `llam_task_group_spawn*()` is a
+borrowed diagnostics handle; regular `llam_join()` and `llam_detach()` reject it
+with `EBUSY` so only `llam_task_group_join*()` can consume group-owned children.
+The child is marked as group-owned before it can execute, so a self-join or
+self-detach path cannot consume the borrowed handle first. Destroying a task
+group with live children, active spawn/cancel operations, or an in-progress join
+fails with `EBUSY`. Calls racing with a completed group destroy fail with
+`EINVAL` instead of dereferencing reclaimed group storage. Child tasks are
+spawned on the group's owner runtime, including host-thread calls that are not
+currently running inside a managed task. If the group's public-operation
+lifecycle counter reaches its saturated sentinel, new group operations fail
+closed with `EBUSY` instead of spawning or consuming children while teardown
+safety cannot be proven.
 
 `llam_yield()` is cooperative. It never transfers ownership of user memory and
 does not imply a memory fence beyond the synchronization performed by the

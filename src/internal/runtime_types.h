@@ -770,6 +770,8 @@ struct llam_task {
     atomic_uint base_task_class;
     uint64_t deadline_ns;
     llam_cancel_token_t *cancel_token;
+    /* Non-NULL means the task handle is borrowed and only this group may join it. */
+    llam_task_group_t *owning_group;
     llam_task_fn entry;
     void *arg;
     _Alignas(16) llam_ctx_t ctx;

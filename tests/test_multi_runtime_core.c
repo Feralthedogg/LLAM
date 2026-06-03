@@ -1235,6 +1235,10 @@ static void *default_channel_host_try_thread(void *arg) {
 }
 #endif
 
+static void default_spawn_public_op_noop_task(void *arg) {
+    (void)arg;
+}
+
 static int init_runtime_opts(llam_runtime_opts_t *opts) {
     if (opts == NULL) {
         errno = EINVAL;
@@ -1685,6 +1689,103 @@ cleanup:
     llam_runtime_destroy(runtime_b);
     if (state.token != NULL) {
         (void)llam_cancel_token_destroy(state.token);
+    }
+    llam_runtime_destroy(runtime_a);
+    return rc;
+}
+
+static int test_task_group_spawn_rejects_foreign_cancel_token(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime_a = NULL;
+    llam_runtime_t *runtime_b = NULL;
+    llam_task_t *token_creator = NULL;
+    llam_task_t *group_creator = NULL;
+    llam_task_t *wrong_task = NULL;
+    cross_spawn_token_state_t token_state;
+    explicit_group_state_t group_state;
+    llam_spawn_opts_t spawn_opts;
+    atomic_uint child_ran;
+    int rc = 1;
+
+    memset(&token_state, 0, sizeof(token_state));
+    memset(&group_state, 0, sizeof(group_state));
+    atomic_init(&token_state.failures, 0U);
+    atomic_init(&group_state.failures, 0U);
+    atomic_init(&child_ran, 0U);
+
+    if (init_runtime_opts(&opts) != 0 ||
+        llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("group foreign-token opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        rc = test_fail_errno("runtime create for group foreign-token test failed");
+        goto cleanup;
+    }
+
+    token_creator = llam_runtime_spawn_ex(runtime_a, cross_spawn_token_creator_task, &token_state, NULL, 0U);
+    group_creator = llam_runtime_spawn_ex(runtime_b, explicit_group_creator_task, &group_state, NULL, 0U);
+    if (token_creator == NULL ||
+        group_creator == NULL ||
+        run_two_runtimes(runtime_a, runtime_b) != 0 ||
+        llam_join(token_creator) != 0 ||
+        llam_join(group_creator) != 0 ||
+        token_state.token == NULL ||
+        group_state.group == NULL ||
+        atomic_load_explicit(&token_state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&group_state.failures, memory_order_relaxed) != 0U) {
+        token_creator = NULL;
+        group_creator = NULL;
+        rc = test_fail_errno("group foreign-token fixture setup failed");
+        goto cleanup;
+    }
+    token_creator = NULL;
+    group_creator = NULL;
+
+    /*
+     * Task groups spawn children on the group's owner runtime even from a host
+     * thread.  An explicit token owned by another runtime must therefore be
+     * rejected before the child is published, or cancellation waiters could
+     * cross owner domains.
+     */
+    spawn_opts.cancel_token = token_state.token;
+    errno = 0;
+    wrong_task = llam_task_group_spawn_ex(group_state.group,
+                                         foreign_target_task,
+                                         &child_ran,
+                                         &spawn_opts,
+                                         LLAM_SPAWN_OPTS_CURRENT_SIZE);
+    if (wrong_task != NULL || errno != EXDEV) {
+        rc = test_fail_errno("task group spawn accepted foreign cancel token");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&child_ran, memory_order_relaxed) != 0U) {
+        rc = test_fail("foreign-token task group child was published");
+        goto cleanup;
+    }
+    if (llam_task_group_destroy(group_state.group) != 0) {
+        rc = test_fail_errno("group foreign-token cleanup destroy failed");
+        goto cleanup;
+    }
+    group_state.group = NULL;
+    rc = 0;
+
+cleanup:
+    if (wrong_task != NULL) {
+        (void)llam_detach(wrong_task);
+    }
+    if (token_creator != NULL) {
+        (void)llam_detach(token_creator);
+    }
+    if (group_creator != NULL) {
+        (void)llam_detach(group_creator);
+    }
+    if (group_state.group != NULL) {
+        (void)llam_task_group_destroy(group_state.group);
+    }
+    llam_runtime_destroy(runtime_b);
+    if (token_state.token != NULL) {
+        (void)llam_cancel_token_destroy(token_state.token);
     }
     llam_runtime_destroy(runtime_a);
     return rc;
@@ -2693,6 +2794,44 @@ static int test_runtime_begin_active_op_near_sentinel_fails_busy(void) {
     return 0;
 }
 
+static int test_default_spawn_respects_runtime_public_op_gate(void) {
+    llam_runtime_opts_t opts;
+    llam_task_t *task;
+    int rc = 1;
+
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("default runtime init for spawn gate failed");
+    }
+
+    /*
+     * This simulates the destroy side of the default-runtime public-op gate.
+     * Before the guard fix, legacy llam_spawn() bypassed begin_public_op() and
+     * could publish work even while the runtime handle was permanently busy.
+     */
+    atomic_store_explicit(&g_llam_runtime.active_ops, SIZE_MAX, memory_order_release);
+    errno = 0;
+    task = llam_spawn(default_spawn_public_op_noop_task, NULL, NULL);
+    if (task != NULL || errno != EBUSY) {
+        int saved_errno = errno;
+
+        atomic_store_explicit(&g_llam_runtime.active_ops, 0U, memory_order_release);
+        if (task != NULL) {
+            (void)llam_detach(task);
+        }
+        llam_runtime_shutdown();
+        errno = saved_errno;
+        return test_fail_errno("default llam_spawn bypassed runtime public-op gate");
+    }
+    atomic_store_explicit(&g_llam_runtime.active_ops, 0U, memory_order_release);
+    rc = 0;
+
+    llam_runtime_shutdown();
+    return rc;
+}
+
 static int test_runtime_destroy_waits_for_active_run(void) {
 #if LLAM_PLATFORM_POSIX
     llam_runtime_opts_t opts;
@@ -3415,6 +3554,7 @@ int main(void) {
         {"cross_runtime_task_owner", test_cross_runtime_task_owner},
         {"cross_runtime_object_owner", test_cross_runtime_object_owner},
         {"cross_runtime_spawn_cancel_token_owner", test_cross_runtime_spawn_cancel_token_owner},
+        {"task_group_spawn_rejects_foreign_cancel_token", test_task_group_spawn_rejects_foreign_cancel_token},
         {"cross_runtime_allocator_returns_are_remote", test_cross_runtime_allocator_returns_are_remote},
         {"task_group_host_spawn_uses_group_runtime", test_task_group_host_spawn_uses_group_runtime},
         {"concurrent_runtime_io", test_concurrent_runtime_io},
@@ -3434,6 +3574,8 @@ int main(void) {
 #endif
         {"runtime_begin_active_op_near_sentinel_fails_busy",
          test_runtime_begin_active_op_near_sentinel_fails_busy},
+        {"default_spawn_respects_runtime_public_op_gate",
+         test_default_spawn_respects_runtime_public_op_gate},
         {"runtime_destroy_waits_for_active_run", test_runtime_destroy_waits_for_active_run},
         {"unmanaged_join_races_runtime_destroy", test_unmanaged_join_races_runtime_destroy},
         {"runtime_run_start_destroy_race", test_runtime_run_start_destroy_race},

@@ -168,16 +168,19 @@ static llam_task_t *llam_task_resolve_public_handle_locked(const llam_task_t *ha
                                             NULL);
 }
 
-int llam_task_claim_join_public_handle(const llam_task_t *handle,
-                                       llam_task_t *self,
-                                       llam_task_t **out_task,
-                                       llam_runtime_t **out_rt,
-                                       bool *out_task_pinned) {
+static int llam_task_claim_join_public_handle_for_group(const llam_task_t *handle,
+                                                        llam_task_group_t *group,
+                                                        bool group_join,
+                                                        llam_task_t *self,
+                                                        llam_task_t **out_task,
+                                                        llam_runtime_t **out_rt,
+                                                        bool *out_task_pinned) {
     llam_task_t *task;
     llam_runtime_t *rt;
     unsigned expected = 0U;
 
-    if (LLAM_UNLIKELY(out_task == NULL || out_rt == NULL || out_task_pinned == NULL)) {
+    if (LLAM_UNLIKELY(out_task == NULL || out_rt == NULL || out_task_pinned == NULL ||
+                      (group_join && group == NULL))) {
         errno = EINVAL;
         return -1;
     }
@@ -203,6 +206,17 @@ int llam_task_claim_join_public_handle(const llam_task_t *handle,
         return -1;
     }
     if (LLAM_UNLIKELY(atomic_load_explicit(&task->detached, memory_order_acquire) != 0U)) {
+        pthread_mutex_unlock(&g_llam_task_registry_lock);
+        errno = EINVAL;
+        return -1;
+    }
+    if (LLAM_UNLIKELY(task->owning_group != NULL)) {
+        if (!group_join || task->owning_group != group) {
+            pthread_mutex_unlock(&g_llam_task_registry_lock);
+            errno = EBUSY;
+            return -1;
+        }
+    } else if (LLAM_UNLIKELY(group_join)) {
         pthread_mutex_unlock(&g_llam_task_registry_lock);
         errno = EINVAL;
         return -1;
@@ -249,6 +263,35 @@ int llam_task_claim_join_public_handle(const llam_task_t *handle,
     return 0;
 }
 
+int llam_task_claim_join_public_handle(const llam_task_t *handle,
+                                       llam_task_t *self,
+                                       llam_task_t **out_task,
+                                       llam_runtime_t **out_rt,
+                                       bool *out_task_pinned) {
+    return llam_task_claim_join_public_handle_for_group(handle,
+                                                        NULL,
+                                                        false,
+                                                        self,
+                                                        out_task,
+                                                        out_rt,
+                                                        out_task_pinned);
+}
+
+int llam_task_claim_group_join_public_handle(const llam_task_t *handle,
+                                             llam_task_group_t *group,
+                                             llam_task_t *self,
+                                             llam_task_t **out_task,
+                                             llam_runtime_t **out_rt,
+                                             bool *out_task_pinned) {
+    return llam_task_claim_join_public_handle_for_group(handle,
+                                                        group,
+                                                        true,
+                                                        self,
+                                                        out_task,
+                                                        out_rt,
+                                                        out_task_pinned);
+}
+
 int llam_task_claim_detach_public_handle(const llam_task_t *handle,
                                          llam_task_t **out_task,
                                          llam_runtime_t **out_rt,
@@ -284,6 +327,11 @@ int llam_task_claim_detach_public_handle(const llam_task_t *handle,
     if (LLAM_UNLIKELY(!atomic_load_explicit(&rt->initialized, memory_order_acquire))) {
         pthread_mutex_unlock(&g_llam_task_registry_lock);
         errno = EINVAL;
+        return -1;
+    }
+    if (LLAM_UNLIKELY(task->owning_group != NULL)) {
+        pthread_mutex_unlock(&g_llam_task_registry_lock);
+        errno = EBUSY;
         return -1;
     }
 

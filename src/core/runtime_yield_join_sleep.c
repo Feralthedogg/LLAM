@@ -589,17 +589,13 @@ static void llam_task_release_join_claim(llam_task_t *task) {
  * @return -1 with @c errno set to @c EINVAL, @c EDEADLK, @c ETIMEDOUT,
  *         @c ECANCELED, or a fatal runtime error.
  */
-int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadline_ns) {
+static int llam_join_claimed_impl(llam_task_t *task,
+                                  llam_runtime_t *rt,
+                                  bool has_deadline,
+                                  uint64_t deadline_ns) {
     llam_task_t *self = g_llam_tls_task;
-    llam_task_t *task = NULL;
-    llam_runtime_t *rt = NULL;
     llam_runtime_t *pinned_runtime = NULL;
-    bool task_pinned = false;
     int caller_errno = llam_thread_errno_load();
-
-    if (llam_task_claim_join_public_handle(task_handle, self, &task, &rt, &task_pinned) != 0) {
-        return -1;
-    }
 
     if (self == NULL) {
         if (llam_runtime_begin_public_op(rt, &pinned_runtime) != 0) {
@@ -733,6 +729,33 @@ int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadlin
     llam_try_reclaim_joined_task(rt, task);
     llam_thread_errno_store(caller_errno);
     return 0;
+}
+
+int llam_join_impl(llam_task_t *task_handle, bool has_deadline, uint64_t deadline_ns) {
+    llam_task_t *self = g_llam_tls_task;
+    llam_task_t *task = NULL;
+    llam_runtime_t *rt = NULL;
+    bool task_pinned = false;
+
+    if (llam_task_claim_join_public_handle(task_handle, self, &task, &rt, &task_pinned) != 0) {
+        return -1;
+    }
+    return llam_join_claimed_impl(task, rt, has_deadline, deadline_ns);
+}
+
+int llam_task_group_join_child_handle(llam_task_t *task_handle,
+                                      llam_task_group_t *group,
+                                      bool has_deadline,
+                                      uint64_t deadline_ns) {
+    llam_task_t *self = g_llam_tls_task;
+    llam_task_t *task = NULL;
+    llam_runtime_t *rt = NULL;
+    bool task_pinned = false;
+
+    if (llam_task_claim_group_join_public_handle(task_handle, group, self, &task, &rt, &task_pinned) != 0) {
+        return -1;
+    }
+    return llam_join_claimed_impl(task, rt, has_deadline, deadline_ns);
 }
 
 /**

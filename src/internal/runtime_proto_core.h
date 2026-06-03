@@ -60,11 +60,23 @@ int llam_task_unregister_public_slab(llam_task_t *items, unsigned count);
 llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle);
 void llam_task_end_public_op(llam_task_t *task);
 int llam_task_wait_public_ops_quiescent(llam_task_t *task);
+llam_task_t *llam_runtime_spawn_group_owned_ex(llam_runtime_t *runtime,
+                                               llam_task_group_t *owning_group,
+                                               llam_task_fn fn,
+                                               void *arg,
+                                               const llam_spawn_opts_t *opts,
+                                               size_t opts_size);
 int llam_task_claim_join_public_handle(const llam_task_t *handle,
                                        llam_task_t *self,
                                        llam_task_t **out_task,
                                        llam_runtime_t **out_rt,
                                        bool *out_task_pinned);
+int llam_task_claim_group_join_public_handle(const llam_task_t *handle,
+                                             llam_task_group_t *group,
+                                             llam_task_t *self,
+                                             llam_task_t **out_task,
+                                             llam_runtime_t **out_rt,
+                                             bool *out_task_pinned);
 int llam_task_claim_detach_public_handle(const llam_task_t *handle,
                                          llam_task_t **out_task,
                                          llam_runtime_t **out_rt,
@@ -310,6 +322,10 @@ int llam_runtime_request_stop_rt(llam_runtime_t *rt);
 int llam_runtime_run_rt(llam_runtime_t *rt);
 void llam_runtime_shutdown_rt(llam_runtime_t *rt);
 void llam_runtime_destroy_rt(llam_runtime_t *rt);
+int llam_task_group_join_child_handle(llam_task_t *task,
+                                      llam_task_group_t *group,
+                                      bool has_deadline,
+                                      uint64_t deadline_ns);
 int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd);
 void llam_record_fatal(llam_runtime_t *rt, int err);
 void llam_request_stop(llam_runtime_t *rt);

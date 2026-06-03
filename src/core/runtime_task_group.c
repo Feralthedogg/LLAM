@@ -398,10 +398,11 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
 
     /*
      * Children belong to the group's owner runtime, not whichever runtime or
-     * unmanaged host thread happens to call the group API.  This keeps the
-     * group token, task handles, and scheduler queues in one owner domain.
+     * unmanaged host thread happens to call the group API. Ownership is attached
+     * inside spawn before runnable publication; marking the returned borrowed
+     * handle afterward leaves a race where a child can consume it first.
      */
-    task = llam_runtime_spawn_ex(owner_runtime, fn, arg, &effective_opts, sizeof(effective_opts));
+    task = llam_runtime_spawn_group_owned_ex(owner_runtime, group, fn, arg, &effective_opts, sizeof(effective_opts));
 
     pthread_mutex_lock(&group->lock);
     group->active_spawns -= 1U;
@@ -472,7 +473,7 @@ static int llam_task_group_join_impl(llam_task_group_t *group, bool has_deadline
     pthread_mutex_unlock(&group->lock);
 
     for (i = 0U; i < count; ++i) {
-        int join_rc = has_deadline ? llam_join_until(tasks[i], deadline_ns) : llam_join(tasks[i]);
+        int join_rc = llam_task_group_join_child_handle(tasks[i], group, has_deadline, deadline_ns);
 
         if (join_rc != 0) {
             int saved_errno = errno;

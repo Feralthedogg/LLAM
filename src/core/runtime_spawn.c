@@ -226,6 +226,8 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
  * @param fn Task entry point. Must be non-NULL.
  * @param arg Opaque argument passed to @p fn when the task starts.
  * @param opts Optional spawn options. NULL selects default task/stack classes.
+ * @param owning_group Optional task group that owns the returned borrowed
+ *        diagnostics handle. NULL keeps the task as a normal join/detach handle.
  *
  * @return Newly allocated task handle on success, or NULL with errno set on
  *         failure.
@@ -233,11 +235,12 @@ static bool llam_public_stack_class_valid(uint32_t stack_class) {
  * @note This is the shared implementation used by both explicit runtime
  *       handles and the legacy current/default runtime wrapper.
  */
-static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,
-                                          llam_task_fn fn,
-                                          void *arg,
-                                          const llam_spawn_opts_t *opts,
-                                          size_t opts_size) {
+static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
+                                                llam_task_fn fn,
+                                                void *arg,
+                                                const llam_spawn_opts_t *opts,
+                                                size_t opts_size,
+                                                llam_task_group_t *owning_group) {
     llam_spawn_opts_t raw_opts;
     llam_spawn_opts_t opts_storage;
     llam_task_t *task;
@@ -316,6 +319,12 @@ static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,
     atomic_store_explicit(&task->base_task_class, (unsigned)task_class, memory_order_release);
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
+    /*
+     * Group-owned tasks must be marked before publication.  Marking after the
+     * runnable enqueue lets a concurrently running child consume its borrowed
+     * handle via llam_join/llam_detach before the group can claim ownership.
+     */
+    task->owning_group = owning_group;
     if (LLAM_UNLIKELY(task->cancel_token != NULL &&
                       llam_cancel_token_retain_task_ref_for_runtime(task->cancel_token, rt, &task->cancel_token) != 0)) {
         task->cancel_token = NULL;
@@ -401,6 +410,14 @@ static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,
     return llam_task_public_handle(task);
 }
 
+static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,
+                                          llam_task_fn fn,
+                                          void *arg,
+                                          const llam_spawn_opts_t *opts,
+                                          size_t opts_size) {
+    return llam_spawn_on_runtime_owned(rt, fn, arg, opts, opts_size, NULL);
+}
+
 llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
                                    llam_task_fn fn,
                                    void *arg,
@@ -421,8 +438,47 @@ llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
     return task;
 }
 
+llam_task_t *llam_runtime_spawn_group_owned_ex(llam_runtime_t *runtime,
+                                               llam_task_group_t *owning_group,
+                                               llam_task_fn fn,
+                                               void *arg,
+                                               const llam_spawn_opts_t *opts,
+                                               size_t opts_size) {
+    llam_runtime_t *pinned_runtime = NULL;
+    llam_task_t *task;
+
+    if (runtime == NULL || owning_group == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
+        return NULL;
+    }
+    task = llam_spawn_on_runtime_owned(pinned_runtime, fn, arg, opts, opts_size, owning_group);
+    llam_runtime_end_public_op(pinned_runtime);
+    return task;
+}
+
 llam_task_t *llam_spawn_ex(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts, size_t opts_size) {
-    return llam_spawn_on_runtime(llam_runtime_current_owner(), fn, arg, opts, opts_size);
+    llam_runtime_t *runtime = llam_runtime_current_owner();
+    llam_runtime_t *pinned_runtime = NULL;
+    llam_task_t *task;
+
+    if (g_llam_tls_task != NULL || g_llam_tls_shard != NULL) {
+        return llam_spawn_on_runtime(runtime, fn, arg, opts, opts_size);
+    }
+
+    /*
+     * Unmanaged legacy spawn targets the default runtime.  Pin it just like the
+     * explicit handle API so default shutdown/destroy cannot tear down scheduler
+     * storage while this host thread is allocating and publishing a task.
+     */
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
+        return NULL;
+    }
+    task = llam_spawn_on_runtime(pinned_runtime, fn, arg, opts, opts_size);
+    llam_runtime_end_public_op(pinned_runtime);
+    return task;
 }
 
 llam_task_t *llam_spawn(llam_task_fn fn, void *arg, const llam_spawn_opts_t *opts) {

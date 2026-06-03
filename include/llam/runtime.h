@@ -525,7 +525,8 @@ LLAM_API int llam_runtime_write_stats_json(int fd);
  * fields as spawn defaults, so older bindings can run against newer
  * libraries that appended fields to ::llam_spawn_opts_t. If @p opts supplies a
  * cancellation token, it must belong to the target runtime selected by this
- * wrapper.
+ * wrapper. Calls from unmanaged host threads target the default runtime and are
+ * rejected if that runtime is not initialized or is already in teardown.
  *
  * @param fn Task entry point. Must not be NULL.
  * @param arg User pointer passed to fn.
@@ -676,12 +677,15 @@ LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
  * @details
  * If @p opts does not provide a cancellation token, the group cancellation token
  * is attached automatically. The returned task pointer is borrowed for
- * diagnostics; callers must not join or detach it outside the group. Spawning
- * while another thread is joining the group fails with @c EBUSY. Calls racing
- * with a completed group destroy fail with @c EINVAL instead of dereferencing a
- * reclaimed handle. A saturated public-operation lifecycle sentinel also fails
- * closed with @c EBUSY. Children are always spawned on the group's owner
- * runtime, including when the caller is an unmanaged host thread.
+ * diagnostics; regular ::llam_join and ::llam_detach reject it with @c EBUSY so
+ * only the owning group can consume the child handle. The child is marked as
+ * group-owned before it can execute, so a self-join/self-detach path cannot
+ * consume the borrowed handle first. Spawning while another thread is joining
+ * the group fails with @c EBUSY. Calls racing with a completed group destroy
+ * fail with @c EINVAL instead of dereferencing a reclaimed handle. A saturated
+ * public-operation lifecycle sentinel also fails closed with @c EBUSY. Children
+ * are always spawned on the group's owner runtime, including when the caller is
+ * an unmanaged host thread.
  */
 LLAM_API llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       llam_task_fn fn,
