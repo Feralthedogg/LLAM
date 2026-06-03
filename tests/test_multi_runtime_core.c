@@ -3153,10 +3153,12 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
     post_destroy_cleanup_state_t state;
     llam_runtime_t *runtime = NULL;
     llam_task_t *task = NULL;
+    atomic_uint child_ran;
     int rc = 1;
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failures, 0U);
+    atomic_init(&child_ran, 0U);
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
@@ -3217,6 +3219,19 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
     }
     if (llam_task_group_cancel(state.group) != -1 || errno != EXDEV) {
         rc = test_fail_errno("post-destroy task group cancel did not fail with EXDEV");
+        goto cleanup;
+    }
+    /*
+     * Cleanup is allowed after owner-runtime teardown, but spawning would need
+     * scheduler queues from the retired runtime.  Keep this as an explicit
+     * regression guard for the raw owner_runtime pointer boundary.
+     */
+    if (llam_task_group_spawn(state.group, foreign_target_task, &child_ran, NULL) != NULL || errno != EXDEV) {
+        rc = test_fail_errno("post-destroy task group spawn did not fail with EXDEV");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&child_ran, memory_order_relaxed) != 0U) {
+        rc = test_fail("post-destroy task group spawn published a child");
         goto cleanup;
     }
 
