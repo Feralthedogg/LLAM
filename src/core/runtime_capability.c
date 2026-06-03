@@ -354,6 +354,7 @@ int llam_capability_validate_subject(const llam_capability_key_t *key,
                       token->family == 0U ||
                       token->runtime_id == 0U ||
                       token->slot == 0U ||
+                      token->slot == UINT64_MAX ||
                       token->generation == 0U ||
                       token->revocation_epoch == 0U ||
                       token->rights == 0U)) {

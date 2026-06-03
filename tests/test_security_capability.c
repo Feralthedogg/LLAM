@@ -705,6 +705,23 @@ static int test_token_tamper_rejected(void) {
         return -1;
     }
     token.slot ^= 1U;
+
+    /*
+     * UINT64_MAX is a reserved invalid slot sentinel. Validation must reject it
+     * as malformed token structure before treating it like an ordinary MAC
+     * mismatch; otherwise callers cannot distinguish reserved authority bytes
+     * from normal tampering and future issue-path regressions would reach the
+     * MAC oracle path.
+     */
+    token.slot = UINT64_MAX;
+    errno = 0;
+    if (expect_errno(llam_capability_validate(&key, &token, LLAM_CAP_RIGHT_SEND, object.revocation_epoch),
+                     EINVAL,
+                     "reserved max-slot token reached MAC validation") != 0) {
+        return -1;
+    }
+    token.slot = object.slot;
+
     token.rights |= LLAM_CAP_RIGHT_DESTROY;
     errno = 0;
     if (expect_errno(llam_capability_validate(&key, &token, LLAM_CAP_RIGHT_DESTROY, object.revocation_epoch),
