@@ -1713,6 +1713,75 @@ cleanup:
     return rc;
 }
 
+static int test_owned_buffer_invalid_accessor_errno_consistent(void) {
+    llam_io_buffer_t *buffer = NULL;
+    llam_io_buffer_t *stale = NULL;
+    llam_io_buffer_t *forged = NULL;
+    int rc = 1;
+
+    if (make_native_owned_buffer("diag", &buffer) != 0) {
+        return test_fail_errno("owned-buffer invalid-accessor fixture allocation failed");
+    }
+    stale = buffer;
+    llam_io_buffer_release(buffer);
+
+    /*
+     * Stale and forged public handles must fail closed with a diagnostic errno
+     * on every accessor.  Scalar accessors already pin through begin_op; data()
+     * has its own borrowed-pointer path and needs the same invalid-handle
+     * signal so stale-handle bugs are not silently hidden as a valid NULL data
+     * pointer.
+     */
+    errno = 0;
+    if (llam_io_buffer_data(stale) != NULL || errno != EINVAL) {
+        rc = test_fail("stale owned-buffer data accessor did not report EINVAL");
+        goto done;
+    }
+    errno = 0;
+    if (llam_io_buffer_size(stale) != 0U || errno != EINVAL) {
+        rc = test_fail("stale owned-buffer size accessor did not report EINVAL");
+        goto done;
+    }
+    errno = 0;
+    if (llam_io_buffer_capacity(stale) != 0U || errno != EINVAL) {
+        rc = test_fail("stale owned-buffer capacity accessor did not report EINVAL");
+        goto done;
+    }
+    errno = 0;
+    if (llam_io_buffer_alignment(stale) != 0U || errno != EINVAL) {
+        rc = test_fail("stale owned-buffer alignment accessor did not report EINVAL");
+        goto done;
+    }
+
+    forged = (llam_io_buffer_t *)llam_public_slot_encode_handle(0U,
+                                                                LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER,
+                                                                OWNED_BUFFER_PUBLIC_HANDLE_SHIFT);
+    errno = 0;
+    if (llam_io_buffer_data(forged) != NULL || errno != EINVAL) {
+        rc = test_fail("forged owned-buffer data accessor did not report EINVAL");
+        goto done;
+    }
+    errno = 0;
+    if (llam_io_buffer_size(forged) != 0U || errno != EINVAL) {
+        rc = test_fail("forged owned-buffer size accessor did not report EINVAL");
+        goto done;
+    }
+    errno = 0;
+    if (llam_io_buffer_capacity(forged) != 0U || errno != EINVAL) {
+        rc = test_fail("forged owned-buffer capacity accessor did not report EINVAL");
+        goto done;
+    }
+    errno = 0;
+    if (llam_io_buffer_alignment(forged) != 0U || errno != EINVAL) {
+        rc = test_fail("forged owned-buffer alignment accessor did not report EINVAL");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    return rc;
+}
+
 static int test_owned_buffer_raw_release_decodable_pointer_guard(void) {
     llam_io_buffer_t *target = NULL;
     llam_io_buffer_t *target_handle = NULL;
@@ -2257,6 +2326,7 @@ int main(void) {
         test_owned_buffer_stale_release_reuse_guard() != 0 ||
         test_owned_buffer_public_handle_corrupt_slot_guard() != 0 ||
         test_owned_buffer_forged_initial_handle_rejected() != 0 ||
+        test_owned_buffer_invalid_accessor_errno_consistent() != 0 ||
         test_owned_buffer_raw_release_decodable_pointer_guard() != 0 ||
         test_owned_buffer_raw_release_rejects_public_handle() != 0 ||
 #if LLAM_PLATFORM_POSIX

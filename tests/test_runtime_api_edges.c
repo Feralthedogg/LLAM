@@ -4760,6 +4760,52 @@ cleanup:
     return rc;
 }
 
+static int test_public_slot_corrupt_affine_seal_fails_fast(void) {
+    llam_public_slot_table_t table;
+    int object = 1;
+    size_t slot = 0U;
+    uint32_t generation = 0U;
+    int rc = 1;
+
+    memset(&table, 0, sizeof(table));
+    table.handle_secret = UINT64_C(0xf0d1c2b3a4958670);
+    if (llam_public_slot_reserve_family(&table,
+                                        &object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                        &slot,
+                                        &generation) != 0) {
+        return fail_errno("corrupt affine seal fixture reserve failed");
+    }
+
+    /*
+     * A corrupted slot seal must fail closed immediately.  With a multiplier
+     * equal to the token modulus, reactivation can otherwise step to the same
+     * public generation until epoch exhaustion, turning a damaged handle table
+     * into a long stall instead of an actionable lifecycle diagnostic.
+     */
+    table.slots[slot].seal_multiplier = LLAM_PUBLIC_HANDLE_EPOCH_MASK;
+    table.slots[slot].seal_addend = 0U;
+    errno = 0;
+    if (llam_public_slot_reactivate_family(&table,
+                                           slot,
+                                           &object,
+                                           LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                           &generation) != -1 ||
+        errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] corrupt affine seal did not fail fast: errno=%d generation=%u\n",
+                      errno,
+                      generation);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    free(table.slots);
+    return rc;
+}
+
 static int test_public_slot_mersenne_reducer_matches_modulus(void) {
     static const uint64_t values[] = {
         UINT64_C(0),
@@ -5740,6 +5786,10 @@ int main(void) {
     }
     if (run_edge_case("public_slot_family_generation_window_is_injective",
                       test_public_slot_family_generation_window_is_injective) != 0) {
+        return 1;
+    }
+    if (run_edge_case("public_slot_corrupt_affine_seal_fails_fast",
+                      test_public_slot_corrupt_affine_seal_fails_fast) != 0) {
         return 1;
     }
     if (run_edge_case("public_slot_mersenne_reducer_matches_modulus",

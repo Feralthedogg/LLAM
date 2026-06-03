@@ -350,6 +350,7 @@ void *llam_io_buffer_public_data(llam_io_buffer_t *buffer) {
     void *data = NULL;
 
     if (buffer == NULL) {
+        errno = EINVAL;
         return NULL;
     }
 
@@ -376,6 +377,8 @@ void *llam_io_buffer_public_data(llam_io_buffer_t *buffer) {
          */
         llam_io_buffer_detach_provided_storage_locked(live);
         data = live->data;
+    } else {
+        errno = EINVAL;
     }
     (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
     return data;

@@ -255,7 +255,13 @@ LLAM_API int llam_io_buffer_alloc(size_t capacity, llam_io_buffer_t **out);
 /** @brief Allocate a runtime-owned buffer with a power-of-two alignment. */
 LLAM_API int llam_io_buffer_alloc_aligned(size_t capacity, size_t alignment, llam_io_buffer_t **out);
 
-/** @brief Return the alignment requested when the owned buffer was allocated. */
+/**
+ * @brief Return the alignment requested when the owned buffer was allocated.
+ *
+ * @details Invalid, stale, or consumed handles return 0 with @c errno set to
+ * @c EINVAL. Saturated or corrupt lifecycle accounting returns 0 with @c errno
+ * set to @c EBUSY.
+ */
 LLAM_API size_t llam_io_buffer_alignment(const llam_io_buffer_t *buffer);
 
 /**
@@ -296,13 +302,27 @@ LLAM_API void llam_io_buffer_release(llam_io_buffer_t *buffer);
  * itself from stale public handles, but it cannot make a raw C pointer safe
  * after another thread releases the buffer. If lifecycle accounting is
  * saturated or corrupt, this returns @c NULL with @c errno set to @c EBUSY.
+ * Invalid, stale, or consumed handles return @c NULL with @c errno set to
+ * @c EINVAL.
  */
 LLAM_API void *llam_io_buffer_data(llam_io_buffer_t *buffer);
 
-/** @brief Return the number of valid bytes in a runtime-owned I/O buffer. */
+/**
+ * @brief Return the number of valid bytes in a runtime-owned I/O buffer.
+ *
+ * @details Invalid, stale, or consumed handles return 0 with @c errno set to
+ * @c EINVAL. Saturated or corrupt lifecycle accounting returns 0 with @c errno
+ * set to @c EBUSY.
+ */
 LLAM_API size_t llam_io_buffer_size(const llam_io_buffer_t *buffer);
 
-/** @brief Return total capacity of a runtime-owned I/O buffer. */
+/**
+ * @brief Return total capacity of a runtime-owned I/O buffer.
+ *
+ * @details Invalid, stale, or consumed handles return 0 with @c errno set to
+ * @c EINVAL. Saturated or corrupt lifecycle accounting returns 0 with @c errno
+ * set to @c EBUSY.
+ */
 LLAM_API size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer);
 
 /**

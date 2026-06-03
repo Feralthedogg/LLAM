@@ -166,6 +166,17 @@ static inline int llam_public_slot_refresh_family_generation(llam_public_slot_ta
     }
     previous_generation = entry->generation;
     llam_public_slot_prepare_affine_seal(table, entry, slot, object, owner_secret);
+    if (LLAM_UNLIKELY(!llam_public_slot_affine_multiplier_valid(entry->seal_multiplier) ||
+                      entry->seal_addend >= LLAM_PUBLIC_HANDLE_EPOCH_MASK)) {
+        /*
+         * A malformed seal can make the affine step repeat the previous public
+         * token until epoch exhaustion.  Treat damaged slot metadata as a
+         * lifecycle-corruption diagnostic instead of spending a long time in
+         * the retry loop below.
+         */
+        errno = EINVAL;
+        return -1;
+    }
     while (entry->epoch < LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH) {
         entry->epoch += 1U;
         entry->generation = llam_public_slot_next_affine_generation(previous_generation,
