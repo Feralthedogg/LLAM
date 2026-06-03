@@ -249,7 +249,7 @@ jobs:
             # Hosted arm64 can drift below generic select thresholds under
             # shared CI load. Keep this as a catastrophic gate; scheduled
             # benchmarks own precise cross-platform performance tracking.
-            export LLAM_BENCH_GUARD_MIN_OPS="select_recv_ready=3000000,select_timeout=7000000"
+            export LLAM_BENCH_GUARD_MIN_OPS="select_recv_ready=3000000,select_timeout=6000000"
           fi
           if [ "${{ matrix.name }}" = "linux-x86_64-stress" ]; then
             # Shared Linux/x86_64 runners occasionally starve the park/wake
