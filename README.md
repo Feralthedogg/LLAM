@@ -707,8 +707,8 @@ Cancellation:
 | --- | --- |
 | `llam_cancel_token_create` | Create a cancellation token. |
 | `llam_cancel_token_destroy` | Destroy a cancellation token; live observers make it fail with `EBUSY`, and managed cross-runtime destroy fails with `EXDEV`. |
-| `llam_cancel_token_cancel` | Request cancellation; managed cross-runtime cancellation fails with `EXDEV`. |
-| `llam_cancel_token_is_cancelled` | Check cancellation state; managed cross-runtime queries fail with `EXDEV`. |
+| `llam_cancel_token_cancel` | Request cancellation; active teardown returns `EBUSY`, and managed cross-runtime cancellation fails with `EXDEV`. |
+| `llam_cancel_token_is_cancelled` | Check cancellation state; active teardown returns `EBUSY`, and managed cross-runtime queries fail with `EXDEV`. |
 
 Mutex and condition variables:
 

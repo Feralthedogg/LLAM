@@ -887,10 +887,11 @@ LLAM_API int llam_cancel_token_destroy(llam_cancel_token_t *token);
  * @brief Request cancellation for all current and future observers of token.
  *
  * @details Calls racing with a completed destroy fail with @c EINVAL instead
- * of dereferencing reclaimed token storage. Managed cross-runtime cancellation
- * fails with @c EXDEV. Unmanaged host calls that need to wake waiters require a
- * live owner runtime and fail with @c ENOTSUP after the owner runtime can no
- * longer service wakeups.
+ * of dereferencing reclaimed token storage. Cancellation also fails with
+ * @c EBUSY while the public handle is already being torn down, and managed
+ * cross-runtime cancellation fails with @c EXDEV. Unmanaged host calls that
+ * need to wake waiters require a live owner runtime and fail with @c ENOTSUP
+ * after the owner runtime can no longer service wakeups.
  */
 LLAM_API int llam_cancel_token_cancel(llam_cancel_token_t *token);
 
@@ -898,8 +899,9 @@ LLAM_API int llam_cancel_token_cancel(llam_cancel_token_t *token);
  * @brief Return non-zero when token has been cancelled.
  *
  * @details Calls racing with a completed destroy fail with @c EINVAL instead
- * of dereferencing reclaimed token storage. Managed cross-runtime queries fail
- * with @c EXDEV.
+ * of dereferencing reclaimed token storage. Queries also fail with @c EBUSY
+ * while the public handle is already being torn down, and managed
+ * cross-runtime queries fail with @c EXDEV.
  */
 LLAM_API int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token);
 

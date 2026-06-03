@@ -4985,6 +4985,8 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         llam_mutex_t *raw_mutex;
         llam_cond_t *cond;
         llam_cond_t *raw_cond;
+        llam_cancel_token_t *token;
+        llam_cancel_token_t *raw_token;
         llam_task_group_t *group;
         llam_task_group_t *raw_group;
         llam_task_t *task;
@@ -5000,18 +5002,34 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         select_peer = llam_channel_create(1U);
         mutex = llam_mutex_create();
         cond = llam_cond_create();
+        token = llam_cancel_token_create();
         group = llam_task_group_create();
         task = llam_spawn(public_op_sentinel_noop_task, NULL, NULL);
-        if (channel == NULL || select_peer == NULL || mutex == NULL || cond == NULL || group == NULL || task == NULL) {
+        if (channel == NULL ||
+            select_peer == NULL ||
+            mutex == NULL ||
+            cond == NULL ||
+            token == NULL ||
+            group == NULL ||
+            task == NULL) {
             _exit(11);
         }
 
         raw_channel = llam_channel_resolve_public_handle(channel);
         raw_mutex = llam_mutex_resolve_public_handle(mutex);
         raw_cond = llam_cond_resolve_public_handle(cond);
+        raw_token = NULL;
+        if (llam_cancel_token_retain_task_ref(token, &raw_token) != 0) {
+            _exit(21);
+        }
         raw_group = llam_task_group_resolve_public_handle(group);
         raw_task = llam_task_resolve_public_handle(task);
-        if (raw_channel == NULL || raw_mutex == NULL || raw_cond == NULL || raw_group == NULL || raw_task == NULL) {
+        if (raw_channel == NULL ||
+            raw_mutex == NULL ||
+            raw_cond == NULL ||
+            raw_token == NULL ||
+            raw_group == NULL ||
+            raw_task == NULL) {
             _exit(12);
         }
 
@@ -5025,6 +5043,7 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         atomic_store_explicit(&raw_channel->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_mutex->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_cond->active_ops, SIZE_MAX, memory_order_release);
+        atomic_store_explicit(&raw_token->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_group->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_task->active_ops, SIZE_MAX, memory_order_release);
         llam_channel_end_public_op(raw_channel);
@@ -5044,6 +5063,14 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         errno = 0;
         if (llam_cond_signal(cond) != -1 || errno != EBUSY) {
             _exit(15);
+        }
+        errno = 0;
+        if (llam_cancel_token_cancel(token) != -1 || errno != EBUSY) {
+            _exit(22);
+        }
+        errno = 0;
+        if (llam_cancel_token_is_cancelled(token) != -1 || errno != EBUSY) {
+            _exit(23);
         }
         errno = 0;
         if (llam_task_group_cancel(group) != -1 || errno != EBUSY) {
@@ -5104,6 +5131,12 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         return fail_msg("public-op sentinel select runtime run failed");
     case 20:
         return fail_msg("channel select public op did not fail saturated active-op sentinel with EBUSY");
+    case 21:
+        return fail_msg("cancel-token public op sentinel fixture retain failed");
+    case 22:
+        return fail_msg("cancel-token cancel did not fail saturated active-op sentinel with EBUSY");
+    case 23:
+        return fail_msg("cancel-token query did not fail saturated active-op sentinel with EBUSY");
     default:
         return fail_msg("public-op sentinel reject child returned unexpected status");
     }
