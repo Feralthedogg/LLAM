@@ -53,6 +53,8 @@
 #endif
 #endif
 
+void llam_runtime_test_force_live_iter_snapshot_alloc_failure(bool enabled);
+
 /*
  * Broker values are intentionally valid caller-owned objects, so examples and
  * tests may place them on the stack. Keep the control object below conservative
@@ -142,6 +144,78 @@ static uint64_t test_broker_ring_batch_max_p99_us(void) {
 #else
     return test_env_u64("LLAM_BROKER_RING_BATCH_MAX_P99_US", UINT64_C(50000), UINT64_C(60000000));
 #endif
+}
+
+static void live_iter_count_callback(llam_runtime_t *rt, void *arg) {
+    unsigned *visited = (unsigned *)arg;
+
+    (void)rt;
+    if (visited != NULL) {
+        *visited += 1U;
+    }
+}
+
+static int test_runtime_live_iter_alloc_failure_releases_pins(void) {
+    enum { RUNTIME_COUNT = 17 };
+    llam_runtime_t *runtimes[RUNTIME_COUNT];
+    unsigned visited = 0U;
+    size_t leaked = 0U;
+    int saved_errno;
+    int rc = 1;
+
+    memset(runtimes, 0, sizeof(runtimes));
+    for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
+        if (llam_runtime_create(NULL, 0U, &runtimes[i]) != 0 || runtimes[i] == NULL) {
+            (void)fprintf(stderr,
+                          "[test_security_capability] live runtime iterator setup failed errno=%d\n",
+                          errno);
+            goto cleanup;
+        }
+    }
+
+    /*
+     * More than 16 live runtimes forces the iterator from its stack snapshot to
+     * heap storage. The fault hook proves the OOM path releases every active-op
+     * pin it acquired while taking that snapshot.
+     */
+    llam_runtime_test_force_live_iter_snapshot_alloc_failure(true);
+    errno = 0;
+    if (llam_runtime_for_each_live(live_iter_count_callback, &visited) != -1) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator ignored forced allocation failure\n");
+        goto cleanup;
+    }
+    saved_errno = errno;
+    if (saved_errno != ENOMEM) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator failed with errno=%d expected=%d\n",
+                      saved_errno,
+                      ENOMEM);
+        goto cleanup;
+    }
+    for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
+        if (llam_public_active_op_count(&runtimes[i]->active_ops) != 0U) {
+            leaked += 1U;
+            atomic_store_explicit(&runtimes[i]->active_ops, 0U, memory_order_release);
+        }
+    }
+    if (leaked != 0U) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator leaked %zu active-op pin(s)\n",
+                      leaked);
+        rc = 1;
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_test_force_live_iter_snapshot_alloc_failure(false);
+    for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
+        if (runtimes[i] != NULL) {
+            llam_runtime_destroy(runtimes[i]);
+        }
+    }
+    return rc;
 }
 
 static size_t broker_active_task_count(const llam_broker_t *broker) {
@@ -11871,6 +11945,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_cancels_sleeping_task_slots);
     LLAM_RUN_SECURITY_TEST(test_broker_failed_task_join_consumes_slot);
     LLAM_RUN_SECURITY_TEST(test_broker_rejects_foreign_runtime_token);
+    LLAM_RUN_SECURITY_TEST(test_runtime_live_iter_alloc_failure_releases_pins);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_and_buffer_grants);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_doorbell_waits);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_doorbell_flood);

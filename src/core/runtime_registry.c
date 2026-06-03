@@ -31,6 +31,25 @@ static llam_runtime_t *g_llam_runtime_registry;
 static llam_runtime_t *g_llam_runtime_retired_handles;
 static atomic_uint_fast64_t g_llam_next_runtime_id = 1U;
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static atomic_bool g_llam_runtime_test_live_iter_snapshot_alloc_failure;
+
+void llam_runtime_test_force_live_iter_snapshot_alloc_failure(bool enabled) {
+    atomic_store_explicit(&g_llam_runtime_test_live_iter_snapshot_alloc_failure,
+                          enabled,
+                          memory_order_release);
+}
+
+static bool llam_runtime_live_iter_snapshot_alloc_should_fail(void) {
+    return atomic_load_explicit(&g_llam_runtime_test_live_iter_snapshot_alloc_failure,
+                                memory_order_acquire);
+}
+#else
+static bool llam_runtime_live_iter_snapshot_alloc_should_fail(void) {
+    return false;
+}
+#endif
+
 llam_runtime_t *llam_runtime_default_storage(void) {
     return &g_llam_runtime;
 }
@@ -216,6 +235,25 @@ void llam_runtime_end_public_op(llam_runtime_t *runtime) {
     llam_public_active_op_end(&runtime->active_ops);
 }
 
+static llam_runtime_t **llam_runtime_live_iter_snapshot_grow(llam_runtime_t **items,
+                                                             llam_runtime_t **stack_items,
+                                                             size_t count,
+                                                             size_t next_capacity) {
+    llam_runtime_t **next_items;
+
+    if (llam_runtime_live_iter_snapshot_alloc_should_fail()) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    next_items = items == stack_items
+                     ? malloc(next_capacity * sizeof(*items))
+                     : realloc(items, next_capacity * sizeof(*items));
+    if (next_items != NULL && items == stack_items) {
+        memcpy(next_items, stack_items, count * sizeof(*next_items));
+    }
+    return next_items;
+}
+
 int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
     enum { LLAM_RUNTIME_STACK_SNAPSHOT = 16 };
     llam_runtime_t *stack_items[LLAM_RUNTIME_STACK_SNAPSHOT];
@@ -235,29 +273,32 @@ int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
         if (atomic_load_explicit(&iter->destroy_claimed, memory_order_acquire)) {
             continue;
         }
-        if (LLAM_UNLIKELY(llam_public_active_op_try_begin(&iter->active_ops) != 0)) {
-            rc = errno;
-            break;
-        }
         if (count == capacity) {
             size_t next_capacity = capacity * 2U;
 
+            /*
+             * Grow the snapshot before pinning this runtime. If the cold OOM
+             * path fails after a successful pin, the runtime destroy gate can
+             * stay permanently busy even though no callback will receive it.
+             */
             if (next_capacity <= capacity || next_capacity > SIZE_MAX / sizeof(*items)) {
                 rc = EOVERFLOW;
                 break;
             }
-            next_items = items == stack_items
-                             ? malloc(next_capacity * sizeof(*items))
-                             : realloc(items, next_capacity * sizeof(*items));
+            next_items = llam_runtime_live_iter_snapshot_grow(items,
+                                                              stack_items,
+                                                              count,
+                                                              next_capacity);
             if (next_items == NULL) {
-                rc = ENOMEM;
+                rc = errno != 0 ? errno : ENOMEM;
                 break;
-            }
-            if (items == stack_items) {
-                memcpy(next_items, stack_items, count * sizeof(*next_items));
             }
             items = next_items;
             capacity = next_capacity;
+        }
+        if (LLAM_UNLIKELY(llam_public_active_op_try_begin(&iter->active_ops) != 0)) {
+            rc = errno;
+            break;
         }
         items[count++] = iter;
     }

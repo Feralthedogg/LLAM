@@ -278,6 +278,9 @@ int llam_runtime_check_handle(const llam_runtime_t *runtime);
 int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_runtime);
 void llam_runtime_end_public_op(llam_runtime_t *runtime);
 int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_runtime_test_force_live_iter_snapshot_alloc_failure(bool enabled);
+#endif
 int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,
                          size_t opts_size,

@@ -417,12 +417,14 @@ SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/runtime_capability.o \
 	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_buffer.o \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_transport.o
+	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_transport.o \
+	$(TESTHOOK_OBJDIR)/src/core/runtime_registry.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
 		$(OBJDIR)/src/core/runtime_capability.o \
 		$(OBJDIR)/src/core/runtime_broker_buffer.o \
-		$(OBJDIR)/src/core/runtime_broker_transport.o, \
+		$(OBJDIR)/src/core/runtime_broker_transport.o \
+		$(OBJDIR)/src/core/runtime_registry.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 DEMO_OBJS = \
