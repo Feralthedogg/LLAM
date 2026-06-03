@@ -2277,11 +2277,13 @@ static int test_process_fp_globals_survive_peer_runtime_destroy(void) {
     int rc = 1;
 
     if (old_fp_env != NULL) {
-        old_fp_env_copy = malloc(strlen(old_fp_env) + 1U);
+        size_t old_fp_env_len = strlen(old_fp_env);
+
+        old_fp_env_copy = malloc(old_fp_env_len + 1U);
         if (old_fp_env_copy == NULL) {
             return test_fail_errno("FP global isolation env copy failed");
         }
-        strcpy(old_fp_env_copy, old_fp_env);
+        memcpy(old_fp_env_copy, old_fp_env, old_fp_env_len + 1U);
     }
     if (setenv("LLAM_FP_CONTROL_CONTEXT", "1", 1) != 0) {
         rc = test_fail_errno("FP global isolation setenv failed");
