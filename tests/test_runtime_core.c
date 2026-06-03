@@ -1835,6 +1835,16 @@ typedef struct spawn_race_state {
     atomic_uint failures;
 } spawn_race_state_t;
 
+#if LLAM_PLATFORM_POSIX
+static void test_host_thread_yield(void) {
+    /*
+     * These race tests use unmanaged pthreads.  A pure busy spin can starve
+     * the final participant on small BSD VMs before the LLAM race is reached.
+     */
+    usleep(100U);
+}
+#endif
+
 static char *test_dup_env_value(const char *name) {
     const char *value = getenv(name);
     size_t bytes;
@@ -2203,6 +2213,7 @@ static void *spawn_race_thread(void *arg) {
 
     atomic_fetch_add_explicit(&state->ready, 1U, memory_order_release);
     while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+        test_host_thread_yield();
     }
     for (unsigned i = 0U; i < 2000U; ++i) {
         llam_task_t *task = llam_spawn(spawn_race_noop_task, NULL, NULL);
@@ -2718,7 +2729,19 @@ static int test_concurrent_spawn_contract(void) {
             return test_fail_errno("pthread_create for concurrent spawn failed");
         }
     }
-    while (atomic_load_explicit(&state.ready, memory_order_acquire) != SPAWN_RACE_THREADS) {
+    for (unsigned wait = 0U;
+         wait < 100000U &&
+         atomic_load_explicit(&state.ready, memory_order_acquire) != SPAWN_RACE_THREADS;
+         ++wait) {
+        test_host_thread_yield();
+    }
+    if (atomic_load_explicit(&state.ready, memory_order_acquire) != SPAWN_RACE_THREADS) {
+        atomic_store_explicit(&state.start, 1U, memory_order_release);
+        for (unsigned i = 0U; i < started; ++i) {
+            pthread_join(threads[i], NULL);
+        }
+        llam_runtime_shutdown();
+        return test_fail("concurrent spawn pthreads did not all reach barrier");
     }
     atomic_store_explicit(&state.start, 1U, memory_order_release);
     for (unsigned i = 0U; i < started; ++i) {
