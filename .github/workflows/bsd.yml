@@ -43,7 +43,7 @@ jobs:
             version: '10.1'
             arch: x86-64
             package_target: netbsd-x86_64
-          - name: dragonflybsd-x86_64
+          - name: dragonflybsd-x86_64-experimental
             os: dragonflybsd
             version: '6.4.2'
             arch: x86-64
@@ -51,6 +51,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Note DragonFlyBSD CI policy
+        if: ${{ matrix.os == 'dragonflybsd' }}
+        shell: bash
+        run: |
+          {
+            echo "### DragonFlyBSD CI policy"
+            echo
+            echo "This job is an experimental allowed-failure smoke gate because public DragonFlyBSD VM/package infrastructure is not stable enough for a hard push gate."
+            echo "Release artifact publication still requires the release workflow's DragonFlyBSD artifact build to pass."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start BSD VM
         uses: cross-platform-actions/action@v1.1.0

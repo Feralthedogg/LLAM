@@ -49,14 +49,15 @@ plus generic HANDLE `ReadFile`/`WriteFile` requests.
 | FreeBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
 | OpenBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
 | NetBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
-| DragonFly BSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
+| DragonFly BSD x86_64 | Experimental BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` allowed-failure smoke; release artifact builds remain hard-gated |
 | Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx, overlapped HANDLE ReadFile/WriteFile, plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MSVC/MASM or MinGW through CMake; Makefile delegates to that CMake path on Windows | CMake Windows build plus runtime core/API/shutdown/buffer tests, `test_windows_policy`, `test_windows_runtime_smoke`, `test_windows_iocp_io`, and `test_windows_handle_io`; `scripts/verify_windows.ps1 -Native` |
 
 BSD support shares the kqueue watch backend with Darwin where the kernel
 contract is common, while Darwin-only Mach wake and scheduler hints remain
-guarded behind Darwin-specific code. The BSD CI matrix is the current support
-gate; long soak and platform-specific performance tuning still trail Linux and
-macOS until native runner history is available.
+guarded behind Darwin-specific code. FreeBSD, OpenBSD, and NetBSD are hard
+CI smoke gates. DragonFly BSD remains an experimental allowed-failure dev gate
+because public VM/package infrastructure is less stable; release artifact
+publication still requires the DragonFly BSD release build to pass.
 
 Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, IOCP-backed socket requests, and overlapped HANDLE I/O. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
 On Windows 11 policy, associated socket/HANDLE objects attempt
@@ -1118,12 +1119,12 @@ New platform work should extend the existing backend model without weakening
 the Linux, Darwin, or Windows fast paths. The priority is correctness first,
 then native I/O integration, then platform-specific context-switch tuning.
 
-- BSD: FreeBSD, OpenBSD, NetBSD, and DragonFly BSD now share the kqueue readiness, user-wake, direct-poll, and packaging path. The remaining work is native soak history, target-specific tuning, and widening CI beyond the current x86_64 smoke gate.
+- BSD: FreeBSD, OpenBSD, NetBSD, and DragonFly BSD now share the kqueue readiness, user-wake, direct-poll, and packaging path. FreeBSD/OpenBSD/NetBSD are hard CI smoke gates; DragonFly BSD is still an experimental allowed-failure dev gate until its public VM/package infrastructure is reliable enough for hard gating. The remaining work is native soak history, target-specific tuning, and widening CI beyond the current x86_64 smoke gate.
 - BSD portability: keep Linux-only assumptions such as `eventfd`, `epoll`, `timerfd`, and io_uring out of shared kqueue code; use kqueue `EVFILT_USER` for runtime wakeups and guard Darwin-only Mach/ulock paths behind Darwin checks.
 - RISC-V: start with Linux `riscv64` on the existing io_uring backend and portable context path, then add dedicated `src/asm/linux/riscv64/` context switching once ABI save/restore rules are fully tested.
 - RISC-V ABI: add explicit tests for stack alignment, callee-saved register preservation, atomic width assumptions, and task entry/exit trampolines before enabling the assembly path by default.
-- CI: keep the BSD VM matrix green for FreeBSD, OpenBSD, NetBSD, and DragonFly BSD; add riscv64 cross-build and QEMU smoke first, then native runner stress if available.
-- Release policy: publish BSD artifacts only after the target's VM smoke gate passes. Do not publish RISC-V artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
+- CI: keep the BSD VM matrix green for FreeBSD, OpenBSD, and NetBSD; keep DragonFly BSD visible as an experimental allowed-failure smoke until its infrastructure is stable enough to hard gate; add riscv64 cross-build and QEMU smoke first, then native runner stress if available.
+- Release policy: publish FreeBSD/OpenBSD/NetBSD artifacts only after the target's BSD VM smoke gate passes; publish DragonFly BSD artifacts only after the release workflow's DragonFly BSD artifact build passes. Do not publish RISC-V artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
 
 ### 5. C Ecosystem And Operations
 
