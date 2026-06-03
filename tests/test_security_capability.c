@@ -80,6 +80,10 @@ _Static_assert(offsetof(llam_broker_ring_t, broker_stats) - offsetof(llam_broker
                    LLAM_BROKER_RING_CACHELINE,
                "broker client and broker stats must not share a cache line");
 
+static int test_ascii_space(int ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 static uint64_t test_env_u64(const char *name, uint64_t fallback, uint64_t max_value) {
     const char *value;
     char *end = NULL;
@@ -87,6 +91,9 @@ static uint64_t test_env_u64(const char *name, uint64_t fallback, uint64_t max_v
 
     value = getenv(name);
     if (value == NULL || value[0] == '\0') {
+        return fallback;
+    }
+    if (test_ascii_space((unsigned char)value[0]) || value[0] == '-' || value[0] == '+') {
         return fallback;
     }
     errno = 0;
@@ -191,6 +198,12 @@ static int test_runtime_live_iter_alloc_failure_releases_pins(void) {
                       "[test_security_capability] live runtime iterator failed with errno=%d expected=%d\n",
                       saved_errno,
                       ENOMEM);
+        goto cleanup;
+    }
+    if (visited != 0U) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator ran %u callback(s) after allocation failure\n",
+                      visited);
         goto cleanup;
     }
     for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
@@ -12260,6 +12273,9 @@ int main(int argc, char **argv) {
         char *end = NULL;
         unsigned long long iterations;
 
+        if (test_ascii_space((unsigned char)argv[4][0]) || argv[4][0] == '-' || argv[4][0] == '+') {
+            return 2;
+        }
         errno = 0;
         iterations = strtoull(argv[4], &end, 10);
         if (argv[2][0] == '\0' || argv[3][0] == '\0' || end == argv[4] || *end != '\0') {
@@ -12276,6 +12292,9 @@ int main(int argc, char **argv) {
         char *end = NULL;
         unsigned long long iterations;
 
+        if (test_ascii_space((unsigned char)argv[3][0]) || argv[3][0] == '-' || argv[3][0] == '+') {
+            return 2;
+        }
         errno = 0;
         iterations = strtoull(argv[3], &end, 10);
         if (argv[2][0] == '\0' || end == argv[3] || *end != '\0') {

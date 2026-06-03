@@ -291,6 +291,11 @@ static unsigned cancel_token_destroy_race_rounds(void) {
     if (env == NULL || env[0] == '\0') {
         return 4000U;
     }
+    if (env[0] == ' ' || env[0] == '\t' || env[0] == '\n' ||
+        env[0] == '\r' || env[0] == '\f' || env[0] == '\v' ||
+        env[0] == '-' || env[0] == '+') {
+        return 4000U;
+    }
     errno = 0;
     value = strtoul(env, &end, 10);
     if (errno != 0 || end == env || *end != '\0' || value == 0UL || value > 4000UL) {
@@ -1528,6 +1533,30 @@ static void blocking_cancel_task(void *arg) {
     }
 }
 
+static void blocking_after_stop_task(void *arg) {
+    edge_state_t *state = arg;
+    void *result = state;
+
+    if (llam_runtime_request_stop() != 0) {
+        task_fail(state, "blocking after stop request", errno);
+        return;
+    }
+    errno = 0;
+    /*
+     * Runtime stop is a cancellation boundary.  A late blocking submission must
+     * not enqueue work after block workers are allowed to leave during teardown,
+     * otherwise destroy can wait forever for a job that no helper will run.
+     */
+    if (llam_call_blocking_result(blocking_echo, state, &result) != -1 ||
+        errno != ECANCELED ||
+        result != NULL ||
+        atomic_load_explicit(&state->blocking_calls, memory_order_relaxed) != 0U) {
+        task_fail(state, "blocking submission after runtime stop", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
 static void blocking_release_task(void *arg) {
     edge_state_t *state = arg;
 
@@ -1656,6 +1685,22 @@ static void channel_close_select_task(void *arg) {
         received != NULL) {
         task_fail(state, "channel select closed recv", errno);
         return;
+    }
+    {
+        llam_select_op_t send_op;
+
+        memset(&send_op, 0, sizeof(send_op));
+        send_op.kind = LLAM_SELECT_OP_SEND;
+        send_op.channel = state->secondary;
+        send_op.send_value = state;
+        send_op.result_errno = ETIMEDOUT;
+        selected = SIZE_MAX;
+        if (llam_channel_select(&send_op, 1U, UINT64_MAX, &selected) != 0 ||
+            selected != 0U ||
+            send_op.result_errno != EPIPE) {
+            task_fail(state, "channel select closed send", errno);
+            return;
+        }
     }
 
     if (llam_channel_try_send(state->primary, &state) != 0) {
@@ -3191,6 +3236,39 @@ static int test_blocking_callback_edges(void) {
     return 0;
 }
 
+static int test_blocking_submission_after_stop_is_cancelled(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for blocking-after-stop edge failed");
+    }
+
+    task = llam_spawn(blocking_after_stop_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn blocking-after-stop task failed");
+    }
+    if (llam_run() == 0 &&
+        check_task_failures(&state) == 0 &&
+        llam_join(task) == 0 &&
+        atomic_load_explicit(&state.ran, memory_order_relaxed) == 1U &&
+        atomic_load_explicit(&state.blocking_calls, memory_order_relaxed) == 0U) {
+        rc = 0;
+    }
+
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("blocking-after-stop edge failed");
+    }
+    return rc;
+}
+
 static int test_blocking_cancel_waits_for_running_callback(void) {
     edge_state_t state;
     llam_spawn_opts_t opts;
@@ -3515,6 +3593,7 @@ static int test_timer_heap_counter_accounting_guard(void) {
     llam_runtime_t runtime;
     llam_shard_t shard;
     llam_timer_node_t overflow_node;
+    llam_timer_node_t normal_node;
     llam_timer_node_t underflow_node;
     llam_timer_node_t *heap[1];
     llam_timer_node_t *removed;
@@ -3522,6 +3601,7 @@ static int test_timer_heap_counter_accounting_guard(void) {
     memset(&runtime, 0, sizeof(runtime));
     memset(&shard, 0, sizeof(shard));
     memset(&overflow_node, 0, sizeof(overflow_node));
+    memset(&normal_node, 0, sizeof(normal_node));
     memset(&underflow_node, 0, sizeof(underflow_node));
     atomic_init(&runtime.fatal_errno, 0);
     atomic_init(&runtime.stop_requested, false);
@@ -3545,6 +3625,33 @@ static int test_timer_heap_counter_accounting_guard(void) {
         atomic_load_explicit(&shard.timer_count, memory_order_acquire) != UINT_MAX ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
         return fail_errno("timer heap counter overflow guard failed");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&runtime.stop_requested, false, memory_order_release);
+    atomic_store_explicit(&shard.timer_count, 0U, memory_order_release);
+    heap[0] = NULL;
+    shard.timer_heap_len = 0U;
+    shard.timers = NULL;
+    normal_node.deadline_ns = 42U;
+
+    errno = 0;
+    if (!llam_timer_heap_push_locked(&shard, &normal_node) ||
+        errno != 0 ||
+        shard.timer_heap_len != 1U ||
+        shard.timers != &normal_node ||
+        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 1U) {
+        return fail_errno("timer heap counter normal push accounting failed");
+    }
+
+    errno = 0;
+    removed = llam_timer_heap_remove_at_locked(&shard, 0U);
+    if (removed != &normal_node ||
+        errno != 0 ||
+        shard.timer_heap_len != 0U ||
+        shard.timers != NULL ||
+        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 0U) {
+        return fail_errno("timer heap counter normal pop accounting failed");
     }
 
     atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
@@ -5016,6 +5123,33 @@ static int test_public_active_op_overflow_fails_closed(void) {
     return 0;
 }
 
+static int test_align_up_overflow_fails_closed(void) {
+    size_t aligned = 0xA5A5U;
+
+    errno = 0;
+    if (llam_align_up_checked(17U, 8U, &aligned) != 0 || aligned != 24U || errno != 0) {
+        return fail_errno("checked align valid case failed");
+    }
+
+    aligned = 0xA5A5U;
+    errno = 0;
+    if (llam_align_up_checked(SIZE_MAX, 64U, &aligned) != -1 ||
+        errno != ENOMEM ||
+        aligned != 0xA5A5U) {
+        return fail_errno("checked align overflow did not fail closed");
+    }
+
+    errno = 0;
+    if (llam_align_up_checked(16U, 0U, &aligned) != -1 || errno != EINVAL) {
+        return fail_errno("checked align accepted zero alignment");
+    }
+    errno = 0;
+    if (llam_align_up_checked(16U, 24U, &aligned) != -1 || errno != EINVAL) {
+        return fail_errno("checked align accepted non-power-of-two alignment");
+    }
+    return 0;
+}
+
 #if !LLAM_PLATFORM_WINDOWS
 typedef struct public_op_sentinel_select_state {
     llam_channel_t *poisoned;
@@ -5804,6 +5938,10 @@ int main(void) {
                       test_public_active_op_overflow_fails_closed) != 0) {
         return 1;
     }
+    if (run_edge_case("align_up_overflow_fails_closed",
+                      test_align_up_overflow_fails_closed) != 0) {
+        return 1;
+    }
 #if !LLAM_PLATFORM_WINDOWS
     if (run_edge_case("task_public_op_sentinel_teardown_does_not_hang",
                       test_task_public_op_sentinel_teardown_does_not_hang) != 0) {
@@ -5911,6 +6049,10 @@ int main(void) {
         return 1;
     }
     if (run_edge_case("blocking_callback_edges", test_blocking_callback_edges) != 0) {
+        return 1;
+    }
+    if (run_edge_case("blocking_submission_after_stop_is_cancelled",
+                      test_blocking_submission_after_stop_is_cancelled) != 0) {
         return 1;
     }
     if (run_edge_case("blocking_cancel_waits_for_running_callback",

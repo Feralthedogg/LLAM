@@ -306,10 +306,11 @@ static int llam_channel_select_finish(llam_channel_select_state_t *state, size_t
 
     *selected_index = state->selected_index;
     state->ops[state->selected_index].result_errno = state->error_code;
-    if (state->error_code == 0 &&
-        state->ops[state->selected_index].kind == LLAM_SELECT_OP_RECV &&
+    if (state->ops[state->selected_index].kind == LLAM_SELECT_OP_RECV &&
         state->ops[state->selected_index].recv_out != NULL) {
-        *state->ops[state->selected_index].recv_out = state->selected_value;
+        /* Closed-channel completions select the op but must not expose stale payloads. */
+        *state->ops[state->selected_index].recv_out =
+            state->error_code == 0 ? state->selected_value : NULL;
     }
     return 0;
 }

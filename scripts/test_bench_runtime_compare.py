@@ -160,9 +160,104 @@ def test_isolated_warning_omits_isolation_hint() -> None:
             fail("isolated spread warning should not recommend --isolate-cases")
 
 
+def test_parse_output_rejects_nonfinite_metrics() -> None:
+    cases = [
+        "[bench] name=spawn_join ops_per_sec=nan p50_us=1.0 p99_us=2.0",
+        "[bench] name=spawn_join ops_per_sec=inf p50_us=1.0 p99_us=2.0",
+        "[bench] name=spawn_join ops_per_sec=1.0 p50_us=nan p99_us=2.0",
+        "[bench] name=spawn_join ops_per_sec=1.0 p50_us=1.0 p99_us=inf",
+    ]
+
+    for line in cases:
+        try:
+            bench.parse_output("LLAM", line)
+        except ValueError:
+            continue
+        fail(f"parse_output accepted non-finite benchmark metric: {line!r}")
+
+
+def test_parse_output_rejects_incomplete_metric_rows() -> None:
+    line = "[bench] name=spawn_join ops_per_sec=1000.0 p50_us=1.0"
+
+    try:
+        bench.parse_output("LLAM", line)
+    except ValueError:
+        return
+    fail(f"parse_output accepted incomplete benchmark metric row: {line!r}")
+
+
+def test_parse_output_rejects_duplicate_case_rows() -> None:
+    output = (
+        "[bench] name=spawn_join ops_per_sec=100.0 p50_us=1.0 p99_us=2.0\n"
+        "[bench] name=spawn_join ops_per_sec=999.0 p50_us=1.0 p99_us=2.0"
+    )
+
+    try:
+        bench.parse_output("LLAM", output)
+    except ValueError:
+        return
+    fail("parse_output accepted duplicate benchmark case rows")
+
+
+def test_parse_output_rejects_duplicate_metric_fields() -> None:
+    line = "[bench] name=spawn_join ops_per_sec=100.0 ops_per_sec=999.0 p50_us=1.0 p99_us=2.0"
+
+    try:
+        bench.parse_output("LLAM", line)
+    except ValueError:
+        return
+    fail("parse_output accepted duplicate metric fields in one benchmark row")
+
+
+def test_parse_cases_rejects_duplicate_requests() -> None:
+    try:
+        bench.parse_cases("spawn_join,channel_pingpong,spawn_join")
+    except Exception:
+        return
+    fail("parse_cases accepted duplicate benchmark case requests")
+
+
+def test_main_rejects_duplicate_case_args_without_traceback() -> None:
+    original_argv = sys.argv
+    stderr = io.StringIO()
+
+    try:
+        sys.argv = [
+            "bench_runtime_compare.py",
+            "--runtime",
+            "llam",
+            "--no-build",
+            "--cases",
+            "spawn_join",
+            "spawn_join",
+        ]
+        with contextlib.redirect_stderr(stderr):
+            try:
+                bench.main()
+            except SystemExit as exc:
+                if exc.code == 0:
+                    fail("main accepted duplicate benchmark case args")
+            else:
+                fail("main accepted duplicate benchmark case args")
+    finally:
+        sys.argv = original_argv
+
+    stderr_text = stderr.getvalue()
+    if "duplicate benchmark case" not in stderr_text:
+        fail(f"duplicate case diagnostic missing: {stderr_text!r}")
+    if "Traceback" in stderr_text:
+        fail(f"duplicate case diagnostic leaked traceback: {stderr_text!r}")
+
+
 def main() -> int:
     test_sample_csv_filters_requested_cases_and_warns()
     test_isolated_warning_omits_isolation_hint()
+    test_parse_output_rejects_nonfinite_metrics()
+    test_parse_output_rejects_incomplete_metric_rows()
+    test_parse_output_rejects_duplicate_case_rows()
+    test_parse_output_rejects_duplicate_metric_fields()
+    test_parse_cases_rejects_duplicate_requests()
+    test_main_rejects_duplicate_case_args_without_traceback()
     print("[test_bench_runtime_compare] ok")
     return 0
 

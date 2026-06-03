@@ -200,7 +200,7 @@ static bool llam_read_ready_initial_handoff_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_READ_READY_INITIAL_HANDOFF");
 
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -221,7 +221,7 @@ static bool llam_read_ready_direct_blocking_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_READ_READY_DIRECT_BLOCKING");
 
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -245,7 +245,7 @@ static bool llam_accept_direct_blocking_enabled(void) {
         const char *env = llam_env_get("LLAM_ACCEPT_DIRECT_BLOCKING");
 
         if (env != NULL && env[0] != '\0') {
-            value = strcmp(env, "0") != 0 ? 1 : 0;
+            value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         } else {
 #if LLAM_RUNTIME_BACKEND_KQUEUE
             value = 1;

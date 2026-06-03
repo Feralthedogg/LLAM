@@ -804,6 +804,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	./test_windows_handle_io
 	./test_security_capability
 	./llam_broker --self-test
+	python3 scripts/test_broker_cli_parsing.py
+	python3 scripts/test_c_env_helpers.py
 	@broker_sock="$${TMPDIR:-/tmp}/llam-broker-test.$$$$.sock"; \
 	server_out="$${TMPDIR:-/tmp}/llam-broker-test.$$$$.out"; \
 	rm -f "$$broker_sock" "$$server_out"; \
@@ -838,8 +840,101 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		cat "$$tmp_out" >&2; \
 		exit 1; \
 	fi; \
+	if ./server_flood --clients 4294967295 --duration 0.001 --message-bytes 2 --batch 1 --target-mps 0 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted resource-exhausting --clients value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --clients 2 --duration 0.001 --message-bytes 2 --batch 4294967295 --target-mps 0 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted resource-exhausting --batch value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
 	if ./server_flood --duration nan >"$$tmp_out" 2>&1; then \
 		echo "server_flood accepted invalid --duration value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --duration 1e100 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted out-of-range --duration value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --duration 1000000000 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted resource-exhausting --duration value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --duration 1e-100 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted sub-nanosecond --duration value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --duration 0.0001 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted sub-millisecond --duration value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --drain-sec 1e100 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted out-of-range --drain-sec value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --drain-sec 1000000000 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted resource-exhausting --drain-sec value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --shutdown-timeout 1e100 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted out-of-range --shutdown-timeout value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --shutdown-timeout 1000000000 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted resource-exhausting --shutdown-timeout value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ./server_flood --shutdown-timeout 1e-100 >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted sub-nanosecond --shutdown-timeout value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if LLAM_SERVER_FLOOD_CLIENTS=-1 ./server_flood --host not-an-ip >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted invalid LLAM_SERVER_FLOOD_CLIENTS value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -q "LLAM_SERVER_FLOOD_CLIENTS" "$$tmp_out"; then \
+		echo "server_flood did not diagnose invalid LLAM_SERVER_FLOOD_CLIENTS" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if LLAM_SERVER_FLOOD_DURATION=nan ./server_flood --host not-an-ip >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted invalid LLAM_SERVER_FLOOD_DURATION value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -q "LLAM_SERVER_FLOOD_DURATION" "$$tmp_out"; then \
+		echo "server_flood did not diagnose invalid LLAM_SERVER_FLOOD_DURATION" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ! LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP=false \
+		LLAM_SERVER_FLOOD_ALLOW_MISSING_STATS=no \
+		LLAM_SERVER_FLOOD_SERVER_LOSSLESS=off \
+		./server_flood --help >"$$tmp_out" 2>&1; then \
+		echo "server_flood rejected false/no/off boolean environment values" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP=maybe ./server_flood --help >"$$tmp_out" 2>&1; then \
+		echo "server_flood accepted invalid boolean environment value" >&2; \
+		cat "$$tmp_out" >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -q "LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP must be a boolean token" "$$tmp_out"; then \
+		echo "server_flood did not diagnose invalid boolean environment value" >&2; \
 		cat "$$tmp_out" >&2; \
 		exit 1; \
 	fi
@@ -976,6 +1071,67 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	fi; \
 	if grep 'outbox_full_drops=654321' "$$tmp_dir/flood.out" >/dev/null; then \
 		echo "server_flood accepted stats through a symlinked parent directory" >&2; \
+		cat "$$tmp_dir/flood.out" >&2; \
+		exit 1; \
+	fi; \
+	grep 'server flood stats: unavailable' "$$tmp_dir/flood.out" >/dev/null
+	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-server-flood-malformed-stats.XXXXXX")"; \
+	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
+	{ \
+		printf '%s\n' '#!/usr/bin/env python3'; \
+		printf '%s\n' 'import os, signal, socket, sys, time'; \
+		printf '%s\n' 'port = int(sys.argv[-1])'; \
+		printf '%s\n' 'stats = os.environ.get("LLAM_CHAT_STATS_PATH")'; \
+		printf '%s\n' 'if stats:'; \
+		printf '%s\n' '    with open(stats, "w", encoding="utf-8") as out:'; \
+		printf '%s\n' '        out.write("server stopped; outbox_full_drops=-1 outbox_closed_drops=0 broadcast_messages_created=1 broadcast_deliveries_attempted=1 broadcast_deliveries_enqueued=1\n")'; \
+		printf '%s\n' 'stop = False'; \
+		printf '%s\n' 'def handle(_signum, _frame):'; \
+		printf '%s\n' '    global stop'; \
+		printf '%s\n' '    stop = True'; \
+		printf '%s\n' 'signal.signal(signal.SIGINT, handle)'; \
+		printf '%s\n' 'sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)'; \
+		printf '%s\n' 'sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)'; \
+		printf '%s\n' 'sock.bind(("127.0.0.1", port))'; \
+		printf '%s\n' 'sock.listen(16)'; \
+		printf '%s\n' 'sock.setblocking(False)'; \
+		printf '%s\n' 'clients = []'; \
+		printf '%s\n' 'deadline = time.time() + 5.0'; \
+		printf '%s\n' 'while not stop and time.time() < deadline:'; \
+		printf '%s\n' '    try:'; \
+		printf '%s\n' '        client, _peer = sock.accept()'; \
+		printf '%s\n' '        client.setblocking(False)'; \
+		printf '%s\n' '        clients.append(client)'; \
+		printf '%s\n' '    except BlockingIOError:'; \
+		printf '%s\n' '        pass'; \
+		printf '%s\n' '    for client in list(clients):'; \
+		printf '%s\n' '        try:'; \
+		printf '%s\n' '            data = client.recv(4096)'; \
+		printf '%s\n' '            if data:'; \
+		printf '%s\n' '                client.sendall(b"x\n")'; \
+		printf '%s\n' '            elif data == b"":'; \
+		printf '%s\n' '                clients.remove(client)'; \
+		printf '%s\n' '                client.close()'; \
+		printf '%s\n' '        except BlockingIOError:'; \
+		printf '%s\n' '            pass'; \
+		printf '%s\n' '        except OSError:'; \
+		printf '%s\n' '            clients.remove(client)'; \
+		printf '%s\n' '    time.sleep(0.001)'; \
+		printf '%s\n' 'for client in clients:'; \
+		printf '%s\n' '    try:'; \
+		printf '%s\n' '        client.close()'; \
+		printf '%s\n' '    except OSError:'; \
+		printf '%s\n' '        pass'; \
+		printf '%s\n' 'sock.close()'; \
+	} > "$$tmp_dir/malformed_stats_server.py"; \
+	chmod +x "$$tmp_dir/malformed_stats_server.py"; \
+	if ! ./server_flood --server "$$tmp_dir/malformed_stats_server.py" --clients 2 --duration 0.5 --drain-sec 0.5 --message-bytes 8 --batch 1 --target-mps 0.010 --min-delivery-mps 0 --min-delivery-ratio 0 --allow-forced-stop --allow-missing-stats >"$$tmp_dir/flood.out" 2>&1; then \
+		echo "server_flood malformed stats regression failed unexpectedly" >&2; \
+		cat "$$tmp_dir/flood.out" >&2; \
+		exit 1; \
+	fi; \
+	if grep 'outbox_full_drops=18446744073709551615' "$$tmp_dir/flood.out" >/dev/null; then \
+		echo "server_flood accepted a signed malformed stats counter" >&2; \
 		cat "$$tmp_dir/flood.out" >&2; \
 		exit 1; \
 	fi; \
@@ -1962,8 +2118,8 @@ TSAN_TEST_TARGETS = \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
 
-FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 512
-FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 128
+FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 2048
+FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 512
 RUNTIME_SOAK_SECONDS ?= 300
 RUNTIME_SOAK_TIMEOUT ?= 180
 RUNTIME_SOAK_SEED ?= 0x4c4c414d534f414b
@@ -2062,7 +2218,10 @@ test-fuzz-heavy: test_runtime_fuzz
 
 test-process-utils:
 	python3 scripts/test_process_utils.py
+	python3 scripts/test_bench_parsers.py
 	python3 scripts/test_bench_runtime_compare.py
+	python3 scripts/test_stress_server_logic.py
+	python3 scripts/test_c_env_helpers.py
 
 test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress test_runtime_shutdown_internal test_io_buffers
 	python3 scripts/runtime_soak.py \

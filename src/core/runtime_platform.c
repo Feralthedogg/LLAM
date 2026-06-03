@@ -61,7 +61,7 @@ void llam_bind_current_thread_to_cpu(unsigned cpu_id) {
         const char *env = llam_env_get("LLAM_BIND_WORKERS");
 
         /* Linux CPU pinning can stretch short blocking syscall wakeups; keep it opt-in. */
-        enabled = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        enabled = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         atomic_store_explicit(&bind_enabled, enabled, memory_order_release);
     }
     if (enabled == 0) {
@@ -79,12 +79,12 @@ void llam_bind_current_thread_to_cpu(unsigned cpu_id) {
 /**
  * @brief Check whether Darwin Mach scheduling tuning is enabled.
  *
- * @return @c true unless @c LLAM_DARWIN_MACH_SCHED is explicitly set to 0.
+ * @return @c true unless @c LLAM_DARWIN_MACH_SCHED is explicitly disabled.
  */
 static bool llam_darwin_sched_tuning_enabled(void) {
     const char *value = llam_env_get("LLAM_DARWIN_MACH_SCHED");
 
-    return value == NULL || value[0] == '\0' || strcmp(value, "0") != 0;
+    return llam_env_flag_value(value, 1U) != 0U;
 }
 
 /**

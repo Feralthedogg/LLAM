@@ -190,28 +190,38 @@ int llam_task_local_key_delete(llam_task_local_key_t key) {
 
 void *llam_task_local_get(llam_task_local_key_t key) {
     llam_task_local_entry_t *entry;
+    void *value = NULL;
 
     if (g_llam_tls_task == NULL) {
         errno = ENOTSUP;
         return NULL;
     }
-    if (!llam_task_local_key_is_active(key)) {
+
+    /*
+     * Keep delete/get linearized. If key_delete marks a key inactive, a
+     * concurrent get must not scan a stale live-task entry and report success.
+     */
+    pthread_mutex_lock(&g_llam_task_local_key_lock);
+    if (!llam_task_local_key_is_active_locked(key)) {
+        pthread_mutex_unlock(&g_llam_task_local_key_lock);
         errno = EINVAL;
         return NULL;
     }
 
     for (entry = g_llam_tls_task->task_locals; entry != NULL; entry = entry->next) {
         if (entry->key == key) {
-            return entry->value;
+            value = entry->value;
+            break;
         }
     }
+    pthread_mutex_unlock(&g_llam_task_local_key_lock);
     /*
      * NULL is a valid "no value has been set" result for an active key. Clear
      * errno so callers can distinguish that successful miss from ENOTSUP/EINVAL
      * without depending on whatever errno happened to contain on entry.
      */
     errno = 0;
-    return NULL;
+    return value;
 }
 
 int llam_task_local_set(llam_task_local_key_t key, void *value) {
@@ -226,11 +236,19 @@ int llam_task_local_set(llam_task_local_key_t key, void *value) {
     for (entry = g_llam_tls_task->task_locals; entry != NULL; entry = entry->next) {
         if (entry->key == key) {
             if (value != NULL) {
-                if (!llam_task_local_key_is_active(key)) {
+                /*
+                 * Updating an existing entry also has to linearize with
+                 * key_delete; otherwise a host could delete a key while a task
+                 * stores a new value under the now-inactive id.
+                 */
+                pthread_mutex_lock(&g_llam_task_local_key_lock);
+                if (!llam_task_local_key_is_active_locked(key)) {
+                    pthread_mutex_unlock(&g_llam_task_local_key_lock);
                     errno = EINVAL;
                     return -1;
                 }
                 entry->value = value;
+                pthread_mutex_unlock(&g_llam_task_local_key_lock);
                 return 0;
             }
             if (prev != NULL) {

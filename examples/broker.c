@@ -151,6 +151,12 @@ static int broker_parse_count(const char *text, size_t *out_count) {
         errno = EINVAL;
         return -1;
     }
+    if (text[0] == ' ' || text[0] == '\t' || text[0] == '\n' ||
+        text[0] == '\r' || text[0] == '\f' || text[0] == '\v' ||
+        text[0] == '-' || text[0] == '+') {
+        errno = EINVAL;
+        return -1;
+    }
     errno = 0;
     value = strtoull(text, &end, 10);
     if (errno != 0 || end == text || *end != '\0' || value == 0ULL || value > (unsigned long long)SIZE_MAX) {

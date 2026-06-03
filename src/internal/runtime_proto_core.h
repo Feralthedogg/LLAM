@@ -216,9 +216,13 @@ void llam_runtime_prewarm_stack_cache(llam_runtime_t *rt);
 /*
  * Small utility and environment helpers.
  */
+int llam_align_up_checked(size_t value, size_t alignment, size_t *out_value);
 size_t llam_align_up(size_t value, size_t alignment);
 void llam_atomic_update_peak(atomic_uint *peak, unsigned value);
 const char *llam_env_get(const char *name);
+bool llam_ascii_is_space(int ch);
+unsigned llam_env_flag(const char *name, unsigned default_value);
+unsigned llam_env_flag_value(const char *value, unsigned default_value);
 unsigned llam_max_unsigned(unsigned a, unsigned b);
 long llam_page_size(void);
 void llam_pause_cpu(void);

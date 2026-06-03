@@ -19,15 +19,30 @@ import threading
 import time
 from pathlib import Path
 
+from cli_numbers import finite_nonnegative_float_at_most, finite_positive_float_at_most
 from process_utils import interrupt_process_tree, kill_process_tree
 from safe_output import open_text_for_write, prepare_output_path
 
 
+MAX_WRAPPER_TIMEOUT_SEC = 86400.0
+MAX_WRAPPER_GRACE_SEC = 3600.0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a command with a hard timeout and live log capture.")
-    parser.add_argument("--timeout", type=float, required=True, help="timeout in seconds")
-    parser.add_argument("--kill-grace", type=float, default=10.0, help="seconds to wait after graceful interrupt")
-    parser.add_argument("--dump-grace", type=float, default=2.0, help="seconds to wait after requesting a dump")
+    parser.add_argument("--timeout", type=finite_positive_float_at_most(MAX_WRAPPER_TIMEOUT_SEC), required=True, help="timeout in seconds")
+    parser.add_argument(
+        "--kill-grace",
+        type=finite_nonnegative_float_at_most(MAX_WRAPPER_GRACE_SEC),
+        default=10.0,
+        help="seconds to wait after graceful interrupt",
+    )
+    parser.add_argument(
+        "--dump-grace",
+        type=finite_nonnegative_float_at_most(MAX_WRAPPER_GRACE_SEC),
+        default=2.0,
+        help="seconds to wait after requesting a dump",
+    )
     parser.add_argument(
         "--dump-on-timeout",
         type=Path,
@@ -41,12 +56,6 @@ def parse_args() -> argparse.Namespace:
         args.command = args.command[1:]
     if not args.command:
         parser.error("missing command")
-    if args.timeout <= 0.0:
-        parser.error("--timeout must be positive")
-    if args.kill_grace < 0.0:
-        parser.error("--kill-grace must be non-negative")
-    if args.dump_grace < 0.0:
-        parser.error("--dump-grace must be non-negative")
     return args
 
 

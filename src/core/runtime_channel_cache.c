@@ -75,13 +75,17 @@ static unsigned llam_channel_tls_cache_cap(void) {
         value = (int)LLAM_CHANNEL_TLS_CACHE_CAP_DEFAULT;
         if (env != NULL && env[0] != '\0') {
             char *end = NULL;
-            unsigned long parsed = strtoul(env, &end, 10);
+            unsigned long parsed;
 
-            if (end != env) {
-                if (parsed > 1024UL) {
-                    parsed = 1024UL;
+            if (!llam_ascii_is_space((unsigned char)env[0]) && env[0] != '-' && env[0] != '+') {
+                errno = 0;
+                parsed = strtoul(env, &end, 10);
+                if (errno == 0 && end != env && *end == '\0') {
+                    if (parsed > 1024UL) {
+                        parsed = 1024UL;
+                    }
+                    value = (int)parsed;
                 }
-                value = (int)parsed;
             }
         }
         atomic_store_explicit(&cached, value, memory_order_release);
@@ -104,13 +108,17 @@ static unsigned llam_channel_cache_cap(void) {
         value = (int)LLAM_CHANNEL_CACHE_CAP_DEFAULT;
         if (env != NULL && env[0] != '\0') {
             char *end = NULL;
-            unsigned long parsed = strtoul(env, &end, 10);
+            unsigned long parsed;
 
-            if (end != env) {
-                if (parsed > 4096UL) {
-                    parsed = 4096UL;
+            if (!llam_ascii_is_space((unsigned char)env[0]) && env[0] != '-' && env[0] != '+') {
+                errno = 0;
+                parsed = strtoul(env, &end, 10);
+                if (errno == 0 && end != env && *end == '\0') {
+                    if (parsed > 4096UL) {
+                        parsed = 4096UL;
+                    }
+                    value = (int)parsed;
                 }
-                value = (int)parsed;
             }
         }
         atomic_store_explicit(&cached, value, memory_order_release);

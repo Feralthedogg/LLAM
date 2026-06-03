@@ -47,7 +47,7 @@ static bool llam_direct_blocking_io_enabled(void) {
         const char *env = llam_env_get("LLAM_DIRECT_BLOCKING_IO");
 
         // Cache env parsing once; this predicate is on I/O hot paths.
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -61,11 +61,7 @@ static bool llam_direct_blocking_poll_enabled(int timeout_ms) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_DIRECT_BLOCKING_POLL");
 
-        if (env != NULL && env[0] != '\0') {
-            value = strcmp(env, "0") != 0 ? 1 : 0;
-        } else {
-            value = 2;
-        }
+        value = (int)llam_env_flag_value(env, 2U);
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     if (value == 2) {
@@ -129,6 +125,10 @@ static unsigned llam_direct_poll_redirect_timeout_ms(void) {
             char *end = NULL;
             long parsed;
 
+            if (llam_ascii_is_space((unsigned char)env[0])) {
+                atomic_store_explicit(&cached, value, memory_order_release);
+                return (unsigned)value;
+            }
             errno = 0;
             parsed = strtol(env, &end, 10);
             if (errno == 0 && end != env && *end == '\0') {
@@ -154,13 +154,13 @@ static bool llam_write_handoff_enabled(void) {
         const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_LINUX
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_WINDOWS
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #else
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -176,13 +176,13 @@ bool llam_io_coop_yield_enabled(void) {
         const char *env = llam_env_get("LLAM_IO_COOP_YIELD");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_LINUX
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_WINDOWS
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #else
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -202,13 +202,13 @@ bool llam_io_poll_coop_yield_enabled(void) {
         const char *env = llam_env_get("LLAM_IO_POLL_COOP_YIELD");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_LINUX
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #elif LLAM_RUNTIME_BACKEND_WINDOWS
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #else
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -228,9 +228,9 @@ bool llam_io_poll_extra_yield_enabled(void) {
         const char *env = llam_env_get("LLAM_IO_POLL_EXTRA_YIELD");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #else
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -251,9 +251,9 @@ bool llam_io_poll_pre_yield_enabled(void) {
         const char *env = llam_env_get("LLAM_IO_POLL_PRE_YIELD");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #else
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -290,6 +290,10 @@ unsigned llam_io_poll_ready_yields(void) {
             char *end = NULL;
             long parsed;
 
+            if (llam_ascii_is_space((unsigned char)env[0])) {
+                atomic_store_explicit(&cached, value, memory_order_release);
+                return (unsigned)value;
+            }
             errno = 0;
             parsed = strtol(env, &end, 10);
             if (errno == 0 && end != env && *end == '\0') {
@@ -319,9 +323,9 @@ static bool llam_poll_socket_peek_enabled(void) {
         const char *env = llam_env_get("LLAM_POLL_SOCKET_PEEK");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #else
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -393,7 +397,7 @@ static bool llam_write_handoff_requires_work(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_REQUIRE_WORK");
 
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -412,9 +416,9 @@ static bool llam_write_direct_local_handoff_enabled(void) {
         const char *env = llam_env_get("LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #else
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -442,10 +446,12 @@ static uint64_t llam_write_handoff_recent_yield_ns(void) {
             char *end = NULL;
             unsigned long long parsed;
 
-            errno = 0;
-            parsed = strtoull(env, &end, 10);
-            if (errno == 0 && end != env && *end == '\0') {
-                value = (uint64_t)parsed;
+            if (!llam_ascii_is_space((unsigned char)env[0]) && env[0] != '-' && env[0] != '+') {
+                errno = 0;
+                parsed = strtoull(env, &end, 10);
+                if (errno == 0 && end != env && *end == '\0') {
+                    value = (uint64_t)parsed;
+                }
             }
         }
         atomic_store_explicit(&cached, value, memory_order_release);
@@ -466,9 +472,9 @@ static bool llam_write_handoff_check_fd_enabled(void) {
         const char *env = llam_env_get("LLAM_IO_WRITE_HANDOFF_CHECK_FD");
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
 #else
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
 #endif
         atomic_store_explicit(&cached, value, memory_order_release);
     }

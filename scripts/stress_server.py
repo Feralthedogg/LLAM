@@ -18,7 +18,22 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cli_numbers import (
+    env_default,
+    finite_nonnegative_float_at_most,
+    finite_positive_float_at_most,
+    integer,
+    nonnegative_int_at_most,
+    positive_int_at_most,
+)
 from process_utils import interrupt_process_tree, kill_process_tree
+
+
+MAX_CLIENTS = 4096
+MAX_MESSAGES = 1_000_000
+MAX_PAYLOAD_BYTES = 1 << 20
+MAX_STRESS_TIMEOUT_SEC = 3600.0
+MAX_CONNECT_SPREAD_MS = 1000.0
 
 
 @dataclass
@@ -33,30 +48,51 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", default="./server", help="path to the server binary")
     parser.add_argument("--host", default="127.0.0.1", help="server bind/connect host")
-    parser.add_argument("--clients", type=int, default=int(os.getenv("LLAM_SERVER_STRESS_CLIENTS", "16")))
-    parser.add_argument("--messages", type=int, default=int(os.getenv("LLAM_SERVER_STRESS_MESSAGES", "8")))
+    parser.add_argument("--clients",
+                        type=positive_int_at_most(MAX_CLIENTS),
+                        default=env_default(parser,
+                                            "LLAM_SERVER_STRESS_CLIENTS",
+                                            "16",
+                                            positive_int_at_most(MAX_CLIENTS)))
+    parser.add_argument("--messages",
+                        type=positive_int_at_most(MAX_MESSAGES),
+                        default=env_default(parser,
+                                            "LLAM_SERVER_STRESS_MESSAGES",
+                                            "8",
+                                            positive_int_at_most(MAX_MESSAGES)))
     parser.add_argument(
         "--payload-bytes",
-        type=int,
-        default=int(os.getenv("LLAM_SERVER_STRESS_PAYLOAD_BYTES", "48")),
+        type=nonnegative_int_at_most(MAX_PAYLOAD_BYTES),
+        default=env_default(parser,
+                            "LLAM_SERVER_STRESS_PAYLOAD_BYTES",
+                            "48",
+                            nonnegative_int_at_most(MAX_PAYLOAD_BYTES)),
         help="random bytes appended to each line payload",
     )
     parser.add_argument(
         "--timeout",
-        type=float,
-        default=float(os.getenv("LLAM_SERVER_STRESS_TIMEOUT", "20")),
+        type=finite_positive_float_at_most(MAX_STRESS_TIMEOUT_SEC),
+        default=env_default(parser,
+                            "LLAM_SERVER_STRESS_TIMEOUT",
+                            "20",
+                            finite_positive_float_at_most(MAX_STRESS_TIMEOUT_SEC)),
         help="seconds to wait for all expected broadcasts",
     )
     parser.add_argument(
         "--connect-spread-ms",
-        type=float,
-        default=float(os.getenv("LLAM_SERVER_STRESS_CONNECT_SPREAD_MS", "5")),
+        type=finite_nonnegative_float_at_most(MAX_CONNECT_SPREAD_MS),
+        default=env_default(parser,
+                            "LLAM_SERVER_STRESS_CONNECT_SPREAD_MS",
+                            "5",
+                            finite_nonnegative_float_at_most(MAX_CONNECT_SPREAD_MS)),
         help="delay between client connects to avoid testing only listen backlog behavior",
     )
     parser.add_argument(
         "--seed",
-        type=int,
-        default=int(os.getenv("LLAM_SERVER_STRESS_SEED")) if os.getenv("LLAM_SERVER_STRESS_SEED") else None,
+        type=integer,
+        default=None
+        if not os.getenv("LLAM_SERVER_STRESS_SEED")
+        else env_default(parser, "LLAM_SERVER_STRESS_SEED", "0", integer),
         help="random seed for deterministic payload generation",
     )
     return parser.parse_args()
@@ -111,24 +147,59 @@ def random_token(length: int) -> str:
     return "".join(random.choice(alphabet) for _ in range(length))
 
 
-def count_payloads(clients: list[ClientState], payloads: list[bytes]) -> dict[bytes, int]:
-    snapshots = [bytes(client.buffer) for client in clients]
-    return {payload: sum(snapshot.count(payload) for snapshot in snapshots) for payload in payloads}
+def count_payloads_by_client(clients: list[ClientState], payloads: list[tuple[int, bytes]]) -> dict[tuple[int, bytes], dict[int, int]]:
+    snapshots = {client.index: bytes(client.buffer) for client in clients}
+    return {
+        payload_record: {
+            client.index: snapshots[client.index].count(payload_record[1])
+            for client in clients
+        }
+        for payload_record in payloads
+    }
 
 
-def wait_for_broadcasts(clients: list[ClientState], payloads: list[bytes], expected_each: int, timeout: float) -> None:
+def wait_for_broadcasts(clients: list[ClientState], payloads: list[tuple[int, bytes]], timeout: float) -> None:
     deadline = time.monotonic() + timeout
-    counts: dict[bytes, int] = {}
+    counts: dict[tuple[int, bytes], dict[int, int]] = {}
 
     while time.monotonic() < deadline:
-        counts = count_payloads(clients, payloads)
-        missing = [payload for payload, count in counts.items() if count < expected_each]
-        if not missing:
+        counts = count_payloads_by_client(clients, payloads)
+        missing = [
+            (sender_index, payload, client.index, client_counts.get(client.index, 0))
+            for (sender_index, payload), client_counts in counts.items()
+            for client in clients
+            if client.index != sender_index and client_counts.get(client.index, 0) != 1
+        ]
+        self_echo = [
+            (sender_index, payload, client_counts.get(sender_index, 0))
+            for (sender_index, payload), client_counts in counts.items()
+            if client_counts.get(sender_index, 0) != 0
+        ]
+        if not missing and not self_echo:
             return
         time.sleep(0.05)
 
-    missing = [(payload.decode("utf-8", "replace"), counts.get(payload, 0)) for payload in payloads if counts.get(payload, 0) < expected_each]
-    preview = ", ".join(f"{payload!r}:{count}/{expected_each}" for payload, count in missing[:8])
+    missing = [
+        (sender_index, payload.decode("utf-8", "replace"), client.index, client_counts.get(client.index, 0))
+        for (sender_index, payload), client_counts in counts.items()
+        for client in clients
+        if client.index != sender_index and client_counts.get(client.index, 0) != 1
+    ]
+    self_echo = [
+        (sender_index, payload.decode("utf-8", "replace"), client_counts.get(sender_index, 0))
+        for (sender_index, payload), client_counts in counts.items()
+        if client_counts.get(sender_index, 0) != 0
+    ]
+    preview = ", ".join(
+        f"{payload!r}:sender={sender_index}->client={client_index} count={count}/1"
+        for sender_index, payload, client_index, count in missing[:8]
+    )
+    if self_echo:
+        echo_preview = ", ".join(
+            f"{payload!r}:sender={sender_index} self_count={count}"
+            for sender_index, payload, count in self_echo[:8]
+        )
+        preview = f"{preview}; self_echo={echo_preview}" if preview else f"self_echo={echo_preview}"
     raise AssertionError(f"missing broadcasts: {preview}")
 
 
@@ -165,8 +236,6 @@ def main() -> int:
 
     if args.clients < 2:
         raise SystemExit("--clients must be >= 2")
-    if args.messages < 1:
-        raise SystemExit("--messages must be >= 1")
     if not server_path.exists():
         raise SystemExit(f"server binary not found: {server_path}")
 
@@ -192,7 +261,7 @@ def main() -> int:
     stderr_thread.start()
 
     started_at = time.monotonic()
-    payloads: list[bytes] = []
+    payloads: list[tuple[int, bytes]] = []
     try:
         connect_deadline = time.monotonic() + args.timeout
         for index in range(args.clients):
@@ -222,9 +291,9 @@ def main() -> int:
                 payload = f"stress:{client.index}:{round_index}:{token}"
                 line = (payload + "\n").encode("utf-8")
                 client.sock.sendall(line)
-                payloads.append(payload.encode("utf-8"))
+                payloads.append((client.index, payload.encode("utf-8")))
 
-        wait_for_broadcasts(clients, payloads, expected_each=args.clients - 1, timeout=args.timeout)
+        wait_for_broadcasts(clients, payloads, timeout=args.timeout)
         elapsed = time.monotonic() - started_at
         total_messages = len(payloads)
         total_expected_deliveries = total_messages * (args.clients - 1)

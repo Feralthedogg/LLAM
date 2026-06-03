@@ -90,9 +90,17 @@ static void *llam_alloc_slab_storage(llam_runtime_t *rt, size_t bytes, size_t *a
 
     if (rt != NULL && rt->experimental_huge_alloc_requested != 0U && bytes >= LLAM_HUGE_ALLOC_MIN_BYTES) {
         long page_size = llam_page_size();
-        size_t mapped_bytes = llam_align_up(bytes, (size_t)page_size);
-        void *storage = mmap(NULL, mapped_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        size_t mapped_bytes = 0U;
+        void *storage;
 
+        if (page_size <= 0) {
+            errno = EINVAL;
+            return NULL;
+        }
+        if (llam_align_up_checked(bytes, (size_t)page_size, &mapped_bytes) != 0) {
+            return NULL;
+        }
+        storage = mmap(NULL, mapped_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (storage != MAP_FAILED) {
 #ifdef MADV_HUGEPAGE
             // Huge-page advice is opportunistic. Failure should not make slab
@@ -543,13 +551,17 @@ void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt) {
     value = llam_env_get("LLAM_TASK_CACHE_PREWARM");
     if (value != NULL && value[0] != '\0') {
         char *end = NULL;
-        unsigned long parsed = strtoul(value, &end, 10);
+        unsigned long parsed;
 
-        if (end != value) {
-            if (parsed > 4096UL) {
-                parsed = 4096UL;
+        if (!llam_ascii_is_space((unsigned char)value[0]) && value[0] != '-' && value[0] != '+') {
+            errno = 0;
+            parsed = strtoul(value, &end, 10);
+            if (errno == 0 && end != value && *end == '\0') {
+                if (parsed > 4096UL) {
+                    parsed = 4096UL;
+                }
+                target = (unsigned)parsed;
             }
-            target = (unsigned)parsed;
         }
     }
     if (target == 0U) {

@@ -38,7 +38,7 @@ bool llam_dynamic_trace_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_DYNAMIC_TRACE");
 
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;

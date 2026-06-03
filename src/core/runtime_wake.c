@@ -55,7 +55,7 @@ static bool llam_windows_high_res_wake_timer_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_WINDOWS_HIGH_RES_WAKE_TIMER");
 
-        value = (env == NULL || env[0] == '\0' || strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 1U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -720,7 +720,7 @@ int llam_opaque_wake_init(llam_shard_t *shard) {
     {
         const char *env = llam_env_get("LLAM_OPAQUE_MACH_SEM");
 
-        if (env != NULL && strcmp(env, "0") == 0) {
+        if (llam_env_flag_value(env, 1U) == 0U) {
             return 0;
         }
         if (semaphore_create(mach_task_self(), &shard->opaque_sem, SYNC_POLICY_FIFO, 0) == KERN_SUCCESS) {
@@ -746,7 +746,7 @@ static llam_darwin_ulock_wake_fn g_llam_darwin_ulock_wake = NULL;
 static void llam_darwin_ulock_resolve_once(void) {
     const char *env = llam_env_get("LLAM_OPAQUE_DARWIN_ULOCK");
 
-    if (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) {
+    if (llam_env_flag_value(env, 0U) != 0U) {
         union {
             void *object;
             llam_darwin_ulock_wait_fn function;
@@ -802,7 +802,7 @@ static bool llam_opaque_mach_sem_indefinite_wait_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_OPAQUE_MACH_SEM_INDEFINITE");
 
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;

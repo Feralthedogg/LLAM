@@ -31,6 +31,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+static inline int llam_test_env_ascii_space(int ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 static inline unsigned llam_test_env_u32(const char *name, unsigned default_value, unsigned max_value) {
     const char *raw = getenv(name);
     char *end = NULL;
@@ -39,8 +43,19 @@ static inline unsigned llam_test_env_u32(const char *name, unsigned default_valu
     if (raw == NULL || *raw == '\0') {
         return default_value;
     }
+    /*
+     * strtoul skips leading whitespace before signs. Reject it explicitly so
+     * fuzz seeds and scenario counts do not accept visually ambiguous values.
+     */
+    if (llam_test_env_ascii_space((unsigned char)*raw) || *raw == '-' || *raw == '+') {
+        return default_value;
+    }
     errno = 0;
-    parsed = strtoul(raw, &end, 10);
+    /*
+     * Use base 0 so bug-hunter runs can paste printed decimal seeds or C-style
+     * hex seeds without accidentally replaying the default scenario set.
+     */
+    parsed = strtoul(raw, &end, 0);
     if (errno != 0 || end == raw || *end != '\0' || parsed == 0UL) {
         return default_value;
     }
@@ -58,8 +73,15 @@ static inline uint64_t llam_test_env_u64(const char *name, uint64_t default_valu
     if (raw == NULL || *raw == '\0') {
         return default_value;
     }
+    if (llam_test_env_ascii_space((unsigned char)*raw) || *raw == '-' || *raw == '+') {
+        return default_value;
+    }
     errno = 0;
-    parsed = strtoull(raw, &end, 10);
+    /*
+     * Keep the same literal syntax as the u32 helper; hex seeds are common when
+     * preserving PRNG state from diagnostics.
+     */
+    parsed = strtoull(raw, &end, 0);
     if (errno != 0 || end == raw || *end != '\0' || parsed == 0ULL) {
         return default_value;
     }

@@ -115,7 +115,7 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
         const char *env = llam_env_get("LLAM_YIELD_DIRECT_HANDOFF");
 
         if (env != NULL && env[0] != '\0') {
-            if (strcmp(env, "0") == 0) {
+            if (llam_env_flag_value(env, 1U) == 0U) {
                 value = 0;
             } else if (strcmp(env, "2") == 0 || strcmp(env, "full") == 0 || strcmp(env, "ordinary") == 0) {
                 value = 2;

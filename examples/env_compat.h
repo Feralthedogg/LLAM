@@ -26,6 +26,8 @@
 #ifndef LLAM_EXAMPLES_ENV_COMPAT_H
 #define LLAM_EXAMPLES_ENV_COMPAT_H
 
+#include <stdbool.h>
+
 const char *llam_env_get(const char *name);
 
 static inline const char *llam_example_env_get(const char *name) {
@@ -35,6 +37,48 @@ static inline const char *llam_example_env_get(const char *name) {
      * in one implementation instead of drifting across examples and core code.
      */
     return llam_env_get(name);
+}
+
+static inline int llam_example_ascii_tolower(int ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+        return ch + ('a' - 'A');
+    }
+    return ch;
+}
+
+static inline bool llam_example_ascii_equal_ci(const char *lhs, const char *rhs) {
+    while (*lhs != '\0' && *rhs != '\0') {
+        if (llam_example_ascii_tolower((unsigned char)*lhs) !=
+            llam_example_ascii_tolower((unsigned char)*rhs)) {
+            return false;
+        }
+        ++lhs;
+        ++rhs;
+    }
+    return *lhs == '\0' && *rhs == '\0';
+}
+
+static inline unsigned llam_example_env_flag_value(const char *value, unsigned default_value) {
+    if (value == NULL || value[0] == '\0') {
+        return default_value != 0U ? 1U : 0U;
+    }
+    if (llam_example_ascii_equal_ci(value, "1") ||
+        llam_example_ascii_equal_ci(value, "true") ||
+        llam_example_ascii_equal_ci(value, "yes") ||
+        llam_example_ascii_equal_ci(value, "on")) {
+        return 1U;
+    }
+    if (llam_example_ascii_equal_ci(value, "0") ||
+        llam_example_ascii_equal_ci(value, "false") ||
+        llam_example_ascii_equal_ci(value, "no") ||
+        llam_example_ascii_equal_ci(value, "off")) {
+        return 0U;
+    }
+    return default_value != 0U ? 1U : 0U;
+}
+
+static inline unsigned llam_example_env_flag_default(const char *name, unsigned default_value) {
+    return llam_example_env_flag_value(llam_example_env_get(name), default_value);
 }
 
 #endif

@@ -95,6 +95,64 @@ const char *llam_env_get(const char *name) {
     return getenv(name);
 }
 
+static int llam_ascii_tolower(int ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+        return ch + ('a' - 'A');
+    }
+    return ch;
+}
+
+bool llam_ascii_is_space(int ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
+static bool llam_ascii_equal_ci(const char *lhs, const char *rhs) {
+    while (*lhs != '\0' && *rhs != '\0') {
+        if (llam_ascii_tolower((unsigned char)*lhs) != llam_ascii_tolower((unsigned char)*rhs)) {
+            return false;
+        }
+        ++lhs;
+        ++rhs;
+    }
+    return *lhs == '\0' && *rhs == '\0';
+}
+
+/**
+ * @brief Parse a boolean-like environment value using explicit tokens.
+ *
+ * @details
+ * The runtime accepts conventional true/false strings instead of treating any
+ * non-zero text as enabled. That prevents mistakes such as
+ * @c LLAM_EXPERIMENTAL_SQPOLL=false from silently enabling an experimental
+ * path. Unknown values preserve @p default_value so future policy sentinels
+ * such as "auto" can be represented by callers without an extra parse pass.
+ */
+unsigned llam_env_flag_value(const char *value, unsigned default_value) {
+    if (value == NULL || value[0] == '\0') {
+        return default_value;
+    }
+    if (llam_ascii_equal_ci(value, "1") ||
+        llam_ascii_equal_ci(value, "true") ||
+        llam_ascii_equal_ci(value, "yes") ||
+        llam_ascii_equal_ci(value, "on")) {
+        return 1U;
+    }
+    if (llam_ascii_equal_ci(value, "0") ||
+        llam_ascii_equal_ci(value, "false") ||
+        llam_ascii_equal_ci(value, "no") ||
+        llam_ascii_equal_ci(value, "off")) {
+        return 0U;
+    }
+    return default_value;
+}
+
+/**
+ * @brief Read and parse a boolean-like runtime environment variable.
+ */
+unsigned llam_env_flag(const char *name, unsigned default_value) {
+    return llam_env_flag_value(llam_env_get(name), default_value);
+}
+
 /**
  * @brief Atomically update a peak counter if @p value is larger.
  *
@@ -121,17 +179,42 @@ unsigned llam_max_unsigned(unsigned a, unsigned b) {
 }
 
 /**
+ * @brief Checked round-up to the next alignment boundary.
+ *
+ * @details
+ * Alignment is often used before allocator or backend-sized memory operations.
+ * Overflow must fail closed; wrapping to a small allocation size would turn a
+ * large request into a later buffer overrun.
+ */
+int llam_align_up_checked(size_t value, size_t alignment, size_t *out_value) {
+    size_t mask = alignment - 1U;
+
+    if (out_value == NULL || alignment == 0U || (alignment & mask) != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (value > SIZE_MAX - mask) {
+        errno = ENOMEM;
+        return -1;
+    }
+    *out_value = (value + mask) & ~mask;
+    return 0;
+}
+
+/**
  * @brief Round a value up to the next alignment boundary.
  *
  * @param value     Value to align.
  * @param alignment Power-of-two alignment.
  *
- * @return @p value rounded up to @p alignment.
- *
- * @note Callers must pass a non-zero power-of-two alignment.
+ * @return @p value rounded up to @p alignment, or 0 on invalid/overflowing
+ *         input with @c errno set.
  */
 size_t llam_align_up(size_t value, size_t alignment) {
-    size_t mask = alignment - 1U;
+    size_t aligned = 0U;
 
-    return (value + mask) & ~mask;
+    if (llam_align_up_checked(value, alignment, &aligned) != 0) {
+        return 0U;
+    }
+    return aligned;
 }

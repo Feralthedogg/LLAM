@@ -1199,9 +1199,10 @@ typedef struct llam_select_op {
  * the selected operation index is returned and remaining queued wait nodes are
  * removed before this call returns. A selected receive on a closed, drained
  * channel sets the operation's @c result_errno to @c EPIPE and stores @c NULL
- * in @c recv_out. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
- * performs a single non-blocking scan. @p op_count must be in the range
- * @c 1..LLAM_CHANNEL_SELECT_MAX_OPS.
+ * in @c recv_out; a selected send on a closed channel sets @c result_errno to
+ * @c EPIPE without enqueueing @c send_value. @p deadline_ns is an absolute
+ * ::llam_now_ns deadline; @c 0 performs a single non-blocking scan. @p op_count
+ * must be in the range @c 1..LLAM_CHANNEL_SELECT_MAX_OPS.
  *
  * @param ops Operation array.
  * @param op_count Number of operations.

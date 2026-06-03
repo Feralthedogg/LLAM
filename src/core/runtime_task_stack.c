@@ -619,13 +619,17 @@ void llam_runtime_prewarm_stack_cache(llam_runtime_t *rt) {
     value = llam_env_get("LLAM_STACK_CACHE_PREWARM");
     if (value != NULL && value[0] != '\0') {
         char *end = NULL;
-        unsigned long parsed = strtoul(value, &end, 10);
+        unsigned long parsed;
 
-        if (end != value) {
-            if (parsed > LLAM_STACK_CACHE_DEFAULT_LIMIT) {
-                parsed = LLAM_STACK_CACHE_DEFAULT_LIMIT;
+        if (!llam_ascii_is_space((unsigned char)value[0]) && value[0] != '-' && value[0] != '+') {
+            errno = 0;
+            parsed = strtoul(value, &end, 10);
+            if (errno == 0 && end != value && *end == '\0') {
+                if (parsed > LLAM_STACK_CACHE_DEFAULT_LIMIT) {
+                    parsed = LLAM_STACK_CACHE_DEFAULT_LIMIT;
+                }
+                target = (unsigned)parsed;
             }
-            target = (unsigned)parsed;
         }
     }
     if (target == 0U) {

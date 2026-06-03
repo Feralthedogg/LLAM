@@ -14,10 +14,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from cli_numbers import finite_positive_float_at_most, positive_int_at_most
 from process_utils import ProcessTimeoutError, print_captured_output, run_capture
 
 
 UINT64_MASK = (1 << 64) - 1
+MAX_SOAK_DURATION_SEC = 86400.0
+MAX_SOAK_TIMEOUT_SEC = 3600.0
+MAX_SOAK_SCENARIOS = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -27,27 +31,39 @@ class SoakCommand:
     env: dict[str, str]
 
 
+def uint64_int(raw: str) -> int:
+    try:
+        value = int(raw, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer in uint64 range") from exc
+    if value < 0 or value > UINT64_MASK:
+        raise argparse.ArgumentTypeError("must be an integer in uint64 range")
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run repeated direct runtime soak tests.")
-    parser.add_argument("--duration", type=float, default=300.0, help="target runtime in seconds")
-    parser.add_argument("--timeout", type=float, default=180.0, help="per-command timeout in seconds")
-    parser.add_argument("--seed", type=lambda value: int(value, 0), default=0x4C4C414D534F414B)
-    parser.add_argument("--fuzz-scenarios", type=int, default=128)
-    parser.add_argument("--multi-fuzz-scenarios", type=int, default=64)
+    parser.add_argument(
+        "--duration",
+        type=finite_positive_float_at_most(MAX_SOAK_DURATION_SEC),
+        default=300.0,
+        help="target runtime in seconds",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=finite_positive_float_at_most(MAX_SOAK_TIMEOUT_SEC),
+        default=180.0,
+        help="per-command timeout in seconds",
+    )
+    parser.add_argument("--seed", type=uint64_int, default=0x4C4C414D534F414B)
+    parser.add_argument("--fuzz-scenarios", type=positive_int_at_most(MAX_SOAK_SCENARIOS), default=128)
+    parser.add_argument("--multi-fuzz-scenarios", type=positive_int_at_most(MAX_SOAK_SCENARIOS), default=64)
     parser.add_argument("--runtime-fuzz", default="./test_runtime_fuzz")
     parser.add_argument("--multi-runtime-core", default="./test_multi_runtime_core")
     parser.add_argument("--runtime-stress", default="./test_runtime_stress")
     parser.add_argument("--runtime-shutdown", default="./test_runtime_shutdown_internal")
     parser.add_argument("--io-buffers", default="./test_io_buffers")
     args = parser.parse_args()
-    if args.duration <= 0.0:
-        parser.error("--duration must be positive")
-    if args.timeout <= 0.0:
-        parser.error("--timeout must be positive")
-    if args.fuzz_scenarios <= 0:
-        parser.error("--fuzz-scenarios must be positive")
-    if args.multi_fuzz_scenarios <= 0:
-        parser.error("--multi-fuzz-scenarios must be positive")
     return args
 
 

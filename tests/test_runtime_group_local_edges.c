@@ -46,6 +46,14 @@ typedef struct local_task_args {
 #define TASK_LOCAL_REUSE_ROUNDS 70000U
 #define TASK_GROUP_DESTROY_RACE_ROUNDS 4000U
 
+typedef struct task_local_delete_race_state {
+    group_local_state_t core;
+    atomic_uint ready;
+    atomic_uint delete_done;
+    int delete_rc;
+    int delete_errno;
+} task_local_delete_race_state_t;
+
 typedef struct task_group_destroy_race_state {
     llam_task_group_t *group;
     atomic_uint go;
@@ -225,6 +233,70 @@ static void task_local_clear_deleted_key_task(void *arg) {
         return;
     }
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
+static void *task_local_delete_race_thread(void *arg) {
+    task_local_delete_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->ready, memory_order_acquire) == 0U) {
+    }
+    errno = 0;
+    state->delete_rc = llam_task_local_key_delete(state->core.key);
+    state->delete_errno = errno;
+    atomic_store_explicit(&state->delete_done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void task_local_delete_race_task(void *arg) {
+    task_local_delete_race_state_t *state = arg;
+    void *value = (void *)(uintptr_t)0xD1EC7U;
+
+    if (llam_task_local_set(state->core.key, value) != 0) {
+        task_fail(&state->core, "task local delete race setup set failed", errno);
+        atomic_store_explicit(&state->ready, 1U, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->ready, 1U, memory_order_release);
+
+    while (atomic_load_explicit(&state->delete_done, memory_order_acquire) == 0U) {
+        errno = 0;
+        if (llam_task_local_get(state->core.key) != value || errno != 0) {
+            if (errno != EINVAL) {
+                task_fail(&state->core, "task local delete race get failed before delete completed", errno);
+            }
+            break;
+        }
+        errno = 0;
+        if (llam_task_local_set(state->core.key, value) != 0 && errno != EINVAL) {
+            task_fail(&state->core, "task local delete race set failed before delete completed", errno);
+            break;
+        }
+        llam_yield();
+    }
+
+    while (atomic_load_explicit(&state->delete_done, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+
+    /*
+     * Deleted keys may keep stale entries on live tasks until explicit clear or
+     * task exit. Public get/set must still fail closed once deletion completes.
+     */
+    errno = 0;
+    if (llam_task_local_get(state->core.key) != NULL || errno != EINVAL) {
+        task_fail(&state->core, "task local get observed value after key delete", errno);
+        return;
+    }
+    errno = 0;
+    if (llam_task_local_set(state->core.key, value) != -1 || errno != EINVAL) {
+        task_fail(&state->core, "task local set accepted value after key delete", errno);
+        return;
+    }
+    if (llam_task_local_set(state->core.key, NULL) != 0) {
+        task_fail(&state->core, "task local clear after racing delete failed", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
 }
 
 static void group_counter_task(void *arg) {
@@ -517,6 +589,69 @@ cleanup_runtime:
     llam_runtime_shutdown();
     if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
         return fail_errno("task local clear after key delete test failed");
+    }
+    return rc;
+}
+
+static int test_task_local_delete_race_invalidates_live_entry(void) {
+    task_local_delete_race_state_t state;
+    pthread_t delete_thread;
+    llam_task_t *task;
+    bool thread_started = false;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.ready, 0U);
+    atomic_init(&state.delete_done, 0U);
+    state.delete_rc = -1;
+    state.core.key = LLAM_TASK_LOCAL_INVALID_KEY;
+    if (llam_task_local_key_create(&state.core.key) != 0) {
+        return fail_errno("task local delete race key create failed");
+    }
+    if (init_runtime() != 0) {
+        goto cleanup_key;
+    }
+    task = llam_spawn(task_local_delete_race_task, &state, NULL);
+    if (task == NULL) {
+        goto cleanup_runtime;
+    }
+    if (pthread_create(&delete_thread, NULL, task_local_delete_race_thread, &state) != 0) {
+        goto cleanup_runtime;
+    }
+    thread_started = true;
+
+    if (llam_run() != 0 ||
+        check_task_failures(&state.core) != 0 ||
+        llam_join(task) != 0) {
+        goto cleanup_runtime;
+    }
+    if (thread_started) {
+        (void)pthread_join(delete_thread, NULL);
+        thread_started = false;
+    }
+    if (state.delete_rc != 0 || state.delete_errno != 0) {
+        errno = state.delete_errno;
+        goto cleanup_runtime;
+    }
+    if (atomic_load_explicit(&state.core.ran, memory_order_relaxed) != 1U) {
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (thread_started) {
+        atomic_store_explicit(&state.ready, 1U, memory_order_release);
+        (void)pthread_join(delete_thread, NULL);
+    }
+    llam_runtime_shutdown();
+cleanup_key:
+    if (state.delete_rc != 0 && state.core.key != LLAM_TASK_LOCAL_INVALID_KEY) {
+        (void)llam_task_local_key_delete(state.core.key);
+    }
+    if (rc != 0 && atomic_load_explicit(&state.core.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("task local delete race invalidation failed");
     }
     return rc;
 }
@@ -945,6 +1080,9 @@ int main(void) {
         return 1;
     }
     if (test_task_local_clear_after_key_delete() != 0) {
+        return 1;
+    }
+    if (test_task_local_delete_race_invalidates_live_entry() != 0) {
         return 1;
     }
     if (test_task_group_spawn_destroy_race() != 0) {

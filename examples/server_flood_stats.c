@@ -63,6 +63,7 @@ intmax_t flood_accounting_tolerance(uint64_t expected_deliveries) {
 
 #else
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -278,26 +279,85 @@ static int flood_open_stats_parent_dir(const char *path, const char **leaf_out, 
     }
 }
 
+static bool flood_stats_key_boundary(const char *line, const char *cursor) {
+    unsigned char prev;
+
+    if (line == NULL || cursor == NULL) {
+        return false;
+    }
+    if (cursor == line) {
+        return true;
+    }
+    prev = (unsigned char)cursor[-1];
+    return isspace(prev) || prev == ';';
+}
+
+static const char *flood_find_stats_field(const char *line, const char *key) {
+    const char *cursor;
+    size_t key_len;
+
+    if (line == NULL || key == NULL || key[0] == '\0') {
+        return NULL;
+    }
+    key_len = strlen(key);
+    cursor = line;
+    while ((cursor = strstr(cursor, key)) != NULL) {
+        /*
+         * Reject substrings inside another token, e.g.
+         * "xoutbox_full_drops=0".  The flood harness treats stats as a
+         * security boundary for accounting, so malformed keys must not be
+         * accepted as valid fields.
+         */
+        if (flood_stats_key_boundary(line, cursor) && cursor[key_len] == '=') {
+            return cursor;
+        }
+        ++cursor;
+    }
+    return NULL;
+}
+
 static bool flood_parse_u64_field(const char *line, const char *key, uint64_t *out) {
-    const char *cursor = strstr(line, key);
+    const char *cursor = flood_find_stats_field(line, key);
     char *end = NULL;
     unsigned long long parsed;
 
-    if (cursor == NULL || out == NULL) {
-        return false;
-    }
+    if (cursor == NULL || out == NULL) { return false; }
     cursor += strlen(key);
-    if (*cursor != '=') {
-        return false;
-    }
+    if (*cursor != '=') { return false; }
     cursor += 1;
+    if (*cursor == '-' || *cursor == '+') { return false; }
     errno = 0;
     parsed = strtoull(cursor, &end, 10);
-    if (errno != 0 || end == cursor) {
+    if (errno != 0 || end == cursor || (*end != '\0' && !isspace((unsigned char)*end))) {
         return false;
     }
+    if ((uint64_t)parsed > (uint64_t)INTMAX_MAX) { return false; }
+    if (flood_find_stats_field(end, key) != NULL) { return false; }
     *out = (uint64_t)parsed;
     return true;
+}
+
+static bool flood_u64_add(uint64_t lhs, uint64_t rhs, uint64_t *out) {
+    if (out == NULL || lhs > UINT64_MAX - rhs) { return false; }
+    *out = lhs + rhs;
+    return true;
+}
+
+static bool flood_server_stats_consistent(const flood_server_stats_t *stats) {
+    uint64_t drops;
+
+    if (stats == NULL || !flood_u64_add(stats->outbox_full_drops, stats->outbox_closed_drops, &drops)) {
+        return false;
+    }
+    /*
+     * The chat server accounts each attempted fanout delivery as exactly one
+     * enqueue or one explicit outbox drop.  Reject impossible counters before
+     * they can wrap accounting arithmetic and make corrupt stats look valid.
+     */
+    if (stats->broadcast_deliveries_enqueued > stats->broadcast_deliveries_attempted) {
+        return false;
+    }
+    return drops == stats->broadcast_deliveries_attempted - stats->broadcast_deliveries_enqueued;
 }
 
 static FILE *flood_open_stats_file(const char *stats_path) {
@@ -391,6 +451,10 @@ bool flood_read_server_stats(const char *stats_path, flood_server_stats_t *stats
         !flood_parse_u64_field(last_line, "broadcast_deliveries_enqueued", &stats->broadcast_deliveries_enqueued)) {
         return false;
     }
+    if (!flood_server_stats_consistent(stats)) {
+        memset(stats, 0, sizeof(*stats));
+        return false;
+    }
     stats->available = true;
     return true;
 }
@@ -416,6 +480,7 @@ static intmax_t flood_delta_u64(uint64_t lhs, uint64_t rhs) {
 }
 
 intmax_t flood_abs_imax(intmax_t value) {
+    if (value == INTMAX_MIN) { return INTMAX_MAX; }
     return value < 0 ? -value : value;
 }
 

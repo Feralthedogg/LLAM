@@ -192,7 +192,6 @@ bool llam_timer_heap_push_locked(llam_shard_t *shard, llam_timer_node_t *node) {
     node->heap_index = index;
     llam_timer_heap_sift_up(shard, index);
     llam_timer_heap_refresh_root(shard);
-    atomic_fetch_add_explicit(&shard->timer_count, 1U, memory_order_release);
     return true;
 }
 

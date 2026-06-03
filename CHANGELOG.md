@@ -214,6 +214,15 @@
 * bound `stress_server_composite.py` child phase commands with process-tree
   timeout cleanup and explicit timeout diagnostics, preventing hung flood
   wrappers from stalling the composite suite until the outer CI job timeout.
+* reject leading whitespace, signs, overflow, and ambiguous base handling in
+  runtime/example numeric environment and CLI parsers. Runtime tuning knobs,
+  broker serving counts, server ports, stress/bench counts, and Windows policy
+  test controls now fail closed on malformed input instead of silently
+  accepting libc `strto*()` whitespace or sign coercions.
+* reject malformed benchmark and server-stress metric lines with empty fields,
+  duplicate keys, signed counters, or impossible accounting. Release benchmark
+  and composite stress harnesses now fail diagnostics instead of letting a later
+  duplicate metric overwrite the value used for pass/fail decisions.
 * drop queued Linux io_uring, Darwin kqueue, and Windows IOCP cancel-control
   records when a request completes naturally before the queued cancel control is
   processed. This prevents late backend control handling from dereferencing

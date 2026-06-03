@@ -26,6 +26,10 @@
 
 atomic_uint g_failures;
 
+static bool stress_ascii_is_space(int ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 /* Stress helpers accumulate failures instead of aborting so one run reports all violated invariants. */
 void stress_fail_msg(const char *label) {
     fprintf(stderr, "[stress] fail: %s\n", label);
@@ -409,6 +413,9 @@ unsigned stress_round_count(void) {
     if (value == NULL || *value == '\0') {
         return 4U;
     }
+    if (stress_ascii_is_space((unsigned char)*value) || *value == '-' || *value == '+') {
+        return 4U;
+    }
 
     errno = 0;
     parsed = strtoul(value, &end, 10);
@@ -429,6 +436,9 @@ unsigned stress_env_u32(const char *name, unsigned default_value, unsigned max_v
     if (value == NULL || *value == '\0') {
         return default_value;
     }
+    if (stress_ascii_is_space((unsigned char)*value) || *value == '-' || *value == '+') {
+        return default_value;
+    }
 
     errno = 0;
     parsed = strtoul(value, &end, 10);
@@ -442,12 +452,7 @@ unsigned stress_env_u32(const char *name, unsigned default_value, unsigned max_v
 }
 
 unsigned stress_env_flag_default(const char *name, unsigned default_value) {
-    const char *value = llam_example_env_get(name);
-
-    if (value == NULL || value[0] == '\0') {
-        return default_value;
-    }
-    return strcmp(value, "0") != 0 ? 1U : 0U;
+    return llam_example_env_flag_default(name, default_value);
 }
 
 int stress_env_i32(const char *name, int default_value, int min_value, int max_value) {
@@ -456,6 +461,9 @@ int stress_env_i32(const char *name, int default_value, int min_value, int max_v
     long parsed = 0L;
 
     if (value == NULL || *value == '\0') {
+        return default_value;
+    }
+    if (stress_ascii_is_space((unsigned char)*value)) {
         return default_value;
     }
 
@@ -650,7 +658,7 @@ void stress_print_phase_skipped(const char *phase_name, const char *reason) {
 void stress_trace_step(const char *name) {
     const char *enabled = llam_example_env_get("LLAM_STRESS_TRACE_PHASES");
 
-    if (enabled != NULL && enabled[0] != '\0' && strcmp(enabled, "0") != 0) {
+    if (llam_example_env_flag_value(enabled, 0U) != 0U) {
         printf("[stress] step=%s\n", name);
         fflush(stdout);
     }

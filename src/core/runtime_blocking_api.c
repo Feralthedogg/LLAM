@@ -65,13 +65,17 @@ static unsigned llam_opaque_handoff_spin_iters(void) {
         value = (int)LLAM_OPAQUE_HANDOFF_SPIN_ITERS_DEFAULT;
         if (env != NULL && env[0] != '\0') {
             char *end = NULL;
-            unsigned long parsed = strtoul(env, &end, 10);
+            unsigned long parsed;
 
-            if (end != env) {
-                if (parsed > 65535UL) {
-                    parsed = 65535UL;
+            if (!llam_ascii_is_space((unsigned char)env[0]) && env[0] != '-' && env[0] != '+') {
+                errno = 0;
+                parsed = strtoul(env, &end, 10);
+                if (errno == 0 && end != env && *end == '\0') {
+                    if (parsed > 65535UL) {
+                        parsed = 65535UL;
+                    }
+                    value = (int)parsed;
                 }
-                value = (int)parsed;
             }
         }
         atomic_store_explicit(&cached, value, memory_order_release);
@@ -98,7 +102,7 @@ static bool llam_opaque_redirect_fastpath_enabled(void) {
 
         value = (int)LLAM_OPAQUE_REDIRECT_FASTPATH_DEFAULT;
         if (env != NULL && env[0] != '\0') {
-            value = strcmp(env, "0") != 0 ? 1 : 0;
+            value = llam_env_flag_value(env, LLAM_OPAQUE_REDIRECT_FASTPATH_DEFAULT) != 0U ? 1 : 0;
         }
         atomic_store_explicit(&cached, value, memory_order_release);
     }
@@ -120,7 +124,7 @@ static bool llam_opaque_timing_enabled(void) {
     if (value < 0) {
         const char *env = llam_env_get("LLAM_OPAQUE_TIMING");
 
-        value = (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+        value = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
@@ -247,6 +251,16 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     rt = task->owner_runtime != NULL ? task->owner_runtime : g_llam_tls_shard->runtime;
     if (rt == NULL) {
         errno = EINVAL;
+        return -1;
+    }
+    /*
+     * Runtime stop is a cancellation boundary for managed waits.  Reject new
+     * blocking submissions after stop is visible so shutdown can let idle block
+     * workers exit without racing a late task that parks on a job nobody will run.
+     */
+    if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire) ||
+        atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire)) {
+        errno = ECANCELED;
         return -1;
     }
 

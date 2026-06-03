@@ -357,6 +357,38 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     memset(rt, 0, sizeof(*rt));
 }
 
+/**
+ * @brief Publish destructive stop before waiting for an active run driver.
+ *
+ * Destroy/shutdown is stronger than cooperative request_stop: no new blocking
+ * helper jobs may be accepted, and idle block workers are allowed to leave their
+ * runtime-lifetime loop.  Running callbacks still finish normally before their
+ * parked task is woken, preserving callback argument lifetime.
+ */
+static void llam_runtime_request_destroy_stop(llam_runtime_t *rt) {
+    atomic_store_explicit(&rt->shutdown_requested, true, memory_order_release);
+    llam_request_stop(rt);
+}
+
+/**
+ * @brief Wait for llam_runtime_run_rt() to publish exec_started=false.
+ *
+ * The initial stop request can race with a worker entering an idle wait or a
+ * task parking immediately after the cancellation scan. Reissue stop
+ * periodically while spinning so destroy cannot silently depend on a single
+ * wake/cancel pass.
+ */
+static void llam_runtime_wait_exec_stopped(llam_runtime_t *rt) {
+    unsigned spins = 0U;
+
+    while (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
+        if ((++spins & 0x3ffU) == 0U) {
+            llam_request_stop(rt);
+        }
+        llam_pause_cpu();
+    }
+}
+
 void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
     llam_runtime_t *current_runtime;
 
@@ -408,10 +440,8 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
         if (llam_runtime_claim_destroy_handle(rt, &heap_runtime) == 0) {
             (void)heap_runtime;
             if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
-                llam_request_stop(rt);
-                while (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
-                    llam_pause_cpu();
-                }
+                llam_runtime_request_destroy_stop(rt);
+                llam_runtime_wait_exec_stopped(rt);
             }
             llam_runtime_shutdown_unlocked(rt);
         }
@@ -448,10 +478,8 @@ void llam_runtime_destroy_rt(llam_runtime_t *rt) {
     llam_runtime_lifecycle_lock();
     if (llam_runtime_claim_destroy_handle(rt, &heap_runtime) == 0) {
         if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
-            llam_request_stop(rt);
-            while (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
-                llam_pause_cpu();
-            }
+            llam_runtime_request_destroy_stop(rt);
+            llam_runtime_wait_exec_stopped(rt);
         }
         llam_runtime_shutdown_unlocked(rt);
     }

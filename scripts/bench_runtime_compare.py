@@ -4,6 +4,7 @@
 
 import argparse
 import csv
+import math
 import os
 import pathlib
 import re
@@ -11,6 +12,12 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from cli_numbers import (
+    env_default,
+    finite_nonnegative_float_at_most,
+    nonnegative_int_at_most,
+    positive_int_at_most,
+)
 from process_utils import ProcessTimeoutError, print_captured_output, run_capture
 from safe_output import open_binary_for_write, open_text_for_write
 
@@ -32,6 +39,11 @@ DEFAULT_CASES = [
     "sleep_fanout",
     "opaque_block",
 ]
+MAX_BENCH_COMPARE_ROUNDS = 10_000
+MAX_BENCH_COMPARE_WARMUP = 1_000
+MAX_BENCH_COMPARE_TIMEOUT_SEC = 3600
+MAX_BENCH_COMPARE_SAMPLES = 100
+MAX_BENCH_COMPARE_SPREAD_RATIO = 1000.0
 NAME_ALIASES = {
     "poll_wake_approx": "poll_wake",
     "opaque_syscall_sleep_approx": "opaque_block",
@@ -59,7 +71,13 @@ class BenchSampleRow:
 
 
 def parse_fields(line: str) -> dict[str, str]:
-    return dict(FIELD_RE.findall(line))
+    fields: dict[str, str] = {}
+
+    for key, value in FIELD_RE.findall(line):
+        if key in fields:
+            raise ValueError(f"benchmark row has duplicate field {key}: {line!r}")
+        fields[key] = value
+    return fields
 
 
 def normalize_case(name: str) -> str:
@@ -69,14 +87,46 @@ def normalize_case(name: str) -> str:
 def parse_cases(value: str) -> list[str]:
     cases = [item.strip() for item in re.split(r"[,\s]+", value) if item.strip()]
     unknown = [case for case in cases if case not in DEFAULT_CASES]
+    seen: set[str] = set()
+    duplicates: list[str] = []
+
+    for case in cases:
+        if case in seen and case not in duplicates:
+            duplicates.append(case)
+        seen.add(case)
 
     if unknown:
         raise argparse.ArgumentTypeError(f"unknown benchmark case(s): {', '.join(unknown)}")
+    if duplicates:
+        raise argparse.ArgumentTypeError(f"duplicate benchmark case(s): {', '.join(duplicates)}")
     return cases
+
+
+def parse_sample_policy(value: str) -> str:
+    if value not in {"median", "best"}:
+        raise argparse.ArgumentTypeError("must be one of: median, best")
+    return value
+
+
+def parse_metric(fields: dict[str, str], line: str, name: str, *, positive: bool) -> float:
+    if name not in fields:
+        raise ValueError(f"benchmark row missing {name}: {line!r}")
+    try:
+        value = float(fields[name])
+    except ValueError as exc:
+        raise ValueError(f"benchmark row has invalid {name}: {line!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"benchmark row has non-finite {name}: {line!r}")
+    if positive and value <= 0.0:
+        raise ValueError(f"benchmark row has non-positive {name}: {line!r}")
+    if not positive and value < 0.0:
+        raise ValueError(f"benchmark row has negative {name}: {line!r}")
+    return value
 
 
 def parse_output(runtime: str, output: str) -> list[BenchRow]:
     rows: list[BenchRow] = []
+    seen_cases: set[str] = set()
     prefixes = {
         "LLAM": "[bench] ",
         "Goroutine": "[go-bench] ",
@@ -88,15 +138,19 @@ def parse_output(runtime: str, output: str) -> list[BenchRow]:
         if not line.startswith(prefix):
             continue
         fields = parse_fields(line)
-        if "name" not in fields or "ops_per_sec" not in fields:
+        if "name" not in fields:
             continue
+        case = normalize_case(fields["name"])
+        if case in seen_cases:
+            raise ValueError(f"duplicate benchmark row for {case}: {line!r}")
+        seen_cases.add(case)
         rows.append(
             BenchRow(
                 runtime=runtime,
-                case=normalize_case(fields["name"]),
-                ops_per_sec=float(fields["ops_per_sec"]),
-                p50_us=float(fields["p50_us"]),
-                p99_us=float(fields["p99_us"]),
+                case=case,
+                ops_per_sec=parse_metric(fields, line, "ops_per_sec", positive=True),
+                p50_us=parse_metric(fields, line, "p50_us", positive=False),
+                p99_us=parse_metric(fields, line, "p99_us", positive=False),
             )
         )
     return rows
@@ -131,7 +185,11 @@ def run_command(
         sys.stderr.write(proc.stdout)
         sys.stderr.write(proc.stderr)
         raise SystemExit(proc.returncode)
-    return parse_output(runtime, proc.stdout)
+    try:
+        return parse_output(runtime, proc.stdout)
+    except ValueError as exc:
+        print(f"[bench-runtime-compare] failed to parse {label} output: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 def select_sample_rows(samples: list[list[BenchRow]], policy: str) -> list[BenchRow]:
@@ -399,9 +457,9 @@ def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str]) -> No
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare LLAM, Goroutine, and Tokio benchmarks and render graphs.")
-    parser.add_argument("--rounds", type=int, default=31)
-    parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--rounds", type=positive_int_at_most(MAX_BENCH_COMPARE_ROUNDS), default=31)
+    parser.add_argument("--warmup", type=nonnegative_int_at_most(MAX_BENCH_COMPARE_WARMUP), default=5)
+    parser.add_argument("--timeout", type=positive_int_at_most(MAX_BENCH_COMPARE_TIMEOUT_SEC), default=180)
     parser.add_argument("--out-dir", default="object/bench_compare")
     parser.add_argument("--runtime", choices=["all", "llam", "go", "tokio"], default="all")
     parser.add_argument("--no-build", action="store_true")
@@ -418,26 +476,33 @@ def main() -> int:
     )
     parser.add_argument(
         "--samples",
-        type=int,
-        default=int(os.environ.get("LLAM_BENCH_COMPARE_SAMPLES", "3")),
+        type=positive_int_at_most(MAX_BENCH_COMPARE_SAMPLES),
+        default=env_default(parser,
+                            "LLAM_BENCH_COMPARE_SAMPLES",
+                            "3",
+                            positive_int_at_most(MAX_BENCH_COMPARE_SAMPLES)),
         help="number of process-level samples per runtime; median is reported by default",
     )
     parser.add_argument(
         "--sample-policy",
-        choices=["median", "best"],
-        default=os.environ.get("LLAM_BENCH_COMPARE_SAMPLE_POLICY", "median"),
+        type=parse_sample_policy,
+        default=env_default(parser, "LLAM_BENCH_COMPARE_SAMPLE_POLICY", "median", parse_sample_policy),
         help="how to select one row per runtime/case when --samples is greater than 1",
     )
     parser.add_argument(
         "--spread-warning-ratio",
-        type=float,
-        default=float(os.environ.get("LLAM_BENCH_COMPARE_SPREAD_WARNING_RATIO", "1.50")),
+        type=finite_nonnegative_float_at_most(MAX_BENCH_COMPARE_SPREAD_RATIO),
+        default=env_default(parser,
+                            "LLAM_BENCH_COMPARE_SPREAD_WARNING_RATIO",
+                            "1.50",
+                            finite_nonnegative_float_at_most(MAX_BENCH_COMPARE_SPREAD_RATIO)),
         help="warn when max/min ops/s across samples for one runtime/case exceeds this ratio; use 0 to disable",
     )
     args = parser.parse_args()
-    if args.samples < 1:
-        parser.error("--samples must be at least 1")
-    cases = DEFAULT_CASES if args.cases is None else parse_cases(" ".join(args.cases))
+    try:
+        cases = DEFAULT_CASES if args.cases is None else parse_cases(" ".join(args.cases))
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
     if not cases:
         parser.error("--cases must contain at least one case")
 

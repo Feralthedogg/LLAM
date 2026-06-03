@@ -22,11 +22,28 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from cli_numbers import (
+    boolean_flag,
+    env_default,
+    finite_nonnegative_float,
+    finite_positive_float_at_most,
+    integer,
+    integer_at_least,
+    nonnegative_int_at_most,
+    positive_int_at_most,
+)
 from process_utils import ProcessTimeoutError, interrupt_process_tree, kill_process_tree, run_capture
 from safe_output import prepare_output_path
 
 
 TAIL_LIMIT = 200
+MAX_COMPOSITE_DURATION_SEC = 86400.0
+MAX_COMPOSITE_TIMEOUT_SEC = 3600.0
+MAX_CORRECTNESS_CLIENTS = 4096
+MAX_CORRECTNESS_MESSAGES = 1_000_000
+MAX_CORRECTNESS_PAYLOAD_BYTES = 1 << 20
+MAX_EDGE_CLIENTS = 4096
+MAX_EDGE_THREADS = 256
 
 
 @dataclass
@@ -301,7 +318,15 @@ def parse_metric_fields(line: str | None) -> dict[str, str]:
         if "=" not in token:
             continue
         key, value = token.split("=", 1)
-        fields[key.strip()] = value.strip()
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(f"empty metric key in line: {line!r}")
+        if not value:
+            raise ValueError(f"empty metric value for {key!r} in line: {line!r}")
+        if key in fields:
+            raise ValueError(f"duplicate metric key {key!r} in line: {line!r}")
+        fields[key] = value
     return fields
 
 
@@ -321,10 +346,18 @@ def diagnostic_field(fields: dict[str, str], key: str) -> str:
     return f"{key}={value}" if value is not None else ""
 
 
+def parse_diagnostic_metrics(line: str | None) -> tuple[dict[str, str], str | None]:
+    try:
+        return parse_metric_fields(line), None
+    except ValueError as exc:
+        return {}, str(exc)
+
+
 def diagnose_flood_result(label: str, rc: int, stdout: str, stderr: str) -> str:
-    flood_fields = parse_metric_fields(find_line(stdout, "server flood ok:"))
-    stats_fields = parse_metric_fields(find_line(stdout, "server flood stats:"))
-    accounting_fields = parse_metric_fields(find_line(stdout, "server flood accounting:"))
+    flood_fields, flood_parse_error = parse_diagnostic_metrics(find_line(stdout, "server flood ok:"))
+    stats_fields, stats_parse_error = parse_diagnostic_metrics(find_line(stdout, "server flood stats:"))
+    accounting_fields, accounting_parse_error = parse_diagnostic_metrics(find_line(stdout, "server flood accounting:"))
+    parse_errors = [error for error in (flood_parse_error, stats_parse_error, accounting_parse_error) if error]
     class_name = "ok" if rc == 0 else "unknown_nonzero"
     reason = "completed" if rc == 0 else "nonzero_exit"
 
@@ -333,7 +366,10 @@ def diagnose_flood_result(label: str, rc: int, stdout: str, stderr: str) -> str:
     ratio_match = first_matching(stderr, r"delivery_ratio\s+([0-9.]+)\s+below required\s+([0-9.]+)")
     accounting_match = first_matching(stderr, r"accounting_gap=([-0-9]+)\s+exceeds tolerance=([-0-9]+)")
 
-    if signal_match is not None:
+    if parse_errors:
+        class_name = "malformed_metrics"
+        reason = parse_errors[0].replace(" ", "_")
+    elif signal_match is not None:
         class_name = "server_crash"
         reason = f"server_signal_{signal_match.group(1)}"
     elif "server did not stop within" in stderr and "killed" in stderr:
@@ -424,6 +460,8 @@ def run_checked(cmd: list[str], label: str, timeout_sec: float) -> None:
         diagnostic = diagnose_checked_result(label, returncode, stdout, stderr)
     if diagnostic is not None:
         print(diagnostic, file=sys.stderr if returncode != 0 else sys.stdout, flush=True)
+    if returncode == 0 and diagnostic is not None and " class=malformed_metrics " in f" {diagnostic} ":
+        raise RuntimeError(f"{label} failed with malformed diagnostic metrics; {diagnostic}")
     if returncode != 0:
         suffix = f"; {diagnostic}" if diagnostic is not None else ""
         raise RuntimeError(f"{label} failed with rc={returncode}{suffix}")
@@ -439,7 +477,14 @@ def parse_correctness_matrix(value: str) -> list[tuple[int, int, int]]:
         parts = raw_case.split(":")
         if len(parts) != 3:
             raise ValueError(f"bad correctness case {raw_case!r}; expected clients:messages:payload_bytes")
-        clients, messages, payload_bytes = (int(part) for part in parts)
+        try:
+            clients = positive_int_at_most(MAX_CORRECTNESS_CLIENTS)(parts[0])
+            messages = positive_int_at_most(MAX_CORRECTNESS_MESSAGES)(parts[1])
+            payload_bytes = nonnegative_int_at_most(MAX_CORRECTNESS_PAYLOAD_BYTES)(parts[2])
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(f"bad correctness case {raw_case!r}: {exc}") from exc
+        if clients < 2:
+            raise ValueError(f"bad correctness case {raw_case!r}: clients must be >= 2")
         cases.append((clients, messages, payload_bytes))
     if not cases:
         raise ValueError("correctness matrix is empty")
@@ -452,8 +497,8 @@ def env_float(name: str, default: float) -> float:
     if raw is None or raw == "":
         return default
     try:
-        return float(raw)
-    except ValueError as exc:
+        return finite_nonnegative_float(raw)
+    except (ValueError, argparse.ArgumentTypeError) as exc:
         raise SystemExit(f"{name} must be a float, got {raw!r}") from exc
 
 
@@ -949,49 +994,122 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("LLAM_SERVER_COMPOSITE_CORRECTNESS", "8:8:16,16:4:64,32:2:1024"),
         help="comma-separated clients:messages:payload_bytes cases",
     )
-    parser.add_argument("--correctness-timeout", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_TIMEOUT", "30")))
-    parser.add_argument("--flood-duration", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_FLOOD_DURATION", "60")))
+    parser.add_argument(
+        "--correctness-timeout",
+        type=finite_positive_float_at_most(MAX_COMPOSITE_TIMEOUT_SEC),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_TIMEOUT",
+                            "30",
+                            finite_positive_float_at_most(MAX_COMPOSITE_TIMEOUT_SEC)),
+    )
+    parser.add_argument(
+        "--flood-duration",
+        type=finite_positive_float_at_most(MAX_COMPOSITE_DURATION_SEC),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_FLOOD_DURATION",
+                            "60",
+                            finite_positive_float_at_most(MAX_COMPOSITE_DURATION_SEC)),
+    )
     parser.add_argument(
         "--flood-min-delivery-ratio",
-        type=float,
-        default=float(os.getenv("LLAM_SERVER_COMPOSITE_FLOOD_MIN_DELIVERY_RATIO", "0.0")),
+        type=finite_nonnegative_float,
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_FLOOD_MIN_DELIVERY_RATIO",
+                            "0.0",
+                            finite_nonnegative_float),
         help="optional minimum observed/expected broadcast ratio for native flood phases",
     )
     parser.add_argument(
         "--allow-flood-forced-stop",
         action="store_true",
-        default=os.getenv("LLAM_SERVER_COMPOSITE_ALLOW_FLOOD_FORCED_STOP", "0") != "0",
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_ALLOW_FLOOD_FORCED_STOP",
+                            "0",
+                            boolean_flag),
         help="allow native flood cleanup to SIGKILL the server without failing the phase",
     )
     parser.add_argument(
         "--payload-flood-duration",
-        type=float,
-        default=float(os.getenv("LLAM_SERVER_COMPOSITE_PAYLOAD_FLOOD_DURATION", "10")),
+        type=finite_positive_float_at_most(MAX_COMPOSITE_DURATION_SEC),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_PAYLOAD_FLOOD_DURATION",
+                            "10",
+                            finite_positive_float_at_most(MAX_COMPOSITE_DURATION_SEC)),
     )
-    parser.add_argument("--edge-duration", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_EDGE_DURATION", "60")))
-    parser.add_argument("--edge-clients", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_EDGE_CLIENTS", "24")))
-    parser.add_argument("--churn-threads", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_CHURN_THREADS", "4")))
-    parser.add_argument("--slow-threads", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_SLOW_THREADS", "4")))
-    parser.add_argument("--resource-interval", type=float, default=1.0)
-    parser.add_argument("--shutdown-timeout", type=float, default=float(os.getenv("LLAM_SERVER_COMPOSITE_SHUTDOWN_TIMEOUT", "30")))
+    parser.add_argument(
+        "--edge-duration",
+        type=finite_positive_float_at_most(MAX_COMPOSITE_DURATION_SEC),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_EDGE_DURATION",
+                            "60",
+                            finite_positive_float_at_most(MAX_COMPOSITE_DURATION_SEC)),
+    )
+    parser.add_argument(
+        "--edge-clients",
+        type=positive_int_at_most(MAX_EDGE_CLIENTS),
+        default=env_default(parser, "LLAM_SERVER_COMPOSITE_EDGE_CLIENTS", "24", positive_int_at_most(MAX_EDGE_CLIENTS)),
+    )
+    parser.add_argument(
+        "--churn-threads",
+        type=nonnegative_int_at_most(MAX_EDGE_THREADS),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_CHURN_THREADS",
+                            "4",
+                            nonnegative_int_at_most(MAX_EDGE_THREADS)),
+    )
+    parser.add_argument(
+        "--slow-threads",
+        type=nonnegative_int_at_most(MAX_EDGE_THREADS),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_SLOW_THREADS",
+                            "4",
+                            nonnegative_int_at_most(MAX_EDGE_THREADS)),
+    )
+    parser.add_argument("--resource-interval", type=finite_positive_float_at_most(MAX_COMPOSITE_TIMEOUT_SEC), default=1.0)
+    parser.add_argument(
+        "--shutdown-timeout",
+        type=finite_positive_float_at_most(MAX_COMPOSITE_TIMEOUT_SEC),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_SHUTDOWN_TIMEOUT",
+                            "30",
+                            finite_positive_float_at_most(MAX_COMPOSITE_TIMEOUT_SEC)),
+    )
     parser.add_argument(
         "--command-timeout-padding",
-        type=float,
-        default=float(os.getenv("LLAM_SERVER_COMPOSITE_COMMAND_TIMEOUT_PADDING", "30")),
+        type=finite_positive_float_at_most(MAX_COMPOSITE_TIMEOUT_SEC),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_COMMAND_TIMEOUT_PADDING",
+                            "30",
+                            finite_positive_float_at_most(MAX_COMPOSITE_TIMEOUT_SEC)),
         help="extra seconds added to bounded child command timeouts before process-tree cleanup",
     )
-    parser.add_argument("--max-rss-mb", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_RSS_MB", "2048")))
-    parser.add_argument("--max-fds", type=int, default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_FDS", "4096")))
+    parser.add_argument("--max-rss-mb",
+                        type=positive_int_at_most(1_000_000),
+                        default=env_default(parser,
+                                            "LLAM_SERVER_COMPOSITE_MAX_RSS_MB",
+                                            "2048",
+                                            positive_int_at_most(1_000_000)))
+    parser.add_argument("--max-fds",
+                        type=positive_int_at_most(1_000_000),
+                        default=env_default(parser,
+                                            "LLAM_SERVER_COMPOSITE_MAX_FDS",
+                                            "4096",
+                                            positive_int_at_most(1_000_000)))
     parser.add_argument(
         "--max-unexpected-client-errors",
-        type=int,
-        default=int(os.getenv("LLAM_SERVER_COMPOSITE_MAX_UNEXPECTED_CLIENT_ERRORS", "0")),
+        type=integer_at_least(-1),
+        default=env_default(parser,
+                            "LLAM_SERVER_COMPOSITE_MAX_UNEXPECTED_CLIENT_ERRORS",
+                            "0",
+                            integer_at_least(-1)),
         help="maximum edge client errors outside expected reset/pipe/bad-fd churn; use -1 to disable",
     )
     parser.add_argument(
         "--seed",
-        type=int,
-        default=int(os.getenv("LLAM_SERVER_COMPOSITE_SEED")) if os.getenv("LLAM_SERVER_COMPOSITE_SEED") else None,
+        type=integer,
+        default=None
+        if not os.getenv("LLAM_SERVER_COMPOSITE_SEED")
+        else env_default(parser, "LLAM_SERVER_COMPOSITE_SEED", "0", integer),
         help="random seed for deterministic edge payload/churn behavior",
     )
     parser.add_argument("--skip-correctness", action="store_true")
@@ -1021,6 +1139,11 @@ def validate_args(args: argparse.Namespace) -> None:
         args.flood_duration = 1800.0
         args.payload_flood_duration = 300.0
         args.edge_duration = 1200.0
+    if not args.skip_correctness:
+        try:
+            parse_correctness_matrix(args.correctness_matrix)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     if not Path(args.server).exists():
         raise SystemExit(f"server binary not found: {args.server}")
     if not args.skip_flood and not Path(args.server_flood).exists():
@@ -1037,7 +1160,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--max-unexpected-client-errors must be >= -1")
     if args.flood_min_delivery_ratio < 0.0 or args.flood_min_delivery_ratio > 1.0:
         raise SystemExit("--flood-min-delivery-ratio must be in [0.0, 1.0]")
-    parse_correctness_matrix(args.correctness_matrix)
 
 
 def main() -> int:

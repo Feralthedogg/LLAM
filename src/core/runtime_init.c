@@ -214,9 +214,9 @@ static bool llam_public_runtime_profile_valid(uint32_t profile) {
 /**
  * @brief Read a boolean-like runtime environment variable.
  *
- * Any non-empty value other than @c "0" is treated as enabled. This matches the
- * rest of the runtime's environment policy and keeps feature toggles cheap to
- * parse during initialization.
+ * Conventional true/false tokens are accepted. Unknown text preserves the
+ * supplied default so misspelled values do not silently enable experimental
+ * paths.
  *
  * @param name          Environment variable name.
  * @param default_value Value returned when @p name is unset or empty.
@@ -224,12 +224,7 @@ static bool llam_public_runtime_profile_valid(uint32_t profile) {
  * @return 0 or 1.
  */
 static unsigned llam_runtime_env_flag(const char *name, unsigned default_value) {
-    const char *env = llam_env_get(name);
-
-    if (env == NULL || env[0] == '\0') {
-        return default_value;
-    }
-    return strcmp(env, "0") != 0 ? 1U : 0U;
+    return llam_env_flag(name, default_value) != 0U ? 1U : 0U;
 }
 
 /**
@@ -251,6 +246,9 @@ static unsigned llam_runtime_env_u32(const char *name, unsigned default_value, u
     unsigned long parsed;
 
     if (env == NULL || env[0] == '\0') {
+        return default_value;
+    }
+    if (llam_ascii_is_space((unsigned char)env[0]) || env[0] == '-' || env[0] == '+') {
         return default_value;
     }
     errno = 0;
@@ -275,6 +273,9 @@ static uint64_t llam_runtime_env_u64(const char *name, uint64_t default_value, u
     if (env == NULL || env[0] == '\0') {
         return default_value;
     }
+    if (llam_ascii_is_space((unsigned char)env[0]) || env[0] == '-' || env[0] == '+') {
+        return default_value;
+    }
     errno = 0;
     parsed = strtoull(env, &end, 10);
     if (errno != 0 || end == env || *end != '\0') {
@@ -295,7 +296,7 @@ static unsigned llam_runtime_preempt_mode_from_env(unsigned default_mode) {
     if (env == NULL || env[0] == '\0') {
         return default_mode;
     }
-    if (strcmp(env, "0") == 0 || strcmp(env, "off") == 0 || strcmp(env, "disabled") == 0) {
+    if (llam_env_flag_value(env, 1U) == 0U || strcmp(env, "disabled") == 0) {
         return LLAM_PREEMPT_OFF;
     }
     if (strcmp(env, "1") == 0 || strcmp(env, "cooperative") == 0 || strcmp(env, "coop") == 0) {
@@ -457,6 +458,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     const char *light_safepoint_env;
     const char *spawn_fanout_env;
     const char *task_list_eager_env;
+    unsigned cheap_safepoint_default;
+    unsigned task_list_eager_default;
     size_t opts_copy_size;
     uint64_t experimental_flags;
     unsigned timer_heap_prewarm;
@@ -628,16 +631,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         llam_runtime_env_flag("LLAM_STACK_SAMPLING", 0U) ||
         (light_safepoint_env != NULL &&
          light_safepoint_env[0] != '\0' &&
-         strcmp(light_safepoint_env, "0") == 0) ||
+         llam_env_flag_value(light_safepoint_env, 1U) == 0U) ||
         llam_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U);
     rt->run_timing_enabled =
         llam_runtime_env_flag("LLAM_RUN_TIMING", 0U) ||
         rt->stack_sampling_enabled != 0U;
+    task_list_eager_default = rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 1U : 0U;
     task_list_eager_env = llam_env_get("LLAM_TASK_LIST_EAGER");
     if (task_list_eager_env != NULL && task_list_eager_env[0] != '\0') {
-        rt->task_list_eager = strcmp(task_list_eager_env, "0") != 0 ? 1U : 0U;
+        rt->task_list_eager = llam_env_flag_value(task_list_eager_env, task_list_eager_default) != 0U ? 1U : 0U;
     } else {
-        rt->task_list_eager = rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 1U : 0U;
+        rt->task_list_eager = task_list_eager_default;
     }
     rt->direct_handoff_stats_enabled = llam_runtime_env_flag("LLAM_DIRECT_HANDOFF_STATS", 0U);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
@@ -660,10 +664,11 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->direct_handoff_allow_timers =
         llam_runtime_env_flag("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", 0U);
 #endif
+    cheap_safepoint_default = llam_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U) != 0U ? 0U : 1U;
     if (light_safepoint_env != NULL && light_safepoint_env[0] != '\0') {
-        rt->cheap_safepoint = strcmp(light_safepoint_env, "0") != 0 ? 1U : 0U;
+        rt->cheap_safepoint = llam_env_flag_value(light_safepoint_env, cheap_safepoint_default) != 0U ? 1U : 0U;
     } else {
-        rt->cheap_safepoint = llam_runtime_env_flag("LLAM_STRICT_SAFEPOINT", 0U) != 0U ? 0U : 1U;
+        rt->cheap_safepoint = cheap_safepoint_default;
     }
     rt->safepoint_clock_period = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 128U : 32U;
     if (rt->profile == LLAM_RUNTIME_PROFILE_IO_LATENCY) {

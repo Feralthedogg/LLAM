@@ -319,7 +319,16 @@ int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
 
     for (size_t i = 0U; i < count; ++i) {
-        fn(items[i], arg);
+        /*
+         * Snapshot construction must be all-or-nothing.  If allocation fails
+         * while collecting live runtimes, applying the callback to the prefix
+         * would create partial side effects even though the API reports failure.
+         * Release acquired pins only; the caller can retry with a complete
+         * snapshot.
+         */
+        if (rc == 0) {
+            fn(items[i], arg);
+        }
         llam_runtime_end_public_op(items[i]);
     }
     if (items != stack_items) {

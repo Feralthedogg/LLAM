@@ -206,7 +206,7 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
 
     fp_env = llam_env_get("LLAM_FP_CONTROL_CONTEXT");
     g_llam_xsave_global_fp_control_context =
-        (fp_env == NULL || fp_env[0] == '\0' || strcmp(fp_env, "0") != 0) ? 1U : 0U;
+        llam_env_flag_value(fp_env, 1U) != 0U ? 1U : 0U;
 
 #if !defined(__linux__)
     /*
@@ -218,7 +218,7 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
 #else
     xsave_env = llam_env_get("LLAM_XSAVE_CONTEXT");
     // XSAVE is opt-in because it increases per-context allocation and switch cost.
-    if (xsave_env == NULL || xsave_env[0] == '\0' || strcmp(xsave_env, "0") == 0) {
+    if (llam_env_flag_value(xsave_env, 0U) == 0U) {
         goto done;
     }
 
@@ -250,7 +250,10 @@ int llam_detect_xsave_support(llam_runtime_t *rt) {
         rt->xsave_mask = 0U;
         goto done;
     }
-    rt->xsave_area_alloc_size = llam_align_up(rt->xsave_area_size, 64U);
+    if (llam_align_up_checked(rt->xsave_area_size, 64U, &rt->xsave_area_alloc_size) != 0) {
+        rt->xsave_mask = 0U;
+        goto done;
+    }
     rt->xsave_enabled = true;
 #endif
 
