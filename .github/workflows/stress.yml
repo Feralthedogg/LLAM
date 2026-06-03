@@ -252,10 +252,11 @@ jobs:
             export LLAM_BENCH_GUARD_MIN_OPS="select_recv_ready=3000000,select_timeout=6000000"
           fi
           if [ "${{ matrix.name }}" = "linux-x86_64-stress" ]; then
-            # Shared Linux/x86_64 runners occasionally starve the park/wake
-            # microbench while runtime stress and server correctness stay clean.
-            # Scheduled benchmark jobs own precise regression tracking.
-            export LLAM_BENCH_GUARD_MIN_OPS="select_park_wake=500000"
+            # Shared Linux/x86_64 runners occasionally starve short
+            # microbenchmarks while runtime stress and server correctness stay
+            # clean. Keep this as a catastrophic smoke guard; scheduled
+            # benchmark jobs own precise regression tracking.
+            export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,channel_pingpong=1000000,select_recv_ready=3000000,select_park_wake=500000,select_timeout=4000000,io_echo=100000,poll_wake=100000"
           fi
           if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then
             # Hosted Apple Silicon runners can temporarily halve pipe/kqueue
