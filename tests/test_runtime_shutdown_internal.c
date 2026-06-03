@@ -692,6 +692,111 @@ static int exercise_linux_wait_cqe_interrupt_policy(void) {
     return 0;
 }
 
+static void free_control_ops(llam_node_t *node) {
+    while (node != NULL && node->control_head != NULL) {
+        llam_io_control_op_t *next = node->control_head->next;
+
+        free(node->control_head);
+        node->control_head = next;
+    }
+    if (node != NULL) {
+        node->control_tail = NULL;
+    }
+}
+
+static int exercise_empty_poll_watch_cancel_disarms_backend_work(void) {
+    llam_node_t node;
+    llam_poll_watch_t watch;
+    llam_io_req_t req;
+    bool kick_node = true;
+    int rc;
+
+    memset(&node, 0, sizeof(node));
+    memset(&watch, 0, sizeof(watch));
+    memset(&req, 0, sizeof(req));
+
+    rc = pthread_mutex_init(&node.watch_lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        return fail_errno("watch lock init for empty poll watch cancel test failed");
+    }
+
+    rc = pthread_mutex_lock(&node.watch_lock);
+    if (rc != 0) {
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch lock for empty poll watch cancel test failed");
+    }
+    watch.wait_head = &req;
+    watch.wait_tail = &req;
+    watch.activating = true;
+    if (llam_node_queue_control_locked(&node, LLAM_IO_CONTROL_POLL_ACTIVATE, &watch) != 0) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_errno("queue poll activate for empty watch cancel test failed");
+    }
+    if (!llam_poll_watch_remove_waiter(&watch, &req) ||
+        !llam_poll_watch_disarm_if_empty_locked(&node, &watch, &kick_node)) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("empty activating poll watch was not disarmed after final waiter cancel");
+    }
+    if (watch.activating || watch.active || watch.deactivate_queued ||
+        node.control_head != NULL || kick_node) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("empty activating poll watch left backend work after final waiter cancel");
+    }
+    rc = pthread_mutex_unlock(&node.watch_lock);
+    if (rc != 0) {
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch unlock after activating poll watch cancel test failed");
+    }
+
+    memset(&watch, 0, sizeof(watch));
+    kick_node = false;
+    rc = pthread_mutex_lock(&node.watch_lock);
+    if (rc != 0) {
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch relock for active poll watch cancel test failed");
+    }
+    watch.active = true;
+    /*
+     * If the worker already consumed activation, cancel cannot drop it from the
+     * control queue.  The empty watch must instead enqueue deactivate so the
+     * active backend registration is drained before runtime shutdown.
+     */
+    if (!llam_poll_watch_disarm_if_empty_locked(&node, &watch, &kick_node)) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("active empty poll watch was not queued for deactivate");
+    }
+    if (!watch.deactivate_queued || node.control_head == NULL ||
+        node.control_head->kind != LLAM_IO_CONTROL_POLL_DEACTIVATE ||
+        node.control_head->target != &watch || !kick_node) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("active empty poll watch did not queue deactivate after final waiter cancel");
+    }
+    rc = pthread_mutex_unlock(&node.watch_lock);
+    if (rc != 0) {
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch unlock after active poll watch cancel test failed");
+    }
+
+    free_control_ops(&node);
+    pthread_mutex_destroy(&node.watch_lock);
+    return 0;
+}
+
 static int exercise_completion_drops_stale_cancel_control(void) {
 #if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_node_t *node;
@@ -1642,6 +1747,9 @@ int main(void) {
         return 1;
     }
     if (exercise_linux_wait_cqe_interrupt_policy() != 0) {
+        return 1;
+    }
+    if (exercise_empty_poll_watch_cancel_disarms_backend_work() != 0) {
         return 1;
     }
     if (exercise_completion_drops_stale_cancel_control() != 0) {

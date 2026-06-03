@@ -190,18 +190,10 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
             if (removed) {
                 (void)llam_node_complete_pending_ops(node, 1U);
             }
-        } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
-            pthread_mutex_lock(&node->watch_lock);
-            (void)llam_poll_watch_remove_waiter(req->poll_watch, req);
-            pthread_mutex_unlock(&node->watch_lock);
-        } else if (mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH && req->accept_watch != NULL) {
-            pthread_mutex_lock(&node->watch_lock);
-            (void)llam_accept_watch_remove_waiter(req->accept_watch, req);
-            pthread_mutex_unlock(&node->watch_lock);
-        } else if (mode == LLAM_IO_WAIT_MODE_RECV_WATCH && req->recv_watch != NULL) {
-            pthread_mutex_lock(&node->watch_lock);
-            (void)llam_recv_watch_remove_waiter(req->recv_watch, req);
-            pthread_mutex_unlock(&node->watch_lock);
+        } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
+                   mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
+                   mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
+            (void)llam_remove_watch_waiter_after_abort(node, req, mode, false);
         }
     }
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
@@ -319,30 +311,10 @@ static bool llam_abort_published_io_setup(llam_io_req_t *req,
         if (removed) {
             (void)llam_node_complete_pending_ops(node, 1U);
         }
-    } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
-        pthread_mutex_lock(&node->watch_lock);
-        removed = llam_poll_watch_remove_waiter(req->poll_watch, req);
-        if (removed) {
-            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
-            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
-        }
-        pthread_mutex_unlock(&node->watch_lock);
-    } else if (mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH && req->accept_watch != NULL) {
-        pthread_mutex_lock(&node->watch_lock);
-        removed = llam_accept_watch_remove_waiter(req->accept_watch, req);
-        if (removed) {
-            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
-            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
-        }
-        pthread_mutex_unlock(&node->watch_lock);
-    } else if (mode == LLAM_IO_WAIT_MODE_RECV_WATCH && req->recv_watch != NULL) {
-        pthread_mutex_lock(&node->watch_lock);
-        removed = llam_recv_watch_remove_waiter(req->recv_watch, req);
-        if (removed) {
-            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
-            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
-        }
-        pthread_mutex_unlock(&node->watch_lock);
+    } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
+               mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
+               mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
+        removed = llam_remove_watch_waiter_after_abort(node, req, mode, true);
     }
 
     if (removed) {

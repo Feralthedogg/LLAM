@@ -245,6 +245,127 @@ bool llam_recv_watch_pop_ready_shared(llam_recv_watch_t *watch,
     return true;
 }
 
+static bool llam_watch_disarm_if_empty_locked_common(llam_node_t *node,
+                                                     bool wait_empty,
+                                                     bool *active,
+                                                     bool *activating,
+                                                     bool *deactivate_queued,
+                                                     llam_io_control_kind_t activate_kind,
+                                                     llam_io_control_kind_t deactivate_kind,
+                                                     void *target,
+                                                     bool *kick_node) {
+    if (kick_node != NULL) {
+        *kick_node = false;
+    }
+    if (node == NULL || active == NULL || activating == NULL ||
+        deactivate_queued == NULL || target == NULL || !wait_empty) {
+        return true;
+    }
+
+    if (*activating && llam_drop_node_control_locked(node, activate_kind, target)) {
+        /*
+         * Cancel removed the final waiter before the worker consumed the
+         * activation control.  Dropping it avoids backend work that no task can
+         * observe and prevents run-drain hangs on idle descriptors.
+         */
+        *activating = false;
+    } else if ((*active || *activating) && !*deactivate_queued) {
+        *deactivate_queued = true;
+        if (llam_node_queue_control_locked(node, deactivate_kind, target) != 0) {
+            *deactivate_queued = false;
+            return false;
+        }
+        if (kick_node != NULL) {
+            *kick_node = true;
+        }
+    }
+    return true;
+}
+
+bool llam_poll_watch_disarm_if_empty_locked(llam_node_t *node, llam_poll_watch_t *watch, bool *kick_node) {
+    if (watch == NULL) {
+        return true;
+    }
+    return llam_watch_disarm_if_empty_locked_common(node,
+                                                   watch->wait_head == NULL,
+                                                   &watch->active,
+                                                   &watch->activating,
+                                                   &watch->deactivate_queued,
+                                                   LLAM_IO_CONTROL_POLL_ACTIVATE,
+                                                   LLAM_IO_CONTROL_POLL_DEACTIVATE,
+                                                   watch,
+                                                   kick_node);
+}
+
+bool llam_accept_watch_disarm_if_empty_locked(llam_node_t *node, llam_accept_watch_t *watch, bool *kick_node) {
+    if (watch == NULL) {
+        return true;
+    }
+    return llam_watch_disarm_if_empty_locked_common(node,
+                                                   watch->wait_head == NULL,
+                                                   &watch->active,
+                                                   &watch->activating,
+                                                   &watch->deactivate_queued,
+                                                   LLAM_IO_CONTROL_ACCEPT_ACTIVATE,
+                                                   LLAM_IO_CONTROL_ACCEPT_DEACTIVATE,
+                                                   watch,
+                                                   kick_node);
+}
+
+bool llam_recv_watch_disarm_if_empty_locked(llam_node_t *node, llam_recv_watch_t *watch, bool *kick_node) {
+    if (watch == NULL) {
+        return true;
+    }
+    return llam_watch_disarm_if_empty_locked_common(node,
+                                                   watch->wait_head == NULL,
+                                                   &watch->active,
+                                                   &watch->activating,
+                                                   &watch->deactivate_queued,
+                                                   LLAM_IO_CONTROL_RECV_ACTIVATE,
+                                                   LLAM_IO_CONTROL_RECV_DEACTIVATE,
+                                                   watch,
+                                                   kick_node);
+}
+
+bool llam_remove_watch_waiter_after_abort(llam_node_t *node,
+                                          llam_io_req_t *req,
+                                          unsigned mode,
+                                          bool clear_wait_mode) {
+    bool removed = false;
+    bool kick_node = false;
+
+    if (node == NULL || req == NULL) {
+        return false;
+    }
+
+    pthread_mutex_lock(&node->watch_lock);
+    if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
+        removed = llam_poll_watch_remove_waiter(req->poll_watch, req);
+        if (removed) {
+            (void)llam_poll_watch_disarm_if_empty_locked(node, req->poll_watch, &kick_node);
+        }
+    } else if (mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH && req->accept_watch != NULL) {
+        removed = llam_accept_watch_remove_waiter(req->accept_watch, req);
+        if (removed) {
+            (void)llam_accept_watch_disarm_if_empty_locked(node, req->accept_watch, &kick_node);
+        }
+    } else if (mode == LLAM_IO_WAIT_MODE_RECV_WATCH && req->recv_watch != NULL) {
+        removed = llam_recv_watch_remove_waiter(req->recv_watch, req);
+        if (removed) {
+            (void)llam_recv_watch_disarm_if_empty_locked(node, req->recv_watch, &kick_node);
+        }
+    }
+    if (removed && clear_wait_mode) {
+        atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
+        atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+    if (kick_node) {
+        llam_kick_node(node);
+    }
+    return removed;
+}
+
 bool llam_arm_watch_locked_common(llam_node_t *node,
                                   bool *active,
                                   bool *activating,

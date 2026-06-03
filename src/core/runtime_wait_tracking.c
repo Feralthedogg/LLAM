@@ -564,30 +564,10 @@ bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason) {
         if (removed) {
             (void)llam_node_complete_pending_ops(node, 1U);
         }
-    } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
-        pthread_mutex_lock(&node->watch_lock);
-        removed = llam_poll_watch_remove_waiter(req->poll_watch, req);
-        if (removed) {
-            atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
-            atomic_store(&req->inflight_owner_shard, UINT_MAX);
-        }
-        pthread_mutex_unlock(&node->watch_lock);
-    } else if (mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH && req->accept_watch != NULL) {
-        pthread_mutex_lock(&node->watch_lock);
-        removed = llam_accept_watch_remove_waiter(req->accept_watch, req);
-        if (removed) {
-            atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
-            atomic_store(&req->inflight_owner_shard, UINT_MAX);
-        }
-        pthread_mutex_unlock(&node->watch_lock);
-    } else if (mode == LLAM_IO_WAIT_MODE_RECV_WATCH && req->recv_watch != NULL) {
-        pthread_mutex_lock(&node->watch_lock);
-        removed = llam_recv_watch_remove_waiter(req->recv_watch, req);
-        if (removed) {
-            atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
-            atomic_store(&req->inflight_owner_shard, UINT_MAX);
-        }
-        pthread_mutex_unlock(&node->watch_lock);
+    } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
+               mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
+               mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
+        removed = llam_remove_watch_waiter_after_abort(node, req, mode, true);
     } else if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
         // In-flight operations require backend cancellation. Completion will do
         // the actual wake once the backend acknowledges or reports the request.

@@ -75,6 +75,13 @@ bool llam_recv_watch_pop_ready(llam_recv_watch_t *watch,
                              unsigned *node_index_out,
                              unsigned char **copy_data_out,
                              size_t *copy_capacity_out);
+bool llam_poll_watch_disarm_if_empty_locked(llam_node_t *node, llam_poll_watch_t *watch, bool *kick_node);
+bool llam_accept_watch_disarm_if_empty_locked(llam_node_t *node, llam_accept_watch_t *watch, bool *kick_node);
+bool llam_recv_watch_disarm_if_empty_locked(llam_node_t *node, llam_recv_watch_t *watch, bool *kick_node);
+bool llam_remove_watch_waiter_after_abort(llam_node_t *node,
+                                          llam_io_req_t *req,
+                                          unsigned mode,
+                                          bool clear_wait_mode);
 
 /*
  * Watch lookup/creation. Callers must hold node->watch_lock for *_locked APIs.
