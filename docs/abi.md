@@ -373,7 +373,10 @@ token. Destroying a task group with live children, active spawn/cancel
 operations, or an in-progress join fails with `EBUSY`. Calls racing with a
 completed group destroy fail with `EINVAL` instead of dereferencing reclaimed
 group storage. Child tasks are spawned on the group's owner runtime, including
-host-thread calls that are not currently running inside a managed task.
+host-thread calls that are not currently running inside a managed task. If the
+group's public-operation lifecycle counter reaches its saturated sentinel, new
+group operations fail closed with `EBUSY` instead of spawning or consuming
+children while teardown safety cannot be proven.
 
 `llam_yield()` is cooperative. It never transfers ownership of user memory and
 does not imply a memory fence beyond the synchronization performed by the

@@ -679,8 +679,9 @@ LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
  * diagnostics; callers must not join or detach it outside the group. Spawning
  * while another thread is joining the group fails with @c EBUSY. Calls racing
  * with a completed group destroy fail with @c EINVAL instead of dereferencing a
- * reclaimed handle. Children are always spawned on the group's owner runtime,
- * including when the caller is an unmanaged host thread.
+ * reclaimed handle. A saturated public-operation lifecycle sentinel also fails
+ * closed with @c EBUSY. Children are always spawned on the group's owner
+ * runtime, including when the caller is an unmanaged host thread.
  */
 LLAM_API llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       llam_task_fn fn,

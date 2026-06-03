@@ -4993,6 +4993,7 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         llam_task_t *raw_task;
         public_op_sentinel_select_state_t select_state;
         int value = 7;
+        void *out = NULL;
 
         (void)alarm(2U);
         if (llam_runtime_init(NULL) != 0) {
@@ -5057,12 +5058,48 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
             _exit(13);
         }
         errno = 0;
+        if (llam_channel_try_recv_result(channel, &out) != -1 || errno != EBUSY || out != NULL) {
+            _exit(24);
+        }
+        errno = 0;
+        if (llam_channel_close(channel) != -1 || errno != EBUSY) {
+            _exit(25);
+        }
+        errno = 0;
+        if (llam_channel_destroy(channel) != -1 || errno != EBUSY) {
+            _exit(26);
+        }
+        errno = 0;
         if (llam_mutex_trylock(mutex) != -1 || errno != EBUSY) {
             _exit(14);
         }
         errno = 0;
+        if (llam_mutex_lock(mutex) != -1 || errno != EBUSY) {
+            _exit(27);
+        }
+        errno = 0;
+        if (llam_mutex_lock_until(mutex, 0U) != -1 || errno != EBUSY) {
+            _exit(28);
+        }
+        errno = 0;
+        if (llam_mutex_unlock(mutex) != -1 || errno != EBUSY) {
+            _exit(29);
+        }
+        errno = 0;
+        if (llam_mutex_destroy(mutex) != -1 || errno != EBUSY) {
+            _exit(30);
+        }
+        errno = 0;
         if (llam_cond_signal(cond) != -1 || errno != EBUSY) {
             _exit(15);
+        }
+        errno = 0;
+        if (llam_cond_broadcast(cond) != -1 || errno != EBUSY) {
+            _exit(31);
+        }
+        errno = 0;
+        if (llam_cond_destroy(cond) != -1 || errno != EBUSY) {
+            _exit(32);
         }
         errno = 0;
         if (llam_cancel_token_cancel(token) != -1 || errno != EBUSY) {
@@ -5075,6 +5112,22 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         errno = 0;
         if (llam_task_group_cancel(group) != -1 || errno != EBUSY) {
             _exit(16);
+        }
+        errno = 0;
+        if (llam_task_group_spawn(group, public_op_sentinel_noop_task, NULL, NULL) != NULL || errno != EBUSY) {
+            _exit(33);
+        }
+        errno = 0;
+        if (llam_task_group_join(group) != -1 || errno != EBUSY) {
+            _exit(34);
+        }
+        errno = 0;
+        if (llam_task_group_join_until(group, 0U) != -1 || errno != EBUSY) {
+            _exit(35);
+        }
+        errno = 0;
+        if (llam_task_group_destroy(group) != -1 || errno != EBUSY) {
+            _exit(36);
         }
         if (llam_task_id(task) != 0U || strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
             _exit(17);
@@ -5137,6 +5190,32 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         return fail_msg("cancel-token cancel did not fail saturated active-op sentinel with EBUSY");
     case 23:
         return fail_msg("cancel-token query did not fail saturated active-op sentinel with EBUSY");
+    case 24:
+        return fail_msg("channel try-recv did not fail saturated active-op sentinel with EBUSY");
+    case 25:
+        return fail_msg("channel close did not fail saturated active-op sentinel with EBUSY");
+    case 26:
+        return fail_msg("channel destroy did not fail saturated active-op sentinel with EBUSY");
+    case 27:
+        return fail_msg("mutex lock did not fail saturated active-op sentinel with EBUSY");
+    case 28:
+        return fail_msg("mutex timed lock did not fail saturated active-op sentinel with EBUSY");
+    case 29:
+        return fail_msg("mutex unlock did not fail saturated active-op sentinel with EBUSY");
+    case 30:
+        return fail_msg("mutex destroy did not fail saturated active-op sentinel with EBUSY");
+    case 31:
+        return fail_msg("cond broadcast did not fail saturated active-op sentinel with EBUSY");
+    case 32:
+        return fail_msg("cond destroy did not fail saturated active-op sentinel with EBUSY");
+    case 33:
+        return fail_msg("task group spawn did not fail saturated active-op sentinel with EBUSY");
+    case 34:
+        return fail_msg("task group join did not fail saturated active-op sentinel with EBUSY");
+    case 35:
+        return fail_msg("task group timed join did not fail saturated active-op sentinel with EBUSY");
+    case 36:
+        return fail_msg("task group destroy did not fail saturated active-op sentinel with EBUSY");
     default:
         return fail_msg("public-op sentinel reject child returned unexpected status");
     }

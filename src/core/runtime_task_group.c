@@ -353,6 +353,17 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
         errno = EBUSY;
         return NULL;
     }
+    if (llam_public_active_op_is_saturated(llam_public_active_op_count(&group->active_ops))) {
+        /*
+         * Do not treat ordinary active ops as a spawn exclusion gate: group
+         * cancel and spawn are allowed to race by design.  Only the saturated
+         * sentinel is rejected so corrupted/exhausted public-op state fails
+         * closed instead of creating a new child while teardown is unsafe.
+         */
+        pthread_mutex_unlock(&group->lock);
+        errno = EBUSY;
+        return NULL;
+    }
     if (group->count >= SIZE_MAX / sizeof(*group->tasks)) {
         /*
          * Keep corrupted or future-imported group state from wrapping
