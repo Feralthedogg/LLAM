@@ -249,9 +249,14 @@ GitHub Actions is split by cost and depth:
 
 - `linux`, `macos`, and `Stress` are PR/push gates.
 - `Stress` repeats `test_runtime_stress`, pins/reports server stress seeds, streams long stress logs through `scripts/run_with_timeout.py`, and uploads diagnostics logs on failure or timeout.
-- `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental TSan, and benchmark guardrails from `.github/workflows/nightly.yml`.
+- `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental allowed-failure Linux TSan diagnostics, and benchmark guardrails from `.github/workflows/nightly.yml`.
 - `Weekly Soak` runs direct runtime soak plus the hour-long stability/accounting composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
 - `Runtime Benchmarks` runs scheduled LLAM/Go/Tokio benchmark comparisons and uploads graphs/results.
+
+Linux TSan is intentionally diagnostic rather than a hard push gate because
+stackful fiber runtimes can expose sanitizer-runtime interaction differences
+across hosted environments. ASan/UBSan, direct runtime tests, stress jobs, and
+regular platform CI remain hard gates.
 
 Current reliability coverage is split between direct runtime tests and the
 example server. Direct runtime tests own LLAM correctness for lifecycle,

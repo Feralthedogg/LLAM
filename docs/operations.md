@@ -351,7 +351,11 @@ profiles when you want a fully empty tree; it removes `object-*`, analyzer
 `.plist` files, and link-signature files in addition to ordinary build outputs.
 
 Use ThreadSanitizer on focused race tests rather than the longest stackful
-edge tests:
+edge tests. In GitHub Actions, the Linux TSan nightly job is intentionally
+allowed-failure and diagnostic-only because stackful fiber switching can produce
+environment-dependent sanitizer reports. Treat its uploaded logs as required
+triage input, but keep ASan/UBSan, direct runtime tests, and regular stress CI
+as the hard gates.
 
 ```bash
 make OBJDIR=object-tsan-hunt CC=clang \
@@ -465,8 +469,8 @@ Before tagging a release build, require:
 - `Nightly Deep CI` on at least one recent `main` commit before a release
   candidate: POSIX standard composite, Windows 2022/2025 policy stress,
   deterministic runtime fuzz, conservative scheduler/channel/select/I/O
-  benchmark guardrails, ASan/UBSan
-  quick gate, and experimental TSan diagnostics.
+  benchmark guardrails, ASan/UBSan quick gate, and experimental allowed-failure
+  Linux TSan diagnostics.
 - `Weekly Soak` direct runtime soak plus hour-long server composite on Linux
   x86_64 and macOS arm64. The direct runtime soak repeats fuzz,
   multi-runtime ownership/isolation, runtime stress, shutdown, and owned-buffer

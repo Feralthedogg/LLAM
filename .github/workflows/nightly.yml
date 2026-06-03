@@ -282,6 +282,16 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Note TSan CI policy
+        run: |
+          {
+            echo "### Linux TSan CI policy"
+            echo
+            echo "This job is an experimental allowed-failure diagnostic gate."
+            echo "Stackful fiber runtimes can interact with ThreadSanitizer in environment-dependent ways, so failures must be inspected from uploaded logs rather than treated as an automatic push failure."
+            echo "ASan/UBSan, direct runtime tests, and regular stress jobs remain hard CI gates."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install dependencies
         run: |
           sudo apt-get update
