@@ -2060,6 +2060,7 @@ test-fuzz-heavy: test_runtime_fuzz
 
 test-process-utils:
 	python3 scripts/test_process_utils.py
+	python3 scripts/test_bench_runtime_compare.py
 
 test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress test_runtime_shutdown_internal test_io_buffers
 	python3 scripts/runtime_soak.py \
