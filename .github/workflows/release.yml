@@ -142,12 +142,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
-          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
+          ctest --test-dir build/release-windows --output-on-failure --timeout 180 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
           $env:LLAM_WINDOWS_IOCP_TCP_POLLIN = "1"
-          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_windows_iocp_io"
+          ctest --test-dir build/release-windows --output-on-failure --timeout 180 -C Release -R "test_windows_iocp_io"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }

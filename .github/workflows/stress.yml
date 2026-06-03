@@ -118,7 +118,7 @@ jobs:
         run: |
           set -o pipefail
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
-          ctest --test-dir build/stress --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
+          ctest --test-dir build/stress --output-on-failure --timeout 240 2>&1 | tee "$OUT_DIR/ctest.log"
 
       - name: Broker ring security stress repeat
         run: |

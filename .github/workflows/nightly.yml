@@ -111,7 +111,7 @@ jobs:
         run: |
           set -o pipefail
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
-          ctest --test-dir build/nightly --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
+          ctest --test-dir build/nightly --output-on-failure --timeout 300 2>&1 | tee "$OUT_DIR/ctest.log"
 
       - name: Fault and completion-order edge repeat
         run: |
@@ -359,7 +359,7 @@ jobs:
           .\scripts\prepare_ci_artifact_dir.ps1 -Path $artifactDir
           $repeat = [int]("${{ github.event.inputs.runtime_stress_repeat || '20' }}")
           & {
-            ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
+            ctest --test-dir build/nightly-windows --output-on-failure --timeout 180 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
             }
@@ -386,7 +386,7 @@ jobs:
             Remove-Item Env:\LLAM_RUNTIME_INVARIANT_SCENARIOS -ErrorAction SilentlyContinue
             foreach ($generation in @("10", "11")) {
               $env:LLAM_WINDOWS_FORCE_GENERATION = $generation
-              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
+              ctest --test-dir build/nightly-windows --output-on-failure --timeout 180 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
               if ($LASTEXITCODE -ne 0) {
                 exit $LASTEXITCODE
               }
@@ -398,7 +398,7 @@ jobs:
                 }
               }
               $env:LLAM_WINDOWS_IOCP_TCP_POLLIN = "1"
-              ctest --test-dir build/nightly-windows --output-on-failure -C Release -R "test_windows_iocp_io"
+              ctest --test-dir build/nightly-windows --output-on-failure --timeout 180 -C Release -R "test_windows_iocp_io"
               if ($LASTEXITCODE -ne 0) {
                 exit $LASTEXITCODE
               }
