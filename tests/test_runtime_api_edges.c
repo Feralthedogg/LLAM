@@ -4897,6 +4897,29 @@ static int test_public_slot_shift_bounds(void) {
 static int test_public_active_op_overflow_fails_closed(void) {
     _Atomic size_t active_ops;
 
+    atomic_init(&active_ops, 0U);
+    llam_public_active_op_end(&active_ops);
+    if (llam_public_active_op_count(&active_ops) != 0U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op end underflowed idle counter to %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+
+    atomic_store_explicit(&active_ops, SIZE_MAX / 2U, memory_order_relaxed);
+    errno = 0;
+    if (llam_public_active_op_try_begin(&active_ops) != -1 || errno != EBUSY) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not reject high-half counter with EBUSY\n");
+        return 1;
+    }
+    if (llam_public_active_op_count(&active_ops) != SIZE_MAX) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not publish saturated sentinel from high-half count: %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+
     atomic_init(&active_ops, SIZE_MAX);
     /*
      * active_ops gates public destroy paths. If begin wraps SIZE_MAX to zero,

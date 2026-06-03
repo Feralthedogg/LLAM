@@ -440,22 +440,29 @@ static inline void llam_public_active_op_init(_Atomic size_t *active_ops) {
 }
 
 static inline int llam_public_active_op_try_begin(_Atomic size_t *active_ops) {
+    size_t current;
     size_t previous;
 
     if (active_ops == NULL) {
         return 0;
     }
+    current = atomic_load_explicit(active_ops, memory_order_relaxed);
+    if (LLAM_UNLIKELY(current >= (SIZE_MAX / 2U))) {
+        /*
+         * Reaching the high half of size_t is not a valid public-operation
+         * count. Publish the permanent busy sentinel before doing arithmetic:
+         * fetch_add(SIZE_MAX, 1) briefly wraps to zero, which can fool
+         * lock-free quiescence checks into freeing an object under a corrupted
+         * lifetime state.
+         */
+        atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
+        errno = EBUSY;
+        return -1;
+    }
     previous = atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
     if (LLAM_LIKELY(previous < (SIZE_MAX / 2U))) {
         return 0;
     }
-    /*
-     * Reaching the high half of size_t is not a valid public-operation count.
-     * Treat it as corruption/exhaustion and fail closed by publishing the
-     * permanent busy sentinel. Resolve/destroy paths hold either the family
-     * registry lock or the object's lifecycle lock while beginning pins, so
-     * destroy cannot observe the repair window.
-     */
     atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
     errno = EBUSY;
     return -1;
@@ -466,9 +473,23 @@ static inline void llam_public_active_op_begin(_Atomic size_t *active_ops) {
 }
 
 static inline void llam_public_active_op_end(_Atomic size_t *active_ops) {
+    size_t current;
     size_t previous;
 
     if (active_ops == NULL) {
+        return;
+    }
+    current = atomic_load_explicit(active_ops, memory_order_relaxed);
+    if (current == 0U) {
+        return;
+    }
+    if (LLAM_UNLIKELY(current >= (SIZE_MAX / 2U))) {
+        /*
+         * Saturated/corrupt counters are permanent EBUSY sentinels. Do not use
+         * fetch_sub on that state: SIZE_MAX - 1 would look like a huge but
+         * different active count instead of the canonical sentinel.
+         */
+        atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
         return;
     }
     previous = atomic_fetch_sub_explicit(active_ops, 1U, memory_order_relaxed);
