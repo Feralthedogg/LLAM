@@ -254,6 +254,7 @@ $BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 Require-Input (Join-Path $Root "LICENSE")
 Require-Input (Join-Path $Root "README.md")
 Require-Input (Join-Path $Root "CHANGELOG.md")
+Require-Input (Join-Path $Root "scripts\install.sh")
 Require-Input (Join-Path $Root "scripts\install.ps1")
 Require-Input (Join-Path $Root "scripts\verify_windows.ps1")
 Require-Input (Join-Path $Root "docs")
@@ -268,6 +269,7 @@ foreach ($InputPath in @(
     (Join-Path $Root "LICENSE"),
     (Join-Path $Root "README.md"),
     (Join-Path $Root "CHANGELOG.md"),
+    (Join-Path $Root "scripts\install.sh"),
     (Join-Path $Root "scripts\install.ps1"),
     (Join-Path $Root "scripts\verify_windows.ps1"),
     (Join-Path $Root "docs"),
@@ -285,6 +287,7 @@ Set-Content -LiteralPath (Join-Path $Stage "VERSION") -Value $Version -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "ABI_MAJOR") -Value $AbiMajor -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "LIBRARY_VERSION") -Value $LibraryVersion -NoNewline
 Copy-Item -LiteralPath @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md"), (Join-Path $Root "CHANGELOG.md")) -Destination $Stage
+Copy-Item -LiteralPath (Join-Path $Root "scripts\install.sh") -Destination $Stage
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.ps1") -Destination $Stage
 foreach ($Item in Get-ChildItem -LiteralPath (Join-Path $Root "docs") -Force) {
     Copy-Item -Recurse -Force -LiteralPath $Item.FullName -Destination (Join-Path $Stage "docs")

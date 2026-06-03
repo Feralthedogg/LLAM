@@ -179,6 +179,8 @@ jobs:
           Expand-Archive -LiteralPath $archive -DestinationPath $tmp -Force
           $root = Join-Path $tmp "llam-$packageVersion-${{ matrix.target }}"
           foreach ($file in @(
+            "install.sh",
+            "install.ps1",
             "include\llam\runtime.h",
             "include\llam\io.h",
             "include\llam\platform.h",
