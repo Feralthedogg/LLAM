@@ -48,6 +48,9 @@
 #define LLAM_PUBLIC_HANDLE_FAMILY_IO_BUFFER 7U
 #define LLAM_PUBLIC_HANDLE_EPOCH_MASK LLAM_PUBLIC_HANDLE_FAMILY_MAX_EPOCH
 #define LLAM_PUBLIC_SLOT_WORD_BITS ((unsigned)(sizeof(uintptr_t) * CHAR_BIT))
+#define LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD ((SIZE_MAX / 2U) - 1U)
+#define LLAM_PUBLIC_ACTIVE_OP_BEGIN_LIMIT (LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD - 1U)
+#define LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL SIZE_MAX
 
 typedef struct llam_public_slot {
     void *object;
@@ -447,23 +450,22 @@ static inline int llam_public_active_op_try_begin(_Atomic size_t *active_ops) {
         return 0;
     }
     current = atomic_load_explicit(active_ops, memory_order_relaxed);
-    if (LLAM_UNLIKELY(current >= (SIZE_MAX / 2U))) {
+    if (LLAM_UNLIKELY(current >= LLAM_PUBLIC_ACTIVE_OP_BEGIN_LIMIT)) {
         /*
-         * Reaching the high half of size_t is not a valid public-operation
-         * count. Publish the permanent busy sentinel before doing arithmetic:
-         * fetch_add(SIZE_MAX, 1) briefly wraps to zero, which can fool
-         * lock-free quiescence checks into freeing an object under a corrupted
-         * lifetime state.
+         * The final low-half value and the high half are reserved sentinel
+         * space. A begin from the last valid count would increment into that
+         * range, and a later end could decrement it back into an apparently valid
+         * count. Publish the permanent busy sentinel before doing arithmetic.
          */
-        atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
+        atomic_store_explicit(active_ops, LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL, memory_order_relaxed);
         errno = EBUSY;
         return -1;
     }
     previous = atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
-    if (LLAM_LIKELY(previous < (SIZE_MAX / 2U))) {
+    if (LLAM_LIKELY(previous < LLAM_PUBLIC_ACTIVE_OP_BEGIN_LIMIT)) {
         return 0;
     }
-    atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
+    atomic_store_explicit(active_ops, LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL, memory_order_relaxed);
     errno = EBUSY;
     return -1;
 }
@@ -483,24 +485,24 @@ static inline void llam_public_active_op_end(_Atomic size_t *active_ops) {
     if (current == 0U) {
         return;
     }
-    if (LLAM_UNLIKELY(current >= (SIZE_MAX / 2U))) {
+    if (LLAM_UNLIKELY(current >= LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD)) {
         /*
          * Saturated/corrupt counters are permanent EBUSY sentinels. Do not use
          * fetch_sub on that state: SIZE_MAX - 1 would look like a huge but
          * different active count instead of the canonical sentinel.
          */
-        atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
+        atomic_store_explicit(active_ops, LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL, memory_order_relaxed);
         return;
     }
     previous = atomic_fetch_sub_explicit(active_ops, 1U, memory_order_relaxed);
-    if (LLAM_LIKELY(previous > 0U && previous < (SIZE_MAX / 2U))) {
+    if (LLAM_LIKELY(previous > 0U && previous < LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD)) {
         return;
     }
     if (previous == 0U) {
         (void)atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
         return;
     }
-    atomic_store_explicit(active_ops, SIZE_MAX, memory_order_relaxed);
+    atomic_store_explicit(active_ops, LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL, memory_order_relaxed);
 }
 
 static inline size_t llam_public_active_op_count(const _Atomic size_t *active_ops) {
@@ -508,7 +510,7 @@ static inline size_t llam_public_active_op_count(const _Atomic size_t *active_op
 }
 
 static inline bool llam_public_active_op_is_saturated(size_t active_ops) {
-    return active_ops >= (SIZE_MAX / 2U);
+    return active_ops >= LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD;
 }
 
 #endif

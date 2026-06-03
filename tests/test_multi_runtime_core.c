@@ -2652,6 +2652,47 @@ static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
 }
 #endif
 
+static int test_runtime_begin_active_op_near_sentinel_fails_busy(void) {
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
+    size_t active_ops;
+    int saved_errno;
+
+    if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+        return test_fail_errno("runtime active-op near-sentinel setup failed");
+    }
+
+    /*
+     * The final low-half value and the high half of active_ops are reserved as
+     * busy/corrupt sentinel space. Beginning a public op at half-1 must fail
+     * before arithmetic can produce a non-canonical sentinel that later end paths
+     * decrement back into apparently-valid counts.
+     */
+    atomic_store_explicit(&runtime->active_ops, (SIZE_MAX / 2U) - 1U, memory_order_release);
+    errno = 0;
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) == 0) {
+        if (pinned_runtime != NULL) {
+            llam_runtime_end_public_op(pinned_runtime);
+        }
+        atomic_store_explicit(&runtime->active_ops, 0U, memory_order_release);
+        llam_runtime_destroy(runtime);
+        return test_fail("runtime public op accepted near-sentinel active_ops");
+    }
+    saved_errno = errno;
+    active_ops = atomic_load_explicit(&runtime->active_ops, memory_order_acquire);
+    atomic_store_explicit(&runtime->active_ops, 0U, memory_order_release);
+    llam_runtime_destroy(runtime);
+
+    if (saved_errno != EBUSY) {
+        errno = saved_errno;
+        return test_fail_errno("runtime near-sentinel begin did not fail with EBUSY");
+    }
+    if (!llam_public_active_op_is_saturated(active_ops)) {
+        return test_fail("runtime near-sentinel begin did not leave a busy sentinel");
+    }
+    return 0;
+}
+
 static int test_runtime_destroy_waits_for_active_run(void) {
 #if LLAM_PLATFORM_POSIX
     llam_runtime_opts_t opts;
@@ -3391,6 +3432,8 @@ int main(void) {
         {"runtime_destroy_active_op_sentinel_does_not_hang",
          test_runtime_destroy_active_op_sentinel_does_not_hang},
 #endif
+        {"runtime_begin_active_op_near_sentinel_fails_busy",
+         test_runtime_begin_active_op_near_sentinel_fails_busy},
         {"runtime_destroy_waits_for_active_run", test_runtime_destroy_waits_for_active_run},
         {"unmanaged_join_races_runtime_destroy", test_unmanaged_join_races_runtime_destroy},
         {"runtime_run_start_destroy_race", test_runtime_run_start_destroy_race},

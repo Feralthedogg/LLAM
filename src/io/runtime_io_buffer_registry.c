@@ -195,7 +195,7 @@ static llam_io_buffer_t *llam_io_buffer_public_unregister_impl(llam_io_buffer_t 
         (void)pthread_mutex_unlock(&g_llam_io_buffer_public_registry_lock);
         return NULL;
     }
-    if (llam_public_active_op_count(&buffer->public_active_ops) >= (SIZE_MAX / 2U)) {
+    if (llam_public_active_op_is_saturated(llam_public_active_op_count(&buffer->public_active_ops))) {
         /*
          * SIZE_MAX is the permanent busy sentinel used when public active-op
          * accounting detects corrupted or exhausted state. Release must fail
@@ -355,7 +355,7 @@ void *llam_io_buffer_public_data(llam_io_buffer_t *buffer) {
 
     (void)pthread_mutex_lock(&g_llam_io_buffer_public_registry_lock);
     if (llam_io_buffer_public_decode_handle_locked(buffer, false, &live)) {
-        if (llam_public_active_op_count(&live->public_active_ops) >= (SIZE_MAX / 2U)) {
+        if (llam_public_active_op_is_saturated(llam_public_active_op_count(&live->public_active_ops))) {
             /*
              * The data accessor does not pin because it returns a borrowed
              * pointer whose lifetime is governed by release.  Saturated

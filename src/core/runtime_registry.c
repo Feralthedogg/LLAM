@@ -105,9 +105,9 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
         return -1;
     }
     active_ops = atomic_load_explicit(&rt->active_ops, memory_order_acquire);
-    if (LLAM_UNLIKELY(active_ops >= (SIZE_MAX / 2U))) {
+    if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(active_ops))) {
         /*
-         * The high half is reserved as corrupted/exhausted active-op state.
+         * Reserved/sentinel counts are corrupted or exhausted active-op state.
          * Destroy must fail closed before claiming the handle; otherwise it
          * would spin forever waiting for the permanent sentinel to become zero.
          */
@@ -200,27 +200,20 @@ int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_r
         errno = EINVAL;
         return -1;
     }
-    if (LLAM_UNLIKELY(atomic_load_explicit(&registered->active_ops, memory_order_acquire) >= (SIZE_MAX / 2U))) {
+    if (LLAM_UNLIKELY(llam_public_active_op_try_begin(&registered->active_ops) != 0)) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
-        errno = EBUSY;
         return -1;
     }
-    (void)atomic_fetch_add_explicit(&registered->active_ops, 1U, memory_order_acq_rel);
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
     *out_runtime = registered;
     return 0;
 }
 
 void llam_runtime_end_public_op(llam_runtime_t *runtime) {
-    size_t previous;
-
     if (runtime == NULL) {
         return;
     }
-    previous = atomic_fetch_sub_explicit(&runtime->active_ops, 1U, memory_order_acq_rel);
-    if (LLAM_UNLIKELY(previous == 0U)) {
-        (void)atomic_fetch_add_explicit(&runtime->active_ops, 1U, memory_order_release);
-    }
+    llam_public_active_op_end(&runtime->active_ops);
 }
 
 int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
@@ -242,8 +235,8 @@ int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
         if (atomic_load_explicit(&iter->destroy_claimed, memory_order_acquire)) {
             continue;
         }
-        if (LLAM_UNLIKELY(atomic_load_explicit(&iter->active_ops, memory_order_acquire) >= (SIZE_MAX / 2U))) {
-            rc = EBUSY;
+        if (LLAM_UNLIKELY(llam_public_active_op_try_begin(&iter->active_ops) != 0)) {
+            rc = errno;
             break;
         }
         if (count == capacity) {
@@ -266,7 +259,6 @@ int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg) {
             items = next_items;
             capacity = next_capacity;
         }
-        (void)atomic_fetch_add_explicit(&iter->active_ops, 1U, memory_order_acq_rel);
         items[count++] = iter;
     }
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);

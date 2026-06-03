@@ -4906,6 +4906,20 @@ static int test_public_active_op_overflow_fails_closed(void) {
         return 1;
     }
 
+    atomic_store_explicit(&active_ops, LLAM_PUBLIC_ACTIVE_OP_BEGIN_LIMIT, memory_order_relaxed);
+    errno = 0;
+    if (llam_public_active_op_try_begin(&active_ops) != -1 || errno != EBUSY) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not reject pre-sentinel counter with EBUSY\n");
+        return 1;
+    }
+    if (llam_public_active_op_count(&active_ops) != LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not publish sentinel from pre-sentinel count: %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+
     atomic_store_explicit(&active_ops, SIZE_MAX / 2U, memory_order_relaxed);
     errno = 0;
     if (llam_public_active_op_try_begin(&active_ops) != -1 || errno != EBUSY) {
