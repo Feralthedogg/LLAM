@@ -214,6 +214,8 @@ int main(int argc, char **argv) {
         "llam_broker_test_buffer_free_count",
         "llam_broker_test_buffer_free_count_reset",
         "llam_broker_test_force_subject_entropy_failure",
+        "llam_broker_test_force_subject_value",
+        "llam_runtime_test_force_live_iter_snapshot_alloc_failure",
         "llam_broker_client_self_test_exchange",
         "llam_broker_client_self_test_local",
         "llam_broker_client_self_test_unix",

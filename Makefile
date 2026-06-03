@@ -773,9 +773,9 @@ audit-shared-exports: shared
 
 audit-production-test-hooks: static
 	@if command -v nm >/dev/null 2>&1; then \
-		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_(force_.*entropy_failure|buffer_free_count)' >/dev/null; then \
+		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
 			echo "production static runtime exports test fault-injection hooks" >&2; \
-			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_(force_.*entropy_failure|buffer_free_count)' >&2; \
+			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
 			exit 1; \
 		fi; \
 	fi
