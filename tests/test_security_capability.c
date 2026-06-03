@@ -7757,6 +7757,10 @@ typedef struct broker_destroy_thread_state {
     llam_broker_t *broker;
 } broker_destroy_thread_state_t;
 
+typedef struct broker_end_op_thread_state {
+    llam_broker_t *broker;
+} broker_end_op_thread_state_t;
+
 typedef struct broker_buffer_read_thread_state {
     llam_broker_t *broker;
     const llam_capability_token_t *token;
@@ -7786,6 +7790,13 @@ static void *broker_destroy_thread(void *arg) {
     broker_destroy_thread_state_t *state = (broker_destroy_thread_state_t *)arg;
 
     llam_broker_destroy(state->broker);
+    return NULL;
+}
+
+static void *broker_end_op_thread(void *arg) {
+    broker_end_op_thread_state_t *state = (broker_end_op_thread_state_t *)arg;
+
+    llam_broker_end_op(state->broker);
     return NULL;
 }
 
@@ -8320,6 +8331,69 @@ static int test_broker_destroy_from_active_op_does_not_hang(void) {
                 WEXITSTATUS(status));
         return -1;
     }
+#else
+    return 0;
+#endif
+}
+
+static int test_broker_end_op_requires_thread_local_owner(void) {
+#if LLAM_PLATFORM_POSIX
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    broker_end_op_thread_state_t end_state;
+    pthread_t end_thread;
+    bool broker_initialized = false;
+    bool active_op = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (llam_broker_begin_op(&broker) != 0) {
+        goto done;
+    }
+    active_op = true;
+
+    /*
+     * active_ops is a lifecycle pin owned by the thread-local op frame that
+     * began it. A foreign thread must not be able to release that pin: doing so
+     * would let destroy proceed while the original accepted request is still
+     * executing against broker-owned authority and runtime state.
+     */
+    end_state.broker = &broker;
+    if (pthread_create(&end_thread, NULL, broker_end_op_thread, &end_state) != 0) {
+        goto done;
+    }
+    (void)pthread_join(end_thread, NULL);
+    if (broker_test_active_ops(&broker) != 1U) {
+        fprintf(stderr,
+                "[test_security_capability] foreign broker end_op released active pin count=%" PRIu32 "\n",
+                broker_test_active_ops(&broker));
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    active_op = false;
+    if (broker_test_active_ops(&broker) != 0U) {
+        fprintf(stderr,
+                "[test_security_capability] owner broker end_op did not release active pin count=%" PRIu32 "\n",
+                broker_test_active_ops(&broker));
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (active_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
 #else
     return 0;
 #endif
@@ -12094,6 +12168,7 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_active_op_sentinel_does_not_hang);
 #endif
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_from_active_op_does_not_hang);
+    LLAM_RUN_SECURITY_TEST(test_broker_end_op_requires_thread_local_owner);
     LLAM_RUN_SECURITY_TEST(test_broker_begin_active_op_sentinel_fails_busy);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);

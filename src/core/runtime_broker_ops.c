@@ -108,11 +108,11 @@ static int llam_broker_tls_enter_op(llam_broker_t *broker, uint64_t subject_id) 
     return 0;
 }
 
-static void llam_broker_tls_leave_op(llam_broker_t *broker) {
+static bool llam_broker_tls_leave_op(llam_broker_t *broker) {
     size_t i;
 
     if (broker == NULL) {
-        return;
+        return false;
     }
     for (i = 0U; i < LLAM_BROKER_TLS_OP_DEPTH; ++i) {
         if (g_llam_broker_tls_ops[i].broker == broker &&
@@ -122,9 +122,10 @@ static void llam_broker_tls_leave_op(llam_broker_t *broker) {
             if (g_llam_broker_tls_ops[i].depth == 0U) {
                 g_llam_broker_tls_ops[i].broker = NULL;
             }
-            return;
+            return true;
         }
     }
+    return false;
 }
 
 uint64_t llam_broker_current_subject(const llam_broker_t *broker) {
@@ -202,7 +203,19 @@ int llam_broker_begin_op(llam_broker_t *broker) {
 }
 
 void llam_broker_end_op(llam_broker_t *broker) {
+    bool owned;
+
     if (llam_broker_lock(broker) != 0) {
+        return;
+    }
+    /*
+     * active_ops is paired with a thread-local op frame. A foreign or duplicate
+     * end_op must not decrement someone else's lifecycle pin, otherwise destroy
+     * can free broker-owned authority while the real owner still executes.
+     */
+    owned = llam_broker_tls_leave_op(broker);
+    if (LLAM_UNLIKELY(!owned)) {
+        llam_broker_unlock(broker);
         return;
     }
     if (LLAM_UNLIKELY(broker->active_ops >= LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL)) {
@@ -214,7 +227,6 @@ void llam_broker_end_op(llam_broker_t *broker) {
     } else if (broker->active_ops > 0U) {
         broker->active_ops -= 1U;
     }
-    llam_broker_tls_leave_op(broker);
     if (broker->destroying && broker->active_ops == 0U && broker->idle_cond_initialized) {
         (void)pthread_cond_broadcast(&broker->idle_cond);
     }
