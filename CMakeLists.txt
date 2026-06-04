@@ -134,6 +134,8 @@ set(LLAM_RUNTIME_SOURCES
     src/core/runtime_wait_accounting.c
     src/core/runtime_timer_heap.c
     src/core/runtime_timer.c
+    src/core/runtime_timer_api.c
+    src/core/runtime_signal_api.c
     src/core/runtime_time.c
     src/core/runtime_trace.c
     src/core/runtime_util.c
@@ -158,6 +160,8 @@ set(LLAM_RUNTIME_SOURCES
     src/io/runtime_io_api_issue.c
     src/io/runtime_io_buffer_registry.c
     src/io/runtime_io_api_blocking_file_ops.c
+    src/io/runtime_io_api_blocking_wrappers.c
+    src/io/runtime_io_api_datagram.c
     src/io/runtime_io_api_handle_positional.c
     src/io/runtime_io_api_owned.c
     src/io/runtime_io_api_positional.c

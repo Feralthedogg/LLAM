@@ -511,7 +511,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS and BSD use kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, and owned-buffer reads on supported native backends. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS and BSD use kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, datagram `recvfrom`/`sendto`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, owned-buffer reads, DNS resolution, and blocking filesystem open/stat wrappers. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
 
 ```c
 #include "llam/runtime.h"
@@ -588,6 +588,27 @@ if (n > 0 && buffer != NULL) {
     (void)size;
 }
 llam_io_buffer_release(buffer);
+```
+
+UDP and other datagram workloads can preserve peer address information with
+`llam_recvfrom()` / `llam_sendto()` or receive into runtime-owned storage with
+`llam_recvfrom_owned()`:
+
+```c
+struct sockaddr_storage peer;
+socklen_t peer_len = sizeof(peer);
+llam_io_buffer_t *packet = NULL;
+
+ssize_t n = llam_recvfrom_owned(fd,
+                                1500,
+                                0,
+                                (struct sockaddr *)&peer,
+                                &peer_len,
+                                &packet);
+if (n > 0) {
+    (void)llam_io_buffer_data(packet);
+}
+llam_io_buffer_release(packet);
 ```
 
 For DB/storage workloads, use positional I/O so the current file offset is not
@@ -670,6 +691,9 @@ Task scheduling:
 | `llam_detach` | Consume a task handle without waiting for completion. |
 | `llam_sleep_ns` | Sleep for a duration. |
 | `llam_sleep_until` | Sleep until an absolute deadline. |
+| `llam_timer_create_ex` / `llam_timer_create` | Create a waitable interval timer handle. |
+| `llam_timer_wait` / `llam_timer_wait_until` | Wait for timer ticks and receive the number of elapsed intervals. |
+| `llam_timer_reset` / `llam_timer_cancel` / `llam_timer_destroy` | Re-arm, cancel, or destroy a timer; destroy fails with `EBUSY` while operations are active. |
 | `llam_task_set_class` | Change the current task class; invalid class values fail with `EINVAL`. |
 | `llam_current_task` | Return the current task handle. |
 | `llam_task_id` | Return a task id. |
@@ -700,6 +724,10 @@ Blocking:
 | `llam_call_blocking` | Convenience blocking API; ambiguous when callback returns `NULL`. |
 | `llam_enter_blocking` | Mark the current task as entering a blocking region. |
 | `llam_leave_blocking` | Mark the current task as leaving a blocking region. |
+| `llam_getaddrinfo_result` | Resolve DNS through the blocking path; resolver errors are returned through `gai_error`. |
+| `llam_freeaddrinfo_result` | Free address results returned by `llam_getaddrinfo_result`. |
+| `llam_open_async` | Open a filesystem path through the blocking path and return a platform handle. |
+| `llam_stat_path_ex` | Read fixed-width file metadata through the blocking path. |
 
 Cancellation:
 
@@ -755,6 +783,8 @@ I/O:
 | `llam_preadv_handle` / `llam_pwritev_handle` | Positional scatter/gather HANDLE read/write. |
 | `llam_read_owned` | Read into a runtime-owned buffer. |
 | `llam_recv_owned` | Receive with flags into a runtime-owned buffer. |
+| `llam_recvfrom` / `llam_sendto` | Datagram receive/send with peer address support. |
+| `llam_recvfrom_owned` | Receive a datagram into a runtime-owned buffer while returning the peer address. |
 | `llam_io_buffer_opts_init` / `llam_io_buffer_alloc_ex` | Initialize and allocate owned I/O buffers with explicit capacity, alignment, and flags. |
 | `llam_io_buffer_alloc` / `llam_io_buffer_alloc_aligned` | Allocate default or explicitly aligned owned I/O buffers. |
 | `llam_io_buffer_release` | Release an owned buffer and invalidate borrowed data pointers. |
@@ -778,6 +808,7 @@ Time, debug, and platform:
 | `llam_handle_t` | Platform-specific generic handle type for HANDLE I/O APIs. |
 | `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Platform-correct invalid descriptor sentinel and predicate. |
 | `LLAM_INVALID_HANDLE` / `LLAM_HANDLE_IS_INVALID` | Platform-correct invalid generic-handle sentinel and predicate. |
+| `llam_signal_set_create_ex` / `llam_signal_wait` / `llam_signal_wait_until` / `llam_signal_set_destroy` | Linux-only opt-in signal wait-set API; other platforms return `ENOTSUP`. |
 | `LLAM_PLATFORM_LINUX` | Linux build flag. |
 | `LLAM_PLATFORM_DARWIN` | macOS/Darwin build flag. |
 | `LLAM_PLATFORM_FREEBSD` / `LLAM_PLATFORM_OPENBSD` / `LLAM_PLATFORM_NETBSD` / `LLAM_PLATFORM_DRAGONFLY` | BSD family build flags. |

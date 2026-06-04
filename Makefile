@@ -262,6 +262,8 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/runtime_wait_tracking.o \
 	$(OBJDIR)/src/core/runtime_timer_heap.o \
 	$(OBJDIR)/src/core/runtime_timer.o \
+	$(OBJDIR)/src/core/runtime_timer_api.o \
+	$(OBJDIR)/src/core/runtime_signal_api.o \
 	$(OBJDIR)/src/engine/runtime_engine.o \
 	$(OBJDIR)/src/engine/runtime_block.o \
 	$(OBJDIR)/src/io/runtime_io_engine.o \
@@ -303,8 +305,10 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/runtime_io_api_issue.o \
 	$(OBJDIR)/src/io/runtime_io_api_blocking_ops.o \
 	$(OBJDIR)/src/io/runtime_io_api_blocking_file_ops.o \
+	$(OBJDIR)/src/io/runtime_io_api_blocking_wrappers.o \
 	$(OBJDIR)/src/io/runtime_io_buffer_registry.o \
 	$(OBJDIR)/src/io/runtime_io_api_owned.o \
+	$(OBJDIR)/src/io/runtime_io_api_datagram.o \
 	$(OBJDIR)/src/io/runtime_io_api_handle_positional.o \
 	$(OBJDIR)/src/io/runtime_io_api_positional.o \
 	$(OBJDIR)/src/io/runtime_io_api_positional_util.o \

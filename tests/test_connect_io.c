@@ -48,6 +48,16 @@ typedef struct invalid_accept_state {
     int observed_errno;
 } invalid_accept_state_t;
 
+typedef struct datagram_state {
+    int recv_fd;
+    int send_fd;
+    struct sockaddr_storage recv_addr;
+    socklen_t recv_addrlen;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[96];
+} datagram_state_t;
+
 #if defined(__APPLE__)
 typedef struct accept_reuse_state {
     int listener_fd;
@@ -92,6 +102,13 @@ static void task_fail(connect_state_t *state, const char *where, int err) {
     }
 }
 
+static void datagram_fail(datagram_state_t *state, const char *where, int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err;
+        (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
 #if defined(__APPLE__)
 static void accept_reuse_fail(accept_reuse_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
@@ -128,6 +145,31 @@ static int make_loopback_listener(int *listener_out, struct sockaddr_storage *ad
     memcpy(addr_out, &addr, sizeof(addr));
     *addrlen_out = len;
     *listener_out = fd;
+    return 0;
+}
+
+static int make_loopback_udp_socket(int *fd_out, struct sockaddr_storage *addr_out, socklen_t *addrlen_out) {
+    struct sockaddr_in addr;
+    socklen_t len = (socklen_t)sizeof(addr);
+    int fd;
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(0U);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(fd, (const struct sockaddr *)(const void *)&addr, (socklen_t)sizeof(addr)) != 0 ||
+        getsockname(fd, (struct sockaddr *)(void *)&addr, &len) != 0) {
+        close_if_valid(&fd);
+        return -1;
+    }
+    memset(addr_out, 0, sizeof(*addr_out));
+    memcpy(addr_out, &addr, sizeof(addr));
+    *addrlen_out = len;
+    *fd_out = fd;
     return 0;
 }
 
@@ -531,6 +573,106 @@ static int test_managed_connect_success_and_invalid(void) {
     return 0;
 }
 
+static void datagram_receiver_task(void *arg) {
+    datagram_state_t *state = arg;
+    llam_io_buffer_t *buffer = NULL;
+    struct sockaddr_storage peer_addr;
+    socklen_t peer_len = (socklen_t)sizeof(peer_addr);
+    ssize_t nread;
+    const char *data;
+
+    memset(&peer_addr, 0, sizeof(peer_addr));
+    nread = llam_recvfrom_owned(state->recv_fd,
+                                64U,
+                                0,
+                                (struct sockaddr *)(void *)&peer_addr,
+                                &peer_len,
+                                &buffer);
+    if (nread != 4 || buffer == NULL) {
+        datagram_fail(state, "llam_recvfrom_owned", nread < 0 ? errno : EINVAL);
+        return;
+    }
+    data = llam_io_buffer_data(buffer);
+    if (data == NULL ||
+        llam_io_buffer_size(buffer) != 4U ||
+        memcmp(data, "ping", 4U) != 0 ||
+        peer_len == 0U) {
+        datagram_fail(state, "recvfrom owned payload/source", errno != 0 ? errno : EINVAL);
+        llam_io_buffer_release(buffer);
+        return;
+    }
+    llam_io_buffer_release(buffer);
+}
+
+static void datagram_sender_task(void *arg) {
+    datagram_state_t *state = arg;
+    ssize_t nwritten;
+
+    /*
+     * Give the receiver a chance to park on readiness so the test exercises the
+     * managed poll + recvfrom path rather than only an immediately-ready socket.
+     */
+    (void)llam_sleep_ns(1000000ULL);
+    nwritten = llam_sendto(state->send_fd,
+                           "ping",
+                           4U,
+                           0,
+                           (const struct sockaddr *)(const void *)&state->recv_addr,
+                           state->recv_addrlen);
+    if (nwritten != 4) {
+        datagram_fail(state, "llam_sendto", nwritten < 0 ? errno : EINVAL);
+    }
+}
+
+static int test_managed_datagram_send_recv(void) {
+    datagram_state_t state;
+    llam_runtime_opts_t opts;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    state.recv_fd = -1;
+    state.send_fd = -1;
+    atomic_init(&state.failures, 0U);
+    if (make_loopback_udp_socket(&state.recv_fd, &state.recv_addr, &state.recv_addrlen) != 0) {
+        return test_fail_errno("datagram recv socket setup failed");
+    }
+    state.send_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (state.send_fd < 0) {
+        close_if_valid(&state.recv_fd);
+        return test_fail_errno("datagram send socket setup failed");
+    }
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&opts) != 0) {
+        close_if_valid(&state.recv_fd);
+        close_if_valid(&state.send_fd);
+        return test_fail_errno("datagram runtime init failed");
+    }
+    if (llam_spawn(datagram_receiver_task, &state, NULL) == NULL ||
+        llam_spawn(datagram_sender_task, &state, NULL) == NULL) {
+        rc = test_fail_errno("datagram task spawn failed");
+    } else if (llam_run() != 0) {
+        rc = test_fail_errno("datagram runtime run failed");
+    }
+    llam_runtime_shutdown();
+    close_if_valid(&state.recv_fd);
+    close_if_valid(&state.send_fd);
+    if (rc != 0) {
+        return rc;
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_connect_io] datagram failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        return 1;
+    }
+    return 0;
+}
+
 static int test_managed_accept_watch_rejects_reused_listener_fd(void) {
 #if defined(__APPLE__)
     accept_reuse_state_t state;
@@ -645,6 +787,7 @@ int main(void) {
         test_invalid_direct_accept_address_pair() != 0 ||
         test_direct_connect_success() != 0 ||
         test_managed_connect_success_and_invalid() != 0 ||
+        test_managed_datagram_send_recv() != 0 ||
         test_managed_accept_watch_rejects_reused_listener_fd() != 0) {
         return 1;
     }

@@ -98,6 +98,8 @@ typedef struct llam_cancel_token llam_cancel_token_t;
 typedef struct llam_io_buffer llam_io_buffer_t;
 typedef struct llam_runtime llam_runtime_t;
 typedef struct llam_task_group llam_task_group_t;
+typedef struct llam_timer llam_timer_t;
+typedef struct llam_signal_set llam_signal_set_t;
 
 /** @brief Task-local storage key. */
 typedef uint32_t llam_task_local_key_t;
@@ -117,6 +119,33 @@ typedef void (*llam_task_fn)(void *arg);
  * @return User-defined result pointer returned to the waiting task.
  */
 typedef void *(*llam_blocking_fn)(void *arg);
+
+/** @brief Options for waitable interval timers. */
+typedef struct llam_timer_opts {
+    uint64_t first_deadline_ns; /**< First absolute deadline in ::llam_now_ns units; 0 means now. */
+    uint64_t interval_ns;       /**< Repeat interval in nanoseconds; must be non-zero. */
+    uint32_t flags;             /**< Reserved for LLAM_TIMER_F_* flags; initialize to 0. */
+    uint32_t reserved0;         /**< Reserved ABI padding; initialize to 0. */
+} llam_timer_opts_t;
+
+/** @brief Current size to pass to ::llam_timer_create_ex. */
+#define LLAM_TIMER_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_timer_opts_t))
+
+/** @brief Signal event returned by ::llam_signal_wait* APIs. */
+typedef struct llam_signal_event {
+    int32_t signo;      /**< Delivered signal number. */
+    uint32_t reserved0; /**< Reserved ABI padding; currently 0. */
+    uint64_t sequence;  /**< Monotonic sequence for this signal-set handle. */
+} llam_signal_event_t;
+
+/** @brief Options for ::llam_signal_set_create_ex. */
+typedef struct llam_signal_opts {
+    uint32_t flags;     /**< Reserved for LLAM_SIGNAL_F_* flags; initialize to 0. */
+    uint32_t reserved0; /**< Reserved ABI padding; initialize to 0. */
+} llam_signal_opts_t;
+
+/** @brief Current size to pass to ::llam_signal_set_create_ex. */
+#define LLAM_SIGNAL_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_signal_opts_t))
 
 /* ============================================================================
  * ABI and dynamic loading
@@ -761,6 +790,91 @@ LLAM_API int llam_sleep_until(uint64_t deadline_ns);
  * @return 0 on wake, -1 on cancellation/failure with errno set.
  */
 LLAM_API int llam_sleep_ns(uint64_t duration_ns);
+
+/**
+ * @brief Create a waitable interval timer bound to the current runtime owner.
+ *
+ * @details
+ * The timer is not a callback source. Callers wait explicitly with
+ * ::llam_timer_wait or ::llam_timer_wait_until, which keeps callback lifetime
+ * and reentrancy under caller control. @c opts.interval_ns must be non-zero.
+ * A @c first_deadline_ns of 0 arms the first tick for the current
+ * ::llam_now_ns timestamp. Timers are runtime-aware objects; using a timer from
+ * another managed runtime fails with @c EXDEV.
+ */
+LLAM_API int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_timer_t **out);
+
+/**
+ * @brief Create an interval timer with a first tick after @p interval_ns.
+ */
+LLAM_API int llam_timer_create(uint64_t interval_ns, llam_timer_t **out);
+
+/**
+ * @brief Wait for the next timer tick.
+ *
+ * @details
+ * On success, @p ticks_out receives the number of elapsed intervals since the
+ * previous successful wait, clamped to at least 1. This lets periodic tasks
+ * account for missed ticks without drift. Managed tasks park cooperatively;
+ * unmanaged callers block the calling OS thread.
+ */
+LLAM_API int llam_timer_wait(llam_timer_t *timer, uint64_t *ticks_out);
+
+/**
+ * @brief Wait for the next timer tick until an absolute deadline.
+ *
+ * @details @p deadline_ns uses ::llam_now_ns units. @c 0 is already expired.
+ */
+LLAM_API int llam_timer_wait_until(llam_timer_t *timer, uint64_t deadline_ns, uint64_t *ticks_out);
+
+/**
+ * @brief Reset a timer to a new first deadline and interval.
+ */
+LLAM_API int llam_timer_reset(llam_timer_t *timer, uint64_t first_deadline_ns, uint64_t interval_ns);
+
+/**
+ * @brief Cancel a timer and wake waiters with @c ECANCELED.
+ */
+LLAM_API int llam_timer_cancel(llam_timer_t *timer);
+
+/**
+ * @brief Destroy a timer.
+ *
+ * @return 0 on success, -1 with @c EBUSY if another public operation is active.
+ */
+LLAM_API int llam_timer_destroy(llam_timer_t *timer);
+
+/**
+ * @brief Create a POSIX signal wait set bound to the current runtime owner.
+ *
+ * @details
+ * This is an opt-in process-level subscription. On Linux, LLAM blocks the
+ * requested signals for the calling thread and waits with @c sigtimedwait on a
+ * blocking helper using bounded slices so runtime stop can be observed. Call
+ * this before starting worker threads when possible so they inherit the signal
+ * mask. Duplicate or unsupported signal sets may fail with @c EBUSY or
+ * @c ENOTSUP. Other platforms currently return @c ENOTSUP.
+ */
+LLAM_API int llam_signal_set_create_ex(const int *signos,
+                                       size_t signo_count,
+                                       const llam_signal_opts_t *opts,
+                                       size_t opts_size,
+                                       llam_signal_set_t **out);
+
+/**
+ * @brief Wait indefinitely for a signal in the set.
+ */
+LLAM_API int llam_signal_wait(llam_signal_set_t *set, llam_signal_event_t *out);
+
+/**
+ * @brief Wait for a signal in the set until an absolute deadline.
+ */
+LLAM_API int llam_signal_wait_until(llam_signal_set_t *set, uint64_t deadline_ns, llam_signal_event_t *out);
+
+/**
+ * @brief Destroy a signal wait set.
+ */
+LLAM_API int llam_signal_set_destroy(llam_signal_set_t *set);
 
 /**
  * @brief Execute a blocking callback through the runtime blocking path.

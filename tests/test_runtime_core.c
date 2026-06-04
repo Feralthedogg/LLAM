@@ -28,10 +28,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if LLAM_PLATFORM_POSIX
 #include <fcntl.h>
+#if LLAM_PLATFORM_POSIX
+#include <netdb.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
+#endif
+
+#ifndef O_RDONLY
+#define O_RDONLY 0
 #endif
 
 typedef struct core_state {
@@ -74,6 +80,11 @@ typedef struct nested_runtime_create_state {
     core_state_t core;
     llam_runtime_t *created_runtime;
 } nested_runtime_create_state_t;
+
+typedef struct signal_wait_state {
+    core_state_t core;
+    llam_signal_set_t *set;
+} signal_wait_state_t;
 
 #if defined(__APPLE__)
 typedef struct timer_handoff_state {
@@ -1538,6 +1549,250 @@ static int test_ex_option_prefixes(void) {
 
     llam_runtime_shutdown();
     return 0;
+}
+
+static void timer_api_task(void *arg) {
+    core_state_t *state = arg;
+    llam_timer_t *timer = NULL;
+    uint64_t ticks = 0U;
+
+    if (llam_timer_create(1000000000ULL, &timer) != 0 || timer == NULL) {
+        task_fail(state, "llam_timer_create", errno);
+        return;
+    }
+    if (llam_timer_wait_until(timer, 0U, &ticks) != -1 || errno != ETIMEDOUT) {
+        task_fail(state, "llam_timer_wait_until expired", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_reset(timer, llam_now_ns() + 1000000ULL, 1000000ULL) != 0 ||
+        llam_timer_wait(timer, &ticks) != 0 ||
+        ticks == 0U) {
+        task_fail(state, "llam_timer_wait first tick", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_reset(timer, llam_now_ns(), 1000000ULL) != 0 ||
+        llam_timer_wait(timer, &ticks) != 0 ||
+        ticks == 0U) {
+        task_fail(state, "llam_timer_wait immediate tick", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_cancel(timer) != 0 ||
+        llam_timer_wait_until(timer, llam_now_ns() + 50000000ULL, &ticks) != -1 ||
+        errno != ECANCELED) {
+        task_fail(state, "llam_timer_cancel wait", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_destroy(timer) != 0) {
+        task_fail(state, "llam_timer_destroy", errno);
+        return;
+    }
+    if (llam_timer_destroy(timer) != -1 || errno != EINVAL) {
+        task_fail(state, "llam_timer_destroy stale", errno);
+    }
+}
+
+static int test_waitable_timer_api(void) {
+    core_state_t state;
+    llam_runtime_opts_t opts;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    atomic_init(&state.failures, 0U);
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("timer runtime init failed");
+    }
+    if (llam_spawn(timer_api_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("timer task spawn failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("timer runtime run failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] timer API failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        return 1;
+    }
+    return 0;
+}
+
+static void blocking_wrapper_task(void *arg) {
+    core_state_t *state = arg;
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    llam_file_stat_t stat_result;
+    llam_handle_t handle = LLAM_INVALID_HANDLE;
+    int gai_error = 0;
+    const char *null_path =
+#if LLAM_PLATFORM_WINDOWS
+        "NUL";
+#else
+        "/dev/null";
+#endif
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    if (llam_getaddrinfo_result("localhost", "80", &hints, &result, &gai_error) != 0 ||
+        gai_error != 0 ||
+        result == NULL) {
+        task_fail(state, "llam_getaddrinfo_result", gai_error != 0 ? gai_error : errno);
+        return;
+    }
+    llam_freeaddrinfo_result(result);
+    if (llam_stat_path_ex(".", &stat_result, LLAM_FILE_STAT_CURRENT_SIZE) != 0 ||
+        stat_result.type == 0U) {
+        task_fail(state, "llam_stat_path_ex", errno);
+        return;
+    }
+    if (llam_open_async(null_path, O_RDONLY, 0U, &handle) != 0 ||
+        LLAM_HANDLE_IS_INVALID(handle)) {
+        task_fail(state, "llam_open_async", errno);
+        return;
+    }
+    if (llam_close_handle(handle) != 0) {
+        task_fail(state, "llam_close_handle after open_async", errno);
+    }
+}
+
+static int test_blocking_wrappers_api(void) {
+    core_state_t state;
+    llam_runtime_opts_t opts;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    atomic_init(&state.failures, 0U);
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("blocking wrappers runtime init failed");
+    }
+    if (llam_spawn(blocking_wrapper_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("blocking wrapper task spawn failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("blocking wrappers runtime run failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] blocking wrapper failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        return 1;
+    }
+    return 0;
+}
+
+#if LLAM_PLATFORM_LINUX
+static void signal_waiter_task(void *arg) {
+    signal_wait_state_t *state = arg;
+    llam_signal_event_t event;
+
+    if (llam_signal_wait_until(state->set, llam_now_ns() + 2000000000ULL, &event) != 0 ||
+        event.signo != SIGUSR1 ||
+        event.sequence == 0U) {
+        task_fail(&state->core, "llam_signal_wait_until", errno);
+    }
+}
+
+static void signal_sender_task(void *arg) {
+    signal_wait_state_t *state = arg;
+
+    (void)llam_sleep_ns(10000000ULL);
+    if (kill(getpid(), SIGUSR1) != 0) {
+        task_fail(&state->core, "kill SIGUSR1", errno);
+    }
+}
+#endif
+
+static int test_signal_wait_api(void) {
+#if LLAM_PLATFORM_LINUX
+    signal_wait_state_t state;
+    llam_runtime_opts_t opts;
+    llam_signal_set_t *duplicate = NULL;
+    llam_signal_opts_t signal_opts;
+    int signo = SIGUSR1;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    memset(&signal_opts, 0, sizeof(signal_opts));
+    atomic_init(&state.core.failures, 0U);
+    if (llam_signal_set_create_ex(&signo, 1U, &signal_opts, 0U, &state.set) != -1 ||
+        errno != EINVAL ||
+        state.set != NULL) {
+        return test_fail("signal opts with zero size did not fail with EINVAL");
+    }
+    if (llam_signal_set_create_ex(&signo, 1U, NULL, 0U, &state.set) != 0 || state.set == NULL) {
+        return test_fail_errno("signal set create failed");
+    }
+    if (llam_signal_set_create_ex(&signo, 1U, NULL, 0U, &duplicate) != -1 || errno != EBUSY) {
+        (void)llam_signal_set_destroy(state.set);
+        return test_fail("duplicate signal set did not fail with EBUSY");
+    }
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        (void)llam_signal_set_destroy(state.set);
+        return test_fail_errno("signal runtime init failed");
+    }
+    if (llam_spawn(signal_waiter_task, &state, NULL) == NULL ||
+        llam_spawn(signal_sender_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        (void)llam_signal_set_destroy(state.set);
+        return test_fail_errno("signal task spawn failed");
+    }
+    if (llam_run() != 0) {
+        rc = test_fail_errno("signal runtime run failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] signal wait failed at %s errno=%d (%s)\n",
+                state.core.first_case,
+                state.core.first_errno,
+                strerror(state.core.first_errno));
+        rc = 1;
+    }
+    if (llam_signal_set_destroy(state.set) != 0) {
+        rc = test_fail_errno("signal set destroy failed");
+    }
+    return rc;
+#elif LLAM_PLATFORM_POSIX
+    llam_signal_set_t *set = NULL;
+    llam_signal_opts_t signal_opts;
+    int signo = SIGTERM;
+
+    memset(&signal_opts, 0, sizeof(signal_opts));
+    if (llam_signal_set_create_ex(&signo, 1U, &signal_opts, 0U, &set) != -1 ||
+        errno != EINVAL ||
+        set != NULL) {
+        return test_fail("non-Linux signal opts with zero size did not fail with EINVAL");
+    }
+    if (llam_signal_set_create_ex(&signo, 1U, NULL, 0U, &set) != -1 || errno != ENOTSUP) {
+        if (set != NULL) {
+            (void)llam_signal_set_destroy(set);
+        }
+        return test_fail("non-Linux signal set did not fail with ENOTSUP");
+    }
+    return 0;
+#else
+    return 0;
+#endif
 }
 
 static int test_errno_is_task_local_across_switches(void) {
@@ -3109,6 +3364,9 @@ int main(void) {
 #endif
     RUN_RUNTIME_CORE_TEST(test_detach_contract);
     RUN_RUNTIME_CORE_TEST(test_ex_option_prefixes);
+    RUN_RUNTIME_CORE_TEST(test_waitable_timer_api);
+    RUN_RUNTIME_CORE_TEST(test_blocking_wrappers_api);
+    RUN_RUNTIME_CORE_TEST(test_signal_wait_api);
     RUN_RUNTIME_CORE_TEST(test_errno_is_task_local_across_switches);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_failure_keeps_task_running);
 #if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS

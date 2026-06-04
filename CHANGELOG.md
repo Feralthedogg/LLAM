@@ -4,6 +4,24 @@
 
 ### Added
 
+* scheduler-safe datagram I/O wrappers: `llam_recvfrom()`, `llam_sendto()`,
+  and `llam_recvfrom_owned()` preserve UDP peer-address metadata while managed
+  tasks park cooperatively on readiness instead of pinning scheduler workers.
+
+* waitable interval timer handles: `llam_timer_create_ex()`,
+  `llam_timer_create()`, `llam_timer_wait*()`, `llam_timer_reset()`,
+  `llam_timer_cancel()`, and `llam_timer_destroy()` provide drift-aware
+  periodic waits without callback lifetime ambiguity.
+
+* Linux opt-in signal wait sets: `llam_signal_set_create_ex()`,
+  `llam_signal_wait*()`, and `llam_signal_set_destroy()` expose process signal
+  waiting through bounded `sigtimedwait` slices. Non-Linux platforms currently
+  fail with `ENOTSUP`.
+
+* blocking syscall wrappers for common libc/filesystem operations:
+  `llam_getaddrinfo_result()`, `llam_freeaddrinfo_result()`,
+  `llam_open_async()`, and `llam_stat_path_ex()`.
+
 * BSD platform support foundation for FreeBSD, OpenBSD, NetBSD, and
   DragonFlyBSD, including platform macros, kqueue readiness/user-wake reuse
   where portable, BSD package target detection, CMake/Make wiring, and a BSD
@@ -17,6 +35,10 @@
 * additional multi-runtime, blocking-pool, public-handle, owned-buffer, broker,
   Windows IOCP, BSD kqueue, and server-stress regression coverage for the
   2.0.0 re-release hardening queue.
+
+* direct API regression coverage for waitable timers, datagram owned-buffer
+  receive/send, blocking DNS/open/stat wrappers, and Linux/non-Linux signal
+  wait-set contracts.
 
 * a direct runtime soak gate for repeated LLAM core fuzz, multi-runtime
   ownership/isolation, runtime stress, shutdown, and owned-buffer coverage
