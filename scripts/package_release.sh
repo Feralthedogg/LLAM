@@ -167,6 +167,48 @@ validate_expected_symlink_target() {
     fi
 }
 
+extract_release_archive() {
+    archive_path="$1"
+    destination="$2"
+
+    if ! tar -xf "$archive_path" -C "$destination" 2>/dev/null; then
+        if ! command -v xz >/dev/null 2>&1; then
+            echo "tar cannot extract $archive_path directly and xz is not available" >&2
+            exit 1
+        fi
+        xz -dc "$archive_path" | tar -xf - -C "$destination"
+    fi
+}
+
+validate_packaged_archive_links() (
+    archive_path="$1"
+    package_root="$2"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-archive.XXXXXX")"
+
+    trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+    extract_release_archive "$archive_path" "$tmp_dir"
+
+    case "$host_os" in
+        Darwin)
+            validate_expected_symlink_target \
+                "$tmp_dir/$package_root/lib/libllam_runtime.dylib" \
+                "libllam_runtime.$abi_major.dylib"
+            ;;
+        Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+            validate_expected_symlink_target \
+                "$tmp_dir/$package_root/lib/libllam_runtime.so.$abi_major" \
+                "libllam_runtime.so.$library_version"
+            validate_expected_symlink_target \
+                "$tmp_dir/$package_root/lib/libllam_runtime.so" \
+                "libllam_runtime.so.$abi_major"
+            ;;
+        *)
+            echo "unsupported release archive host: $host_os" >&2
+            exit 1
+            ;;
+    esac
+)
+
 validate_release_input_file() {
     path="$1"
 
@@ -385,6 +427,9 @@ if ! tar -C "$out_dir" -cJf "$archive" "$package_name" 2>/dev/null; then
     fi
     tar -C "$out_dir" -cf - "$package_name" | xz -z -c > "$archive"
 fi
+
+validate_packaged_archive_links "$archive" "$package_name"
+
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$out_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v shasum >/dev/null 2>&1; then
