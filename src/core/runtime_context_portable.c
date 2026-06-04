@@ -3,9 +3,10 @@
  * @brief Portable ucontext-based fiber context fallback for unsupported assembly targets.
  *
  * @details
- * Linux/Darwin x86-64 and AArch64 builds use assembly context switching. Other
- * supported targets fall back to @c ucontext so the runtime remains buildable
- * and testable without architecture-specific assembly.
+ * Linux, Darwin, and BSD x86-64 builds use native assembly context switching.
+ * AArch64/arm64 builds also use native assembly on the supported Unix-like
+ * targets. Other supported targets fall back to @c ucontext so the runtime
+ * remains buildable and testable without architecture-specific assembly.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
