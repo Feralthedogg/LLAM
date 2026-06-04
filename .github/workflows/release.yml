@@ -371,8 +371,31 @@ jobs:
               sleep "$delay_seconds"
             done
           }
+          configure_dragonfly_pkg_repo() {
+            # The default Avalon repository is the upstream master and can be
+            # unreachable from GitHub runners. Use DragonFly's AUTO mirror
+            # endpoint so pkg can select a reachable binary package mirror.
+            sudo mkdir -p /usr/local/etc/pkg/repos
+            sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
+          AUTO: {
+            url             : "https://pkg.dragonflybsd.org/pkg/${ABI}/LATEST"
+            mirror_type     : HTTP
+            enabled         : yes
+          }
+          Avalon: {
+            enabled         : no
+          }
+          EOF
+          }
           case "$(uname -s)" in
-            FreeBSD|DragonFly)
+            FreeBSD)
+              command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
+              command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
+              command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
+              ;;
+            DragonFly)
+              configure_dragonfly_pkg_repo
+              retry sudo pkg update -f
               command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz

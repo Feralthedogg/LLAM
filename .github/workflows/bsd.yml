@@ -91,9 +91,24 @@ jobs:
               sleep "$delay_seconds"
             done
           }
+          configure_dragonfly_pkg_repo() {
+            # The default Avalon repository is the upstream master and can be
+            # unreachable from GitHub runners. Use DragonFly's AUTO mirror
+            # endpoint so pkg can select a reachable binary package mirror.
+            sudo mkdir -p /usr/local/etc/pkg/repos
+            sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
+          AUTO: {
+            url             : "https://pkg.dragonflybsd.org/pkg/${ABI}/LATEST"
+            mirror_type     : HTTP
+            enabled         : yes
+          }
+          Avalon: {
+            enabled         : no
+          }
+          EOF
+          }
           case "$(uname -s)" in
-            FreeBSD|DragonFly)
-              system_name="$(uname -s)"
+            FreeBSD)
               packages=""
               if ! command -v gmake >/dev/null 2>&1; then
                 packages="$packages gmake"
@@ -105,18 +120,29 @@ jobs:
                 packages="$packages xz"
               fi
               if [ -n "$packages" ]; then
-                if [ "$system_name" = DragonFly ]; then
-                  if ! retry sudo pkg update -f; then
-                    echo "DragonFlyBSD pkg repository unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
-                    exit 0
-                  fi
+                retry sudo pkg install -y $packages
+              fi
+              ;;
+            DragonFly)
+              configure_dragonfly_pkg_repo
+              packages=""
+              if ! command -v gmake >/dev/null 2>&1; then
+                packages="$packages gmake"
+              fi
+              if ! command -v cmake >/dev/null 2>&1; then
+                packages="$packages cmake"
+              fi
+              if ! command -v xz >/dev/null 2>&1; then
+                packages="$packages xz"
+              fi
+              if [ -n "$packages" ]; then
+                if ! retry sudo pkg update -f; then
+                  echo "DragonFlyBSD pkg repository unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
+                  exit 0
                 fi
                 if ! retry sudo pkg install -y $packages; then
-                  if [ "$system_name" = DragonFly ]; then
-                    echo "DragonFlyBSD pkg install unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
-                    exit 0
-                  fi
-                  exit 1
+                  echo "DragonFlyBSD pkg install unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
+                  exit 0
                 fi
               fi
               ;;
