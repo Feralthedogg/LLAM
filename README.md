@@ -1372,8 +1372,8 @@ Context switches are performed in hand-written assembly for each supported platf
 
 | Platform | Saved registers | Mechanism |
 | --- | --- | --- |
-| Linux x86_64 | `rbx, rbp, r12-r15`, `rsp` | Direct `mov`/`ret` in `context_x86_64.S` |
-| Linux aarch64 | `x19-x29, x30, sp` | `stp`/`ldp` in `context_arm64.S` |
+| Linux x86_64 | `rbx, rbp, r12-r15`, `rsp` | Direct `mov`/`ret` in `linux_context_x86_64.S` |
+| Linux aarch64 | `x19-x29, x30, sp` | `stp`/`ldp` in `linux_context_arm64.S` |
 | Darwin x86_64 | `rbx, rbp, r12-r15`, `rsp` | Same register set as Linux x86_64 |
 | Darwin arm64 | `x19-x29, x30, sp` | Same register set as Linux aarch64 |
 | BSD x86_64 | `rbx, rbp, r12-r15`, `rsp` | ELF x86_64 context switch path |
@@ -1479,14 +1479,14 @@ The connect fallback (`llam_blocking_connect_impl`) drives a nonblocking `connec
 
 ### Watchdog System
 
-The watchdog thread (`src/engine/`) runs at 1ms intervals (`LLAM_WATCHDOG_INTERVAL_NS`) and performs:
+The watchdog thread (`src/engine/watchdog/`) runs at 1ms intervals (`LLAM_WATCHDOG_INTERVAL_NS`) and performs:
 
 | Module | File | Function |
 | --- | --- | --- |
-| **Probe** | `runtime_watchdog_probe.c` | Detect stalled safepoints, measure queue pressure, suspect deadlocks after 4 consecutive observations |
-| **Scale** | `runtime_watchdog_scale.c` | Dynamic worker scaling: scale up after 2 consecutive pressure observations, scale down after 12 consecutive idle observations, with a 4-tick cooldown |
-| **Merge** | `runtime_watchdog_merge.c` | Offline a shard by draining its queues and migrating tasks to a target shard |
-| **Rehome** | `runtime_watchdog_rehome.c` | Atomically transfer ownership of parked waiters, in-flight I/O, submit-queue entries, and multishot watch state from an offline shard to a target shard |
+| **Probe** | `watchdog_probe.c` | Detect stalled safepoints, measure queue pressure, suspect deadlocks after 4 consecutive observations |
+| **Scale** | `watchdog_scale.c` | Dynamic worker scaling: scale up after 2 consecutive pressure observations, scale down after 12 consecutive idle observations, with a 4-tick cooldown |
+| **Merge** | `watchdog_merge.c` | Offline a shard by draining its queues and migrating tasks to a target shard |
+| **Rehome** | `watchdog_rehome.c` | Atomically transfer ownership of parked waiters, in-flight I/O, submit-queue entries, and multishot watch state from an offline shard to a target shard |
 
 Rehome validates the entire waiter list before any migration. If a single entry cannot be rehomed (pinned task, incompatible I/O state), the entire list migration is aborted to prevent partial ownership inconsistency.
 

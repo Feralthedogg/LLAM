@@ -196,6 +196,7 @@ def build_server_flood_stats_probe(tmp: Path) -> Path:
             str(ROOT / "examples"),
             source,
             ROOT / "examples" / "server_flood_stats.c",
+            ROOT / "examples" / "server_flood_stats_open.c",
             "-o",
             binary,
         ],

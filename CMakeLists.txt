@@ -45,204 +45,207 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR LLAM_SYSTEM_IS_BSD)
 endif()
 
 set(LLAM_RUNTIME_SOURCES
-    src/core/runtime.c
-    src/core/runtime_abi.c
-    src/core/runtime_errno.c
-    src/core/runtime_alloc.c
-    src/core/runtime_allocator_quiescent.c
-    src/core/runtime_api.c
-    src/core/runtime_blocking_api.c
-    src/core/runtime_capability.c
-    src/core/runtime_broker.c
-    src/core/runtime_broker_ops.c
-    src/core/runtime_broker_validate.c
-    src/core/runtime_broker_buffer.c
-    src/core/runtime_broker_descriptor.c
-    src/core/runtime_broker_channel.c
-    src/core/runtime_broker_revoke.c
-    src/core/runtime_broker_task.c
-    src/core/runtime_broker_windows_security.c
-    src/core/runtime_broker_transport_dispatch.c
-    src/core/runtime_broker_transport_ops.c
-    src/core/runtime_broker_transport_response.c
-    src/core/runtime_broker_transport_rollback.c
-    src/core/runtime_broker_transport_ring.c
-    src/core/runtime_broker_transport.c
-    src/core/runtime_broker_transport_windows.c
-    src/core/runtime_broker_transport_windows_fd_stubs.c
-    src/core/runtime_broker_transport_windows_pipe.c
-    src/core/runtime_broker_transport_windows_session.c
-    src/core/runtime_broker_transport_posix.c
-    src/core/runtime_broker_transport_posix_message.c
-    src/core/runtime_broker_transport_posix_socket.c
-    src/core/runtime_broker_transport_unix.c
-    src/core/runtime_broker_transport_selftest.c
-    src/core/runtime_broker_ring.c
-    src/core/runtime_broker_ring_buffer_grant.c
-    src/core/runtime_broker_ring_doorbell.c
-    src/core/runtime_broker_ring_dispatch.c
-    src/core/runtime_broker_ring_ops.c
-    src/core/runtime_broker_ring_queue.c
-    src/core/runtime_broker_ring_stats.c
-    src/core/runtime_broker_ring_shm.c
-    src/core/runtime_broker_ring_shm_posix.c
-    src/core/runtime_broker_ring_shm_windows.c
-    src/core/runtime_cancel_api.c
-    src/core/runtime_context_portable.c
-    src/core/runtime_debug.c
-    src/core/runtime_debug_dump_helpers.c
-    src/core/runtime_debug_stats_json.c
-    src/core/runtime_fault.c
-    src/core/runtime_fp.c
-    src/core/runtime_io_object_alloc.c
-    src/core/runtime_io_udata.c
-    src/core/runtime_init.c
-    src/core/runtime_lifecycle.c
-    src/core/runtime_channel_cache.c
-    src/core/runtime_channel_lifecycle.c
-    src/core/runtime_channel_fast.c
-    src/core/runtime_channel.c
-    src/core/runtime_channel_select_fast.c
-    src/core/runtime_channel_select.c
-    src/core/runtime_cond_lifecycle.c
-    src/core/runtime_cond.c
-    src/core/runtime_handle.c
-    src/core/runtime_owner.c
-    src/core/runtime_registry.c
-    src/core/runtime_mutex_lifecycle.c
-    src/core/runtime_mutex.c
-    src/core/runtime_names.c
-    src/core/runtime_norm_queue_depth.c
-    src/core/runtime_norm_queue.c
-    src/core/runtime_platform.c
-    src/core/runtime_queue_base.c
-    src/core/runtime_queue.c
-    src/core/runtime_reinject.c
-    src/core/runtime_safepoint.c
-    src/core/runtime_run.c
-    src/core/runtime_scheduler.c
-    src/core/runtime_shutdown.c
-    src/core/runtime_stack_sample.c
-    src/core/runtime_sync.c
-    src/core/runtime_spawn.c
-    src/core/runtime_task_alloc.c
-    src/core/runtime_task_handle_registry.c
-    src/core/runtime_task_group.c
-    src/core/runtime_task_local.c
-    src/core/runtime_task_reclaim.c
-    src/core/runtime_task_stack.c
-    src/core/runtime_wait_accounting.c
-    src/core/runtime_timer_heap.c
-    src/core/runtime_timer.c
-    src/core/runtime_timer_api.c
-    src/core/runtime_signal_api.c
-    src/core/runtime_time.c
-    src/core/runtime_trace.c
-    src/core/runtime_util.c
-    src/core/runtime_wait.c
-    src/core/runtime_wait_timer_alloc.c
-    src/core/runtime_wait_tracking.c
-    src/core/runtime_wake.c
-    src/core/runtime_windows.c
-    src/core/runtime_yield_join_sleep.c
-    src/engine/runtime_block.c
-    src/engine/runtime_engine.c
-    src/engine/runtime_watchdog.c
-    src/engine/runtime_watchdog_merge.c
-    src/engine/runtime_watchdog_probe.c
-    src/engine/runtime_watchdog_rehome.c
-    src/engine/runtime_watchdog_scale.c
-    src/engine/runtime_watchdog_worker.c
-    src/io/runtime_io_api.c
-    src/io/runtime_io_api_blocking_ops.c
-    src/io/runtime_io_api_direct.c
-    src/io/runtime_io_api_direct_tuning.c
-    src/io/runtime_io_api_issue.c
-    src/io/runtime_io_buffer_registry.c
-    src/io/runtime_io_api_blocking_file_ops.c
-    src/io/runtime_io_api_blocking_wrappers.c
-    src/io/runtime_io_api_datagram.c
-    src/io/runtime_io_api_handle_positional.c
-    src/io/runtime_io_api_owned.c
-    src/io/runtime_io_api_positional.c
-    src/io/runtime_io_api_positional_util.c
-    src/io/runtime_io_api_public.c
-    src/io/runtime_io_engine.c
-    src/io/runtime_io_watch.c
-    src/io/runtime_io_watch_close.c
-    src/io/runtime_io_watch_lookup.c
-    src/io/runtime_io_watch_migration.c
-    src/io/runtime_io_watch_queue.c
-    src/io/runtime_io_watch_waiter.c
-    src/io/windows/runtime_windows_iocp.c
+    src/core/lifecycle/runtime.c
+    src/core/base/abi.c
+    src/core/base/errno.c
+    src/core/memory/alloc.c
+    src/core/memory/allocator_quiescent.c
+    src/core/api/core_api.c
+    src/core/api/blocking_api.c
+    src/core/registry/capability.c
+    src/core/broker/broker.c
+    src/core/broker/broker_lifecycle.c
+    src/core/broker/broker_ops.c
+    src/core/broker/broker_validate.c
+    src/core/broker/broker_buffer.c
+    src/core/broker/broker_descriptor.c
+    src/core/broker/broker_channel.c
+    src/core/broker/broker_revoke.c
+    src/core/broker/broker_task.c
+    src/core/broker/broker_windows_security.c
+    src/core/broker/transport/broker_transport_dispatch.c
+    src/core/broker/transport/broker_transport_ops.c
+    src/core/broker/transport/broker_transport_response.c
+    src/core/broker/transport/broker_transport_rollback.c
+    src/core/broker/transport/broker_transport_ring.c
+    src/core/broker/transport/broker_transport.c
+    src/core/broker/transport/broker_transport_windows.c
+    src/core/broker/transport/broker_transport_windows_fd_stubs.c
+    src/core/broker/transport/broker_transport_windows_pipe.c
+    src/core/broker/transport/broker_transport_windows_session.c
+    src/core/broker/transport/broker_transport_posix.c
+    src/core/broker/transport/broker_transport_posix_message.c
+    src/core/broker/transport/broker_transport_posix_socket.c
+    src/core/broker/transport/broker_transport_unix.c
+    src/core/broker/transport/broker_transport_selftest.c
+    src/core/broker/ring/broker_ring.c
+    src/core/broker/ring/broker_ring_buffer_grant.c
+    src/core/broker/ring/broker_ring_doorbell.c
+    src/core/broker/ring/broker_ring_dispatch.c
+    src/core/broker/ring/broker_ring_ops.c
+    src/core/broker/ring/broker_ring_queue.c
+    src/core/broker/ring/broker_ring_stats.c
+    src/core/broker/ring/broker_ring_shm.c
+    src/core/broker/ring/broker_ring_shm_posix.c
+    src/core/broker/ring/broker_ring_shm_windows.c
+    src/core/api/cancel_api.c
+    src/core/context/context_portable.c
+    src/core/debug/debug.c
+    src/core/debug/debug_dump_helpers.c
+    src/core/debug/debug_stats_json.c
+    src/core/debug/fault.c
+    src/core/context/fp.c
+    src/core/memory/io_object_alloc.c
+    src/core/base/io_udata.c
+    src/core/lifecycle/init.c
+    src/core/lifecycle/lifecycle.c
+    src/core/sync/channel_cache.c
+    src/core/sync/channel_lifecycle.c
+    src/core/sync/channel_fast.c
+    src/core/sync/channel.c
+    src/core/sync/channel_select_fast.c
+    src/core/sync/channel_select.c
+    src/core/sync/cond_lifecycle.c
+    src/core/sync/cond.c
+    src/core/registry/handle.c
+    src/core/registry/owner.c
+    src/core/registry/registry.c
+    src/core/sync/mutex_lifecycle.c
+    src/core/sync/mutex.c
+    src/core/base/names.c
+    src/core/sched/norm_queue_depth.c
+    src/core/sched/norm_queue.c
+    src/core/platform/platform.c
+    src/core/sched/queue_base.c
+    src/core/sched/core_queue.c
+    src/core/sched/reinject.c
+    src/core/sched/safepoint.c
+    src/core/lifecycle/run.c
+    src/core/sched/scheduler.c
+    src/core/lifecycle/shutdown.c
+    src/core/context/stack_sample.c
+    src/core/sync/sync.c
+    src/core/task/spawn.c
+    src/core/task/task_alloc.c
+    src/core/task/task_handle_registry.c
+    src/core/task/task_handle_claim.c
+    src/core/task/task_group.c
+    src/core/task/task_group_registry.c
+    src/core/task/task_local.c
+    src/core/task/task_reclaim.c
+    src/core/task/task_stack.c
+    src/core/wait/wait_accounting.c
+    src/core/time/timer_heap.c
+    src/core/time/timer.c
+    src/core/api/timer_api.c
+    src/core/api/signal_api.c
+    src/core/time/time.c
+    src/core/debug/trace.c
+    src/core/base/util.c
+    src/core/wait/wait.c
+    src/core/wait/wait_timer_alloc.c
+    src/core/wait/wait_tracking.c
+    src/core/sched/wake.c
+    src/core/platform/windows_policy.c
+    src/core/task/yield_join_sleep.c
+    src/engine/scheduler/block.c
+    src/engine/scheduler/scheduler_engine.c
+    src/engine/watchdog/watchdog.c
+    src/engine/watchdog/watchdog_merge.c
+    src/engine/watchdog/watchdog_probe.c
+    src/engine/watchdog/watchdog_rehome.c
+    src/engine/watchdog/watchdog_scale.c
+    src/engine/watchdog/watchdog_worker.c
+    src/io/api/io_api.c
+    src/io/api/blocking_ops.c
+    src/io/api/direct.c
+    src/io/api/direct_tuning.c
+    src/io/api/issue.c
+    src/io/buffer/buffer_registry.c
+    src/io/api/blocking_file_ops.c
+    src/io/api/blocking_wrappers.c
+    src/io/api/datagram.c
+    src/io/api/handle_positional.c
+    src/io/api/owned.c
+    src/io/api/positional.c
+    src/io/api/positional_util.c
+    src/io/api/public.c
+    src/io/engine/io_engine.c
+    src/io/watch/watch.c
+    src/io/watch/close.c
+    src/io/watch/watch_lookup.c
+    src/io/watch/migration.c
+    src/io/watch/watch_queue.c
+    src/io/watch/waiter.c
+    src/io/windows/watch/iocp.c
 )
 
 if(LLAM_SYSTEM_IS_KQUEUE)
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/darwin/runtime_io_watch_darwin_state.c
-        src/io/darwin/runtime_io_watch_darwin_migration_live.c
-        src/io/darwin/runtime_io_watch_darwin_migration_rehome.c
-        src/io/darwin/runtime_io_watch_darwin_control.c
-        src/io/darwin/runtime_io_watch_darwin_completion.c
-        src/io/darwin/runtime_io_watch_darwin_events.c
-        src/io/darwin/runtime_io_watch_darwin_worker.c
+        src/io/darwin/watch/darwin_state.c
+        src/io/darwin/watch/darwin_migration_live.c
+        src/io/darwin/watch/darwin_migration_rehome.c
+        src/io/darwin/watch/darwin_control.c
+        src/io/darwin/watch/darwin_completion.c
+        src/io/darwin/watch/events.c
+        src/io/darwin/watch/darwin_worker.c
     )
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/linux/runtime_io_watch_linux_prelude.c
-        src/io/linux/runtime_io_watch_linux_state.c
-        src/io/linux/runtime_io_watch_linux_lookup.c
-        src/io/linux/runtime_io_watch_linux_migration_live.c
-        src/io/linux/runtime_io_watch_linux_migration_rehome.c
-        src/io/linux/runtime_io_watch_linux_control.c
-        src/io/linux/runtime_io_watch_linux_submit.c
-        src/io/linux/runtime_io_watch_linux_cqe.c
-        src/io/linux/runtime_io_watch_linux_worker.c
+        src/io/linux/watch/prelude.c
+        src/io/linux/watch/linux_state.c
+        src/io/linux/watch/linux_lookup.c
+        src/io/linux/watch/linux_migration_live.c
+        src/io/linux/watch/linux_migration_rehome.c
+        src/io/linux/watch/linux_control.c
+        src/io/linux/watch/linux_submit.c
+        src/io/linux/watch/cqe.c
+        src/io/linux/watch/linux_worker.c
     )
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/io/windows/runtime_io_watch_windows_state.c
-        src/io/windows/runtime_io_watch_windows_socket.c
-        src/io/windows/runtime_io_watch_windows_pool.c
-        src/io/windows/runtime_io_watch_windows_control.c
-        src/io/windows/runtime_io_watch_windows_submit.c
-        src/io/windows/runtime_io_watch_windows_completion.c
-        src/io/windows/runtime_io_watch_windows_fallback.c
-        src/io/windows/runtime_io_watch_windows.c
+        src/io/windows/watch/windows_state.c
+        src/io/windows/watch/socket.c
+        src/io/windows/watch/pool.c
+        src/io/windows/watch/windows_control.c
+        src/io/windows/watch/windows_submit.c
+        src/io/windows/watch/windows_completion.c
+        src/io/windows/watch/fallback.c
+        src/io/windows/watch/windows_watch.c
     )
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND LLAM_TARGET_PROCESSOR MATCHES "arm64|aarch64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/core/runtime_context_arm64.c
-        src/asm/darwin/arm64/context_arm64.S
+        src/core/context/context_arm64.c
+        src/asm/darwin/arm64/darwin_context_arm64.S
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/darwin/x86_64/context_x86_64.S
+        src/asm/darwin/x86_64/darwin_context_x86_64.S
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/linux/x86_64/context_x86_64.S
-        src/asm/linux/x86_64/runtime_linux_x86_64.S
+        src/asm/linux/x86_64/linux_context_x86_64.S
+        src/asm/linux/x86_64/wake_syscalls_x86_64.S
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_TARGET_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/core/runtime_context_arm64.c
-        src/asm/linux/arm64/context_arm64.S
+        src/core/context/context_arm64.c
+        src/asm/linux/arm64/linux_context_arm64.S
     )
 elseif(LLAM_SYSTEM_IS_BSD AND LLAM_TARGET_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/linux/x86_64/context_x86_64.S
+        src/asm/linux/x86_64/linux_context_x86_64.S
     )
 elseif(LLAM_SYSTEM_IS_BSD AND LLAM_TARGET_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/core/runtime_context_arm64.c
-        src/asm/linux/arm64/context_arm64.S
+        src/core/context/context_arm64.c
+        src/asm/linux/arm64/linux_context_arm64.S
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND MSVC)
     enable_language(ASM_MASM)
@@ -251,7 +254,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND MSVC)
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     list(APPEND LLAM_RUNTIME_SOURCES
-        src/asm/windows/x86_64/context_x86_64.S
+        src/asm/windows/x86_64/windows_context_x86_64.S
     )
 endif()
 
@@ -470,6 +473,7 @@ target_link_libraries(server_lossless PRIVATE llam_runtime)
 add_executable(server_flood ${LLAM_POSIX_EXAMPLE_EXCLUDE}
     examples/server_flood.c
     examples/server_flood_stats.c
+    examples/server_flood_stats_open.c
 )
 target_compile_definitions(server_flood PRIVATE _GNU_SOURCE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")

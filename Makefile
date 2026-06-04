@@ -170,6 +170,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_internal.h \
 	src/internal/runtime_types.h \
 	src/internal/runtime_public_slot.h \
+	src/internal/runtime_public_active_op.h \
 	src/internal/runtime_public_slot_seal.h \
 	src/internal/runtime_capability.h \
 	src/internal/runtime_broker.h \
@@ -181,148 +182,153 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_proto_sched.h \
 	src/internal/runtime_proto_io.h \
 	src/internal/runtime_proto_sync.h \
+	src/core/task/task_group_internal.h \
+	src/core/task/task_handle_registry_internal.h \
 	src/engine/runtime_watchdog_internal.h \
 	src/io/runtime_io_api_internal.h \
-	src/io/runtime_io_watch_migration_live_finalize_template.inc \
-	src/io/runtime_io_watch_migration_live_forward_template.inc \
-	src/io/runtime_io_watch_rehome_accept_template.inc \
-	src/io/runtime_io_watch_rehome_recv_template.inc \
-	src/io/runtime_io_watch_rehome_template.inc \
+	src/io/watch/migration_live_finalize_template.inc \
+	src/io/watch/migration_live_forward_template.inc \
+	src/io/watch/rehome_accept_template.inc \
+	src/io/watch/rehome_recv_template.inc \
+	src/io/watch/rehome_template.inc \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
 	src/io/linux/runtime_io_watch_linux_internal.h \
 	src/io/windows/runtime_io_watch_windows_internal.h
 
 RUNTIME_COMMON_OBJS = \
-	$(OBJDIR)/src/core/runtime.o \
-	$(OBJDIR)/src/core/runtime_abi.o \
-	$(OBJDIR)/src/core/runtime_errno.o \
-	$(OBJDIR)/src/core/runtime_util.o \
-	$(OBJDIR)/src/core/runtime_io_udata.o \
-	$(OBJDIR)/src/core/runtime_capability.o \
-	$(OBJDIR)/src/core/runtime_broker.o \
-	$(OBJDIR)/src/core/runtime_broker_ops.o \
-	$(OBJDIR)/src/core/runtime_broker_validate.o \
-	$(OBJDIR)/src/core/runtime_broker_buffer.o \
-	$(OBJDIR)/src/core/runtime_broker_descriptor.o \
-	$(OBJDIR)/src/core/runtime_broker_channel.o \
-	$(OBJDIR)/src/core/runtime_broker_revoke.o \
-	$(OBJDIR)/src/core/runtime_broker_task.o \
-	$(OBJDIR)/src/core/runtime_broker_windows_security.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_dispatch.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_ops.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_response.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_rollback.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_ring.o \
-	$(OBJDIR)/src/core/runtime_broker_transport.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows_fd_stubs.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows_pipe.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows_session.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_posix.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_posix_message.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_posix_socket.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_unix.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_selftest.o \
-	$(OBJDIR)/src/core/runtime_broker_ring.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_buffer_grant.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_doorbell.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_dispatch.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_ops.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_queue.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_stats.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_shm.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_shm_posix.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_shm_windows.o \
-	$(OBJDIR)/src/core/runtime_fault.o \
-	$(OBJDIR)/src/core/runtime_names.o \
-	$(OBJDIR)/src/core/runtime_time.o \
-	$(OBJDIR)/src/core/runtime_fp.o \
-	$(OBJDIR)/src/core/runtime_stack_sample.o \
-	$(OBJDIR)/src/core/runtime_context_portable.o \
-	$(OBJDIR)/src/core/runtime_queue_base.o \
-	$(OBJDIR)/src/core/runtime_norm_queue_depth.o \
-	$(OBJDIR)/src/core/runtime_norm_queue.o \
-	$(OBJDIR)/src/core/runtime_queue.o \
-	$(OBJDIR)/src/core/runtime_alloc.o \
-	$(OBJDIR)/src/core/runtime_allocator_quiescent.o \
-	$(OBJDIR)/src/core/runtime_task_alloc.o \
-	$(OBJDIR)/src/core/runtime_task_handle_registry.o \
-	$(OBJDIR)/src/core/runtime_io_object_alloc.o \
-	$(OBJDIR)/src/core/runtime_wait_timer_alloc.o \
-	$(OBJDIR)/src/core/runtime_trace.o \
-	$(OBJDIR)/src/core/runtime_wake.o \
-	$(OBJDIR)/src/core/runtime_platform.o \
-	$(OBJDIR)/src/core/runtime_windows.o \
-	$(OBJDIR)/src/core/runtime_safepoint.o \
-	$(OBJDIR)/src/core/runtime_wait.o \
-	$(OBJDIR)/src/core/runtime_task_reclaim.o \
-	$(OBJDIR)/src/core/runtime_task_stack.o \
-	$(OBJDIR)/src/core/runtime_reinject.o \
-	$(OBJDIR)/src/core/runtime_wait_accounting.o \
-	$(OBJDIR)/src/core/runtime_wait_tracking.o \
-	$(OBJDIR)/src/core/runtime_timer_heap.o \
-	$(OBJDIR)/src/core/runtime_timer.o \
-	$(OBJDIR)/src/core/runtime_timer_api.o \
-	$(OBJDIR)/src/core/runtime_signal_api.o \
-	$(OBJDIR)/src/engine/runtime_engine.o \
-	$(OBJDIR)/src/engine/runtime_block.o \
-	$(OBJDIR)/src/io/runtime_io_engine.o \
-	$(OBJDIR)/src/engine/runtime_watchdog.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_probe.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_merge.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_rehome.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_scale.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_worker.o \
-	$(OBJDIR)/src/core/runtime_api.o \
-	$(OBJDIR)/src/core/runtime_spawn.o \
-	$(OBJDIR)/src/core/runtime_yield_join_sleep.o \
-	$(OBJDIR)/src/core/runtime_blocking_api.o \
-	$(OBJDIR)/src/core/runtime_cancel_api.o \
-	$(OBJDIR)/src/core/runtime_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_scheduler.o \
-	$(OBJDIR)/src/core/runtime_init.o \
-	$(OBJDIR)/src/core/runtime_shutdown.o \
-	$(OBJDIR)/src/core/runtime_run.o \
-	$(OBJDIR)/src/core/runtime_sync.o \
-	$(OBJDIR)/src/core/runtime_mutex_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_mutex.o \
-	$(OBJDIR)/src/core/runtime_cond_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_cond.o \
-	$(OBJDIR)/src/core/runtime_channel_cache.o \
-	$(OBJDIR)/src/core/runtime_channel_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_channel_fast.o \
-	$(OBJDIR)/src/core/runtime_channel.o \
-	$(OBJDIR)/src/core/runtime_channel_select_fast.o \
-	$(OBJDIR)/src/core/runtime_channel_select.o \
-	$(OBJDIR)/src/core/runtime_handle.o \
-	$(OBJDIR)/src/core/runtime_owner.o \
-	$(OBJDIR)/src/core/runtime_registry.o \
-	$(OBJDIR)/src/core/runtime_task_group.o \
-	$(OBJDIR)/src/core/runtime_task_local.o \
-	$(OBJDIR)/src/io/runtime_io_api.o \
-	$(OBJDIR)/src/io/runtime_io_api_direct.o \
-	$(OBJDIR)/src/io/runtime_io_api_direct_tuning.o \
-	$(OBJDIR)/src/io/runtime_io_api_issue.o \
-	$(OBJDIR)/src/io/runtime_io_api_blocking_ops.o \
-	$(OBJDIR)/src/io/runtime_io_api_blocking_file_ops.o \
-	$(OBJDIR)/src/io/runtime_io_api_blocking_wrappers.o \
-	$(OBJDIR)/src/io/runtime_io_buffer_registry.o \
-	$(OBJDIR)/src/io/runtime_io_api_owned.o \
-	$(OBJDIR)/src/io/runtime_io_api_datagram.o \
-	$(OBJDIR)/src/io/runtime_io_api_handle_positional.o \
-	$(OBJDIR)/src/io/runtime_io_api_positional.o \
-	$(OBJDIR)/src/io/runtime_io_api_positional_util.o \
-	$(OBJDIR)/src/io/runtime_io_api_public.o \
-	$(OBJDIR)/src/io/windows/runtime_windows_iocp.o \
-	$(OBJDIR)/src/core/runtime_debug_dump_helpers.o \
-	$(OBJDIR)/src/core/runtime_debug_stats_json.o \
-	$(OBJDIR)/src/core/runtime_debug.o \
-	$(OBJDIR)/src/io/runtime_io_watch.o \
-	$(OBJDIR)/src/io/runtime_io_watch_close.o \
-	$(OBJDIR)/src/io/runtime_io_watch_lookup.o \
-	$(OBJDIR)/src/io/runtime_io_watch_migration.o \
-	$(OBJDIR)/src/io/runtime_io_watch_queue.o \
-	$(OBJDIR)/src/io/runtime_io_watch_waiter.o
+	$(OBJDIR)/src/core/lifecycle/runtime.o \
+	$(OBJDIR)/src/core/base/abi.o \
+	$(OBJDIR)/src/core/base/errno.o \
+	$(OBJDIR)/src/core/base/util.o \
+	$(OBJDIR)/src/core/base/io_udata.o \
+	$(OBJDIR)/src/core/registry/capability.o \
+	$(OBJDIR)/src/core/broker/broker.o \
+	$(OBJDIR)/src/core/broker/broker_lifecycle.o \
+	$(OBJDIR)/src/core/broker/broker_ops.o \
+	$(OBJDIR)/src/core/broker/broker_validate.o \
+	$(OBJDIR)/src/core/broker/broker_buffer.o \
+	$(OBJDIR)/src/core/broker/broker_descriptor.o \
+	$(OBJDIR)/src/core/broker/broker_channel.o \
+	$(OBJDIR)/src/core/broker/broker_revoke.o \
+	$(OBJDIR)/src/core/broker/broker_task.o \
+	$(OBJDIR)/src/core/broker/broker_windows_security.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_dispatch.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_ops.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_response.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_rollback.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_ring.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows_fd_stubs.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows_pipe.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows_session.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_posix.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_posix_socket.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_unix.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_selftest.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_buffer_grant.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_doorbell.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_dispatch.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_ops.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_queue.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_stats.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_shm.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_shm_posix.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_shm_windows.o \
+	$(OBJDIR)/src/core/debug/fault.o \
+	$(OBJDIR)/src/core/base/names.o \
+	$(OBJDIR)/src/core/time/time.o \
+	$(OBJDIR)/src/core/context/fp.o \
+	$(OBJDIR)/src/core/context/stack_sample.o \
+	$(OBJDIR)/src/core/context/context_portable.o \
+	$(OBJDIR)/src/core/sched/queue_base.o \
+	$(OBJDIR)/src/core/sched/norm_queue_depth.o \
+	$(OBJDIR)/src/core/sched/norm_queue.o \
+	$(OBJDIR)/src/core/sched/core_queue.o \
+	$(OBJDIR)/src/core/memory/alloc.o \
+	$(OBJDIR)/src/core/memory/allocator_quiescent.o \
+	$(OBJDIR)/src/core/task/task_alloc.o \
+	$(OBJDIR)/src/core/task/task_handle_registry.o \
+	$(OBJDIR)/src/core/task/task_handle_claim.o \
+	$(OBJDIR)/src/core/memory/io_object_alloc.o \
+	$(OBJDIR)/src/core/wait/wait_timer_alloc.o \
+	$(OBJDIR)/src/core/debug/trace.o \
+	$(OBJDIR)/src/core/sched/wake.o \
+	$(OBJDIR)/src/core/platform/platform.o \
+	$(OBJDIR)/src/core/platform/windows_policy.o \
+	$(OBJDIR)/src/core/sched/safepoint.o \
+	$(OBJDIR)/src/core/wait/wait.o \
+	$(OBJDIR)/src/core/task/task_reclaim.o \
+	$(OBJDIR)/src/core/task/task_stack.o \
+	$(OBJDIR)/src/core/sched/reinject.o \
+	$(OBJDIR)/src/core/wait/wait_accounting.o \
+	$(OBJDIR)/src/core/wait/wait_tracking.o \
+	$(OBJDIR)/src/core/time/timer_heap.o \
+	$(OBJDIR)/src/core/time/timer.o \
+	$(OBJDIR)/src/core/api/timer_api.o \
+	$(OBJDIR)/src/core/api/signal_api.o \
+	$(OBJDIR)/src/engine/scheduler/scheduler_engine.o \
+	$(OBJDIR)/src/engine/scheduler/block.o \
+	$(OBJDIR)/src/io/engine/io_engine.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_probe.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_merge.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_scale.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_worker.o \
+	$(OBJDIR)/src/core/api/core_api.o \
+	$(OBJDIR)/src/core/task/spawn.o \
+	$(OBJDIR)/src/core/task/yield_join_sleep.o \
+	$(OBJDIR)/src/core/api/blocking_api.o \
+	$(OBJDIR)/src/core/api/cancel_api.o \
+	$(OBJDIR)/src/core/lifecycle/lifecycle.o \
+	$(OBJDIR)/src/core/sched/scheduler.o \
+	$(OBJDIR)/src/core/lifecycle/init.o \
+	$(OBJDIR)/src/core/lifecycle/shutdown.o \
+	$(OBJDIR)/src/core/lifecycle/run.o \
+	$(OBJDIR)/src/core/sync/sync.o \
+	$(OBJDIR)/src/core/sync/mutex_lifecycle.o \
+	$(OBJDIR)/src/core/sync/mutex.o \
+	$(OBJDIR)/src/core/sync/cond_lifecycle.o \
+	$(OBJDIR)/src/core/sync/cond.o \
+	$(OBJDIR)/src/core/sync/channel_cache.o \
+	$(OBJDIR)/src/core/sync/channel_lifecycle.o \
+	$(OBJDIR)/src/core/sync/channel_fast.o \
+	$(OBJDIR)/src/core/sync/channel.o \
+	$(OBJDIR)/src/core/sync/channel_select_fast.o \
+	$(OBJDIR)/src/core/sync/channel_select.o \
+	$(OBJDIR)/src/core/registry/handle.o \
+	$(OBJDIR)/src/core/registry/owner.o \
+	$(OBJDIR)/src/core/registry/registry.o \
+	$(OBJDIR)/src/core/task/task_group.o \
+	$(OBJDIR)/src/core/task/task_group_registry.o \
+	$(OBJDIR)/src/core/task/task_local.o \
+	$(OBJDIR)/src/io/api/io_api.o \
+	$(OBJDIR)/src/io/api/direct.o \
+	$(OBJDIR)/src/io/api/direct_tuning.o \
+	$(OBJDIR)/src/io/api/issue.o \
+	$(OBJDIR)/src/io/api/blocking_ops.o \
+	$(OBJDIR)/src/io/api/blocking_file_ops.o \
+	$(OBJDIR)/src/io/api/blocking_wrappers.o \
+	$(OBJDIR)/src/io/buffer/buffer_registry.o \
+	$(OBJDIR)/src/io/api/owned.o \
+	$(OBJDIR)/src/io/api/datagram.o \
+	$(OBJDIR)/src/io/api/handle_positional.o \
+	$(OBJDIR)/src/io/api/positional.o \
+	$(OBJDIR)/src/io/api/positional_util.o \
+	$(OBJDIR)/src/io/api/public.o \
+	$(OBJDIR)/src/io/windows/watch/iocp.o \
+	$(OBJDIR)/src/core/debug/debug_dump_helpers.o \
+	$(OBJDIR)/src/core/debug/debug_stats_json.o \
+	$(OBJDIR)/src/core/debug/debug.o \
+	$(OBJDIR)/src/io/watch/watch.o \
+	$(OBJDIR)/src/io/watch/close.o \
+	$(OBJDIR)/src/io/watch/watch_lookup.o \
+	$(OBJDIR)/src/io/watch/migration.o \
+	$(OBJDIR)/src/io/watch/watch_queue.o \
+	$(OBJDIR)/src/io/watch/waiter.o
 
 ifeq ($(HOST_PLATFORM),linux)
 LDLIBS += -lm
@@ -332,59 +338,59 @@ CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
 endif
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_prelude.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_state.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_lookup.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_migration_live.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_migration_rehome.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_control.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_submit.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_cqe.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_worker.o
+	$(OBJDIR)/src/io/linux/watch/prelude.o \
+	$(OBJDIR)/src/io/linux/watch/linux_state.o \
+	$(OBJDIR)/src/io/linux/watch/linux_lookup.o \
+	$(OBJDIR)/src/io/linux/watch/linux_migration_live.o \
+	$(OBJDIR)/src/io/linux/watch/linux_migration_rehome.o \
+	$(OBJDIR)/src/io/linux/watch/linux_control.o \
+	$(OBJDIR)/src/io/linux/watch/linux_submit.o \
+	$(OBJDIR)/src/io/linux/watch/cqe.o \
+	$(OBJDIR)/src/io/linux/watch/linux_worker.o
 ifeq ($(UNAME_M),x86_64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o \
-	$(OBJDIR)/src/asm/linux/x86_64/runtime_linux_x86_64.o
+	$(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o \
+	$(OBJDIR)/src/asm/linux/x86_64/wake_syscalls_x86_64.o
 else ifeq ($(UNAME_M),aarch64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/runtime_context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+	$(OBJDIR)/src/core/context/context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
 endif
 else ifeq ($(HOST_PLATFORM),darwin)
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -luring,$(LDLIBS))
 CPPFLAGS += -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_state.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_live.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_rehome.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_control.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_completion.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_events.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_worker.o
+	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_control.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
+	$(OBJDIR)/src/io/darwin/watch/events.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
 ifeq ($(UNAME_M),arm64)
-RUNTIME_OBJS += $(OBJDIR)/src/core/runtime_context_arm64.o
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/arm64/context_arm64.o
+RUNTIME_OBJS += $(OBJDIR)/src/core/context/context_arm64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/arm64/darwin_context_arm64.o
 else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/darwin_context_x86_64.o
 endif
 else ifeq ($(HOST_PLATFORM),windows)
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock -ladvapi32
 CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_state.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_socket.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_pool.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_control.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_submit.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_completion.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_fallback.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows.o
+	$(OBJDIR)/src/io/windows/watch/windows_state.o \
+	$(OBJDIR)/src/io/windows/watch/socket.o \
+	$(OBJDIR)/src/io/windows/watch/pool.o \
+	$(OBJDIR)/src/io/windows/watch/windows_control.o \
+	$(OBJDIR)/src/io/windows/watch/windows_submit.o \
+	$(OBJDIR)/src/io/windows/watch/windows_completion.o \
+	$(OBJDIR)/src/io/windows/watch/fallback.o \
+	$(OBJDIR)/src/io/windows/watch/windows_watch.o
 ifeq ($(UNAME_M),AMD64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
 else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
 endif
 else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
@@ -395,40 +401,40 @@ ifeq ($(UNAME_S),NetBSD)
 LDLIBS += -lrt
 endif
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_state.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_live.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_rehome.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_control.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_completion.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_events.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_worker.o
+	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_control.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
+	$(OBJDIR)/src/io/darwin/watch/events.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
 ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
 else ifeq ($(UNAME_M),amd64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
 else ifeq ($(UNAME_M),aarch64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/runtime_context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+	$(OBJDIR)/src/core/context/context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
 else ifeq ($(UNAME_M),arm64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/runtime_context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+	$(OBJDIR)/src/core/context/context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
 endif
 endif
 endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_capability.o \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_buffer.o \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_transport.o \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_registry.o
+	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
+	$(TESTHOOK_OBJDIR)/src/core/broker/broker_buffer.o \
+	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport.o \
+	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
-		$(OBJDIR)/src/core/runtime_capability.o \
-		$(OBJDIR)/src/core/runtime_broker_buffer.o \
-		$(OBJDIR)/src/core/runtime_broker_transport.o \
-		$(OBJDIR)/src/core/runtime_registry.o, \
+		$(OBJDIR)/src/core/registry/capability.o \
+		$(OBJDIR)/src/core/broker/broker_buffer.o \
+		$(OBJDIR)/src/core/broker/transport/broker_transport.o \
+		$(OBJDIR)/src/core/registry/registry.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 DEMO_OBJS = \
@@ -462,7 +468,8 @@ SERVER_LOSSLESS_OBJS = \
 	$(OBJDIR)/examples/server_support.o
 SERVER_FLOOD_OBJS = \
 	$(OBJDIR)/examples/server_flood.o \
-	$(OBJDIR)/examples/server_flood_stats.o
+	$(OBJDIR)/examples/server_flood_stats.o \
+	$(OBJDIR)/examples/server_flood_stats_open.o
 TEST_ABI_OBJS = \
 	$(OBJDIR)/tests/test_abi_contract.o
 TEST_ABI_COMPAT_OBJS = \
@@ -768,6 +775,7 @@ all: demo stress bench llam_broker server server_lossless server_flood static sh
 static: libllam_runtime.a
 
 libllam_runtime.a: $(RUNTIME_OBJS)
+	rm -f $@
 	$(AR) rcs $@ $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
@@ -2495,9 +2503,9 @@ $(SHARED_OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
-$(OBJDIR)/src/engine/runtime_watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
+$(OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
-$(SHARED_OBJDIR)/src/engine/runtime_watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
+$(SHARED_OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
 $(OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
@@ -2623,7 +2631,11 @@ $(OBJDIR)/examples/server_flood.o: examples/server_flood.c examples/server_flood
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/server_flood_stats.h
+$(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/server_flood_stats.h examples/server_flood_stats_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/examples/server_flood_stats_open.o: examples/server_flood_stats_open.c examples/server_flood_stats_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

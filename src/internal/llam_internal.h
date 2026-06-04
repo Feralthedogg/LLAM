@@ -97,7 +97,7 @@ typedef enum llam_trace_kind {
  *
  * Windows x64 preserves RSI, RDI, and XMM6-XMM15 in addition to the integer
  * registers saved by the SysV x86-64 path. Offsets are consumed directly by
- * @c asm/windows/x86_64/context_x86_64.S.
+ * @c asm/windows/x86_64/windows_context_x86_64.S.
  */
 #define LLAM_CTX_SIMD_F_SKIP_SAVE 0x1U
 #define LLAM_CTX_SIMD_F_SKIP_RESTORE 0x2U
@@ -152,8 +152,8 @@ _Static_assert(sizeof(llam_ctx_t) == 264, "llam_ctx_t size must match asm/window
  * @brief x86-64 callee-saved context layout.
  *
  * The offsets below are consumed directly by
- * @c asm/linux/x86_64/context_x86_64.S and
- * @c asm/darwin/x86_64/context_x86_64.S. BSD x86-64 targets intentionally use
+ * @c asm/linux/x86_64/linux_context_x86_64.S and
+ * @c asm/darwin/x86_64/darwin_context_x86_64.S. BSD x86-64 targets intentionally use
  * the Linux-labelled SysV assembly path because the saved callee-saved register
  * set and stack ABI are the same for this fiber switch contract.
  */
