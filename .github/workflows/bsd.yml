@@ -92,14 +92,14 @@ jobs:
             done
           }
           configure_dragonfly_pkg_repo() {
-            # The default Avalon repository is the upstream master and can be
-            # unreachable from GitHub runners. Use DragonFly's AUTO mirror
-            # endpoint so pkg can select a reachable binary package mirror.
+            # The default Avalon repository can be unreachable from GitHub
+            # runners. Pin an online dports mirror directly; AUTO mirror
+            # selection has failed in CI with "No HTTP mirrors found".
             sudo mkdir -p /usr/local/etc/pkg/repos
             sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
           AUTO: {
-            url             : "https://pkg.dragonflybsd.org/pkg/${ABI}/LATEST"
-            mirror_type     : HTTP
+            url             : "https://ftp.kr.freebsd.org/pub/dragonflybsd/dports/${ABI}/LATEST"
+            mirror_type     : NONE
             enabled         : yes
           }
           Avalon: {
