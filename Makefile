@@ -1939,6 +1939,91 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		exit 1; \
 	fi; \
 	grep 'refusing duplicate archive member' "$$tmp_dir/install.out" >/dev/null
+	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-absolute-archive.XXXXXX")"; \
+	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
+	case "$$(uname -s)-$$(uname -m)" in \
+		Darwin-arm64) package_target=macos-aarch64 ;; \
+		Darwin-x86_64) package_target=macos-x86_64 ;; \
+		Linux-x86_64) package_target=linux-x86_64 ;; \
+		Linux-aarch64) package_target=linux-aarch64 ;; \
+		*) echo "unsupported installer absolute-member smoke host" >&2; exit 1 ;; \
+	esac; \
+	package="llam-ci-$$package_target"; \
+	rm -f "/tmp/$$package-escape"; \
+	{ \
+		printf '%s\n' 'import io'; \
+		printf '%s\n' 'import sys'; \
+		printf '%s\n' 'import tarfile'; \
+		printf '%s\n' 'from pathlib import Path'; \
+		printf '%s\n' 'tmp = Path(sys.argv[1])'; \
+		printf '%s\n' 'package = sys.argv[2]'; \
+		printf '%s\n' 'entries = ('; \
+		printf '%s\n' '    (f"{package}/install.sh", b"#!/bin/sh\nexit 0\n", 0o755),'; \
+		printf '%s\n' '    (f"/tmp/{package}-escape", b"escape", 0o644),'; \
+		printf '%s\n' ')'; \
+		printf '%s\n' 'with tarfile.open(tmp / f"{package}.tar", "w") as archive:'; \
+		printf '%s\n' '    for name, data, mode in entries:'; \
+		printf '%s\n' '        info = tarfile.TarInfo(name)'; \
+		printf '%s\n' '        info.size = len(data)'; \
+		printf '%s\n' '        info.mode = mode'; \
+		printf '%s\n' '        archive.addfile(info, io.BytesIO(data))'; \
+	} > "$$tmp_dir/absolute_archive.py"; \
+	python3 "$$tmp_dir/absolute_archive.py" "$$tmp_dir" "$$package"; \
+	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
+	else \
+		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
+	fi; \
+	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
+		echo "install.sh accepted an absolute archive member" >&2; \
+		cat "$$tmp_dir/install.out" >&2; \
+		exit 1; \
+	fi; \
+	grep 'refusing unsafe archive member' "$$tmp_dir/install.out" >/dev/null; \
+	test ! -e "/tmp/$$package-escape"
+	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-parent-archive.XXXXXX")"; \
+	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
+	case "$$(uname -s)-$$(uname -m)" in \
+		Darwin-arm64) package_target=macos-aarch64 ;; \
+		Darwin-x86_64) package_target=macos-x86_64 ;; \
+		Linux-x86_64) package_target=linux-x86_64 ;; \
+		Linux-aarch64) package_target=linux-aarch64 ;; \
+		*) echo "unsupported installer parent-member smoke host" >&2; exit 1 ;; \
+	esac; \
+	package="llam-ci-$$package_target"; \
+	{ \
+		printf '%s\n' 'import io'; \
+		printf '%s\n' 'import sys'; \
+		printf '%s\n' 'import tarfile'; \
+		printf '%s\n' 'from pathlib import Path'; \
+		printf '%s\n' 'tmp = Path(sys.argv[1])'; \
+		printf '%s\n' 'package = sys.argv[2]'; \
+		printf '%s\n' 'entries = ('; \
+		printf '%s\n' '    (f"{package}/install.sh", b"#!/bin/sh\nexit 0\n", 0o755),'; \
+		printf '%s\n' '    (f"{package}/../escape", b"escape", 0o644),'; \
+		printf '%s\n' ')'; \
+		printf '%s\n' 'with tarfile.open(tmp / f"{package}.tar", "w") as archive:'; \
+		printf '%s\n' '    for name, data, mode in entries:'; \
+		printf '%s\n' '        info = tarfile.TarInfo(name)'; \
+		printf '%s\n' '        info.size = len(data)'; \
+		printf '%s\n' '        info.mode = mode'; \
+		printf '%s\n' '        archive.addfile(info, io.BytesIO(data))'; \
+	} > "$$tmp_dir/parent_archive.py"; \
+	python3 "$$tmp_dir/parent_archive.py" "$$tmp_dir" "$$package"; \
+	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
+	else \
+		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
+	fi; \
+	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
+		echo "install.sh accepted a parent-traversal archive member" >&2; \
+		cat "$$tmp_dir/install.out" >&2; \
+		exit 1; \
+	fi; \
+	grep 'refusing unsafe archive member' "$$tmp_dir/install.out" >/dev/null; \
+	test ! -e "$$tmp_dir/escape"
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-dot-component-archive.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	case "$$(uname -s)-$$(uname -m)" in \
