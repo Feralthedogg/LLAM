@@ -269,6 +269,38 @@ jobs:
               throw
             }
           }
+          $absoluteZip = Join-Path $tmp "bad-absolute.zip"
+          $zip = [System.IO.Compression.ZipFile]::Open($absoluteZip, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            [void]$zip.CreateEntry("$badPackage/install.ps1")
+            [void]$zip.CreateEntry("/tmp/llam-windows-escape")
+          } finally {
+            $zip.Dispose()
+          }
+          try {
+            Assert-SafeZipArchive $absoluteZip $badPackage
+            throw "archive-local Windows installer accepted an absolute archive member"
+          } catch {
+            if ($_.Exception.Message -notmatch "refusing unsafe archive member") {
+              throw
+            }
+          }
+          $parentZip = Join-Path $tmp "bad-parent.zip"
+          $zip = [System.IO.Compression.ZipFile]::Open($parentZip, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            [void]$zip.CreateEntry("$badPackage/install.ps1")
+            [void]$zip.CreateEntry("$badPackage/../escape")
+          } finally {
+            $zip.Dispose()
+          }
+          try {
+            Assert-SafeZipArchive $parentZip $badPackage
+            throw "archive-local Windows installer accepted a parent-traversal archive member"
+          } catch {
+            if ($_.Exception.Message -notmatch "refusing unsafe archive member") {
+              throw
+            }
+          }
 
       - name: Upload platform artifact
         uses: actions/upload-artifact@v6
