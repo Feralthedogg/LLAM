@@ -88,9 +88,9 @@ while [ "$prefix" != "/" ] && [ "${prefix%/}" != "$prefix" ]; do
     prefix="${prefix%/}"
 done
 
-script_dir="$(dirname -- "$0")"
-script_name="$(basename -- "$0")"
-src_dir="$(CDPATH='' cd -- "$script_dir" 2>/dev/null && pwd)"
+script_dir="$(dirname "$0")"
+script_name="$(basename "$0")"
+src_dir="$(CDPATH='' cd "$script_dir" 2>/dev/null && pwd)"
 archive_mode=0
 if [ "$script_name" = "install.sh" ] &&
     [ -f "$src_dir/install.sh" ] &&
@@ -148,7 +148,7 @@ copy_file() {
         echo "copy $src -> $dst"
         return 0
     fi
-    dst_parent="$(dirname -- "$dst")"
+    dst_parent="$(dirname "$dst")"
     mkdir -p "$dst_parent"
     validate_destination_path "$dst_parent"
     validate_destination_path "$dst"
@@ -374,7 +374,7 @@ is_allowed_system_symlink_path() {
 
     case "$(uname -s):$path" in
         Darwin:/tmp|Darwin:/var|Darwin:/etc)
-            resolved="$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P)" || return 1
+            resolved="$(CDPATH='' cd "$path" 2>/dev/null && pwd -P)" || return 1
             [ "$resolved" = "/private${path}" ]
             ;;
         *)
