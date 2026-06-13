@@ -27,7 +27,7 @@
 #include "runtime_internal.h"
 #include "engine/runtime_watchdog_internal.h"
 
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
 #elif LLAM_RUNTIME_BACKEND_LINUX
 #include "io/linux/runtime_io_watch_linux_internal.h"
@@ -76,7 +76,7 @@ static int init_runtime(void) {
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
 
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
 static void close_if_valid(int *fd) {
     if (fd != NULL && *fd >= 0) {
         (void)close(*fd);
@@ -179,14 +179,14 @@ static int exercise_recv_ready_copy_payload_shutdown(void) {
 }
 
 static int exercise_recv_ready_pop_without_transfer(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_recv_watch_t watch;
     unsigned char data[64];
     size_t size = 0U;
 
     memset(&watch, 0, sizeof(watch));
     memset(data, 0x33, sizeof(data));
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     if (!llam_recv_watch_push_ready_copy(&watch, data, sizeof(data))) {
         return fail_errno("recv ready copy push failed");
     }
@@ -219,7 +219,7 @@ static int exercise_recv_ready_pop_without_transfer(void) {
 }
 
 static int exercise_close_purges_accept_watch_ready_fds(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_node_t *node;
     llam_accept_watch_t *watch;
     int listener = -1;
@@ -300,7 +300,7 @@ static int exercise_close_purges_accept_watch_ready_fds(void) {
 }
 
 static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *runtime = NULL;
     llam_node_t *node;
     llam_accept_watch_t *watch;
@@ -382,6 +382,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     return 0;
 }
 
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
 typedef struct managed_close_state {
     int fd;
     int rc;
@@ -397,9 +398,10 @@ static void managed_close_task(void *arg) {
     state->rc = llam_close(state->fd);
     state->error = errno;
 }
+#endif
 
 static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *closer_runtime = NULL;
     llam_runtime_t *watch_runtime = NULL;
     llam_node_t *node;
@@ -798,7 +800,7 @@ static int exercise_empty_poll_watch_cancel_disarms_backend_work(void) {
 }
 
 static int exercise_completion_drops_stale_cancel_control(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_node_t *node;
     llam_io_req_t req;
     int lock_rc;
@@ -846,7 +848,7 @@ static int exercise_completion_drops_stale_cancel_control(void) {
      * also prevents a stale io_uring cancel SQE from targeting a later request
      * that reuses the same embedded request address.
      */
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     llam_io_complete_req(node, &req, 0, false);
 #elif LLAM_RUNTIME_BACKEND_LINUX
     llam_io_complete_req(node, &req, 0, 0U, false);
@@ -883,7 +885,7 @@ static int exercise_completion_drops_stale_cancel_control(void) {
 }
 
 static int exercise_completion_rejects_foreign_runtime_request(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t foreign_runtime;
     llam_node_t *node;
     llam_io_req_t req;
@@ -912,7 +914,7 @@ static int exercise_completion_rejects_foreign_runtime_request(void) {
      * another runtime.  This models stale completion/user-data corruption and
      * must fail closed before any wakeup is attempted on the wrong scheduler.
      */
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     llam_io_complete_req(node, &req, 0, false);
 #elif LLAM_RUNTIME_BACKEND_LINUX
     llam_io_complete_req(node, &req, 0, 0U, false);
@@ -931,7 +933,7 @@ static int exercise_completion_rejects_foreign_runtime_request(void) {
 }
 
 static int exercise_completion_rejects_unmatched_pending_decrement(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_node_t *node;
     llam_io_req_t req;
 
@@ -958,7 +960,7 @@ static int exercise_completion_rejects_unmatched_pending_decrement(void) {
      * or forged packet with decrement_pending=true used to underflow the node
      * counter before validation; it must now fail closed without mutating it.
      */
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     llam_io_complete_req(node, &req, 0, true);
 #elif LLAM_RUNTIME_BACKEND_LINUX
     llam_io_complete_req(node, &req, 0, 0U, true);
@@ -978,7 +980,7 @@ static int exercise_completion_rejects_unmatched_pending_decrement(void) {
 }
 
 static int exercise_submit_queue_rejects_foreign_runtime_request(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t foreign_runtime;
     llam_node_t *node;
     llam_io_req_t req;
@@ -1032,7 +1034,7 @@ static int exercise_submit_queue_rejects_foreign_runtime_request(void) {
 }
 
 static int exercise_submit_queue_rejects_pending_counter_overflow(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t runtime;
     llam_node_t node;
     llam_io_req_t req;
