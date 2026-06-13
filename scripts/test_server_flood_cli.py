@@ -124,6 +124,19 @@ def main(argv: list[str]) -> int:
         {"LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP": "maybe"},
         "LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP must be a boolean token",
     )
+    long_path = "/tmp/" + ("x" * 600)
+    expect_reject(
+        binary,
+        "truncated runtime dump path",
+        ["--clients", "2", "--duration", "0.01"],
+        {"LLAM_SERVER_FLOOD_DUMP_DIR": long_path},
+    )
+    expect_reject(
+        binary,
+        "truncated stats temp path",
+        ["--clients", "2", "--duration", "0.01"],
+        {"TMPDIR": long_path},
+    )
 
     print("[test_server_flood_cli] ok")
     return 0
