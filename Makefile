@@ -1873,12 +1873,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/archive/$$package/include/llam" "$$tmp_dir/archive/$$package/lib"; \
 	cp scripts/install.sh "$$tmp_dir/archive/$$package/install.sh"; \
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		digest="$$(sha256sum "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	else \
-		digest="$$(shasum -a 256 "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	digest="$$(sh scripts/test_release_fixture.sh sha256 "$$tmp_dir/$$package.tar.xz")"; \
 	{ \
 		printf '%s  %s trailing-field\n' "$$digest" "$$package.tar.xz"; \
 		printf '%064d  other-file\n' 0; \
@@ -1910,12 +1906,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/archive/$$package/include/llam" "$$tmp_dir/archive/$$package/lib"; \
 	cp scripts/install.sh "$$tmp_dir/archive/$$package/install.sh"; \
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		digest="$$(sha256sum "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	else \
-		digest="$$(shasum -a 256 "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	digest="$$(sh scripts/test_release_fixture.sh sha256 "$$tmp_dir/$$package.tar.xz")"; \
 	printf '%s  *.tar.xz\n' "$$digest" > "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a glob checksum target" >&2; \
@@ -1944,12 +1936,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/archive/$$package/include/llam" "$$tmp_dir/archive/$$package/lib"; \
 	printf '#!/bin/sh\nprintf exploited > %s/marker\nexit 0\n' "$$tmp_dir" > "$$tmp_dir/archive/$$package/install.sh"; \
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; \
 	if [ -f "$$tmp_dir/marker" ]; then \
 		echo "install.sh executed installer code from the downloaded archive" >&2; \
@@ -1980,12 +1968,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
 	printf 'payload\n' > "$$tmp_dir/archive/$$package/bin/llam-danger"; \
 	chmod 4777 "$$tmp_dir/archive/$$package/bin/llam-danger"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted an archive member with unsafe mode bits" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2015,12 +1999,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	chmod +x "$$tmp_dir/archive/$$package/install.sh"; \
 	printf payload > "$$tmp_dir/archive/$$package/payload"; \
 	ln "$$tmp_dir/archive/$$package/payload" "$$tmp_dir/archive/$$package/payload-hardlink"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a hard-link archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2053,11 +2033,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf second > "$$tmp_dir/archive/$$package/payload"; \
 	tar -C "$$tmp_dir/archive" -rf "$$tmp_dir/$$package.tar" "$$package/payload"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a duplicate archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2103,11 +2079,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	} > "$$tmp_dir/absolute_archive.py"; \
 	python3 "$$tmp_dir/absolute_archive.py" "$$tmp_dir" "$$package"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted an absolute archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2153,11 +2125,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	} > "$$tmp_dir/parent_archive.py"; \
 	python3 "$$tmp_dir/parent_archive.py" "$$tmp_dir" "$$package"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a parent-traversal archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2191,11 +2159,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf second > "$$tmp_dir/archive/$$package/payload"; \
 	(cd "$$tmp_dir/archive" && tar -rf "$$tmp_dir/$$package.tar" "$$package/./payload"); \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a non-canonical ./ archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2228,11 +2192,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf second > "$$tmp_dir/archive/$$package/payload"; \
 	(cd "$$tmp_dir/archive" && tar -rf "$$tmp_dir/$$package.tar" "$$package//payload"); \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a non-canonical // archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2278,11 +2238,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	} > "$$tmp_dir/casefold_archive.py"; \
 	python3 "$$tmp_dir/casefold_archive.py" "$$tmp_dir" "$$package"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a case-insensitive duplicate archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2316,11 +2272,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/archive/$$package/collision"; \
 	tar -C "$$tmp_dir/archive" -rf "$$tmp_dir/$$package.tar" "$$package/collision"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted an archive path type collision" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -2349,12 +2301,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf '%s\n' '#!/bin/sh' 'exit 0' > "$$tmp_dir/archive/$$package/install.sh"; \
 	chmod +x "$$tmp_dir/archive/$$package/install.sh"; \
 	ln -s 'payload target' "$$tmp_dir/archive/$$package/payload-link"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted an unsafe archive symlink target" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
