@@ -3469,6 +3469,7 @@ cleanup_no_runtime:
 
 static int test_cond_owner_recheck_unlinks_waiter(void) {
     cond_owner_recheck_state_t state;
+    llam_spawn_opts_t spawn_opts;
     pthread_t corrupter;
     llam_task_t *task = NULL;
     bool corrupter_started = false;
@@ -3493,10 +3494,19 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
     if (state.raw_mutex == NULL || state.raw_cond == NULL) {
         goto cleanup_no_runtime;
     }
+    if (llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        goto cleanup_no_runtime;
+    }
+    /*
+     * This edge test intentionally stalls in pthread_mutex_lock() while a host
+     * thread corrupts the mutex owner.  Disable watchdog preemption for the
+     * task so SIGUSR1 does not mask the owner-recheck assertion on BSD.
+     */
+    spawn_opts.flags |= LLAM_SPAWN_F_NO_PREEMPT;
     if (init_runtime() != 0) {
         goto cleanup_no_runtime;
     }
-    task = llam_spawn(cond_owner_recheck_task, &state, NULL);
+    task = llam_spawn(cond_owner_recheck_task, &state, &spawn_opts);
     if (task == NULL) {
         goto cleanup_runtime;
     }
