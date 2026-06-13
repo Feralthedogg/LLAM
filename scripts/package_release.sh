@@ -432,12 +432,12 @@ validate_packaged_archive_links "$archive" "$package_name"
 
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$out_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
-elif command -v shasum >/dev/null 2>&1; then
-    (cd "$out_dir" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v sha256 >/dev/null 2>&1; then
     archive_base="$(basename "$archive")"
     digest="$(cd "$out_dir" && sha256 -q "$archive_base")"
     printf '%s  %s\n' "$digest" "$archive_base" > "$archive.sha256"
+elif command -v shasum >/dev/null 2>&1; then
+    (cd "$out_dir" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v openssl >/dev/null 2>&1; then
     (cd "$out_dir" && openssl dgst -sha256 -r "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v cksum >/dev/null 2>&1; then
@@ -445,7 +445,7 @@ elif command -v cksum >/dev/null 2>&1; then
     digest="$(cd "$out_dir" && cksum -a sha256 "$archive_base" | awk '{ print $1 }')"
     printf '%s  %s\n' "$digest" "$archive_base" > "$archive.sha256"
 else
-    echo "sha256sum, shasum, sha256, openssl, or cksum is required to write release checksums" >&2
+    echo "sha256sum, sha256, shasum, openssl, or cksum is required to write release checksums" >&2
     exit 1
 fi
 
