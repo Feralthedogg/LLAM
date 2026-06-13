@@ -1461,6 +1461,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	case "$$(uname -s)" in \
 		Darwin) ln -s libllam_runtime.2.dylib "$$tmp_dir/pkg/lib/libllam_runtime.dylib" ;; \
 		Linux) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
+		FreeBSD|OpenBSD|NetBSD|DragonFly) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
 		*) echo "unsupported installer dangling lib-link smoke host" >&2; exit 1 ;; \
 	esac; \
 	if sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
@@ -1488,6 +1489,10 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.999"; \
 			ln -s libllam_runtime.so.999 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
 			;; \
+		FreeBSD|OpenBSD|NetBSD|DragonFly) \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.999"; \
+			ln -s libllam_runtime.so.999 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
+			;; \
 		*) echo "unsupported installer wrong lib-link smoke host" >&2; exit 1 ;; \
 	esac; \
 	if sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
@@ -1512,6 +1517,10 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.dylib"; \
 			;; \
 		Linux) \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.0.0"; \
+			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
+			;; \
+		FreeBSD|OpenBSD|NetBSD|DragonFly) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.0.0"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
@@ -1547,6 +1556,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package symlink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
@@ -1569,7 +1586,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	ln -s "$$tmp_dir/outside" "$$tmp_dir/repo/target"; \
 	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
@@ -1585,6 +1602,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package output file-component smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts"; \
@@ -1603,6 +1628,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1625,7 +1658,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	chmod 666 "$$tmp_dir/repo/README.md"; \
 	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
@@ -1641,6 +1674,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
@@ -1664,7 +1705,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	ln -s "$$tmp_dir/outside/README.md" "$$tmp_dir/repo/README.md"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release input path" >&2; \
@@ -1679,6 +1720,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1704,7 +1753,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	ln "$$tmp_dir/outside-runtime.h" "$$tmp_dir/repo/include/llam/runtime.h"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh copied a hard-linked release input file" >&2; \
@@ -1719,6 +1768,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package liblink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1741,7 +1798,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unexpected library symlink target" >&2; \
@@ -1756,6 +1813,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package regular-liblink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1779,7 +1844,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; : > "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted non-symlink shared-library link artifacts" >&2; \
@@ -1794,6 +1859,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer checksum smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1823,6 +1896,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer checksum-glob smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1849,6 +1930,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer archive-script smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1875,6 +1964,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1902,6 +1999,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1929,6 +2034,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer duplicate smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1958,6 +2071,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer absolute-member smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -2001,6 +2122,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer parent-member smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -2043,6 +2172,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer dot-component smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -2072,6 +2209,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer double-slash smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -2101,6 +2246,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer casefold smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -2143,6 +2296,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer type-collision smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -2173,6 +2334,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer symlink-target smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
