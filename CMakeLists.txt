@@ -595,6 +595,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test_windows_iocp_io PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime)
@@ -605,6 +606,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test_windows_handle_io PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_compile_definitions(test_windows_handle_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     target_link_libraries(test_windows_handle_io PRIVATE llam_runtime)
@@ -615,6 +617,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_include_directories(test_windows_iocp_dump PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_compile_definitions(test_windows_iocp_dump PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
     target_link_libraries(test_windows_iocp_dump PRIVATE llam_runtime)
