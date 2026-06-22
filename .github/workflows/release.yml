@@ -390,6 +390,18 @@ jobs:
           EOF
             sudo sed -i.bak "s|__LLAM_DRAGONFLY_REPO__|$1|g" /usr/local/etc/pkg/repos/llam-auto.conf
           }
+          retry_dragonfly_pkg_update() {
+            attempts=0
+            max_attempts="${LLAM_DRAGONFLY_PKG_UPDATE_RETRIES:-2}"
+            delay_seconds="${LLAM_DRAGONFLY_PKG_UPDATE_RETRY_DELAY:-5}"
+            while ! sudo pkg update -f; do
+              attempts=$((attempts + 1))
+              if [ "$attempts" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep "$delay_seconds"
+            done
+          }
           install_dragonfly_release_tools() {
             if dragonfly_release_tools_available; then
               return 0
@@ -402,9 +414,10 @@ jobs:
               "https://ftp.kr.freebsd.org/pub/dragonflybsd/dports/\${ABI}/LATEST" \
               "https://www.mirrorservice.org/sites/ftp.dragonflybsd.org/dports/\${ABI}/LATEST"
             do
+              echo "Trying DragonFly pkg repo: $repo_url"
               configure_dragonfly_pkg_repo "$repo_url"
               pkg -vv | sed -n '/Repositories:/,$p' || true
-              if retry sudo pkg update -f &&
+              if retry_dragonfly_pkg_update &&
                  { command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake; } &&
                  { command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake; } &&
                  { command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz; } &&
