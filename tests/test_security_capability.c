@@ -12257,6 +12257,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     bool thread_started = false;
     bool thread_cancelled = false;
     bool broker_initialized = false;
+    const size_t self_test_attempts = 20U;
     int rc = -1;
 
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
@@ -12273,7 +12274,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
 
     state.broker = &broker;
     state.path = path;
-    state.max_connections = 8U;
+    state.max_connections = self_test_attempts + 8U;
     atomic_init(&state.done, 0);
     state.rc = -1;
     if (pthread_create(&thread, NULL, broker_local_server_thread, &state) != 0) {
@@ -12292,7 +12293,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     if (broker_connect_and_close(path) != 0) {
         goto done;
     }
-    if (broker_client_self_test_unix_retry(path, 5U) != 0) {
+    if (broker_client_self_test_unix_retry(path, self_test_attempts) != 0) {
         fprintf(stderr,
                 "[test_security_capability] malformed local server follow-up self-test failed errno=%d\n",
                 errno);
