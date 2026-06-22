@@ -34,7 +34,7 @@ jobs:
             runner: macos-14
             cc: clang
           - target: windows-x86_64
-            runner: windows-2025
+            runner: windows-2022
             cc: msvc
 
     steps:
