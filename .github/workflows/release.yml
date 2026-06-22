@@ -371,15 +371,16 @@ jobs:
               sleep "$delay_seconds"
             done
           }
+          dragonfly_release_tools_available() {
+            command -v gmake >/dev/null 2>&1 &&
+              command -v cmake >/dev/null 2>&1 &&
+              command -v xz >/dev/null 2>&1
+          }
           configure_dragonfly_pkg_repo() {
-            # The default Avalon repository can be unreachable from GitHub
-            # runners. Pin the DragonFly dports master over plain HTTP:
-            # the CI VM's pkg has failed fetching HTTPS metadata while this
-            # direct HTTP endpoint serves ${ABI}/LATEST/meta.conf reliably.
             sudo mkdir -p /usr/local/etc/pkg/repos
             sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
           AUTO: {
-            url             : "http://mirror-master.dragonflybsd.org/dports/${ABI}/LATEST"
+            url             : "__LLAM_DRAGONFLY_REPO__"
             mirror_type     : NONE
             enabled         : yes
           }
@@ -387,6 +388,31 @@ jobs:
             enabled         : no
           }
           EOF
+            sudo sed -i.bak "s|__LLAM_DRAGONFLY_REPO__|$1|g" /usr/local/etc/pkg/repos/llam-auto.conf
+          }
+          install_dragonfly_release_tools() {
+            if dragonfly_release_tools_available; then
+              return 0
+            fi
+            for repo_url in \
+              "https://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
+              "http://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
+              "https://mirrors.nycbug.org/pub/DragonflyBSD/dports/\${ABI}/LATEST" \
+              "https://ftp.jaist.ac.jp/pub/DragonFly/dports/\${ABI}/LATEST" \
+              "https://ftp.kr.freebsd.org/pub/dragonflybsd/dports/\${ABI}/LATEST" \
+              "https://www.mirrorservice.org/sites/ftp.dragonflybsd.org/dports/\${ABI}/LATEST"
+            do
+              configure_dragonfly_pkg_repo "$repo_url"
+              pkg -vv | sed -n '/Repositories:/,$p' || true
+              if retry sudo pkg update -f &&
+                 { command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake; } &&
+                 { command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake; } &&
+                 { command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz; } &&
+                 dragonfly_release_tools_available; then
+                return 0
+              fi
+            done
+            return 1
           }
           case "$(uname -s)" in
             FreeBSD)
@@ -395,13 +421,8 @@ jobs:
               command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
               ;;
             DragonFly)
-              configure_dragonfly_pkg_repo
               pkg config ABI || true
-              pkg -vv | sed -n '/Repositories:/,$p' || true
-              retry sudo pkg update -f
-              command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
-              command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
-              command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
+              install_dragonfly_release_tools
               ;;
             OpenBSD)
               sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
