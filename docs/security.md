@@ -45,7 +45,7 @@ trusted LLAM broker process
   validates every token before applying an operation
 ```
 
-The current 2.0.0 implementation provides the following internal token and
+The current 2.0.1 implementation provides the following internal token and
 broker-control foundation:
 
 - `llam_capability_token_t` carries runtime id, object family, slot,

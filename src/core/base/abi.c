@@ -30,7 +30,7 @@
 #include <errno.h>
 #include <string.h>
 
-#define LLAM_VERSION_STRING_LITERAL "2.0.0"
+#define LLAM_VERSION_STRING_LITERAL "2.0.1"
 
 /** @brief Return the smaller of two byte counts. */
 static size_t llam_min_size(size_t a, size_t b) {
@@ -64,7 +64,7 @@ int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
     }
 
     memset(&defaults, 0, sizeof(defaults));
-    defaults.deterministic = 1U;
+    defaults.deterministic = 0U;
     defaults.sqpoll_cpu = -1;
     defaults.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     defaults.preempt_mode = LLAM_PREEMPT_AUTO;

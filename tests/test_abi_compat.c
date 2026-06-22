@@ -74,8 +74,8 @@ static int test_old_runtime_opts_prefix(void) {
     if (llam_runtime_opts_init((llam_runtime_opts_t *)(void *)old_opts, sizeof(*old_opts)) != 0) {
         return fail_errno("llam_runtime_opts_init old-prefix call failed");
     }
-    if (old_opts->deterministic != 1U) {
-        return fail_msg("old runtime opts prefix did not receive default deterministic value");
+    if (old_opts->deterministic != 0U) {
+        return fail_msg("old runtime opts prefix did not receive default non-deterministic value");
     }
     if (!guard_unchanged(storage + sizeof(*old_opts), sizeof(storage) - sizeof(*old_opts))) {
         return fail_msg("llam_runtime_opts_init wrote past old runtime opts prefix");
@@ -112,9 +112,9 @@ static int test_partial_runtime_opts_prefix_defaults(void) {
                              sizeof(partial_opts)) != 0) {
         return fail_errno("llam_runtime_init_ex partial-prefix call failed");
     }
-    if (g_llam_runtime.deterministic != 1U) {
+    if (g_llam_runtime.deterministic != 0U) {
         llam_runtime_shutdown();
-        return fail_msg("partial runtime opts prefix clobbered deterministic default");
+        return fail_msg("partial runtime opts prefix clobbered non-deterministic default");
     }
     llam_runtime_shutdown();
     return 0;

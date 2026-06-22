@@ -1,5 +1,17 @@
 # LLAM ChangeLog
 
+## 2.0.1 - 2026-06-23
+
+### Changed
+
+* change the default runtime policy to non-deterministic scheduling
+  (`deterministic = 0`) for `llam_runtime_opts_init()`, prefix-compatible
+  option initialization, and `llam_runtime_init_ex(NULL, ...)` startup.
+
+* refresh install, packaging, shared-library smoke, and release workflow
+  metadata for the `2.0.1` library patch release while keeping the public ABI at
+  `2.0`.
+
 ## 2.0.0 - 2026-05-25
 
 ### Added

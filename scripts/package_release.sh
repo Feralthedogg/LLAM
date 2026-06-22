@@ -5,10 +5,10 @@
 set -eu
 
 target="${1:-}"
-version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.0.0}}"
+version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.0.1}}"
 version="${version#v}"
 abi_major="${LLAM_ABI_MAJOR:-2}"
-library_version="${LLAM_VERSION:-2.0.0}"
+library_version="${LLAM_VERSION:-2.0.1}"
 script_dir="$(dirname "$0")"
 root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
 out_dir="$root_dir/target/dist"

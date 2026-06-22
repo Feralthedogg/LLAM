@@ -392,6 +392,7 @@ static int test_broker_destroy_scrubs_authority_state(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -459,6 +460,7 @@ static int test_broker_transport_subject_rejects_destroying_broker(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -499,6 +501,7 @@ static int test_broker_transport_subject_requires_os_entropy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -554,6 +557,7 @@ static int test_broker_transport_subject_collision_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -898,6 +902,7 @@ static int test_capability_key_requires_os_entropy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     llam_capability_test_force_entropy_failure(true);
     errno = 0;
@@ -921,6 +926,7 @@ static int test_in_process_runtime_does_not_require_broker_entropy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
     /*
@@ -1033,6 +1039,7 @@ static int test_broker_issue_validate_and_revoke(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1070,6 +1077,7 @@ static int test_broker_revoke_all_epoch_overflow_invalidates_authority(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1133,6 +1141,7 @@ static int test_broker_create_paths_clear_output_on_invalid_input(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1279,6 +1288,7 @@ static int test_broker_object_id_max_fails_before_wrap(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1420,6 +1430,7 @@ static int test_broker_transport_grants_require_explicit_rights(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1557,6 +1568,7 @@ static int test_broker_transport_malformed_requests_fail_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1694,6 +1706,7 @@ static int test_broker_direct_issue_clears_output_on_invalid_input(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1734,6 +1747,7 @@ static int test_broker_validate_requires_nonzero_rights(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1804,6 +1818,7 @@ static int test_broker_attenuate_capability(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1881,6 +1896,7 @@ static int test_broker_subject_bound_tokens(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1956,6 +1972,7 @@ static int test_broker_nested_subject_scope_restores_outer(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2005,6 +2022,7 @@ static int test_broker_nested_subject_conflict_preserves_outer(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2047,6 +2065,7 @@ static int test_broker_nested_subject_depth_overflow_preserves_scope(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2116,6 +2135,7 @@ static int test_broker_object_revocation_rotates_generation(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2224,6 +2244,7 @@ static int test_broker_destroy_drains_unjoined_task_slots(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2277,6 +2298,7 @@ static int test_broker_destroy_cancels_sleeping_task_slots(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2322,6 +2344,7 @@ static int test_broker_failed_task_join_consumes_slot(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2410,6 +2433,7 @@ static int test_broker_wire_task_join_sleep_returns_eagain(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2497,6 +2521,7 @@ static int test_broker_wire_task_join_does_not_drain_peer_sleep(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2594,6 +2619,7 @@ static int test_broker_rejects_foreign_runtime_token(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3097,6 +3123,7 @@ static int test_broker_concurrent_channel_state(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3201,6 +3228,7 @@ static int test_broker_validate_revoke_race_guard(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3573,6 +3601,7 @@ static int test_broker_posix_transport_fds_are_cloexec(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3753,6 +3782,7 @@ static int test_broker_create_response_failure_rolls_back_memory_grants(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3810,6 +3840,7 @@ static int test_broker_register_descriptor_response_failure_rolls_back(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3914,6 +3945,7 @@ static int test_broker_detach_reclaims_racing_completed_task_slots(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3989,6 +4021,7 @@ static int test_broker_task_spawn_response_failure_rolls_back_race(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4499,6 +4532,7 @@ static int test_broker_direct_failed_outputs_are_cleared(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4790,6 +4824,7 @@ static int test_broker_invalid_register_descriptor_closes_received_fd(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4863,6 +4898,7 @@ static int test_broker_overauthorized_descriptor_array_closes_all_received_fds(v
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4947,6 +4983,7 @@ static int test_broker_unclaimed_descriptor_is_rejected_and_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -5092,6 +5129,7 @@ static int test_broker_serve_one_fd_keeps_session_subject(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -5152,6 +5190,7 @@ static int test_broker_transport_rejects_cross_session_replay(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -5251,6 +5290,7 @@ static int test_broker_transport_subject_table_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -5550,6 +5590,7 @@ static int test_broker_ring_reinit_stale_session_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6165,6 +6206,7 @@ static int test_broker_ring_batch_perf_gate(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
@@ -6515,6 +6557,7 @@ static int test_broker_ring_multiprocess_session_replay_guard(void) {
         if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
         }
+        opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
         if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
@@ -6675,6 +6718,7 @@ static int test_broker_ring_multiprocess_teardown_guard(void) {
         if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
         }
+        opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
         if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
@@ -6779,6 +6823,7 @@ static int test_broker_ring_capability_validate_op(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6873,6 +6918,7 @@ static int test_broker_ring_capability_attenuate_op(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6946,6 +6992,7 @@ static int test_broker_ring_capability_revoke_op(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7026,6 +7073,7 @@ static int test_broker_ring_failed_output_windows_are_cleared(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7152,6 +7200,7 @@ static int test_broker_ring_malformed_submissions_fail_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7230,6 +7279,7 @@ static int test_broker_ring_buffer_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7328,6 +7378,7 @@ static int test_broker_ring_channel_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7490,6 +7541,7 @@ static int test_broker_ring_task_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7751,6 +7803,7 @@ static int test_broker_ring_subject_bound_session(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7870,6 +7923,7 @@ static int test_broker_ring_fd_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8093,6 +8147,7 @@ static int test_broker_nested_op_survives_destroy_start(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8189,6 +8244,7 @@ static int test_broker_nested_dispatch_survives_destroy_start(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8260,6 +8316,7 @@ static int test_broker_nested_ring_create_survives_destroy_start(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8336,6 +8393,7 @@ static int test_broker_destroy_is_single_owner_under_race(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8411,6 +8469,7 @@ static int test_broker_destroy_active_op_sentinel_does_not_hang(void) {
         if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(10);
         }
+        opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
         if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(11);
@@ -8494,6 +8553,7 @@ static int test_broker_destroy_from_active_op_does_not_hang(void) {
         if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(10);
         }
+        opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
         if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(11);
@@ -8579,6 +8639,7 @@ static int test_broker_end_op_requires_thread_local_owner(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8638,6 +8699,7 @@ static int test_broker_begin_active_op_sentinel_fails_busy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8737,6 +8799,7 @@ static int test_broker_destroy_waits_for_active_ring_io(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8846,6 +8909,7 @@ static int test_broker_ring_publish_cursor_mismatch_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8985,6 +9049,7 @@ static int test_broker_ring_session_forget_rejects_busy_serve(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9128,6 +9193,7 @@ static int test_broker_ring_named_session_cleanup_unlinks_mapping(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9213,6 +9279,7 @@ static int test_broker_destroy_reclaims_inactive_owned_ring_mapping(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9298,6 +9365,7 @@ static int test_broker_ring_reuse_reclaims_inactive_owned_mapping(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9374,6 +9442,7 @@ static int test_broker_buffer_reuse_reclaims_inactive_storage(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9447,6 +9516,7 @@ static int test_broker_destroy_reclaims_inactive_owned_descriptor(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9525,6 +9595,7 @@ static int test_broker_descriptor_reuse_reclaims_inactive_owned_slot(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9700,6 +9771,7 @@ static int broker_ring_windows_session_child(const char *name,
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
@@ -9786,6 +9858,7 @@ static int broker_ring_windows_teardown_child(const char *name, uint64_t iterati
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
@@ -10361,6 +10434,7 @@ static int test_broker_ring_handle_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -10501,6 +10575,7 @@ static int test_broker_register_handle_clears_inherit_flag(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
@@ -10669,6 +10744,7 @@ static int test_broker_pipe_transport_handle_grants(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -10941,6 +11017,7 @@ static int test_broker_pipe_create_ring_write_failure_closes_remote_handle(void)
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -11057,6 +11134,7 @@ static int test_broker_pipe_serve_local_n_survives_malformed_session(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -11590,6 +11668,7 @@ static int test_broker_socketpair_transport(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -12109,6 +12188,7 @@ static int test_broker_create_ring_response_failure_reclaims_session(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -12182,6 +12262,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;

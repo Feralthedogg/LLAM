@@ -428,7 +428,7 @@ static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_i
  * process diagnostics shared by peer runtimes. The final @c initialized flag is
  * published only after all required subsystems are ready.
  *
- * @param opts Optional runtime options. Passing @c NULL uses deterministic
+ * @param opts Optional runtime options. Passing @c NULL uses non-deterministic
  *             balanced defaults with environment overrides still honored.
  * @param opts_size Size of the caller's option struct when @p opts is non-NULL.
  *
@@ -492,7 +492,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         memcpy(&raw_opts, opts, opts_copy_size);
 
         memset(&opts_storage, 0, sizeof(opts_storage));
-        opts_storage.deterministic = 1U;
+        opts_storage.deterministic = 0U;
         opts_storage.sqpoll_cpu = -1;
         opts_storage.profile = LLAM_RUNTIME_PROFILE_BALANCED;
         opts_storage.preempt_mode = LLAM_PREEMPT_AUTO;
@@ -591,7 +591,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
      * environment variables or caller option structs.
      */
     experimental_flags = opts != NULL ? opts->experimental_flags : 0U;
-    rt->deterministic = opts != NULL ? (opts->deterministic != 0U) : 1U;
+    rt->deterministic = opts != NULL ? (opts->deterministic != 0U) : 0U;
     rt->forced_yield_every = opts != NULL ? opts->forced_yield_every : 0U;
     rt->experimental_shard_rings =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS) != 0U ? 1U : 0U;

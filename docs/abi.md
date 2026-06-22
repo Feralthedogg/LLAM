@@ -15,7 +15,7 @@ public symbols.
 The current public ABI version is:
 
 ```text
-LLAM_VERSION         = 2.0.0
+LLAM_VERSION         = 2.0.1
 LLAM_ABI_VERSION_MAJOR = 2
 LLAM_ABI_VERSION_MINOR = 0
 LLAM_ABI_VERSION       = (major << 16) | minor
@@ -146,8 +146,8 @@ LLAM_IO_BUFFER_OPTS_CURRENT_SIZE
 `llam_runtime_opts_init()` and `llam_spawn_opts_init()` write only the known
 compatible prefix, so bindings can ask the loaded library for its current
 defaults without assuming that all-zero options equal the default policy.
-Current defaults are deterministic balanced runtime startup and default-class,
-default-stack task spawn.
+Current defaults are non-deterministic balanced runtime startup and
+default-class, default-stack task spawn.
 
 Public option structs store enum-valued fields and flag words as `uint32_t`,
 not C enum or `unsigned` objects. The enum types and constants remain available
@@ -278,8 +278,8 @@ make shared
 Expected dynamic artifacts:
 
 ```text
-Linux:  libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.2.0.0
-BSD:    libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.2.0.0
+Linux:  libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.2.0.1
+BSD:    libllam_runtime.so -> libllam_runtime.so.2 -> libllam_runtime.so.2.0.1
 macOS:  libllam_runtime.dylib -> libllam_runtime.2.dylib
 Windows: llam_runtime.dll plus llam_runtime.lib and llam_runtime_shared.lib in
          the native Windows x86_64 release archive.

@@ -318,7 +318,7 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v2.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v2.0.1` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, macOS arm64, and BSD targets that pass the BSD CI smoke gate, plus
 a native Windows x86_64 `.zip` archive through `.github/workflows/release.yml`.
 
@@ -347,19 +347,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS/BSD:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.1/install.sh | sh -s -- --version 2.0.1 --prefix "$HOME/.local"
 ```
 
 Install a specific POSIX target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.1/install.sh | sh -s -- --version 2.0.1 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 2.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v2.0.1/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 2.0.1 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
@@ -855,7 +855,7 @@ Important fields:
 
 | Field | Meaning |
 | --- | --- |
-| `deterministic` | Deterministic scheduling mode. |
+| `deterministic` | Deterministic scheduling mode; defaults to disabled. |
 | `forced_yield_every` | Force a yield at a fixed interval. |
 | `experimental_flags` | Bitwise OR of `LLAM_RUNTIME_EXPERIMENTAL_F_*` flags. |
 | `idle_spin_ns` | Spin before idle poll fallback. |

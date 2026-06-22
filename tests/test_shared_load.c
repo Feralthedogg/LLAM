@@ -34,7 +34,7 @@ typedef int (*connect_fn)(llam_fd_t fd, const struct sockaddr *addr, socklen_t a
 #if defined(__APPLE__) && defined(__MACH__)
 #define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.2.dylib"
 #elif defined(__linux__)
-#define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.so.2.0.0"
+#define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.so.2.0.1"
 #else
 #define LLAM_TEST_DEFAULT_SHARED_PATH "./libllam_runtime.so"
 #endif

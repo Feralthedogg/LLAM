@@ -67,11 +67,11 @@ public static class LlamWin32FileInfo {
 }
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v2.0.0" }
+    $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v2.0.1" }
 }
 $Version = $Version -replace '^v', ''
 if ([string]::IsNullOrWhiteSpace($LibraryVersion)) {
-    $LibraryVersion = "2.0.0"
+    $LibraryVersion = "2.0.1"
 }
 if ([string]::IsNullOrWhiteSpace($AbiMajor)) {
     $AbiMajor = "2"
