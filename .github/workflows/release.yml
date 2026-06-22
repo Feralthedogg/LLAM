@@ -65,12 +65,20 @@ jobs:
 
       - name: Build and test POSIX
         if: runner.os != 'Windows'
+        timeout-minutes: 20
         run: |
           version="2.0.1"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
-          make clean all test CC="${{ matrix.cc }}" LLAM_VERSION="$version"
+          jobs=2
+          if command -v nproc >/dev/null 2>&1; then
+            jobs="$(nproc)"
+          elif command -v sysctl >/dev/null 2>&1; then
+            jobs="$(sysctl -n hw.logicalcpu)"
+          fi
+          make clean
+          make -j"$jobs" all test CC="${{ matrix.cc }}" LLAM_VERSION="$version"
 
       - name: Smoke test POSIX runtime executables
         if: runner.os != 'Windows'
