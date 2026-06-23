@@ -1377,7 +1377,7 @@ int main(int argc, char **argv) {
     atomic_init(&server.signal_thread_stop, false);
     atomic_init(&server.signal_thread_done, false);
     quiet_env = getenv("LLAM_CHAT_QUIET");
-    server.quiet = quiet_env != NULL && strcmp(quiet_env, "0") != 0;
+    server.quiet = chat_env_enabled(quiet_env, false);
     server.lossless_outbox = lossless_outbox;
     atomic_store_explicit(&g_stop_requested, false, memory_order_release);
 

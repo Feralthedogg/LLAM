@@ -43,7 +43,7 @@ jobs:
             version: '10.1'
             arch: x86-64
             package_target: netbsd-x86_64
-          - name: dragonflybsd-x86_64
+          - name: dragonflybsd-x86_64-experimental
             os: dragonflybsd
             version: '6.4.2'
             arch: x86-64
@@ -51,6 +51,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Note DragonFlyBSD CI policy
+        if: ${{ matrix.os == 'dragonflybsd' }}
+        shell: bash
+        run: |
+          {
+            echo "### DragonFlyBSD CI policy"
+            echo
+            echo "This job is an experimental allowed-failure smoke gate because public DragonFlyBSD VM/package infrastructure is not stable enough for a hard push gate."
+            echo "Release artifact publication still requires the release workflow's DragonFlyBSD artifact build to pass."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start BSD VM
         uses: cross-platform-actions/action@v1.1.0
@@ -80,9 +91,25 @@ jobs:
               sleep "$delay_seconds"
             done
           }
+          configure_dragonfly_pkg_repo() {
+            # The default Avalon repository can be unreachable from GitHub
+            # runners. Pin the DragonFly dports master over plain HTTP:
+            # the CI VM's pkg has failed fetching HTTPS metadata while this
+            # direct HTTP endpoint serves ${ABI}/LATEST/meta.conf reliably.
+            sudo mkdir -p /usr/local/etc/pkg/repos
+            sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
+          AUTO: {
+            url             : "http://mirror-master.dragonflybsd.org/dports/${ABI}/LATEST"
+            mirror_type     : NONE
+            enabled         : yes
+          }
+          Avalon: {
+            enabled         : no
+          }
+          EOF
+          }
           case "$(uname -s)" in
-            FreeBSD|DragonFly)
-              system_name="$(uname -s)"
+            FreeBSD)
               packages=""
               if ! command -v gmake >/dev/null 2>&1; then
                 packages="$packages gmake"
@@ -94,22 +121,36 @@ jobs:
                 packages="$packages xz"
               fi
               if [ -n "$packages" ]; then
-                if [ "$system_name" = DragonFly ]; then
-                  if ! retry sudo pkg update -f; then
-                    echo "DragonFlyBSD pkg repository unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
-                    exit 0
-                  fi
+                retry sudo pkg install -y $packages
+              fi
+              ;;
+            DragonFly)
+              configure_dragonfly_pkg_repo
+              pkg config ABI || true
+              pkg -vv | sed -n '/Repositories:/,$p' || true
+              packages=""
+              if ! command -v gmake >/dev/null 2>&1; then
+                packages="$packages gmake"
+              fi
+              if ! command -v cmake >/dev/null 2>&1; then
+                packages="$packages cmake"
+              fi
+              if ! command -v xz >/dev/null 2>&1; then
+                packages="$packages xz"
+              fi
+              if [ -n "$packages" ]; then
+                if ! retry sudo pkg update -f; then
+                  echo "DragonFlyBSD pkg repository unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
+                  exit 0
                 fi
                 if ! retry sudo pkg install -y $packages; then
-                  if [ "$system_name" = DragonFly ]; then
-                    echo "DragonFlyBSD pkg install unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
-                    exit 0
-                  fi
-                  exit 1
+                  echo "DragonFlyBSD pkg install unavailable; skipping this infrastructure-gated job." | tee "$skip_file"
+                  exit 0
                 fi
               fi
               ;;
             OpenBSD)
+              sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
               if ! command -v gmake >/dev/null 2>&1; then
                 retry sudo pkg_add gmake
               fi
@@ -185,7 +226,7 @@ jobs:
           run_with_timeout test_runtime_api_edges 300 env LLAM_API_EDGE_CANCEL_RACE_ROUNDS=256 ./test_runtime_api_edges
           run_with_timeout test_runtime_select_edges 120 ./test_runtime_select_edges
           run_with_timeout test_io_buffers 120 ./test_io_buffers
-          run_with_timeout test_shared_load 120 ./test_shared_load ./libllam_runtime.so.2.0.0
+          run_with_timeout test_shared_load 120 ./test_shared_load ./libllam_runtime.so.2.0.1
 
       - name: CMake build and CTest smoke
         run: |
@@ -215,8 +256,8 @@ jobs:
             exit 0
           fi
           gmake -j2 demo stress bench server server_lossless server_flood static shared CC=cc
-          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.0/'
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 \
+          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.1/'
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.1 LLAM_ABI_MAJOR=2 \
             ./scripts/package_release.sh "${{ matrix.package_target }}"
           if ! tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt 2>/dev/null; then
             xz -dc "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" | tar -tf - > package-files.txt

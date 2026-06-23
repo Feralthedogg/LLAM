@@ -81,9 +81,14 @@ static inline LLAM_TEST_NO_SANITIZE_THREAD void fuzz_errno_store(int value) {
 #define FUZZ_MAX_CHANNEL_PAIRS 16U
 #define FUZZ_MAX_CANCEL_WAITERS 128U
 #define FUZZ_DEFAULT_SCENARIOS 48U
-#define FUZZ_MAX_SCENARIOS 512U
+/*
+ * Defaults stay CI-friendly, but the hard cap must allow manual bug-hunter
+ * runs to scale beyond the normal quick suite.  Otherwise a caller can request
+ * thousands of scenarios and still get only the old 512/128 coverage.
+ */
+#define FUZZ_MAX_SCENARIOS 65536U
 #define MULTI_FUZZ_DEFAULT_SCENARIOS 16U
-#define MULTI_FUZZ_MAX_SCENARIOS 128U
+#define MULTI_FUZZ_MAX_SCENARIOS 32768U
 #define MULTI_FUZZ_MAX_MESSAGES 128U
 
 typedef struct fuzz_prng {

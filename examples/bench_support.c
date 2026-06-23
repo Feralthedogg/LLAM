@@ -25,6 +25,10 @@ static void bench_fail(atomic_uint *failures, const char *label) {
     atomic_fetch_add(failures, 1U);
 }
 
+static bool bench_ascii_is_space(int ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 /* Parse positive integer knobs used to scale benchmark duration/work size. */
 unsigned bench_env_u32(const char *name, unsigned default_value, unsigned max_value) {
     const char *value = llam_example_env_get(name);
@@ -32,6 +36,9 @@ unsigned bench_env_u32(const char *name, unsigned default_value, unsigned max_va
     unsigned long parsed = 0UL;
 
     if (value == NULL || *value == '\0') {
+        return default_value;
+    }
+    if (bench_ascii_is_space((unsigned char)*value) || *value == '-' || *value == '+') {
         return default_value;
     }
 
@@ -55,6 +62,9 @@ unsigned bench_env_u32_allow_zero(const char *name, unsigned default_value, unsi
     if (value == NULL || *value == '\0') {
         return default_value;
     }
+    if (bench_ascii_is_space((unsigned char)*value) || *value == '-' || *value == '+') {
+        return default_value;
+    }
 
     errno = 0;
     parsed = strtoul(value, &end, 10);
@@ -67,14 +77,9 @@ unsigned bench_env_u32_allow_zero(const char *name, unsigned default_value, unsi
     return (unsigned)parsed;
 }
 
-/* Parse boolean environment switches without rejecting future non-zero strings. */
+/* Parse boolean environment switches with explicit true/false tokens. */
 unsigned bench_env_flag_default(const char *name, unsigned default_value) {
-    const char *value = llam_example_env_get(name);
-
-    if (value == NULL || value[0] == '\0') {
-        return default_value;
-    }
-    return strcmp(value, "0") != 0 ? 1U : 0U;
+    return llam_example_env_flag_default(name, default_value);
 }
 
 /* Parse bounded signed knobs such as CPU ids and latency tuning values. */
@@ -84,6 +89,9 @@ int bench_env_i32(const char *name, int default_value, int min_value, int max_va
     long parsed = 0L;
 
     if (value == NULL || *value == '\0') {
+        return default_value;
+    }
+    if (bench_ascii_is_space((unsigned char)*value)) {
         return default_value;
     }
 
@@ -105,7 +113,7 @@ static bool bench_platform_prefers_indefinite_ready_poll(void) {
     const char *env = llam_example_env_get("LLAM_BENCH_POLL_INDEFINITE");
 
     if (env != NULL && env[0] != '\0') {
-        return strcmp(env, "0") != 0;
+        return llam_example_env_flag_value(env, 1U) != 0U;
     }
 
 #if defined(__APPLE__) || LLAM_PLATFORM_WINDOWS
@@ -272,7 +280,7 @@ static bool bench_reuse_socketpair_enabled(void) {
     const char *env = llam_example_env_get("LLAM_BENCH_REUSE_SOCKETPAIR");
 
     if (env != NULL && env[0] != '\0') {
-        return strcmp(env, "0") != 0;
+        return llam_example_env_flag_value(env, 1U) != 0U;
     }
 #if LLAM_PLATFORM_WINDOWS
     return false;

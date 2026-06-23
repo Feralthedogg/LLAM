@@ -80,7 +80,7 @@ jobs:
         run: |
           set -o pipefail
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
-          ctest --test-dir build/soak --output-on-failure 2>&1 | tee "$OUT_DIR/ctest.log"
+          ctest --test-dir build/soak --output-on-failure --timeout 300 2>&1 | tee "$OUT_DIR/ctest.log"
           for i in $(seq 1 10); do
             echo "[test_runtime_api_edges repeat $i/10]"
             python3 scripts/run_with_timeout.py \

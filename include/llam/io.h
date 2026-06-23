@@ -34,6 +34,10 @@
 #ifndef LLAM_IO_DECLS_INCLUDED
 #define LLAM_IO_DECLS_INCLUDED
 
+#if LLAM_PLATFORM_POSIX
+#include <netdb.h>
+#endif
+
 /** @brief Portable immutable scatter/gather I/O slice used by write APIs. */
 typedef struct llam_iovec {
     const void *iov_base; /**< Pointer to bytes to write. */
@@ -59,6 +63,29 @@ typedef struct llam_io_buffer_opts {
 
 /** @brief Current size to pass to ::llam_io_buffer_opts_init and ::llam_io_buffer_alloc_ex. */
 #define LLAM_IO_BUFFER_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_io_buffer_opts_t))
+
+/** @brief Portable file metadata returned by ::llam_stat_path_ex. */
+typedef struct llam_file_stat {
+    uint64_t size;       /**< File size in bytes when representable. */
+    uint64_t mtime_ns;   /**< Last modification time as Unix epoch nanoseconds. */
+    uint64_t atime_ns;   /**< Last access time as Unix epoch nanoseconds. */
+    uint64_t ctime_ns;   /**< Metadata/change time as Unix epoch nanoseconds. */
+    uint32_t mode;       /**< Platform mode/attribute bits. */
+    uint32_t type;       /**< LLAM_FILE_TYPE_* value. */
+    uint64_t reserved0;  /**< Reserved ABI padding; currently 0. */
+} llam_file_stat_t;
+
+/** @brief Current size to pass to ::llam_stat_path_ex. */
+#define LLAM_FILE_STAT_CURRENT_SIZE ((size_t)sizeof(llam_file_stat_t))
+
+/** @brief Regular file type. */
+#define LLAM_FILE_TYPE_REGULAR UINT32_C(1)
+/** @brief Directory file type. */
+#define LLAM_FILE_TYPE_DIRECTORY UINT32_C(2)
+/** @brief Symbolic link or reparse-point file type. */
+#define LLAM_FILE_TYPE_SYMLINK UINT32_C(3)
+/** @brief Other platform-specific file type. */
+#define LLAM_FILE_TYPE_OTHER UINT32_C(4)
 
 /* ============================================================================
  * Runtime I/O and owned buffers
@@ -239,6 +266,49 @@ LLAM_API ssize_t llam_read_owned(llam_fd_t fd, size_t max_count, llam_io_buffer_
 LLAM_API ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffer_t **out);
 
 /**
+ * @brief Receive a datagram and optionally return the peer address.
+ *
+ * @details Managed tasks first try a nonblocking @c recvfrom, then park on
+ * read readiness. Calls outside a managed task delegate to the platform
+ * @c recvfrom and may block. @p src_addr and @p addrlen must either both be
+ * NULL or both be non-NULL.
+ */
+LLAM_API ssize_t llam_recvfrom(llam_fd_t fd,
+                               void *buf,
+                               size_t count,
+                               int flags,
+                               struct sockaddr *src_addr,
+                               socklen_t *addrlen);
+
+/**
+ * @brief Send a datagram to @p dst_addr.
+ *
+ * @details Managed tasks first try a nonblocking @c sendto, then park on
+ * write readiness. Calls outside a managed task delegate to the platform
+ * @c sendto and may block.
+ */
+LLAM_API ssize_t llam_sendto(llam_fd_t fd,
+                             const void *buf,
+                             size_t count,
+                             int flags,
+                             const struct sockaddr *dst_addr,
+                             socklen_t addrlen);
+
+/**
+ * @brief Receive a datagram into a runtime-owned buffer.
+ *
+ * @details On success with a positive byte count, @p out receives a non-NULL
+ * owned buffer that must be released. A zero-length datagram returns 0 and
+ * stores NULL in @p out, matching the existing owned-buffer EOF/zero rule.
+ */
+LLAM_API ssize_t llam_recvfrom_owned(llam_fd_t fd,
+                                     size_t max_count,
+                                     int flags,
+                                     struct sockaddr *src_addr,
+                                     socklen_t *addrlen,
+                                     llam_io_buffer_t **out);
+
+/**
  * @brief Initialize I/O buffer allocation options with ABI-safe defaults.
  *
  * @details LLAM writes only the prefix known to the loaded library. Caller-side
@@ -255,7 +325,13 @@ LLAM_API int llam_io_buffer_alloc(size_t capacity, llam_io_buffer_t **out);
 /** @brief Allocate a runtime-owned buffer with a power-of-two alignment. */
 LLAM_API int llam_io_buffer_alloc_aligned(size_t capacity, size_t alignment, llam_io_buffer_t **out);
 
-/** @brief Return the alignment requested when the owned buffer was allocated. */
+/**
+ * @brief Return the alignment requested when the owned buffer was allocated.
+ *
+ * @details Invalid, stale, or consumed handles return 0 with @c errno set to
+ * @c EINVAL. Saturated or corrupt lifecycle accounting returns 0 with @c errno
+ * set to @c EBUSY.
+ */
 LLAM_API size_t llam_io_buffer_alignment(const llam_io_buffer_t *buffer);
 
 /**
@@ -294,14 +370,29 @@ LLAM_API void llam_io_buffer_release(llam_io_buffer_t *buffer);
  * @details The returned pointer is a borrowed view into @p buffer. It remains
  * valid only while the buffer remains unreleased; LLAM protects the accessor
  * itself from stale public handles, but it cannot make a raw C pointer safe
- * after another thread releases the buffer.
+ * after another thread releases the buffer. If lifecycle accounting is
+ * saturated or corrupt, this returns @c NULL with @c errno set to @c EBUSY.
+ * Invalid, stale, or consumed handles return @c NULL with @c errno set to
+ * @c EINVAL.
  */
 LLAM_API void *llam_io_buffer_data(llam_io_buffer_t *buffer);
 
-/** @brief Return the number of valid bytes in a runtime-owned I/O buffer. */
+/**
+ * @brief Return the number of valid bytes in a runtime-owned I/O buffer.
+ *
+ * @details Invalid, stale, or consumed handles return 0 with @c errno set to
+ * @c EINVAL. Saturated or corrupt lifecycle accounting returns 0 with @c errno
+ * set to @c EBUSY.
+ */
 LLAM_API size_t llam_io_buffer_size(const llam_io_buffer_t *buffer);
 
-/** @brief Return total capacity of a runtime-owned I/O buffer. */
+/**
+ * @brief Return total capacity of a runtime-owned I/O buffer.
+ *
+ * @details Invalid, stale, or consumed handles return 0 with @c errno set to
+ * @c EINVAL. Saturated or corrupt lifecycle accounting returns 0 with @c errno
+ * set to @c EBUSY.
+ */
 LLAM_API size_t llam_io_buffer_capacity(const llam_io_buffer_t *buffer);
 
 /**
@@ -352,6 +443,38 @@ LLAM_API int llam_poll_fd(llam_fd_t fd, short events, int timeout_ms, short *rev
  * delegates to ::llam_poll_fd.
  */
 LLAM_API int llam_poll_handle(llam_handle_t handle, short events, int timeout_ms, short *revents);
+
+/**
+ * @brief Resolve addresses through the runtime blocking path.
+ *
+ * @details LLAM submission/cancellation failures return -1 with @c errno set.
+ * Resolver failures return 0, store the getaddrinfo @c EAI_* status in
+ * @p gai_error, and store NULL in @p out. Successful results must be freed with
+ * ::llam_freeaddrinfo_result.
+ */
+LLAM_API int llam_getaddrinfo_result(const char *node,
+                                     const char *service,
+                                     const struct addrinfo *hints,
+                                     struct addrinfo **out,
+                                     int *gai_error);
+
+/** @brief Free a result returned by ::llam_getaddrinfo_result. */
+LLAM_API void llam_freeaddrinfo_result(struct addrinfo *result);
+
+/**
+ * @brief Open a filesystem path through the runtime blocking path.
+ *
+ * @details POSIX callers pass normal @c open flags and mode bits. Windows maps
+ * the common @c O_RDONLY, @c O_WRONLY, @c O_RDWR, @c O_CREAT, @c O_EXCL, and
+ * @c O_TRUNC flags to @c CreateFileA. On success, @p out receives a
+ * ::llam_handle_t that must be closed with ::llam_close_handle.
+ */
+LLAM_API int llam_open_async(const char *path, int flags, uint32_t mode, llam_handle_t *out);
+
+/**
+ * @brief Stat a filesystem path through the runtime blocking path.
+ */
+LLAM_API int llam_stat_path_ex(const char *path, llam_file_stat_t *out, size_t out_size);
 
 
 #endif /* LLAM_IO_DECLS_INCLUDED */

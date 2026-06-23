@@ -23,12 +23,7 @@
 llam_task_t *g_worker_task;
 
 unsigned demo_env_flag_default(const char *name, unsigned default_value) {
-    const char *value = llam_example_env_get(name);
-
-    if (value == NULL || value[0] == '\0') {
-        return default_value;
-    }
-    return strcmp(value, "0") != 0 ? 1U : 0U;
+    return llam_example_env_flag_default(name, default_value);
 }
 
 int demo_env_i32(const char *name, int default_value, int min_value, int max_value) {
@@ -37,6 +32,10 @@ int demo_env_i32(const char *name, int default_value, int min_value, int max_val
     long parsed = 0L;
 
     if (value == NULL || *value == '\0') {
+        return default_value;
+    }
+    if (value[0] == ' ' || value[0] == '\t' || value[0] == '\n' ||
+        value[0] == '\r' || value[0] == '\f' || value[0] == '\v') {
         return default_value;
     }
 

@@ -12,11 +12,16 @@ import subprocess
 import sys
 from typing import Any
 
+from cli_numbers import nonnegative_int_at_most, positive_int_at_most
 from process_utils import ProcessTimeoutError, run_capture
 from safe_output import write_text_safely
 
 
 FIELD_RE = re.compile(r"([A-Za-z0-9_]+)=([^\s]+)")
+MAX_BENCH_MATRIX_ROUNDS = 10_000
+MAX_BENCH_MATRIX_TIMEOUT_SEC = 3600
+MAX_BENCH_MATRIX_SPIN_NS = 1_000_000_000
+MAX_BENCH_MATRIX_SPIN_ITERS = 10_000_000
 
 
 def parse_value(raw: str) -> Any:
@@ -27,6 +32,40 @@ def parse_value(raw: str) -> Any:
     return raw
 
 
+def parse_fields(line: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+
+    for key, value in FIELD_RE.findall(line):
+        if key in fields:
+            raise ValueError(f"duplicate benchmark field {key}: {line!r}")
+        fields[key] = parse_value(value)
+    return fields
+
+
+def require_finite_metric(fields: dict[str, Any], line: str, name: str, *, positive: bool) -> float:
+    if name not in fields:
+        raise ValueError(f"benchmark row missing {name}: {line!r}")
+    try:
+        value = float(fields[name])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"benchmark row has invalid {name}: {line!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"benchmark row has non-finite {name}: {line!r}")
+    if positive and value <= 0.0:
+        raise ValueError(f"benchmark row has non-positive {name}: {line!r}")
+    if not positive and value < 0.0:
+        raise ValueError(f"benchmark row has negative {name}: {line!r}")
+    fields[name] = value
+    return value
+
+
+def validate_workload_fields(fields: dict[str, Any], line: str) -> None:
+    require_finite_metric(fields, line, "ops_per_sec", positive=True)
+    require_finite_metric(fields, line, "p50_us", positive=False)
+    require_finite_metric(fields, line, "p99_us", positive=False)
+    require_finite_metric(fields, line, "io_submit_syscalls", positive=False)
+
+
 def parse_bench_output(output: str) -> dict[str, Any]:
     config: dict[str, Any] | None = None
     workloads: dict[str, dict[str, Any]] = {}
@@ -34,11 +73,16 @@ def parse_bench_output(output: str) -> dict[str, Any]:
     for line in output.splitlines():
         if not line.startswith("[bench] "):
             continue
-        fields = {key: parse_value(value) for key, value in FIELD_RE.findall(line)}
+        fields = parse_fields(line)
         if "name" in fields:
             name = str(fields.pop("name"))
+            if name in workloads:
+                raise ValueError(f"duplicate benchmark row for {name}: {line!r}")
+            validate_workload_fields(fields, line)
             workloads[name] = fields
         elif "config" in line:
+            if config is not None:
+                raise ValueError(f"duplicate benchmark config row: {line!r}")
             config = fields
 
     if config is None or not workloads:
@@ -174,6 +218,23 @@ def default_profiles(args: argparse.Namespace) -> dict[str, dict[str, str]]:
             "LLAM_EXPERIMENTAL_SQPOLL": "1",
             "LLAM_SQPOLL_CPU": reserved_sqpoll_cpu,
         }
+    return profiles
+
+
+def parse_profile_names(raw: str) -> list[str]:
+    profiles = [name.strip() for name in raw.split(",") if name.strip()]
+    seen: set[str] = set()
+    duplicates: list[str] = []
+
+    for name in profiles:
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+
+    if not profiles:
+        raise argparse.ArgumentTypeError("must contain at least one profile")
+    if duplicates:
+        raise argparse.ArgumentTypeError(f"duplicate profile(s): {', '.join(duplicates)}")
     return profiles
 
 
@@ -322,13 +383,14 @@ def summarize_profiles(results: list[dict[str, Any]]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run LLAM bench across a matrix of runtime profiles.")
-    parser.add_argument("--rounds", type=int, default=7, help="Value for LLAM_BENCH_ROUNDS.")
-    parser.add_argument("--timeout", type=int, default=60, help="Per-profile timeout in seconds.")
-    parser.add_argument("--spin-ns", type=int, default=50000, help="Spin budget for the 'spin' profile.")
-    parser.add_argument("--spin-iters", type=int, default=10000, help="Spin iteration cap for the 'spin' profile.")
+    parser.add_argument("--rounds", type=positive_int_at_most(MAX_BENCH_MATRIX_ROUNDS), default=7, help="Value for LLAM_BENCH_ROUNDS.")
+    parser.add_argument("--timeout", type=positive_int_at_most(MAX_BENCH_MATRIX_TIMEOUT_SEC), default=60, help="Per-profile timeout in seconds.")
+    parser.add_argument("--spin-ns", type=nonnegative_int_at_most(MAX_BENCH_MATRIX_SPIN_NS), default=50000, help="Spin budget for the 'spin' profile.")
+    parser.add_argument("--spin-iters", type=nonnegative_int_at_most(MAX_BENCH_MATRIX_SPIN_ITERS), default=10000, help="Spin iteration cap for the 'spin' profile.")
     parser.add_argument(
         "--profiles",
-        default="baseline,legacy_dynamic,legacy_normq,spin,sqpoll,worker_rings,worker_rings+multishot,huge",
+        type=parse_profile_names,
+        default=parse_profile_names("baseline,legacy_dynamic,legacy_normq,spin,sqpoll,worker_rings,worker_rings+multishot,huge"),
         help="Comma-separated profile list.",
     )
     parser.add_argument("--json-out", help="Optional path to write raw results as JSON.")
@@ -337,7 +399,7 @@ def main() -> int:
 
     root = pathlib.Path(__file__).resolve().parent.parent
     profile_map = default_profiles(args)
-    selected_profiles = [name.strip() for name in args.profiles.split(",") if name.strip()]
+    selected_profiles = args.profiles
 
     for name in selected_profiles:
         if name not in profile_map:

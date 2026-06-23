@@ -67,12 +67,19 @@ int main(void) { fprintf(stderr, "server_flood requires POSIX sockets/fork in th
 #endif
 
 #define FLOOD_DEFAULT_CLIENTS 4U
+#define FLOOD_MAX_CLIENTS 4096U
 #define FLOOD_DEFAULT_DURATION_SEC 3.0
+#define FLOOD_MAX_DURATION_SEC 86400.0
 #define FLOOD_DEFAULT_DRAIN_SEC 1.0
+#define FLOOD_MAX_DRAIN_SEC 3600.0
+#define FLOOD_MAX_SHUTDOWN_TIMEOUT_SEC 3600.0
 #define FLOOD_DEFAULT_MESSAGE_BYTES 8U
 #define FLOOD_DEFAULT_BATCH 128U
+#define FLOOD_MAX_BATCH 65536U
 #define FLOOD_MAX_MESSAGE_BYTES 1024U
 #define FLOOD_RECV_BUF_BYTES 65536U
+#define FLOOD_NS_PER_SEC 1000000000ULL
+#define FLOOD_MIN_MEASURED_NS 1000000ULL
 
 typedef struct flood_opts {
     const char *server_path;
@@ -106,14 +113,44 @@ static uint64_t flood_now_ns(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return 0U;
     }
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    return (uint64_t)ts.tv_sec * FLOOD_NS_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
+static bool flood_seconds_to_ns(double seconds, uint64_t *out_ns) {
+    long double ns;
+
+    if (out_ns == NULL || !isfinite(seconds) || seconds < 0.0) {
+        return false;
+    }
+    ns = (long double)seconds * (long double)FLOOD_NS_PER_SEC;
+    if (ns > (long double)UINT64_MAX) {
+        return false;
+    }
+    *out_ns = (uint64_t)ns;
+    if (seconds > 0.0 && *out_ns == 0U) {
+        *out_ns = 1U;
+    }
+    return true;
+}
+
+static bool flood_deadline_after(uint64_t start_ns, double seconds, uint64_t *out_deadline) {
+    uint64_t delta_ns;
+
+    if (out_deadline == NULL || !flood_seconds_to_ns(seconds, &delta_ns) ||
+        delta_ns > UINT64_MAX - start_ns) {
+        return false;
+    }
+    *out_deadline = start_ns + delta_ns;
+    return true;
+}
+
+static bool flood_ascii_is_space(int ch) { return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v'; }
 static bool flood_parse_unsigned_value(const char *value, unsigned *out) {
     char *end = NULL;
     unsigned long parsed;
 
-    if (value == NULL || value[0] == '\0' || out == NULL) {
+    if (value == NULL || value[0] == '\0' || out == NULL ||
+        flood_ascii_is_space((unsigned char)value[0]) || value[0] == '-' || value[0] == '+') {
         return false;
     }
     errno = 0;
@@ -129,7 +166,8 @@ static bool flood_parse_double_value(const char *value, double *out) {
     char *end = NULL;
     double parsed;
 
-    if (value == NULL || value[0] == '\0' || out == NULL) {
+    if (value == NULL || value[0] == '\0' || out == NULL ||
+        flood_ascii_is_space((unsigned char)value[0])) {
         return false;
     }
     errno = 0;
@@ -141,22 +179,84 @@ static bool flood_parse_double_value(const char *value, double *out) {
     return true;
 }
 
-static unsigned flood_env_unsigned(const char *name, unsigned fallback) {
+static int flood_ascii_tolower(int ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+        return ch + ('a' - 'A');
+    }
+    return ch;
+}
+
+static bool flood_ascii_equal_ci(const char *lhs, const char *rhs) {
+    while (*lhs != '\0' && *rhs != '\0') {
+        if (flood_ascii_tolower((unsigned char)*lhs) != flood_ascii_tolower((unsigned char)*rhs)) {
+            return false;
+        }
+        ++lhs;
+        ++rhs;
+    }
+    return *lhs == '\0' && *rhs == '\0';
+}
+
+static bool flood_parse_flag_value(const char *value, bool fallback, bool *out) {
+    if (out == NULL) { return false; }
+    if (value == NULL || value[0] == '\0') { *out = fallback; return true; }
+    if (flood_ascii_equal_ci(value, "1") ||
+        flood_ascii_equal_ci(value, "true") ||
+        flood_ascii_equal_ci(value, "yes") ||
+        flood_ascii_equal_ci(value, "on")) {
+        *out = true; return true;
+    }
+    if (flood_ascii_equal_ci(value, "0") ||
+        flood_ascii_equal_ci(value, "false") ||
+        flood_ascii_equal_ci(value, "no") ||
+        flood_ascii_equal_ci(value, "off")) {
+        *out = false; return true;
+    }
+    return false;
+}
+
+static bool flood_env_unsigned(const char *name, unsigned fallback, unsigned *out) {
     const char *value = getenv(name);
     unsigned parsed;
 
-    if (value == NULL || value[0] == '\0') { return fallback; }
-    if (!flood_parse_unsigned_value(value, &parsed)) { return fallback; }
-    return parsed;
+    if (out == NULL) { return false; }
+    if (value == NULL || value[0] == '\0') {
+        *out = fallback;
+        return true;
+    }
+    if (!flood_parse_unsigned_value(value, &parsed)) {
+        fprintf(stderr, "%s must be an unsigned integer, got %s\n", name, value);
+        return false;
+    }
+    *out = parsed;
+    return true;
 }
 
-static double flood_env_double(const char *name, double fallback) {
+static bool flood_env_flag(const char *name, bool fallback, bool *out) {
+    const char *value = getenv(name);
+
+    if (!flood_parse_flag_value(value, fallback, out)) {
+        fprintf(stderr, "%s must be a boolean token, got %s\n", name, value != NULL ? value : "(null)");
+        return false;
+    }
+    return true;
+}
+
+static bool flood_env_double(const char *name, double fallback, double *out) {
     const char *value = getenv(name);
     double parsed;
 
-    if (value == NULL || value[0] == '\0') { return fallback; }
-    if (!flood_parse_double_value(value, &parsed)) { return fallback; }
-    return parsed;
+    if (out == NULL) { return false; }
+    if (value == NULL || value[0] == '\0') {
+        *out = fallback;
+        return true;
+    }
+    if (!flood_parse_double_value(value, &parsed)) {
+        fprintf(stderr, "%s must be a finite number, got %s\n", name, value);
+        return false;
+    }
+    *out = parsed;
+    return true;
 }
 
 static void flood_usage(const char *argv0) {
@@ -175,22 +275,44 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
     memset(opts, 0, sizeof(*opts));
     opts->server_path = "./server";
     opts->host = "127.0.0.1";
-    opts->clients = flood_env_unsigned("LLAM_SERVER_FLOOD_CLIENTS", FLOOD_DEFAULT_CLIENTS);
-    opts->duration_sec = flood_env_double("LLAM_SERVER_FLOOD_DURATION", FLOOD_DEFAULT_DURATION_SEC);
-    opts->drain_sec = flood_env_double("LLAM_SERVER_FLOOD_DRAIN_SEC", FLOOD_DEFAULT_DRAIN_SEC);
-    opts->message_bytes = flood_env_unsigned("LLAM_SERVER_FLOOD_MESSAGE_BYTES", FLOOD_DEFAULT_MESSAGE_BYTES);
-    opts->batch = flood_env_unsigned("LLAM_SERVER_FLOOD_BATCH", FLOOD_DEFAULT_BATCH);
-    opts->target_mps = flood_env_double("LLAM_SERVER_FLOOD_TARGET_MPS", 0.0);
-    opts->min_delivery_mps = flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_MPS", 0.0);
-    opts->min_delivery_ratio = flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_RATIO", 0.0);
-    opts->shutdown_timeout_sec = flood_env_double("LLAM_SERVER_FLOOD_SHUTDOWN_TIMEOUT", 30.0);
-    opts->server_lossless = flood_env_unsigned("LLAM_SERVER_FLOOD_SERVER_LOSSLESS", 0U) != 0U;
-    opts->fail_on_forced_stop = flood_env_unsigned("LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP", 0U) == 0U;
-    if (flood_env_unsigned("LLAM_SERVER_FLOOD_FAIL_ON_FORCED_STOP", 0U) != 0U) {
+    bool env_flag;
+
+    if (!flood_env_unsigned("LLAM_SERVER_FLOOD_CLIENTS", FLOOD_DEFAULT_CLIENTS, &opts->clients) ||
+        !flood_env_double("LLAM_SERVER_FLOOD_DURATION", FLOOD_DEFAULT_DURATION_SEC, &opts->duration_sec) ||
+        !flood_env_double("LLAM_SERVER_FLOOD_DRAIN_SEC", FLOOD_DEFAULT_DRAIN_SEC, &opts->drain_sec) ||
+        !flood_env_unsigned("LLAM_SERVER_FLOOD_MESSAGE_BYTES", FLOOD_DEFAULT_MESSAGE_BYTES, &opts->message_bytes) ||
+        !flood_env_unsigned("LLAM_SERVER_FLOOD_BATCH", FLOOD_DEFAULT_BATCH, &opts->batch) ||
+        !flood_env_double("LLAM_SERVER_FLOOD_TARGET_MPS", 0.0, &opts->target_mps) ||
+        !flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_MPS", 0.0, &opts->min_delivery_mps) ||
+        !flood_env_double("LLAM_SERVER_FLOOD_MIN_DELIVERY_RATIO", 0.0, &opts->min_delivery_ratio) ||
+        !flood_env_double("LLAM_SERVER_FLOOD_SHUTDOWN_TIMEOUT", 30.0, &opts->shutdown_timeout_sec) ||
+        !flood_env_flag("LLAM_SERVER_FLOOD_SERVER_LOSSLESS", false, &env_flag)) {
+        flood_usage(argv[0]);
+        return -1;
+    }
+    opts->server_lossless = env_flag;
+    if (!flood_env_flag("LLAM_SERVER_FLOOD_ALLOW_FORCED_STOP", false, &env_flag)) {
+        flood_usage(argv[0]);
+        return -1;
+    }
+    opts->fail_on_forced_stop = !env_flag;
+    if (!flood_env_flag("LLAM_SERVER_FLOOD_FAIL_ON_FORCED_STOP", false, &env_flag)) {
+        flood_usage(argv[0]);
+        return -1;
+    }
+    if (env_flag) {
         opts->fail_on_forced_stop = true;
     }
-    opts->fail_on_missing_stats = flood_env_unsigned("LLAM_SERVER_FLOOD_ALLOW_MISSING_STATS", 0U) == 0U;
-    if (flood_env_unsigned("LLAM_SERVER_FLOOD_FAIL_ON_MISSING_STATS", 0U) != 0U) {
+    if (!flood_env_flag("LLAM_SERVER_FLOOD_ALLOW_MISSING_STATS", false, &env_flag)) {
+        flood_usage(argv[0]);
+        return -1;
+    }
+    opts->fail_on_missing_stats = !env_flag;
+    if (!flood_env_flag("LLAM_SERVER_FLOOD_FAIL_ON_MISSING_STATS", false, &env_flag)) {
+        flood_usage(argv[0]);
+        return -1;
+    }
+    if (env_flag) {
         opts->fail_on_missing_stats = true;
     }
 
@@ -248,11 +370,24 @@ static int flood_parse_args(int argc, char **argv, flood_opts_t *opts) {
 
 #undef FLOOD_PARSE_ARG
 
-    if (opts->clients < 2U || opts->duration_sec <= 0.0 || opts->drain_sec < 0.0 ||
+    uint64_t parsed_duration_ns = 0U;
+    uint64_t parsed_drain_ns = 0U;
+    uint64_t parsed_shutdown_ns = 0U;
+
+    if (opts->clients < 2U || opts->clients > FLOOD_MAX_CLIENTS ||
+        opts->duration_sec <= 0.0 || opts->duration_sec > FLOOD_MAX_DURATION_SEC ||
+        opts->drain_sec < 0.0 || opts->drain_sec > FLOOD_MAX_DRAIN_SEC ||
         opts->message_bytes < 2U || opts->message_bytes > FLOOD_MAX_MESSAGE_BYTES ||
-        opts->batch == 0U || opts->target_mps < 0.0 || opts->min_delivery_mps < 0.0 ||
+        opts->batch == 0U || opts->batch > FLOOD_MAX_BATCH ||
+        opts->target_mps < 0.0 || opts->min_delivery_mps < 0.0 ||
         opts->min_delivery_ratio < 0.0 || opts->min_delivery_ratio > 1.0 ||
-        opts->shutdown_timeout_sec <= 0.0) {
+        opts->shutdown_timeout_sec <= 0.0 ||
+        opts->shutdown_timeout_sec > FLOOD_MAX_SHUTDOWN_TIMEOUT_SEC ||
+        !flood_seconds_to_ns(opts->duration_sec, &parsed_duration_ns) ||
+        !flood_seconds_to_ns(opts->drain_sec, &parsed_drain_ns) ||
+        !flood_seconds_to_ns(opts->shutdown_timeout_sec, &parsed_shutdown_ns) ||
+        parsed_duration_ns < FLOOD_MIN_MEASURED_NS ||
+        parsed_shutdown_ns < FLOOD_MIN_MEASURED_NS) {
         flood_usage(argv[0]);
         return -1;
     }
@@ -380,7 +515,11 @@ static bool flood_stop_server(pid_t pid, double timeout_sec) {
         return false;
     }
     (void)kill(pid, SIGINT);
-    deadline = flood_now_ns() + (uint64_t)(timeout_sec * 1000000000.0);
+    if (!flood_deadline_after(flood_now_ns(), timeout_sec, &deadline)) {
+        (void)kill(pid, SIGKILL);
+        (void)waitpid(pid, &status, 0);
+        return true;
+    }
     while (flood_now_ns() < deadline) {
         pid_t rc = waitpid(pid, &status, WNOHANG);
 
@@ -790,7 +929,10 @@ int main(int argc, char **argv) {
 
     flood_build_message(message, opts.message_bytes);
     start_ns = flood_now_ns();
-    end_ns = start_ns + (uint64_t)(opts.duration_sec * 1000000000.0);
+    if (!flood_deadline_after(start_ns, opts.duration_sec, &end_ns)) {
+        fprintf(stderr, "duration exceeds monotonic deadline range\n");
+        goto done;
+    }
 
     while (flood_now_ns() < end_ns) {
         bool progressed = false;
@@ -851,7 +993,10 @@ int main(int argc, char **argv) {
     }
 
     active_end_ns = flood_now_ns();
-    drain_end_ns = flood_now_ns() + (uint64_t)(opts.drain_sec * 1000000000.0);
+    if (!flood_deadline_after(flood_now_ns(), opts.drain_sec, &drain_end_ns)) {
+        fprintf(stderr, "drain timeout exceeds monotonic deadline range\n");
+        goto done;
+    }
     while (flood_now_ns() < drain_end_ns) {
         bool progressed = false;
 

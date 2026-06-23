@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -77,6 +78,14 @@ def _decode_output(output: str | bytes | None) -> str:
     return output
 
 
+def _validate_timeout(timeout: float | None) -> None:
+    if timeout is None:
+        return
+    timeout_value = float(timeout)
+    if not math.isfinite(timeout_value) or timeout_value < 0.0:
+        raise ValueError("timeout must be a finite non-negative value")
+
+
 def run_capture(
     command: Sequence[str],
     *,
@@ -93,6 +102,7 @@ def run_capture(
     callers get a new session/process group; Windows callers use ``taskkill /T``.
     """
 
+    _validate_timeout(timeout)
     command_args = [str(arg) for arg in command]
     stderr = subprocess.STDOUT if stderr_to_stdout else subprocess.PIPE
     proc = subprocess.Popen(

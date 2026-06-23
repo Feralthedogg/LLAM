@@ -279,6 +279,7 @@ void llam_broker_end_op(llam_broker_t *broker);
 int llam_broker_lock(llam_broker_t *broker);
 void llam_broker_unlock(llam_broker_t *broker);
 uint64_t llam_broker_current_subject(const llam_broker_t *broker);
+bool llam_broker_current_thread_has_op(const llam_broker_t *broker);
 
 uint64_t llam_broker_revocation_epoch(const llam_broker_t *broker);
 uint64_t llam_broker_revoke_all(llam_broker_t *broker);
@@ -290,6 +291,7 @@ int llam_broker_issue_object_cap(llam_broker_t *broker,
                                  uint64_t rights,
                                  llam_capability_token_t *out_token);
 int llam_broker_validate_object_rights(uint32_t family, uint64_t rights);
+int llam_broker_validate_next_object_id(uint64_t next_id);
 int llam_broker_issue_object_cap_unlocked(llam_broker_t *broker,
                                           uint32_t family,
                                           uint64_t slot,
@@ -464,6 +466,7 @@ int llam_broker_capture_owned_socket(const char *path, llam_broker_socket_identi
 int llam_broker_restrict_owned_socket(const char *path, const llam_broker_socket_identity_t *identity);
 void llam_broker_unlink_owned_socket(const char *path, const llam_broker_socket_identity_t *identity);
 int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle);
+int llam_broker_listen_pipe_instance(const char *name, bool first_instance, llam_handle_t *out_handle);
 int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle);
 void llam_broker_close_handle(llam_handle_t handle);
 int llam_broker_windows_pipe_errno(unsigned long error_code);

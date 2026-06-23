@@ -54,7 +54,7 @@ extern "C" {
 #endif
 
 #define LLAM_VERSION_MAJOR 2U
-#define LLAM_VERSION_MINOR 0U
+#define LLAM_VERSION_MINOR 1U
 #define LLAM_VERSION_PATCH 0U
 
 #define LLAM_ABI_VERSION_MAJOR 2U
@@ -98,6 +98,8 @@ typedef struct llam_cancel_token llam_cancel_token_t;
 typedef struct llam_io_buffer llam_io_buffer_t;
 typedef struct llam_runtime llam_runtime_t;
 typedef struct llam_task_group llam_task_group_t;
+typedef struct llam_timer llam_timer_t;
+typedef struct llam_signal_set llam_signal_set_t;
 
 /** @brief Task-local storage key. */
 typedef uint32_t llam_task_local_key_t;
@@ -117,6 +119,33 @@ typedef void (*llam_task_fn)(void *arg);
  * @return User-defined result pointer returned to the waiting task.
  */
 typedef void *(*llam_blocking_fn)(void *arg);
+
+/** @brief Options for waitable interval timers. */
+typedef struct llam_timer_opts {
+    uint64_t first_deadline_ns; /**< First absolute deadline in ::llam_now_ns units; 0 means now. */
+    uint64_t interval_ns;       /**< Repeat interval in nanoseconds; must be non-zero. */
+    uint32_t flags;             /**< Reserved for LLAM_TIMER_F_* flags; initialize to 0. */
+    uint32_t reserved0;         /**< Reserved ABI padding; initialize to 0. */
+} llam_timer_opts_t;
+
+/** @brief Current size to pass to ::llam_timer_create_ex. */
+#define LLAM_TIMER_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_timer_opts_t))
+
+/** @brief Signal event returned by ::llam_signal_wait* APIs. */
+typedef struct llam_signal_event {
+    int32_t signo;      /**< Delivered signal number. */
+    uint32_t reserved0; /**< Reserved ABI padding; currently 0. */
+    uint64_t sequence;  /**< Monotonic sequence for this signal-set handle. */
+} llam_signal_event_t;
+
+/** @brief Options for ::llam_signal_set_create_ex. */
+typedef struct llam_signal_opts {
+    uint32_t flags;     /**< Reserved for LLAM_SIGNAL_F_* flags; initialize to 0. */
+    uint32_t reserved0; /**< Reserved ABI padding; initialize to 0. */
+} llam_signal_opts_t;
+
+/** @brief Current size to pass to ::llam_signal_set_create_ex. */
+#define LLAM_SIGNAL_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_signal_opts_t))
 
 /* ============================================================================
  * ABI and dynamic loading
@@ -525,7 +554,8 @@ LLAM_API int llam_runtime_write_stats_json(int fd);
  * fields as spawn defaults, so older bindings can run against newer
  * libraries that appended fields to ::llam_spawn_opts_t. If @p opts supplies a
  * cancellation token, it must belong to the target runtime selected by this
- * wrapper.
+ * wrapper. Calls from unmanaged host threads target the default runtime and are
+ * rejected if that runtime is not initialized or is already in teardown.
  *
  * @param fn Task entry point. Must not be NULL.
  * @param arg User pointer passed to fn.
@@ -676,11 +706,15 @@ LLAM_API int llam_task_group_destroy(llam_task_group_t *group);
  * @details
  * If @p opts does not provide a cancellation token, the group cancellation token
  * is attached automatically. The returned task pointer is borrowed for
- * diagnostics; callers must not join or detach it outside the group. Spawning
- * while another thread is joining the group fails with @c EBUSY. Calls racing
- * with a completed group destroy fail with @c EINVAL instead of dereferencing a
- * reclaimed handle. Children are always spawned on the group's owner runtime,
- * including when the caller is an unmanaged host thread.
+ * diagnostics; regular ::llam_join and ::llam_detach reject it with @c EBUSY so
+ * only the owning group can consume the child handle. The child is marked as
+ * group-owned before it can execute, so a self-join/self-detach path cannot
+ * consume the borrowed handle first. Spawning while another thread is joining
+ * the group fails with @c EBUSY. Calls racing with a completed group destroy
+ * fail with @c EINVAL instead of dereferencing a reclaimed handle. A saturated
+ * public-operation lifecycle sentinel also fails closed with @c EBUSY. Children
+ * are always spawned on the group's owner runtime, including when the caller is
+ * an unmanaged host thread.
  */
 LLAM_API llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
                                       llam_task_fn fn,
@@ -756,6 +790,91 @@ LLAM_API int llam_sleep_until(uint64_t deadline_ns);
  * @return 0 on wake, -1 on cancellation/failure with errno set.
  */
 LLAM_API int llam_sleep_ns(uint64_t duration_ns);
+
+/**
+ * @brief Create a waitable interval timer bound to the current runtime owner.
+ *
+ * @details
+ * The timer is not a callback source. Callers wait explicitly with
+ * ::llam_timer_wait or ::llam_timer_wait_until, which keeps callback lifetime
+ * and reentrancy under caller control. @c opts.interval_ns must be non-zero.
+ * A @c first_deadline_ns of 0 arms the first tick for the current
+ * ::llam_now_ns timestamp. Timers are runtime-aware objects; using a timer from
+ * another managed runtime fails with @c EXDEV.
+ */
+LLAM_API int llam_timer_create_ex(const llam_timer_opts_t *opts, size_t opts_size, llam_timer_t **out);
+
+/**
+ * @brief Create an interval timer with a first tick after @p interval_ns.
+ */
+LLAM_API int llam_timer_create(uint64_t interval_ns, llam_timer_t **out);
+
+/**
+ * @brief Wait for the next timer tick.
+ *
+ * @details
+ * On success, @p ticks_out receives the number of elapsed intervals since the
+ * previous successful wait, clamped to at least 1. This lets periodic tasks
+ * account for missed ticks without drift. Managed tasks park cooperatively;
+ * unmanaged callers block the calling OS thread.
+ */
+LLAM_API int llam_timer_wait(llam_timer_t *timer, uint64_t *ticks_out);
+
+/**
+ * @brief Wait for the next timer tick until an absolute deadline.
+ *
+ * @details @p deadline_ns uses ::llam_now_ns units. @c 0 is already expired.
+ */
+LLAM_API int llam_timer_wait_until(llam_timer_t *timer, uint64_t deadline_ns, uint64_t *ticks_out);
+
+/**
+ * @brief Reset a timer to a new first deadline and interval.
+ */
+LLAM_API int llam_timer_reset(llam_timer_t *timer, uint64_t first_deadline_ns, uint64_t interval_ns);
+
+/**
+ * @brief Cancel a timer and wake waiters with @c ECANCELED.
+ */
+LLAM_API int llam_timer_cancel(llam_timer_t *timer);
+
+/**
+ * @brief Destroy a timer.
+ *
+ * @return 0 on success, -1 with @c EBUSY if another public operation is active.
+ */
+LLAM_API int llam_timer_destroy(llam_timer_t *timer);
+
+/**
+ * @brief Create a POSIX signal wait set bound to the current runtime owner.
+ *
+ * @details
+ * This is an opt-in process-level subscription. On Linux, LLAM blocks the
+ * requested signals for the calling thread and waits with @c sigtimedwait on a
+ * blocking helper using bounded slices so runtime stop can be observed. Call
+ * this before starting worker threads when possible so they inherit the signal
+ * mask. Duplicate or unsupported signal sets may fail with @c EBUSY or
+ * @c ENOTSUP. Other platforms currently return @c ENOTSUP.
+ */
+LLAM_API int llam_signal_set_create_ex(const int *signos,
+                                       size_t signo_count,
+                                       const llam_signal_opts_t *opts,
+                                       size_t opts_size,
+                                       llam_signal_set_t **out);
+
+/**
+ * @brief Wait indefinitely for a signal in the set.
+ */
+LLAM_API int llam_signal_wait(llam_signal_set_t *set, llam_signal_event_t *out);
+
+/**
+ * @brief Wait for a signal in the set until an absolute deadline.
+ */
+LLAM_API int llam_signal_wait_until(llam_signal_set_t *set, uint64_t deadline_ns, llam_signal_event_t *out);
+
+/**
+ * @brief Destroy a signal wait set.
+ */
+LLAM_API int llam_signal_set_destroy(llam_signal_set_t *set);
 
 /**
  * @brief Execute a blocking callback through the runtime blocking path.
@@ -878,7 +997,8 @@ LLAM_API llam_cancel_token_t *llam_cancel_token_create(void);
  * token with active observers fails with @c EBUSY; it does not invalidate
  * active observers behind the caller's back. Destroy also fails with @c EBUSY
  * while another thread is cancelling, querying, or retaining the token for a
- * new task; calls that race with a completed destroy fail with @c EINVAL.
+ * new task. Calls that race with a completed destroy fail with @c EINVAL, and
+ * managed cross-runtime destroy attempts fail with @c EXDEV.
  */
 LLAM_API int llam_cancel_token_destroy(llam_cancel_token_t *token);
 
@@ -886,7 +1006,11 @@ LLAM_API int llam_cancel_token_destroy(llam_cancel_token_t *token);
  * @brief Request cancellation for all current and future observers of token.
  *
  * @details Calls racing with a completed destroy fail with @c EINVAL instead
- * of dereferencing reclaimed token storage.
+ * of dereferencing reclaimed token storage. Cancellation also fails with
+ * @c EBUSY while the public handle is already being torn down, and managed
+ * cross-runtime cancellation fails with @c EXDEV. Unmanaged host calls that
+ * need to wake waiters require a live owner runtime and fail with @c ENOTSUP
+ * after the owner runtime can no longer service wakeups.
  */
 LLAM_API int llam_cancel_token_cancel(llam_cancel_token_t *token);
 
@@ -894,7 +1018,9 @@ LLAM_API int llam_cancel_token_cancel(llam_cancel_token_t *token);
  * @brief Return non-zero when token has been cancelled.
  *
  * @details Calls racing with a completed destroy fail with @c EINVAL instead
- * of dereferencing reclaimed token storage.
+ * of dereferencing reclaimed token storage. Queries also fail with @c EBUSY
+ * while the public handle is already being torn down, and managed
+ * cross-runtime queries fail with @c EXDEV.
  */
 LLAM_API int llam_cancel_token_is_cancelled(const llam_cancel_token_t *token);
 
@@ -912,6 +1038,7 @@ LLAM_API llam_mutex_t *llam_mutex_create(void);
  * @details
  * Destroy fails with @c EBUSY while a task owns or waits on the mutex, or while
  * another public mutex operation is still pinned inside the handle registry.
+ * Managed cross-runtime destroy attempts fail with @c EXDEV.
  */
 LLAM_API int llam_mutex_destroy(llam_mutex_t *mutex);
 
@@ -967,6 +1094,7 @@ LLAM_API llam_cond_t *llam_cond_create(void);
  * condition, including the interval after signal/broadcast has selected the
  * waiter but before that task has returned from llam_cond_wait(), or while
  * another public condition operation is still pinned inside the handle registry.
+ * Managed cross-runtime destroy attempts fail with @c EXDEV.
  */
 LLAM_API int llam_cond_destroy(llam_cond_t *cond);
 
@@ -998,10 +1126,13 @@ LLAM_API int llam_cond_wait_until(llam_cond_t *cond, llam_mutex_t *mutex, uint64
  * @brief Wake one condition-variable waiter.
  *
  * @details May be called with or without the associated mutex held. Calls
- * outside a managed LLAM task are allowed.
+ * outside a managed LLAM task are allowed while the owner runtime is live.
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
- * arguments.
+ * arguments, @c EBUSY when the public handle is already being torn down,
+ * @c EXDEV for cross-runtime managed use, or @c ENOTSUP when an unmanaged host
+ * caller touches a condition whose owner runtime can no longer service waiter
+ * wakeups.
  */
 LLAM_API int llam_cond_signal(llam_cond_t *cond);
 
@@ -1009,10 +1140,13 @@ LLAM_API int llam_cond_signal(llam_cond_t *cond);
  * @brief Wake all condition-variable waiters.
  *
  * @details May be called with or without the associated mutex held. Calls
- * outside a managed LLAM task are allowed.
+ * outside a managed LLAM task are allowed while the owner runtime is live.
  *
  * @return 0 on success, or -1 with @c errno set to @c EINVAL for invalid
- * arguments.
+ * arguments, @c EBUSY when the public handle is already being torn down,
+ * @c EXDEV for cross-runtime managed use, or @c ENOTSUP when an unmanaged host
+ * caller touches a condition whose owner runtime can no longer service waiter
+ * wakeups.
  */
 LLAM_API int llam_cond_broadcast(llam_cond_t *cond);
 
@@ -1179,9 +1313,10 @@ typedef struct llam_select_op {
  * the selected operation index is returned and remaining queued wait nodes are
  * removed before this call returns. A selected receive on a closed, drained
  * channel sets the operation's @c result_errno to @c EPIPE and stores @c NULL
- * in @c recv_out. @p deadline_ns is an absolute ::llam_now_ns deadline; @c 0
- * performs a single non-blocking scan. @p op_count must be in the range
- * @c 1..LLAM_CHANNEL_SELECT_MAX_OPS.
+ * in @c recv_out; a selected send on a closed channel sets @c result_errno to
+ * @c EPIPE without enqueueing @c send_value. @p deadline_ns is an absolute
+ * ::llam_now_ns deadline; @c 0 performs a single non-blocking scan. @p op_count
+ * must be in the range @c 1..LLAM_CHANNEL_SELECT_MAX_OPS.
  *
  * @param ops Operation array.
  * @param op_count Number of operations.

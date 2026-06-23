@@ -1,8 +1,65 @@
 # LLAM ChangeLog
 
+## 2.1.0 - 2026-06-23
+
+### Security
+
+* harden broker revoke handling so descriptor, buffer, and channel tokens cannot
+  regain rights after being narrowed to destroy-only authority.
+
+* close broker ring task-spawn rollback gaps by failing poisoned cursor
+  publication closed and rolling back newly allocated task slots.
+
+* move descriptor read/write execution outside broker active-operation critical
+  sections so blocking descriptors cannot stall teardown or broker progress.
+
+* harden broker transports against socket-path replacement, stalled POSIX
+  clients, stalled Windows named-pipe sessions, and Windows pipe endpoint
+  squatting.
+
+* bound Darwin/Linux accept and receive readiness queues, retain io_uring
+  requests until cancel completion retires, and verify fd identity before live
+  receive-readiness migration.
+
+### Changed
+
+* refresh version, installer, packaging, workflow, shared-library smoke, and
+  documentation metadata for the `2.1.0` security release while keeping the
+  public ABI at `2.0`.
+
+## 2.0.1 - 2026-06-23
+
+### Changed
+
+* change the default runtime policy to non-deterministic scheduling
+  (`deterministic = 0`) for `llam_runtime_opts_init()`, prefix-compatible
+  option initialization, and `llam_runtime_init_ex(NULL, ...)` startup.
+
+* refresh install, packaging, shared-library smoke, and release workflow
+  metadata for the `2.0.1` library patch release while keeping the public ABI at
+  `2.0`.
+
 ## 2.0.0 - 2026-05-25
 
 ### Added
+
+* scheduler-safe datagram I/O wrappers: `llam_recvfrom()`, `llam_sendto()`,
+  and `llam_recvfrom_owned()` preserve UDP peer-address metadata while managed
+  tasks park cooperatively on readiness instead of pinning scheduler workers.
+
+* waitable interval timer handles: `llam_timer_create_ex()`,
+  `llam_timer_create()`, `llam_timer_wait*()`, `llam_timer_reset()`,
+  `llam_timer_cancel()`, and `llam_timer_destroy()` provide drift-aware
+  periodic waits without callback lifetime ambiguity.
+
+* Linux opt-in signal wait sets: `llam_signal_set_create_ex()`,
+  `llam_signal_wait*()`, and `llam_signal_set_destroy()` expose process signal
+  waiting through bounded `sigtimedwait` slices. Non-Linux platforms currently
+  fail with `ENOTSUP`.
+
+* blocking syscall wrappers for common libc/filesystem operations:
+  `llam_getaddrinfo_result()`, `llam_freeaddrinfo_result()`,
+  `llam_open_async()`, and `llam_stat_path_ex()`.
 
 * BSD platform support foundation for FreeBSD, OpenBSD, NetBSD, and
   DragonFlyBSD, including platform macros, kqueue readiness/user-wake reuse
@@ -17,6 +74,10 @@
 * additional multi-runtime, blocking-pool, public-handle, owned-buffer, broker,
   Windows IOCP, BSD kqueue, and server-stress regression coverage for the
   2.0.0 re-release hardening queue.
+
+* direct API regression coverage for waitable timers, datagram owned-buffer
+  receive/send, blocking DNS/open/stat wrappers, and Linux/non-Linux signal
+  wait-set contracts.
 
 * a direct runtime soak gate for repeated LLAM core fuzz, multi-runtime
   ownership/isolation, runtime stress, shutdown, and owned-buffer coverage
@@ -214,6 +275,15 @@
 * bound `stress_server_composite.py` child phase commands with process-tree
   timeout cleanup and explicit timeout diagnostics, preventing hung flood
   wrappers from stalling the composite suite until the outer CI job timeout.
+* reject leading whitespace, signs, overflow, and ambiguous base handling in
+  runtime/example numeric environment and CLI parsers. Runtime tuning knobs,
+  broker serving counts, server ports, stress/bench counts, and Windows policy
+  test controls now fail closed on malformed input instead of silently
+  accepting libc `strto*()` whitespace or sign coercions.
+* reject malformed benchmark and server-stress metric lines with empty fields,
+  duplicate keys, signed counters, or impossible accounting. Release benchmark
+  and composite stress harnesses now fail diagnostics instead of letting a later
+  duplicate metric overwrite the value used for pass/fail decisions.
 * drop queued Linux io_uring, Darwin kqueue, and Windows IOCP cancel-control
   records when a request completes naturally before the queued cancel control is
   processed. This prevents late backend control handling from dereferencing

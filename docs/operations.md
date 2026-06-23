@@ -139,14 +139,13 @@ stress, forced Windows 10/11 policy checks, IOCP smoke coverage, HANDLE I/O
 coverage, public handle/lifetime edge tests, shutdown and owned-buffer tests,
 shared-library export checks, and benchmark smoke coverage.
 BSD rollout is gated by the `.github/workflows/bsd.yml` VM matrix for FreeBSD,
-OpenBSD, NetBSD, and DragonFly BSD. That gate currently builds the runtime,
-runs core/API/select/I/O-buffer/shared-load smoke tests, and validates release
-archive shape for each target before BSD artifacts are treated as publishable.
-DragonFlyBSD package repository or package-install outages are treated as
-infrastructure skips because the public mirror availability has been unstable;
-compiler, build, test, and package-shape failures after dependencies are present
-remain hard failures. FreeBSD, OpenBSD, and NetBSD package or test failures are
-not skipped.
+OpenBSD, and NetBSD. That gate currently builds the runtime, runs
+core/API/select/I/O-buffer/shared-load smoke tests, and validates release
+archive shape for each hard-gated target. DragonFly BSD is kept in the same
+workflow as an experimental allowed-failure smoke path because public
+DragonFlyBSD VM/package infrastructure has been unstable; release artifact
+publication still requires the release workflow's DragonFlyBSD artifact build to
+pass. FreeBSD, OpenBSD, and NetBSD package or test failures are not skipped.
 The top-level Makefile does not maintain a separate Windows compiler pipeline:
 when `HOST_PLATFORM=windows` it delegates build, test, shared/static, package,
 and explicit executable/test targets to the native CMake backend. This keeps the
@@ -352,7 +351,11 @@ profiles when you want a fully empty tree; it removes `object-*`, analyzer
 `.plist` files, and link-signature files in addition to ordinary build outputs.
 
 Use ThreadSanitizer on focused race tests rather than the longest stackful
-edge tests:
+edge tests. In GitHub Actions, the Linux TSan nightly job is intentionally
+allowed-failure and diagnostic-only because stackful fiber switching can produce
+environment-dependent sanitizer reports. Treat its uploaded logs as required
+triage input, but keep ASan/UBSan, direct runtime tests, and regular stress CI
+as the hard gates.
 
 ```bash
 make OBJDIR=object-tsan-hunt CC=clang \
@@ -432,7 +435,11 @@ python3 scripts/bench_runtime_compare.py --runtime all --rounds 9 --warmup 1 --i
 By default the script runs three process-level samples per runtime and reports
 the median row for each benchmark case. This keeps short cases such as
 `spawn_join` from being dominated by a single OS scheduling outlier. Use
-`--samples 1` only for quick smoke checks.
+`--samples 1` only for quick smoke checks. The script writes
+`runtime_compare_samples.csv` beside the selected median CSV and warns when a
+runtime/case has a large max/min sample spread. A spread warning is diagnostic,
+not a failure; rerun with `--isolate-cases` before treating that case as a
+regression.
 
 Use `--isolate-cases` for release-quality numbers so each case runs in a fresh
 process. This avoids cross-case worker-count, timer, cache, and CPU-frequency
@@ -453,16 +460,17 @@ Before tagging a release build, require:
 
 - `make verify-linux CC=gcc` or `./scripts/docker_verify_linux.sh` on Linux.
 - `CC=clang make verify-darwin` or the macOS GitHub Actions matrix.
-- BSD VM smoke through `.github/workflows/bsd.yml` for FreeBSD, OpenBSD,
-  NetBSD, and DragonFly BSD before publishing BSD artifacts.
+- BSD VM smoke through `.github/workflows/bsd.yml` for FreeBSD, OpenBSD, and
+  NetBSD, plus a successful DragonFly BSD artifact build in the release
+  workflow before publishing DragonFly BSD artifacts.
 - Native Windows CMake/CTest through `scripts/verify_windows.ps1 -Native` and
   the Windows 2022/2025 stress jobs, including forced Windows 10/11 policies and
   opt-in TCP `POLLIN` IOCP smoke.
 - `Nightly Deep CI` on at least one recent `main` commit before a release
   candidate: POSIX standard composite, Windows 2022/2025 policy stress,
   deterministic runtime fuzz, conservative scheduler/channel/select/I/O
-  benchmark guardrails, ASan/UBSan
-  quick gate, and experimental TSan diagnostics.
+  benchmark guardrails, ASan/UBSan quick gate, and experimental allowed-failure
+  Linux TSan diagnostics.
 - `Weekly Soak` direct runtime soak plus hour-long server composite on Linux
   x86_64 and macOS arm64. The direct runtime soak repeats fuzz,
   multi-runtime ownership/isolation, runtime stress, shutdown, and owned-buffer

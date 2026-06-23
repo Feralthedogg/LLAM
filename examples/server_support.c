@@ -28,15 +28,45 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int chat_ascii_tolower(int ch) {
+    if (ch >= 'A' && ch <= 'Z') {
+        return ch + ('a' - 'A');
+    }
+    return ch;
+}
+
+static bool chat_ascii_equal_ci(const char *lhs, const char *rhs) {
+    while (*lhs != '\0' && *rhs != '\0') {
+        if (chat_ascii_tolower((unsigned char)*lhs) != chat_ascii_tolower((unsigned char)*rhs)) {
+            return false;
+        }
+        ++lhs;
+        ++rhs;
+    }
+    return *lhs == '\0' && *rhs == '\0';
+}
+
+static bool chat_ascii_is_space(int ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 bool chat_env_enabled(const char *value, bool default_value) {
     if (value == NULL || value[0] == '\0') {
         return default_value;
     }
-    return strcmp(value, "0") != 0 &&
-           strcmp(value, "false") != 0 &&
-           strcmp(value, "FALSE") != 0 &&
-           strcmp(value, "off") != 0 &&
-           strcmp(value, "OFF") != 0;
+    if (chat_ascii_equal_ci(value, "1") ||
+        chat_ascii_equal_ci(value, "true") ||
+        chat_ascii_equal_ci(value, "yes") ||
+        chat_ascii_equal_ci(value, "on")) {
+        return true;
+    }
+    if (chat_ascii_equal_ci(value, "0") ||
+        chat_ascii_equal_ci(value, "false") ||
+        chat_ascii_equal_ci(value, "no") ||
+        chat_ascii_equal_ci(value, "off")) {
+        return false;
+    }
+    return default_value;
 }
 
 int chat_open_append_regular(const char *path) {
@@ -76,6 +106,10 @@ uint16_t chat_parse_port(const char *value, uint16_t default_port) {
 
     if (value == NULL || value[0] == '\0') {
         return default_port;
+    }
+    if (chat_ascii_is_space((unsigned char)value[0]) || value[0] == '+' || value[0] == '-') {
+        fprintf(stderr, "invalid port: %s\n", value);
+        return 0U;
     }
     errno = 0;
     port = strtoul(value, &end, 10);

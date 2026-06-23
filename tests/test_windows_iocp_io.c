@@ -260,9 +260,7 @@ static void run_udp_poll_peek_test(windows_iocp_state_t *state) {
     char buffer[4];
     short revents = 0;
     const char *native_udp_pollin = getenv("LLAM_WINDOWS_IOCP_UDP_POLLIN");
-    bool use_native_udp_pollin = native_udp_pollin != NULL &&
-                                 native_udp_pollin[0] != '\0' &&
-                                 strcmp(native_udp_pollin, "0") != 0;
+    bool use_native_udp_pollin = llam_env_flag_value(native_udp_pollin, 0U) != 0U;
     int rc;
 
     receiver = create_overlapped_udp_socket();
@@ -382,9 +380,7 @@ static void server_task(void *arg) {
     ssize_t nwritten;
     short revents = 0;
     const char *native_tcp_pollin = getenv("LLAM_WINDOWS_IOCP_TCP_POLLIN");
-    bool use_native_tcp_pollin = native_tcp_pollin != NULL &&
-                                 native_tcp_pollin[0] != '\0' &&
-                                 strcmp(native_tcp_pollin, "0") != 0;
+    bool use_native_tcp_pollin = llam_env_flag_value(native_tcp_pollin, 0U) != 0U;
 
     test_note("server task start");
     accepted = llam_accept(state->listener, NULL, NULL);

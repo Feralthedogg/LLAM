@@ -128,6 +128,11 @@ static unsigned select_race_rounds_from_env(void) {
     if (value == NULL || value[0] == '\0') {
         return SELECT_RACE_DEFAULT_ROUNDS;
     }
+    if (value[0] == ' ' || value[0] == '\t' || value[0] == '\n' ||
+        value[0] == '\r' || value[0] == '\f' || value[0] == '\v' ||
+        value[0] == '-' || value[0] == '+') {
+        return SELECT_RACE_DEFAULT_ROUNDS;
+    }
 
     errno = 0;
     parsed = strtoul(value, &end, 10);
@@ -142,7 +147,7 @@ static unsigned select_race_rounds_from_env(void) {
 
 static void select_race_waiter_task(void *arg) {
     select_state_t *state = arg;
-    void *received = NULL;
+    void *received = (void *)(uintptr_t)0xBAD0C105U;
     size_t selected = SIZE_MAX;
     llam_select_op_t ops[2];
 
@@ -171,7 +176,7 @@ static void select_race_waiter_task(void *arg) {
             return;
         }
     } else if (state->mode == SELECT_RACE_CLOSE) {
-        if (selected != 1U || ops[1].result_errno != EPIPE) {
+        if (selected != 1U || ops[1].result_errno != EPIPE || received != NULL) {
             task_fail(state, "select race close selected wrong op", EINVAL);
             return;
         }

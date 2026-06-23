@@ -49,14 +49,15 @@ plus generic HANDLE `ReadFile`/`WriteFile` requests.
 | FreeBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
 | OpenBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
 | NetBSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
-| DragonFly BSD x86_64 | BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` core/API/I/O-buffer smoke |
+| DragonFly BSD x86_64 | Experimental BSD CI smoke path | kqueue + x86_64 asm context switch | Clang or GCC with GNU Make | `.github/workflows/bsd.yml` allowed-failure smoke; release artifact builds remain hard-gated |
 | Windows 10/11 | Supported native x86_64 backend | IOCP for WSARecv/WSASend/AcceptEx/ConnectEx, overlapped HANDLE ReadFile/WriteFile, plus gated TCP `POLLOUT` and UDP `POLLIN`; TCP `POLLIN` defaults to fallback unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled | MSVC/MASM or MinGW through CMake; Makefile delegates to that CMake path on Windows | CMake Windows build plus runtime core/API/shutdown/buffer tests, `test_windows_policy`, `test_windows_runtime_smoke`, `test_windows_iocp_io`, and `test_windows_handle_io`; `scripts/verify_windows.ps1 -Native` |
 
 BSD support shares the kqueue watch backend with Darwin where the kernel
 contract is common, while Darwin-only Mach wake and scheduler hints remain
-guarded behind Darwin-specific code. The BSD CI matrix is the current support
-gate; long soak and platform-specific performance tuning still trail Linux and
-macOS until native runner history is available.
+guarded behind Darwin-specific code. FreeBSD, OpenBSD, and NetBSD are hard
+CI smoke gates. DragonFly BSD remains an experimental allowed-failure dev gate
+because public VM/package infrastructure is less stable; release artifact
+publication still requires the DragonFly BSD release build to pass.
 
 Native Windows runtime support covers scheduler/core, wake handles, x86_64 context switching, IOCP-backed socket requests, and overlapped HANDLE I/O. Windows 10 and Windows 11 use the same public API; LLAM selects conservative Windows 10 tuning or batched Windows 11 tuning at runtime, and CI forces both policy branches on native Windows runners.
 On Windows 11 policy, associated socket/HANDLE objects attempt
@@ -248,9 +249,14 @@ GitHub Actions is split by cost and depth:
 
 - `linux`, `macos`, and `Stress` are PR/push gates.
 - `Stress` repeats `test_runtime_stress`, pins/reports server stress seeds, streams long stress logs through `scripts/run_with_timeout.py`, and uploads diagnostics logs on failure or timeout.
-- `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental TSan, and benchmark guardrails from `.github/workflows/nightly.yml`.
+- `Nightly Deep CI` runs longer POSIX/Windows stress, deterministic runtime fuzz, ASan/UBSan, experimental allowed-failure Linux TSan diagnostics, and benchmark guardrails from `.github/workflows/nightly.yml`.
 - `Weekly Soak` runs direct runtime soak plus the hour-long stability/accounting composite profile on Linux x86_64 and macOS arm64 from `.github/workflows/soak.yml`.
 - `Runtime Benchmarks` runs scheduled LLAM/Go/Tokio benchmark comparisons and uploads graphs/results.
+
+Linux TSan is intentionally diagnostic rather than a hard push gate because
+stackful fiber runtimes can expose sanitizer-runtime interaction differences
+across hosted environments. ASan/UBSan, direct runtime tests, stress jobs, and
+regular platform CI remain hard gates.
 
 Current reliability coverage is split between direct runtime tests and the
 example server. Direct runtime tests own LLAM correctness for lifecycle,
@@ -312,7 +318,7 @@ The Makefile equivalent is `make shared`.
 
 Release archives include the public headers, docs, bundled examples, runtime
 libraries, `pkg-config` metadata, and CMake package files. Tag pushes such as
-`v2.0.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
+`v2.1.0` build and publish `.tar.xz` archives for Linux x86_64, Linux aarch64,
 macOS x86_64, macOS arm64, and BSD targets that pass the BSD CI smoke gate, plus
 a native Windows x86_64 `.zip` archive through `.github/workflows/release.yml`.
 
@@ -341,19 +347,19 @@ cc main.c $(pkg-config --cflags --libs llam) -o my_app
 Install on Linux/macOS/BSD:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.1.0/install.sh | sh -s -- --version 2.1.0 --prefix "$HOME/.local"
 ```
 
 Install a specific POSIX target:
 
 ```bash
-curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.sh | sh -s -- --version 2.0.0 --target macos-aarch64 --prefix "$HOME/.local"
+curl -fsSL https://github.com/Feralthedogg/LLAM/releases/download/v2.1.0/install.sh | sh -s -- --version 2.1.0 --target macos-aarch64 --prefix "$HOME/.local"
 ```
 
 Install on Windows x86_64:
 
 ```powershell
-Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v2.0.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 2.0.0 -Prefix "$env:LOCALAPPDATA\LLAM"
+Invoke-WebRequest "https://github.com/Feralthedogg/LLAM/releases/download/v2.1.0/install.ps1" -OutFile install.ps1; .\install.ps1 -Version 2.1.0 -Prefix "$env:LOCALAPPDATA\LLAM"
 ```
 
 Include the canonical public API:
@@ -505,7 +511,7 @@ static void root(void *arg) {
 
 ## I/O
 
-LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS and BSD use kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, and owned-buffer reads on supported native backends. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
+LLAM I/O calls are written like blocking calls from inside a task, while the runtime backend handles readiness and completion. Linux uses io_uring, macOS and BSD use kqueue, and Windows uses IOCP for overlapped Winsock `read`, `write`, `accept`, `connect`, generic HANDLE `ReadFile`/`WriteFile`, gated TCP `POLLOUT`, and UDP `POLLIN` requests. Windows TCP `POLLIN` defaults to the cooperative/direct fallback path unless `LLAM_WINDOWS_IOCP_TCP_POLLIN=1` is enabled for controlled smoke or benchmark runs; unsupported poll masks remain fallback. The current I/O primitive set covers stream `read`/`write`, datagram `recvfrom`/`sendto`, `close`, HANDLE read/write, explicit-offset `pread`/`pwrite`, fd/HANDLE polling, `accept`, `connect`, owned-buffer reads, DNS resolution, and blocking filesystem open/stat wrappers. Windows file I/O is HANDLE-based: `llam_pread()`/`llam_pwrite()` on Windows fd/socket values fail with `ENOTSUP`, and file users should call the `*_handle` variants. Use `llam_close()` or `llam_close_handle()` for descriptors and handles that have been used with LLAM I/O so runtime-local descriptor caches observe the close boundary. Use `LLAM_INVALID_FD` or `LLAM_FD_IS_INVALID(fd)` for descriptor-returning failures such as `llam_accept()`, and `LLAM_INVALID_HANDLE` or `LLAM_HANDLE_IS_INVALID(handle)` for HANDLE-returning integrations.
 
 ```c
 #include "llam/runtime.h"
@@ -582,6 +588,27 @@ if (n > 0 && buffer != NULL) {
     (void)size;
 }
 llam_io_buffer_release(buffer);
+```
+
+UDP and other datagram workloads can preserve peer address information with
+`llam_recvfrom()` / `llam_sendto()` or receive into runtime-owned storage with
+`llam_recvfrom_owned()`:
+
+```c
+struct sockaddr_storage peer;
+socklen_t peer_len = sizeof(peer);
+llam_io_buffer_t *packet = NULL;
+
+ssize_t n = llam_recvfrom_owned(fd,
+                                1500,
+                                0,
+                                (struct sockaddr *)&peer,
+                                &peer_len,
+                                &packet);
+if (n > 0) {
+    (void)llam_io_buffer_data(packet);
+}
+llam_io_buffer_release(packet);
 ```
 
 For DB/storage workloads, use positional I/O so the current file offset is not
@@ -664,6 +691,9 @@ Task scheduling:
 | `llam_detach` | Consume a task handle without waiting for completion. |
 | `llam_sleep_ns` | Sleep for a duration. |
 | `llam_sleep_until` | Sleep until an absolute deadline. |
+| `llam_timer_create_ex` / `llam_timer_create` | Create a waitable interval timer handle. |
+| `llam_timer_wait` / `llam_timer_wait_until` | Wait for timer ticks and receive the number of elapsed intervals. |
+| `llam_timer_reset` / `llam_timer_cancel` / `llam_timer_destroy` | Re-arm, cancel, or destroy a timer; destroy fails with `EBUSY` while operations are active. |
 | `llam_task_set_class` | Change the current task class; invalid class values fail with `EINVAL`. |
 | `llam_current_task` | Return the current task handle. |
 | `llam_task_id` | Return a task id. |
@@ -694,29 +724,33 @@ Blocking:
 | `llam_call_blocking` | Convenience blocking API; ambiguous when callback returns `NULL`. |
 | `llam_enter_blocking` | Mark the current task as entering a blocking region. |
 | `llam_leave_blocking` | Mark the current task as leaving a blocking region. |
+| `llam_getaddrinfo_result` | Resolve DNS through the blocking path; resolver errors are returned through `gai_error`. |
+| `llam_freeaddrinfo_result` | Free address results returned by `llam_getaddrinfo_result`. |
+| `llam_open_async` | Open a filesystem path through the blocking path and return a platform handle. |
+| `llam_stat_path_ex` | Read fixed-width file metadata through the blocking path. |
 
 Cancellation:
 
 | API | Purpose |
 | --- | --- |
 | `llam_cancel_token_create` | Create a cancellation token. |
-| `llam_cancel_token_destroy` | Destroy a cancellation token; live observers make it fail with `EBUSY`. |
-| `llam_cancel_token_cancel` | Request cancellation. |
-| `llam_cancel_token_is_cancelled` | Check cancellation state. |
+| `llam_cancel_token_destroy` | Destroy a cancellation token; live observers make it fail with `EBUSY`, and managed cross-runtime destroy fails with `EXDEV`. |
+| `llam_cancel_token_cancel` | Request cancellation; active teardown returns `EBUSY`, and managed cross-runtime cancellation fails with `EXDEV`. |
+| `llam_cancel_token_is_cancelled` | Check cancellation state; active teardown returns `EBUSY`, and managed cross-runtime queries fail with `EXDEV`. |
 
 Mutex and condition variables:
 
 | API | Purpose |
 | --- | --- |
-| `llam_mutex_create` / `llam_mutex_destroy` | Create or destroy a mutex; destroy returns `EBUSY` while owned or waited on. |
-| `llam_mutex_lock` / `llam_mutex_unlock` | Lock or unlock a non-recursive mutex; self-lock returns `EDEADLK`, non-owner unlock returns `EPERM`. |
+| `llam_mutex_create` / `llam_mutex_destroy` | Create or destroy a mutex; destroy returns `EBUSY` while owned or waited on, and managed cross-runtime destroy returns `EXDEV`. |
+| `llam_mutex_lock` / `llam_mutex_unlock` | Lock or unlock a non-recursive mutex; self-lock returns `EDEADLK`, non-owner unlock returns `EPERM`, and managed cross-runtime use returns `EXDEV`. |
 | `llam_mutex_lock_until` | Wait for a mutex until a deadline; self-lock returns `EDEADLK`. |
 | `llam_mutex_trylock` | Try to lock immediately; returns `EBUSY` when already locked. |
-| `llam_cond_create` / `llam_cond_destroy` | Create or destroy a condition variable; destroy returns `EBUSY` while waited on. |
+| `llam_cond_create` / `llam_cond_destroy` | Create or destroy a condition variable; destroy returns `EBUSY` while waited on, and managed cross-runtime destroy returns `EXDEV`. |
 | `llam_cond_wait` | Wait on a condition variable; caller must own the mutex and wait in a predicate loop. |
 | `llam_cond_wait_until` | Wait on a condition variable until a deadline; reacquires the mutex before returning. |
-| `llam_cond_signal` | Wake one waiter; may be called with or without the mutex and outside a managed task. |
-| `llam_cond_broadcast` | Wake all waiters; may be called with or without the mutex and outside a managed task. |
+| `llam_cond_signal` | Wake one waiter; may be called with or without the mutex, including from an unmanaged host thread while the owner runtime is live. |
+| `llam_cond_broadcast` | Wake all waiters; may be called with or without the mutex, including from an unmanaged host thread while the owner runtime is live. |
 
 Channels:
 
@@ -749,6 +783,8 @@ I/O:
 | `llam_preadv_handle` / `llam_pwritev_handle` | Positional scatter/gather HANDLE read/write. |
 | `llam_read_owned` | Read into a runtime-owned buffer. |
 | `llam_recv_owned` | Receive with flags into a runtime-owned buffer. |
+| `llam_recvfrom` / `llam_sendto` | Datagram receive/send with peer address support. |
+| `llam_recvfrom_owned` | Receive a datagram into a runtime-owned buffer while returning the peer address. |
 | `llam_io_buffer_opts_init` / `llam_io_buffer_alloc_ex` | Initialize and allocate owned I/O buffers with explicit capacity, alignment, and flags. |
 | `llam_io_buffer_alloc` / `llam_io_buffer_alloc_aligned` | Allocate default or explicitly aligned owned I/O buffers. |
 | `llam_io_buffer_release` | Release an owned buffer and invalidate borrowed data pointers. |
@@ -772,6 +808,7 @@ Time, debug, and platform:
 | `llam_handle_t` | Platform-specific generic handle type for HANDLE I/O APIs. |
 | `LLAM_INVALID_FD` / `LLAM_FD_IS_INVALID` | Platform-correct invalid descriptor sentinel and predicate. |
 | `LLAM_INVALID_HANDLE` / `LLAM_HANDLE_IS_INVALID` | Platform-correct invalid generic-handle sentinel and predicate. |
+| `llam_signal_set_create_ex` / `llam_signal_wait` / `llam_signal_wait_until` / `llam_signal_set_destroy` | Linux-only opt-in signal wait-set API; other platforms return `ENOTSUP`. |
 | `LLAM_PLATFORM_LINUX` | Linux build flag. |
 | `LLAM_PLATFORM_DARWIN` | macOS/Darwin build flag. |
 | `LLAM_PLATFORM_FREEBSD` / `LLAM_PLATFORM_OPENBSD` / `LLAM_PLATFORM_NETBSD` / `LLAM_PLATFORM_DRAGONFLY` | BSD family build flags. |
@@ -818,7 +855,7 @@ Important fields:
 
 | Field | Meaning |
 | --- | --- |
-| `deterministic` | Deterministic scheduling mode. |
+| `deterministic` | Deterministic scheduling mode; defaults to disabled. |
 | `forced_yield_every` | Force a yield at a fixed interval. |
 | `experimental_flags` | Bitwise OR of `LLAM_RUNTIME_EXPERIMENTAL_F_*` flags. |
 | `idle_spin_ns` | Spin before idle poll fallback. |
@@ -930,7 +967,10 @@ python3 scripts/bench_runtime_compare.py --runtime all --isolate-cases
 The comparison script runs three process-level samples per runtime by default
 and reports the median row for each case so one noisy scheduler outlier does
 not dominate the table. Use `--samples 1` for a quick smoke run or
-`--sample-policy best` when locally measuring peak tuning.
+`--sample-policy best` when locally measuring peak tuning. The script also
+writes `runtime_compare_samples.csv` with every raw sample and warns when one
+runtime/case has a large max/min spread; treat those warnings as a signal to
+rerun with `--isolate-cases` before drawing release-quality conclusions.
 
 Release-quality comparison numbers should use isolated case execution so each
 benchmark case starts from a fresh process instead of inheriting worker, timer,
@@ -1115,12 +1155,12 @@ New platform work should extend the existing backend model without weakening
 the Linux, Darwin, or Windows fast paths. The priority is correctness first,
 then native I/O integration, then platform-specific context-switch tuning.
 
-- BSD: FreeBSD, OpenBSD, NetBSD, and DragonFly BSD now share the kqueue readiness, user-wake, direct-poll, and packaging path. The remaining work is native soak history, target-specific tuning, and widening CI beyond the current x86_64 smoke gate.
+- BSD: FreeBSD, OpenBSD, NetBSD, and DragonFly BSD now share the kqueue readiness, user-wake, direct-poll, and packaging path. FreeBSD/OpenBSD/NetBSD are hard CI smoke gates; DragonFly BSD is still an experimental allowed-failure dev gate until its public VM/package infrastructure is reliable enough for hard gating. The remaining work is native soak history, target-specific tuning, and widening CI beyond the current x86_64 smoke gate.
 - BSD portability: keep Linux-only assumptions such as `eventfd`, `epoll`, `timerfd`, and io_uring out of shared kqueue code; use kqueue `EVFILT_USER` for runtime wakeups and guard Darwin-only Mach/ulock paths behind Darwin checks.
 - RISC-V: start with Linux `riscv64` on the existing io_uring backend and portable context path, then add dedicated `src/asm/linux/riscv64/` context switching once ABI save/restore rules are fully tested.
 - RISC-V ABI: add explicit tests for stack alignment, callee-saved register preservation, atomic width assumptions, and task entry/exit trampolines before enabling the assembly path by default.
-- CI: keep the BSD VM matrix green for FreeBSD, OpenBSD, NetBSD, and DragonFly BSD; add riscv64 cross-build and QEMU smoke first, then native runner stress if available.
-- Release policy: publish BSD artifacts only after the target's VM smoke gate passes. Do not publish RISC-V artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
+- CI: keep the BSD VM matrix green for FreeBSD, OpenBSD, and NetBSD; keep DragonFly BSD visible as an experimental allowed-failure smoke until its infrastructure is stable enough to hard gate; add riscv64 cross-build and QEMU smoke first, then native runner stress if available.
+- Release policy: publish FreeBSD/OpenBSD/NetBSD artifacts only after the target's BSD VM smoke gate passes; publish DragonFly BSD artifacts only after the release workflow's DragonFly BSD artifact build passes. Do not publish RISC-V artifacts until `make test`, CMake/CTest, benchmark smoke, and a reduced server composite suite pass on that target.
 
 ### 5. C Ecosystem And Operations
 
@@ -1332,8 +1372,8 @@ Context switches are performed in hand-written assembly for each supported platf
 
 | Platform | Saved registers | Mechanism |
 | --- | --- | --- |
-| Linux x86_64 | `rbx, rbp, r12-r15`, `rsp` | Direct `mov`/`ret` in `context_x86_64.S` |
-| Linux aarch64 | `x19-x29, x30, sp` | `stp`/`ldp` in `context_arm64.S` |
+| Linux x86_64 | `rbx, rbp, r12-r15`, `rsp` | Direct `mov`/`ret` in `linux_context_x86_64.S` |
+| Linux aarch64 | `x19-x29, x30, sp` | `stp`/`ldp` in `linux_context_arm64.S` |
 | Darwin x86_64 | `rbx, rbp, r12-r15`, `rsp` | Same register set as Linux x86_64 |
 | Darwin arm64 | `x19-x29, x30, sp` | Same register set as Linux aarch64 |
 | BSD x86_64 | `rbx, rbp, r12-r15`, `rsp` | ELF x86_64 context switch path |
@@ -1439,14 +1479,14 @@ The connect fallback (`llam_blocking_connect_impl`) drives a nonblocking `connec
 
 ### Watchdog System
 
-The watchdog thread (`src/engine/`) runs at 1ms intervals (`LLAM_WATCHDOG_INTERVAL_NS`) and performs:
+The watchdog thread (`src/engine/watchdog/`) runs at 1ms intervals (`LLAM_WATCHDOG_INTERVAL_NS`) and performs:
 
 | Module | File | Function |
 | --- | --- | --- |
-| **Probe** | `runtime_watchdog_probe.c` | Detect stalled safepoints, measure queue pressure, suspect deadlocks after 4 consecutive observations |
-| **Scale** | `runtime_watchdog_scale.c` | Dynamic worker scaling: scale up after 2 consecutive pressure observations, scale down after 12 consecutive idle observations, with a 4-tick cooldown |
-| **Merge** | `runtime_watchdog_merge.c` | Offline a shard by draining its queues and migrating tasks to a target shard |
-| **Rehome** | `runtime_watchdog_rehome.c` | Atomically transfer ownership of parked waiters, in-flight I/O, submit-queue entries, and multishot watch state from an offline shard to a target shard |
+| **Probe** | `watchdog_probe.c` | Detect stalled safepoints, measure queue pressure, suspect deadlocks after 4 consecutive observations |
+| **Scale** | `watchdog_scale.c` | Dynamic worker scaling: scale up after 2 consecutive pressure observations, scale down after 12 consecutive idle observations, with a 4-tick cooldown |
+| **Merge** | `watchdog_merge.c` | Offline a shard by draining its queues and migrating tasks to a target shard |
+| **Rehome** | `watchdog_rehome.c` | Atomically transfer ownership of parked waiters, in-flight I/O, submit-queue entries, and multishot watch state from an offline shard to a target shard |
 
 Rehome validates the entire waiter list before any migration. If a single entry cannot be rehomed (pinned task, incompatible I/O state), the entire list migration is aborted to prevent partial ownership inconsistency.
 

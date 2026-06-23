@@ -34,7 +34,7 @@ jobs:
             runner: macos-14
             cc: clang
           - target: windows-x86_64
-            runner: windows-2025
+            runner: windows-2022
             cc: msvc
 
     steps:
@@ -65,12 +65,20 @@ jobs:
 
       - name: Build and test POSIX
         if: runner.os != 'Windows'
+        timeout-minutes: 20
         run: |
-          version="2.0.0"
+          version="2.1.0"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
-          make clean all test CC="${{ matrix.cc }}" LLAM_VERSION="$version"
+          jobs=2
+          if command -v nproc >/dev/null 2>&1; then
+            jobs="$(nproc)"
+          elif command -v sysctl >/dev/null 2>&1; then
+            jobs="$(sysctl -n hw.logicalcpu)"
+          fi
+          make clean
+          make -j"$jobs" all test CC="${{ matrix.cc }}" LLAM_VERSION="$version"
 
       - name: Smoke test POSIX runtime executables
         if: runner.os != 'Windows'
@@ -87,7 +95,7 @@ jobs:
       - name: Package POSIX release archive
         if: runner.os != 'Windows'
         run: |
-          version="2.0.0"
+          version="2.1.0"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi
@@ -142,12 +150,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
-          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
+          ctest --test-dir build/release-windows --output-on-failure --timeout 180 -C Release -R "test_abi_compat|test_multi_runtime_core|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_handle_io|test_security_capability|llam_broker_self_test"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
           $env:LLAM_WINDOWS_IOCP_TCP_POLLIN = "1"
-          ctest --test-dir build/release-windows --output-on-failure -C Release -R "test_windows_iocp_io"
+          ctest --test-dir build/release-windows --output-on-failure --timeout 180 -C Release -R "test_windows_iocp_io"
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
@@ -161,10 +169,10 @@ jobs:
         shell: pwsh
         run: |
           $dryRun = (& .\scripts\install.ps1 -DryRun -Target "${{ matrix.target }}" 6>&1 | Out-String)
-          if ($dryRun -notmatch "/releases/download/v2\.0\.0/") {
-            throw "standalone Windows installer default URL did not use the v2.0.0 release tag"
+          if ($dryRun -notmatch "/releases/download/v2\.1\.0/") {
+            throw "standalone Windows installer default URL did not use the v2.1.0 release tag"
           }
-          $version = "2.0.0"
+          $version = "2.1.0"
           $releaseVersion = "dev"
           if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq "true") {
             $tagName = $env:GITHUB_REF_NAME
@@ -179,6 +187,8 @@ jobs:
           Expand-Archive -LiteralPath $archive -DestinationPath $tmp -Force
           $root = Join-Path $tmp "llam-$packageVersion-${{ matrix.target }}"
           foreach ($file in @(
+            "install.sh",
+            "install.ps1",
             "include\llam\runtime.h",
             "include\llam\io.h",
             "include\llam\platform.h",
@@ -267,6 +277,38 @@ jobs:
               throw
             }
           }
+          $absoluteZip = Join-Path $tmp "bad-absolute.zip"
+          $zip = [System.IO.Compression.ZipFile]::Open($absoluteZip, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            [void]$zip.CreateEntry("$badPackage/install.ps1")
+            [void]$zip.CreateEntry("/tmp/llam-windows-escape")
+          } finally {
+            $zip.Dispose()
+          }
+          try {
+            Assert-SafeZipArchive $absoluteZip $badPackage
+            throw "archive-local Windows installer accepted an absolute archive member"
+          } catch {
+            if ($_.Exception.Message -notmatch "refusing unsafe archive member") {
+              throw
+            }
+          }
+          $parentZip = Join-Path $tmp "bad-parent.zip"
+          $zip = [System.IO.Compression.ZipFile]::Open($parentZip, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            [void]$zip.CreateEntry("$badPackage/install.ps1")
+            [void]$zip.CreateEntry("$badPackage/../escape")
+          } finally {
+            $zip.Dispose()
+          }
+          try {
+            Assert-SafeZipArchive $parentZip $badPackage
+            throw "archive-local Windows installer accepted a parent-traversal archive member"
+          } catch {
+            if ($_.Exception.Message -notmatch "refusing unsafe archive member") {
+              throw
+            }
+          }
 
       - name: Upload platform artifact
         uses: actions/upload-artifact@v6
@@ -325,28 +367,101 @@ jobs:
       - name: Install BSD packages
         run: |
           set -eu
+          retry() {
+            attempts=0
+            max_attempts="${LLAM_BSD_PKG_RETRIES:-10}"
+            delay_seconds="${LLAM_BSD_PKG_RETRY_DELAY:-30}"
+            while ! "$@"; do
+              attempts=$((attempts + 1))
+              if [ "$attempts" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep "$delay_seconds"
+            done
+          }
+          dragonfly_release_tools_available() {
+            command -v gmake >/dev/null 2>&1 &&
+              command -v cmake >/dev/null 2>&1 &&
+              command -v xz >/dev/null 2>&1
+          }
+          configure_dragonfly_pkg_repo() {
+            sudo mkdir -p /usr/local/etc/pkg/repos
+            sudo tee /usr/local/etc/pkg/repos/llam-auto.conf >/dev/null <<'EOF'
+          AUTO: {
+            url             : "__LLAM_DRAGONFLY_REPO__"
+            mirror_type     : NONE
+            enabled         : yes
+          }
+          Avalon: {
+            enabled         : no
+          }
+          EOF
+            sudo sed -i.bak "s|__LLAM_DRAGONFLY_REPO__|$1|g" /usr/local/etc/pkg/repos/llam-auto.conf
+          }
+          retry_dragonfly_pkg_update() {
+            attempts=0
+            max_attempts="${LLAM_DRAGONFLY_PKG_UPDATE_RETRIES:-2}"
+            delay_seconds="${LLAM_DRAGONFLY_PKG_UPDATE_RETRY_DELAY:-5}"
+            while ! sudo pkg update -f; do
+              attempts=$((attempts + 1))
+              if [ "$attempts" -ge "$max_attempts" ]; then
+                return 1
+              fi
+              sleep "$delay_seconds"
+            done
+          }
+          install_dragonfly_release_tools() {
+            if dragonfly_release_tools_available; then
+              return 0
+            fi
+            for repo_url in \
+              "https://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
+              "http://mirror-master.dragonflybsd.org/dports/\${ABI}/LATEST" \
+              "https://mirrors.nycbug.org/pub/DragonflyBSD/dports/\${ABI}/LATEST" \
+              "https://ftp.jaist.ac.jp/pub/DragonFly/dports/\${ABI}/LATEST" \
+              "https://ftp.kr.freebsd.org/pub/dragonflybsd/dports/\${ABI}/LATEST" \
+              "https://www.mirrorservice.org/sites/ftp.dragonflybsd.org/dports/\${ABI}/LATEST"
+            do
+              echo "Trying DragonFly pkg repo: $repo_url"
+              configure_dragonfly_pkg_repo "$repo_url"
+              pkg -vv | sed -n '/Repositories:/,$p' || true
+              if retry_dragonfly_pkg_update &&
+                 { command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake; } &&
+                 { command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake; } &&
+                 { command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz; } &&
+                 dragonfly_release_tools_available; then
+                return 0
+              fi
+            done
+            return 1
+          }
           case "$(uname -s)" in
-            FreeBSD|DragonFly)
-              command -v gmake >/dev/null 2>&1 || sudo pkg install -y gmake
-              command -v cmake >/dev/null 2>&1 || sudo pkg install -y cmake
-              command -v xz >/dev/null 2>&1 || sudo pkg install -y xz
+            FreeBSD)
+              command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
+              command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
+              command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
+              ;;
+            DragonFly)
+              pkg config ABI || true
+              install_dragonfly_release_tools
               ;;
             OpenBSD)
-              command -v gmake >/dev/null 2>&1 || sudo pkg_add gmake
-              command -v cmake >/dev/null 2>&1 || sudo pkg_add cmake
-              command -v xz >/dev/null 2>&1 || sudo pkg_add xz
+              sudo sh -c 'echo https://cdn.openbsd.org/pub/OpenBSD > /etc/installurl'
+              command -v gmake >/dev/null 2>&1 || retry sudo pkg_add gmake
+              command -v cmake >/dev/null 2>&1 || retry sudo pkg_add cmake
+              command -v xz >/dev/null 2>&1 || retry sudo pkg_add xz
               ;;
             NetBSD)
-              command -v gmake >/dev/null 2>&1 || sudo pkgin -y install gmake
-              command -v cmake >/dev/null 2>&1 || sudo pkgin -y install cmake
-              command -v xz >/dev/null 2>&1 || sudo pkgin -y install xz
+              command -v gmake >/dev/null 2>&1 || retry sudo pkgin -y install gmake
+              command -v cmake >/dev/null 2>&1 || retry sudo pkgin -y install cmake
+              command -v xz >/dev/null 2>&1 || retry sudo pkgin -y install xz
               ;;
           esac
 
       - name: Build, test, and package BSD
         run: |
           set -eu
-          version="2.0.0"
+          version="2.1.0"
           if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             version="${GITHUB_REF_NAME#v}"
           fi

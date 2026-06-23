@@ -278,6 +278,7 @@ static int init_runtime(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
     return llam_runtime_init(&opts);
@@ -289,6 +290,11 @@ static unsigned cancel_token_destroy_race_rounds(void) {
     unsigned long value;
 
     if (env == NULL || env[0] == '\0') {
+        return 4000U;
+    }
+    if (env[0] == ' ' || env[0] == '\t' || env[0] == '\n' ||
+        env[0] == '\r' || env[0] == '\f' || env[0] == '\v' ||
+        env[0] == '-' || env[0] == '+') {
         return 4000U;
     }
     errno = 0;
@@ -1528,6 +1534,30 @@ static void blocking_cancel_task(void *arg) {
     }
 }
 
+static void blocking_after_stop_task(void *arg) {
+    edge_state_t *state = arg;
+    void *result = state;
+
+    if (llam_runtime_request_stop() != 0) {
+        task_fail(state, "blocking after stop request", errno);
+        return;
+    }
+    errno = 0;
+    /*
+     * Runtime stop is a cancellation boundary.  A late blocking submission must
+     * not enqueue work after block workers are allowed to leave during teardown,
+     * otherwise destroy can wait forever for a job that no helper will run.
+     */
+    if (llam_call_blocking_result(blocking_echo, state, &result) != -1 ||
+        errno != ECANCELED ||
+        result != NULL ||
+        atomic_load_explicit(&state->blocking_calls, memory_order_relaxed) != 0U) {
+        task_fail(state, "blocking submission after runtime stop", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
+}
+
 static void blocking_release_task(void *arg) {
     edge_state_t *state = arg;
 
@@ -1656,6 +1686,22 @@ static void channel_close_select_task(void *arg) {
         received != NULL) {
         task_fail(state, "channel select closed recv", errno);
         return;
+    }
+    {
+        llam_select_op_t send_op;
+
+        memset(&send_op, 0, sizeof(send_op));
+        send_op.kind = LLAM_SELECT_OP_SEND;
+        send_op.channel = state->secondary;
+        send_op.send_value = state;
+        send_op.result_errno = ETIMEDOUT;
+        selected = SIZE_MAX;
+        if (llam_channel_select(&send_op, 1U, UINT64_MAX, &selected) != 0 ||
+            selected != 0U ||
+            send_op.result_errno != EPIPE) {
+            task_fail(state, "channel select closed send", errno);
+            return;
+        }
     }
 
     if (llam_channel_try_send(state->primary, &state) != 0) {
@@ -3191,6 +3237,39 @@ static int test_blocking_callback_edges(void) {
     return 0;
 }
 
+static int test_blocking_submission_after_stop_is_cancelled(void) {
+    edge_state_t state;
+    llam_task_t *task;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.ran, 0U);
+    atomic_init(&state.blocking_calls, 0U);
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init for blocking-after-stop edge failed");
+    }
+
+    task = llam_spawn(blocking_after_stop_task, &state, NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno("spawn blocking-after-stop task failed");
+    }
+    if (llam_run() == 0 &&
+        check_task_failures(&state) == 0 &&
+        llam_join(task) == 0 &&
+        atomic_load_explicit(&state.ran, memory_order_relaxed) == 1U &&
+        atomic_load_explicit(&state.blocking_calls, memory_order_relaxed) == 0U) {
+        rc = 0;
+    }
+
+    llam_runtime_shutdown();
+    if (rc != 0 && atomic_load_explicit(&state.failures, memory_order_relaxed) == 0U) {
+        return fail_errno("blocking-after-stop edge failed");
+    }
+    return rc;
+}
+
 static int test_blocking_cancel_waits_for_running_callback(void) {
     edge_state_t state;
     llam_spawn_opts_t opts;
@@ -3391,6 +3470,7 @@ cleanup_no_runtime:
 
 static int test_cond_owner_recheck_unlinks_waiter(void) {
     cond_owner_recheck_state_t state;
+    llam_spawn_opts_t spawn_opts;
     pthread_t corrupter;
     llam_task_t *task = NULL;
     bool corrupter_started = false;
@@ -3415,10 +3495,19 @@ static int test_cond_owner_recheck_unlinks_waiter(void) {
     if (state.raw_mutex == NULL || state.raw_cond == NULL) {
         goto cleanup_no_runtime;
     }
+    if (llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        goto cleanup_no_runtime;
+    }
+    /*
+     * This edge test intentionally stalls in pthread_mutex_lock() while a host
+     * thread corrupts the mutex owner.  Disable watchdog preemption for the
+     * task so SIGUSR1 does not mask the owner-recheck assertion on BSD.
+     */
+    spawn_opts.flags |= LLAM_SPAWN_F_NO_PREEMPT;
     if (init_runtime() != 0) {
         goto cleanup_no_runtime;
     }
-    task = llam_spawn(cond_owner_recheck_task, &state, NULL);
+    task = llam_spawn(cond_owner_recheck_task, &state, &spawn_opts);
     if (task == NULL) {
         goto cleanup_runtime;
     }
@@ -3515,6 +3604,7 @@ static int test_timer_heap_counter_accounting_guard(void) {
     llam_runtime_t runtime;
     llam_shard_t shard;
     llam_timer_node_t overflow_node;
+    llam_timer_node_t normal_node;
     llam_timer_node_t underflow_node;
     llam_timer_node_t *heap[1];
     llam_timer_node_t *removed;
@@ -3522,6 +3612,7 @@ static int test_timer_heap_counter_accounting_guard(void) {
     memset(&runtime, 0, sizeof(runtime));
     memset(&shard, 0, sizeof(shard));
     memset(&overflow_node, 0, sizeof(overflow_node));
+    memset(&normal_node, 0, sizeof(normal_node));
     memset(&underflow_node, 0, sizeof(underflow_node));
     atomic_init(&runtime.fatal_errno, 0);
     atomic_init(&runtime.stop_requested, false);
@@ -3545,6 +3636,33 @@ static int test_timer_heap_counter_accounting_guard(void) {
         atomic_load_explicit(&shard.timer_count, memory_order_acquire) != UINT_MAX ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
         return fail_errno("timer heap counter overflow guard failed");
+    }
+
+    atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&runtime.stop_requested, false, memory_order_release);
+    atomic_store_explicit(&shard.timer_count, 0U, memory_order_release);
+    heap[0] = NULL;
+    shard.timer_heap_len = 0U;
+    shard.timers = NULL;
+    normal_node.deadline_ns = 42U;
+
+    errno = 0;
+    if (!llam_timer_heap_push_locked(&shard, &normal_node) ||
+        errno != 0 ||
+        shard.timer_heap_len != 1U ||
+        shard.timers != &normal_node ||
+        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 1U) {
+        return fail_errno("timer heap counter normal push accounting failed");
+    }
+
+    errno = 0;
+    removed = llam_timer_heap_remove_at_locked(&shard, 0U);
+    if (removed != &normal_node ||
+        errno != 0 ||
+        shard.timer_heap_len != 0U ||
+        shard.timers != NULL ||
+        atomic_load_explicit(&shard.timer_count, memory_order_acquire) != 0U) {
+        return fail_errno("timer heap counter normal pop accounting failed");
     }
 
     atomic_store_explicit(&runtime.fatal_errno, 0, memory_order_release);
@@ -4760,6 +4878,52 @@ cleanup:
     return rc;
 }
 
+static int test_public_slot_corrupt_affine_seal_fails_fast(void) {
+    llam_public_slot_table_t table;
+    int object = 1;
+    size_t slot = 0U;
+    uint32_t generation = 0U;
+    int rc = 1;
+
+    memset(&table, 0, sizeof(table));
+    table.handle_secret = UINT64_C(0xf0d1c2b3a4958670);
+    if (llam_public_slot_reserve_family(&table,
+                                        &object,
+                                        1U,
+                                        LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                        &slot,
+                                        &generation) != 0) {
+        return fail_errno("corrupt affine seal fixture reserve failed");
+    }
+
+    /*
+     * A corrupted slot seal must fail closed immediately.  With a multiplier
+     * equal to the token modulus, reactivation can otherwise step to the same
+     * public generation until epoch exhaustion, turning a damaged handle table
+     * into a long stall instead of an actionable lifecycle diagnostic.
+     */
+    table.slots[slot].seal_multiplier = LLAM_PUBLIC_HANDLE_EPOCH_MASK;
+    table.slots[slot].seal_addend = 0U;
+    errno = 0;
+    if (llam_public_slot_reactivate_family(&table,
+                                           slot,
+                                           &object,
+                                           LLAM_PUBLIC_HANDLE_FAMILY_TASK,
+                                           &generation) != -1 ||
+        errno != EINVAL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] corrupt affine seal did not fail fast: errno=%d generation=%u\n",
+                      errno,
+                      generation);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    free(table.slots);
+    return rc;
+}
+
 static int test_public_slot_mersenne_reducer_matches_modulus(void) {
     static const uint64_t values[] = {
         UINT64_C(0),
@@ -4897,6 +5061,43 @@ static int test_public_slot_shift_bounds(void) {
 static int test_public_active_op_overflow_fails_closed(void) {
     _Atomic size_t active_ops;
 
+    atomic_init(&active_ops, 0U);
+    llam_public_active_op_end(&active_ops);
+    if (llam_public_active_op_count(&active_ops) != 0U) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op end underflowed idle counter to %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+
+    atomic_store_explicit(&active_ops, LLAM_PUBLIC_ACTIVE_OP_BEGIN_LIMIT, memory_order_relaxed);
+    errno = 0;
+    if (llam_public_active_op_try_begin(&active_ops) != -1 || errno != EBUSY) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not reject pre-sentinel counter with EBUSY\n");
+        return 1;
+    }
+    if (llam_public_active_op_count(&active_ops) != LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not publish sentinel from pre-sentinel count: %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+
+    atomic_store_explicit(&active_ops, SIZE_MAX / 2U, memory_order_relaxed);
+    errno = 0;
+    if (llam_public_active_op_try_begin(&active_ops) != -1 || errno != EBUSY) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not reject high-half counter with EBUSY\n");
+        return 1;
+    }
+    if (llam_public_active_op_count(&active_ops) != SIZE_MAX) {
+        (void)fprintf(stderr,
+                      "[test_runtime_api_edges] active op try_begin did not publish saturated sentinel from high-half count: %zu\n",
+                      llam_public_active_op_count(&active_ops));
+        return 1;
+    }
+
     atomic_init(&active_ops, SIZE_MAX);
     /*
      * active_ops gates public destroy paths. If begin wraps SIZE_MAX to zero,
@@ -4933,6 +5134,33 @@ static int test_public_active_op_overflow_fails_closed(void) {
     return 0;
 }
 
+static int test_align_up_overflow_fails_closed(void) {
+    size_t aligned = 0xA5A5U;
+
+    errno = 0;
+    if (llam_align_up_checked(17U, 8U, &aligned) != 0 || aligned != 24U || errno != 0) {
+        return fail_errno("checked align valid case failed");
+    }
+
+    aligned = 0xA5A5U;
+    errno = 0;
+    if (llam_align_up_checked(SIZE_MAX, 64U, &aligned) != -1 ||
+        errno != ENOMEM ||
+        aligned != 0xA5A5U) {
+        return fail_errno("checked align overflow did not fail closed");
+    }
+
+    errno = 0;
+    if (llam_align_up_checked(16U, 0U, &aligned) != -1 || errno != EINVAL) {
+        return fail_errno("checked align accepted zero alignment");
+    }
+    errno = 0;
+    if (llam_align_up_checked(16U, 24U, &aligned) != -1 || errno != EINVAL) {
+        return fail_errno("checked align accepted non-power-of-two alignment");
+    }
+    return 0;
+}
+
 #if !LLAM_PLATFORM_WINDOWS
 typedef struct public_op_sentinel_select_state {
     llam_channel_t *poisoned;
@@ -4940,8 +5168,25 @@ typedef struct public_op_sentinel_select_state {
     _Atomic int result;
 } public_op_sentinel_select_state_t;
 
+typedef struct public_op_sentinel_channel_send_state {
+    llam_channel_t *poisoned;
+    int value;
+    _Atomic int result;
+} public_op_sentinel_channel_send_state_t;
+
 static void public_op_sentinel_noop_task(void *arg) {
     (void)arg;
+}
+
+static void public_op_sentinel_channel_send_task(void *arg) {
+    public_op_sentinel_channel_send_state_t *state = arg;
+
+    errno = 0;
+    if (llam_channel_send(state->poisoned, &state->value) == -1 && errno == EBUSY) {
+        atomic_store_explicit(&state->result, 0, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->result, errno != 0 ? errno : -1, memory_order_release);
 }
 
 static void public_op_sentinel_select_task(void *arg) {
@@ -4985,12 +5230,16 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         llam_mutex_t *raw_mutex;
         llam_cond_t *cond;
         llam_cond_t *raw_cond;
+        llam_cancel_token_t *token;
+        llam_cancel_token_t *raw_token;
         llam_task_group_t *group;
         llam_task_group_t *raw_group;
         llam_task_t *task;
         llam_task_t *raw_task;
+        public_op_sentinel_channel_send_state_t send_state;
         public_op_sentinel_select_state_t select_state;
         int value = 7;
+        void *out = NULL;
 
         (void)alarm(2U);
         if (llam_runtime_init(NULL) != 0) {
@@ -5000,18 +5249,34 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         select_peer = llam_channel_create(1U);
         mutex = llam_mutex_create();
         cond = llam_cond_create();
+        token = llam_cancel_token_create();
         group = llam_task_group_create();
         task = llam_spawn(public_op_sentinel_noop_task, NULL, NULL);
-        if (channel == NULL || select_peer == NULL || mutex == NULL || cond == NULL || group == NULL || task == NULL) {
+        if (channel == NULL ||
+            select_peer == NULL ||
+            mutex == NULL ||
+            cond == NULL ||
+            token == NULL ||
+            group == NULL ||
+            task == NULL) {
             _exit(11);
         }
 
         raw_channel = llam_channel_resolve_public_handle(channel);
         raw_mutex = llam_mutex_resolve_public_handle(mutex);
         raw_cond = llam_cond_resolve_public_handle(cond);
+        raw_token = NULL;
+        if (llam_cancel_token_retain_task_ref(token, &raw_token) != 0) {
+            _exit(21);
+        }
         raw_group = llam_task_group_resolve_public_handle(group);
         raw_task = llam_task_resolve_public_handle(task);
-        if (raw_channel == NULL || raw_mutex == NULL || raw_cond == NULL || raw_group == NULL || raw_task == NULL) {
+        if (raw_channel == NULL ||
+            raw_mutex == NULL ||
+            raw_cond == NULL ||
+            raw_token == NULL ||
+            raw_group == NULL ||
+            raw_task == NULL) {
             _exit(12);
         }
 
@@ -5025,6 +5290,7 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         atomic_store_explicit(&raw_channel->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_mutex->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_cond->active_ops, SIZE_MAX, memory_order_release);
+        atomic_store_explicit(&raw_token->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_group->active_ops, SIZE_MAX, memory_order_release);
         atomic_store_explicit(&raw_task->active_ops, SIZE_MAX, memory_order_release);
         llam_channel_end_public_op(raw_channel);
@@ -5034,23 +5300,93 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         llam_task_end_public_op(raw_task);
 
         errno = 0;
+        if (llam_channel_send(channel, &value) != -1 || errno != EBUSY) {
+            _exit(37);
+        }
+        errno = 0;
         if (llam_channel_try_send(channel, &value) != -1 || errno != EBUSY) {
             _exit(13);
+        }
+        errno = 0;
+        if (llam_channel_try_recv_result(channel, &out) != -1 || errno != EBUSY || out != NULL) {
+            _exit(24);
+        }
+        errno = 0;
+        if (llam_channel_close(channel) != -1 || errno != EBUSY) {
+            _exit(25);
+        }
+        errno = 0;
+        if (llam_channel_destroy(channel) != -1 || errno != EBUSY) {
+            _exit(26);
         }
         errno = 0;
         if (llam_mutex_trylock(mutex) != -1 || errno != EBUSY) {
             _exit(14);
         }
         errno = 0;
+        if (llam_mutex_lock(mutex) != -1 || errno != EBUSY) {
+            _exit(27);
+        }
+        errno = 0;
+        if (llam_mutex_lock_until(mutex, 0U) != -1 || errno != EBUSY) {
+            _exit(28);
+        }
+        errno = 0;
+        if (llam_mutex_unlock(mutex) != -1 || errno != EBUSY) {
+            _exit(29);
+        }
+        errno = 0;
+        if (llam_mutex_destroy(mutex) != -1 || errno != EBUSY) {
+            _exit(30);
+        }
+        errno = 0;
         if (llam_cond_signal(cond) != -1 || errno != EBUSY) {
             _exit(15);
+        }
+        errno = 0;
+        if (llam_cond_broadcast(cond) != -1 || errno != EBUSY) {
+            _exit(31);
+        }
+        errno = 0;
+        if (llam_cond_destroy(cond) != -1 || errno != EBUSY) {
+            _exit(32);
+        }
+        errno = 0;
+        if (llam_cancel_token_cancel(token) != -1 || errno != EBUSY) {
+            _exit(22);
+        }
+        errno = 0;
+        if (llam_cancel_token_is_cancelled(token) != -1 || errno != EBUSY) {
+            _exit(23);
         }
         errno = 0;
         if (llam_task_group_cancel(group) != -1 || errno != EBUSY) {
             _exit(16);
         }
+        errno = 0;
+        if (llam_task_group_spawn(group, public_op_sentinel_noop_task, NULL, NULL) != NULL || errno != EBUSY) {
+            _exit(33);
+        }
+        errno = 0;
+        if (llam_task_group_join(group) != -1 || errno != EBUSY) {
+            _exit(34);
+        }
+        errno = 0;
+        if (llam_task_group_join_until(group, 0U) != -1 || errno != EBUSY) {
+            _exit(35);
+        }
+        errno = 0;
+        if (llam_task_group_destroy(group) != -1 || errno != EBUSY) {
+            _exit(36);
+        }
         if (llam_task_id(task) != 0U || strcmp(llam_task_state_name(task), "UNKNOWN") != 0) {
             _exit(17);
+        }
+        send_state.poisoned = channel;
+        send_state.value = 11;
+        atomic_init(&send_state.result, EINVAL);
+        if (llam_spawn(public_op_sentinel_channel_send_task, &send_state, NULL) == NULL) {
+            _exit(38);
         }
         select_state.poisoned = channel;
         select_state.peer = select_peer;
@@ -5063,6 +5399,9 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         }
         if (atomic_load_explicit(&select_state.result, memory_order_acquire) != 0) {
             _exit(20);
+        }
+        if (atomic_load_explicit(&send_state.result, memory_order_acquire) != 0) {
+            _exit(39);
         }
         _exit(0);
     }
@@ -5104,6 +5443,44 @@ static int test_public_op_sentinel_rejects_new_public_ops(void) {
         return fail_msg("public-op sentinel select runtime run failed");
     case 20:
         return fail_msg("channel select public op did not fail saturated active-op sentinel with EBUSY");
+    case 21:
+        return fail_msg("cancel-token public op sentinel fixture retain failed");
+    case 22:
+        return fail_msg("cancel-token cancel did not fail saturated active-op sentinel with EBUSY");
+    case 23:
+        return fail_msg("cancel-token query did not fail saturated active-op sentinel with EBUSY");
+    case 24:
+        return fail_msg("channel try-recv did not fail saturated active-op sentinel with EBUSY");
+    case 25:
+        return fail_msg("channel close did not fail saturated active-op sentinel with EBUSY");
+    case 26:
+        return fail_msg("channel destroy did not fail saturated active-op sentinel with EBUSY");
+    case 27:
+        return fail_msg("mutex lock did not fail saturated active-op sentinel with EBUSY");
+    case 28:
+        return fail_msg("mutex timed lock did not fail saturated active-op sentinel with EBUSY");
+    case 29:
+        return fail_msg("mutex unlock did not fail saturated active-op sentinel with EBUSY");
+    case 30:
+        return fail_msg("mutex destroy did not fail saturated active-op sentinel with EBUSY");
+    case 31:
+        return fail_msg("cond broadcast did not fail saturated active-op sentinel with EBUSY");
+    case 32:
+        return fail_msg("cond destroy did not fail saturated active-op sentinel with EBUSY");
+    case 33:
+        return fail_msg("task group spawn did not fail saturated active-op sentinel with EBUSY");
+    case 34:
+        return fail_msg("task group join did not fail saturated active-op sentinel with EBUSY");
+    case 35:
+        return fail_msg("task group timed join did not fail saturated active-op sentinel with EBUSY");
+    case 36:
+        return fail_msg("task group destroy did not fail saturated active-op sentinel with EBUSY");
+    case 37:
+        return fail_msg("channel send did not fail saturated active-op sentinel with EBUSY");
+    case 38:
+        return fail_msg("public-op sentinel managed channel-send task spawn failed");
+    case 39:
+        return fail_msg("managed channel send did not fail saturated active-op sentinel with EBUSY");
     default:
         return fail_msg("public-op sentinel reject child returned unexpected status");
     }
@@ -5556,6 +5933,10 @@ int main(void) {
                       test_public_slot_family_generation_window_is_injective) != 0) {
         return 1;
     }
+    if (run_edge_case("public_slot_corrupt_affine_seal_fails_fast",
+                      test_public_slot_corrupt_affine_seal_fails_fast) != 0) {
+        return 1;
+    }
     if (run_edge_case("public_slot_mersenne_reducer_matches_modulus",
                       test_public_slot_mersenne_reducer_matches_modulus) != 0) {
         return 1;
@@ -5566,6 +5947,10 @@ int main(void) {
     }
     if (run_edge_case("public_active_op_overflow_fails_closed",
                       test_public_active_op_overflow_fails_closed) != 0) {
+        return 1;
+    }
+    if (run_edge_case("align_up_overflow_fails_closed",
+                      test_align_up_overflow_fails_closed) != 0) {
         return 1;
     }
 #if !LLAM_PLATFORM_WINDOWS
@@ -5675,6 +6060,10 @@ int main(void) {
         return 1;
     }
     if (run_edge_case("blocking_callback_edges", test_blocking_callback_edges) != 0) {
+        return 1;
+    }
+    if (run_edge_case("blocking_submission_after_stop_is_cancelled",
+                      test_blocking_submission_after_stop_is_cancelled) != 0) {
         return 1;
     }
     if (run_edge_case("blocking_cancel_waits_for_running_callback",

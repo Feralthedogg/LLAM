@@ -4,6 +4,7 @@
 
 import argparse
 import csv
+import math
 import os
 import pathlib
 import re
@@ -11,6 +12,12 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+from cli_numbers import (
+    env_default,
+    finite_nonnegative_float_at_most,
+    nonnegative_int_at_most,
+    positive_int_at_most,
+)
 from process_utils import ProcessTimeoutError, print_captured_output, run_capture
 from safe_output import open_binary_for_write, open_text_for_write
 
@@ -32,6 +39,11 @@ DEFAULT_CASES = [
     "sleep_fanout",
     "opaque_block",
 ]
+MAX_BENCH_COMPARE_ROUNDS = 10_000
+MAX_BENCH_COMPARE_WARMUP = 1_000
+MAX_BENCH_COMPARE_TIMEOUT_SEC = 3600
+MAX_BENCH_COMPARE_SAMPLES = 100
+MAX_BENCH_COMPARE_SPREAD_RATIO = 1000.0
 NAME_ALIASES = {
     "poll_wake_approx": "poll_wake",
     "opaque_syscall_sleep_approx": "opaque_block",
@@ -48,8 +60,24 @@ class BenchRow:
     p99_us: float
 
 
+@dataclass
+class BenchSampleRow:
+    runtime: str
+    case: str
+    sample: int
+    ops_per_sec: float
+    p50_us: float
+    p99_us: float
+
+
 def parse_fields(line: str) -> dict[str, str]:
-    return dict(FIELD_RE.findall(line))
+    fields: dict[str, str] = {}
+
+    for key, value in FIELD_RE.findall(line):
+        if key in fields:
+            raise ValueError(f"benchmark row has duplicate field {key}: {line!r}")
+        fields[key] = value
+    return fields
 
 
 def normalize_case(name: str) -> str:
@@ -59,14 +87,46 @@ def normalize_case(name: str) -> str:
 def parse_cases(value: str) -> list[str]:
     cases = [item.strip() for item in re.split(r"[,\s]+", value) if item.strip()]
     unknown = [case for case in cases if case not in DEFAULT_CASES]
+    seen: set[str] = set()
+    duplicates: list[str] = []
+
+    for case in cases:
+        if case in seen and case not in duplicates:
+            duplicates.append(case)
+        seen.add(case)
 
     if unknown:
         raise argparse.ArgumentTypeError(f"unknown benchmark case(s): {', '.join(unknown)}")
+    if duplicates:
+        raise argparse.ArgumentTypeError(f"duplicate benchmark case(s): {', '.join(duplicates)}")
     return cases
+
+
+def parse_sample_policy(value: str) -> str:
+    if value not in {"median", "best"}:
+        raise argparse.ArgumentTypeError("must be one of: median, best")
+    return value
+
+
+def parse_metric(fields: dict[str, str], line: str, name: str, *, positive: bool) -> float:
+    if name not in fields:
+        raise ValueError(f"benchmark row missing {name}: {line!r}")
+    try:
+        value = float(fields[name])
+    except ValueError as exc:
+        raise ValueError(f"benchmark row has invalid {name}: {line!r}") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"benchmark row has non-finite {name}: {line!r}")
+    if positive and value <= 0.0:
+        raise ValueError(f"benchmark row has non-positive {name}: {line!r}")
+    if not positive and value < 0.0:
+        raise ValueError(f"benchmark row has negative {name}: {line!r}")
+    return value
 
 
 def parse_output(runtime: str, output: str) -> list[BenchRow]:
     rows: list[BenchRow] = []
+    seen_cases: set[str] = set()
     prefixes = {
         "LLAM": "[bench] ",
         "Goroutine": "[go-bench] ",
@@ -78,15 +138,19 @@ def parse_output(runtime: str, output: str) -> list[BenchRow]:
         if not line.startswith(prefix):
             continue
         fields = parse_fields(line)
-        if "name" not in fields or "ops_per_sec" not in fields:
+        if "name" not in fields:
             continue
+        case = normalize_case(fields["name"])
+        if case in seen_cases:
+            raise ValueError(f"duplicate benchmark row for {case}: {line!r}")
+        seen_cases.add(case)
         rows.append(
             BenchRow(
                 runtime=runtime,
-                case=normalize_case(fields["name"]),
-                ops_per_sec=float(fields["ops_per_sec"]),
-                p50_us=float(fields["p50_us"]),
-                p99_us=float(fields["p99_us"]),
+                case=case,
+                ops_per_sec=parse_metric(fields, line, "ops_per_sec", positive=True),
+                p50_us=parse_metric(fields, line, "p50_us", positive=False),
+                p99_us=parse_metric(fields, line, "p99_us", positive=False),
             )
         )
     return rows
@@ -121,7 +185,11 @@ def run_command(
         sys.stderr.write(proc.stdout)
         sys.stderr.write(proc.stderr)
         raise SystemExit(proc.returncode)
-    return parse_output(runtime, proc.stdout)
+    try:
+        return parse_output(runtime, proc.stdout)
+    except ValueError as exc:
+        print(f"[bench-runtime-compare] failed to parse {label} output: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 def select_sample_rows(samples: list[list[BenchRow]], policy: str) -> list[BenchRow]:
@@ -141,6 +209,21 @@ def select_sample_rows(samples: list[list[BenchRow]], policy: str) -> list[Bench
     return selected
 
 
+def record_sample_rows(sample_rows: list[BenchSampleRow], samples: list[list[BenchRow]]) -> None:
+    for sample_index, rows in enumerate(samples, start=1):
+        for row in rows:
+            sample_rows.append(
+                BenchSampleRow(
+                    runtime=row.runtime,
+                    case=row.case,
+                    sample=sample_index,
+                    ops_per_sec=row.ops_per_sec,
+                    p50_us=row.p50_us,
+                    p99_us=row.p99_us,
+                )
+            )
+
+
 def run_command_samples(
     root: pathlib.Path,
     runtime: str,
@@ -149,13 +232,15 @@ def run_command_samples(
     timeout: int,
     samples: int,
     policy: str,
+    sample_records: list[BenchSampleRow],
     case: str | None = None,
 ) -> list[BenchRow]:
-    sample_rows = [
+    raw_samples = [
         run_command(root, runtime, command, env, timeout, sample + 1, samples, case)
         for sample in range(samples)
     ]
-    return select_sample_rows(sample_rows, policy)
+    record_sample_rows(sample_records, raw_samples)
+    return select_sample_rows(raw_samples, policy)
 
 
 def run_isolated_cases(
@@ -167,13 +252,14 @@ def run_isolated_cases(
     samples: int,
     policy: str,
     cases: list[str],
+    sample_records: list[BenchSampleRow],
 ) -> list[BenchRow]:
     rows: list[BenchRow] = []
 
     for case in cases:
         env = base_env.copy()
         env["LLAM_BENCH_ONLY"] = case
-        rows.extend(run_command_samples(root, runtime, command, env, timeout, samples, policy, case))
+        rows.extend(run_command_samples(root, runtime, command, env, timeout, samples, policy, sample_records, case))
     return rows
 
 
@@ -215,6 +301,56 @@ def write_csv(path: pathlib.Path, rows: list[BenchRow]) -> None:
         writer.writerow(["runtime", "case", "ops_per_sec", "p50_us", "p99_us"])
         for row in rows:
             writer.writerow([row.runtime, row.case, f"{row.ops_per_sec:.2f}", f"{row.p50_us:.2f}", f"{row.p99_us:.2f}"])
+
+
+def write_samples_csv(path: pathlib.Path, rows: list[BenchSampleRow]) -> None:
+    with open_text_for_write(path, newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["runtime", "case", "sample", "ops_per_sec", "p50_us", "p99_us"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row.runtime,
+                    row.case,
+                    row.sample,
+                    f"{row.ops_per_sec:.2f}",
+                    f"{row.p50_us:.2f}",
+                    f"{row.p99_us:.2f}",
+                ]
+            )
+
+
+def warn_sample_spread(rows: list[BenchSampleRow], ratio_threshold: float, isolate_cases: bool) -> None:
+    if ratio_threshold <= 0.0:
+        return
+
+    grouped: dict[tuple[str, str], list[BenchSampleRow]] = {}
+    for row in rows:
+        grouped.setdefault((row.runtime, row.case), []).append(row)
+
+    for key in sorted(grouped):
+        case_rows = grouped[key]
+        if len(case_rows) < 2:
+            continue
+        min_row = min(case_rows, key=lambda row: row.ops_per_sec)
+        max_row = max(case_rows, key=lambda row: row.ops_per_sec)
+        if min_row.ops_per_sec <= 0.0:
+            continue
+        spread = max_row.ops_per_sec / min_row.ops_per_sec
+        if spread < ratio_threshold:
+            continue
+
+        runtime, case = key
+        suggestion = ""
+        if not isolate_cases:
+            suggestion = "; use --isolate-cases for release-quality numbers"
+        print(
+            "[bench-runtime-compare] warning: "
+            f"{runtime} {case} sample spread {spread:.2f}x "
+            f"(min={min_row.ops_per_sec:.2f}, max={max_row.ops_per_sec:.2f})"
+            f"{suggestion}",
+            file=sys.stderr,
+        )
 
 
 def print_summary(rows: list[BenchRow], cases: list[str]) -> None:
@@ -321,9 +457,9 @@ def plot_graph(path: pathlib.Path, rows: list[BenchRow], cases: list[str]) -> No
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare LLAM, Goroutine, and Tokio benchmarks and render graphs.")
-    parser.add_argument("--rounds", type=int, default=31)
-    parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--rounds", type=positive_int_at_most(MAX_BENCH_COMPARE_ROUNDS), default=31)
+    parser.add_argument("--warmup", type=nonnegative_int_at_most(MAX_BENCH_COMPARE_WARMUP), default=5)
+    parser.add_argument("--timeout", type=positive_int_at_most(MAX_BENCH_COMPARE_TIMEOUT_SEC), default=180)
     parser.add_argument("--out-dir", default="object/bench_compare")
     parser.add_argument("--runtime", choices=["all", "llam", "go", "tokio"], default="all")
     parser.add_argument("--no-build", action="store_true")
@@ -340,20 +476,33 @@ def main() -> int:
     )
     parser.add_argument(
         "--samples",
-        type=int,
-        default=int(os.environ.get("LLAM_BENCH_COMPARE_SAMPLES", "3")),
+        type=positive_int_at_most(MAX_BENCH_COMPARE_SAMPLES),
+        default=env_default(parser,
+                            "LLAM_BENCH_COMPARE_SAMPLES",
+                            "3",
+                            positive_int_at_most(MAX_BENCH_COMPARE_SAMPLES)),
         help="number of process-level samples per runtime; median is reported by default",
     )
     parser.add_argument(
         "--sample-policy",
-        choices=["median", "best"],
-        default=os.environ.get("LLAM_BENCH_COMPARE_SAMPLE_POLICY", "median"),
+        type=parse_sample_policy,
+        default=env_default(parser, "LLAM_BENCH_COMPARE_SAMPLE_POLICY", "median", parse_sample_policy),
         help="how to select one row per runtime/case when --samples is greater than 1",
     )
+    parser.add_argument(
+        "--spread-warning-ratio",
+        type=finite_nonnegative_float_at_most(MAX_BENCH_COMPARE_SPREAD_RATIO),
+        default=env_default(parser,
+                            "LLAM_BENCH_COMPARE_SPREAD_WARNING_RATIO",
+                            "1.50",
+                            finite_nonnegative_float_at_most(MAX_BENCH_COMPARE_SPREAD_RATIO)),
+        help="warn when max/min ops/s across samples for one runtime/case exceeds this ratio; use 0 to disable",
+    )
     args = parser.parse_args()
-    if args.samples < 1:
-        parser.error("--samples must be at least 1")
-    cases = DEFAULT_CASES if args.cases is None else parse_cases(" ".join(args.cases))
+    try:
+        cases = DEFAULT_CASES if args.cases is None else parse_cases(" ".join(args.cases))
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
     if not cases:
         parser.error("--cases must contain at least one case")
 
@@ -391,6 +540,7 @@ def main() -> int:
         )
 
     rows: list[BenchRow] = []
+    sample_records: list[BenchSampleRow] = []
     if "LLAM" in selected_runtimes:
         assert llam_command is not None
         if args.isolate_cases:
@@ -404,6 +554,7 @@ def main() -> int:
                     args.samples,
                     args.sample_policy,
                     cases,
+                    sample_records,
                 )
             )
         else:
@@ -416,6 +567,7 @@ def main() -> int:
                     args.timeout,
                     args.samples,
                     args.sample_policy,
+                    sample_records,
                 )
             )
     if "Goroutine" in selected_runtimes:
@@ -431,6 +583,7 @@ def main() -> int:
                     args.samples,
                     args.sample_policy,
                     cases,
+                    sample_records,
                 )
             )
         else:
@@ -443,6 +596,7 @@ def main() -> int:
                     args.timeout,
                     args.samples,
                     args.sample_policy,
+                    sample_records,
                 )
             )
     if "Tokio" in selected_runtimes:
@@ -467,6 +621,7 @@ def main() -> int:
                     args.samples,
                     args.sample_policy,
                     cases,
+                    sample_records,
                 )
             )
         else:
@@ -479,13 +634,21 @@ def main() -> int:
                     args.timeout,
                     args.samples,
                     args.sample_policy,
+                    sample_records,
                 )
             )
 
+    rows = [row for row in rows if row.case in cases]
+    sample_records = [row for row in sample_records if row.case in cases]
+
     csv_path = out_dir / "runtime_compare.csv"
+    samples_csv_path = out_dir / "runtime_compare_samples.csv"
     graph_path = out_dir / "runtime_compare.png"
     graph_written = False
     write_csv(csv_path, rows)
+    if args.samples > 1:
+        write_samples_csv(samples_csv_path, sample_records)
+        warn_sample_spread(sample_records, args.spread_warning_ratio, args.isolate_cases)
     if selected_runtimes == ["LLAM", "Goroutine", "Tokio"]:
         plot_graph(graph_path, rows, cases)
         graph_written = plt is not None
@@ -493,6 +656,8 @@ def main() -> int:
         print("[bench-runtime-compare] graph requires --runtime all; skipping graph", file=sys.stderr)
     print_summary(rows, cases)
     print(f"\nCSV: {csv_path}")
+    if args.samples > 1:
+        print(f"Samples CSV: {samples_csv_path}")
     if graph_written:
         print(f"Graph: {graph_path}")
     return 0

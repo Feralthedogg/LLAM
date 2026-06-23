@@ -225,7 +225,7 @@ static int test_llam_option_initializers(void) {
     if (llam_runtime_opts_init(&runtime_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return test_fail_errno("llam_runtime_opts_init full-size call failed");
     }
-    if (runtime_opts.deterministic != 1U ||
+    if (runtime_opts.deterministic != 0U ||
         runtime_opts.sqpoll_cpu != -1 ||
         runtime_opts.profile != LLAM_RUNTIME_PROFILE_BALANCED ||
         runtime_opts.experimental_flags != 0U) {
@@ -260,8 +260,8 @@ static int test_llam_option_initializers(void) {
         return test_fail_errno("llam_runtime_opts_init prefix call failed");
     }
     memcpy(&prefix_value, &runtime_opts, sizeof(prefix_value));
-    if (prefix_value != 1U) {
-        return test_fail("llam runtime option prefix init returned wrong deterministic default");
+    if (prefix_value != 0U) {
+        return test_fail("llam runtime option prefix init returned wrong non-deterministic default");
     }
     return 0;
 }

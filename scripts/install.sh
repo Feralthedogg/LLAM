@@ -5,7 +5,7 @@
 set -eu
 
 prefix="/usr/local"
-version="${LLAM_INSTALL_VERSION:-2.0.0}"
+version="${LLAM_INSTALL_VERSION:-2.1.0}"
 target=""
 base_url=""
 dry_run=0
@@ -88,9 +88,9 @@ while [ "$prefix" != "/" ] && [ "${prefix%/}" != "$prefix" ]; do
     prefix="${prefix%/}"
 done
 
-script_dir="$(dirname -- "$0")"
-script_name="$(basename -- "$0")"
-src_dir="$(CDPATH='' cd -- "$script_dir" 2>/dev/null && pwd)"
+script_dir="$(dirname "$0")"
+script_name="$(basename "$0")"
+src_dir="$(CDPATH='' cd "$script_dir" 2>/dev/null && pwd)"
 archive_mode=0
 if [ "$script_name" = "install.sh" ] &&
     [ -f "$src_dir/install.sh" ] &&
@@ -148,7 +148,7 @@ copy_file() {
         echo "copy $src -> $dst"
         return 0
     fi
-    dst_parent="$(dirname -- "$dst")"
+    dst_parent="$(dirname "$dst")"
     mkdir -p "$dst_parent"
     validate_destination_path "$dst_parent"
     validate_destination_path "$dst"
@@ -174,16 +174,16 @@ sha256_file() {
 
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$path" | awk '{ print $1 }'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$path" | awk '{ print $1 }'
     elif command -v sha256 >/dev/null 2>&1; then
         sha256 -q "$path"
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{ print $1 }'
     elif command -v openssl >/dev/null 2>&1; then
         openssl dgst -sha256 -r "$path" | awk '{ print $1 }'
     elif command -v cksum >/dev/null 2>&1; then
         cksum -a sha256 "$path" | awk '{ print $1 }'
     else
-        echo "sha256sum, shasum, sha256, openssl, or cksum is required for checksum verification" >&2
+        echo "sha256sum, sha256, shasum, openssl, or cksum is required for checksum verification" >&2
         exit 1
     fi
 }
@@ -374,7 +374,7 @@ is_allowed_system_symlink_path() {
 
     case "$(uname -s):$path" in
         Darwin:/tmp|Darwin:/var|Darwin:/etc)
-            resolved="$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P)" || return 1
+            resolved="$(CDPATH='' cd "$path" 2>/dev/null && pwd -P)" || return 1
             [ "$resolved" = "/private${path}" ]
             ;;
         *)

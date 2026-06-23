@@ -27,7 +27,7 @@
 #include "runtime_internal.h"
 #include "engine/runtime_watchdog_internal.h"
 
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
 #elif LLAM_RUNTIME_BACKEND_LINUX
 #include "io/linux/runtime_io_watch_linux_internal.h"
@@ -76,7 +76,7 @@ static int init_runtime(void) {
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
 
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
 static void close_if_valid(int *fd) {
     if (fd != NULL && *fd >= 0) {
         (void)close(*fd);
@@ -179,14 +179,14 @@ static int exercise_recv_ready_copy_payload_shutdown(void) {
 }
 
 static int exercise_recv_ready_pop_without_transfer(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_recv_watch_t watch;
     unsigned char data[64];
     size_t size = 0U;
 
     memset(&watch, 0, sizeof(watch));
     memset(data, 0x33, sizeof(data));
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     if (!llam_recv_watch_push_ready_copy(&watch, data, sizeof(data))) {
         return fail_errno("recv ready copy push failed");
     }
@@ -219,7 +219,7 @@ static int exercise_recv_ready_pop_without_transfer(void) {
 }
 
 static int exercise_close_purges_accept_watch_ready_fds(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_node_t *node;
     llam_accept_watch_t *watch;
     int listener = -1;
@@ -300,7 +300,7 @@ static int exercise_close_purges_accept_watch_ready_fds(void) {
 }
 
 static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *runtime = NULL;
     llam_node_t *node;
     llam_accept_watch_t *watch;
@@ -382,6 +382,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     return 0;
 }
 
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
 typedef struct managed_close_state {
     int fd;
     int rc;
@@ -397,9 +398,10 @@ static void managed_close_task(void *arg) {
     state->rc = llam_close(state->fd);
     state->error = errno;
 }
+#endif
 
 static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *closer_runtime = NULL;
     llam_runtime_t *watch_runtime = NULL;
     llam_node_t *node;
@@ -692,8 +694,113 @@ static int exercise_linux_wait_cqe_interrupt_policy(void) {
     return 0;
 }
 
+static void free_control_ops(llam_node_t *node) {
+    while (node != NULL && node->control_head != NULL) {
+        llam_io_control_op_t *next = node->control_head->next;
+
+        free(node->control_head);
+        node->control_head = next;
+    }
+    if (node != NULL) {
+        node->control_tail = NULL;
+    }
+}
+
+static int exercise_empty_poll_watch_cancel_disarms_backend_work(void) {
+    llam_node_t node;
+    llam_poll_watch_t watch;
+    llam_io_req_t req;
+    bool kick_node = true;
+    int rc;
+
+    memset(&node, 0, sizeof(node));
+    memset(&watch, 0, sizeof(watch));
+    memset(&req, 0, sizeof(req));
+
+    rc = pthread_mutex_init(&node.watch_lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        return fail_errno("watch lock init for empty poll watch cancel test failed");
+    }
+
+    rc = pthread_mutex_lock(&node.watch_lock);
+    if (rc != 0) {
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch lock for empty poll watch cancel test failed");
+    }
+    watch.wait_head = &req;
+    watch.wait_tail = &req;
+    watch.activating = true;
+    if (llam_node_queue_control_locked(&node, LLAM_IO_CONTROL_POLL_ACTIVATE, &watch) != 0) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_errno("queue poll activate for empty watch cancel test failed");
+    }
+    if (!llam_poll_watch_remove_waiter(&watch, &req) ||
+        !llam_poll_watch_disarm_if_empty_locked(&node, &watch, &kick_node)) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("empty activating poll watch was not disarmed after final waiter cancel");
+    }
+    if (watch.activating || watch.active || watch.deactivate_queued ||
+        node.control_head != NULL || kick_node) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("empty activating poll watch left backend work after final waiter cancel");
+    }
+    rc = pthread_mutex_unlock(&node.watch_lock);
+    if (rc != 0) {
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch unlock after activating poll watch cancel test failed");
+    }
+
+    memset(&watch, 0, sizeof(watch));
+    kick_node = false;
+    rc = pthread_mutex_lock(&node.watch_lock);
+    if (rc != 0) {
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch relock for active poll watch cancel test failed");
+    }
+    watch.active = true;
+    /*
+     * If the worker already consumed activation, cancel cannot drop it from the
+     * control queue.  The empty watch must instead enqueue deactivate so the
+     * active backend registration is drained before runtime shutdown.
+     */
+    if (!llam_poll_watch_disarm_if_empty_locked(&node, &watch, &kick_node)) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("active empty poll watch was not queued for deactivate");
+    }
+    if (!watch.deactivate_queued || node.control_head == NULL ||
+        node.control_head->kind != LLAM_IO_CONTROL_POLL_DEACTIVATE ||
+        node.control_head->target != &watch || !kick_node) {
+        (void)pthread_mutex_unlock(&node.watch_lock);
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("active empty poll watch did not queue deactivate after final waiter cancel");
+    }
+    rc = pthread_mutex_unlock(&node.watch_lock);
+    if (rc != 0) {
+        free_control_ops(&node);
+        pthread_mutex_destroy(&node.watch_lock);
+        errno = rc;
+        return fail_errno("watch unlock after active poll watch cancel test failed");
+    }
+
+    free_control_ops(&node);
+    pthread_mutex_destroy(&node.watch_lock);
+    return 0;
+}
+
 static int exercise_completion_drops_stale_cancel_control(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_node_t *node;
     llam_io_req_t req;
     int lock_rc;
@@ -741,7 +848,7 @@ static int exercise_completion_drops_stale_cancel_control(void) {
      * also prevents a stale io_uring cancel SQE from targeting a later request
      * that reuses the same embedded request address.
      */
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     llam_io_complete_req(node, &req, 0, false);
 #elif LLAM_RUNTIME_BACKEND_LINUX
     llam_io_complete_req(node, &req, 0, 0U, false);
@@ -778,7 +885,7 @@ static int exercise_completion_drops_stale_cancel_control(void) {
 }
 
 static int exercise_completion_rejects_foreign_runtime_request(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t foreign_runtime;
     llam_node_t *node;
     llam_io_req_t req;
@@ -807,7 +914,7 @@ static int exercise_completion_rejects_foreign_runtime_request(void) {
      * another runtime.  This models stale completion/user-data corruption and
      * must fail closed before any wakeup is attempted on the wrong scheduler.
      */
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     llam_io_complete_req(node, &req, 0, false);
 #elif LLAM_RUNTIME_BACKEND_LINUX
     llam_io_complete_req(node, &req, 0, 0U, false);
@@ -826,7 +933,7 @@ static int exercise_completion_rejects_foreign_runtime_request(void) {
 }
 
 static int exercise_completion_rejects_unmatched_pending_decrement(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_node_t *node;
     llam_io_req_t req;
 
@@ -853,7 +960,7 @@ static int exercise_completion_rejects_unmatched_pending_decrement(void) {
      * or forged packet with decrement_pending=true used to underflow the node
      * counter before validation; it must now fail closed without mutating it.
      */
-#if LLAM_RUNTIME_BACKEND_DARWIN
+#if LLAM_RUNTIME_BACKEND_KQUEUE
     llam_io_complete_req(node, &req, 0, true);
 #elif LLAM_RUNTIME_BACKEND_LINUX
     llam_io_complete_req(node, &req, 0, 0U, true);
@@ -873,7 +980,7 @@ static int exercise_completion_rejects_unmatched_pending_decrement(void) {
 }
 
 static int exercise_submit_queue_rejects_foreign_runtime_request(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t foreign_runtime;
     llam_node_t *node;
     llam_io_req_t req;
@@ -927,7 +1034,7 @@ static int exercise_submit_queue_rejects_foreign_runtime_request(void) {
 }
 
 static int exercise_submit_queue_rejects_pending_counter_overflow(void) {
-#if LLAM_RUNTIME_BACKEND_DARWIN || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
     llam_runtime_t runtime;
     llam_node_t node;
     llam_io_req_t req;
@@ -1642,6 +1749,9 @@ int main(void) {
         return 1;
     }
     if (exercise_linux_wait_cqe_interrupt_policy() != 0) {
+        return 1;
+    }
+    if (exercise_empty_poll_watch_cancel_disarms_backend_work() != 0) {
         return 1;
     }
     if (exercise_completion_drops_stale_cancel_control() != 0) {

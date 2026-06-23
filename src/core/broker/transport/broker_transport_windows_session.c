@@ -1,0 +1,208 @@
+/**
+ * @file src/core/broker/transport/broker_transport_windows_session.c
+ * @brief Windows named-pipe broker local session helpers.
+ *
+ * @details
+ * This layer owns named-pipe accept/session orchestration. Keeping it separate
+ * from HANDLE duplication and exact pipe I/O keeps the Windows transport split
+ * aligned with the POSIX Unix-domain transport layout.
+ *
+ * @copyright Copyright 2026 Feralthedogg
+ *
+ * @par License
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "runtime_internal.h"
+#include "runtime_broker.h"
+
+#if LLAM_PLATFORM_WINDOWS
+
+#include <windows.h>
+
+#include <string.h>
+
+static bool llam_broker_pipe_listen_retryable_errno(int error_code) {
+    return error_code == EACCES || error_code == EAGAIN || error_code == EIO;
+}
+
+static int llam_broker_listen_pipe_session(const char *path,
+                                           llam_handle_t *out_pipe,
+                                           size_t served_sessions) {
+    ULONGLONG deadline;
+
+    /*
+     * CreateNamedPipeA(FILE_FLAG_FIRST_PIPE_INSTANCE) can briefly fail after a
+     * just-closed instance while the pipe namespace retires the previous kernel
+     * object. Only retry after this broker has already accepted at least one
+     * session; an initial collision still means the requested endpoint is not
+     * exclusively ours and must fail closed.
+     */
+    if (served_sessions == 0U) {
+        return llam_broker_listen_pipe_instance(path, true, out_pipe);
+    }
+    deadline = GetTickCount64() + 500U;
+    for (;;) {
+        if (llam_broker_listen_pipe_instance(path, false, out_pipe) == 0) {
+            return 0;
+        }
+        if (!llam_broker_pipe_listen_retryable_errno(errno) || GetTickCount64() >= deadline) {
+            return -1;
+        }
+        Sleep(5U);
+    }
+}
+
+static int llam_broker_connect_pipe_server(llam_handle_t pipe) {
+    OVERLAPPED overlapped;
+    HANDLE event;
+
+    if (LLAM_UNLIKELY(llam_handle_is_invalid(pipe))) {
+        errno = EINVAL;
+        return -1;
+    }
+    event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (event == NULL) {
+        errno = llam_broker_windows_pipe_errno(GetLastError());
+        return -1;
+    }
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.hEvent = event;
+    if (!ConnectNamedPipe((HANDLE)pipe, &overlapped)) {
+        DWORD error_code = GetLastError();
+
+        if (error_code == ERROR_PIPE_CONNECTED) {
+            SetEvent(event);
+        } else if (error_code == ERROR_IO_PENDING) {
+            (void)WaitForSingleObject(event, INFINITE);
+        } else {
+            CloseHandle(event);
+            errno = llam_broker_windows_pipe_errno(error_code);
+            return -1;
+        }
+    }
+    CloseHandle(event);
+    return 0;
+}
+
+int llam_broker_serve_unix_once(llam_broker_t *broker, const char *path) {
+    return llam_broker_serve_local_once(broker, path);
+}
+
+int llam_broker_client_self_test_unix(const char *path) {
+    return llam_broker_client_self_test_local(path);
+}
+
+int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t max_connections) {
+    llam_handle_t pipe = LLAM_INVALID_HANDLE;
+    llam_handle_t next_pipe = LLAM_INVALID_HANDLE;
+    int rc = -1;
+    int last_session_errno = 0;
+    size_t served = 0U;
+    size_t successful = 0U;
+
+    if (LLAM_UNLIKELY(broker == NULL || max_connections == 0U)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_broker_listen_pipe_session(path, &pipe, 0U) != 0) {
+        return -1;
+    }
+    while (served < max_connections) {
+        if (llam_broker_connect_pipe_server(pipe) != 0) {
+            if (errno == EPIPE) {
+                last_session_errno = EPIPE;
+                (void)DisconnectNamedPipe((HANDLE)pipe);
+                llam_broker_close_handle(pipe);
+                pipe = next_pipe;
+                next_pipe = LLAM_INVALID_HANDLE;
+                served++;
+                continue;
+            }
+            llam_broker_close_handle(pipe);
+            return -1;
+        }
+        if (served + 1U < max_connections &&
+            llam_broker_listen_pipe_session(path, &next_pipe, served + 1U) != 0) {
+            last_session_errno = errno;
+        }
+        /*
+         * Named pipes create one kernel pipe instance per accepted session.
+         * STOP closes only that session; the broker can create a fresh instance
+         * for the next client without sharing subject ids or HANDLE authority.
+         * Malformed clients therefore fail their own session without terminating
+         * the long-running broker process.
+         */
+        rc = llam_broker_serve_handle(broker, pipe);
+        if (rc == 0) {
+            successful++;
+        } else {
+            last_session_errno = errno != 0 ? errno : EIO;
+        }
+        (void)DisconnectNamedPipe((HANDLE)pipe);
+        llam_broker_close_handle(pipe);
+        pipe = next_pipe;
+        next_pipe = LLAM_INVALID_HANDLE;
+        served++;
+        if (served < max_connections && llam_handle_is_invalid(pipe)) {
+            errno = last_session_errno != 0 ? last_session_errno : EIO;
+            return successful > 0U ? 0 : -1;
+        }
+    }
+    if (!llam_handle_is_invalid(pipe)) {
+        llam_broker_close_handle(pipe);
+    }
+    if (!llam_handle_is_invalid(next_pipe)) {
+        llam_broker_close_handle(next_pipe);
+    }
+    if (successful == 0U) {
+        errno = last_session_errno != 0 ? last_session_errno : EPIPE;
+        return -1;
+    }
+    return 0;
+}
+
+int llam_broker_serve_local_once(llam_broker_t *broker, const char *path) {
+    return llam_broker_serve_local_n(broker, path, 1U);
+}
+
+int llam_broker_serve_local(llam_broker_t *broker, const char *path) {
+    return llam_broker_serve_local_n(broker, path, (size_t)-1);
+}
+
+typedef struct llam_broker_handle_transport {
+    llam_handle_t handle;
+} llam_broker_handle_transport_t;
+
+static int llam_broker_request_handle_adapter(void *transport,
+                                              const llam_broker_wire_request_t *request,
+                                              llam_broker_wire_response_t *response) {
+    llam_broker_handle_transport_t *state = (llam_broker_handle_transport_t *)transport;
+
+    return llam_broker_request_handle(state->handle, request, response);
+}
+
+int llam_broker_client_self_test_local(const char *path) {
+    llam_broker_handle_transport_t transport;
+    int rc;
+
+    transport.handle = LLAM_INVALID_HANDLE;
+    if (llam_broker_connect_pipe(path, &transport.handle) != 0) {
+        return -1;
+    }
+    rc = llam_broker_client_self_test_exchange(llam_broker_request_handle_adapter, &transport);
+    llam_broker_close_handle(transport.handle);
+    return rc;
+}
+
+#endif

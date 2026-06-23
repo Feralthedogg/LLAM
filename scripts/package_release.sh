@@ -5,12 +5,12 @@
 set -eu
 
 target="${1:-}"
-version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.0.0}}"
+version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.1.0}}"
 version="${version#v}"
 abi_major="${LLAM_ABI_MAJOR:-2}"
-library_version="${LLAM_VERSION:-2.0.0}"
-script_dir="$(dirname -- "$0")"
-root_dir="$(CDPATH='' cd -- "$script_dir/.." && pwd)"
+library_version="${LLAM_VERSION:-2.1.0}"
+script_dir="$(dirname "$0")"
+root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
 out_dir="$root_dir/target/dist"
 host_os="$(uname -s)"
 
@@ -166,6 +166,48 @@ validate_expected_symlink_target() {
         exit 1
     fi
 }
+
+extract_release_archive() {
+    archive_path="$1"
+    destination="$2"
+
+    if ! tar -xf "$archive_path" -C "$destination" 2>/dev/null; then
+        if ! command -v xz >/dev/null 2>&1; then
+            echo "tar cannot extract $archive_path directly and xz is not available" >&2
+            exit 1
+        fi
+        xz -dc "$archive_path" | tar -xf - -C "$destination"
+    fi
+}
+
+validate_packaged_archive_links() (
+    archive_path="$1"
+    package_root="$2"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-archive.XXXXXX")"
+
+    trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+    extract_release_archive "$archive_path" "$tmp_dir"
+
+    case "$host_os" in
+        Darwin)
+            validate_expected_symlink_target \
+                "$tmp_dir/$package_root/lib/libllam_runtime.dylib" \
+                "libllam_runtime.$abi_major.dylib"
+            ;;
+        Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+            validate_expected_symlink_target \
+                "$tmp_dir/$package_root/lib/libllam_runtime.so.$abi_major" \
+                "libllam_runtime.so.$library_version"
+            validate_expected_symlink_target \
+                "$tmp_dir/$package_root/lib/libllam_runtime.so" \
+                "libllam_runtime.so.$abi_major"
+            ;;
+        *)
+            echo "unsupported release archive host: $host_os" >&2
+            exit 1
+            ;;
+    esac
+)
 
 validate_release_input_file() {
     path="$1"
@@ -356,12 +398,15 @@ cp "$root_dir/libllam_runtime.a" "$stage/lib/"
 case "$host_os" in
     Darwin)
         cp "$root_dir/libllam_runtime.$abi_major.dylib" "$stage/lib/"
-        cp -P "$root_dir/libllam_runtime.dylib" "$stage/lib/"
+        ln -s "libllam_runtime.$abi_major.dylib" "$stage/lib/libllam_runtime.dylib"
+        validate_expected_symlink_target "$stage/lib/libllam_runtime.dylib" "libllam_runtime.$abi_major.dylib"
         ;;
     Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
         cp "$root_dir/libllam_runtime.so.$library_version" "$stage/lib/"
-        cp -P "$root_dir/libllam_runtime.so.$abi_major" "$stage/lib/"
-        cp -P "$root_dir/libllam_runtime.so" "$stage/lib/"
+        ln -s "libllam_runtime.so.$library_version" "$stage/lib/libllam_runtime.so.$abi_major"
+        ln -s "libllam_runtime.so.$abi_major" "$stage/lib/libllam_runtime.so"
+        validate_expected_symlink_target "$stage/lib/libllam_runtime.so.$abi_major" "libllam_runtime.so.$library_version"
+        validate_expected_symlink_target "$stage/lib/libllam_runtime.so" "libllam_runtime.so.$abi_major"
         ;;
     *)
         echo "unsupported release packaging host: $host_os" >&2
@@ -382,14 +427,17 @@ if ! tar -C "$out_dir" -cJf "$archive" "$package_name" 2>/dev/null; then
     fi
     tar -C "$out_dir" -cf - "$package_name" | xz -z -c > "$archive"
 fi
+
+validate_packaged_archive_links "$archive" "$package_name"
+
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$out_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
-elif command -v shasum >/dev/null 2>&1; then
-    (cd "$out_dir" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v sha256 >/dev/null 2>&1; then
     archive_base="$(basename "$archive")"
     digest="$(cd "$out_dir" && sha256 -q "$archive_base")"
     printf '%s  %s\n' "$digest" "$archive_base" > "$archive.sha256"
+elif command -v shasum >/dev/null 2>&1; then
+    (cd "$out_dir" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v openssl >/dev/null 2>&1; then
     (cd "$out_dir" && openssl dgst -sha256 -r "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v cksum >/dev/null 2>&1; then
@@ -397,7 +445,7 @@ elif command -v cksum >/dev/null 2>&1; then
     digest="$(cd "$out_dir" && cksum -a sha256 "$archive_base" | awk '{ print $1 }')"
     printf '%s  %s\n' "$digest" "$archive_base" > "$archive.sha256"
 else
-    echo "sha256sum, shasum, sha256, openssl, or cksum is required to write release checksums" >&2
+    echo "sha256sum, sha256, shasum, openssl, or cksum is required to write release checksums" >&2
     exit 1
 fi
 

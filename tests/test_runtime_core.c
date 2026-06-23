@@ -28,10 +28,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if LLAM_PLATFORM_POSIX
 #include <fcntl.h>
+#if LLAM_PLATFORM_POSIX
+#include <netdb.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
+#endif
+
+#ifndef O_RDONLY
+#define O_RDONLY 0
 #endif
 
 typedef struct core_state {
@@ -74,6 +80,11 @@ typedef struct nested_runtime_create_state {
     core_state_t core;
     llam_runtime_t *created_runtime;
 } nested_runtime_create_state_t;
+
+typedef struct signal_wait_state {
+    core_state_t core;
+    llam_signal_set_t *set;
+} signal_wait_state_t;
 
 #if defined(__APPLE__)
 typedef struct timer_handoff_state {
@@ -1540,6 +1551,250 @@ static int test_ex_option_prefixes(void) {
     return 0;
 }
 
+static void timer_api_task(void *arg) {
+    core_state_t *state = arg;
+    llam_timer_t *timer = NULL;
+    uint64_t ticks = 0U;
+
+    if (llam_timer_create(1000000000ULL, &timer) != 0 || timer == NULL) {
+        task_fail(state, "llam_timer_create", errno);
+        return;
+    }
+    if (llam_timer_wait_until(timer, 0U, &ticks) != -1 || errno != ETIMEDOUT) {
+        task_fail(state, "llam_timer_wait_until expired", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_reset(timer, llam_now_ns() + 1000000ULL, 1000000ULL) != 0 ||
+        llam_timer_wait(timer, &ticks) != 0 ||
+        ticks == 0U) {
+        task_fail(state, "llam_timer_wait first tick", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_reset(timer, llam_now_ns(), 1000000ULL) != 0 ||
+        llam_timer_wait(timer, &ticks) != 0 ||
+        ticks == 0U) {
+        task_fail(state, "llam_timer_wait immediate tick", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_cancel(timer) != 0 ||
+        llam_timer_wait_until(timer, llam_now_ns() + 50000000ULL, &ticks) != -1 ||
+        errno != ECANCELED) {
+        task_fail(state, "llam_timer_cancel wait", errno);
+        (void)llam_timer_destroy(timer);
+        return;
+    }
+    if (llam_timer_destroy(timer) != 0) {
+        task_fail(state, "llam_timer_destroy", errno);
+        return;
+    }
+    if (llam_timer_destroy(timer) != -1 || errno != EINVAL) {
+        task_fail(state, "llam_timer_destroy stale", errno);
+    }
+}
+
+static int test_waitable_timer_api(void) {
+    core_state_t state;
+    llam_runtime_opts_t opts;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    atomic_init(&state.failures, 0U);
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("timer runtime init failed");
+    }
+    if (llam_spawn(timer_api_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("timer task spawn failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("timer runtime run failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] timer API failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        return 1;
+    }
+    return 0;
+}
+
+static void blocking_wrapper_task(void *arg) {
+    core_state_t *state = arg;
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    llam_file_stat_t stat_result;
+    llam_handle_t handle = LLAM_INVALID_HANDLE;
+    int gai_error = 0;
+    const char *null_path =
+#if LLAM_PLATFORM_WINDOWS
+        "NUL";
+#else
+        "/dev/null";
+#endif
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    if (llam_getaddrinfo_result("localhost", "80", &hints, &result, &gai_error) != 0 ||
+        gai_error != 0 ||
+        result == NULL) {
+        task_fail(state, "llam_getaddrinfo_result", gai_error != 0 ? gai_error : errno);
+        return;
+    }
+    llam_freeaddrinfo_result(result);
+    if (llam_stat_path_ex(".", &stat_result, LLAM_FILE_STAT_CURRENT_SIZE) != 0 ||
+        stat_result.type == 0U) {
+        task_fail(state, "llam_stat_path_ex", errno);
+        return;
+    }
+    if (llam_open_async(null_path, O_RDONLY, 0U, &handle) != 0 ||
+        LLAM_HANDLE_IS_INVALID(handle)) {
+        task_fail(state, "llam_open_async", errno);
+        return;
+    }
+    if (llam_close_handle(handle) != 0) {
+        task_fail(state, "llam_close_handle after open_async", errno);
+    }
+}
+
+static int test_blocking_wrappers_api(void) {
+    core_state_t state;
+    llam_runtime_opts_t opts;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    atomic_init(&state.failures, 0U);
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("blocking wrappers runtime init failed");
+    }
+    if (llam_spawn(blocking_wrapper_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        return test_fail_errno("blocking wrapper task spawn failed");
+    }
+    if (llam_run() != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("blocking wrappers runtime run failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] blocking wrapper failed at %s errno=%d (%s)\n",
+                state.first_case,
+                state.first_errno,
+                strerror(state.first_errno));
+        return 1;
+    }
+    return 0;
+}
+
+#if LLAM_PLATFORM_LINUX
+static void signal_waiter_task(void *arg) {
+    signal_wait_state_t *state = arg;
+    llam_signal_event_t event;
+
+    if (llam_signal_wait_until(state->set, llam_now_ns() + 2000000000ULL, &event) != 0 ||
+        event.signo != SIGUSR1 ||
+        event.sequence == 0U) {
+        task_fail(&state->core, "llam_signal_wait_until", errno);
+    }
+}
+
+static void signal_sender_task(void *arg) {
+    signal_wait_state_t *state = arg;
+
+    (void)llam_sleep_ns(10000000ULL);
+    if (kill(getpid(), SIGUSR1) != 0) {
+        task_fail(&state->core, "kill SIGUSR1", errno);
+    }
+}
+#endif
+
+static int test_signal_wait_api(void) {
+#if LLAM_PLATFORM_LINUX
+    signal_wait_state_t state;
+    llam_runtime_opts_t opts;
+    llam_signal_set_t *duplicate = NULL;
+    llam_signal_opts_t signal_opts;
+    int signo = SIGUSR1;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    memset(&signal_opts, 0, sizeof(signal_opts));
+    atomic_init(&state.core.failures, 0U);
+    if (llam_signal_set_create_ex(&signo, 1U, &signal_opts, 0U, &state.set) != -1 ||
+        errno != EINVAL ||
+        state.set != NULL) {
+        return test_fail("signal opts with zero size did not fail with EINVAL");
+    }
+    if (llam_signal_set_create_ex(&signo, 1U, NULL, 0U, &state.set) != 0 || state.set == NULL) {
+        return test_fail_errno("signal set create failed");
+    }
+    if (llam_signal_set_create_ex(&signo, 1U, NULL, 0U, &duplicate) != -1 || errno != EBUSY) {
+        (void)llam_signal_set_destroy(state.set);
+        return test_fail("duplicate signal set did not fail with EBUSY");
+    }
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        (void)llam_signal_set_destroy(state.set);
+        return test_fail_errno("signal runtime init failed");
+    }
+    if (llam_spawn(signal_waiter_task, &state, NULL) == NULL ||
+        llam_spawn(signal_sender_task, &state, NULL) == NULL) {
+        llam_runtime_shutdown();
+        (void)llam_signal_set_destroy(state.set);
+        return test_fail_errno("signal task spawn failed");
+    }
+    if (llam_run() != 0) {
+        rc = test_fail_errno("signal runtime run failed");
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] signal wait failed at %s errno=%d (%s)\n",
+                state.core.first_case,
+                state.core.first_errno,
+                strerror(state.core.first_errno));
+        rc = 1;
+    }
+    if (llam_signal_set_destroy(state.set) != 0) {
+        rc = test_fail_errno("signal set destroy failed");
+    }
+    return rc;
+#elif LLAM_PLATFORM_POSIX
+    llam_signal_set_t *set = NULL;
+    llam_signal_opts_t signal_opts;
+    int signo = SIGTERM;
+
+    memset(&signal_opts, 0, sizeof(signal_opts));
+    if (llam_signal_set_create_ex(&signo, 1U, &signal_opts, 0U, &set) != -1 ||
+        errno != EINVAL ||
+        set != NULL) {
+        return test_fail("non-Linux signal opts with zero size did not fail with EINVAL");
+    }
+    if (llam_signal_set_create_ex(&signo, 1U, NULL, 0U, &set) != -1 || errno != ENOTSUP) {
+        if (set != NULL) {
+            (void)llam_signal_set_destroy(set);
+        }
+        return test_fail("non-Linux signal set did not fail with ENOTSUP");
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
 static int test_errno_is_task_local_across_switches(void) {
     core_state_t state;
     errno_task_args_t task_a;
@@ -1835,6 +2090,28 @@ typedef struct spawn_race_state {
     atomic_uint failures;
 } spawn_race_state_t;
 
+typedef struct runtime_env_snapshot {
+    uint32_t preempt_poll_period;
+    uint64_t preempt_quantum_ns;
+    uint64_t task_slab_grows;
+    unsigned stack_cache_default_count;
+    unsigned channel_safepoint_interval;
+    unsigned trace_events_enabled;
+    unsigned stack_sampling_enabled;
+    unsigned task_list_eager;
+    unsigned cheap_safepoint;
+} runtime_env_snapshot_t;
+
+#if LLAM_PLATFORM_POSIX
+static void test_host_thread_yield(void) {
+    /*
+     * These race tests use unmanaged pthreads.  A pure busy spin can starve
+     * the final participant on small BSD VMs before the LLAM race is reached.
+     */
+    usleep(100U);
+}
+#endif
+
 static char *test_dup_env_value(const char *name) {
     const char *value = getenv(name);
     size_t bytes;
@@ -1858,6 +2135,42 @@ static void test_restore_env_value(const char *name, char *value) {
     } else {
         unsetenv(name);
     }
+}
+
+static int collect_runtime_env_snapshot(runtime_env_snapshot_t *snapshot) {
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+
+    if (snapshot == NULL) {
+        return test_fail("runtime env snapshot output was NULL");
+    }
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("runtime env snapshot opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("runtime env snapshot init failed");
+    }
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0) {
+        llam_runtime_shutdown();
+        return test_fail_errno("runtime env snapshot stats failed");
+    }
+    snapshot->preempt_poll_period = stats.preempt_poll_period;
+    snapshot->preempt_quantum_ns = stats.preempt_quantum_ns;
+    snapshot->channel_safepoint_interval = g_llam_runtime.channel_safepoint_interval;
+    snapshot->trace_events_enabled = g_llam_runtime.trace_events_enabled;
+    snapshot->stack_sampling_enabled = g_llam_runtime.stack_sampling_enabled;
+    snapshot->task_list_eager = g_llam_runtime.task_list_eager;
+    snapshot->cheap_safepoint = g_llam_runtime.cheap_safepoint;
+    snapshot->task_slab_grows = 0U;
+    snapshot->stack_cache_default_count = g_llam_runtime.stack_cache_default_count;
+    for (unsigned i = 0U; i < g_llam_runtime.active_shards; ++i) {
+        snapshot->task_slab_grows += g_llam_runtime.shards[i].allocator.slab_grows;
+        snapshot->stack_cache_default_count += g_llam_runtime.shards[i].stack_cache_default_count;
+    }
+    llam_runtime_shutdown();
+    return 0;
 }
 
 static void *init_stats_race_stats_thread(void *arg) {
@@ -2109,6 +2422,278 @@ cleanup_env:
 #endif
 }
 
+static int test_unsigned_runtime_env_rejects_malformed_input(void) {
+    char *saved_preempt_poll = test_dup_env_value("LLAM_PREEMPT_POLL_PERIOD");
+    char *saved_preempt_quantum = test_dup_env_value("LLAM_PREEMPT_QUANTUM_NS");
+    char *saved_channel_interval = test_dup_env_value("LLAM_CHANNEL_SAFEPOINT_INTERVAL");
+    char *saved_task_prewarm = test_dup_env_value("LLAM_TASK_CACHE_PREWARM");
+    char *saved_stack_prewarm = test_dup_env_value("LLAM_STACK_CACHE_PREWARM");
+    const char *huge_unsigned = "999999999999999999999999999999999999";
+    runtime_env_snapshot_t baseline;
+    runtime_env_snapshot_t signed_snapshot;
+    int rc = 1;
+
+    /*
+     * strtoul/strtoull accept "-1" as a huge unsigned value on many libc
+     * implementations and also accept numeric prefixes such as "7x" unless
+     * the caller checks the parse tail. Runtime tuning knobs are documented as
+     * unsigned decimal values, so malformed text must leave the compiled/profile
+     * default intact instead of silently selecting a partial value or max cap.
+     */
+    if (unsetenv("LLAM_PREEMPT_POLL_PERIOD") != 0 ||
+        unsetenv("LLAM_PREEMPT_QUANTUM_NS") != 0 ||
+        unsetenv("LLAM_CHANNEL_SAFEPOINT_INTERVAL") != 0 ||
+        unsetenv("LLAM_TASK_CACHE_PREWARM") != 0 ||
+        unsetenv("LLAM_STACK_CACHE_PREWARM") != 0) {
+        rc = test_fail_errno("unsetenv for unsigned runtime env baseline failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&baseline) != 0) {
+        goto cleanup_env;
+    }
+
+    if (setenv("LLAM_PREEMPT_POLL_PERIOD", "-1", 1) != 0 ||
+        setenv("LLAM_PREEMPT_QUANTUM_NS", "-1", 1) != 0 ||
+        setenv("LLAM_CHANNEL_SAFEPOINT_INTERVAL", "-1", 1) != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM", "-1", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "-1", 1) != 0) {
+        rc = test_fail_errno("setenv for negative unsigned runtime env failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&signed_snapshot) != 0) {
+        goto cleanup_env;
+    }
+    if (baseline.preempt_poll_period != signed_snapshot.preempt_poll_period ||
+        baseline.preempt_quantum_ns != signed_snapshot.preempt_quantum_ns ||
+        baseline.channel_safepoint_interval != signed_snapshot.channel_safepoint_interval ||
+        baseline.task_slab_grows != signed_snapshot.task_slab_grows ||
+        baseline.stack_cache_default_count != signed_snapshot.stack_cache_default_count) {
+        fprintf(stderr,
+                "[test_runtime_core] negative unsigned env changed runtime config: "
+                "baseline(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u) "
+                "signed(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u)\n",
+                baseline.preempt_poll_period,
+                (unsigned long long)baseline.preempt_quantum_ns,
+                baseline.channel_safepoint_interval,
+                (unsigned long long)baseline.task_slab_grows,
+                baseline.stack_cache_default_count,
+                signed_snapshot.preempt_poll_period,
+                (unsigned long long)signed_snapshot.preempt_quantum_ns,
+                signed_snapshot.channel_safepoint_interval,
+                (unsigned long long)signed_snapshot.task_slab_grows,
+                signed_snapshot.stack_cache_default_count);
+        goto cleanup_env;
+    }
+
+    if (setenv("LLAM_PREEMPT_POLL_PERIOD", "+7", 1) != 0 ||
+        setenv("LLAM_PREEMPT_QUANTUM_NS", "+7", 1) != 0 ||
+        setenv("LLAM_CHANNEL_SAFEPOINT_INTERVAL", "+7", 1) != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM", "+7", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "+7", 1) != 0) {
+        rc = test_fail_errno("setenv for signed-plus unsigned runtime env failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&signed_snapshot) != 0) {
+        goto cleanup_env;
+    }
+    if (baseline.preempt_poll_period != signed_snapshot.preempt_poll_period ||
+        baseline.preempt_quantum_ns != signed_snapshot.preempt_quantum_ns ||
+        baseline.channel_safepoint_interval != signed_snapshot.channel_safepoint_interval ||
+        baseline.task_slab_grows != signed_snapshot.task_slab_grows ||
+        baseline.stack_cache_default_count != signed_snapshot.stack_cache_default_count) {
+        fprintf(stderr,
+                "[test_runtime_core] signed-plus unsigned env changed runtime config: "
+                "baseline(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u) "
+                "signed(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u)\n",
+                baseline.preempt_poll_period,
+                (unsigned long long)baseline.preempt_quantum_ns,
+                baseline.channel_safepoint_interval,
+                (unsigned long long)baseline.task_slab_grows,
+                baseline.stack_cache_default_count,
+                signed_snapshot.preempt_poll_period,
+                (unsigned long long)signed_snapshot.preempt_quantum_ns,
+                signed_snapshot.channel_safepoint_interval,
+                (unsigned long long)signed_snapshot.task_slab_grows,
+                signed_snapshot.stack_cache_default_count);
+        goto cleanup_env;
+    }
+
+    if (setenv("LLAM_PREEMPT_POLL_PERIOD", " +7", 1) != 0 ||
+        setenv("LLAM_PREEMPT_QUANTUM_NS", " +7", 1) != 0 ||
+        setenv("LLAM_CHANNEL_SAFEPOINT_INTERVAL", " +7", 1) != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM", " +7", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", " +7", 1) != 0) {
+        rc = test_fail_errno("setenv for whitespace signed-plus unsigned runtime env failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&signed_snapshot) != 0) {
+        goto cleanup_env;
+    }
+    if (baseline.preempt_poll_period != signed_snapshot.preempt_poll_period ||
+        baseline.preempt_quantum_ns != signed_snapshot.preempt_quantum_ns ||
+        baseline.channel_safepoint_interval != signed_snapshot.channel_safepoint_interval ||
+        baseline.task_slab_grows != signed_snapshot.task_slab_grows ||
+        baseline.stack_cache_default_count != signed_snapshot.stack_cache_default_count) {
+        fprintf(stderr,
+                "[test_runtime_core] whitespace signed-plus unsigned env changed runtime config: "
+                "baseline(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u) "
+                "signed(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u)\n",
+                baseline.preempt_poll_period,
+                (unsigned long long)baseline.preempt_quantum_ns,
+                baseline.channel_safepoint_interval,
+                (unsigned long long)baseline.task_slab_grows,
+                baseline.stack_cache_default_count,
+                signed_snapshot.preempt_poll_period,
+                (unsigned long long)signed_snapshot.preempt_quantum_ns,
+                signed_snapshot.channel_safepoint_interval,
+                (unsigned long long)signed_snapshot.task_slab_grows,
+                signed_snapshot.stack_cache_default_count);
+        goto cleanup_env;
+    }
+
+    if (setenv("LLAM_PREEMPT_POLL_PERIOD", "7x", 1) != 0 ||
+        setenv("LLAM_PREEMPT_QUANTUM_NS", "7x", 1) != 0 ||
+        setenv("LLAM_CHANNEL_SAFEPOINT_INTERVAL", "7x", 1) != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM", "7x", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "7x", 1) != 0) {
+        rc = test_fail_errno("setenv for malformed unsigned runtime env failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&signed_snapshot) != 0) {
+        goto cleanup_env;
+    }
+    if (baseline.preempt_poll_period != signed_snapshot.preempt_poll_period ||
+        baseline.preempt_quantum_ns != signed_snapshot.preempt_quantum_ns ||
+        baseline.channel_safepoint_interval != signed_snapshot.channel_safepoint_interval ||
+        baseline.task_slab_grows != signed_snapshot.task_slab_grows ||
+        baseline.stack_cache_default_count != signed_snapshot.stack_cache_default_count) {
+        fprintf(stderr,
+                "[test_runtime_core] malformed unsigned env changed runtime config: "
+                "baseline(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u) "
+                "malformed(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u)\n",
+                baseline.preempt_poll_period,
+                (unsigned long long)baseline.preempt_quantum_ns,
+                baseline.channel_safepoint_interval,
+                (unsigned long long)baseline.task_slab_grows,
+                baseline.stack_cache_default_count,
+                signed_snapshot.preempt_poll_period,
+                (unsigned long long)signed_snapshot.preempt_quantum_ns,
+                signed_snapshot.channel_safepoint_interval,
+                (unsigned long long)signed_snapshot.task_slab_grows,
+                signed_snapshot.stack_cache_default_count);
+        goto cleanup_env;
+    }
+
+    if (setenv("LLAM_PREEMPT_POLL_PERIOD", huge_unsigned, 1) != 0 ||
+        setenv("LLAM_PREEMPT_QUANTUM_NS", huge_unsigned, 1) != 0 ||
+        setenv("LLAM_CHANNEL_SAFEPOINT_INTERVAL", huge_unsigned, 1) != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM", huge_unsigned, 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", huge_unsigned, 1) != 0) {
+        rc = test_fail_errno("setenv for overflowing unsigned runtime env failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&signed_snapshot) != 0) {
+        goto cleanup_env;
+    }
+    if (baseline.preempt_poll_period != signed_snapshot.preempt_poll_period ||
+        baseline.preempt_quantum_ns != signed_snapshot.preempt_quantum_ns ||
+        baseline.channel_safepoint_interval != signed_snapshot.channel_safepoint_interval ||
+        baseline.task_slab_grows != signed_snapshot.task_slab_grows ||
+        baseline.stack_cache_default_count != signed_snapshot.stack_cache_default_count) {
+        fprintf(stderr,
+                "[test_runtime_core] overflowing unsigned env changed runtime config: "
+                "baseline(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u) "
+                "overflow(period=%u quantum=%llu channel=%u task_slabs=%llu stacks=%u)\n",
+                baseline.preempt_poll_period,
+                (unsigned long long)baseline.preempt_quantum_ns,
+                baseline.channel_safepoint_interval,
+                (unsigned long long)baseline.task_slab_grows,
+                baseline.stack_cache_default_count,
+                signed_snapshot.preempt_poll_period,
+                (unsigned long long)signed_snapshot.preempt_quantum_ns,
+                signed_snapshot.channel_safepoint_interval,
+                (unsigned long long)signed_snapshot.task_slab_grows,
+                signed_snapshot.stack_cache_default_count);
+        goto cleanup_env;
+    }
+    rc = 0;
+
+cleanup_env:
+    test_restore_env_value("LLAM_PREEMPT_POLL_PERIOD", saved_preempt_poll);
+    test_restore_env_value("LLAM_PREEMPT_QUANTUM_NS", saved_preempt_quantum);
+    test_restore_env_value("LLAM_CHANNEL_SAFEPOINT_INTERVAL", saved_channel_interval);
+    test_restore_env_value("LLAM_TASK_CACHE_PREWARM", saved_task_prewarm);
+    test_restore_env_value("LLAM_STACK_CACHE_PREWARM", saved_stack_prewarm);
+    return rc;
+}
+
+static int test_runtime_env_flags_accept_false_tokens(void) {
+    char *saved_trace = test_dup_env_value("LLAM_TRACE_EVENTS");
+    char *saved_task_list = test_dup_env_value("LLAM_TASK_LIST_EAGER");
+    char *saved_light_safepoint = test_dup_env_value("LLAM_DIAG_LIGHT_SAFEPOINT");
+    runtime_env_snapshot_t snapshot;
+    int rc = 1;
+
+    /*
+     * Boolean runtime flags must not use the historical "anything except 0"
+     * parser. Operators commonly use false/no/off in shell environments; those
+     * tokens must disable the knob rather than silently enabling diagnostics or
+     * experimental behavior.
+     */
+    if (setenv("LLAM_TRACE_EVENTS", "yes", 1) != 0 ||
+        setenv("LLAM_TASK_LIST_EAGER", "on", 1) != 0 ||
+        setenv("LLAM_DIAG_LIGHT_SAFEPOINT", "true", 1) != 0) {
+        rc = test_fail_errno("setenv for true boolean runtime env failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&snapshot) != 0) {
+        goto cleanup_env;
+    }
+    if (snapshot.trace_events_enabled == 0U ||
+        snapshot.task_list_eager == 0U ||
+        snapshot.cheap_safepoint == 0U ||
+        snapshot.stack_sampling_enabled != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] true boolean env parsed incorrectly: "
+                "trace=%u task_list=%u cheap=%u stack_sampling=%u\n",
+                snapshot.trace_events_enabled,
+                snapshot.task_list_eager,
+                snapshot.cheap_safepoint,
+                snapshot.stack_sampling_enabled);
+        goto cleanup_env;
+    }
+
+    if (setenv("LLAM_TRACE_EVENTS", "false", 1) != 0 ||
+        setenv("LLAM_TASK_LIST_EAGER", "no", 1) != 0 ||
+        setenv("LLAM_DIAG_LIGHT_SAFEPOINT", "off", 1) != 0) {
+        rc = test_fail_errno("setenv for false boolean runtime env failed");
+        goto cleanup_env;
+    }
+    if (collect_runtime_env_snapshot(&snapshot) != 0) {
+        goto cleanup_env;
+    }
+    if (snapshot.trace_events_enabled != 0U ||
+        snapshot.task_list_eager != 0U ||
+        snapshot.cheap_safepoint != 0U ||
+        snapshot.stack_sampling_enabled == 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] false boolean env parsed incorrectly: "
+                "trace=%u task_list=%u cheap=%u stack_sampling=%u\n",
+                snapshot.trace_events_enabled,
+                snapshot.task_list_eager,
+                snapshot.cheap_safepoint,
+                snapshot.stack_sampling_enabled);
+        goto cleanup_env;
+    }
+    rc = 0;
+
+cleanup_env:
+    test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+    test_restore_env_value("LLAM_TASK_LIST_EAGER", saved_task_list);
+    test_restore_env_value("LLAM_DIAG_LIGHT_SAFEPOINT", saved_light_safepoint);
+    return rc;
+}
+
 static void *init_shutdown_race_init_thread(void *arg) {
     init_shutdown_race_state_t *state = arg;
     llam_runtime_opts_t opts;
@@ -2203,6 +2788,7 @@ static void *spawn_race_thread(void *arg) {
 
     atomic_fetch_add_explicit(&state->ready, 1U, memory_order_release);
     while (atomic_load_explicit(&state->start, memory_order_acquire) == 0U) {
+        test_host_thread_yield();
     }
     for (unsigned i = 0U; i < 2000U; ++i) {
         llam_task_t *task = llam_spawn(spawn_race_noop_task, NULL, NULL);
@@ -2718,7 +3304,19 @@ static int test_concurrent_spawn_contract(void) {
             return test_fail_errno("pthread_create for concurrent spawn failed");
         }
     }
-    while (atomic_load_explicit(&state.ready, memory_order_acquire) != SPAWN_RACE_THREADS) {
+    for (unsigned wait = 0U;
+         wait < 100000U &&
+         atomic_load_explicit(&state.ready, memory_order_acquire) != SPAWN_RACE_THREADS;
+         ++wait) {
+        test_host_thread_yield();
+    }
+    if (atomic_load_explicit(&state.ready, memory_order_acquire) != SPAWN_RACE_THREADS) {
+        atomic_store_explicit(&state.start, 1U, memory_order_release);
+        for (unsigned i = 0U; i < started; ++i) {
+            pthread_join(threads[i], NULL);
+        }
+        llam_runtime_shutdown();
+        return test_fail("concurrent spawn pthreads did not all reach barrier");
     }
     atomic_store_explicit(&state.start, 1U, memory_order_release);
     for (unsigned i = 0U; i < started; ++i) {
@@ -2746,6 +3344,8 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_timer_policy_is_bounded);
+    RUN_RUNTIME_CORE_TEST(test_unsigned_runtime_env_rejects_malformed_input);
+    RUN_RUNTIME_CORE_TEST(test_runtime_env_flags_accept_false_tokens);
     RUN_RUNTIME_CORE_TEST(test_runtime_handle_api);
     RUN_RUNTIME_CORE_TEST(test_runtime_lifecycle_and_task_contracts);
     RUN_RUNTIME_CORE_TEST(test_request_stop_returns_success);
@@ -2764,6 +3364,9 @@ int main(void) {
 #endif
     RUN_RUNTIME_CORE_TEST(test_detach_contract);
     RUN_RUNTIME_CORE_TEST(test_ex_option_prefixes);
+    RUN_RUNTIME_CORE_TEST(test_waitable_timer_api);
+    RUN_RUNTIME_CORE_TEST(test_blocking_wrappers_api);
+    RUN_RUNTIME_CORE_TEST(test_signal_wait_api);
     RUN_RUNTIME_CORE_TEST(test_errno_is_task_local_across_switches);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_failure_keeps_task_running);
 #if LLAM_ARCH_AARCH64 && !LLAM_PLATFORM_WINDOWS

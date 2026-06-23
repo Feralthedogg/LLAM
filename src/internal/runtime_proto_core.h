@@ -60,11 +60,23 @@ int llam_task_unregister_public_slab(llam_task_t *items, unsigned count);
 llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle);
 void llam_task_end_public_op(llam_task_t *task);
 int llam_task_wait_public_ops_quiescent(llam_task_t *task);
+llam_task_t *llam_runtime_spawn_group_owned_ex(llam_runtime_t *runtime,
+                                               llam_task_group_t *owning_group,
+                                               llam_task_fn fn,
+                                               void *arg,
+                                               const llam_spawn_opts_t *opts,
+                                               size_t opts_size);
 int llam_task_claim_join_public_handle(const llam_task_t *handle,
                                        llam_task_t *self,
                                        llam_task_t **out_task,
                                        llam_runtime_t **out_rt,
                                        bool *out_task_pinned);
+int llam_task_claim_group_join_public_handle(const llam_task_t *handle,
+                                             llam_task_group_t *group,
+                                             llam_task_t *self,
+                                             llam_task_t **out_task,
+                                             llam_runtime_t **out_rt,
+                                             bool *out_task_pinned);
 int llam_task_claim_detach_public_handle(const llam_task_t *handle,
                                          llam_task_t **out_task,
                                          llam_runtime_t **out_rt,
@@ -204,9 +216,13 @@ void llam_runtime_prewarm_stack_cache(llam_runtime_t *rt);
 /*
  * Small utility and environment helpers.
  */
+int llam_align_up_checked(size_t value, size_t alignment, size_t *out_value);
 size_t llam_align_up(size_t value, size_t alignment);
 void llam_atomic_update_peak(atomic_uint *peak, unsigned value);
 const char *llam_env_get(const char *name);
+bool llam_ascii_is_space(int ch);
+unsigned llam_env_flag(const char *name, unsigned default_value);
+unsigned llam_env_flag_value(const char *value, unsigned default_value);
 unsigned llam_max_unsigned(unsigned a, unsigned b);
 long llam_page_size(void);
 void llam_pause_cpu(void);
@@ -278,6 +294,9 @@ int llam_runtime_check_handle(const llam_runtime_t *runtime);
 int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_runtime);
 void llam_runtime_end_public_op(llam_runtime_t *runtime);
 int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_runtime_test_force_live_iter_snapshot_alloc_failure(bool enabled);
+#endif
 int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,
                          size_t opts_size,
@@ -307,6 +326,10 @@ int llam_runtime_request_stop_rt(llam_runtime_t *rt);
 int llam_runtime_run_rt(llam_runtime_t *rt);
 void llam_runtime_shutdown_rt(llam_runtime_t *rt);
 void llam_runtime_destroy_rt(llam_runtime_t *rt);
+int llam_task_group_join_child_handle(llam_task_t *task,
+                                      llam_task_group_t *group,
+                                      bool has_deadline,
+                                      uint64_t deadline_ns);
 int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd);
 void llam_record_fatal(llam_runtime_t *rt, int err);
 void llam_request_stop(llam_runtime_t *rt);

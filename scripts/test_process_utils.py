@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from process_utils import ProcessTimeoutError, run_capture
+from safe_output import prepare_output_dir, write_text_safely
 
 
 def fail(message: str) -> None:
@@ -55,6 +56,16 @@ def kill_process(pid: int) -> None:
         pass
 
 
+def try_symlink(target: Path, link: Path) -> bool:
+    """Create a symlink when the host permits it; Windows may deny this."""
+
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
 def wait_for_exit(pid: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -74,6 +85,414 @@ def test_path_command_capture() -> None:
         fail(f"normal command returned {proc.returncode}")
     if proc.stdout.strip() != "process-utils-normal-ok":
         fail(f"normal command output mismatch: {proc.stdout!r}")
+
+
+def test_run_capture_rejects_nonfinite_timeout_before_spawn() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-process-utils-invalid-timeout-test-") as tmp:
+        tmp_path = Path(tmp)
+        pidfile = tmp_path / "spawned.pid"
+        child = tmp_path / "child.py"
+        child.write_text(
+            "\n".join(
+                [
+                    "import os",
+                    "import sys",
+                    "import time",
+                    "from pathlib import Path",
+                    "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8')",
+                    "time.sleep(30)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        for timeout in (float("nan"), float("inf"), -1.0):
+            try:
+                run_capture([Path(sys.executable), child, pidfile], timeout=timeout, stderr_to_stdout=True)
+            except ValueError as exc:
+                if "finite non-negative" not in str(exc):
+                    fail(f"run_capture rejected invalid timeout with unexpected error: {exc}")
+            else:
+                fail(f"run_capture accepted invalid timeout {timeout!r}")
+
+            time.sleep(0.2)
+            if pidfile.exists():
+                pid = int(pidfile.read_text(encoding="utf-8").strip())
+                try:
+                    fail(f"run_capture spawned child before rejecting invalid timeout {timeout!r}: pid={pid}")
+                finally:
+                    if process_alive(pid):
+                        kill_process(pid)
+
+
+def test_run_with_timeout_rejects_nonfinite_timeouts() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-run-timeout-invalid-test-") as tmp:
+        tmp_path = Path(tmp)
+        wrapper = Path(__file__).resolve().with_name("run_with_timeout.py")
+        cases = [
+            ["--timeout", "nan"],
+            ["--timeout", "inf"],
+            ["--timeout", "-1"],
+            ["--timeout", "1000000000"],
+            ["--timeout", "1", "--kill-grace", "nan"],
+            ["--timeout", "1", "--kill-grace", "1000000000"],
+            ["--timeout", "1", "--dump-grace", "inf"],
+            ["--timeout", "1", "--dump-grace", "-1"],
+            ["--timeout", "1", "--dump-grace", "1000000000"],
+        ]
+
+        for index, option_args in enumerate(cases):
+            logfile = tmp_path / f"invalid-{index}.log"
+            proc = run_capture(
+                [
+                    Path(sys.executable),
+                    wrapper,
+                    *option_args,
+                    "--log",
+                    logfile,
+                    "--",
+                    Path(sys.executable),
+                    "-c",
+                    "pass",
+                ],
+                timeout=5.0,
+                stderr_to_stdout=True,
+            )
+            if proc.returncode == 0:
+                fail(f"run_with_timeout accepted invalid timing args {option_args!r}")
+            if "finite" not in proc.stdout:
+                fail(f"run_with_timeout invalid timing diagnostic was unclear: {proc.stdout!r}")
+
+
+def test_stress_and_bench_helpers_reject_invalid_numbers() -> None:
+    script_dir = Path(__file__).resolve().parent
+    cases = [
+        [
+            script_dir / "runtime_soak.py",
+            "--duration",
+            "nan",
+            "--runtime-fuzz",
+            "./does-not-exist",
+            "--multi-runtime-core",
+            "./does-not-exist",
+            "--runtime-stress",
+            "./does-not-exist",
+            "--runtime-shutdown",
+            "./does-not-exist",
+            "--io-buffers",
+            "./does-not-exist",
+        ],
+        [script_dir / "runtime_soak.py", "--timeout", "inf"],
+        [script_dir / "runtime_soak.py", "--duration", "1000000000"],
+        [script_dir / "runtime_soak.py", "--timeout", "1000000000"],
+        [script_dir / "runtime_soak.py", "--fuzz-scenarios", "1000000000"],
+        [script_dir / "runtime_soak.py", "--multi-fuzz-scenarios", "1000000000"],
+        [script_dir / "runtime_soak.py", "--seed", "18446744073709551616"],
+        [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge", "--edge-duration", "nan"],
+        [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge", "--flood-duration", "inf"],
+        [
+            script_dir / "stress_server_composite.py",
+            "--skip-correctness",
+            "--skip-flood",
+            "--skip-edge",
+            "--edge-duration",
+            "1000000000",
+        ],
+        [
+            script_dir / "stress_server_composite.py",
+            "--skip-correctness",
+            "--skip-flood",
+            "--skip-edge",
+            "--edge-clients",
+            "1000000000",
+        ],
+        [
+            script_dir / "stress_server_composite.py",
+            "--skip-correctness",
+            "--skip-flood",
+            "--skip-edge",
+            "--churn-threads",
+            "1000000000",
+        ],
+        [
+            script_dir / "stress_server_composite.py",
+            "--skip-correctness",
+            "--skip-flood",
+            "--skip-edge",
+            "--slow-threads",
+            "1000000000",
+        ],
+        [
+            script_dir / "stress_server_composite.py",
+            "--skip-correctness",
+            "--skip-flood",
+            "--skip-edge",
+            "--command-timeout-padding",
+            "1000000000",
+        ],
+        [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "2", "--timeout", "nan"],
+        [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "2", "--timeout", "1000000000"],
+        [
+            script_dir / "stress_server.py",
+            "--server",
+            "./does-not-exist",
+            "--clients",
+            "2",
+            "--connect-spread-ms",
+            "1000000000",
+        ],
+        [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "1000000000"],
+        [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "2", "--payload-bytes", "1000000000000"],
+        [script_dir / "bench_guard.py", "--timeout", "nan"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--rounds", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--timeout", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--spawn-tasks", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--channel-messages", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--select-ops", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--io-messages", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--poll-events", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--sleep-tasks", "1000000000"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--opaque-scopes", "1000000000"],
+        [script_dir / "bench_matrix.py", "--timeout", "-1", "--no-build"],
+        [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam", "--timeout", "-1"],
+        [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam", "--spread-warning-ratio", "nan"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--min-ops", "spawn_join=-1"],
+        [script_dir / "bench_guard.py", "--bench", "./does-not-exist", "--min-ops", "spawn_join=nan"],
+        [script_dir / "bench_matrix.py", "--rounds", "1000000000", "--no-build"],
+        [script_dir / "bench_matrix.py", "--timeout", "1000000000", "--no-build"],
+        [script_dir / "bench_matrix.py", "--spin-ns", "10000000000", "--no-build"],
+        [script_dir / "bench_matrix.py", "--spin-iters", "1000000000", "--no-build"],
+        [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam", "--rounds", "1000000000"],
+        [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam", "--timeout", "1000000000"],
+        [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam", "--samples", "1000000000"],
+        [
+            script_dir / "bench_runtime_compare.py",
+            "--no-build",
+            "--runtime",
+            "llam",
+            "--spread-warning-ratio",
+            "1000000000",
+        ],
+    ]
+
+    for command in cases:
+        proc = run_capture(
+            [Path(sys.executable), *command],
+            timeout=5.0,
+            stderr_to_stdout=True,
+        )
+        if proc.returncode == 0:
+            fail(f"helper accepted invalid numeric argument: {command!r}")
+        if "finite" not in proc.stdout and "positive" not in proc.stdout and "integer" not in proc.stdout:
+            fail(f"helper invalid numeric diagnostic was unclear for {command!r}: {proc.stdout!r}")
+
+    env_cases = [
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_EDGE_DURATION": "nan"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_EDGE_DURATION": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_EDGE_CLIENTS": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_CHURN_THREADS": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_SLOW_THREADS": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_COMMAND_TIMEOUT_PADDING": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "2"],
+            {"LLAM_SERVER_STRESS_TIMEOUT": "nan"},
+        ),
+        (
+            [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "2"],
+            {"LLAM_SERVER_STRESS_TIMEOUT": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "2"],
+            {"LLAM_SERVER_STRESS_CONNECT_SPREAD_MS": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server.py", "--server", "./does-not-exist"],
+            {"LLAM_SERVER_STRESS_CLIENTS": "1000000000"},
+        ),
+        (
+            [script_dir / "stress_server.py", "--server", "./does-not-exist"],
+            {"LLAM_SERVER_STRESS_PAYLOAD_BYTES": "1000000000000"},
+        ),
+        (
+            [script_dir / "stress_server.py", "--server", "./does-not-exist", "--clients", "2"],
+            {"LLAM_SERVER_STRESS_SEED": "nan"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_MAX_UNEXPECTED_CLIENT_ERRORS": "nan"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--skip-correctness", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_ALLOW_FLOOD_FORCED_STOP": "maybe"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--server", "./does-not-exist", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_CORRECTNESS": "bad"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--server", "./does-not-exist", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_CORRECTNESS": "1:1:-1"},
+        ),
+        (
+            [script_dir / "stress_server_composite.py", "--server", "./does-not-exist", "--skip-flood", "--skip-edge"],
+            {"LLAM_SERVER_COMPOSITE_CORRECTNESS": "0:1:1"},
+        ),
+        (
+            [script_dir / "bench_guard.py", "--bench", "./does-not-exist"],
+            {"LLAM_BENCH_GUARD_TIMEOUT": "nan"},
+        ),
+        (
+            [script_dir / "bench_guard.py", "--bench", "./does-not-exist"],
+            {"LLAM_BENCH_GUARD_TIMEOUT": "1000000000"},
+        ),
+        (
+            [script_dir / "bench_guard.py", "--bench", "./does-not-exist"],
+            {"LLAM_BENCH_GUARD_ROUNDS": "1000000000"},
+        ),
+        (
+            [script_dir / "bench_guard.py", "--bench", "./does-not-exist"],
+            {"LLAM_BENCH_GUARD_WARMUP": "1000000000"},
+        ),
+        (
+            [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam"],
+            {"LLAM_BENCH_COMPARE_SAMPLES": "nan"},
+        ),
+        (
+            [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam"],
+            {"LLAM_BENCH_COMPARE_SAMPLES": "1000000000"},
+        ),
+        (
+            [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam"],
+            {"LLAM_BENCH_COMPARE_SPREAD_WARNING_RATIO": "1000000000"},
+        ),
+        (
+            [script_dir / "bench_runtime_compare.py", "--no-build", "--runtime", "llam"],
+            {"LLAM_BENCH_COMPARE_SAMPLE_POLICY": "garbage"},
+        ),
+    ]
+
+    for command, extra_env in env_cases:
+        env = os.environ.copy()
+        env.update(extra_env)
+        proc = run_capture(
+            [Path(sys.executable), *command],
+            env=env,
+            timeout=5.0,
+            stderr_to_stdout=True,
+        )
+        if proc.returncode == 0:
+            fail(f"helper accepted invalid numeric environment: {command!r} env={extra_env!r}")
+        if "Traceback" in proc.stdout:
+            fail(f"helper produced traceback for invalid environment {extra_env!r}: {proc.stdout!r}")
+        if (
+            "finite" not in proc.stdout
+            and "positive" not in proc.stdout
+            and "integer" not in proc.stdout
+            and "correctness case" not in proc.stdout
+            and "must be one of" not in proc.stdout
+        ):
+            fail(f"helper invalid environment diagnostic was unclear for {extra_env!r}: {proc.stdout!r}")
+
+    env = os.environ.copy()
+    env["LLAM_SERVER_COMPOSITE_ALLOW_FLOOD_FORCED_STOP"] = "false"
+    proc = run_capture(
+        [
+            Path(sys.executable),
+            script_dir / "stress_server_composite.py",
+            "--skip-correctness",
+            "--skip-flood",
+            "--skip-edge",
+        ],
+        env=env,
+        timeout=5.0,
+        stderr_to_stdout=True,
+    )
+    if proc.returncode != 0:
+        fail(f"stress composite rejected false boolean environment: {proc.stdout!r}")
+
+
+def test_safe_output_rejects_symlink_leaf() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-safe-output-leaf-test-") as tmp:
+        tmp_path = Path(tmp)
+        outside = tmp_path / "outside.txt"
+        link = tmp_path / "result.txt"
+        outside.write_text("outside-before", encoding="utf-8")
+        if not try_symlink(outside, link):
+            return
+
+        try:
+            write_text_safely(link, "unsafe")
+        except RuntimeError as exc:
+            if "refusing symlink output path" not in str(exc):
+                fail(f"safe_output reported unexpected symlink leaf error: {exc}")
+        else:
+            fail("safe_output followed a symlink output leaf")
+        if outside.read_text(encoding="utf-8") != "outside-before":
+            fail("safe_output modified a symlink target")
+
+
+def test_safe_output_rejects_hardlinked_leaf() -> None:
+    if not hasattr(os, "link"):
+        return
+
+    with tempfile.TemporaryDirectory(prefix="llam-safe-output-hardlink-test-") as tmp:
+        tmp_path = Path(tmp)
+        outside = tmp_path / "outside.txt"
+        hardlink = tmp_path / "result.txt"
+        outside.write_text("outside-before", encoding="utf-8")
+        try:
+            os.link(outside, hardlink)
+        except OSError:
+            return
+
+        try:
+            write_text_safely(hardlink, "unsafe")
+        except RuntimeError as exc:
+            if "refusing hard-linked output path" not in str(exc):
+                fail(f"safe_output reported unexpected hardlink error: {exc}")
+        else:
+            fail("safe_output overwrote a hard-linked output leaf")
+        if outside.read_text(encoding="utf-8") != "outside-before":
+            fail("safe_output modified a hard-linked target")
+
+
+def test_safe_output_rejects_symlink_parent_prepare_dir() -> None:
+    with tempfile.TemporaryDirectory(prefix="llam-safe-output-parent-test-") as tmp:
+        tmp_path = Path(tmp)
+        outside = tmp_path / "outside"
+        link = tmp_path / "link-dir"
+        outside.mkdir()
+        if not try_symlink(outside, link):
+            return
+
+        try:
+            prepare_output_dir(link / "artifacts")
+        except RuntimeError as exc:
+            if "refusing symlink output directory" not in str(exc):
+                fail(f"safe_output reported unexpected symlink parent error: {exc}")
+        else:
+            fail("safe_output followed a symlink output parent")
+        if (outside / "artifacts").exists():
+            fail("safe_output created a directory through a symlink parent")
 
 
 def test_timeout_kills_descendant() -> None:
@@ -512,6 +931,12 @@ def test_stress_server_composite_times_out_wrapper_flood_descendant() -> None:
 
 def main() -> int:
     test_path_command_capture()
+    test_run_capture_rejects_nonfinite_timeout_before_spawn()
+    test_run_with_timeout_rejects_nonfinite_timeouts()
+    test_stress_and_bench_helpers_reject_invalid_numbers()
+    test_safe_output_rejects_symlink_leaf()
+    test_safe_output_rejects_hardlinked_leaf()
+    test_safe_output_rejects_symlink_parent_prepare_dir()
     test_timeout_kills_descendant()
     test_run_with_timeout_kills_descendant()
     test_run_with_timeout_dump_signal_reaches_descendant()

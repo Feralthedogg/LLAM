@@ -19,6 +19,7 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +43,7 @@ jobs:
         run: |
           cmake -S . -B build/macos -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang
           cmake --build build/macos
-          ctest --test-dir build/macos --output-on-failure
+          ctest --test-dir build/macos --output-on-failure --timeout 180
 
       - name: Benchmark smoke
         run: |
@@ -55,8 +56,8 @@ jobs:
 
       - name: Package smoke
         run: |
-          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.0/'
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.1/'
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.1 LLAM_ABI_MAJOR=2 ./scripts/package_release.sh "${{ matrix.package_target }}"
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
           grep '/CHANGELOG.md$' package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt

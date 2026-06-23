@@ -185,6 +185,13 @@ typedef struct runtime_destroy_race_state {
     bool go;
 } runtime_destroy_race_state_t;
 
+typedef struct runtime_destroy_claim_sentinel_state {
+    llam_runtime_t *runtime;
+    bool heap_allocated;
+    int rc;
+    int err;
+} runtime_destroy_claim_sentinel_state_t;
+
 typedef struct runtime_destroy_running_state {
     atomic_uint entered;
 } runtime_destroy_running_state_t;
@@ -769,11 +776,31 @@ static void cross_object_task(void *arg) {
         cross_object_fail(state);
     }
     errno = 0;
+    if (llam_mutex_lock(state->foreign_mutex) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
+    if (llam_mutex_lock_until(state->foreign_mutex, 0U) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
+    if (llam_mutex_unlock(state->foreign_mutex) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
     if (llam_cond_signal(state->foreign_cond) != -1 || errno != EXDEV) {
         cross_object_fail(state);
     }
     errno = 0;
+    if (llam_cond_broadcast(state->foreign_cond) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
     if (llam_cancel_token_cancel(state->foreign_token) != -1 || errno != EXDEV) {
+        cross_object_fail(state);
+    }
+    errno = 0;
+    if (llam_cancel_token_is_cancelled(state->foreign_token) != -1 || errno != EXDEV) {
         cross_object_fail(state);
     }
     errno = 0;
@@ -1016,6 +1043,15 @@ static void *destroy_runtime_thread(void *arg) {
     return NULL;
 }
 
+static void *claim_destroy_runtime_thread(void *arg) {
+    runtime_destroy_claim_sentinel_state_t *state = arg;
+
+    errno = 0;
+    state->rc = llam_runtime_claim_destroy_handle(state->runtime, &state->heap_allocated);
+    state->err = errno;
+    return NULL;
+}
+
 static void *join_destroy_race_thread(void *arg) {
     runtime_join_destroy_race_state_t *state = arg;
     uint64_t deadline_ns = llam_now_ns() + 5000000ULL;
@@ -1214,6 +1250,10 @@ static void *default_channel_host_try_thread(void *arg) {
     return NULL;
 }
 #endif
+
+static void default_spawn_public_op_noop_task(void *arg) {
+    (void)arg;
+}
 
 static int init_runtime_opts(llam_runtime_opts_t *opts) {
     if (opts == NULL) {
@@ -1665,6 +1705,103 @@ cleanup:
     llam_runtime_destroy(runtime_b);
     if (state.token != NULL) {
         (void)llam_cancel_token_destroy(state.token);
+    }
+    llam_runtime_destroy(runtime_a);
+    return rc;
+}
+
+static int test_task_group_spawn_rejects_foreign_cancel_token(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime_a = NULL;
+    llam_runtime_t *runtime_b = NULL;
+    llam_task_t *token_creator = NULL;
+    llam_task_t *group_creator = NULL;
+    llam_task_t *wrong_task = NULL;
+    cross_spawn_token_state_t token_state;
+    explicit_group_state_t group_state;
+    llam_spawn_opts_t spawn_opts;
+    atomic_uint child_ran;
+    int rc = 1;
+
+    memset(&token_state, 0, sizeof(token_state));
+    memset(&group_state, 0, sizeof(group_state));
+    atomic_init(&token_state.failures, 0U);
+    atomic_init(&group_state.failures, 0U);
+    atomic_init(&child_ran, 0U);
+
+    if (init_runtime_opts(&opts) != 0 ||
+        llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("group foreign-token opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        rc = test_fail_errno("runtime create for group foreign-token test failed");
+        goto cleanup;
+    }
+
+    token_creator = llam_runtime_spawn_ex(runtime_a, cross_spawn_token_creator_task, &token_state, NULL, 0U);
+    group_creator = llam_runtime_spawn_ex(runtime_b, explicit_group_creator_task, &group_state, NULL, 0U);
+    if (token_creator == NULL ||
+        group_creator == NULL ||
+        run_two_runtimes(runtime_a, runtime_b) != 0 ||
+        llam_join(token_creator) != 0 ||
+        llam_join(group_creator) != 0 ||
+        token_state.token == NULL ||
+        group_state.group == NULL ||
+        atomic_load_explicit(&token_state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&group_state.failures, memory_order_relaxed) != 0U) {
+        token_creator = NULL;
+        group_creator = NULL;
+        rc = test_fail_errno("group foreign-token fixture setup failed");
+        goto cleanup;
+    }
+    token_creator = NULL;
+    group_creator = NULL;
+
+    /*
+     * Task groups spawn children on the group's owner runtime even from a host
+     * thread.  An explicit token owned by another runtime must therefore be
+     * rejected before the child is published, or cancellation waiters could
+     * cross owner domains.
+     */
+    spawn_opts.cancel_token = token_state.token;
+    errno = 0;
+    wrong_task = llam_task_group_spawn_ex(group_state.group,
+                                         foreign_target_task,
+                                         &child_ran,
+                                         &spawn_opts,
+                                         LLAM_SPAWN_OPTS_CURRENT_SIZE);
+    if (wrong_task != NULL || errno != EXDEV) {
+        rc = test_fail_errno("task group spawn accepted foreign cancel token");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&child_ran, memory_order_relaxed) != 0U) {
+        rc = test_fail("foreign-token task group child was published");
+        goto cleanup;
+    }
+    if (llam_task_group_destroy(group_state.group) != 0) {
+        rc = test_fail_errno("group foreign-token cleanup destroy failed");
+        goto cleanup;
+    }
+    group_state.group = NULL;
+    rc = 0;
+
+cleanup:
+    if (wrong_task != NULL) {
+        (void)llam_detach(wrong_task);
+    }
+    if (token_creator != NULL) {
+        (void)llam_detach(token_creator);
+    }
+    if (group_creator != NULL) {
+        (void)llam_detach(group_creator);
+    }
+    if (group_state.group != NULL) {
+        (void)llam_task_group_destroy(group_state.group);
+    }
+    llam_runtime_destroy(runtime_b);
+    if (token_state.token != NULL) {
+        (void)llam_cancel_token_destroy(token_state.token);
     }
     llam_runtime_destroy(runtime_a);
     return rc;
@@ -2257,11 +2394,13 @@ static int test_process_fp_globals_survive_peer_runtime_destroy(void) {
     int rc = 1;
 
     if (old_fp_env != NULL) {
-        old_fp_env_copy = malloc(strlen(old_fp_env) + 1U);
+        size_t old_fp_env_len = strlen(old_fp_env);
+
+        old_fp_env_copy = malloc(old_fp_env_len + 1U);
         if (old_fp_env_copy == NULL) {
             return test_fail_errno("FP global isolation env copy failed");
         }
-        strcpy(old_fp_env_copy, old_fp_env);
+        memcpy(old_fp_env_copy, old_fp_env, old_fp_env_len + 1U);
     }
     if (setenv("LLAM_FP_CONTROL_CONTEXT", "1", 1) != 0) {
         rc = test_fail_errno("FP global isolation setenv failed");
@@ -2628,7 +2767,181 @@ static int test_runtime_destroy_active_op_sentinel_does_not_hang(void) {
         return test_fail("runtime active-op sentinel child returned unexpected status");
     }
 }
+
+static int test_runtime_destroy_detects_sentinel_after_claim(void) {
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return test_fail_errno("runtime post-claim active-op sentinel fork failed");
+    }
+    if (pid == 0) {
+        runtime_destroy_claim_sentinel_state_t state;
+        llam_runtime_t *runtime = NULL;
+        llam_runtime_t *pinned_runtime = NULL;
+        pthread_t thread;
+        int err;
+
+        /*
+         * Destroy first claims the public handle, then waits for active public
+         * operations to drain. If the counter enters reserved sentinel space
+         * after the claim, destroy must fail closed instead of spinning forever.
+         */
+        (void)alarm(2U);
+        memset(&state, 0, sizeof(state));
+        if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+            _exit(10);
+        }
+        if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0 ||
+            pinned_runtime != runtime) {
+            llam_runtime_destroy(runtime);
+            _exit(11);
+        }
+        state.runtime = runtime;
+        err = pthread_create(&thread, NULL, claim_destroy_runtime_thread, &state);
+        if (err != 0) {
+            atomic_store_explicit(&runtime->active_ops, 1U, memory_order_release);
+            llam_runtime_end_public_op(pinned_runtime);
+            llam_runtime_destroy(runtime);
+            _exit(12);
+        }
+        while (!atomic_load_explicit(&runtime->destroy_claimed, memory_order_acquire)) {
+            llam_pause_cpu();
+        }
+        atomic_store_explicit(&runtime->active_ops, SIZE_MAX, memory_order_release);
+        pthread_join(thread, NULL);
+        if (state.rc == 0) {
+            _exit(13);
+        }
+        if (state.err != EBUSY) {
+            _exit(14);
+        }
+        if (atomic_load_explicit(&runtime->destroy_claimed, memory_order_acquire)) {
+            _exit(15);
+        }
+        if (state.heap_allocated) {
+            _exit(16);
+        }
+        atomic_store_explicit(&runtime->active_ops, 1U, memory_order_release);
+        llam_runtime_end_public_op(pinned_runtime);
+        llam_runtime_destroy(runtime);
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return test_fail_errno("runtime post-claim active-op sentinel waitpid failed");
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            return test_fail("runtime destroy hung on post-claim active-op sentinel");
+        }
+        return test_fail("runtime post-claim active-op sentinel child died from signal");
+    }
+    if (!WIFEXITED(status)) {
+        return test_fail("runtime post-claim active-op sentinel child did not exit cleanly");
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        return test_fail("runtime post-claim active-op sentinel setup failed");
+    case 11:
+        return test_fail("runtime post-claim public-op pin setup failed");
+    case 12:
+        return test_fail("runtime post-claim destroy thread create failed");
+    case 13:
+        return test_fail("runtime post-claim sentinel destroy succeeded unexpectedly");
+    case 14:
+        return test_fail("runtime post-claim sentinel did not fail with EBUSY");
+    case 15:
+        return test_fail("runtime post-claim sentinel did not release destroy claim");
+    case 16:
+        return test_fail("runtime post-claim sentinel published heap ownership on failure");
+    default:
+        return test_fail("runtime post-claim active-op sentinel child returned unexpected status");
+    }
+}
 #endif
+
+static int test_runtime_begin_active_op_near_sentinel_fails_busy(void) {
+    llam_runtime_t *runtime = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
+    size_t active_ops;
+    int saved_errno;
+
+    if (llam_runtime_create(NULL, 0U, &runtime) != 0 || runtime == NULL) {
+        return test_fail_errno("runtime active-op near-sentinel setup failed");
+    }
+
+    /*
+     * The final low-half value and the high half of active_ops are reserved as
+     * busy/corrupt sentinel space. Beginning a public op at half-1 must fail
+     * before arithmetic can produce a non-canonical sentinel that later end paths
+     * decrement back into apparently-valid counts.
+     */
+    atomic_store_explicit(&runtime->active_ops, (SIZE_MAX / 2U) - 1U, memory_order_release);
+    errno = 0;
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) == 0) {
+        if (pinned_runtime != NULL) {
+            llam_runtime_end_public_op(pinned_runtime);
+        }
+        atomic_store_explicit(&runtime->active_ops, 0U, memory_order_release);
+        llam_runtime_destroy(runtime);
+        return test_fail("runtime public op accepted near-sentinel active_ops");
+    }
+    saved_errno = errno;
+    active_ops = atomic_load_explicit(&runtime->active_ops, memory_order_acquire);
+    atomic_store_explicit(&runtime->active_ops, 0U, memory_order_release);
+    llam_runtime_destroy(runtime);
+
+    if (saved_errno != EBUSY) {
+        errno = saved_errno;
+        return test_fail_errno("runtime near-sentinel begin did not fail with EBUSY");
+    }
+    if (!llam_public_active_op_is_saturated(active_ops)) {
+        return test_fail("runtime near-sentinel begin did not leave a busy sentinel");
+    }
+    return 0;
+}
+
+static int test_default_spawn_respects_runtime_public_op_gate(void) {
+    llam_runtime_opts_t opts;
+    llam_task_t *task;
+    int rc = 1;
+
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("default runtime init for spawn gate failed");
+    }
+
+    /*
+     * This simulates the destroy side of the default-runtime public-op gate.
+     * Before the guard fix, legacy llam_spawn() bypassed begin_public_op() and
+     * could publish work even while the runtime handle was permanently busy.
+     */
+    atomic_store_explicit(&g_llam_runtime.active_ops, SIZE_MAX, memory_order_release);
+    errno = 0;
+    task = llam_spawn(default_spawn_public_op_noop_task, NULL, NULL);
+    if (task != NULL || errno != EBUSY) {
+        int saved_errno = errno;
+
+        atomic_store_explicit(&g_llam_runtime.active_ops, 0U, memory_order_release);
+        if (task != NULL) {
+            (void)llam_detach(task);
+        }
+        llam_runtime_shutdown();
+        errno = saved_errno;
+        return test_fail_errno("default llam_spawn bypassed runtime public-op gate");
+    }
+    atomic_store_explicit(&g_llam_runtime.active_ops, 0U, memory_order_release);
+    rc = 0;
+
+    llam_runtime_shutdown();
+    return rc;
+}
 
 static int test_runtime_destroy_waits_for_active_run(void) {
 #if LLAM_PLATFORM_POSIX
@@ -2951,10 +3264,12 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
     post_destroy_cleanup_state_t state;
     llam_runtime_t *runtime = NULL;
     llam_task_t *task = NULL;
+    atomic_uint child_ran;
     int rc = 1;
 
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failures, 0U);
+    atomic_init(&child_ran, 0U);
     if (init_runtime_opts(&opts) != 0) {
         return test_fail_errno("runtime opts init failed");
     }
@@ -3015,6 +3330,19 @@ static int test_public_cleanup_after_owner_runtime_destroy(void) {
     }
     if (llam_task_group_cancel(state.group) != -1 || errno != EXDEV) {
         rc = test_fail_errno("post-destroy task group cancel did not fail with EXDEV");
+        goto cleanup;
+    }
+    /*
+     * Cleanup is allowed after owner-runtime teardown, but spawning would need
+     * scheduler queues from the retired runtime.  Keep this as an explicit
+     * regression guard for the raw owner_runtime pointer boundary.
+     */
+    if (llam_task_group_spawn(state.group, foreign_target_task, &child_ran, NULL) != NULL || errno != EXDEV) {
+        rc = test_fail_errno("post-destroy task group spawn did not fail with EXDEV");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&child_ran, memory_order_relaxed) != 0U) {
+        rc = test_fail("post-destroy task group spawn published a child");
         goto cleanup;
     }
 
@@ -3352,6 +3680,7 @@ int main(void) {
         {"cross_runtime_task_owner", test_cross_runtime_task_owner},
         {"cross_runtime_object_owner", test_cross_runtime_object_owner},
         {"cross_runtime_spawn_cancel_token_owner", test_cross_runtime_spawn_cancel_token_owner},
+        {"task_group_spawn_rejects_foreign_cancel_token", test_task_group_spawn_rejects_foreign_cancel_token},
         {"cross_runtime_allocator_returns_are_remote", test_cross_runtime_allocator_returns_are_remote},
         {"task_group_host_spawn_uses_group_runtime", test_task_group_host_spawn_uses_group_runtime},
         {"concurrent_runtime_io", test_concurrent_runtime_io},
@@ -3368,7 +3697,13 @@ int main(void) {
 #if LLAM_PLATFORM_POSIX
         {"runtime_destroy_active_op_sentinel_does_not_hang",
          test_runtime_destroy_active_op_sentinel_does_not_hang},
+        {"runtime_destroy_detects_sentinel_after_claim",
+         test_runtime_destroy_detects_sentinel_after_claim},
 #endif
+        {"runtime_begin_active_op_near_sentinel_fails_busy",
+         test_runtime_begin_active_op_near_sentinel_fails_busy},
+        {"default_spawn_respects_runtime_public_op_gate",
+         test_default_spawn_respects_runtime_public_op_gate},
         {"runtime_destroy_waits_for_active_run", test_runtime_destroy_waits_for_active_run},
         {"unmanaged_join_races_runtime_destroy", test_unmanaged_join_races_runtime_destroy},
         {"runtime_run_start_destroy_race", test_runtime_run_start_destroy_race},

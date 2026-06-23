@@ -24,6 +24,7 @@
  */
 
 #include "server_flood_stats.h"
+#include "server_flood_stats_internal.h"
 
 #if defined(_WIN32)
 
@@ -63,301 +64,92 @@ intmax_t flood_accounting_tolerance(uint64_t expected_deliveries) {
 
 #else
 
+#include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
-#ifdef O_CLOEXEC
-#define FLOOD_OPEN_CLOEXEC O_CLOEXEC
-#else
-#define FLOOD_OPEN_CLOEXEC 0
-#endif
+static bool flood_stats_key_boundary(const char *line, const char *cursor) {
+    unsigned char prev;
 
-#ifdef O_DIRECTORY
-#define FLOOD_OPEN_DIRECTORY O_DIRECTORY
-#else
-#define FLOOD_OPEN_DIRECTORY 0
-#endif
+    if (line == NULL || cursor == NULL) {
+        return false;
+    }
+    if (cursor == line) {
+        return true;
+    }
+    prev = (unsigned char)cursor[-1];
+    return isspace(prev) || prev == ';';
+}
 
-#ifdef O_NOFOLLOW
-#define FLOOD_OPEN_NOFOLLOW O_NOFOLLOW
-#define FLOOD_OPEN_NOFOLLOW_MISSING 0
-#else
-#define FLOOD_OPEN_NOFOLLOW 0
-#define FLOOD_OPEN_NOFOLLOW_MISSING 1
-#endif
+static const char *flood_find_stats_field(const char *line, const char *key) {
+    const char *cursor;
+    size_t key_len;
 
-#ifdef ENOTSUP
-#define FLOOD_OPEN_UNSUPPORTED_ERRNO ENOTSUP
-#else
-#define FLOOD_OPEN_UNSUPPORTED_ERRNO EINVAL
-#endif
-
-static char *flood_dup_range(const char *value, size_t len) {
-    char *copy = malloc(len + 1U);
-
-    if (copy == NULL) {
+    if (line == NULL || key == NULL || key[0] == '\0') {
         return NULL;
     }
-    memcpy(copy, value, len);
-    copy[len] = '\0';
-    return copy;
-}
-
-#if defined(__APPLE__)
-static bool flood_component_matches(const char *path, const char *component) {
-    size_t len = strlen(component);
-
-    return strncmp(path, component, len) == 0 && (path[len] == '\0' || path[len] == '/');
-}
-#endif
-
-static char *flood_rewrite_darwin_root_alias(const char *path) {
-#if defined(__APPLE__)
-    struct flood_alias_entry {
-        const char *prefix;
-        const char *resolved;
-        const char *target_a;
-        const char *target_b;
-    };
-    static const struct flood_alias_entry aliases[] = {
-        {"/var", "/private/var", "private/var", "/private/var"},
-        {"/tmp", "/private/tmp", "private/tmp", "/private/tmp"},
-        {"/etc", "/private/etc", "private/etc", "/private/etc"},
-    };
-
-    for (size_t i = 0U; i < sizeof(aliases) / sizeof(aliases[0]); ++i) {
-        char target[128];
-        ssize_t len;
-
-        if (!flood_component_matches(path, aliases[i].prefix)) {
-            continue;
+    key_len = strlen(key);
+    cursor = line;
+    while ((cursor = strstr(cursor, key)) != NULL) {
+        /*
+         * Reject substrings inside another token, e.g.
+         * "xoutbox_full_drops=0".  The flood harness treats stats as a
+         * security boundary for accounting, so malformed keys must not be
+         * accepted as valid fields.
+         */
+        if (flood_stats_key_boundary(line, cursor) && cursor[key_len] == '=') {
+            return cursor;
         }
-        len = readlink(aliases[i].prefix, target, sizeof(target) - 1U);
-        if (len < 0) {
-            break;
-        }
-        target[len] = '\0';
-        if (strcmp(target, aliases[i].target_a) == 0 || strcmp(target, aliases[i].target_b) == 0) {
-            size_t prefix_len = strlen(aliases[i].prefix);
-            size_t resolved_len = strlen(aliases[i].resolved);
-            size_t suffix_len = strlen(path + prefix_len);
-            char *rewritten = malloc(resolved_len + suffix_len + 1U);
-
-            if (rewritten == NULL) {
-                return NULL;
-            }
-            memcpy(rewritten, aliases[i].resolved, resolved_len);
-            memcpy(rewritten + resolved_len, path + prefix_len, suffix_len + 1U);
-            return rewritten;
-        }
+        ++cursor;
     }
-#else
-    /*
-     * Linux/BSD paths are traversed directly with O_NOFOLLOW.  Only Darwin's
-     * root aliases need rewrite before per-component symlink checks.
-     */
-    (void)path;
-#endif
     return NULL;
 }
 
-static int flood_open_directory_component(int dirfd, const char *component) {
-    int fd = openat(dirfd, component, O_RDONLY | FLOOD_OPEN_DIRECTORY | FLOOD_OPEN_NOFOLLOW | FLOOD_OPEN_CLOEXEC);
-    struct stat st;
-
-    if (fd < 0) {
-        return -1;
-    }
-    if (fstat(fd, &st) != 0) {
-        int saved_errno = errno;
-
-        close(fd);
-        errno = saved_errno;
-        return -1;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        close(fd);
-        errno = ENOTDIR;
-        return -1;
-    }
-    return fd;
-}
-
-static int flood_open_stats_parent_dir(const char *path, const char **leaf_out, char **rewritten_out) {
-    char *rewritten = NULL;
-    const char *work;
-    const char *cursor;
-    int dirfd;
-
-    if (path == NULL || path[0] == '\0' || leaf_out == NULL || rewritten_out == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (path[strlen(path) - 1U] == '/') {
-        errno = EINVAL;
-        return -1;
-    }
-
-    rewritten = flood_rewrite_darwin_root_alias(path);
-    work = rewritten != NULL ? rewritten : path;
-    if (work[0] == '/') {
-        dirfd = open("/", O_RDONLY | FLOOD_OPEN_DIRECTORY | FLOOD_OPEN_CLOEXEC);
-        cursor = work + 1;
-    } else {
-        dirfd = open(".", O_RDONLY | FLOOD_OPEN_DIRECTORY | FLOOD_OPEN_CLOEXEC);
-        cursor = work;
-    }
-    if (dirfd < 0) {
-        free(rewritten);
-        return -1;
-    }
-
-    for (;;) {
-        const char *slash = strchr(cursor, '/');
-        size_t part_len = slash != NULL ? (size_t)(slash - cursor) : strlen(cursor);
-        char *part;
-
-        if (part_len == 0U) {
-            cursor = slash != NULL ? slash + 1 : cursor + strlen(cursor);
-            continue;
-        }
-        part = flood_dup_range(cursor, part_len);
-        if (part == NULL) {
-            close(dirfd);
-            free(rewritten);
-            errno = ENOMEM;
-            return -1;
-        }
-        if (strcmp(part, ".") == 0) {
-            free(part);
-            if (slash == NULL) {
-                close(dirfd);
-                free(rewritten);
-                errno = EINVAL;
-                return -1;
-            }
-            cursor = slash + 1;
-            continue;
-        }
-        if (strcmp(part, "..") == 0) {
-            free(part);
-            close(dirfd);
-            free(rewritten);
-            errno = EINVAL;
-            return -1;
-        }
-        if (slash == NULL) {
-            *leaf_out = cursor;
-            *rewritten_out = rewritten;
-            free(part);
-            return dirfd;
-        }
-
-        {
-            int next_fd = flood_open_directory_component(dirfd, part);
-
-            free(part);
-            if (next_fd < 0) {
-                int saved_errno = errno;
-
-                close(dirfd);
-                free(rewritten);
-                errno = saved_errno;
-                return -1;
-            }
-            close(dirfd);
-            dirfd = next_fd;
-        }
-        cursor = slash + 1;
-    }
-}
-
 static bool flood_parse_u64_field(const char *line, const char *key, uint64_t *out) {
-    const char *cursor = strstr(line, key);
+    const char *cursor = flood_find_stats_field(line, key);
     char *end = NULL;
     unsigned long long parsed;
 
-    if (cursor == NULL || out == NULL) {
-        return false;
-    }
+    if (cursor == NULL || out == NULL) { return false; }
     cursor += strlen(key);
-    if (*cursor != '=') {
-        return false;
-    }
+    if (*cursor != '=') { return false; }
     cursor += 1;
+    if (*cursor == '-' || *cursor == '+') { return false; }
     errno = 0;
     parsed = strtoull(cursor, &end, 10);
-    if (errno != 0 || end == cursor) {
+    if (errno != 0 || end == cursor || (*end != '\0' && !isspace((unsigned char)*end))) {
         return false;
     }
+    if ((uint64_t)parsed > (uint64_t)INTMAX_MAX) { return false; }
+    if (flood_find_stats_field(end, key) != NULL) { return false; }
     *out = (uint64_t)parsed;
     return true;
 }
 
-static FILE *flood_open_stats_file(const char *stats_path) {
-    const char *leaf = NULL;
-    char *rewritten = NULL;
-    int parent_fd;
-    int fd;
-    struct stat st;
-    FILE *file;
+static bool flood_u64_add(uint64_t lhs, uint64_t rhs, uint64_t *out) {
+    if (out == NULL || lhs > UINT64_MAX - rhs) { return false; }
+    *out = lhs + rhs;
+    return true;
+}
 
-    if (stats_path == NULL || stats_path[0] == '\0') {
-        errno = EINVAL;
-        return NULL;
+static bool flood_server_stats_consistent(const flood_server_stats_t *stats) {
+    uint64_t drops;
+
+    if (stats == NULL || !flood_u64_add(stats->outbox_full_drops, stats->outbox_closed_drops, &drops)) {
+        return false;
     }
-#if FLOOD_OPEN_NOFOLLOW_MISSING
-    errno = FLOOD_OPEN_UNSUPPORTED_ERRNO;
-    return NULL;
-#endif
     /*
-     * The server process is not trusted for accounting.  It receives the stats
-     * path through the environment and can replace the private parent
-     * directory with a symlink before shutdown.  Resolve each parent component
-     * with O_NOFOLLOW, then open only the final leaf.
+     * The chat server accounts each attempted fanout delivery as exactly one
+     * enqueue or one explicit outbox drop.  Reject impossible counters before
+     * they can wrap accounting arithmetic and make corrupt stats look valid.
      */
-    parent_fd = flood_open_stats_parent_dir(stats_path, &leaf, &rewritten);
-    if (parent_fd < 0) {
-        return NULL;
+    if (stats->broadcast_deliveries_enqueued > stats->broadcast_deliveries_attempted) {
+        return false;
     }
-    fd = openat(parent_fd, leaf, O_RDONLY | FLOOD_OPEN_NOFOLLOW | FLOOD_OPEN_CLOEXEC);
-    close(parent_fd);
-    free(rewritten);
-    if (fd < 0) {
-        return NULL;
-    }
-    if (fstat(fd, &st) != 0) {
-        int saved_errno = errno;
-
-        close(fd);
-        errno = saved_errno;
-        return NULL;
-    }
-    if (!S_ISREG(st.st_mode)) {
-        close(fd);
-        errno = EINVAL;
-        return NULL;
-    }
-    if (st.st_nlink > 1U) {
-        close(fd);
-        errno = EMLINK;
-        return NULL;
-    }
-    file = fdopen(fd, "r");
-    if (file == NULL) {
-        int saved_errno = errno;
-
-        close(fd);
-        errno = saved_errno;
-        return NULL;
-    }
-    return file;
+    return drops == stats->broadcast_deliveries_attempted - stats->broadcast_deliveries_enqueued;
 }
 
 bool flood_read_server_stats(const char *stats_path, flood_server_stats_t *stats) {
@@ -391,6 +183,10 @@ bool flood_read_server_stats(const char *stats_path, flood_server_stats_t *stats
         !flood_parse_u64_field(last_line, "broadcast_deliveries_enqueued", &stats->broadcast_deliveries_enqueued)) {
         return false;
     }
+    if (!flood_server_stats_consistent(stats)) {
+        memset(stats, 0, sizeof(*stats));
+        return false;
+    }
     stats->available = true;
     return true;
 }
@@ -416,6 +212,7 @@ static intmax_t flood_delta_u64(uint64_t lhs, uint64_t rhs) {
 }
 
 intmax_t flood_abs_imax(intmax_t value) {
+    if (value == INTMAX_MIN) { return INTMAX_MAX; }
     return value < 0 ? -value : value;
 }
 

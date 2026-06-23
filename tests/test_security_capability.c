@@ -27,6 +27,7 @@
 #include "runtime_broker.h"
 #include "runtime_broker_ring.h"
 #include "runtime_proto_core.h"
+#include "runtime_proto_io.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -53,6 +54,8 @@
 #endif
 #endif
 
+void llam_runtime_test_force_live_iter_snapshot_alloc_failure(bool enabled);
+
 /*
  * Broker values are intentionally valid caller-owned objects, so examples and
  * tests may place them on the stack. Keep the control object below conservative
@@ -78,6 +81,10 @@ _Static_assert(offsetof(llam_broker_ring_t, broker_stats) - offsetof(llam_broker
                    LLAM_BROKER_RING_CACHELINE,
                "broker client and broker stats must not share a cache line");
 
+static int test_ascii_space(int ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
+}
+
 static uint64_t test_env_u64(const char *name, uint64_t fallback, uint64_t max_value) {
     const char *value;
     char *end = NULL;
@@ -85,6 +92,9 @@ static uint64_t test_env_u64(const char *name, uint64_t fallback, uint64_t max_v
 
     value = getenv(name);
     if (value == NULL || value[0] == '\0') {
+        return fallback;
+    }
+    if (test_ascii_space((unsigned char)value[0]) || value[0] == '-' || value[0] == '+') {
         return fallback;
     }
     errno = 0;
@@ -144,6 +154,84 @@ static uint64_t test_broker_ring_batch_max_p99_us(void) {
 #endif
 }
 
+static void live_iter_count_callback(llam_runtime_t *rt, void *arg) {
+    unsigned *visited = (unsigned *)arg;
+
+    (void)rt;
+    if (visited != NULL) {
+        *visited += 1U;
+    }
+}
+
+static int test_runtime_live_iter_alloc_failure_releases_pins(void) {
+    enum { RUNTIME_COUNT = 17 };
+    llam_runtime_t *runtimes[RUNTIME_COUNT];
+    unsigned visited = 0U;
+    size_t leaked = 0U;
+    int saved_errno;
+    int rc = 1;
+
+    memset(runtimes, 0, sizeof(runtimes));
+    for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
+        if (llam_runtime_create(NULL, 0U, &runtimes[i]) != 0 || runtimes[i] == NULL) {
+            (void)fprintf(stderr,
+                          "[test_security_capability] live runtime iterator setup failed errno=%d\n",
+                          errno);
+            goto cleanup;
+        }
+    }
+
+    /*
+     * More than 16 live runtimes forces the iterator from its stack snapshot to
+     * heap storage. The fault hook proves the OOM path releases every active-op
+     * pin it acquired while taking that snapshot.
+     */
+    llam_runtime_test_force_live_iter_snapshot_alloc_failure(true);
+    errno = 0;
+    if (llam_runtime_for_each_live(live_iter_count_callback, &visited) != -1) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator ignored forced allocation failure\n");
+        goto cleanup;
+    }
+    saved_errno = errno;
+    if (saved_errno != ENOMEM) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator failed with errno=%d expected=%d\n",
+                      saved_errno,
+                      ENOMEM);
+        goto cleanup;
+    }
+    if (visited != 0U) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator ran %u callback(s) after allocation failure\n",
+                      visited);
+        goto cleanup;
+    }
+    for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
+        if (llam_public_active_op_count(&runtimes[i]->active_ops) != 0U) {
+            leaked += 1U;
+            atomic_store_explicit(&runtimes[i]->active_ops, 0U, memory_order_release);
+        }
+    }
+    if (leaked != 0U) {
+        (void)fprintf(stderr,
+                      "[test_security_capability] live runtime iterator leaked %zu active-op pin(s)\n",
+                      leaked);
+        rc = 1;
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_test_force_live_iter_snapshot_alloc_failure(false);
+    for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
+        if (runtimes[i] != NULL) {
+            llam_runtime_destroy(runtimes[i]);
+        }
+    }
+    return rc;
+}
+
 static size_t broker_active_task_count(const llam_broker_t *broker) {
     size_t count = 0U;
 
@@ -152,6 +240,79 @@ static size_t broker_active_task_count(const llam_broker_t *broker) {
     }
     for (size_t i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
         count += broker->tasks[i].active ? 1U : 0U;
+    }
+    return count;
+}
+
+static int test_io_req_cancel_retire_blocks_address_reuse(void) {
+    llam_runtime_t runtime;
+    llam_shard_t shard;
+    llam_io_req_t req;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&shard, 0, sizeof(shard));
+    memset(&req, 0, sizeof(req));
+    runtime.shards = &shard;
+    runtime.active_shards = 1U;
+    shard.runtime = &runtime;
+    shard.id = 0U;
+    llam_io_req_reset(&req, &runtime, 0U, 0U);
+
+    atomic_store_explicit(&req.cancel_submitted, 1U, memory_order_release);
+    llam_io_req_free(&shard, &req);
+    if (shard.allocator.io_req_free != NULL ||
+        atomic_load_explicit(&shard.allocator.io_req_remote_free, memory_order_acquire) != NULL ||
+        atomic_load_explicit(&req.free_after_cancel, memory_order_acquire) != 1U) {
+        fprintf(stderr, "[test_security_capability] cancel-submitted io req was recycled before cancel retire\n");
+        return -1;
+    }
+
+    atomic_store_explicit(&req.cancel_submitted, 0U, memory_order_release);
+    if (atomic_exchange_explicit(&req.free_after_cancel, 0U, memory_order_acq_rel) != 1U) {
+        fprintf(stderr, "[test_security_capability] deferred io req free marker was lost\n");
+        return -1;
+    }
+    llam_io_req_free(NULL, &req);
+    if (shard.allocator.io_req_free != &req &&
+        atomic_load_explicit(&shard.allocator.io_req_remote_free, memory_order_acquire) != &req) {
+        fprintf(stderr, "[test_security_capability] retired cancel io req was not returned exactly once\n");
+        return -1;
+    }
+    return 0;
+}
+
+static size_t broker_active_buffer_count(const llam_broker_t *broker) {
+    size_t count = 0U;
+
+    if (broker == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_BUFFER_SLOTS; ++i) {
+        count += broker->buffers[i].active ? 1U : 0U;
+    }
+    return count;
+}
+
+static size_t broker_active_descriptor_count(const llam_broker_t *broker) {
+    size_t count = 0U;
+
+    if (broker == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        count += broker->descriptors[i].active ? 1U : 0U;
+    }
+    return count;
+}
+
+static size_t broker_active_channel_count(const llam_broker_t *broker) {
+    size_t count = 0U;
+
+    if (broker == NULL || broker->channels == NULL) {
+        return 0U;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
+        count += broker->channels[i].active ? 1U : 0U;
     }
     return count;
 }
@@ -269,6 +430,7 @@ static int test_broker_destroy_scrubs_authority_state(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -336,6 +498,7 @@ static int test_broker_transport_subject_rejects_destroying_broker(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -376,6 +539,7 @@ static int test_broker_transport_subject_requires_os_entropy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -431,6 +595,7 @@ static int test_broker_transport_subject_collision_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -595,6 +760,23 @@ static int test_token_tamper_rejected(void) {
         return -1;
     }
     token.slot ^= 1U;
+
+    /*
+     * UINT64_MAX is a reserved invalid slot sentinel. Validation must reject it
+     * as malformed token structure before treating it like an ordinary MAC
+     * mismatch; otherwise callers cannot distinguish reserved authority bytes
+     * from normal tampering and future issue-path regressions would reach the
+     * MAC oracle path.
+     */
+    token.slot = UINT64_MAX;
+    errno = 0;
+    if (expect_errno(llam_capability_validate(&key, &token, LLAM_CAP_RIGHT_SEND, object.revocation_epoch),
+                     EINVAL,
+                     "reserved max-slot token reached MAC validation") != 0) {
+        return -1;
+    }
+    token.slot = object.slot;
+
     token.rights |= LLAM_CAP_RIGHT_DESTROY;
     errno = 0;
     if (expect_errno(llam_capability_validate(&key, &token, LLAM_CAP_RIGHT_DESTROY, object.revocation_epoch),
@@ -758,6 +940,7 @@ static int test_capability_key_requires_os_entropy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     llam_capability_test_force_entropy_failure(true);
     errno = 0;
@@ -781,6 +964,7 @@ static int test_in_process_runtime_does_not_require_broker_entropy(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
 
     /*
@@ -893,6 +1077,7 @@ static int test_broker_issue_validate_and_revoke(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -920,6 +1105,68 @@ static int test_broker_issue_validate_and_revoke(void) {
     return 0;
 }
 
+static int test_broker_revoke_all_epoch_overflow_invalidates_authority(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    uint64_t next_epoch;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    if (llam_broker_create_channel(&broker,
+                                   2U,
+                                   LLAM_CAP_RIGHT_SEND | LLAM_CAP_RIGHT_CLOSE,
+                                   &token) != 0) {
+        goto done;
+    }
+    if (llam_broker_validate_cap(&broker, &token, LLAM_CAP_RIGHT_SEND) != 0) {
+        goto done;
+    }
+
+    /*
+     * Epoch 0 is not a valid capability epoch. If revoke_all wraps UINT64_MAX
+     * back to 1, an old epoch-1 token can become valid again with the same
+     * slot/generation/MAC material. Overflow must instead invalidate authority
+     * and report EOVERFLOW.
+     */
+    atomic_store_explicit(&broker.revocation_epoch, UINT64_MAX, memory_order_release);
+    errno = 0;
+    next_epoch = llam_broker_revoke_all(&broker);
+    if (next_epoch != 0U || errno != EOVERFLOW) {
+        if (llam_broker_validate_cap(&broker, &token, LLAM_CAP_RIGHT_SEND) == 0) {
+            fprintf(stderr, "[test_security_capability] revoke_all overflow reactivated old token\n");
+        } else {
+            fprintf(stderr,
+                    "[test_security_capability] revoke_all overflow returned epoch=%" PRIu64 " errno=%d\n",
+                    next_epoch,
+                    errno);
+        }
+        goto done;
+    }
+    errno = 0;
+    if (expect_errno(llam_broker_validate_cap(&broker, &token, LLAM_CAP_RIGHT_SEND),
+                     EACCES,
+                     "overflow-revoked token accepted") != 0) {
+        goto done;
+    }
+    if (llam_broker_revocation_epoch(&broker) != 0U) {
+        fprintf(stderr, "[test_security_capability] overflow revoke did not publish terminal zero epoch\n");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 static int test_broker_create_paths_clear_output_on_invalid_input(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -932,6 +1179,7 @@ static int test_broker_create_paths_clear_output_on_invalid_input(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1062,6 +1310,146 @@ done:
     return rc;
 }
 
+static int test_broker_object_id_max_fails_before_wrap(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    const unsigned char payload[1] = {0x41U};
+#if LLAM_PLATFORM_WINDOWS
+    HANDLE pipe_read = INVALID_HANDLE_VALUE;
+    HANDLE pipe_write = INVALID_HANDLE_VALUE;
+#else
+    int pipe_fds[2] = {-1, -1};
+#endif
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+
+    /*
+     * UINT64_MAX is not a valid token slot. Creation must reject it before
+     * mutating the broker ID counter or activating a slot; otherwise the first
+     * failing call wraps the counter to 0 and reports the wrong contract errno.
+     */
+    broker.next_buffer_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_register_buffer(&broker,
+                                                 payload,
+                                                 sizeof(payload),
+                                                 LLAM_CAP_RIGHT_READ,
+                                                 &token),
+                     EOVERFLOW,
+                     "broker buffer id max did not fail before wrap") != 0 ||
+        broker.next_buffer_id != UINT64_MAX ||
+        broker_active_buffer_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_buffer_id = 1U;
+
+    broker.next_channel_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_create_channel(&broker,
+                                                1U,
+                                                LLAM_CAP_RIGHT_SEND,
+                                                &token),
+                     EOVERFLOW,
+                     "broker channel id max did not fail before wrap") != 0 ||
+        broker.next_channel_id != UINT64_MAX ||
+        broker_active_channel_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_channel_id = 1U;
+
+#if LLAM_PLATFORM_WINDOWS
+    if (!CreatePipe(&pipe_read, &pipe_write, NULL, 0U)) {
+        goto done;
+    }
+    broker.next_descriptor_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_register_handle(&broker,
+                                                 (llam_handle_t)pipe_read,
+                                                 LLAM_CAP_RIGHT_READ,
+                                                 false,
+                                                 &token),
+                     EOVERFLOW,
+                     "broker descriptor id max did not fail before wrap") != 0 ||
+        broker.next_descriptor_id != UINT64_MAX ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_descriptor_id = 1U;
+#else
+    if (pipe(pipe_fds) != 0) {
+        goto done;
+    }
+    broker.next_descriptor_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_register_fd(&broker,
+                                             pipe_fds[0],
+                                             LLAM_CAP_RIGHT_READ,
+                                             false,
+                                             &token),
+                     EOVERFLOW,
+                     "broker descriptor id max did not fail before wrap") != 0 ||
+        broker.next_descriptor_id != UINT64_MAX ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+    broker.next_descriptor_id = 1U;
+#endif
+
+    broker.next_task_id = UINT64_MAX;
+    memset(&token, 0xa5, sizeof(token));
+    errno = 0;
+    if (expect_errno(llam_broker_spawn_task(&broker,
+                                            LLAM_BROKER_TASK_KIND_RETURN_U64,
+                                            1U,
+                                            LLAM_CAP_RIGHT_JOIN,
+                                            &token),
+                     EOVERFLOW,
+                     "broker task id max did not fail before wrap") != 0 ||
+        broker.next_task_id != UINT64_MAX ||
+        broker_active_task_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U)) {
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+#if LLAM_PLATFORM_WINDOWS
+    if (pipe_read != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe_read);
+    }
+    if (pipe_write != INVALID_HANDLE_VALUE) {
+        CloseHandle(pipe_write);
+    }
+#else
+    if (pipe_fds[0] >= 0) {
+        close(pipe_fds[0]);
+    }
+    if (pipe_fds[1] >= 0) {
+        close(pipe_fds[1]);
+    }
+#endif
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 static int test_broker_transport_grants_require_explicit_rights(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -1080,6 +1468,7 @@ static int test_broker_transport_grants_require_explicit_rights(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1217,6 +1606,7 @@ static int test_broker_transport_malformed_requests_fail_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1354,6 +1744,7 @@ static int test_broker_direct_issue_clears_output_on_invalid_input(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1394,6 +1785,7 @@ static int test_broker_validate_requires_nonzero_rights(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1464,6 +1856,7 @@ static int test_broker_attenuate_capability(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1541,6 +1934,7 @@ static int test_broker_subject_bound_tokens(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1616,6 +2010,7 @@ static int test_broker_nested_subject_scope_restores_outer(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1665,6 +2060,7 @@ static int test_broker_nested_subject_conflict_preserves_outer(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1707,6 +2103,7 @@ static int test_broker_nested_subject_depth_overflow_preserves_scope(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1776,6 +2173,7 @@ static int test_broker_object_revocation_rotates_generation(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1875,6 +2273,107 @@ done:
     return rc;
 }
 
+static int test_broker_revoke_cannot_expand_object_rights(void) {
+    unsigned char initial[4] = {1U, 2U, 3U, 4U};
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t full;
+    llam_capability_token_t destroy_only;
+    llam_capability_token_t widened;
+#if !LLAM_PLATFORM_WINDOWS
+    int fd = -1;
+#endif
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+
+    if (llam_broker_register_buffer(&broker,
+                                    initial,
+                                    sizeof(initial),
+                                    LLAM_CAP_RIGHT_READ | LLAM_CAP_RIGHT_WRITE | LLAM_CAP_RIGHT_DESTROY,
+                                    &full) != 0 ||
+        llam_broker_revoke_object_cap(&broker, &full, LLAM_CAP_RIGHT_DESTROY, &destroy_only) != 0 ||
+        expect_errno(llam_broker_validate_cap(&broker, &destroy_only, LLAM_CAP_RIGHT_READ),
+                     EACCES,
+                     "destroy-only buffer token kept read right") != 0 ||
+        expect_errno(llam_broker_revoke_object_cap(&broker,
+                                                   &destroy_only,
+                                                   LLAM_CAP_RIGHT_READ | LLAM_CAP_RIGHT_WRITE |
+                                                       LLAM_CAP_RIGHT_DESTROY,
+                                                   &widened),
+                     EACCES,
+                     "destroy-only buffer token expanded rights") != 0) {
+        goto done;
+    }
+
+    if (llam_broker_create_channel(&broker,
+                                   2U,
+                                   LLAM_CAP_RIGHT_SEND | LLAM_CAP_RIGHT_RECV |
+                                       LLAM_CAP_RIGHT_CLOSE | LLAM_CAP_RIGHT_DESTROY,
+                                   &full) != 0 ||
+        llam_broker_revoke_object_cap(&broker, &full, LLAM_CAP_RIGHT_DESTROY, &destroy_only) != 0 ||
+        expect_errno(llam_broker_validate_cap(&broker, &destroy_only, LLAM_CAP_RIGHT_SEND),
+                     EACCES,
+                     "destroy-only channel token kept send right") != 0 ||
+        expect_errno(llam_broker_revoke_object_cap(&broker,
+                                                   &destroy_only,
+                                                   LLAM_CAP_RIGHT_SEND | LLAM_CAP_RIGHT_RECV |
+                                                       LLAM_CAP_RIGHT_CLOSE | LLAM_CAP_RIGHT_DESTROY,
+                                                   &widened),
+                     EACCES,
+                     "destroy-only channel token expanded rights") != 0) {
+        goto done;
+    }
+
+#if !LLAM_PLATFORM_WINDOWS
+    fd = open("/dev/null", O_RDWR);
+    if (fd < 0) {
+        goto done;
+    }
+    if (llam_broker_register_fd(&broker,
+                                fd,
+                                LLAM_CAP_RIGHT_READ | LLAM_CAP_RIGHT_WRITE | LLAM_CAP_RIGHT_DESTROY,
+                                true,
+                                &full) != 0) {
+        close(fd);
+        fd = -1;
+        goto done;
+    }
+    fd = -1;
+    if (llam_broker_revoke_object_cap(&broker, &full, LLAM_CAP_RIGHT_DESTROY, &destroy_only) != 0 ||
+        expect_errno(llam_broker_validate_cap(&broker, &destroy_only, LLAM_CAP_RIGHT_READ),
+                     EACCES,
+                     "destroy-only descriptor token kept read right") != 0 ||
+        expect_errno(llam_broker_revoke_object_cap(&broker,
+                                                   &destroy_only,
+                                                   LLAM_CAP_RIGHT_READ | LLAM_CAP_RIGHT_WRITE |
+                                                       LLAM_CAP_RIGHT_DESTROY,
+                                                   &widened),
+                     EACCES,
+                     "destroy-only descriptor token expanded rights") != 0) {
+        goto done;
+    }
+#endif
+
+    rc = 0;
+
+done:
+#if !LLAM_PLATFORM_WINDOWS
+    if (fd >= 0) {
+        close(fd);
+    }
+#endif
+    llam_broker_destroy(&broker);
+    return rc;
+}
+
 static int test_broker_destroy_drains_unjoined_task_slots(void) {
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -1884,6 +2383,7 @@ static int test_broker_destroy_drains_unjoined_task_slots(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1937,6 +2437,7 @@ static int test_broker_destroy_cancels_sleeping_task_slots(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -1982,6 +2483,7 @@ static int test_broker_failed_task_join_consumes_slot(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2070,6 +2572,7 @@ static int test_broker_wire_task_join_sleep_returns_eagain(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2157,6 +2660,7 @@ static int test_broker_wire_task_join_does_not_drain_peer_sleep(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2205,10 +2709,9 @@ static int test_broker_wire_task_join_does_not_drain_peer_sleep(void) {
     join_started = true;
 
     /*
-     * Synchronous wire joins may only opportunistically drive short work when
-     * doing so cannot also wait out another client's long sleeping command in
-     * the same broker runtime. Otherwise a cheap quick-task join becomes a
-     * control-plane delay primitive.
+     * Quick broker commands complete synchronously and must not need a runtime
+     * drain. Joining one while another client's long sleep is pending should
+     * return the quick result promptly and leave the sleep task outstanding.
      */
     if (!broker_wait_for_atomic_done(&join_state.done, max_join_wait_ns)) {
         (void)llam_runtime_request_stop_rt(broker.runtime);
@@ -2220,9 +2723,9 @@ static int test_broker_wire_task_join_does_not_drain_peer_sleep(void) {
     }
     (void)pthread_join(join_thread, NULL);
     join_started = false;
-    if (join_state.response.status == 0 ||
-        join_state.response.error_code != EAGAIN ||
-        join_state.response.result0 != 0U) {
+    if (join_state.response.status != 0 ||
+        join_state.response.result0 != 16U ||
+        broker_active_task_count(&broker) != 1U) {
         fprintf(stderr,
                 "[test_security_capability] quick TASK_JOIN with peer sleep status=%d errno=%d result=%" PRIu64 "\n",
                 join_state.response.status,
@@ -2254,6 +2757,7 @@ static int test_broker_rejects_foreign_runtime_token(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2757,6 +3261,7 @@ static int test_broker_concurrent_channel_state(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2861,6 +3366,7 @@ static int test_broker_validate_revoke_race_guard(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -2902,63 +3408,78 @@ done:
 }
 
 static int test_broker_listen_unix_preserves_existing_file(void) {
-    char path[128];
+    char dir_template[128] = {0};
+    char path[128] = {0};
     char data[8] = {0};
     FILE *file;
     int fd = -1;
     int written;
+    int rc = -1;
 
-    written = snprintf(path, sizeof(path), "/tmp/llam-broker-regular-%ld.sock", (long)getpid());
-    if (written < 0 || (size_t)written >= sizeof(path)) {
+    written = snprintf(dir_template, sizeof(dir_template), "/tmp/llam-broker-regular-%ld.XXXXXX", (long)getpid());
+    if (written < 0 || (size_t)written >= sizeof(dir_template) || mkdtemp(dir_template) == NULL) {
         return -1;
     }
-    (void)unlink(path);
+    (void)chmod(dir_template, 0700);
+    written = snprintf(path, sizeof(path), "%s/regular.sock", dir_template);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        goto done;
+    }
     file = fopen(path, "wb");
     if (file == NULL) {
-        return -1;
+        goto done;
     }
     if (fwrite("keep", 1U, 4U, file) != 4U || fclose(file) != 0) {
-        (void)unlink(path);
-        return -1;
+        goto done;
     }
 
     errno = 0;
     if (expect_errno(llam_broker_listen_unix(path, &fd),
                      EEXIST,
                      "broker listen unlinked a non-socket path") != 0) {
-        if (fd >= 0) {
-            close(fd);
-        }
-        (void)unlink(path);
-        return -1;
+        goto done;
     }
     file = fopen(path, "rb");
     if (file == NULL) {
-        (void)unlink(path);
-        return -1;
+        goto done;
     }
     if (fread(data, 1U, 4U, file) != 4U || memcmp(data, "keep", 4U) != 0) {
         (void)fclose(file);
-        (void)unlink(path);
-        return -1;
+        goto done;
     }
     (void)fclose(file);
-    (void)unlink(path);
-    return 0;
+    rc = 0;
+
+done:
+    if (fd >= 0) {
+        close(fd);
+    }
+    if (path[0] != '\0') {
+        (void)unlink(path);
+    }
+    if (dir_template[0] != '\0') {
+        (void)rmdir(dir_template);
+    }
+    return rc;
 }
 
 static int test_broker_listen_unix_owner_only_mode(void) {
-    char path[128];
+    char dir_template[128] = {0};
+    char path[128] = {0};
     struct stat info;
     int fd = -1;
     int written;
     int rc = -1;
 
-    written = snprintf(path, sizeof(path), "/tmp/llam-broker-mode-%ld.sock", (long)getpid());
-    if (written < 0 || (size_t)written >= sizeof(path)) {
+    written = snprintf(dir_template, sizeof(dir_template), "/tmp/llam-broker-mode-%ld.XXXXXX", (long)getpid());
+    if (written < 0 || (size_t)written >= sizeof(dir_template) || mkdtemp(dir_template) == NULL) {
         return -1;
     }
-    (void)unlink(path);
+    (void)chmod(dir_template, 0700);
+    written = snprintf(path, sizeof(path), "%s/broker.sock", dir_template);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        goto done;
+    }
     if (llam_broker_listen_unix(path, &fd) != 0) {
         goto done;
     }
@@ -2977,7 +3498,12 @@ done:
     if (fd >= 0) {
         close(fd);
     }
-    (void)unlink(path);
+    if (path[0] != '\0') {
+        (void)unlink(path);
+    }
+    if (dir_template[0] != '\0') {
+        (void)rmdir(dir_template);
+    }
     return rc;
 }
 
@@ -3207,45 +3733,10 @@ static bool broker_fd_has_cloexec(int fd) {
     return flags >= 0 && (flags & FD_CLOEXEC) != 0;
 }
 
-static size_t broker_active_descriptor_count(const llam_broker_t *broker) {
-    size_t count = 0U;
-
-    if (broker == NULL) {
-        return 0U;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
-        count += broker->descriptors[i].active ? 1U : 0U;
-    }
-    return count;
-}
-
-static size_t broker_active_buffer_count(const llam_broker_t *broker) {
-    size_t count = 0U;
-
-    if (broker == NULL) {
-        return 0U;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_BUFFER_SLOTS; ++i) {
-        count += broker->buffers[i].active ? 1U : 0U;
-    }
-    return count;
-}
-
-static size_t broker_active_channel_count(const llam_broker_t *broker) {
-    size_t count = 0U;
-
-    if (broker == NULL || broker->channels == NULL) {
-        return 0U;
-    }
-    for (size_t i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
-        count += broker->channels[i].active ? 1U : 0U;
-    }
-    return count;
-}
-
 static int broker_write_request_plain(int fd, const llam_broker_wire_request_t *request);
 
 static int test_broker_posix_transport_fds_are_cloexec(void) {
+    char dir_template[128];
     char path[128];
     llam_runtime_opts_t opts;
     llam_broker_t broker;
@@ -3269,17 +3760,22 @@ static int test_broker_posix_transport_fds_are_cloexec(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
     broker_initialized = true;
 
-    written = snprintf(path, sizeof(path), "/tmp/llam-broker-cloexec-%ld.sock", (long)getpid());
-    if (written < 0 || (size_t)written >= sizeof(path)) {
+    written = snprintf(dir_template, sizeof(dir_template), "/tmp/llam-broker-cloexec-%ld.XXXXXX", (long)getpid());
+    if (written < 0 || (size_t)written >= sizeof(dir_template) || mkdtemp(dir_template) == NULL) {
         return -1;
     }
-    (void)unlink(path);
+    (void)chmod(dir_template, 0700);
+    written = snprintf(path, sizeof(path), "%s/broker.sock", dir_template);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        goto done;
+    }
     if (llam_broker_listen_unix(path, &listen_fd) != 0) {
         goto done;
     }
@@ -3390,6 +3886,7 @@ done:
         close(listen_fd);
     }
     (void)unlink(path);
+    (void)rmdir(dir_template);
     if (broker_initialized) {
         llam_broker_destroy(&broker);
     }
@@ -3449,6 +3946,7 @@ static int test_broker_create_response_failure_rolls_back_memory_grants(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3506,6 +4004,7 @@ static int test_broker_register_descriptor_response_failure_rolls_back(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3610,6 +4109,7 @@ static int test_broker_detach_reclaims_racing_completed_task_slots(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -3685,6 +4185,7 @@ static int test_broker_task_spawn_response_failure_rolls_back_race(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4195,6 +4696,7 @@ static int test_broker_direct_failed_outputs_are_cleared(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4486,6 +4988,7 @@ static int test_broker_invalid_register_descriptor_closes_received_fd(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4559,6 +5062,7 @@ static int test_broker_overauthorized_descriptor_array_closes_all_received_fds(v
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4643,6 +5147,7 @@ static int test_broker_unclaimed_descriptor_is_rejected_and_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4788,6 +5293,7 @@ static int test_broker_serve_one_fd_keeps_session_subject(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4848,6 +5354,7 @@ static int test_broker_transport_rejects_cross_session_replay(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -4947,6 +5454,7 @@ static int test_broker_transport_subject_table_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -5246,6 +5754,7 @@ static int test_broker_ring_reinit_stale_session_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -5861,6 +6370,7 @@ static int test_broker_ring_batch_perf_gate(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
@@ -6211,6 +6721,7 @@ static int test_broker_ring_multiprocess_session_replay_guard(void) {
         if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
         }
+        opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
         if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
@@ -6371,6 +6882,7 @@ static int test_broker_ring_multiprocess_teardown_guard(void) {
         if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
         }
+        opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
         if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(2);
@@ -6475,6 +6987,7 @@ static int test_broker_ring_capability_validate_op(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6569,6 +7082,7 @@ static int test_broker_ring_capability_attenuate_op(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6642,6 +7156,7 @@ static int test_broker_ring_capability_revoke_op(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6722,6 +7237,7 @@ static int test_broker_ring_failed_output_windows_are_cleared(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6848,6 +7364,7 @@ static int test_broker_ring_malformed_submissions_fail_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -6926,6 +7443,7 @@ static int test_broker_ring_buffer_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7024,6 +7542,7 @@ static int test_broker_ring_channel_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7186,6 +7705,7 @@ static int test_broker_ring_task_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7215,24 +7735,12 @@ static int test_broker_ring_task_data_plane(void) {
     if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
         llam_broker_ring_serve_one(&broker, &ring) != 0 ||
         llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
-        completion.status == 0 ||
-        completion.error_code != EAGAIN) {
-        goto done;
-    }
-
-    if (llam_runtime_run_handle(broker.runtime) != 0) {
-        goto done;
-    }
-    submission.request_id = 52U;
-    if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
-        llam_broker_ring_serve_one(&broker, &ring) != 0 ||
-        llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
         completion.status != 0 ||
         completion.result0 != UINT64_C(0x123456789abcdef0)) {
         goto done;
     }
 
-    submission.request_id = 53U;
+    submission.request_id = 52U;
     if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
         llam_broker_ring_serve_one(&broker, &ring) != 0 ||
         llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
@@ -7409,21 +7917,8 @@ static int test_broker_ring_task_data_plane(void) {
     if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
         llam_broker_ring_serve_one(&broker, &ring) != 0 ||
         llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
-        completion.status != 0) {
-        goto done;
-    }
-    memcpy(&task_token, ring.data + 896U, sizeof(task_token));
-    if (llam_runtime_run_handle(broker.runtime) != 0) {
-        goto done;
-    }
-    submission.request_id = 66U;
-    submission.op = LLAM_BROKER_RING_OP_TASK_JOIN;
-    submission.token = task_token;
-    if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
-        llam_broker_ring_serve_one(&broker, &ring) != 0 ||
-        llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
-        completion.status != 0 ||
-        completion.result0 != 1U) {
+        completion.status == 0 ||
+        completion.error_code != EINVAL) {
         goto done;
     }
 
@@ -7447,6 +7942,7 @@ static int test_broker_ring_subject_bound_session(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7502,26 +7998,13 @@ static int test_broker_ring_subject_bound_session(void) {
     if (llam_broker_ring_serve_one_subject(&broker, &ring, subject_id) != 0 ||
         llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
         completion.request_id != submission.request_id ||
-        completion.status == 0 ||
-        completion.error_code != EAGAIN) {
-        goto done;
-    }
-
-    if (llam_runtime_run_handle(broker.runtime) != 0) {
-        goto done;
-    }
-    submission.request_id = 92U;
-    if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
-        llam_broker_ring_serve_one_subject(&broker, &ring, subject_id) != 0 ||
-        llam_broker_ring_complete_pop(&ring, &completion) != 0 ||
-        completion.request_id != submission.request_id ||
         completion.status != 0 ||
         completion.result0 != UINT64_C(0x987654321)) {
         goto done;
     }
 
     memset(&submission, 0, sizeof(submission));
-    submission.request_id = 93U;
+    submission.request_id = 92U;
     submission.op = LLAM_BROKER_RING_OP_NOP;
     if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
         goto done;
@@ -7566,6 +8049,7 @@ static int test_broker_ring_fd_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7667,6 +8151,8 @@ done:
 typedef struct broker_ring_serve_thread_state {
     llam_broker_t *broker;
     llam_broker_ring_t *ring;
+    size_t max_requests;
+    size_t served;
     int rc;
     int error_code;
 } broker_ring_serve_thread_state_t;
@@ -7683,6 +8169,10 @@ typedef struct broker_destroy_thread_state {
     llam_broker_t *broker;
 } broker_destroy_thread_state_t;
 
+typedef struct broker_end_op_thread_state {
+    llam_broker_t *broker;
+} broker_end_op_thread_state_t;
+
 typedef struct broker_buffer_read_thread_state {
     llam_broker_t *broker;
     const llam_capability_token_t *token;
@@ -7695,7 +8185,18 @@ typedef struct broker_buffer_read_thread_state {
 static void *broker_ring_serve_thread(void *arg) {
     broker_ring_serve_thread_state_t *state = (broker_ring_serve_thread_state_t *)arg;
 
-    state->rc = llam_broker_ring_serve_one(state->broker, state->ring);
+    if (state->max_requests > 1U) {
+        state->rc = llam_broker_ring_serve_batch(state->broker,
+                                                 state->ring,
+                                                 state->max_requests,
+                                                 &state->served);
+    } else {
+        state->served = 0U;
+        state->rc = llam_broker_ring_serve_one(state->broker, state->ring);
+        if (state->rc == 0) {
+            state->served = 1U;
+        }
+    }
     state->error_code = state->rc == 0 ? 0 : errno;
     return NULL;
 }
@@ -7712,6 +8213,13 @@ static void *broker_destroy_thread(void *arg) {
     broker_destroy_thread_state_t *state = (broker_destroy_thread_state_t *)arg;
 
     llam_broker_destroy(state->broker);
+    return NULL;
+}
+
+static void *broker_end_op_thread(void *arg) {
+    broker_end_op_thread_state_t *state = (broker_end_op_thread_state_t *)arg;
+
+    llam_broker_end_op(state->broker);
     return NULL;
 }
 
@@ -7778,6 +8286,7 @@ static int test_broker_nested_op_survives_destroy_start(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7874,6 +8383,7 @@ static int test_broker_nested_dispatch_survives_destroy_start(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -7945,6 +8455,7 @@ static int test_broker_nested_ring_create_survives_destroy_start(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8021,6 +8532,7 @@ static int test_broker_destroy_is_single_owner_under_race(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8096,6 +8608,7 @@ static int test_broker_destroy_active_op_sentinel_does_not_hang(void) {
         if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(10);
         }
+        opts.deterministic = 1U;
         opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
         if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
             _exit(11);
@@ -8163,6 +8676,247 @@ static int test_broker_destroy_active_op_sentinel_does_not_hang(void) {
 }
 #endif
 
+static int test_broker_destroy_from_active_op_does_not_hang(void) {
+#if LLAM_PLATFORM_POSIX
+    pid_t pid;
+    int status = 0;
+
+    pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        llam_runtime_opts_t opts;
+        llam_broker_t broker;
+
+        if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(10);
+        }
+        opts.deterministic = 1U;
+        opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+        if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+            _exit(11);
+        }
+        if (llam_broker_begin_op(&broker) != 0) {
+            llam_broker_destroy(&broker);
+            _exit(12);
+        }
+        /*
+         * Destroy from the same active broker operation cannot drain active_ops:
+         * the only thread that can call end_op is blocked inside destroy. It must
+         * therefore fail closed with EBUSY and leave the broker initialized.
+         */
+        (void)alarm(2U);
+        errno = 0;
+        llam_broker_destroy(&broker);
+        if (errno != EBUSY) {
+            _exit(13);
+        }
+        if (!broker.initialized) {
+            _exit(14);
+        }
+        llam_broker_end_op(&broker);
+        llam_broker_destroy(&broker);
+        _exit(0);
+    }
+
+    if (waitpid(pid, &status, 0) != pid) {
+        return -1;
+    }
+    if (WIFSIGNALED(status)) {
+        if (WTERMSIG(status) == SIGALRM) {
+            fprintf(stderr, "[test_security_capability] broker destroy hung from active op\n");
+            return -1;
+        }
+        fprintf(stderr,
+                "[test_security_capability] broker active-op destroy child died from signal %d\n",
+                WTERMSIG(status));
+        return -1;
+    }
+    if (!WIFEXITED(status)) {
+        return -1;
+    }
+    switch (WEXITSTATUS(status)) {
+    case 0:
+        return 0;
+    case 10:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy opts init failed\n");
+        return -1;
+    case 11:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy init failed\n");
+        return -1;
+    case 12:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy begin_op failed\n");
+        return -1;
+    case 13:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy did not set EBUSY\n");
+        return -1;
+    case 14:
+        fprintf(stderr, "[test_security_capability] broker active-op destroy consumed broker\n");
+        return -1;
+    default:
+        fprintf(stderr,
+                "[test_security_capability] broker active-op destroy child returned %d\n",
+                WEXITSTATUS(status));
+        return -1;
+    }
+#else
+    return 0;
+#endif
+}
+
+static int test_broker_end_op_requires_thread_local_owner(void) {
+#if LLAM_PLATFORM_POSIX
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    broker_end_op_thread_state_t end_state;
+    pthread_t end_thread;
+    bool broker_initialized = false;
+    bool active_op = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (llam_broker_begin_op(&broker) != 0) {
+        goto done;
+    }
+    active_op = true;
+
+    /*
+     * active_ops is a lifecycle pin owned by the thread-local op frame that
+     * began it. A foreign thread must not be able to release that pin: doing so
+     * would let destroy proceed while the original accepted request is still
+     * executing against broker-owned authority and runtime state.
+     */
+    end_state.broker = &broker;
+    if (pthread_create(&end_thread, NULL, broker_end_op_thread, &end_state) != 0) {
+        goto done;
+    }
+    (void)pthread_join(end_thread, NULL);
+    if (broker_test_active_ops(&broker) != 1U) {
+        fprintf(stderr,
+                "[test_security_capability] foreign broker end_op released active pin count=%" PRIu32 "\n",
+                broker_test_active_ops(&broker));
+        goto done;
+    }
+    llam_broker_end_op(&broker);
+    active_op = false;
+    if (broker_test_active_ops(&broker) != 0U) {
+        fprintf(stderr,
+                "[test_security_capability] owner broker end_op did not release active pin count=%" PRIu32 "\n",
+                broker_test_active_ops(&broker));
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (active_op) {
+        llam_broker_end_op(&broker);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    return rc;
+#else
+    return 0;
+#endif
+}
+
+static int test_broker_begin_active_op_sentinel_fails_busy(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    int rc;
+    int saved_errno;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    if (llam_broker_lock(&broker) != 0) {
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+    /*
+     * The slot immediately before the high-half sentinel is the last value
+     * where a naive begin could increment into the reserved range. Beginning a
+     * new op must fail before crossing that boundary.
+     */
+    broker.active_ops = LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL - 1U;
+    llam_broker_unlock(&broker);
+
+    errno = 0;
+    rc = llam_broker_begin_op(&broker);
+    saved_errno = errno;
+    if (rc != -1 || saved_errno != EBUSY) {
+        fprintf(stderr,
+                "[test_security_capability] broker begin near-sentinel rc=%d errno=%d expected EBUSY\n",
+                rc,
+                saved_errno);
+        if (llam_broker_lock(&broker) == 0) {
+            broker.active_ops = 0U;
+            llam_broker_unlock(&broker);
+        }
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+
+    if (llam_broker_lock(&broker) == 0) {
+        /*
+         * The broker active-op high half is a permanent busy/corrupt lifecycle
+         * state. New operations must report EBUSY, matching destroy and public
+         * handle sentinel semantics, rather than exposing it as a generic
+         * counter overflow.
+         */
+        broker.active_ops = LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL;
+        llam_broker_unlock(&broker);
+    }
+    errno = 0;
+    rc = llam_broker_begin_op(&broker);
+    saved_errno = errno;
+    if (rc != -1 || saved_errno != EBUSY) {
+        fprintf(stderr,
+                "[test_security_capability] broker begin sentinel rc=%d errno=%d expected EBUSY\n",
+                rc,
+                saved_errno);
+        if (llam_broker_lock(&broker) == 0) {
+            broker.active_ops = 0U;
+            llam_broker_unlock(&broker);
+        }
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+    llam_broker_end_op(&broker);
+    if (broker_test_active_ops(&broker) != LLAM_BROKER_ACTIVE_OP_BUSY_SENTINEL) {
+        fprintf(stderr,
+                "[test_security_capability] broker end decremented sentinel to %" PRIu32 "\n",
+                broker_test_active_ops(&broker));
+        if (llam_broker_lock(&broker) == 0) {
+            broker.active_ops = 0U;
+            llam_broker_unlock(&broker);
+        }
+        llam_broker_destroy(&broker);
+        return -1;
+    }
+
+    if (llam_broker_lock(&broker) == 0) {
+        broker.active_ops = 0U;
+        llam_broker_unlock(&broker);
+    }
+    llam_broker_destroy(&broker);
+    return 0;
+}
+
 static int test_broker_destroy_waits_for_active_ring_io(void) {
     static const char inbound[] = "destroy waits";
     llam_runtime_opts_t opts;
@@ -8184,6 +8938,7 @@ static int test_broker_destroy_waits_for_active_ring_io(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8215,17 +8970,17 @@ static int test_broker_destroy_waits_for_active_ring_io(void) {
     serve_started = true;
 
     /*
-     * Wait until the ring serve operation and its nested descriptor read are
-     * both pinned. Without the broker active-op guard, destroy could clear the
-     * broker lock/table while the serve thread later publishes completion.
+     * Wait until the ring serve operation is pinned. Descriptor I/O releases its
+     * own broker lifecycle pin before blocking, but the outer ring serve remains
+     * an active operation until it can publish or fail the completion.
      */
     for (unsigned i = 0U; i < 100000U; ++i) {
-        if (broker_test_active_ops(&broker) >= 2U) {
+        if (broker_test_active_ops(&broker) >= 1U) {
             break;
         }
         sched_yield();
     }
-    if (broker_test_active_ops(&broker) < 2U) {
+    if (broker_test_active_ops(&broker) < 1U) {
         goto done;
     }
 
@@ -8293,6 +9048,7 @@ static int test_broker_ring_publish_cursor_mismatch_fails_closed(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8314,9 +9070,19 @@ static int test_broker_ring_publish_cursor_mismatch_fails_closed(void) {
     if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
         goto done;
     }
+    memset(&submission, 0, sizeof(submission));
+    submission.request_id = 73U;
+    submission.op = LLAM_BROKER_RING_OP_TASK_SPAWN;
+    submission.arg0 = LLAM_BROKER_TASK_KIND_RETURN_U64;
+    submission.arg1 = UINT64_C(0x1234);
+    submission.arg2 = 128U;
+    if (llam_broker_ring_submit_push(&ring, &submission) != 0) {
+        goto done;
+    }
     memset(&serve_state, 0, sizeof(serve_state));
     serve_state.broker = &broker;
     serve_state.ring = &ring;
+    serve_state.max_requests = 2U;
     serve_state.rc = -1;
     if (pthread_create(&serve_thread, NULL, broker_ring_serve_thread, &serve_state) != 0) {
         goto done;
@@ -8324,18 +9090,18 @@ static int test_broker_ring_publish_cursor_mismatch_fails_closed(void) {
     serve_started = true;
 
     /*
-     * Wait until the broker has copied the submission and is blocked inside
-     * the nested descriptor read. The client-visible ring cursors are shared
-     * memory, so a corrupt client can still modify them before the broker
-     * publishes completions. That must fail closed at publish time.
+     * Wait until the broker has entered ring serve. The client-visible ring
+     * cursors are shared memory, so a corrupt client can still modify them
+     * before the broker publishes completions. That must fail closed at publish
+     * time and must not execute the queued TASK_SPAWN behind this read.
      */
     for (unsigned i = 0U; i < 100000U; ++i) {
-        if (broker_test_active_ops(&broker) >= 2U) {
+        if (broker_test_active_ops(&broker) >= 1U) {
             break;
         }
         sched_yield();
     }
-    if (broker_test_active_ops(&broker) < 2U) {
+    if (broker_test_active_ops(&broker) < 1U) {
         goto done;
     }
     atomic_store_explicit(&ring.submit_head.value, UINT64_C(123), memory_order_release);
@@ -8349,6 +9115,12 @@ static int test_broker_ring_publish_cursor_mismatch_fails_closed(void) {
                 "[test_security_capability] broker published after cursor corruption rc=%d errno=%d\n",
                 serve_state.rc,
                 serve_state.error_code);
+        goto done;
+    }
+    if (broker_active_task_count(&broker) != 0U) {
+        fprintf(stderr,
+                "[test_security_capability] cursor-corrupted ring batch leaked %zu task slots\n",
+                broker_active_task_count(&broker));
         goto done;
     }
     errno = 0;
@@ -8373,7 +9145,7 @@ static int test_broker_ring_publish_cursor_mismatch_fails_closed(void) {
         goto done;
     }
     memset(&submission, 0, sizeof(submission));
-    submission.request_id = 73U;
+    submission.request_id = 74U;
     submission.op = LLAM_BROKER_RING_OP_NOP;
     if (llam_broker_ring_submit_push(&ring, &submission) != 0 ||
         llam_broker_ring_serve_one(&broker, &ring) != 0 ||
@@ -8432,6 +9204,7 @@ static int test_broker_ring_session_forget_rejects_busy_serve(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8575,6 +9348,7 @@ static int test_broker_ring_named_session_cleanup_unlinks_mapping(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8660,6 +9434,7 @@ static int test_broker_destroy_reclaims_inactive_owned_ring_mapping(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8745,6 +9520,7 @@ static int test_broker_ring_reuse_reclaims_inactive_owned_mapping(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8821,6 +9597,7 @@ static int test_broker_buffer_reuse_reclaims_inactive_storage(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8894,6 +9671,7 @@ static int test_broker_destroy_reclaims_inactive_owned_descriptor(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -8972,6 +9750,7 @@ static int test_broker_descriptor_reuse_reclaims_inactive_owned_slot(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9147,6 +9926,7 @@ static int broker_ring_windows_session_child(const char *name,
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
@@ -9233,6 +10013,7 @@ static int broker_ring_windows_teardown_child(const char *name, uint64_t iterati
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return 2;
@@ -9808,6 +10589,7 @@ static int test_broker_ring_handle_data_plane(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -9948,6 +10730,7 @@ static int test_broker_register_handle_clears_inherit_flag(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         goto done;
@@ -10116,6 +10899,7 @@ static int test_broker_pipe_transport_handle_grants(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -10388,6 +11172,7 @@ static int test_broker_pipe_create_ring_write_failure_closes_remote_handle(void)
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -10504,6 +11289,7 @@ static int test_broker_pipe_serve_local_n_survives_malformed_session(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -11037,6 +11823,7 @@ static int test_broker_socketpair_transport(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -11556,6 +12343,7 @@ static int test_broker_create_ring_response_failure_reclaims_session(void) {
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
@@ -11620,26 +12408,37 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     llam_broker_t broker;
     broker_local_server_thread_state_t state;
     pthread_t thread;
-    char path[128];
+    char dir_template[128] = {0};
+    char path[128] = {0};
     bool thread_started = false;
     bool thread_cancelled = false;
     bool broker_initialized = false;
+    const size_t self_test_attempts = 20U;
+    int written;
     int rc = -1;
 
     if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
+    opts.deterministic = 1U;
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
         return -1;
     }
     broker_initialized = true;
-    snprintf(path, sizeof(path), "/tmp/llam-broker-malformed-%ld.sock", (long)getpid());
-    (void)unlink(path);
+    written = snprintf(dir_template, sizeof(dir_template), "/tmp/llam-broker-malformed-%ld.XXXXXX", (long)getpid());
+    if (written < 0 || (size_t)written >= sizeof(dir_template) || mkdtemp(dir_template) == NULL) {
+        goto done;
+    }
+    (void)chmod(dir_template, 0700);
+    written = snprintf(path, sizeof(path), "%s/broker.sock", dir_template);
+    if (written < 0 || (size_t)written >= sizeof(path)) {
+        goto done;
+    }
 
     state.broker = &broker;
     state.path = path;
-    state.max_connections = 8U;
+    state.max_connections = self_test_attempts + 8U;
     atomic_init(&state.done, 0);
     state.rc = -1;
     if (pthread_create(&thread, NULL, broker_local_server_thread, &state) != 0) {
@@ -11658,7 +12457,7 @@ static int test_broker_serve_local_n_survives_malformed_session(void) {
     if (broker_connect_and_close(path) != 0) {
         goto done;
     }
-    if (broker_client_self_test_unix_retry(path, 5U) != 0) {
+    if (broker_client_self_test_unix_retry(path, self_test_attempts) != 0) {
         fprintf(stderr,
                 "[test_security_capability] malformed local server follow-up self-test failed errno=%d\n",
                 errno);
@@ -11690,7 +12489,12 @@ done:
             rc = -1;
         }
     }
-    (void)unlink(path);
+    if (path[0] != '\0') {
+        (void)unlink(path);
+    }
+    if (dir_template[0] != '\0') {
+        (void)rmdir(dir_template);
+    }
     if (broker_initialized) {
         llam_broker_destroy(&broker);
     }
@@ -11720,6 +12524,9 @@ int main(int argc, char **argv) {
         char *end = NULL;
         unsigned long long iterations;
 
+        if (test_ascii_space((unsigned char)argv[4][0]) || argv[4][0] == '-' || argv[4][0] == '+') {
+            return 2;
+        }
         errno = 0;
         iterations = strtoull(argv[4], &end, 10);
         if (argv[2][0] == '\0' || argv[3][0] == '\0' || end == argv[4] || *end != '\0') {
@@ -11736,6 +12543,9 @@ int main(int argc, char **argv) {
         char *end = NULL;
         unsigned long long iterations;
 
+        if (test_ascii_space((unsigned char)argv[3][0]) || argv[3][0] == '-' || argv[3][0] == '+') {
+            return 2;
+        }
         errno = 0;
         iterations = strtoull(argv[3], &end, 10);
         if (argv[2][0] == '\0' || end == argv[3] || *end != '\0') {
@@ -11765,7 +12575,9 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_capability_issue_requires_os_entropy);
     LLAM_RUN_SECURITY_TEST(test_capability_issue_clears_output_on_invalid_input);
     LLAM_RUN_SECURITY_TEST(test_broker_issue_validate_and_revoke);
+    LLAM_RUN_SECURITY_TEST(test_broker_revoke_all_epoch_overflow_invalidates_authority);
     LLAM_RUN_SECURITY_TEST(test_broker_create_paths_clear_output_on_invalid_input);
+    LLAM_RUN_SECURITY_TEST(test_broker_object_id_max_fails_before_wrap);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_grants_require_explicit_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_transport_malformed_requests_fail_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_direct_issue_clears_output_on_invalid_input);
@@ -11780,10 +12592,13 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_conflict_preserves_outer);
     LLAM_RUN_SECURITY_TEST(test_broker_nested_subject_depth_overflow_preserves_scope);
     LLAM_RUN_SECURITY_TEST(test_broker_object_revocation_rotates_generation);
+    LLAM_RUN_SECURITY_TEST(test_broker_revoke_cannot_expand_object_rights);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_drains_unjoined_task_slots);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_cancels_sleeping_task_slots);
     LLAM_RUN_SECURITY_TEST(test_broker_failed_task_join_consumes_slot);
     LLAM_RUN_SECURITY_TEST(test_broker_rejects_foreign_runtime_token);
+    LLAM_RUN_SECURITY_TEST(test_io_req_cancel_retire_blocks_address_reuse);
+    LLAM_RUN_SECURITY_TEST(test_runtime_live_iter_alloc_failure_releases_pins);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_and_buffer_grants);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_doorbell_waits);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_doorbell_flood);
@@ -11843,6 +12658,9 @@ int main(int argc, char **argv) {
 #if LLAM_PLATFORM_POSIX
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_active_op_sentinel_does_not_hang);
 #endif
+    LLAM_RUN_SECURITY_TEST(test_broker_destroy_from_active_op_does_not_hang);
+    LLAM_RUN_SECURITY_TEST(test_broker_end_op_requires_thread_local_owner);
+    LLAM_RUN_SECURITY_TEST(test_broker_begin_active_op_sentinel_fails_busy);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_publish_cursor_mismatch_fails_closed);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_session_forget_rejects_busy_serve);

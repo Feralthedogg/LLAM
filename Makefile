@@ -13,7 +13,7 @@ TESTHOOK_OBJDIR ?= $(OBJDIR)-testhooks
 SHARED_CPPFLAGS ?= $(CPPFLAGS) -DLLAM_BUILD_SHARED
 PICFLAGS ?= -fPIC -fvisibility=hidden
 LLAM_ABI_MAJOR ?= 2
-LLAM_VERSION ?= 2.0.0
+LLAM_VERSION ?= 2.1.0
 SANITIZER_TARGETS_ENABLED ?= 0
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
@@ -170,6 +170,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_internal.h \
 	src/internal/runtime_types.h \
 	src/internal/runtime_public_slot.h \
+	src/internal/runtime_public_active_op.h \
 	src/internal/runtime_public_slot_seal.h \
 	src/internal/runtime_capability.h \
 	src/internal/runtime_broker.h \
@@ -181,144 +182,153 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_proto_sched.h \
 	src/internal/runtime_proto_io.h \
 	src/internal/runtime_proto_sync.h \
+	src/core/task/task_group_internal.h \
+	src/core/task/task_handle_registry_internal.h \
 	src/engine/runtime_watchdog_internal.h \
 	src/io/runtime_io_api_internal.h \
-	src/io/runtime_io_watch_migration_live_finalize_template.inc \
-	src/io/runtime_io_watch_migration_live_forward_template.inc \
-	src/io/runtime_io_watch_rehome_accept_template.inc \
-	src/io/runtime_io_watch_rehome_recv_template.inc \
-	src/io/runtime_io_watch_rehome_template.inc \
+	src/io/watch/migration_live_finalize_template.inc \
+	src/io/watch/migration_live_forward_template.inc \
+	src/io/watch/rehome_accept_template.inc \
+	src/io/watch/rehome_recv_template.inc \
+	src/io/watch/rehome_template.inc \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
 	src/io/linux/runtime_io_watch_linux_internal.h \
 	src/io/windows/runtime_io_watch_windows_internal.h
 
 RUNTIME_COMMON_OBJS = \
-	$(OBJDIR)/src/core/runtime.o \
-	$(OBJDIR)/src/core/runtime_abi.o \
-	$(OBJDIR)/src/core/runtime_errno.o \
-	$(OBJDIR)/src/core/runtime_util.o \
-	$(OBJDIR)/src/core/runtime_io_udata.o \
-	$(OBJDIR)/src/core/runtime_capability.o \
-	$(OBJDIR)/src/core/runtime_broker.o \
-	$(OBJDIR)/src/core/runtime_broker_ops.o \
-	$(OBJDIR)/src/core/runtime_broker_validate.o \
-	$(OBJDIR)/src/core/runtime_broker_buffer.o \
-	$(OBJDIR)/src/core/runtime_broker_descriptor.o \
-	$(OBJDIR)/src/core/runtime_broker_channel.o \
-	$(OBJDIR)/src/core/runtime_broker_revoke.o \
-	$(OBJDIR)/src/core/runtime_broker_task.o \
-	$(OBJDIR)/src/core/runtime_broker_windows_security.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_dispatch.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_ops.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_response.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_rollback.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_ring.o \
-	$(OBJDIR)/src/core/runtime_broker_transport.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows_fd_stubs.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows_pipe.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_windows_session.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_posix.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_posix_message.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_posix_socket.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_unix.o \
-	$(OBJDIR)/src/core/runtime_broker_transport_selftest.o \
-	$(OBJDIR)/src/core/runtime_broker_ring.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_buffer_grant.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_doorbell.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_dispatch.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_ops.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_queue.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_stats.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_shm.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_shm_posix.o \
-	$(OBJDIR)/src/core/runtime_broker_ring_shm_windows.o \
-	$(OBJDIR)/src/core/runtime_fault.o \
-	$(OBJDIR)/src/core/runtime_names.o \
-	$(OBJDIR)/src/core/runtime_time.o \
-	$(OBJDIR)/src/core/runtime_fp.o \
-	$(OBJDIR)/src/core/runtime_stack_sample.o \
-	$(OBJDIR)/src/core/runtime_context_portable.o \
-	$(OBJDIR)/src/core/runtime_queue_base.o \
-	$(OBJDIR)/src/core/runtime_norm_queue_depth.o \
-	$(OBJDIR)/src/core/runtime_norm_queue.o \
-	$(OBJDIR)/src/core/runtime_queue.o \
-	$(OBJDIR)/src/core/runtime_alloc.o \
-	$(OBJDIR)/src/core/runtime_allocator_quiescent.o \
-	$(OBJDIR)/src/core/runtime_task_alloc.o \
-	$(OBJDIR)/src/core/runtime_task_handle_registry.o \
-	$(OBJDIR)/src/core/runtime_io_object_alloc.o \
-	$(OBJDIR)/src/core/runtime_wait_timer_alloc.o \
-	$(OBJDIR)/src/core/runtime_trace.o \
-	$(OBJDIR)/src/core/runtime_wake.o \
-	$(OBJDIR)/src/core/runtime_platform.o \
-	$(OBJDIR)/src/core/runtime_windows.o \
-	$(OBJDIR)/src/core/runtime_safepoint.o \
-	$(OBJDIR)/src/core/runtime_wait.o \
-	$(OBJDIR)/src/core/runtime_task_reclaim.o \
-	$(OBJDIR)/src/core/runtime_task_stack.o \
-	$(OBJDIR)/src/core/runtime_reinject.o \
-	$(OBJDIR)/src/core/runtime_wait_accounting.o \
-	$(OBJDIR)/src/core/runtime_wait_tracking.o \
-	$(OBJDIR)/src/core/runtime_timer_heap.o \
-	$(OBJDIR)/src/core/runtime_timer.o \
-	$(OBJDIR)/src/engine/runtime_engine.o \
-	$(OBJDIR)/src/engine/runtime_block.o \
-	$(OBJDIR)/src/io/runtime_io_engine.o \
-	$(OBJDIR)/src/engine/runtime_watchdog.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_probe.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_merge.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_rehome.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_scale.o \
-	$(OBJDIR)/src/engine/runtime_watchdog_worker.o \
-	$(OBJDIR)/src/core/runtime_api.o \
-	$(OBJDIR)/src/core/runtime_spawn.o \
-	$(OBJDIR)/src/core/runtime_yield_join_sleep.o \
-	$(OBJDIR)/src/core/runtime_blocking_api.o \
-	$(OBJDIR)/src/core/runtime_cancel_api.o \
-	$(OBJDIR)/src/core/runtime_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_scheduler.o \
-	$(OBJDIR)/src/core/runtime_init.o \
-	$(OBJDIR)/src/core/runtime_shutdown.o \
-	$(OBJDIR)/src/core/runtime_run.o \
-	$(OBJDIR)/src/core/runtime_sync.o \
-	$(OBJDIR)/src/core/runtime_mutex_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_mutex.o \
-	$(OBJDIR)/src/core/runtime_cond_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_cond.o \
-	$(OBJDIR)/src/core/runtime_channel_cache.o \
-	$(OBJDIR)/src/core/runtime_channel_lifecycle.o \
-	$(OBJDIR)/src/core/runtime_channel_fast.o \
-	$(OBJDIR)/src/core/runtime_channel.o \
-	$(OBJDIR)/src/core/runtime_channel_select_fast.o \
-	$(OBJDIR)/src/core/runtime_channel_select.o \
-	$(OBJDIR)/src/core/runtime_handle.o \
-	$(OBJDIR)/src/core/runtime_owner.o \
-	$(OBJDIR)/src/core/runtime_registry.o \
-	$(OBJDIR)/src/core/runtime_task_group.o \
-	$(OBJDIR)/src/core/runtime_task_local.o \
-	$(OBJDIR)/src/io/runtime_io_api.o \
-	$(OBJDIR)/src/io/runtime_io_api_direct.o \
-	$(OBJDIR)/src/io/runtime_io_api_direct_tuning.o \
-	$(OBJDIR)/src/io/runtime_io_api_issue.o \
-	$(OBJDIR)/src/io/runtime_io_api_blocking_ops.o \
-	$(OBJDIR)/src/io/runtime_io_api_blocking_file_ops.o \
-	$(OBJDIR)/src/io/runtime_io_buffer_registry.o \
-	$(OBJDIR)/src/io/runtime_io_api_owned.o \
-	$(OBJDIR)/src/io/runtime_io_api_handle_positional.o \
-	$(OBJDIR)/src/io/runtime_io_api_positional.o \
-	$(OBJDIR)/src/io/runtime_io_api_positional_util.o \
-	$(OBJDIR)/src/io/runtime_io_api_public.o \
-	$(OBJDIR)/src/io/windows/runtime_windows_iocp.o \
-	$(OBJDIR)/src/core/runtime_debug_dump_helpers.o \
-	$(OBJDIR)/src/core/runtime_debug_stats_json.o \
-	$(OBJDIR)/src/core/runtime_debug.o \
-	$(OBJDIR)/src/io/runtime_io_watch.o \
-	$(OBJDIR)/src/io/runtime_io_watch_close.o \
-	$(OBJDIR)/src/io/runtime_io_watch_lookup.o \
-	$(OBJDIR)/src/io/runtime_io_watch_migration.o \
-	$(OBJDIR)/src/io/runtime_io_watch_queue.o \
-	$(OBJDIR)/src/io/runtime_io_watch_waiter.o
+	$(OBJDIR)/src/core/lifecycle/runtime.o \
+	$(OBJDIR)/src/core/base/abi.o \
+	$(OBJDIR)/src/core/base/errno.o \
+	$(OBJDIR)/src/core/base/util.o \
+	$(OBJDIR)/src/core/base/io_udata.o \
+	$(OBJDIR)/src/core/registry/capability.o \
+	$(OBJDIR)/src/core/broker/broker.o \
+	$(OBJDIR)/src/core/broker/broker_lifecycle.o \
+	$(OBJDIR)/src/core/broker/broker_ops.o \
+	$(OBJDIR)/src/core/broker/broker_validate.o \
+	$(OBJDIR)/src/core/broker/broker_buffer.o \
+	$(OBJDIR)/src/core/broker/broker_descriptor.o \
+	$(OBJDIR)/src/core/broker/broker_channel.o \
+	$(OBJDIR)/src/core/broker/broker_revoke.o \
+	$(OBJDIR)/src/core/broker/broker_task.o \
+	$(OBJDIR)/src/core/broker/broker_windows_security.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_dispatch.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_ops.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_response.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_rollback.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_ring.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows_fd_stubs.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows_pipe.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_windows_session.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_posix.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_posix_socket.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_unix.o \
+	$(OBJDIR)/src/core/broker/transport/broker_transport_selftest.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_buffer_grant.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_doorbell.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_dispatch.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_ops.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_queue.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_stats.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_shm.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_shm_posix.o \
+	$(OBJDIR)/src/core/broker/ring/broker_ring_shm_windows.o \
+	$(OBJDIR)/src/core/debug/fault.o \
+	$(OBJDIR)/src/core/base/names.o \
+	$(OBJDIR)/src/core/time/time.o \
+	$(OBJDIR)/src/core/context/fp.o \
+	$(OBJDIR)/src/core/context/stack_sample.o \
+	$(OBJDIR)/src/core/context/context_portable.o \
+	$(OBJDIR)/src/core/sched/queue_base.o \
+	$(OBJDIR)/src/core/sched/norm_queue_depth.o \
+	$(OBJDIR)/src/core/sched/norm_queue.o \
+	$(OBJDIR)/src/core/sched/core_queue.o \
+	$(OBJDIR)/src/core/memory/alloc.o \
+	$(OBJDIR)/src/core/memory/allocator_quiescent.o \
+	$(OBJDIR)/src/core/task/task_alloc.o \
+	$(OBJDIR)/src/core/task/task_handle_registry.o \
+	$(OBJDIR)/src/core/task/task_handle_claim.o \
+	$(OBJDIR)/src/core/memory/io_object_alloc.o \
+	$(OBJDIR)/src/core/wait/wait_timer_alloc.o \
+	$(OBJDIR)/src/core/debug/trace.o \
+	$(OBJDIR)/src/core/sched/wake.o \
+	$(OBJDIR)/src/core/platform/platform.o \
+	$(OBJDIR)/src/core/platform/windows_policy.o \
+	$(OBJDIR)/src/core/sched/safepoint.o \
+	$(OBJDIR)/src/core/wait/wait.o \
+	$(OBJDIR)/src/core/task/task_reclaim.o \
+	$(OBJDIR)/src/core/task/task_stack.o \
+	$(OBJDIR)/src/core/sched/reinject.o \
+	$(OBJDIR)/src/core/wait/wait_accounting.o \
+	$(OBJDIR)/src/core/wait/wait_tracking.o \
+	$(OBJDIR)/src/core/time/timer_heap.o \
+	$(OBJDIR)/src/core/time/timer.o \
+	$(OBJDIR)/src/core/api/timer_api.o \
+	$(OBJDIR)/src/core/api/signal_api.o \
+	$(OBJDIR)/src/engine/scheduler/scheduler_engine.o \
+	$(OBJDIR)/src/engine/scheduler/block.o \
+	$(OBJDIR)/src/io/engine/io_engine.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_probe.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_merge.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_scale.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_worker.o \
+	$(OBJDIR)/src/core/api/core_api.o \
+	$(OBJDIR)/src/core/task/spawn.o \
+	$(OBJDIR)/src/core/task/yield_join_sleep.o \
+	$(OBJDIR)/src/core/api/blocking_api.o \
+	$(OBJDIR)/src/core/api/cancel_api.o \
+	$(OBJDIR)/src/core/lifecycle/lifecycle.o \
+	$(OBJDIR)/src/core/sched/scheduler.o \
+	$(OBJDIR)/src/core/lifecycle/init.o \
+	$(OBJDIR)/src/core/lifecycle/shutdown.o \
+	$(OBJDIR)/src/core/lifecycle/run.o \
+	$(OBJDIR)/src/core/sync/sync.o \
+	$(OBJDIR)/src/core/sync/mutex_lifecycle.o \
+	$(OBJDIR)/src/core/sync/mutex.o \
+	$(OBJDIR)/src/core/sync/cond_lifecycle.o \
+	$(OBJDIR)/src/core/sync/cond.o \
+	$(OBJDIR)/src/core/sync/channel_cache.o \
+	$(OBJDIR)/src/core/sync/channel_lifecycle.o \
+	$(OBJDIR)/src/core/sync/channel_fast.o \
+	$(OBJDIR)/src/core/sync/channel.o \
+	$(OBJDIR)/src/core/sync/channel_select_fast.o \
+	$(OBJDIR)/src/core/sync/channel_select.o \
+	$(OBJDIR)/src/core/registry/handle.o \
+	$(OBJDIR)/src/core/registry/owner.o \
+	$(OBJDIR)/src/core/registry/registry.o \
+	$(OBJDIR)/src/core/task/task_group.o \
+	$(OBJDIR)/src/core/task/task_group_registry.o \
+	$(OBJDIR)/src/core/task/task_local.o \
+	$(OBJDIR)/src/io/api/io_api.o \
+	$(OBJDIR)/src/io/api/direct.o \
+	$(OBJDIR)/src/io/api/direct_tuning.o \
+	$(OBJDIR)/src/io/api/issue.o \
+	$(OBJDIR)/src/io/api/blocking_ops.o \
+	$(OBJDIR)/src/io/api/blocking_file_ops.o \
+	$(OBJDIR)/src/io/api/blocking_wrappers.o \
+	$(OBJDIR)/src/io/buffer/buffer_registry.o \
+	$(OBJDIR)/src/io/api/owned.o \
+	$(OBJDIR)/src/io/api/datagram.o \
+	$(OBJDIR)/src/io/api/handle_positional.o \
+	$(OBJDIR)/src/io/api/positional.o \
+	$(OBJDIR)/src/io/api/positional_util.o \
+	$(OBJDIR)/src/io/api/public.o \
+	$(OBJDIR)/src/io/windows/watch/iocp.o \
+	$(OBJDIR)/src/core/debug/debug_dump_helpers.o \
+	$(OBJDIR)/src/core/debug/debug_stats_json.o \
+	$(OBJDIR)/src/core/debug/debug.o \
+	$(OBJDIR)/src/io/watch/watch.o \
+	$(OBJDIR)/src/io/watch/close.o \
+	$(OBJDIR)/src/io/watch/watch_lookup.o \
+	$(OBJDIR)/src/io/watch/migration.o \
+	$(OBJDIR)/src/io/watch/watch_queue.o \
+	$(OBJDIR)/src/io/watch/waiter.o
 
 ifeq ($(HOST_PLATFORM),linux)
 LDLIBS += -lm
@@ -328,59 +338,59 @@ CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
 endif
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_prelude.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_state.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_lookup.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_migration_live.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_migration_rehome.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_control.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_submit.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_cqe.o \
-	$(OBJDIR)/src/io/linux/runtime_io_watch_linux_worker.o
+	$(OBJDIR)/src/io/linux/watch/prelude.o \
+	$(OBJDIR)/src/io/linux/watch/linux_state.o \
+	$(OBJDIR)/src/io/linux/watch/linux_lookup.o \
+	$(OBJDIR)/src/io/linux/watch/linux_migration_live.o \
+	$(OBJDIR)/src/io/linux/watch/linux_migration_rehome.o \
+	$(OBJDIR)/src/io/linux/watch/linux_control.o \
+	$(OBJDIR)/src/io/linux/watch/linux_submit.o \
+	$(OBJDIR)/src/io/linux/watch/cqe.o \
+	$(OBJDIR)/src/io/linux/watch/linux_worker.o
 ifeq ($(UNAME_M),x86_64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o \
-	$(OBJDIR)/src/asm/linux/x86_64/runtime_linux_x86_64.o
+	$(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o \
+	$(OBJDIR)/src/asm/linux/x86_64/wake_syscalls_x86_64.o
 else ifeq ($(UNAME_M),aarch64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/runtime_context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+	$(OBJDIR)/src/core/context/context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
 endif
 else ifeq ($(HOST_PLATFORM),darwin)
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -luring,$(LDLIBS))
 CPPFLAGS += -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_state.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_live.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_rehome.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_control.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_completion.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_events.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_worker.o
+	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_control.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
+	$(OBJDIR)/src/io/darwin/watch/events.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
 ifeq ($(UNAME_M),arm64)
-RUNTIME_OBJS += $(OBJDIR)/src/core/runtime_context_arm64.o
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/arm64/context_arm64.o
+RUNTIME_OBJS += $(OBJDIR)/src/core/context/context_arm64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/arm64/darwin_context_arm64.o
 else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/darwin_context_x86_64.o
 endif
 else ifeq ($(HOST_PLATFORM),windows)
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
 LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock -ladvapi32
 CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_state.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_socket.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_pool.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_control.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_submit.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_completion.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows_fallback.o \
-	$(OBJDIR)/src/io/windows/runtime_io_watch_windows.o
+	$(OBJDIR)/src/io/windows/watch/windows_state.o \
+	$(OBJDIR)/src/io/windows/watch/socket.o \
+	$(OBJDIR)/src/io/windows/watch/pool.o \
+	$(OBJDIR)/src/io/windows/watch/windows_control.o \
+	$(OBJDIR)/src/io/windows/watch/windows_submit.o \
+	$(OBJDIR)/src/io/windows/watch/windows_completion.o \
+	$(OBJDIR)/src/io/windows/watch/fallback.o \
+	$(OBJDIR)/src/io/windows/watch/windows_watch.o
 ifeq ($(UNAME_M),AMD64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
 else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
 endif
 else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
@@ -391,38 +401,40 @@ ifeq ($(UNAME_S),NetBSD)
 LDLIBS += -lrt
 endif
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_state.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_live.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_migration_rehome.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_control.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_completion.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_events.o \
-	$(OBJDIR)/src/io/darwin/runtime_io_watch_darwin_worker.o
+	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_control.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
+	$(OBJDIR)/src/io/darwin/watch/events.o \
+	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
 ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
 else ifeq ($(UNAME_M),amd64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/context_x86_64.o
+RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
 else ifeq ($(UNAME_M),aarch64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/runtime_context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+	$(OBJDIR)/src/core/context/context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
 else ifeq ($(UNAME_M),arm64)
 RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/runtime_context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/context_arm64.o
+	$(OBJDIR)/src/core/context/context_arm64.o \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
 endif
 endif
 endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_capability.o \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_buffer.o \
-	$(TESTHOOK_OBJDIR)/src/core/runtime_broker_transport.o
+	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
+	$(TESTHOOK_OBJDIR)/src/core/broker/broker_buffer.o \
+	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport.o \
+	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
-		$(OBJDIR)/src/core/runtime_capability.o \
-		$(OBJDIR)/src/core/runtime_broker_buffer.o \
-		$(OBJDIR)/src/core/runtime_broker_transport.o, \
+		$(OBJDIR)/src/core/registry/capability.o \
+		$(OBJDIR)/src/core/broker/broker_buffer.o \
+		$(OBJDIR)/src/core/broker/transport/broker_transport.o \
+		$(OBJDIR)/src/core/registry/registry.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 DEMO_OBJS = \
@@ -456,7 +468,8 @@ SERVER_LOSSLESS_OBJS = \
 	$(OBJDIR)/examples/server_support.o
 SERVER_FLOOD_OBJS = \
 	$(OBJDIR)/examples/server_flood.o \
-	$(OBJDIR)/examples/server_flood_stats.o
+	$(OBJDIR)/examples/server_flood_stats.o \
+	$(OBJDIR)/examples/server_flood_stats_open.o
 TEST_ABI_OBJS = \
 	$(OBJDIR)/tests/test_abi_contract.o
 TEST_ABI_COMPAT_OBJS = \
@@ -584,7 +597,7 @@ ifeq ($(HOST_PLATFORM),windows)
 WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
-WINDOWS_CTEST_ARGS ?=
+WINDOWS_CTEST_ARGS ?= --timeout 180
 WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
@@ -762,6 +775,7 @@ all: demo stress bench llam_broker server server_lossless server_flood static sh
 static: libllam_runtime.a
 
 libllam_runtime.a: $(RUNTIME_OBJS)
+	rm -f $@
 	$(AR) rcs $@ $(RUNTIME_OBJS)
 
 shared: $(SHLIB_LINK)
@@ -771,9 +785,9 @@ audit-shared-exports: shared
 
 audit-production-test-hooks: static
 	@if command -v nm >/dev/null 2>&1; then \
-		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_(force_.*entropy_failure|buffer_free_count)' >/dev/null; then \
+		if nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >/dev/null; then \
 			echo "production static runtime exports test fault-injection hooks" >&2; \
-			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker)_test_(force_.*entropy_failure|buffer_free_count)' >&2; \
+			nm -g libllam_runtime.a 2>/dev/null | grep -E 'llam_(capability|broker|runtime)_test_(force_.*(entropy|alloc)_failure|force_subject_value|buffer_free_count)' >&2; \
 			exit 1; \
 		fi; \
 	fi
@@ -802,7 +816,11 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	./test_windows_handle_io
 	./test_security_capability
 	./llam_broker --self-test
-	@broker_sock="$${TMPDIR:-/tmp}/llam-broker-test.$$$$.sock"; \
+	python3 scripts/test_broker_cli_parsing.py
+	python3 scripts/test_c_env_helpers.py
+	@broker_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-broker-test.$$$$.XXXXXX")"; \
+	chmod 700 "$$broker_dir"; \
+	broker_sock="$$broker_dir/broker.sock"; \
 	server_out="$${TMPDIR:-/tmp}/llam-broker-test.$$$$.out"; \
 	rm -f "$$broker_sock" "$$server_out"; \
 	./llam_broker --serve-n "$$broker_sock" 3 >"$$server_out" 2>&1 & \
@@ -820,387 +838,22 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		wait "$$server_pid" >/dev/null 2>&1 || true; \
 		cat "$$server_out" >&2; \
 		rm -f "$$broker_sock" "$$server_out"; \
+		rmdir "$$broker_dir" >/dev/null 2>&1 || true; \
 		exit "$$client_rc"; \
 	fi; \
 	if ! wait "$$server_pid"; then \
 		cat "$$server_out" >&2; \
 		rm -f "$$broker_sock" "$$server_out"; \
+		rmdir "$$broker_dir" >/dev/null 2>&1 || true; \
 		exit 1; \
 	fi; \
-	rm -f "$$broker_sock" "$$server_out"
+	rm -f "$$broker_sock" "$$server_out"; \
+	rmdir "$$broker_dir" >/dev/null 2>&1 || true
 	./test_shared_load ./$(SHLIB_REAL)
-	@tmp_out="$$(mktemp "$${TMPDIR:-/tmp}/llam-server-flood-invalid.XXXXXX")"; \
-	trap 'rm -f "$$tmp_out"' 0 1 2 3 15; \
-	if ./server_flood --clients 8x >"$$tmp_out" 2>&1; then \
-		echo "server_flood accepted invalid --clients value" >&2; \
-		cat "$$tmp_out" >&2; \
-		exit 1; \
-	fi; \
-	if ./server_flood --duration nan >"$$tmp_out" 2>&1; then \
-		echo "server_flood accepted invalid --duration value" >&2; \
-		cat "$$tmp_out" >&2; \
-		exit 1; \
-	fi
-	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-server-flood-stats-symlink.XXXXXX")"; \
-	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
-	{ \
-		printf '%s\n' '#!/usr/bin/env python3'; \
-		printf '%s\n' 'import os, signal, socket, sys, time'; \
-		printf '%s\n' 'port = int(sys.argv[-1])'; \
-		printf '%s\n' 'stats = os.environ.get("LLAM_CHAT_STATS_PATH")'; \
-		printf '%s\n' 'target = os.environ.get("LLAM_MALICIOUS_STATS_TARGET")'; \
-		printf '%s\n' 'if stats and target:'; \
-		printf '%s\n' '    try:'; \
-		printf '%s\n' '        os.unlink(stats)'; \
-		printf '%s\n' '    except FileNotFoundError:'; \
-		printf '%s\n' '        pass'; \
-		printf '%s\n' '    os.symlink(target, stats)'; \
-		printf '%s\n' 'stop = False'; \
-		printf '%s\n' 'def handle(_signum, _frame):'; \
-		printf '%s\n' '    global stop'; \
-		printf '%s\n' '    stop = True'; \
-		printf '%s\n' 'signal.signal(signal.SIGINT, handle)'; \
-		printf '%s\n' 'sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)'; \
-		printf '%s\n' 'sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)'; \
-		printf '%s\n' 'sock.bind(("127.0.0.1", port))'; \
-		printf '%s\n' 'sock.listen(16)'; \
-		printf '%s\n' 'sock.setblocking(False)'; \
-		printf '%s\n' 'clients = []'; \
-		printf '%s\n' 'deadline = time.time() + 5.0'; \
-		printf '%s\n' 'while not stop and time.time() < deadline:'; \
-		printf '%s\n' '    try:'; \
-		printf '%s\n' '        client, _peer = sock.accept()'; \
-		printf '%s\n' '        client.setblocking(False)'; \
-		printf '%s\n' '        clients.append(client)'; \
-		printf '%s\n' '    except BlockingIOError:'; \
-		printf '%s\n' '        pass'; \
-		printf '%s\n' '    for client in list(clients):'; \
-		printf '%s\n' '        try:'; \
-		printf '%s\n' '            data = client.recv(4096)'; \
-		printf '%s\n' '            if data:'; \
-		printf '%s\n' '                client.sendall(b"x\n")'; \
-		printf '%s\n' '            elif data == b"":'; \
-		printf '%s\n' '                clients.remove(client)'; \
-		printf '%s\n' '                client.close()'; \
-		printf '%s\n' '        except BlockingIOError:'; \
-		printf '%s\n' '            pass'; \
-		printf '%s\n' '        except OSError:'; \
-		printf '%s\n' '            clients.remove(client)'; \
-		printf '%s\n' '    time.sleep(0.001)'; \
-		printf '%s\n' 'for client in clients:'; \
-		printf '%s\n' '    try:'; \
-		printf '%s\n' '        client.close()'; \
-		printf '%s\n' '    except OSError:'; \
-		printf '%s\n' '        pass'; \
-		printf '%s\n' 'sock.close()'; \
-	} > "$$tmp_dir/malicious_server.py"; \
-	chmod +x "$$tmp_dir/malicious_server.py"; \
-	printf 'server stopped; outbox_full_drops=123456 outbox_closed_drops=0 broadcast_messages_created=1 broadcast_deliveries_attempted=1 broadcast_deliveries_enqueued=1\n' > "$$tmp_dir/outside-stats"; \
-	if ! LLAM_MALICIOUS_STATS_TARGET="$$tmp_dir/outside-stats" ./server_flood --server "$$tmp_dir/malicious_server.py" --clients 2 --duration 0.5 --drain-sec 0.5 --message-bytes 8 --batch 1 --target-mps 0.010 --min-delivery-mps 0 --min-delivery-ratio 0 --allow-forced-stop --allow-missing-stats >"$$tmp_dir/flood.out" 2>&1; then \
-		echo "server_flood symlink stats regression failed unexpectedly" >&2; \
-		cat "$$tmp_dir/flood.out" >&2; \
-		exit 1; \
-	fi; \
-	if grep 'outbox_full_drops=123456' "$$tmp_dir/flood.out" >/dev/null; then \
-		echo "server_flood accepted a symlinked stats file" >&2; \
-		cat "$$tmp_dir/flood.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'server flood stats: unavailable' "$$tmp_dir/flood.out" >/dev/null
-	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-server-flood-stats-parent-symlink.XXXXXX")"; \
-	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
-	{ \
-		printf '%s\n' '#!/usr/bin/env python3'; \
-		printf '%s\n' 'import os, signal, socket, sys, time'; \
-		printf '%s\n' 'port = int(sys.argv[-1])'; \
-		printf '%s\n' 'stats = os.environ.get("LLAM_CHAT_STATS_PATH")'; \
-		printf '%s\n' 'target_dir = os.environ.get("LLAM_MALICIOUS_STATS_DIR")'; \
-		printf '%s\n' 'if stats and target_dir:'; \
-		printf '%s\n' '    parent = os.path.dirname(stats)'; \
-		printf '%s\n' '    try:'; \
-		printf '%s\n' '        os.rmdir(parent)'; \
-		printf '%s\n' '    except OSError:'; \
-		printf '%s\n' '        pass'; \
-		printf '%s\n' '    try:'; \
-		printf '%s\n' '        os.symlink(target_dir, parent)'; \
-		printf '%s\n' '    except FileExistsError:'; \
-		printf '%s\n' '        pass'; \
-		printf '%s\n' 'stop = False'; \
-		printf '%s\n' 'def handle(_signum, _frame):'; \
-		printf '%s\n' '    global stop'; \
-		printf '%s\n' '    stop = True'; \
-		printf '%s\n' 'signal.signal(signal.SIGINT, handle)'; \
-		printf '%s\n' 'sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)'; \
-		printf '%s\n' 'sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)'; \
-		printf '%s\n' 'sock.bind(("127.0.0.1", port))'; \
-		printf '%s\n' 'sock.listen(16)'; \
-		printf '%s\n' 'sock.setblocking(False)'; \
-		printf '%s\n' 'clients = []'; \
-		printf '%s\n' 'deadline = time.time() + 5.0'; \
-		printf '%s\n' 'while not stop and time.time() < deadline:'; \
-		printf '%s\n' '    try:'; \
-		printf '%s\n' '        client, _peer = sock.accept()'; \
-		printf '%s\n' '        client.setblocking(False)'; \
-		printf '%s\n' '        clients.append(client)'; \
-		printf '%s\n' '    except BlockingIOError:'; \
-		printf '%s\n' '        pass'; \
-		printf '%s\n' '    for client in list(clients):'; \
-		printf '%s\n' '        try:'; \
-		printf '%s\n' '            data = client.recv(4096)'; \
-		printf '%s\n' '            if data:'; \
-		printf '%s\n' '                client.sendall(b"x\n")'; \
-		printf '%s\n' '            elif data == b"":'; \
-		printf '%s\n' '                clients.remove(client)'; \
-		printf '%s\n' '                client.close()'; \
-		printf '%s\n' '        except BlockingIOError:'; \
-		printf '%s\n' '            pass'; \
-		printf '%s\n' '        except OSError:'; \
-		printf '%s\n' '            clients.remove(client)'; \
-		printf '%s\n' '    time.sleep(0.001)'; \
-		printf '%s\n' 'for client in clients:'; \
-		printf '%s\n' '    try:'; \
-		printf '%s\n' '        client.close()'; \
-		printf '%s\n' '    except OSError:'; \
-		printf '%s\n' '        pass'; \
-		printf '%s\n' 'sock.close()'; \
-	} > "$$tmp_dir/malicious_server_parent.py"; \
-	chmod +x "$$tmp_dir/malicious_server_parent.py"; \
-	mkdir "$$tmp_dir/outside"; \
-	printf 'server stopped; outbox_full_drops=654321 outbox_closed_drops=0 broadcast_messages_created=1 broadcast_deliveries_attempted=1 broadcast_deliveries_enqueued=1\n' > "$$tmp_dir/outside/stats.txt"; \
-	if ! LLAM_MALICIOUS_STATS_DIR="$$tmp_dir/outside" ./server_flood --server "$$tmp_dir/malicious_server_parent.py" --clients 2 --duration 0.5 --drain-sec 0.5 --message-bytes 8 --batch 1 --target-mps 0.010 --min-delivery-mps 0 --min-delivery-ratio 0 --allow-forced-stop --allow-missing-stats >"$$tmp_dir/flood.out" 2>&1; then \
-		echo "server_flood parent symlink stats regression failed unexpectedly" >&2; \
-		cat "$$tmp_dir/flood.out" >&2; \
-		exit 1; \
-	fi; \
-	if grep 'outbox_full_drops=654321' "$$tmp_dir/flood.out" >/dev/null; then \
-		echo "server_flood accepted stats through a symlinked parent directory" >&2; \
-		cat "$$tmp_dir/flood.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'server flood stats: unavailable' "$$tmp_dir/flood.out" >/dev/null
-	@tmp_out="$$(mktemp "$${TMPDIR:-/tmp}/llam-server-flood-dump-path.XXXXXX")"; \
-	trap 'rm -f "$$tmp_out"' 0 1 2 3 15; \
-	long_dump_dir="$$(python3 -c 'print("/tmp/" + "x" * 600)')"; \
-	if LLAM_SERVER_FLOOD_DUMP_DIR="$$long_dump_dir" ./server_flood --clients 2 --duration 0.01 >"$$tmp_out" 2>&1; then \
-		echo "server_flood accepted truncated runtime dump path" >&2; \
-		cat "$$tmp_out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'dump path' "$$tmp_out" >/dev/null
-	@tmp_out="$$(mktemp "$${TMPDIR:-/tmp}/llam-server-flood-tmpdir.XXXXXX")"; \
-	trap 'rm -f "$$tmp_out"' 0 1 2 3 15; \
-	long_tmp_dir="$$(python3 -c 'print("/tmp/" + "x" * 600)')"; \
-	if TMPDIR="$$long_tmp_dir" ./server_flood --clients 2 --duration 0.01 >"$$tmp_out" 2>&1; then \
-		echo "server_flood accepted truncated stats temp path" >&2; \
-		cat "$$tmp_out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'stats dir path' "$$tmp_out" >/dev/null
-	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-server-diagnostics-symlink.XXXXXX")"; \
-	trap 'if test -n "$${server_pid:-}"; then kill -TERM "$$server_pid" >/dev/null 2>&1 || true; wait "$$server_pid" >/dev/null 2>&1 || true; fi; rm -rf "$$tmp_dir"' 0 1 2 3 15; \
-	port="$$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"; \
-	: > "$$tmp_dir/outside-stats"; \
-	: > "$$tmp_dir/outside-dump"; \
-	ln -s "$$tmp_dir/outside-stats" "$$tmp_dir/stats-link"; \
-	ln -s "$$tmp_dir/outside-dump" "$$tmp_dir/dump-link"; \
-	LLAM_CHAT_QUIET=1 LLAM_CHAT_STATS_PATH="$$tmp_dir/stats-link" LLAM_CHAT_DUMP_ON_STOP="$$tmp_dir/dump-link" ./server "$$port" >"$$tmp_dir/server.out" 2>&1 & \
-	server_pid="$$!"; \
-	sleep 0.5; \
-	if ! kill -INT "$$server_pid" >/dev/null 2>&1; then \
-		echo "server exited before diagnostic symlink test could signal it" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi; \
-	if ! wait "$$server_pid"; then \
-		echo "server failed during diagnostic symlink test" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi; \
-	server_pid=""; \
-	if test -s "$$tmp_dir/outside-stats" || test -s "$$tmp_dir/outside-dump"; then \
-		echo "server followed a diagnostic symlink path" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi
-	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-server-diagnostics-hardlink.XXXXXX")"; \
-	trap 'if test -n "$${server_pid:-}"; then kill -TERM "$$server_pid" >/dev/null 2>&1 || true; wait "$$server_pid" >/dev/null 2>&1 || true; fi; rm -rf "$$tmp_dir"' 0 1 2 3 15; \
-	port="$$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"; \
-	printf 'outside-stats\n' > "$$tmp_dir/outside-stats"; \
-	printf 'outside-dump\n' > "$$tmp_dir/outside-dump"; \
-	ln "$$tmp_dir/outside-stats" "$$tmp_dir/stats-hardlink"; \
-	ln "$$tmp_dir/outside-dump" "$$tmp_dir/dump-hardlink"; \
-	LLAM_CHAT_QUIET=1 LLAM_CHAT_STATS_PATH="$$tmp_dir/stats-hardlink" LLAM_CHAT_DUMP_ON_STOP="$$tmp_dir/dump-hardlink" ./server "$$port" >"$$tmp_dir/server.out" 2>&1 & \
-	server_pid="$$!"; \
-	sleep 0.5; \
-	if ! kill -INT "$$server_pid" >/dev/null 2>&1; then \
-		echo "server exited before diagnostic hardlink test could signal it" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi; \
-	if ! wait "$$server_pid"; then \
-		echo "server failed during diagnostic hardlink test" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi; \
-	server_pid=""; \
-	grep '^outside-stats$$' "$$tmp_dir/outside-stats" >/dev/null; \
-	grep '^outside-dump$$' "$$tmp_dir/outside-dump" >/dev/null; \
-	test "$$(wc -l < "$$tmp_dir/outside-stats" | tr -d ' ')" = 1; \
-	test "$$(wc -l < "$$tmp_dir/outside-dump" | tr -d ' ')" = 1
-	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-server-diagnostics-parent-symlink.XXXXXX")"; \
-	trap 'if test -n "$${server_pid:-}"; then kill -TERM "$$server_pid" >/dev/null 2>&1 || true; wait "$$server_pid" >/dev/null 2>&1 || true; fi; rm -rf "$$tmp_dir"' 0 1 2 3 15; \
-	port="$$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"; \
-	mkdir "$$tmp_dir/outside"; \
-	ln -s "$$tmp_dir/outside" "$$tmp_dir/diag-link"; \
-	LLAM_CHAT_QUIET=1 LLAM_CHAT_STATS_PATH="$$tmp_dir/diag-link/stats.txt" LLAM_CHAT_DUMP_ON_STOP="$$tmp_dir/diag-link/dump.txt" ./server "$$port" >"$$tmp_dir/server.out" 2>&1 & \
-	server_pid="$$!"; \
-	sleep 0.5; \
-	if ! kill -INT "$$server_pid" >/dev/null 2>&1; then \
-		echo "server exited before parent diagnostic symlink test could signal it" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi; \
-	if ! wait "$$server_pid"; then \
-		echo "server failed during parent diagnostic symlink test" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi; \
-	server_pid=""; \
-	if test -e "$$tmp_dir/outside/stats.txt" || test -e "$$tmp_dir/outside/dump.txt"; then \
-		echo "server followed a diagnostic parent symlink path" >&2; \
-		cat "$$tmp_dir/server.out" >&2; \
-		exit 1; \
-	fi
-	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-stress-dump-parent-symlink.XXXXXX")"; \
-	trap 'if test -n "$${stress_pid:-}"; then kill -TERM "$$stress_pid" >/dev/null 2>&1 || true; wait "$$stress_pid" >/dev/null 2>&1 || true; fi; rm -rf "$$tmp_dir"' 0 1 2 3 15; \
-	mkdir "$$tmp_dir/outside"; \
-	ln -s "$$tmp_dir/outside" "$$tmp_dir/diag-link"; \
-	LLAM_STRESS_ROUNDS=1 LLAM_STRESS_DYNAMIC_ROUNDS=1 LLAM_RUNTIME_DUMP_ON_SIGNAL="$$tmp_dir/diag-link/dump.txt" ./stress >"$$tmp_dir/stress.out" 2>&1 & \
-	stress_pid="$$!"; \
-	ready=0; \
-	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
-		if grep 'signal dump path' "$$tmp_dir/stress.out" >/dev/null 2>&1; then \
-			ready=1; \
-			break; \
-		fi; \
-		if ! kill -0 "$$stress_pid" >/dev/null 2>&1; then \
-			break; \
-		fi; \
-		sleep 0.05; \
-	done; \
-	if test "$$ready" != 1; then \
-		echo "stress signal dump test did not reach signal setup" >&2; \
-		cat "$$tmp_dir/stress.out" >&2; \
-		exit 1; \
-	fi; \
-	sleep 0.05; \
-	sent_signal=0; \
-	for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
-		if kill -0 "$$stress_pid" >/dev/null 2>&1; then \
-			kill -USR2 "$$stress_pid" >/dev/null 2>&1 || true; \
-			sent_signal=1; \
-			sleep 0.05; \
-		else \
-			break; \
-		fi; \
-	done; \
-	if ! wait "$$stress_pid"; then \
-		echo "stress failed during parent diagnostic symlink test" >&2; \
-		cat "$$tmp_dir/stress.out" >&2; \
-		exit 1; \
-	fi; \
-	stress_pid=""; \
-	test "$$sent_signal" = 1; \
-	if test -e "$$tmp_dir/outside/dump.txt"; then \
-		echo "stress followed a diagnostic parent symlink path" >&2; \
-		cat "$$tmp_dir/stress.out" >&2; \
-		exit 1; \
-	fi
-	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-python-safe-output.XXXXXX")"; \
-	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
-	: > "$$tmp_dir/outside-json"; \
-	ln -s "$$tmp_dir/outside-json" "$$tmp_dir/result-link.json"; \
-	if PYTHONPATH=scripts python3 -c 'from pathlib import Path; from safe_output import write_text_safely; write_text_safely(Path("'"$$tmp_dir/result-link.json"'"), "x")' >"$$tmp_dir/safe-output.out" 2>&1; then \
-		echo "safe_output followed a symlink output path" >&2; \
-		cat "$$tmp_dir/safe-output.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output path' "$$tmp_dir/safe-output.out" >/dev/null; \
-	test ! -s "$$tmp_dir/outside-json"; \
-	printf 'outside\n' > "$$tmp_dir/outside-hardlink.json"; \
-	ln "$$tmp_dir/outside-hardlink.json" "$$tmp_dir/result-hardlink.json"; \
-	if PYTHONPATH=scripts python3 -c 'from pathlib import Path; from safe_output import write_text_safely; write_text_safely(Path("'"$$tmp_dir/result-hardlink.json"'"), "x")' >"$$tmp_dir/safe-output-hardlink.out" 2>&1; then \
-		echo "safe_output overwrote a hard-linked output path" >&2; \
-		cat "$$tmp_dir/safe-output-hardlink.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing hard-linked output path' "$$tmp_dir/safe-output-hardlink.out" >/dev/null; \
-	grep '^outside$$' "$$tmp_dir/outside-hardlink.json" >/dev/null; \
-	mkdir "$$tmp_dir/outside-dir"; \
-	ln -s "$$tmp_dir/outside-dir" "$$tmp_dir/link-dir"; \
-	if PYTHONPATH=scripts python3 -c 'from pathlib import Path; from safe_output import write_text_safely; write_text_safely(Path("'"$$tmp_dir/link-dir/result.json"'"), "x")' >"$$tmp_dir/safe-output-parent.out" 2>&1; then \
-		echo "safe_output followed a symlink output directory" >&2; \
-		cat "$$tmp_dir/safe-output-parent.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/safe-output-parent.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/result.json"; \
-	if PYTHONPATH=scripts python3 -c 'from pathlib import Path; from safe_output import write_text_safely; write_text_safely(Path("'"$$tmp_dir/link-dir/sub/result.json"'"), "x")' >"$$tmp_dir/safe-output-deep-parent.out" 2>&1; then \
-		echo "safe_output followed a symlink output directory before creating a child path" >&2; \
-		cat "$$tmp_dir/safe-output-deep-parent.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/safe-output-deep-parent.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/sub/result.json"; \
-	if (cd "$$tmp_dir" && PYTHONPATH="$(CURDIR)/scripts" python3 -c 'from pathlib import Path; from safe_output import write_text_safely; write_text_safely(Path("link-dir/relative.json"), "x")') >"$$tmp_dir/safe-output-relative-parent.out" 2>&1; then \
-		echo "safe_output followed a relative symlink output directory" >&2; \
-		cat "$$tmp_dir/safe-output-relative-parent.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/safe-output-relative-parent.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/relative.json"; \
-	if PYTHONPATH=scripts python3 -c 'from pathlib import Path; from safe_output import open_binary_for_write; handle = open_binary_for_write(Path("'"$$tmp_dir/link-dir/graph/runtime.png"'")); handle.write(b"x"); handle.close()' >"$$tmp_dir/safe-output-binary-parent.out" 2>&1; then \
-		echo "safe_output binary writer followed a symlink output directory" >&2; \
-		cat "$$tmp_dir/safe-output-binary-parent.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/safe-output-binary-parent.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/graph/runtime.png"; \
-	if PYTHONPATH=scripts python3 -c 'from pathlib import Path; import safe_output; safe_output._CAN_USE_DIR_FD = False; safe_output.write_text_safely(Path("'"$$tmp_dir/link-dir/fallback.json"'"), "x")' >"$$tmp_dir/safe-output-fallback-parent.out" 2>&1; then \
-		echo "safe_output fallback followed a symlink output directory" >&2; \
-		cat "$$tmp_dir/safe-output-fallback-parent.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/safe-output-fallback-parent.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/fallback.json"; \
-	if PYTHONPATH=scripts python3 -c 'from pathlib import Path; import safe_output; safe_output._CAN_USE_DIR_FD = False; safe_output.write_text_safely(Path("'"$$tmp_dir/result-link.json"'"), "x")' >"$$tmp_dir/safe-output-fallback-leaf.out" 2>&1; then \
-		echo "safe_output fallback followed a symlink output path" >&2; \
-		cat "$$tmp_dir/safe-output-fallback-leaf.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output path' "$$tmp_dir/safe-output-fallback-leaf.out" >/dev/null; \
-	test ! -s "$$tmp_dir/outside-json"; \
-	if PYTHONPATH=scripts python3 scripts/safe_output.py --prepare-dir "$$tmp_dir/link-dir/artifacts" >"$$tmp_dir/safe-output-cli-dir.out" 2>&1; then \
-		echo "safe_output CLI followed a symlink artifact directory" >&2; \
-		cat "$$tmp_dir/safe-output-cli-dir.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/safe-output-cli-dir.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/artifacts"; \
-	if python3 scripts/run_with_timeout.py --timeout 1 --dump-on-timeout "$$tmp_dir/link-dir/dump/runtime.txt" --log "$$tmp_dir/timeout.log" -- python3 -c 'print("ok")' >"$$tmp_dir/run-timeout-dump-parent.out" 2>&1; then \
-		echo "run_with_timeout followed a symlink dump output directory" >&2; \
-		cat "$$tmp_dir/run-timeout-dump-parent.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/run-timeout-dump-parent.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/dump/runtime.txt"; \
-	if LLAM_SERVER_COMPOSITE_DUMP_DIR="$$tmp_dir/link-dir/composite" PYTHONPATH=scripts python3 -c 'from pathlib import Path; import stress_server_composite as s; s.start_server(Path("/definitely/missing/llam-server"), "127.0.0.1", 0.01)' >"$$tmp_dir/composite-dump-parent.out" 2>&1; then \
-		echo "stress_server_composite followed a symlink dump output directory" >&2; \
-		cat "$$tmp_dir/composite-dump-parent.out" >&2; \
-		exit 1; \
-	fi; \
-	grep 'refusing symlink output directory' "$$tmp_dir/composite-dump-parent.out" >/dev/null; \
-	test ! -e "$$tmp_dir/outside-dir/composite"
+	python3 scripts/test_server_flood_cli.py ./server_flood
+	python3 scripts/test_server_flood_stats_security.py ./server_flood
+	python3 scripts/test_example_diagnostic_security.py ./server ./stress
+	python3 scripts/test_safe_output_security.py
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-dest-symlink.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib" "$$tmp_dir/outside" "$$tmp_dir/prefix"; \
@@ -1285,12 +938,13 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.0.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.1.0\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.0.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) ln -s libllam_runtime.2.dylib "$$tmp_dir/pkg/lib/libllam_runtime.dylib" ;; \
 		Linux) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
+		FreeBSD|OpenBSD|NetBSD|DragonFly) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
 		*) echo "unsupported installer dangling lib-link smoke host" >&2; exit 1 ;; \
 	esac; \
 	if sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
@@ -1306,15 +960,19 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.0.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.1.0\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.0.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.999.dylib"; \
 			ln -s libllam_runtime.999.dylib "$$tmp_dir/pkg/lib/libllam_runtime.dylib"; \
 			;; \
 		Linux) \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.999"; \
+			ln -s libllam_runtime.so.999 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
+			;; \
+		FreeBSD|OpenBSD|NetBSD|DragonFly) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.999"; \
 			ln -s libllam_runtime.so.999 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
 			;; \
@@ -1333,16 +991,20 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.0.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.1.0\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.0.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.2.dylib"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.dylib"; \
 			;; \
 		Linux) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.0.0"; \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.1.0"; \
+			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
+			;; \
+		FreeBSD|OpenBSD|NetBSD|DragonFly) \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.1.0"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
 		*) echo "unsupported installer regular lib-link smoke host" >&2; exit 1 ;; \
@@ -1360,16 +1022,16 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.0.0-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.1.0-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.0.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
-	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.0.0"; \
-	ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
+	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.1.0"; \
+	ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 	ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
 	sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; \
 	test -L "$$tmp_dir/prefix/lib/libllam_runtime.so"; \
-	grep '^2.0.0-rc.1$$' "$$tmp_dir/prefix/share/llam/VERSION" >/dev/null; \
-	grep '^2.0.0$$' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION" >/dev/null
+	grep '^2.1.0-rc.1$$' "$$tmp_dir/prefix/share/llam/VERSION" >/dev/null; \
+	grep '^2.1.0$$' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION" >/dev/null
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-package-output-symlink.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	case "$$(uname -s)-$$(uname -m)" in \
@@ -1377,6 +1039,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package symlink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
@@ -1399,10 +1069,10 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	ln -s "$$tmp_dir/outside" "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release output path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1415,12 +1085,20 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package output file-component smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted a non-directory release output path component" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1433,6 +1111,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1455,10 +1141,10 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	chmod 666 "$$tmp_dir/repo/README.md"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unsafe release stage mode" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1471,6 +1157,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
@@ -1494,9 +1188,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	ln -s "$$tmp_dir/outside/README.md" "$$tmp_dir/repo/README.md"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release input path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1509,6 +1203,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1534,9 +1236,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	ln "$$tmp_dir/outside-runtime.h" "$$tmp_dir/repo/include/llam/runtime.h"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh copied a hard-linked release input file" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1549,6 +1251,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package liblink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1571,9 +1281,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; ln -s libllam_runtime.so.2.0.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unexpected library symlink target" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1586,6 +1296,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package regular-liblink smoke host" >&2; exit 1 ;; \
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
@@ -1609,9 +1327,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; : > "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.0.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted non-symlink shared-library link artifacts" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1624,18 +1342,22 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer checksum smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
 	mkdir -p "$$tmp_dir/archive/$$package/include/llam" "$$tmp_dir/archive/$$package/lib"; \
 	cp scripts/install.sh "$$tmp_dir/archive/$$package/install.sh"; \
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		digest="$$(sha256sum "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	else \
-		digest="$$(shasum -a 256 "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	digest="$$(sh scripts/test_release_fixture.sh sha256 "$$tmp_dir/$$package.tar.xz")"; \
 	{ \
 		printf '%s  %s trailing-field\n' "$$digest" "$$package.tar.xz"; \
 		printf '%064d  other-file\n' 0; \
@@ -1653,18 +1375,22 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer checksum-glob smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
 	mkdir -p "$$tmp_dir/archive/$$package/include/llam" "$$tmp_dir/archive/$$package/lib"; \
 	cp scripts/install.sh "$$tmp_dir/archive/$$package/install.sh"; \
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		digest="$$(sha256sum "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	else \
-		digest="$$(shasum -a 256 "$$tmp_dir/$$package.tar.xz" | awk '{ print $$1 }')"; \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	digest="$$(sh scripts/test_release_fixture.sh sha256 "$$tmp_dir/$$package.tar.xz")"; \
 	printf '%s  *.tar.xz\n' "$$digest" > "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a glob checksum target" >&2; \
@@ -1679,18 +1405,22 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer archive-script smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
 	mkdir -p "$$tmp_dir/archive/$$package/include/llam" "$$tmp_dir/archive/$$package/lib"; \
 	printf '#!/bin/sh\nprintf exploited > %s/marker\nexit 0\n' "$$tmp_dir" > "$$tmp_dir/archive/$$package/install.sh"; \
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; \
 	if [ -f "$$tmp_dir/marker" ]; then \
 		echo "install.sh executed installer code from the downloaded archive" >&2; \
@@ -1705,6 +1435,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1713,12 +1451,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/archive/$$package/include/llam/runtime.h"; \
 	printf 'payload\n' > "$$tmp_dir/archive/$$package/bin/llam-danger"; \
 	chmod 4777 "$$tmp_dir/archive/$$package/bin/llam-danger"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted an archive member with unsafe mode bits" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -1732,6 +1466,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1740,12 +1482,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	chmod +x "$$tmp_dir/archive/$$package/install.sh"; \
 	printf payload > "$$tmp_dir/archive/$$package/payload"; \
 	ln "$$tmp_dir/archive/$$package/payload" "$$tmp_dir/archive/$$package/payload-hardlink"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a hard-link archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -1759,6 +1497,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer duplicate smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1770,17 +1516,106 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf second > "$$tmp_dir/archive/$$package/payload"; \
 	tar -C "$$tmp_dir/archive" -rf "$$tmp_dir/$$package.tar" "$$package/payload"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a duplicate archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
 		exit 1; \
 	fi; \
 	grep 'refusing duplicate archive member' "$$tmp_dir/install.out" >/dev/null
+	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-absolute-archive.XXXXXX")"; \
+	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
+	case "$$(uname -s)-$$(uname -m)" in \
+		Darwin-arm64) package_target=macos-aarch64 ;; \
+		Darwin-x86_64) package_target=macos-x86_64 ;; \
+		Linux-x86_64) package_target=linux-x86_64 ;; \
+		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
+		*) echo "unsupported installer absolute-member smoke host" >&2; exit 1 ;; \
+	esac; \
+	package="llam-ci-$$package_target"; \
+	rm -f "/tmp/$$package-escape"; \
+	{ \
+		printf '%s\n' 'import io'; \
+		printf '%s\n' 'import sys'; \
+		printf '%s\n' 'import tarfile'; \
+		printf '%s\n' 'from pathlib import Path'; \
+		printf '%s\n' 'tmp = Path(sys.argv[1])'; \
+		printf '%s\n' 'package = sys.argv[2]'; \
+		printf '%s\n' 'entries = ('; \
+		printf '%s\n' '    (f"{package}/install.sh", b"#!/bin/sh\nexit 0\n", 0o755),'; \
+		printf '%s\n' '    (f"/tmp/{package}-escape", b"escape", 0o644),'; \
+		printf '%s\n' ')'; \
+		printf '%s\n' 'with tarfile.open(tmp / f"{package}.tar", "w") as archive:'; \
+		printf '%s\n' '    for name, data, mode in entries:'; \
+		printf '%s\n' '        info = tarfile.TarInfo(name)'; \
+		printf '%s\n' '        info.size = len(data)'; \
+		printf '%s\n' '        info.mode = mode'; \
+		printf '%s\n' '        archive.addfile(info, io.BytesIO(data))'; \
+	} > "$$tmp_dir/absolute_archive.py"; \
+	python3 "$$tmp_dir/absolute_archive.py" "$$tmp_dir" "$$package"; \
+	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
+	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
+		echo "install.sh accepted an absolute archive member" >&2; \
+		cat "$$tmp_dir/install.out" >&2; \
+		exit 1; \
+	fi; \
+	grep 'refusing unsafe archive member' "$$tmp_dir/install.out" >/dev/null; \
+	test ! -e "/tmp/$$package-escape"
+	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-parent-archive.XXXXXX")"; \
+	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
+	case "$$(uname -s)-$$(uname -m)" in \
+		Darwin-arm64) package_target=macos-aarch64 ;; \
+		Darwin-x86_64) package_target=macos-x86_64 ;; \
+		Linux-x86_64) package_target=linux-x86_64 ;; \
+		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
+		*) echo "unsupported installer parent-member smoke host" >&2; exit 1 ;; \
+	esac; \
+	package="llam-ci-$$package_target"; \
+	{ \
+		printf '%s\n' 'import io'; \
+		printf '%s\n' 'import sys'; \
+		printf '%s\n' 'import tarfile'; \
+		printf '%s\n' 'from pathlib import Path'; \
+		printf '%s\n' 'tmp = Path(sys.argv[1])'; \
+		printf '%s\n' 'package = sys.argv[2]'; \
+		printf '%s\n' 'entries = ('; \
+		printf '%s\n' '    (f"{package}/install.sh", b"#!/bin/sh\nexit 0\n", 0o755),'; \
+		printf '%s\n' '    (f"{package}/../escape", b"escape", 0o644),'; \
+		printf '%s\n' ')'; \
+		printf '%s\n' 'with tarfile.open(tmp / f"{package}.tar", "w") as archive:'; \
+		printf '%s\n' '    for name, data, mode in entries:'; \
+		printf '%s\n' '        info = tarfile.TarInfo(name)'; \
+		printf '%s\n' '        info.size = len(data)'; \
+		printf '%s\n' '        info.mode = mode'; \
+		printf '%s\n' '        archive.addfile(info, io.BytesIO(data))'; \
+	} > "$$tmp_dir/parent_archive.py"; \
+	python3 "$$tmp_dir/parent_archive.py" "$$tmp_dir" "$$package"; \
+	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
+	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
+		echo "install.sh accepted a parent-traversal archive member" >&2; \
+		cat "$$tmp_dir/install.out" >&2; \
+		exit 1; \
+	fi; \
+	grep 'refusing unsafe archive member' "$$tmp_dir/install.out" >/dev/null; \
+	test ! -e "$$tmp_dir/escape"
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-install-dot-component-archive.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	case "$$(uname -s)-$$(uname -m)" in \
@@ -1788,6 +1623,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer dot-component smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1799,11 +1642,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf second > "$$tmp_dir/archive/$$package/payload"; \
 	(cd "$$tmp_dir/archive" && tar -rf "$$tmp_dir/$$package.tar" "$$package/./payload"); \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a non-canonical ./ archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -1817,6 +1656,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer double-slash smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1828,11 +1675,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf second > "$$tmp_dir/archive/$$package/payload"; \
 	(cd "$$tmp_dir/archive" && tar -rf "$$tmp_dir/$$package.tar" "$$package//payload"); \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a non-canonical // archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -1846,6 +1689,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer casefold smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1870,11 +1721,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	} > "$$tmp_dir/casefold_archive.py"; \
 	python3 "$$tmp_dir/casefold_archive.py" "$$tmp_dir" "$$package"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted a case-insensitive duplicate archive member" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -1888,6 +1735,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer type-collision smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1900,11 +1755,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/archive/$$package/collision"; \
 	tar -C "$$tmp_dir/archive" -rf "$$tmp_dir/$$package.tar" "$$package/collision"; \
 	xz -zc "$$tmp_dir/$$package.tar" > "$$tmp_dir/$$package.tar.xz"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted an archive path type collision" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -1918,6 +1769,14 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 		Darwin-x86_64) package_target=macos-x86_64 ;; \
 		Linux-x86_64) package_target=linux-x86_64 ;; \
 		Linux-aarch64) package_target=linux-aarch64 ;; \
+		FreeBSD-x86_64|FreeBSD-amd64) package_target=freebsd-x86_64 ;; \
+		FreeBSD-aarch64|FreeBSD-arm64) package_target=freebsd-aarch64 ;; \
+		OpenBSD-x86_64|OpenBSD-amd64) package_target=openbsd-x86_64 ;; \
+		OpenBSD-aarch64|OpenBSD-arm64) package_target=openbsd-aarch64 ;; \
+		NetBSD-x86_64|NetBSD-amd64) package_target=netbsd-x86_64 ;; \
+		NetBSD-aarch64|NetBSD-arm64) package_target=netbsd-aarch64 ;; \
+		DragonFly-x86_64|DragonFly-amd64) package_target=dragonflybsd-x86_64 ;; \
+		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported installer symlink-target smoke host" >&2; exit 1 ;; \
 	esac; \
 	package="llam-ci-$$package_target"; \
@@ -1925,12 +1784,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	printf '%s\n' '#!/bin/sh' 'exit 0' > "$$tmp_dir/archive/$$package/install.sh"; \
 	chmod +x "$$tmp_dir/archive/$$package/install.sh"; \
 	ln -s 'payload target' "$$tmp_dir/archive/$$package/payload-link"; \
-	tar -C "$$tmp_dir/archive" -cJf "$$tmp_dir/$$package.tar.xz" "$$package"; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		(cd "$$tmp_dir" && sha256sum "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	else \
-		(cd "$$tmp_dir" && shasum -a 256 "$$package.tar.xz" > "$$package.tar.xz.sha256"); \
-	fi; \
+	sh scripts/test_release_fixture.sh archive-xz "$$tmp_dir/archive" "$$package" "$$tmp_dir/$$package.tar.xz"; \
+	sh scripts/test_release_fixture.sh sha256-sidecar "$$tmp_dir/$$package.tar.xz" "$$tmp_dir/$$package.tar.xz.sha256"; \
 	if sh scripts/install.sh --version ci --target "$$package_target" --base-url "file://$$tmp_dir" --prefix "$$tmp_dir/prefix" >"$$tmp_dir/install.out" 2>&1; then \
 		echo "install.sh accepted an unsafe archive symlink target" >&2; \
 		cat "$$tmp_dir/install.out" >&2; \
@@ -1960,8 +1815,8 @@ TSAN_TEST_TARGETS = \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
 
-FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 512
-FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 128
+FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 2048
+FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 512
 RUNTIME_SOAK_SECONDS ?= 300
 RUNTIME_SOAK_TIMEOUT ?= 180
 RUNTIME_SOAK_SEED ?= 0x4c4c414d534f414b
@@ -2060,6 +1915,10 @@ test-fuzz-heavy: test_runtime_fuzz
 
 test-process-utils:
 	python3 scripts/test_process_utils.py
+	python3 scripts/test_bench_parsers.py
+	python3 scripts/test_bench_runtime_compare.py
+	python3 scripts/test_stress_server_logic.py
+	python3 scripts/test_c_env_helpers.py
 
 test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress test_runtime_shutdown_internal test_io_buffers
 	python3 scripts/runtime_soak.py \
@@ -2244,9 +2103,9 @@ $(SHARED_OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
 
-$(OBJDIR)/src/engine/runtime_watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
+$(OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
-$(SHARED_OBJDIR)/src/engine/runtime_watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
+$(SHARED_OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
 $(OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
@@ -2372,7 +2231,11 @@ $(OBJDIR)/examples/server_flood.o: examples/server_flood.c examples/server_flood
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/server_flood_stats.h
+$(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/server_flood_stats.h examples/server_flood_stats_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/examples/server_flood_stats_open.o: examples/server_flood_stats_open.c examples/server_flood_stats_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 

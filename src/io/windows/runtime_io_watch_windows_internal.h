@@ -21,7 +21,7 @@
 #ifndef LLAM_IO_WINDOWS_RUNTIME_IO_WATCH_WINDOWS_INTERNAL_H
 #define LLAM_IO_WINDOWS_RUNTIME_IO_WATCH_WINDOWS_INTERNAL_H
 
-#include "../runtime_io_api_internal.h"
+#include "io/runtime_io_api_internal.h"
 
 #include "runtime_windows_iocp.h"
 
