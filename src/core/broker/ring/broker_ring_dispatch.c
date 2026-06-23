@@ -28,6 +28,8 @@
 #include "runtime_internal.h"
 #include "runtime_broker_ring.h"
 
+#include <string.h>
+
 static void llam_broker_ring_session_submit_publish(llam_broker_ring_t *ring,
                                                     const llam_broker_ring_session_t *session) {
     /*
@@ -160,6 +162,70 @@ static int llam_broker_ring_session_validate_publish_locked(const llam_broker_ri
     return 0;
 }
 
+static bool llam_broker_ring_spawned_task_token(const llam_broker_ring_t *ring,
+                                                const llam_broker_ring_submission_t *submission,
+                                                const llam_broker_ring_completion_t *completion,
+                                                llam_capability_token_t *out_token) {
+    uint64_t end;
+
+    if (out_token != NULL) {
+        memset(out_token, 0, sizeof(*out_token));
+    }
+    if (ring == NULL ||
+        submission == NULL ||
+        completion == NULL ||
+        out_token == NULL ||
+        submission->op != LLAM_BROKER_RING_OP_TASK_SPAWN ||
+        completion->status != 0 ||
+        submission->arg2 > (uint64_t)LLAM_BROKER_RING_DATA_BYTES ||
+        sizeof(*out_token) > LLAM_BROKER_RING_DATA_BYTES) {
+        return false;
+    }
+    end = submission->arg2 + (uint64_t)sizeof(*out_token);
+    if (end < submission->arg2 || end > (uint64_t)LLAM_BROKER_RING_DATA_BYTES) {
+        return false;
+    }
+    memcpy(out_token, ring->data + (size_t)submission->arg2, sizeof(*out_token));
+    return out_token->family == LLAM_BROKER_CAP_FAMILY_TASK;
+}
+
+static size_t llam_broker_ring_authority_safe_batch_count(const llam_broker_ring_submission_t *submissions,
+                                                          size_t count) {
+    size_t i;
+
+    if (submissions == NULL) {
+        return 0U;
+    }
+    for (i = 0U; i < count; ++i) {
+        if (submissions[i].op == LLAM_BROKER_RING_OP_TASK_SPAWN) {
+            return i == 0U ? 1U : i;
+        }
+    }
+    return count;
+}
+
+static void llam_broker_ring_rollback_unpublished_tasks(llam_broker_t *broker,
+                                                        const llam_capability_token_t *tokens,
+                                                        const bool *created,
+                                                        size_t count) {
+    size_t i;
+
+    for (i = 0U; i < count; ++i) {
+        llam_broker_wire_request_t request;
+        llam_broker_wire_response_t response;
+
+        if (!created[i]) {
+            continue;
+        }
+        memset(&request, 0, sizeof(request));
+        memset(&response, 0, sizeof(response));
+        request.op = (uint32_t)LLAM_BROKER_WIRE_OP_TASK_SPAWN;
+        response.status = 0;
+        response.token = tokens[i];
+        llam_broker_rollback_created_response(broker, &request, &response, 0U);
+    }
+}
+
 int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
                                                 llam_broker_ring_t *ring,
                                                 llam_broker_ring_session_t *session,
@@ -167,6 +233,8 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
                                                 size_t *out_served) {
     llam_broker_ring_submission_t submissions[LLAM_BROKER_RING_SERVE_BATCH_MAX];
     llam_broker_ring_completion_t completions[LLAM_BROKER_RING_SERVE_BATCH_MAX];
+    llam_capability_token_t created_task_tokens[LLAM_BROKER_RING_SERVE_BATCH_MAX];
+    bool created_task[LLAM_BROKER_RING_SERVE_BATCH_MAX];
     llam_broker_ring_mapping_t poisoned_mapping;
     uint64_t completion_tail;
     uint64_t serve_start_ns;
@@ -197,11 +265,24 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
      * session busy. The client owns the shared mapping and may mutate slots
      * after publishing them; the local copy is the broker's immutable worklist.
      */
+    count = llam_broker_ring_authority_safe_batch_count(submissions, count);
+    if (count == 0U) {
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
+        errno = EINVAL;
+        return -1;
+    }
     session->busy = true;
     llam_broker_unlock(broker);
 
+    memset(created_task_tokens, 0, sizeof(created_task_tokens));
+    memset(created_task, 0, sizeof(created_task));
     for (i = 0U; i < count; ++i) {
         llam_broker_ring_execute_submission(broker, ring, &submissions[i], &completions[i]);
+        created_task[i] = llam_broker_ring_spawned_task_token(ring,
+                                                              &submissions[i],
+                                                              &completions[i],
+                                                              &created_task_tokens[i]);
     }
 
     if (llam_broker_lock(broker) != 0) {
@@ -222,6 +303,7 @@ int llam_broker_ring_serve_locked_session_batch(llam_broker_t *broker,
          */
         unmap_mapping = llam_broker_ring_session_take_mapping(session, &poisoned_mapping);
         llam_broker_unlock(broker);
+        llam_broker_ring_rollback_unpublished_tasks(broker, created_task_tokens, created_task, count);
         if (unmap_mapping) {
             llam_broker_ring_unmap(&poisoned_mapping);
         }

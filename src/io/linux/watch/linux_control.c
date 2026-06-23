@@ -105,16 +105,23 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
     if (atomic_load_explicit(&req->cancel_queued, memory_order_acquire) != 0U) {
+        bool dropped;
+
         /*
          * A real CQE can win before the queued cancel control is submitted.
          * Drop that stale control now; otherwise a later io_uring cancel SQE
          * can target a new request that reuses this embedded request address.
          */
         pthread_mutex_lock(&node->watch_lock);
-        (void)llam_drop_node_control_locked(node, LLAM_IO_CONTROL_REQ_CANCEL, req);
+        dropped = llam_drop_node_control_locked(node, LLAM_IO_CONTROL_REQ_CANCEL, req);
         pthread_mutex_unlock(&node->watch_lock);
+        if (dropped) {
+            atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
+            atomic_store_explicit(&req->cancel_submitted, 0U, memory_order_release);
+        }
+    } else {
+        atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
     }
-    atomic_store(&req->cancel_queued, 0U);
     req->poll_watch = NULL;
     req->accept_watch = NULL;
     req->recv_watch = NULL;
@@ -269,6 +276,7 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
              * so a later timeout/cancel pass can retry backend cancellation.
              */
             atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
+            atomic_store_explicit(&req->cancel_submitted, 0U, memory_order_release);
         }
         break;
     }
@@ -326,6 +334,9 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
     if (!llam_io_control_op_ready(op)) {
         llam_io_fail_control_op(node, op);
         return;
+    }
+    if (op->kind == LLAM_IO_CONTROL_REQ_CANCEL) {
+        atomic_store_explicit(&((llam_io_req_t *)op->target)->cancel_submitted, 1U, memory_order_release);
     }
 
     sqe = io_uring_get_sqe(&node->ring);

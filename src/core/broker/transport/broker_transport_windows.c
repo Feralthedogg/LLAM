@@ -33,6 +33,8 @@
 
 #include <string.h>
 
+#define LLAM_BROKER_WINDOWS_IO_TIMEOUT_MS 250U
+
 int llam_broker_windows_pipe_errno(unsigned long error_code) {
     switch (error_code) {
     case ERROR_FILE_NOT_FOUND:
@@ -48,6 +50,7 @@ int llam_broker_windows_pipe_errno(unsigned long error_code) {
 static int llam_broker_read_exact_handle(HANDLE handle, void *data, size_t len) {
     unsigned char *cursor = (unsigned char *)data;
     size_t done = 0U;
+    HANDLE event;
 
     if (LLAM_UNLIKELY(handle == NULL ||
                       handle == INVALID_HANDLE_VALUE ||
@@ -55,39 +58,101 @@ static int llam_broker_read_exact_handle(HANDLE handle, void *data, size_t len) 
                       len == 0U)) {
         return llam_broker_fail_clear_output(data, len, EINVAL);
     }
+    event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (event == NULL) {
+        return llam_broker_fail_clear_output(data, len, llam_broker_windows_pipe_errno(GetLastError()));
+    }
     while (done < len) {
         DWORD chunk = (DWORD)((len - done) > UINT32_MAX ? UINT32_MAX : (len - done));
         DWORD nread = 0U;
+        OVERLAPPED overlapped;
 
-        if (!ReadFile(handle, cursor + done, chunk, &nread, NULL)) {
-            return llam_broker_fail_clear_output(data, len, llam_broker_windows_pipe_errno(GetLastError()));
+        memset(&overlapped, 0, sizeof(overlapped));
+        ResetEvent(event);
+        overlapped.hEvent = event;
+        if (!ReadFile(handle, cursor + done, chunk, &nread, &overlapped)) {
+            DWORD error_code = GetLastError();
+
+            if (error_code != ERROR_IO_PENDING) {
+                CloseHandle(event);
+                return llam_broker_fail_clear_output(data, len, llam_broker_windows_pipe_errno(error_code));
+            }
+            error_code = WaitForSingleObject(event, LLAM_BROKER_WINDOWS_IO_TIMEOUT_MS);
+            if (error_code != WAIT_OBJECT_0) {
+                (void)CancelIoEx(handle, &overlapped);
+                (void)WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+                return llam_broker_fail_clear_output(data,
+                                                     len,
+                                                     error_code == WAIT_TIMEOUT ? ETIMEDOUT : llam_broker_windows_pipe_errno(GetLastError()));
+            }
+            if (!GetOverlappedResult(handle, &overlapped, &nread, FALSE)) {
+                error_code = GetLastError();
+
+                CloseHandle(event);
+                return llam_broker_fail_clear_output(data, len, llam_broker_windows_pipe_errno(error_code));
+            }
         }
         if (nread == 0U) {
+            CloseHandle(event);
             return llam_broker_fail_clear_output(data, len, EPIPE);
         }
         done += (size_t)nread;
     }
+    CloseHandle(event);
     return 0;
 }
 
 static int llam_broker_write_exact_handle(HANDLE handle, const void *data, size_t len) {
     const unsigned char *cursor = (const unsigned char *)data;
     size_t done = 0U;
+    HANDLE event;
 
+    event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (event == NULL) {
+        errno = llam_broker_windows_pipe_errno(GetLastError());
+        return -1;
+    }
     while (done < len) {
         DWORD chunk = (DWORD)((len - done) > UINT32_MAX ? UINT32_MAX : (len - done));
         DWORD nwritten = 0U;
+        OVERLAPPED overlapped;
 
-        if (!WriteFile(handle, cursor + done, chunk, &nwritten, NULL)) {
-            errno = llam_broker_windows_pipe_errno(GetLastError());
-            return -1;
+        memset(&overlapped, 0, sizeof(overlapped));
+        ResetEvent(event);
+        overlapped.hEvent = event;
+        if (!WriteFile(handle, cursor + done, chunk, &nwritten, &overlapped)) {
+            DWORD error_code = GetLastError();
+
+            if (error_code != ERROR_IO_PENDING) {
+                CloseHandle(event);
+                errno = llam_broker_windows_pipe_errno(error_code);
+                return -1;
+            }
+            error_code = WaitForSingleObject(event, LLAM_BROKER_WINDOWS_IO_TIMEOUT_MS);
+            if (error_code != WAIT_OBJECT_0) {
+                (void)CancelIoEx(handle, &overlapped);
+                (void)WaitForSingleObject(event, INFINITE);
+                CloseHandle(event);
+                errno = error_code == WAIT_TIMEOUT ? ETIMEDOUT : llam_broker_windows_pipe_errno(GetLastError());
+                return -1;
+            }
+            if (!GetOverlappedResult(handle, &overlapped, &nwritten, FALSE)) {
+                error_code = GetLastError();
+
+                CloseHandle(event);
+                errno = llam_broker_windows_pipe_errno(error_code);
+                return -1;
+            }
         }
         if (nwritten == 0U) {
+            CloseHandle(event);
             errno = EPIPE;
             return -1;
         }
         done += (size_t)nwritten;
     }
+    CloseHandle(event);
     return 0;
 }
 

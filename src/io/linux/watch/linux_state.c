@@ -74,8 +74,12 @@ llam_io_req_t *llam_recv_watch_pop_waiter(llam_recv_watch_t *watch) {
  * @return true on success, false if allocation failed.
  */
 bool llam_accept_watch_push_ready_owned(llam_accept_watch_t *watch, int fd) {
-    llam_accept_ready_t *ready = calloc(1, sizeof(*ready));
+    llam_accept_ready_t *ready;
 
+    if (watch == NULL || watch->ready_depth >= LLAM_WATCH_READY_DEPTH_MAX) {
+        return false;
+    }
+    ready = calloc(1, sizeof(*ready));
     if (ready == NULL) {
         return false;
     }
@@ -171,8 +175,16 @@ bool llam_recv_watch_push_ready(llam_recv_watch_t *watch,
                                      unsigned node_index,
                                      unsigned char *copy_data,
                                      size_t copy_capacity) {
-    llam_recv_ready_t *ready = calloc(1, sizeof(*ready));
+    llam_recv_ready_t *ready;
 
+    if (watch == NULL ||
+        watch->ready_depth >= LLAM_WATCH_READY_DEPTH_MAX ||
+        copy_capacity > LLAM_RECV_WATCH_READY_BYTES_MAX ||
+        watch->ready_bytes > LLAM_RECV_WATCH_READY_BYTES_MAX - copy_capacity) {
+        free(copy_data);
+        return false;
+    }
+    ready = calloc(1, sizeof(*ready));
     if (ready == NULL) {
         // copy_data ownership was passed to this function; release on failure.
         free(copy_data);
@@ -192,6 +204,7 @@ bool llam_recv_watch_push_ready(llam_recv_watch_t *watch,
     }
     watch->ready_tail = ready;
     watch->ready_depth += 1U;
+    watch->ready_bytes += copy_capacity;
     return true;
 }
 

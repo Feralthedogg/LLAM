@@ -80,6 +80,8 @@ void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsign
     atomic_init(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
     atomic_init(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_init(&req->cancel_queued, 0U);
+    atomic_init(&req->cancel_submitted, 0U);
+    atomic_init(&req->free_after_cancel, 0U);
     req->use_recv_op = false;
     req->use_provided_buffer = false;
 }
@@ -143,6 +145,10 @@ void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req) {
 
     (void)shard;
     if (req == NULL || rt == NULL || req->alloc_owner_shard >= rt->active_shards) {
+        return;
+    }
+    if (atomic_load_explicit(&req->cancel_submitted, memory_order_acquire) != 0U) {
+        atomic_store_explicit(&req->free_after_cancel, 1U, memory_order_release);
         return;
     }
 

@@ -98,11 +98,8 @@ static void llam_broker_rollback_response_token_locked(llam_broker_t *broker,
                 for (;;) {
                     uint32_t state = atomic_load_explicit(&slot->state, memory_order_acquire);
 
-                    if (slot->task == NULL) {
-                        return;
-                    }
                     if (state == LLAM_BROKER_TASK_STATE_COMPLETED) {
-                        if (out_task_to_detach != NULL) {
+                        if (slot->task != NULL && out_task_to_detach != NULL) {
                             *out_task_to_detach = slot->task;
                         }
                         memset(slot, 0, sizeof(*slot));

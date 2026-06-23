@@ -1,5 +1,32 @@
 # LLAM ChangeLog
 
+## 2.1.0 - 2026-06-23
+
+### Security
+
+* harden broker revoke handling so descriptor, buffer, and channel tokens cannot
+  regain rights after being narrowed to destroy-only authority.
+
+* close broker ring task-spawn rollback gaps by failing poisoned cursor
+  publication closed and rolling back newly allocated task slots.
+
+* move descriptor read/write execution outside broker active-operation critical
+  sections so blocking descriptors cannot stall teardown or broker progress.
+
+* harden broker transports against socket-path replacement, stalled POSIX
+  clients, stalled Windows named-pipe sessions, and Windows pipe endpoint
+  squatting.
+
+* bound Darwin/Linux accept and receive readiness queues, retain io_uring
+  requests until cancel completion retires, and verify fd identity before live
+  receive-readiness migration.
+
+### Changed
+
+* refresh version, installer, packaging, workflow, shared-library smoke, and
+  documentation metadata for the `2.1.0` security release while keeping the
+  public ABI at `2.0`.
+
 ## 2.0.1 - 2026-06-23
 
 ### Changed

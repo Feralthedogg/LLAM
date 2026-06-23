@@ -30,6 +30,8 @@
 
 #include <windows.h>
 
+#include <string.h>
+
 static bool llam_broker_pipe_listen_retryable_errno(int error_code) {
     return error_code == EACCES || error_code == EAGAIN || error_code == EIO;
 }
@@ -47,11 +49,11 @@ static int llam_broker_listen_pipe_session(const char *path,
      * exclusively ours and must fail closed.
      */
     if (served_sessions == 0U) {
-        return llam_broker_listen_pipe(path, out_pipe);
+        return llam_broker_listen_pipe_instance(path, true, out_pipe);
     }
     deadline = GetTickCount64() + 500U;
     for (;;) {
-        if (llam_broker_listen_pipe(path, out_pipe) == 0) {
+        if (llam_broker_listen_pipe_instance(path, false, out_pipe) == 0) {
             return 0;
         }
         if (!llam_broker_pipe_listen_retryable_errno(errno) || GetTickCount64() >= deadline) {
@@ -59,6 +61,38 @@ static int llam_broker_listen_pipe_session(const char *path,
         }
         Sleep(5U);
     }
+}
+
+static int llam_broker_connect_pipe_server(llam_handle_t pipe) {
+    OVERLAPPED overlapped;
+    HANDLE event;
+
+    if (LLAM_UNLIKELY(llam_handle_is_invalid(pipe))) {
+        errno = EINVAL;
+        return -1;
+    }
+    event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (event == NULL) {
+        errno = llam_broker_windows_pipe_errno(GetLastError());
+        return -1;
+    }
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.hEvent = event;
+    if (!ConnectNamedPipe((HANDLE)pipe, &overlapped)) {
+        DWORD error_code = GetLastError();
+
+        if (error_code == ERROR_PIPE_CONNECTED) {
+            SetEvent(event);
+        } else if (error_code == ERROR_IO_PENDING) {
+            (void)WaitForSingleObject(event, INFINITE);
+        } else {
+            CloseHandle(event);
+            errno = llam_broker_windows_pipe_errno(error_code);
+            return -1;
+        }
+    }
+    CloseHandle(event);
+    return 0;
 }
 
 int llam_broker_serve_unix_once(llam_broker_t *broker, const char *path) {
@@ -71,6 +105,7 @@ int llam_broker_client_self_test_unix(const char *path) {
 
 int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t max_connections) {
     llam_handle_t pipe = LLAM_INVALID_HANDLE;
+    llam_handle_t next_pipe = LLAM_INVALID_HANDLE;
     int rc = -1;
     int last_session_errno = 0;
     size_t served = 0U;
@@ -80,37 +115,26 @@ int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t ma
         errno = EINVAL;
         return -1;
     }
+    if (llam_broker_listen_pipe_session(path, &pipe, 0U) != 0) {
+        return -1;
+    }
     while (served < max_connections) {
-        pipe = LLAM_INVALID_HANDLE;
-        if (llam_broker_listen_pipe_session(path, &pipe, served) != 0) {
-            if (served > 0U && successful > 0U) {
-                return 0;
+        if (llam_broker_connect_pipe_server(pipe) != 0) {
+            if (errno == EPIPE) {
+                last_session_errno = EPIPE;
+                (void)DisconnectNamedPipe((HANDLE)pipe);
+                llam_broker_close_handle(pipe);
+                pipe = next_pipe;
+                next_pipe = LLAM_INVALID_HANDLE;
+                served++;
+                continue;
             }
-            if (served > 0U && last_session_errno != 0) {
-                errno = last_session_errno;
-            }
+            llam_broker_close_handle(pipe);
             return -1;
         }
-        if (!ConnectNamedPipe((HANDLE)pipe, NULL)) {
-            DWORD error_code = GetLastError();
-
-            if (error_code != ERROR_PIPE_CONNECTED) {
-                if (error_code == ERROR_NO_DATA || error_code == ERROR_BROKEN_PIPE) {
-                    /*
-                     * A client may connect and close before the broker reaches
-                     * ConnectNamedPipe. Treat that as a malformed one-session
-                     * failure, not as failure of the long-running broker.
-                     */
-                    last_session_errno = EPIPE;
-                    (void)DisconnectNamedPipe((HANDLE)pipe);
-                    llam_broker_close_handle(pipe);
-                    served++;
-                    continue;
-                }
-                errno = llam_broker_windows_pipe_errno(error_code);
-                llam_broker_close_handle(pipe);
-                return -1;
-            }
+        if (served + 1U < max_connections &&
+            llam_broker_listen_pipe_session(path, &next_pipe, served + 1U) != 0) {
+            last_session_errno = errno;
         }
         /*
          * Named pipes create one kernel pipe instance per accepted session.
@@ -127,7 +151,19 @@ int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t ma
         }
         (void)DisconnectNamedPipe((HANDLE)pipe);
         llam_broker_close_handle(pipe);
+        pipe = next_pipe;
+        next_pipe = LLAM_INVALID_HANDLE;
         served++;
+        if (served < max_connections && llam_handle_is_invalid(pipe)) {
+            errno = last_session_errno != 0 ? last_session_errno : EIO;
+            return successful > 0U ? 0 : -1;
+        }
+    }
+    if (!llam_handle_is_invalid(pipe)) {
+        llam_broker_close_handle(pipe);
+    }
+    if (!llam_handle_is_invalid(next_pipe)) {
+        llam_broker_close_handle(next_pipe);
     }
     if (successful == 0U) {
         errno = last_session_errno != 0 ? last_session_errno : EPIPE;

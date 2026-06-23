@@ -466,6 +466,7 @@ int llam_broker_capture_owned_socket(const char *path, llam_broker_socket_identi
 int llam_broker_restrict_owned_socket(const char *path, const llam_broker_socket_identity_t *identity);
 void llam_broker_unlink_owned_socket(const char *path, const llam_broker_socket_identity_t *identity);
 int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle);
+int llam_broker_listen_pipe_instance(const char *name, bool first_instance, llam_handle_t *out_handle);
 int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle);
 void llam_broker_close_handle(llam_handle_t handle);
 int llam_broker_windows_pipe_errno(unsigned long error_code);

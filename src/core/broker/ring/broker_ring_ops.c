@@ -270,7 +270,8 @@ void llam_broker_ring_execute_submission(llam_broker_t *broker,
                                         &length) == 0) {
             llam_capability_token_t task_token;
 
-            if (LLAM_UNLIKELY(submission->arg0 > (uint64_t)UINT32_MAX)) {
+            if (LLAM_UNLIKELY(submission->arg0 > (uint64_t)UINT32_MAX ||
+                              submission->arg0 == (uint64_t)LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64)) {
                 llam_broker_ring_clear_output(ring, ring_offset, length);
                 llam_broker_ring_completion_fail(completion, EINVAL);
             } else if (llam_broker_spawn_task(broker,

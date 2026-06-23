@@ -35,6 +35,7 @@
 #include <unistd.h>
 
 #include <fcntl.h>
+#include <limits.h>
 #include <string.h>
 
 int llam_broker_set_cloexec_fd(int fd) {
@@ -146,6 +147,44 @@ static int llam_broker_open_unix_endpoint(const char *path, struct sockaddr_un *
     return 0;
 }
 
+static int llam_broker_parent_dir_private(const char *path) {
+    char parent[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    const char *slash;
+    size_t len;
+    struct stat st;
+
+    if (LLAM_UNLIKELY(path == NULL || path[0] == '\0')) {
+        errno = EINVAL;
+        return -1;
+    }
+    slash = strrchr(path, '/');
+    if (slash == NULL) {
+        memcpy(parent, ".", 2U);
+    } else if (slash == path) {
+        memcpy(parent, "/", 2U);
+    } else {
+        len = (size_t)(slash - path);
+        if (LLAM_UNLIKELY(len == 0U || len >= sizeof(parent))) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        memcpy(parent, path, len);
+        parent[len] = '\0';
+    }
+    if (stat(parent, &st) != 0) {
+        return -1;
+    }
+    if (LLAM_UNLIKELY(!S_ISDIR(st.st_mode))) {
+        errno = ENOTDIR;
+        return -1;
+    }
+    if (LLAM_UNLIKELY((st.st_mode & (S_IWGRP | S_IWOTH)) != 0)) {
+        errno = EACCES;
+        return -1;
+    }
+    return 0;
+}
+
 int llam_broker_listen_unix(const char *path, int *out_fd) {
     struct sockaddr_un addr;
     llam_broker_socket_identity_t identity;
@@ -155,6 +194,9 @@ int llam_broker_listen_unix(const char *path, int *out_fd) {
 
     if (out_fd != NULL) {
         *out_fd = -1;
+    }
+    if (llam_broker_parent_dir_private(path) != 0) {
+        return -1;
     }
     if (llam_broker_open_unix_endpoint(path, &addr, &fd) != 0) {
         return -1;
@@ -271,6 +313,11 @@ int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
     }
     errno = ENOTSUP;
     return -1;
+}
+
+int llam_broker_listen_pipe_instance(const char *name, bool first_instance, llam_handle_t *out_handle) {
+    (void)first_instance;
+    return llam_broker_listen_pipe(name, out_handle);
 }
 
 int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {

@@ -447,6 +447,8 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 unsigned accept_migrate_target = UINT_MAX;
                 unsigned recv_migrate_target = UINT_MAX;
                 bool kick_target = false;
+                llam_io_req_t *retired_cancel_req = NULL;
+                bool free_retired_cancel_req = false;
 
                 pthread_mutex_lock(&node->watch_lock);
                 // Control completions finalize deactivate/cancel state and then
@@ -499,6 +501,18 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     }
                     break;
                 }
+                case LLAM_IO_CONTROL_REQ_CANCEL: {
+                    llam_io_req_t *req = op->target;
+
+                    if (req != NULL) {
+                        atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
+                        atomic_store_explicit(&req->cancel_submitted, 0U, memory_order_release);
+                        free_retired_cancel_req =
+                            atomic_exchange_explicit(&req->free_after_cancel, 0U, memory_order_acq_rel) != 0U;
+                        retired_cancel_req = free_retired_cancel_req ? req : NULL;
+                    }
+                    break;
+                }
                 default:
                     break;
                 }
@@ -517,6 +531,9 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     if (target_index < node->runtime->active_nodes) {
                         llam_kick_node(&node->runtime->nodes[target_index]);
                     }
+                }
+                if (retired_cancel_req != NULL) {
+                    llam_io_req_free(NULL, retired_cancel_req);
                 }
                 free(op);
             }

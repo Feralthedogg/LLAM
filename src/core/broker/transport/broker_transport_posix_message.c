@@ -28,10 +28,13 @@
 
 #if !LLAM_PLATFORM_WINDOWS
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <string.h>
+
+#define LLAM_BROKER_TRANSPORT_IO_TIMEOUT_MS 250
 
 #if !defined(MSG_NOSIGNAL)
 static void llam_broker_disable_sigpipe(int fd) {
@@ -63,6 +66,37 @@ static ssize_t llam_broker_sendmsg_transport(int fd, const struct msghdr *msg) {
     llam_broker_disable_sigpipe(fd);
     return sendmsg(fd, msg, 0);
 #endif
+}
+
+static int llam_broker_wait_transport_fd(int fd, short events) {
+    struct pollfd pfd;
+
+    if (LLAM_UNLIKELY(fd < 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd;
+    pfd.events = events;
+    for (;;) {
+        int rc = poll(&pfd, 1U, LLAM_BROKER_TRANSPORT_IO_TIMEOUT_MS);
+
+        if (rc > 0) {
+            if ((pfd.revents & (events | POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                return 0;
+            }
+            errno = EIO;
+            return -1;
+        }
+        if (rc == 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return -1;
+    }
 }
 
 static void llam_broker_close_received_fds(int fds[4], size_t *count) {
@@ -102,8 +136,12 @@ static int llam_broker_write_remainder(int fd, const unsigned char *cursor, size
     size_t done = 0U;
 
     while (done < len) {
-        ssize_t nwritten = llam_broker_send_transport(fd, cursor + done, len - done);
+        ssize_t nwritten;
 
+        if (llam_broker_wait_transport_fd(fd, POLLOUT) != 0) {
+            return -1;
+        }
+        nwritten = llam_broker_send_transport(fd, cursor + done, len - done);
         if (nwritten > 0) {
             done += (size_t)nwritten;
             continue;
@@ -156,6 +194,13 @@ static int llam_broker_read_message_fd(int fd, void *message, size_t message_len
          * on platforms that support it.  We still call llam_broker_set_cloexec_fd
          * below because not every supported POSIX target exposes this flag.
          */
+        if (llam_broker_wait_transport_fd(fd, POLLIN) != 0) {
+            return llam_broker_read_message_fail(message,
+                                                 message_len,
+                                                 descriptor_fds,
+                                                 &descriptor_count,
+                                                 errno);
+        }
 #if defined(MSG_CMSG_CLOEXEC)
         nread = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
 #else
@@ -321,8 +366,12 @@ static int llam_broker_write_message_with_descriptor(int fd,
     msg.msg_controllen = CMSG_SPACE(sizeof(int));
 
     for (;;) {
-        ssize_t nwritten = llam_broker_sendmsg_transport(fd, &msg);
+        ssize_t nwritten;
 
+        if (llam_broker_wait_transport_fd(fd, POLLOUT) != 0) {
+            return -1;
+        }
+        nwritten = llam_broker_sendmsg_transport(fd, &msg);
         if (nwritten > 0) {
             if ((size_t)nwritten < message_len) {
                 return llam_broker_write_remainder(fd,
@@ -361,8 +410,12 @@ static int llam_broker_read_exact(int fd, void *data, size_t len) {
         return llam_broker_fail_clear_output(data, len, EINVAL);
     }
     while (done < len) {
-        ssize_t nread = read(fd, cursor + done, len - done);
+        ssize_t nread;
 
+        if (llam_broker_wait_transport_fd(fd, POLLIN) != 0) {
+            return llam_broker_fail_clear_output(data, len, errno);
+        }
+        nread = read(fd, cursor + done, len - done);
         if (nread > 0) {
             done += (size_t)nread;
             continue;
@@ -383,8 +436,12 @@ static int llam_broker_write_exact(int fd, const void *data, size_t len) {
     size_t done = 0U;
 
     while (done < len) {
-        ssize_t nwritten = llam_broker_send_transport(fd, cursor + done, len - done);
+        ssize_t nwritten;
 
+        if (llam_broker_wait_transport_fd(fd, POLLOUT) != 0) {
+            return -1;
+        }
+        nwritten = llam_broker_send_transport(fd, cursor + done, len - done);
         if (nwritten > 0) {
             done += (size_t)nwritten;
             continue;

@@ -111,6 +111,42 @@ static bool llam_broker_has_pending_sleep_task_locked(const llam_broker_t *broke
     return false;
 }
 
+static void llam_broker_task_compute(uint32_t kind,
+                                     uint64_t arg0,
+                                     uint64_t *out_result0,
+                                     int *out_error_code) {
+    uint64_t result0 = 0U;
+    int error_code = 0;
+
+    switch ((llam_broker_task_kind_t)kind) {
+    case LLAM_BROKER_TASK_KIND_RETURN_U64:
+        result0 = arg0;
+        break;
+    case LLAM_BROKER_TASK_KIND_INCREMENT_U64:
+        result0 = arg0 + 1U;
+        break;
+    case LLAM_BROKER_TASK_KIND_POPCOUNT_U64:
+        result0 = llam_broker_popcount_u64(arg0);
+        break;
+    case LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64:
+        if (llam_sleep_ns(arg0) == 0) {
+            result0 = arg0;
+        } else {
+            error_code = errno == 0 ? EINVAL : errno;
+        }
+        break;
+    default:
+        error_code = EINVAL;
+        break;
+    }
+    if (out_result0 != NULL) {
+        *out_result0 = result0;
+    }
+    if (out_error_code != NULL) {
+        *out_error_code = error_code;
+    }
+}
+
 static void llam_broker_task_trampoline(void *arg) {
     llam_broker_task_slot_t *slot = (llam_broker_task_slot_t *)arg;
     uint32_t expected;
@@ -118,33 +154,7 @@ static void llam_broker_task_trampoline(void *arg) {
     if (slot == NULL) {
         return;
     }
-    switch ((llam_broker_task_kind_t)slot->kind) {
-    case LLAM_BROKER_TASK_KIND_RETURN_U64:
-        slot->result0 = slot->arg0;
-        slot->error_code = 0;
-        break;
-    case LLAM_BROKER_TASK_KIND_INCREMENT_U64:
-        slot->result0 = slot->arg0 + 1U;
-        slot->error_code = 0;
-        break;
-    case LLAM_BROKER_TASK_KIND_POPCOUNT_U64:
-        slot->result0 = llam_broker_popcount_u64(slot->arg0);
-        slot->error_code = 0;
-        break;
-    case LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64:
-        if (llam_sleep_ns(slot->arg0) == 0) {
-            slot->result0 = slot->arg0;
-            slot->error_code = 0;
-        } else {
-            slot->result0 = 0U;
-            slot->error_code = errno == 0 ? EINVAL : errno;
-        }
-        break;
-    default:
-        slot->result0 = 0U;
-        slot->error_code = EINVAL;
-        break;
-    }
+    llam_broker_task_compute(slot->kind, slot->arg0, &slot->result0, &slot->error_code);
 
     expected = LLAM_BROKER_TASK_STATE_SPAWNED;
     if (atomic_compare_exchange_strong_explicit(&slot->state,
@@ -284,6 +294,13 @@ int llam_broker_spawn_task(llam_broker_t *broker,
         return -1;
     }
 
+    if (kind != (uint32_t)LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64) {
+        llam_broker_task_compute(kind, arg0, &slot->result0, &slot->error_code);
+        atomic_store_explicit(&slot->state, LLAM_BROKER_TASK_STATE_COMPLETED, memory_order_release);
+        llam_broker_end_op(broker);
+        return 0;
+    }
+
     slot->task = llam_runtime_spawn_ex(broker->runtime, llam_broker_task_trampoline, slot, NULL, 0U);
     if (slot->task == NULL) {
         memset(out_token, 0, sizeof(*out_token));
@@ -381,7 +398,7 @@ int llam_broker_join_task(llam_broker_t *broker,
         errno = EAGAIN;
         return -1;
     }
-    if (state != LLAM_BROKER_TASK_STATE_COMPLETED || slot->task == NULL) {
+    if (state != LLAM_BROKER_TASK_STATE_COMPLETED) {
         llam_broker_unlock(broker);
         llam_broker_end_op(broker);
         errno = EINVAL;
@@ -396,7 +413,7 @@ int llam_broker_join_task(llam_broker_t *broker,
     llam_broker_task_slot_reset(slot);
     llam_broker_unlock(broker);
 
-    if (llam_join(task) != 0) {
+    if (task != NULL && llam_join(task) != 0) {
         llam_broker_end_op(broker);
         return -1;
     }
@@ -433,12 +450,6 @@ int llam_broker_detach_task(llam_broker_t *broker, const llam_capability_token_t
     for (;;) {
         state = atomic_load_explicit(&slot->state, memory_order_acquire);
         if (state == LLAM_BROKER_TASK_STATE_COMPLETED) {
-            if (slot->task == NULL) {
-                llam_broker_unlock(broker);
-                llam_broker_end_op(broker);
-                errno = EINVAL;
-                return -1;
-            }
             task = slot->task;
             slot->task = NULL;
             llam_broker_task_slot_reset(slot);

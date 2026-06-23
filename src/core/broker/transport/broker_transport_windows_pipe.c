@@ -56,10 +56,11 @@ static int llam_broker_pipe_name(const char *path, char *out, size_t out_size) {
     return 0;
 }
 
-int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
+int llam_broker_listen_pipe_instance(const char *name, bool first_instance, llam_handle_t *out_handle) {
     char pipe_name[256];
     llam_broker_windows_security_t security;
     HANDLE handle;
+    DWORD open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
 
     if (out_handle != NULL) {
         *out_handle = LLAM_INVALID_HANDLE;
@@ -74,10 +75,13 @@ int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
     if (llam_broker_windows_security_init(&security, GENERIC_ALL) != 0) {
         return -1;
     }
+    if (first_instance) {
+        open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+    }
     handle = CreateNamedPipeA(pipe_name,
-                              PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                              open_mode,
                               PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                              1U,
+                              PIPE_UNLIMITED_INSTANCES,
                               (DWORD)(sizeof(llam_broker_wire_response_t) * 4U),
                               (DWORD)(sizeof(llam_broker_wire_request_t) * 4U),
                               5000U,
@@ -89,6 +93,10 @@ int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
     }
     *out_handle = (llam_handle_t)handle;
     return 0;
+}
+
+int llam_broker_listen_pipe(const char *name, llam_handle_t *out_handle) {
+    return llam_broker_listen_pipe_instance(name, true, out_handle);
 }
 
 int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {
@@ -113,7 +121,7 @@ int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {
                                     0U,
                                     NULL,
                                     OPEN_EXISTING,
-                                    FILE_ATTRIBUTE_NORMAL,
+                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                                     NULL);
         if (handle != INVALID_HANDLE_VALUE) {
             if (!SetNamedPipeHandleState(handle, &mode, NULL, NULL)) {

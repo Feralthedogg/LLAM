@@ -428,6 +428,8 @@ typedef struct llam_io_req {
     atomic_uint wait_mode;
     atomic_uint abort_reason;
     atomic_uint cancel_queued;
+    atomic_uint cancel_submitted;
+    atomic_uint free_after_cancel;
     bool use_recv_op;
     bool use_provided_buffer;
 } llam_io_req_t;
@@ -500,6 +502,9 @@ struct llam_accept_ready {
     llam_fd_t fd;
     llam_accept_ready_t *next;
 };
+
+#define LLAM_WATCH_READY_DEPTH_MAX 64U
+#define LLAM_RECV_WATCH_READY_BYTES_MAX (1024U * 1024U)
 
 /**
  * @brief Completed recv/read readiness buffered by a watch.  Linux may use provided
@@ -574,6 +579,7 @@ struct llam_recv_watch {
     bool activating;
     bool deactivate_queued;
     unsigned ready_depth;
+    size_t ready_bytes;
     llam_io_req_t *wait_head;
     llam_io_req_t *wait_tail;
     llam_recv_ready_t *ready_head;

@@ -202,6 +202,8 @@ bool llam_forward_live_recv_watch_ready(llam_node_t *source,
     llam_node_t *target_locked = NULL;
     llam_recv_watch_t *source_watch;
     llam_recv_watch_t *target_watch;
+    dev_t target_st_dev = 0;
+    ino_t target_st_ino = 0;
     bool ok = false;
 
     if (source == NULL || source->runtime == NULL) {
@@ -216,6 +218,11 @@ bool llam_forward_live_recv_watch_ready(llam_node_t *source,
     llam_io_lock_rehome_pair(source, target, &source_locked, &target_locked);
     source_watch = llam_find_recv_watch_locked(source_locked, fd, st_dev, st_ino);
     if (source_watch != NULL && source_watch->migrate_target_node_index != target_index) {
+        goto out;
+    }
+    if (!llam_capture_fd_watch_identity(fd, &target_st_dev, &target_st_ino) ||
+        target_st_dev != st_dev ||
+        target_st_ino != st_ino) {
         goto out;
     }
     target_watch = llam_get_or_create_recv_watch_locked(target_locked, fd);

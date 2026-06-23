@@ -373,24 +373,22 @@ ssize_t llam_broker_read_handle(llam_broker_t *broker,
         return llam_broker_fail_clear_output_ssize(out_data, length, saved_errno);
     }
     llam_broker_unlock(broker);
+    llam_broker_end_op(broker);
 #if LLAM_PLATFORM_WINDOWS
     {
         DWORD transferred = 0U;
 
         if (LLAM_UNLIKELY(length > (size_t)ULONG_MAX)) {
             (void)CloseHandle((HANDLE)handle);
-            llam_broker_end_op(broker);
             return llam_broker_fail_clear_output_ssize(out_data, length, EINVAL);
         }
         if (!ReadFile((HANDLE)handle, out_data, (DWORD)length, &transferred, NULL)) {
             int saved_errno = llam_windows_system_error_to_errno(GetLastError());
 
             (void)CloseHandle((HANDLE)handle);
-            llam_broker_end_op(broker);
             return llam_broker_fail_clear_output_ssize(out_data, length, saved_errno);
         }
         (void)CloseHandle((HANDLE)handle);
-        llam_broker_end_op(broker);
         return llam_broker_finish_read_clear_tail(out_data, length, (ssize_t)transferred);
     }
 #else
@@ -401,7 +399,6 @@ ssize_t llam_broker_read_handle(llam_broker_t *broker,
         (void)close((int)handle);
         errno = saved_errno;
     }
-    llam_broker_end_op(broker);
     return llam_broker_finish_read_clear_tail(out_data, length, result);
 #endif
 }
@@ -430,13 +427,13 @@ ssize_t llam_broker_write_handle(llam_broker_t *broker,
         return -1;
     }
     llam_broker_unlock(broker);
+    llam_broker_end_op(broker);
 #if LLAM_PLATFORM_WINDOWS
     {
         DWORD transferred = 0U;
 
         if (LLAM_UNLIKELY(length > (size_t)ULONG_MAX)) {
             (void)CloseHandle((HANDLE)handle);
-            llam_broker_end_op(broker);
             errno = EINVAL;
             return -1;
         }
@@ -444,12 +441,10 @@ ssize_t llam_broker_write_handle(llam_broker_t *broker,
             int saved_errno = llam_windows_system_error_to_errno(GetLastError());
 
             (void)CloseHandle((HANDLE)handle);
-            llam_broker_end_op(broker);
             errno = saved_errno;
             return -1;
         }
         (void)CloseHandle((HANDLE)handle);
-        llam_broker_end_op(broker);
         return (ssize_t)transferred;
     }
 #else
@@ -460,7 +455,6 @@ ssize_t llam_broker_write_handle(llam_broker_t *broker,
         (void)close((int)handle);
         errno = saved_errno;
     }
-    llam_broker_end_op(broker);
     return result;
 #endif
 }

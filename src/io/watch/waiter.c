@@ -189,9 +189,11 @@ void llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *
     }
     target->ready_tail = source->ready_tail;
     target->ready_depth += source->ready_depth;
+    target->ready_bytes += source->ready_bytes;
     source->ready_head = NULL;
     source->ready_tail = NULL;
     source->ready_depth = 0U;
+    source->ready_bytes = 0U;
 }
 
 bool llam_recv_watch_pop_ready_shared(llam_recv_watch_t *watch,
@@ -217,6 +219,11 @@ bool llam_recv_watch_pop_ready_shared(llam_recv_watch_t *watch,
         watch->ready_tail = NULL;
     }
     watch->ready_depth -= 1U;
+    if (watch->ready_bytes >= ready->copy_capacity) {
+        watch->ready_bytes -= ready->copy_capacity;
+    } else {
+        watch->ready_bytes = 0U;
+    }
     if (size_out != NULL) {
         *size_out = ready->size;
     }

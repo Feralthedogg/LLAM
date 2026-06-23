@@ -33,14 +33,14 @@ static int llam_broker_reissue_rotated_cap_unlocked(llam_broker_t *broker,
                                                     uint32_t family,
                                                     uint64_t id,
                                                     uint64_t generation,
-                                                    uint64_t slot_rights,
+                                                    uint64_t authority_rights,
                                                     uint64_t replacement_rights,
                                                     llam_capability_token_t *out_token) {
     if (LLAM_UNLIKELY(out_token == NULL || replacement_rights == 0U)) {
         errno = EINVAL;
         return -1;
     }
-    if (LLAM_UNLIKELY((slot_rights & replacement_rights) != replacement_rights)) {
+    if (LLAM_UNLIKELY((authority_rights & replacement_rights) != replacement_rights)) {
         errno = EACCES;
         return -1;
     }
@@ -56,7 +56,7 @@ static int llam_broker_prepare_rotated_cap_unlocked(llam_broker_t *broker,
                                                     uint32_t family,
                                                     uint64_t id,
                                                     uint64_t current_generation,
-                                                    uint64_t slot_rights,
+                                                    uint64_t authority_rights,
                                                     uint64_t replacement_rights,
                                                     uint64_t *out_generation,
                                                     llam_capability_token_t *out_token) {
@@ -81,7 +81,7 @@ static int llam_broker_prepare_rotated_cap_unlocked(llam_broker_t *broker,
                                                 family,
                                                 id,
                                                 next_generation,
-                                                slot_rights,
+                                                authority_rights,
                                                 replacement_rights,
                                                 out_token) != 0) {
         return -1;
@@ -100,21 +100,18 @@ static int llam_broker_revoke_buffer_unlocked(llam_broker_t *broker,
     if (slot == NULL) {
         return -1;
     }
-    if (LLAM_UNLIKELY((slot->rights & replacement_rights) != replacement_rights)) {
-        errno = EACCES;
-        return -1;
-    }
     if (llam_broker_prepare_rotated_cap_unlocked(broker,
                                                 token->family,
                                                 slot->id,
                                                 slot->generation,
-                                                slot->rights,
+                                                token->rights,
                                                 replacement_rights,
                                                 &next_generation,
                                                 out_token) != 0) {
         return -1;
     }
     slot->generation = next_generation;
+    slot->rights = replacement_rights;
     return 0;
 }
 
@@ -136,8 +133,7 @@ static int llam_broker_revoke_descriptor_unlocked(llam_broker_t *broker,
             slot->generation == token->generation) {
             uint64_t next_generation;
 
-            if (LLAM_UNLIKELY((slot->rights & LLAM_CAP_RIGHT_DESTROY) == 0U ||
-                              (slot->rights & replacement_rights) != replacement_rights)) {
+            if (LLAM_UNLIKELY((slot->rights & LLAM_CAP_RIGHT_DESTROY) == 0U)) {
                 errno = EACCES;
                 return -1;
             }
@@ -145,13 +141,14 @@ static int llam_broker_revoke_descriptor_unlocked(llam_broker_t *broker,
                                                         token->family,
                                                         slot->id,
                                                         slot->generation,
-                                                        slot->rights,
+                                                        token->rights,
                                                         replacement_rights,
                                                         &next_generation,
                                                         out_token) != 0) {
                 return -1;
             }
             slot->generation = next_generation;
+            slot->rights = replacement_rights;
             return 0;
         }
     }
@@ -169,21 +166,18 @@ static int llam_broker_revoke_channel_unlocked(llam_broker_t *broker,
     if (slot == NULL) {
         return -1;
     }
-    if (LLAM_UNLIKELY((slot->rights & replacement_rights) != replacement_rights)) {
-        errno = EACCES;
-        return -1;
-    }
     if (llam_broker_prepare_rotated_cap_unlocked(broker,
                                                 token->family,
                                                 slot->id,
                                                 slot->generation,
-                                                slot->rights,
+                                                token->rights,
                                                 replacement_rights,
                                                 &next_generation,
                                                 out_token) != 0) {
         return -1;
     }
     slot->generation = next_generation;
+    slot->rights = replacement_rights;
     return 0;
 }
 

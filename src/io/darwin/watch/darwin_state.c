@@ -61,8 +61,12 @@ llam_io_req_t *llam_accept_watch_pop_waiter(llam_accept_watch_t *watch) {
 
 /** @brief Buffer an accepted fd, transferring ownership to the watch. */
 bool llam_accept_watch_push_ready_owned(llam_accept_watch_t *watch, int fd) {
-    llam_accept_ready_t *ready = calloc(1, sizeof(*ready));
+    llam_accept_ready_t *ready;
 
+    if (watch == NULL || watch->ready_depth >= LLAM_WATCH_READY_DEPTH_MAX) {
+        return false;
+    }
+    ready = calloc(1, sizeof(*ready));
     if (ready == NULL) {
         return false;
     }
@@ -106,8 +110,15 @@ llam_io_req_t *llam_recv_watch_pop_waiter(llam_recv_watch_t *watch) {
  * owns a heap copy of the received payload.
  */
 bool llam_recv_watch_push_ready_copy(llam_recv_watch_t *watch, const unsigned char *data, size_t size) {
-    llam_recv_ready_t *ready = calloc(1, sizeof(*ready));
+    llam_recv_ready_t *ready;
 
+    if (watch == NULL ||
+        watch->ready_depth >= LLAM_WATCH_READY_DEPTH_MAX ||
+        size > LLAM_RECV_WATCH_READY_BYTES_MAX ||
+        watch->ready_bytes > LLAM_RECV_WATCH_READY_BYTES_MAX - size) {
+        return false;
+    }
+    ready = calloc(1, sizeof(*ready));
     if (ready == NULL) {
         return false;
     }
@@ -131,6 +142,7 @@ bool llam_recv_watch_push_ready_copy(llam_recv_watch_t *watch, const unsigned ch
     }
     watch->ready_tail = ready;
     watch->ready_depth += 1U;
+    watch->ready_bytes += size;
     return true;
 }
 
@@ -145,6 +157,11 @@ void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch)
                 llam_recv_ready_t *next = watch->ready_head->next;
 
                 free(watch->ready_head->copy_data);
+                if (watch->ready_bytes >= watch->ready_head->size) {
+                    watch->ready_bytes -= watch->ready_head->size;
+                } else {
+                    watch->ready_bytes = 0U;
+                }
                 free(watch->ready_head);
                 watch->ready_head = next;
             }
