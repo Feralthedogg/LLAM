@@ -56,7 +56,7 @@ jobs:
         run: |
           cmake -S . -B build/macos -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang
           cmake --build build/macos
-          ctest --test-dir build/macos --output-on-failure --timeout 180
+          LLAM_SELECT_RACE_ROUNDS=4 ctest --test-dir build/macos --output-on-failure --timeout 180
 
       - name: Benchmark smoke
         run: |
