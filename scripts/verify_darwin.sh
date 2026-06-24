@@ -10,7 +10,11 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 make clean
-make -j4 all test
+if [ "${LLAM_VERIFY_DARWIN_SKIP_MAKE_TEST:-0}" = "1" ]; then
+    make -j4 all
+else
+    make -j4 all test
+fi
 python3 - <<'PY'
 import os
 import sys
