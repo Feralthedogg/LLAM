@@ -8,8 +8,21 @@ on:
     branches:
       - main
       - dev
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
+
+env:
+  LLAM_CI_VERSION: "2.1.0"
 
 concurrency:
   group: macos-${{ github.ref }}
@@ -56,8 +69,8 @@ jobs:
 
       - name: Package smoke
         run: |
-          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.1/'
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.1 LLAM_ABI_MAJOR=2 ./scripts/package_release.sh "${{ matrix.package_target }}"
+          LLAM_INSTALL_VERSION="$LLAM_CI_VERSION" ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep "/releases/download/v${LLAM_CI_VERSION}/"
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION="$LLAM_CI_VERSION" LLAM_ABI_MAJOR=2 ./scripts/package_release.sh "${{ matrix.package_target }}"
           tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt
           grep '/CHANGELOG.md$' package-files.txt
           grep '/include/llam/runtime.h$' package-files.txt

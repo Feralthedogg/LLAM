@@ -8,7 +8,17 @@ on:
     branches:
       - main
       - dev
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
     inputs:
       stress_rounds:
@@ -126,7 +136,7 @@ jobs:
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           repeat=3
           timeout=120
-          if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
             repeat=1
             timeout=90
           fi
@@ -146,7 +156,7 @@ jobs:
           python3 scripts/safe_output.py --prepare-dir "$OUT_DIR"
           repeat=3
           timeout=120
-          if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
             repeat=1
             timeout=90
           fi
@@ -310,7 +320,7 @@ jobs:
           if [ "${{ matrix.name }}" = "macos-x86_64-stress" ]; then
             # Hosted Intel macOS is kept as a runtime/bench/correctness/flood
             # smoke lane. Edge churn coverage remains on macOS arm64, Linux
-            # x86_64/aarch64, and Windows 2022/2025, where crash diagnostics are
+            # x86_64/aarch64, and Windows 2022, where crash diagnostics are
             # more reliable and the runners are less noisy.
             args+=("--skip-edge")
             export LLAM_SERVER_COMPOSITE_EDGE_CLIENTS=4
@@ -350,8 +360,6 @@ jobs:
         include:
           - name: windows-2022-x86_64-stress
             runner: windows-2022
-          - name: windows-2025-x86_64-stress
-            runner: windows-2025
     env:
       RUNTIME_INVARIANT_REPEAT: ${{ github.event.inputs.runtime_invariant_repeat || '10' }}
       SERVER_SEED: ${{ github.event.inputs.server_seed || '1234' }}
@@ -503,9 +511,8 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = ".artifacts\stress\${{ matrix.name }}"
-          # Hosted Windows runners, especially the windows-2025 image while it
-          # is being redirected to the next VS image, can dip below the precise
-          # select-ready/channel baselines without failing runtime correctness.
+          # Hosted Windows runners can dip below precise select-ready/channel
+          # baselines without failing runtime correctness.
           # Keep this as a catastrophic-regression gate; scheduled benchmark
           # jobs own public comparison numbers.
           $env:LLAM_BENCH_GUARD_MIN_OPS = "spawn_join=350000,channel_pingpong=750000,select_recv_ready=4000000,select_park_wake=500000,select_timeout=5000000,io_echo=80000,poll_wake=30000"

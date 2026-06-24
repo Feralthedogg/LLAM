@@ -8,8 +8,21 @@ on:
     branches:
       - main
       - dev
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'README.md'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
+
+env:
+  LLAM_CI_VERSION: "2.1.0"
 
 concurrency:
   group: bsd-${{ github.ref }}
@@ -226,7 +239,7 @@ jobs:
           run_with_timeout test_runtime_api_edges 300 env LLAM_API_EDGE_CANCEL_RACE_ROUNDS=256 ./test_runtime_api_edges
           run_with_timeout test_runtime_select_edges 120 ./test_runtime_select_edges
           run_with_timeout test_io_buffers 120 ./test_io_buffers
-          run_with_timeout test_shared_load 120 ./test_shared_load ./libllam_runtime.so.2.0.1
+          run_with_timeout test_shared_load 120 ./test_shared_load "./libllam_runtime.so.${LLAM_CI_VERSION}"
 
       - name: CMake build and CTest smoke
         run: |
@@ -256,8 +269,8 @@ jobs:
             exit 0
           fi
           gmake -j2 demo stress bench server server_lossless server_flood static shared CC=cc
-          ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep '/releases/download/v2.0.1/'
-          LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.0.1 LLAM_ABI_MAJOR=2 \
+          LLAM_INSTALL_VERSION="$LLAM_CI_VERSION" ./scripts/install.sh --dry-run --target "${{ matrix.package_target }}" | grep "/releases/download/v${LLAM_CI_VERSION}/"
+          LLAM_RELEASE_VERSION=ci LLAM_VERSION="$LLAM_CI_VERSION" LLAM_ABI_MAJOR=2 \
             ./scripts/package_release.sh "${{ matrix.package_target }}"
           if ! tar -tf "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" > package-files.txt 2>/dev/null; then
             xz -dc "target/dist/llam-ci-${{ matrix.package_target }}.tar.xz" | tar -tf - > package-files.txt
