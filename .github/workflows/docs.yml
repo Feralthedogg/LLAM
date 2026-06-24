@@ -1,0 +1,88 @@
+name: Docs
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build-docs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+
+      - name: Install documentation dependencies
+        run: python -m pip install -r docs/requirements.txt
+
+      - name: Build documentation
+        run: mkdocs build --strict
+
+      - name: Check public API reference coverage
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          root = pathlib.Path(".")
+          api_doc = (root / "docs/reference/api.md").read_text(encoding="utf-8")
+          headers = "\n".join(
+              (root / path).read_text(encoding="utf-8")
+              for path in ("include/llam/runtime.h", "include/llam/io.h")
+          )
+          public_symbols = sorted(set(re.findall(r"LLAM_API\s+[^;()]*?\b(llam_[A-Za-z0-9_]+)\s*\(", headers)))
+          missing_symbols = [name for name in public_symbols if name not in api_doc]
+          required_macros = [
+              "LLAM_ABI_INFO_CURRENT_SIZE",
+              "LLAM_RUNTIME_OPTS_CURRENT_SIZE",
+              "LLAM_SPAWN_OPTS_CURRENT_SIZE",
+              "LLAM_TIMER_OPTS_CURRENT_SIZE",
+              "LLAM_SIGNAL_OPTS_CURRENT_SIZE",
+              "LLAM_IO_BUFFER_OPTS_CURRENT_SIZE",
+              "LLAM_FILE_STAT_CURRENT_SIZE",
+              "LLAM_RUNTIME_STATS_CURRENT_SIZE",
+          ]
+          missing_macros = [name for name in required_macros if name not in api_doc and name not in (root / "docs/reference/options.md").read_text(encoding="utf-8")]
+          missing = missing_symbols + missing_macros
+          if missing:
+              print("Public API docs are missing:")
+              for name in missing:
+                  print(f"  - {name}")
+              sys.exit(1)
+          PY
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: deploy-docs
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

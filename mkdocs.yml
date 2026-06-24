@@ -1,0 +1,106 @@
+site_name: LLAM
+site_description: Stackful C runtime documentation
+site_url: https://feralthedogg.github.io/LLAM/
+repo_url: https://github.com/Feralthedogg/LLAM
+repo_name: Feralthedogg/LLAM
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  logo: assets/llam.png
+  favicon: assets/llam.png
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.tabs
+    - navigation.footer
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - toc.follow
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10.9.1/dist/mermaid.min.js
+  - javascripts/mermaid.js
+  - javascripts/install-copy.js
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Quickstart: getting-started.md
+      - Build From Source: build.md
+      - Platform Support: reference/platform-support.md
+  - Examples:
+      - Overview: examples/index.md
+      - Tasks And Timers: examples/tasks-and-timers.md
+      - Channels And Select: examples/channels-and-select.md
+      - Runtime I/O: examples/runtime-io.md
+      - Embedding: examples/embedding.md
+      - Blocking Work: examples/blocking-work.md
+  - Concepts:
+      - Execution Model: concepts/execution-model.md
+      - Runtime Handles: concepts/runtime-handles.md
+      - Synchronization: concepts/synchronization.md
+      - I/O Model: concepts/io-model.md
+  - Guides:
+      - Embedding LLAM: guides/embedding.md
+      - Diagnostics: guides/diagnostics.md
+      - Performance Tuning: guides/performance-tuning.md
+  - Reference:
+      - Public API: reference/api.md
+      - Options: reference/options.md
+      - CLI And Tools: reference/cli-tools.md
+      - ABI Contract: abi.md
+      - Environment Variables: reference/environment.md
+      - Security Model: security.md
+  - Operations:
+      - Verification: operations/verification.md
+      - Benchmarks: operations/benchmarks.md
+      - Troubleshooting: operations/troubleshooting.md
+      - Production Checklist: operations.md
+  - Internals:
+      - Architecture: internals/architecture.md
+      - Testing Strategy: internals/testing-strategy.md
+  - Project:
+      - Documentation Guide: project/documentation-guide.md
+      - Roadmap: roadmap.md

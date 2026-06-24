@@ -4,6 +4,7 @@ object-pic/
 build/
 build-*/
 target/
+site/
 .artifacts/
 CMakeFiles/
 CMakeCache.txt

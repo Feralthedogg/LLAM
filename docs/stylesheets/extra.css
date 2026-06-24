@@ -1,0 +1,430 @@
+:root {
+  --llam-accent: #67e8f9;
+  --llam-accent-strong: #818cf8;
+  --llam-good: #22c55e;
+  --llam-warn: #f59e0b;
+  --llam-card-bg: rgba(148, 163, 184, 0.055);
+  --llam-card-bg-hover: rgba(103, 232, 249, 0.075);
+  --llam-terminal: #0b1020;
+  --llam-terminal-border: rgba(103, 232, 249, 0.35);
+}
+
+.md-header,
+.md-tabs {
+  background: #111827;
+}
+
+.md-header__button.md-logo {
+  margin: 0.16rem 0.35rem 0.16rem 0.2rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  width: 2rem;
+  height: 2rem;
+  object-fit: contain;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.22));
+}
+
+.md-header__title {
+  margin-left: 0.1rem;
+  font-weight: 700;
+}
+
+.md-typeset h1,
+.md-typeset h2 {
+  font-weight: 700;
+}
+
+.md-typeset .llam-hero {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.85rem 0 0.55rem;
+}
+
+.md-typeset .llam-hero-download {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.95rem 0 0.65rem;
+}
+
+.md-typeset .llam-hero-copy {
+  min-width: 0;
+  max-width: 620px;
+}
+
+.md-typeset .llam-hero .llam-eyebrow {
+  margin: 0 0 0.32rem;
+  color: var(--llam-accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.md-typeset .llam-hero h1 {
+  margin: 0;
+  max-width: 700px;
+  color: var(--md-default-fg-color);
+  font-size: 1.48rem;
+  line-height: 1.12;
+}
+
+.md-typeset .llam-hero-copy > p:not(.llam-eyebrow) {
+  margin: 0.42rem 0 0;
+  max-width: 620px;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.84rem;
+  line-height: 1.42;
+}
+
+.md-typeset .llam-download-panel {
+  border: 1px solid var(--llam-terminal-border);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(88, 101, 242, 0.16), transparent 42%),
+    var(--llam-terminal);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.26);
+  color: #e5e7eb;
+  overflow: hidden;
+  width: 100%;
+  max-width: 760px;
+}
+
+.md-typeset .llam-step-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.8rem;
+  margin: 1rem 0 1.5rem;
+}
+
+.md-typeset .llam-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.28rem 0.7rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  padding: 0.95rem;
+  background: var(--llam-card-bg);
+  color: inherit;
+  text-decoration: none;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.md-typeset .llam-step:hover {
+  border-color: rgba(103, 232, 249, 0.55);
+  background: var(--llam-card-bg-hover);
+  transform: translateY(-1px);
+}
+
+.md-typeset .llam-step span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  grid-row: span 2;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 999px;
+  background: rgba(103, 232, 249, 0.14);
+  color: var(--llam-accent);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.md-typeset .llam-step strong {
+  display: block;
+  font-size: 0.95rem;
+}
+
+.md-typeset .llam-step p {
+  margin: 0;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.md-typeset .llam-download-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.62rem 0.78rem;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.78rem;
+}
+
+.md-typeset .llam-download-head span:first-child {
+  font-weight: 700;
+}
+
+.md-typeset .llam-download-head span:last-child {
+  color: #9ca3af;
+}
+
+.md-typeset .llam-command-box {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0.72rem 0.78rem;
+  position: relative;
+}
+
+.md-typeset .llam-install-section {
+  display: grid;
+  gap: 0;
+}
+
+.md-typeset .llam-install-section-border {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.md-typeset .llam-install-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.62rem 0.78rem 0;
+  font-size: 0.7rem;
+}
+
+.md-typeset .llam-install-label span:first-child {
+  color: #f9fafb;
+  font-weight: 700;
+}
+
+.md-typeset .llam-install-label span:last-child {
+  color: #9ca3af;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.md-typeset .llam-prompt {
+  color: var(--llam-accent);
+  font-weight: 700;
+  line-height: 1.55;
+  margin-right: 0.65rem;
+}
+
+.md-typeset .llam-command-box code {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  padding: 0 3.2rem 0 0;
+  background: transparent;
+  color: #f9fafb;
+  font-size: 0.7rem;
+  line-height: 1.42;
+  white-space: normal;
+  overflow-x: visible;
+  overflow-y: visible;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.md-typeset .llam-command-box code > span {
+  display: block;
+}
+
+.md-typeset .llam-command-box code > span + span::before {
+  content: "";
+}
+
+.md-typeset .llam-copy-button {
+  align-items: center;
+  background: rgba(15, 23, 42, 0.86);
+  border: 1px solid rgba(103, 232, 249, 0.34);
+  border-radius: 999px;
+  color: #cbd5e1;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 0.58rem;
+  font-weight: 800;
+  height: 1.36rem;
+  justify-content: center;
+  line-height: 1;
+  padding: 0 0.5rem;
+  position: absolute;
+  right: 0.62rem;
+  top: 0.58rem;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.md-typeset .llam-copy-button:hover,
+.md-typeset .llam-copy-button:focus-visible {
+  background: rgba(103, 232, 249, 0.14);
+  border-color: rgba(103, 232, 249, 0.7);
+  color: #f8fafc;
+  outline: none;
+}
+
+.md-typeset .llam-copy-button[data-copy-state="copied"] {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(74, 222, 128, 0.6);
+  color: #bbf7d0;
+}
+
+.md-typeset .llam-copy-button[data-copy-state="failed"] {
+  background: rgba(248, 113, 113, 0.13);
+  border-color: rgba(248, 113, 113, 0.6);
+  color: #fecaca;
+}
+
+.md-typeset .llam-platform-row {
+  display: flex;
+  gap: 0.34rem;
+  flex-wrap: wrap;
+  padding: 0 0.78rem 0.72rem;
+}
+
+.md-typeset .llam-platform-row span {
+  border: 1px solid rgba(103, 232, 249, 0.28);
+  border-radius: 999px;
+  padding: 0.16rem 0.46rem;
+  color: #cbd5e1;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.md-typeset .llam-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.85rem;
+  margin: 1.2rem 0;
+}
+
+.md-typeset .llam-card-grid-wide {
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+}
+
+.md-typeset .llam-card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  padding: 1rem;
+  background: var(--llam-card-bg);
+  color: inherit;
+  text-decoration: none;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.md-typeset .llam-card:hover {
+  border-color: rgba(103, 232, 249, 0.55);
+  background: var(--llam-card-bg-hover);
+  transform: translateY(-1px);
+}
+
+.md-typeset .llam-card h3 {
+  margin: 0 0 0.3rem;
+  font-size: 1rem;
+}
+
+.md-typeset .llam-card p {
+  margin: 0;
+  color: var(--md-default-fg-color--light);
+}
+
+.md-typeset .llam-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 0.85rem;
+  margin: 1.2rem 0;
+}
+
+.md-typeset .llam-status {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 8px;
+  padding: 1rem;
+  background: var(--llam-card-bg);
+}
+
+.md-typeset .llam-status strong {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+.md-typeset .llam-status span {
+  display: inline-flex;
+  margin-bottom: 0.55rem;
+  border-radius: 999px;
+  padding: 0.16rem 0.48rem;
+  background: rgba(34, 197, 94, 0.14);
+  color: var(--llam-good);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.md-typeset .llam-status span.llam-experimental {
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--llam-warn);
+}
+
+.md-typeset .llam-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin: 1rem 0 1.8rem;
+}
+
+.md-typeset .llam-link-row a {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 999px;
+  padding: 0.32rem 0.72rem;
+  background: var(--llam-card-bg);
+  color: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.md-typeset .llam-link-row a:hover {
+  border-color: rgba(103, 232, 249, 0.55);
+  background: var(--llam-card-bg-hover);
+}
+
+.md-typeset code {
+  border-radius: 4px;
+}
+
+@media screen and (max-width: 600px) {
+  .md-typeset .llam-hero h1 {
+    font-size: 1.38rem;
+  }
+
+  .md-typeset .llam-command-box {
+    padding: 0.62rem 0.7rem;
+  }
+
+  .md-typeset .llam-command-box code {
+    padding-right: 3.1rem;
+    white-space: normal;
+    overflow-x: visible;
+    overflow-wrap: break-word;
+  }
+
+  .md-typeset .llam-command-box code > span {
+    display: block;
+  }
+
+  .md-typeset .llam-command-box code > span + span::before {
+    content: "";
+  }
+
+  .md-typeset .llam-install-label {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.12rem;
+    padding: 0.6rem 0.7rem 0;
+    font-size: 0.7rem;
+  }
+}
+
+@media screen and (min-width: 900px) {
+  .md-typeset .llam-hero-download {
+    grid-template-columns: minmax(250px, 0.85fr) minmax(320px, 1fr);
+  }
+}

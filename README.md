@@ -12,6 +12,9 @@
 ![Build](https://img.shields.io/badge/build-Make%20%2F%20CMake-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
+[Documentation](https://feralthedogg.github.io/LLAM/) starts with install,
+quickstart examples, platform support, CLI/tool options, and operations guides.
+
 LLAM is a stackful user-thread runtime for C applications. It lets C code express concurrency with task-oriented APIs such as `spawn`, `join`, `sleep`, channels, `read`, `write`, `accept`, `connect`, and `poll`, while the runtime schedules many user tasks over a smaller set of OS worker threads.
 
 LLAM is not Linux-only. The Linux backend uses io_uring/liburing, macOS/Darwin
