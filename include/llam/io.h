@@ -38,6 +38,13 @@
 #include <netdb.h>
 #endif
 
+/*
+ * Keep the SDK headers self-contained under strict C modes where <netdb.h>
+ * may hide addrinfo unless feature macros were defined before any system
+ * header include.
+ */
+struct addrinfo;
+
 /** @brief Portable immutable scatter/gather I/O slice used by write APIs. */
 typedef struct llam_iovec {
     const void *iov_base; /**< Pointer to bytes to write. */
