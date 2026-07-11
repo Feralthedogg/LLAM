@@ -372,13 +372,45 @@ Include the canonical public API:
 ```
 
 Dynamic loaders should check `llam_abi_version()` or `llam_abi_get_info()` before binding the rest of the API. FFI bindings should prefer size-aware `_ex` entry points so inbound option structs carry an explicit caller-side size. The ABI and semantic contract is documented in `docs/abi.md`.
-Embedding code that needs independent scheduler instances should use `llam_runtime_create()`, `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()`. The older host-thread lifecycle calls remain convenience wrappers for the process-default runtime; managed task spawn/stop/shutdown wrappers target the task's owner runtime and do not stop foreign runtimes.
+Embedding code should use `llam_runtime_create()`, `llam_runtime_spawn_ex()`, `llam_runtime_run_handle()`, and `llam_runtime_destroy()` as the canonical lifecycle. The older host-thread lifecycle calls remain convenience wrappers for the process-default runtime; managed task spawn/stop/shutdown wrappers target the task's owner runtime and do not stop foreign runtimes.
 macOS/BSD kqueue performance gates and remaining structural work are covered by the platform-local release checklist in `docs/operations.md`.
 Windows backend scope, policy split, and acceptance gates are tracked in `docs/operations.md`.
 
 ## Execution Model
 
-A typical LLAM program follows this lifecycle:
+Embedding applications should drive explicit runtime handles:
+
+1. Create a runtime with `llam_runtime_create()`.
+2. Spawn root tasks with `llam_runtime_spawn_ex()`.
+3. Run the scheduler with `llam_runtime_run_handle()`.
+4. Tear down with `llam_runtime_destroy()`.
+
+```c
+#include "llam/runtime.h"
+
+static void root(void *arg) {
+    (void)arg;
+    /* ordinary blocking-style C control flow */
+}
+
+int main(void) {
+    llam_runtime_t *rt = NULL;
+    llam_task_t *task = NULL;
+
+    if (llam_runtime_create(NULL, 0, &rt) != 0) {
+        return 1;
+    }
+    task = llam_runtime_spawn_ex(rt, root, NULL, NULL, 0);
+    if (task == NULL || llam_runtime_run_handle(rt) != 0 || llam_join(task) != 0) {
+        llam_runtime_destroy(rt);
+        return 1;
+    }
+    llam_runtime_destroy(rt);
+    return 0;
+}
+```
+
+The process-default compatibility lifecycle is still available for simple single-runtime programs:
 
 1. Initialize the runtime with `llam_runtime_init()`.
 2. Spawn one or more root tasks with `llam_spawn()`.
@@ -822,17 +854,19 @@ Time, debug, and platform:
 
 ## Runtime Options
 
-Pass `NULL` to `llam_runtime_init()` for the default runtime configuration. Pass
-`llam_runtime_opts_t` when you need explicit tuning. Embedders that need
-independent scheduler instances should initialize options the same way and pass
-them to `llam_runtime_create()`. Dynamic loaders and language bindings should
+Pass `NULL` to `llam_runtime_create()` for the default runtime configuration, or
+initialize `llam_runtime_opts_t` when you need explicit tuning. The
+process-default `llam_runtime_init()` path accepts the same options for
+compatibility, but embedding code should pass initialized options to
+`llam_runtime_create()`. Dynamic loaders and language bindings should
 initialize option structs with
 `llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE)` and
 `llam_spawn_opts_init(&opts, LLAM_SPAWN_OPTS_CURRENT_SIZE)`, then call the
-size-aware lifecycle and spawn APIs: `llam_runtime_init_ex()` or
-`llam_runtime_create()` for runtime setup, `llam_spawn_ex()` or
-`llam_runtime_spawn_ex()` for task creation, and
-`llam_runtime_collect_stats_ex()` for stats snapshots.
+size-aware handle lifecycle: `llam_runtime_create()` for runtime setup,
+`llam_runtime_spawn_ex()` for task creation,
+`llam_runtime_run_handle()` for driving work,
+`llam_runtime_destroy()` for teardown, and
+`llam_runtime_collect_stats_ex_handle()` for stats snapshots.
 
 Public option and stats structs use fixed-width integer storage for ABI-facing
 scalar fields. Enum constants remain available for C readability, but FFI
@@ -911,6 +945,12 @@ Selected environment variables:
 | `LLAM_IO_WRITE_HANDOFF` | `0`, `1` | Yield after small socket writes so local readers can run; default is enabled on macOS and Linux. |
 | `LLAM_IO_WRITE_DIRECT_LOCAL_HANDOFF` | `0`, `1` | Prefer direct same-shard task handoff after eligible socket writes; default is enabled on macOS, Linux, and Windows. |
 | `LLAM_YIELD_DIRECT_HANDOFF` | `0`, `1`, unset | Allow ordinary yields to switch directly to same-shard runnable work when no timers or inject work are pending. |
+| `LLAM_AUTOTUNE` | `off`, `observe`, `on`, `frozen` | Enable the watchdog-attached adaptive guardrail/probe governor. `observe` publishes windows and JSON state without changing policy; `on` probes the direct handoff budget only when the sampled hit rate suggests the current budget is poor. |
+| `LLAM_AUTOTUNE_DOMAINS` | `workers,idle,handoff,preempt,io` | Restrict the domains the governor may observe or eventually control. Unset defaults to the safe idle/handoff set, plus workers when dynamic workers are active. |
+| `LLAM_AUTOTUNE_DECISION_INTERVAL_NS` | nanoseconds | Override the low-frequency governor decision interval. `0` uses the default 100ms cadence. |
+| `LLAM_AUTOTUNE_MIN_HOLD_NS` | nanoseconds | Record the minimum policy hold period used by future controllers. `0` uses the default 500ms hold. |
+| `LLAM_AUTOTUNE_SAMPLE_PERIOD` | power-of-two-ish count | Downsample autotune-only handoff and wake-latency telemetry. Default is `64`; `1` records every event. Explicit `LLAM_DIRECT_HANDOFF_STATS=1` still records full handoff counters. |
+| `LLAM_AUTOTUNE_WAKE_P99_NS` | nanoseconds | Optional wake-latency rollback guardrail. `0` leaves latency sampling off in `on` mode; nonzero samples p50/p99 and rolls back the handoff budget when sampled p99 exceeds the target. `observe` mode samples without changing policy. |
 | `LLAM_PREEMPT_MODE` | `off`, `cooperative`, `auto`, `strict` | Select request-based cooperative preemption policy. `auto` requests preemption under budget pressure; `strict` is diagnostic and polls aggressively. |
 | `LLAM_PREEMPT_POLL_PERIOD` | `0`-`4096` | Override the task-local safepoint flag-poll period. `0` uses the profile default; strict mode forces frequent polling. |
 | `LLAM_PREEMPT_QUANTUM_NS` | nanoseconds | Override the global preemption slice. `0` uses task-class defaults. |
@@ -1084,7 +1124,7 @@ current maintained contract rather than future roadmap work:
   they rely on example-server reproduction. The example server remains an
   integration and policy workload, while scheduler, cancellation, wakeup,
   select, and ownership regressions belong in direct tests.
-- The runtime handle API is the supported embedding boundary. The public header,
+- The runtime handle API is the canonical embedding boundary. The public header,
   ABI guide, operations guide, and direct tests pin the current contract:
   explicit heap-backed runtimes can be created, spawned into, driven, and
   destroyed independently; legacy host-thread lifecycle wrappers target
@@ -1369,6 +1409,26 @@ loop:
 
 Task selection priority: **hot queue → normal queue → inject queue → steal**. The hot queue is reserved for latency-class tasks and I/O completions. The inject queue receives cross-shard work and is drained with a budget cap to prevent starvation.
 
+### Wake Handoff Fusion
+
+Wake Handoff Fusion is the same-shard wake fast path used by channel, mutex,
+condition-variable, join, yield, and I/O handoff paths when the producer and
+waiter are already inside the same runtime shard. Instead of always enqueueing
+the woken task and signaling the worker wake handle, LLAM validates the owner
+runtime, waiter state, timer policy, live-task guard, and direct-handoff budget,
+then switches through the scheduler context directly into useful local work.
+
+The path is a policy optimization only. Context mismatch, timer pressure,
+budget exhaustion, queue races, push failure, or disabled handoff all fall back
+to the ordinary enqueue-and-wake path. Metrics separate yield handoff and wake
+handoff attempts, hits, policy failures, budget failures, queue/push failures,
+and wake races so dumps can distinguish a bad policy from a correctness bug.
+
+The runtime-local `direct_handoff_budget` starts from
+`LLAM_YIELD_DIRECT_HANDOFF_BURST`. The watchdog-attached autotune governor can
+probe that budget in `LLAM_AUTOTUNE=on` mode; `observe` mode records the same
+windows without publishing policy changes.
+
 ### Context Switching
 
 Context switches are performed in hand-written assembly for each supported platform. The runtime saves and restores only the callee-saved registers required by the platform ABI:
@@ -1490,8 +1550,16 @@ The watchdog thread (`src/engine/watchdog/`) runs at 1ms intervals (`LLAM_WATCHD
 | **Scale** | `watchdog_scale.c` | Dynamic worker scaling: scale up after 2 consecutive pressure observations, scale down after 12 consecutive idle observations, with a 4-tick cooldown |
 | **Merge** | `watchdog_merge.c` | Offline a shard by draining its queues and migrating tasks to a target shard |
 | **Rehome** | `watchdog_rehome.c` | Atomically transfer ownership of parked waiters, in-flight I/O, submit-queue entries, and multishot watch state from an offline shard to a target shard |
+| **Autotune** | `watchdog_autotune.c` | Rotate low-frequency metric windows and guard handoff-budget probes without running as a managed task |
 
 Rehome validates the entire waiter list before any migration. If a single entry cannot be rehomed (pinned task, incompatible I/O state), the entire list migration is aborted to prevent partial ownership inconsistency.
+
+Autotune runs on the watchdog controller thread. It avoids allocation, blocking
+calls, and user callbacks. `observe` publishes sampled handoff, wake-latency,
+idle-spin, and queue-overflow windows for diagnostics. `on` can adjust the
+direct handoff budget only after enough sample volume is collected; low-traffic
+probe windows are extended, and hard push/race failures or an optional wake p99
+guardrail roll the budget back.
 
 ### Synchronization Primitives
 

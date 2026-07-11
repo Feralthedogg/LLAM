@@ -28,13 +28,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <fcntl.h>
 #if LLAM_PLATFORM_POSIX
 #include <netdb.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
+
+void llam_watchdog_autotune_tick(llam_runtime_t *rt, uint64_t now_ns);
 
 #ifndef O_RDONLY
 #define O_RDONLY 0
@@ -85,6 +89,16 @@ typedef struct signal_wait_state {
     core_state_t core;
     llam_signal_set_t *set;
 } signal_wait_state_t;
+
+#define AUTOTUNE_HANDOFF_WORKERS 2U
+
+typedef struct autotune_handoff_state {
+    core_state_t core;
+    atomic_uint started;
+    atomic_uint stop;
+    atomic_uint_fast64_t deadline_ns;
+    llam_task_t *workers[AUTOTUNE_HANDOFF_WORKERS];
+} autotune_handoff_state_t;
 
 #if defined(__APPLE__)
 typedef struct timer_handoff_state {
@@ -383,6 +397,57 @@ static void detached_task(void *arg) {
     llam_yield();
     atomic_fetch_add_explicit(&state->ran, 1U, memory_order_relaxed);
 }
+
+#if LLAM_PLATFORM_POSIX
+static void autotune_handoff_worker_task(void *arg) {
+    autotune_handoff_state_t *state = arg;
+    uint64_t deadline_ns = atomic_load_explicit(&state->deadline_ns, memory_order_acquire);
+
+    atomic_fetch_add_explicit(&state->started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->stop, memory_order_acquire) == 0U &&
+           llam_now_ns() < deadline_ns) {
+        if (!llam_yield_to_local_runnable()) {
+            llam_yield();
+        }
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
+}
+
+static void autotune_handoff_parent_task(void *arg) {
+    autotune_handoff_state_t *state = arg;
+    llam_spawn_opts_t spawn_opts;
+    unsigned i;
+
+    memset(&spawn_opts, 0, sizeof(spawn_opts));
+    spawn_opts.task_class = (uint32_t)LLAM_TASK_CLASS_DEFAULT;
+    spawn_opts.stack_class = (uint32_t)LLAM_STACK_CLASS_DEFAULT;
+    spawn_opts.flags = LLAM_SPAWN_F_PINNED;
+    atomic_store_explicit(&state->deadline_ns,
+                          llam_now_ns() + 150ULL * 1000ULL * 1000ULL,
+                          memory_order_release);
+
+    for (i = 0U; i < AUTOTUNE_HANDOFF_WORKERS; ++i) {
+        state->workers[i] = llam_spawn(autotune_handoff_worker_task, state, &spawn_opts);
+        if (state->workers[i] == NULL) {
+            atomic_store_explicit(&state->stop, 1U, memory_order_release);
+            task_fail(&state->core, "autotune handoff worker spawn failed", errno);
+            return;
+        }
+    }
+    while (atomic_load_explicit(&state->started, memory_order_acquire) < AUTOTUNE_HANDOFF_WORKERS) {
+        llam_yield();
+    }
+    for (i = 0U; i < AUTOTUNE_HANDOFF_WORKERS; ++i) {
+        if (state->workers[i] != NULL && llam_join(state->workers[i]) != 0) {
+            task_fail(&state->core, "autotune handoff worker join failed", errno);
+            return;
+        }
+        state->workers[i] = NULL;
+    }
+    atomic_store_explicit(&state->stop, 1U, memory_order_release);
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
+}
+#endif
 
 #if defined(__APPLE__)
 static void timer_handoff_sleep_task(void *arg) {
@@ -939,7 +1004,7 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
 #if LLAM_PLATFORM_POSIX
     {
         int pipe_fds[2];
-        char json[4096];
+        char json[8192];
         ssize_t nread;
 
         if (pipe(pipe_fds) != 0) {
@@ -968,7 +1033,14 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
             strstr(json, "\"active_workers\":") == NULL ||
             strstr(json, "\"io_submit_syscalls\":") == NULL ||
             strstr(json, "\"yield_direct_attempts\":") == NULL ||
-            strstr(json, "\"yield_direct_fail_push\":") == NULL) {
+            strstr(json, "\"yield_direct_fail_push\":") == NULL ||
+            strstr(json, "\"wake_handoff_attempts\":") == NULL ||
+            strstr(json, "\"wake_handoff_fail_race\":") == NULL ||
+            strstr(json, "\"autotune\":") == NULL ||
+            strstr(json, "\"sample_period\":") == NULL ||
+            strstr(json, "\"sampled_yield_handoff_fail_policy\":") == NULL ||
+            strstr(json, "\"sampled_wake_handoff_hits\":") == NULL ||
+            strstr(json, "\"sampled_wake_latency_p99_ns\":") == NULL) {
             llam_runtime_shutdown();
             return test_fail("stats json did not contain expected fields");
         }
@@ -2422,6 +2494,524 @@ cleanup_env:
 #endif
 }
 
+static int test_autotune_handoff_budget_actuates(void) {
+    char *saved_autotune = test_dup_env_value("LLAM_AUTOTUNE");
+    char *saved_domains = test_dup_env_value("LLAM_AUTOTUNE_DOMAINS");
+    char *saved_decision_interval = test_dup_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS");
+    char *saved_min_hold = test_dup_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS");
+    char *saved_wake_p99 = test_dup_env_value("LLAM_AUTOTUNE_WAKE_P99_NS");
+    char *saved_sample_period = test_dup_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD");
+    char *saved_handoff = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF");
+    char *saved_burst = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_BURST");
+    char *saved_allow_timers = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS");
+    char *saved_live_limit = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT");
+    char *saved_trace = test_dup_env_value("LLAM_TRACE_EVENTS");
+    char *saved_run_timing = test_dup_env_value("LLAM_RUN_TIMING");
+    char *saved_wake_latency = test_dup_env_value("LLAM_WAKE_LATENCY_METRICS");
+    char *saved_task_list = test_dup_env_value("LLAM_TASK_LIST_EAGER");
+    char *saved_strict = test_dup_env_value("LLAM_STRICT_SAFEPOINT");
+    char *saved_light_safepoint = test_dup_env_value("LLAM_DIAG_LIGHT_SAFEPOINT");
+    char *saved_stack_sampling = test_dup_env_value("LLAM_STACK_SAMPLING");
+    char *saved_profile = test_dup_env_value("LLAM_RUNTIME_PROFILE");
+    autotune_handoff_state_t state;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_task_t *parent = NULL;
+    uint64_t decisions;
+    uint64_t commits;
+    uint64_t min_hold_ns;
+    unsigned budget;
+    unsigned mode;
+    int rc = 1;
+
+    if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1000000", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF", "2", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF_BURST", "1", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", "1", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT", "0", 1) != 0 ||
+        setenv("LLAM_TRACE_EVENTS", "0", 1) != 0 ||
+        setenv("LLAM_RUN_TIMING", "0", 1) != 0 ||
+        setenv("LLAM_WAKE_LATENCY_METRICS", "0", 1) != 0 ||
+        setenv("LLAM_TASK_LIST_EAGER", "0", 1) != 0 ||
+        setenv("LLAM_STRICT_SAFEPOINT", "0", 1) != 0 ||
+        unsetenv("LLAM_DIAG_LIGHT_SAFEPOINT") != 0 ||
+        setenv("LLAM_STACK_SAMPLING", "0", 1) != 0 ||
+        setenv("LLAM_RUNTIME_PROFILE", "balanced", 1) != 0) {
+        rc = test_fail_errno("setenv for autotune handoff budget failed");
+        goto cleanup_env;
+    }
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    atomic_init(&state.started, 0U);
+    atomic_init(&state.stop, 0U);
+    atomic_init(&state.deadline_ns, 0U);
+    memset(&opts, 0, sizeof(opts));
+    opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno("autotune handoff runtime init failed");
+        goto cleanup_env;
+    }
+    parent = llam_spawn(autotune_handoff_parent_task, &state, NULL);
+    if (parent == NULL) {
+        rc = test_fail_errno("autotune handoff parent spawn failed");
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 || llam_join(parent) != 0) {
+        rc = test_fail_errno("autotune handoff run/join failed");
+        parent = NULL;
+        goto cleanup_runtime;
+    }
+    parent = NULL;
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.core.ran, memory_order_relaxed) != AUTOTUNE_HANDOFF_WORKERS + 1U) {
+        rc = test_fail("autotune handoff workload did not complete cleanly");
+        goto cleanup_runtime;
+    }
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex(&stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno("collect autotune handoff stats failed");
+        goto cleanup_runtime;
+    }
+    decisions = atomic_load_explicit(&g_llam_runtime.autotune.decisions, memory_order_acquire);
+    commits = atomic_load_explicit(&g_llam_runtime.autotune.commits, memory_order_acquire);
+    min_hold_ns = atomic_load_explicit(&g_llam_runtime.autotune.min_hold_ns, memory_order_acquire);
+    budget = llam_runtime_direct_handoff_budget(&g_llam_runtime);
+    mode = atomic_load_explicit(&g_llam_runtime.autotune.mode, memory_order_acquire);
+    if (mode != LLAM_AUTOTUNE_INTERNAL_ON ||
+        decisions == 0U ||
+        commits == 0U ||
+        budget <= 1U ||
+        min_hold_ns != LLAM_AUTOTUNE_DEFAULT_MIN_HOLD_NS ||
+        stats.yield_direct_attempts < 32U ||
+        stats.yield_direct_fast_hits < 16U) {
+        fprintf(stderr,
+                "[test_runtime_core] autotune handoff did not actuate: "
+                "mode=%u decisions=%llu commits=%llu budget=%u min_hold=%llu "
+                "attempts=%llu hits=%llu fail_policy=%llu\n",
+                mode,
+                (unsigned long long)decisions,
+                (unsigned long long)commits,
+                budget,
+                (unsigned long long)min_hold_ns,
+                (unsigned long long)stats.yield_direct_attempts,
+                (unsigned long long)stats.yield_direct_fast_hits,
+                (unsigned long long)stats.yield_direct_fail_policy);
+        rc = 1;
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (parent != NULL) {
+        (void)llam_detach(parent);
+    }
+    atomic_store_explicit(&state.stop, 1U, memory_order_release);
+    llam_runtime_shutdown();
+cleanup_env:
+    test_restore_env_value("LLAM_AUTOTUNE", saved_autotune);
+    test_restore_env_value("LLAM_AUTOTUNE_DOMAINS", saved_domains);
+    test_restore_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", saved_decision_interval);
+    test_restore_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS", saved_min_hold);
+    test_restore_env_value("LLAM_AUTOTUNE_WAKE_P99_NS", saved_wake_p99);
+    test_restore_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD", saved_sample_period);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF", saved_handoff);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_BURST", saved_burst);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", saved_allow_timers);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT", saved_live_limit);
+    test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+    test_restore_env_value("LLAM_RUN_TIMING", saved_run_timing);
+    test_restore_env_value("LLAM_WAKE_LATENCY_METRICS", saved_wake_latency);
+    test_restore_env_value("LLAM_TASK_LIST_EAGER", saved_task_list);
+    test_restore_env_value("LLAM_STRICT_SAFEPOINT", saved_strict);
+    test_restore_env_value("LLAM_DIAG_LIGHT_SAFEPOINT", saved_light_safepoint);
+    test_restore_env_value("LLAM_STACK_SAMPLING", saved_stack_sampling);
+    test_restore_env_value("LLAM_RUNTIME_PROFILE", saved_profile);
+    return rc;
+}
+
+static void init_autotune_fake_handoff_metrics(llam_metrics_t *metrics) {
+    unsigned bucket;
+
+    memset(metrics, 0, sizeof(*metrics));
+    atomic_init(&metrics->yield_direct_attempts, 0U);
+    atomic_init(&metrics->yield_direct_fast_hits, 0U);
+    atomic_init(&metrics->yield_direct_locked_hits, 0U);
+    atomic_init(&metrics->yield_direct_fail_policy, 0U);
+    atomic_init(&metrics->yield_direct_fail_budget, 0U);
+    atomic_init(&metrics->yield_direct_fail_no_work, 0U);
+    atomic_init(&metrics->yield_direct_fail_push, 0U);
+    atomic_init(&metrics->wake_handoff_attempts, 0U);
+    atomic_init(&metrics->wake_handoff_hits, 0U);
+    atomic_init(&metrics->wake_handoff_fail_policy, 0U);
+    atomic_init(&metrics->wake_handoff_fail_budget, 0U);
+    atomic_init(&metrics->wake_handoff_fail_race, 0U);
+    atomic_init(&metrics->autotune_wake_latency_samples, 0U);
+    for (bucket = 0U; bucket < LLAM_AUTOTUNE_WAKE_LATENCY_BUCKETS; ++bucket) {
+        atomic_init(&metrics->autotune_wake_latency_buckets[bucket], 0U);
+    }
+    atomic_init(&metrics->idle_spin_hits, 0U);
+    atomic_init(&metrics->idle_spin_fallbacks, 0U);
+    atomic_init(&metrics->idle_spin_ns, 0U);
+    atomic_init(&metrics->queue_overflows, 0U);
+}
+
+static void add_autotune_fake_yield_metrics(llam_shard_t *shard,
+                                            uint64_t attempts,
+                                            uint64_t hits,
+                                            uint64_t budget_failures) {
+    llam_metrics_t *metrics = &shard->metrics;
+
+    atomic_fetch_add_explicit(&metrics->yield_direct_attempts, attempts, memory_order_relaxed);
+    atomic_fetch_add_explicit(&metrics->yield_direct_fast_hits, hits, memory_order_relaxed);
+    atomic_fetch_add_explicit(&metrics->yield_direct_fail_policy, budget_failures, memory_order_relaxed);
+    atomic_fetch_add_explicit(&metrics->yield_direct_fail_budget, budget_failures, memory_order_relaxed);
+}
+
+static void add_autotune_fake_yield_no_work_metrics(llam_shard_t *shard,
+                                                    uint64_t attempts,
+                                                    uint64_t hits,
+                                                    uint64_t no_work_failures) {
+    llam_metrics_t *metrics = &shard->metrics;
+
+    atomic_fetch_add_explicit(&metrics->yield_direct_attempts, attempts, memory_order_relaxed);
+    atomic_fetch_add_explicit(&metrics->yield_direct_fast_hits, hits, memory_order_relaxed);
+    atomic_fetch_add_explicit(&metrics->yield_direct_fail_no_work, no_work_failures, memory_order_relaxed);
+}
+
+static int test_autotune_handoff_freezes_no_work_low_hit(void) {
+    char *saved_autotune = test_dup_env_value("LLAM_AUTOTUNE");
+    char *saved_domains = test_dup_env_value("LLAM_AUTOTUNE_DOMAINS");
+    char *saved_decision_interval = test_dup_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS");
+    char *saved_min_hold = test_dup_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS");
+    char *saved_wake_p99 = test_dup_env_value("LLAM_AUTOTUNE_WAKE_P99_NS");
+    char *saved_sample_period = test_dup_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD");
+    llam_runtime_t rt;
+    llam_shard_t shard;
+    unsigned budget;
+    unsigned phase;
+    uint64_t commits;
+    uint64_t rollbacks;
+    int rc = 1;
+
+    if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0) {
+        rc = test_fail_errno("setenv for autotune no-work low-hit probe failed");
+        goto cleanup_env;
+    }
+
+    memset(&rt, 0, sizeof(rt));
+    memset(&shard, 0, sizeof(shard));
+    init_autotune_fake_handoff_metrics(&shard.metrics);
+    rt.shards = &shard;
+    rt.active_shards = 1U;
+    rt.direct_handoff_burst = 1U;
+    atomic_init(&rt.direct_handoff_budget, 1U);
+    shard.runtime = &rt;
+    shard.id = 0U;
+    llam_autotune_init(&rt);
+
+    llam_watchdog_autotune_tick(&rt, 1U);
+    add_autotune_fake_yield_no_work_metrics(&shard, 64U, 32U, 32U);
+    llam_watchdog_autotune_tick(&rt, 3U);
+
+    budget = llam_runtime_direct_handoff_budget(&rt);
+    phase = atomic_load_explicit(&rt.autotune.phase, memory_order_acquire);
+    commits = atomic_load_explicit(&rt.autotune.commits, memory_order_acquire);
+    rollbacks = atomic_load_explicit(&rt.autotune.rollbacks, memory_order_acquire);
+    if (budget != 1U ||
+        phase != LLAM_AUTOTUNE_INTERNAL_PHASE_HOLD ||
+        commits != 0U ||
+        rollbacks != 0U ||
+        rt.autotune.handoff_probe_budget != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] autotune no-work low-hit path opened a probe: "
+                "budget=%u phase=%u commits=%llu rollbacks=%llu probe_budget=%u\n",
+                budget,
+                phase,
+                (unsigned long long)commits,
+                (unsigned long long)rollbacks,
+                rt.autotune.handoff_probe_budget);
+        goto cleanup_env;
+    }
+
+    rc = 0;
+
+cleanup_env:
+    test_restore_env_value("LLAM_AUTOTUNE", saved_autotune);
+    test_restore_env_value("LLAM_AUTOTUNE_DOMAINS", saved_domains);
+    test_restore_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", saved_decision_interval);
+    test_restore_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS", saved_min_hold);
+    test_restore_env_value("LLAM_AUTOTUNE_WAKE_P99_NS", saved_wake_p99);
+    test_restore_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD", saved_sample_period);
+    return rc;
+}
+
+static int test_autotune_handoff_probe_defers_low_sample(void) {
+    char *saved_autotune = test_dup_env_value("LLAM_AUTOTUNE");
+    char *saved_domains = test_dup_env_value("LLAM_AUTOTUNE_DOMAINS");
+    char *saved_decision_interval = test_dup_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS");
+    char *saved_min_hold = test_dup_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS");
+    char *saved_wake_p99 = test_dup_env_value("LLAM_AUTOTUNE_WAKE_P99_NS");
+    char *saved_sample_period = test_dup_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD");
+    llam_runtime_t rt;
+    llam_shard_t shard;
+    unsigned budget;
+    unsigned phase;
+    uint64_t rollbacks;
+    int rc = 1;
+
+    if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0) {
+        rc = test_fail_errno("setenv for autotune low-sample probe failed");
+        goto cleanup_env;
+    }
+
+    memset(&rt, 0, sizeof(rt));
+    memset(&shard, 0, sizeof(shard));
+    init_autotune_fake_handoff_metrics(&shard.metrics);
+    rt.shards = &shard;
+    rt.active_shards = 1U;
+    rt.direct_handoff_burst = 1U;
+    atomic_init(&rt.direct_handoff_budget, 1U);
+    shard.runtime = &rt;
+    shard.id = 0U;
+    llam_autotune_init(&rt);
+
+    llam_watchdog_autotune_tick(&rt, 1U);
+    add_autotune_fake_yield_metrics(&shard, 64U, 32U, 32U);
+    llam_watchdog_autotune_tick(&rt, 3U);
+    budget = llam_runtime_direct_handoff_budget(&rt);
+    phase = atomic_load_explicit(&rt.autotune.phase, memory_order_acquire);
+    if (budget != 2U || phase != LLAM_AUTOTUNE_INTERNAL_PHASE_PROBE) {
+        fprintf(stderr,
+                "[test_runtime_core] autotune low-sample probe did not open: budget=%u phase=%u\n",
+                budget,
+                phase);
+        goto cleanup_env;
+    }
+
+    add_autotune_fake_yield_metrics(&shard, 10U, 5U, 5U);
+    llam_watchdog_autotune_tick(&rt, 5U);
+    budget = llam_runtime_direct_handoff_budget(&rt);
+    phase = atomic_load_explicit(&rt.autotune.phase, memory_order_acquire);
+    rollbacks = atomic_load_explicit(&rt.autotune.rollbacks, memory_order_acquire);
+    if (budget != 2U ||
+        phase != LLAM_AUTOTUNE_INTERNAL_PHASE_PROBE ||
+        rollbacks != 0U ||
+        rt.autotune.handoff_probe_attempts != 10U ||
+        rt.autotune.handoff_probe_hits != 5U) {
+        fprintf(stderr,
+                "[test_runtime_core] autotune low-sample probe was not deferred: "
+                "budget=%u phase=%u rollbacks=%llu attempts=%llu hits=%llu\n",
+                budget,
+                phase,
+                (unsigned long long)rollbacks,
+                (unsigned long long)rt.autotune.handoff_probe_attempts,
+                (unsigned long long)rt.autotune.handoff_probe_hits);
+        goto cleanup_env;
+    }
+
+    add_autotune_fake_yield_metrics(&shard, 22U, 11U, 11U);
+    llam_watchdog_autotune_tick(&rt, 7U);
+    budget = llam_runtime_direct_handoff_budget(&rt);
+    phase = atomic_load_explicit(&rt.autotune.phase, memory_order_acquire);
+    rollbacks = atomic_load_explicit(&rt.autotune.rollbacks, memory_order_acquire);
+    if (budget != 1U ||
+        phase != LLAM_AUTOTUNE_INTERNAL_PHASE_BACKOFF ||
+        rollbacks != 1U ||
+        rt.autotune.handoff_probe_attempts != 0U ||
+        rt.autotune.handoff_probe_hits != 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] autotune accumulated low-gain probe did not roll back: "
+                "budget=%u phase=%u rollbacks=%llu attempts=%llu hits=%llu\n",
+                budget,
+                phase,
+                (unsigned long long)rollbacks,
+                (unsigned long long)rt.autotune.handoff_probe_attempts,
+                (unsigned long long)rt.autotune.handoff_probe_hits);
+        goto cleanup_env;
+    }
+
+    rc = 0;
+
+cleanup_env:
+    test_restore_env_value("LLAM_AUTOTUNE", saved_autotune);
+    test_restore_env_value("LLAM_AUTOTUNE_DOMAINS", saved_domains);
+    test_restore_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", saved_decision_interval);
+    test_restore_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS", saved_min_hold);
+    test_restore_env_value("LLAM_AUTOTUNE_WAKE_P99_NS", saved_wake_p99);
+    test_restore_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD", saved_sample_period);
+    return rc;
+}
+
+static int test_autotune_handoff_wake_guardrail_rolls_back(void) {
+    char *saved_autotune = test_dup_env_value("LLAM_AUTOTUNE");
+    char *saved_domains = test_dup_env_value("LLAM_AUTOTUNE_DOMAINS");
+    char *saved_decision_interval = test_dup_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS");
+    char *saved_min_hold = test_dup_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS");
+    char *saved_wake_p99 = test_dup_env_value("LLAM_AUTOTUNE_WAKE_P99_NS");
+    char *saved_sample_period = test_dup_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD");
+    char *saved_handoff = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF");
+    char *saved_burst = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_BURST");
+    char *saved_allow_timers = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS");
+    char *saved_live_limit = test_dup_env_value("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT");
+    char *saved_trace = test_dup_env_value("LLAM_TRACE_EVENTS");
+    char *saved_run_timing = test_dup_env_value("LLAM_RUN_TIMING");
+    char *saved_wake_latency = test_dup_env_value("LLAM_WAKE_LATENCY_METRICS");
+    char *saved_task_list = test_dup_env_value("LLAM_TASK_LIST_EAGER");
+    char *saved_strict = test_dup_env_value("LLAM_STRICT_SAFEPOINT");
+    char *saved_light_safepoint = test_dup_env_value("LLAM_DIAG_LIGHT_SAFEPOINT");
+    char *saved_stack_sampling = test_dup_env_value("LLAM_STACK_SAMPLING");
+    char *saved_profile = test_dup_env_value("LLAM_RUNTIME_PROFILE");
+    autotune_handoff_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *parent = NULL;
+    uint64_t decisions;
+    uint64_t rollbacks;
+    uint64_t guardrail_trips;
+    uint64_t sampled_latency_samples;
+    uint64_t sampled_latency_p99_ns;
+    unsigned budget;
+    unsigned mode;
+    int rc = 1;
+
+    if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1000000", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "1", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF", "2", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF_BURST", "8", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", "1", 1) != 0 ||
+        setenv("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT", "0", 1) != 0 ||
+        setenv("LLAM_TRACE_EVENTS", "0", 1) != 0 ||
+        setenv("LLAM_RUN_TIMING", "0", 1) != 0 ||
+        setenv("LLAM_WAKE_LATENCY_METRICS", "0", 1) != 0 ||
+        setenv("LLAM_TASK_LIST_EAGER", "0", 1) != 0 ||
+        setenv("LLAM_STRICT_SAFEPOINT", "0", 1) != 0 ||
+        unsetenv("LLAM_DIAG_LIGHT_SAFEPOINT") != 0 ||
+        setenv("LLAM_STACK_SAMPLING", "0", 1) != 0 ||
+        setenv("LLAM_RUNTIME_PROFILE", "balanced", 1) != 0) {
+        rc = test_fail_errno("setenv for autotune handoff wake guardrail failed");
+        goto cleanup_env;
+    }
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    atomic_init(&state.started, 0U);
+    atomic_init(&state.stop, 0U);
+    atomic_init(&state.deadline_ns, 0U);
+    memset(&opts, 0, sizeof(opts));
+    opts.profile = LLAM_RUNTIME_PROFILE_BALANCED;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno("autotune handoff wake guardrail runtime init failed");
+        goto cleanup_env;
+    }
+    parent = llam_spawn(autotune_handoff_parent_task, &state, NULL);
+    if (parent == NULL) {
+        rc = test_fail_errno("autotune handoff wake guardrail parent spawn failed");
+        goto cleanup_runtime;
+    }
+    if (llam_run() != 0 || llam_join(parent) != 0) {
+        rc = test_fail_errno("autotune handoff wake guardrail run/join failed");
+        parent = NULL;
+        goto cleanup_runtime;
+    }
+    parent = NULL;
+    if (atomic_load_explicit(&state.core.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.core.ran, memory_order_relaxed) != AUTOTUNE_HANDOFF_WORKERS + 1U) {
+        rc = test_fail("autotune handoff wake guardrail workload did not complete cleanly");
+        goto cleanup_runtime;
+    }
+
+    decisions = atomic_load_explicit(&g_llam_runtime.autotune.decisions, memory_order_acquire);
+    rollbacks = atomic_load_explicit(&g_llam_runtime.autotune.rollbacks, memory_order_acquire);
+    guardrail_trips = atomic_load_explicit(&g_llam_runtime.autotune.guardrail_trips, memory_order_acquire);
+    sampled_latency_samples =
+        atomic_load_explicit(&g_llam_runtime.autotune.sampled_wake_latency_samples, memory_order_acquire);
+    sampled_latency_p99_ns =
+        atomic_load_explicit(&g_llam_runtime.autotune.sampled_wake_latency_p99_ns, memory_order_acquire);
+    budget = llam_runtime_direct_handoff_budget(&g_llam_runtime);
+    mode = atomic_load_explicit(&g_llam_runtime.autotune.mode, memory_order_acquire);
+    /*
+     * The sampled latency fields describe the most recent decision window,
+     * which can be a short trailing window after an earlier guardrail fired.
+     * Rollbacks and guardrail trips are cumulative, so they are the stable
+     * evidence that this workload crossed the wake-latency threshold.  The
+     * live budget is not stable evidence: later decision windows may open a
+     * new probe and legitimately raise it again before the workload exits.
+     */
+    if (mode != LLAM_AUTOTUNE_INTERNAL_ON ||
+        decisions == 0U ||
+        rollbacks == 0U ||
+        guardrail_trips == 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] autotune wake guardrail did not roll back: "
+                "mode=%u decisions=%llu rollbacks=%llu guardrails=%llu "
+                "samples=%llu p99=%llu budget=%u\n",
+                mode,
+                (unsigned long long)decisions,
+                (unsigned long long)rollbacks,
+                (unsigned long long)guardrail_trips,
+                (unsigned long long)sampled_latency_samples,
+                (unsigned long long)sampled_latency_p99_ns,
+                budget);
+        rc = 1;
+        goto cleanup_runtime;
+    }
+    rc = 0;
+
+cleanup_runtime:
+    if (parent != NULL) {
+        (void)llam_detach(parent);
+    }
+    atomic_store_explicit(&state.stop, 1U, memory_order_release);
+    llam_runtime_shutdown();
+cleanup_env:
+    test_restore_env_value("LLAM_AUTOTUNE", saved_autotune);
+    test_restore_env_value("LLAM_AUTOTUNE_DOMAINS", saved_domains);
+    test_restore_env_value("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", saved_decision_interval);
+    test_restore_env_value("LLAM_AUTOTUNE_MIN_HOLD_NS", saved_min_hold);
+    test_restore_env_value("LLAM_AUTOTUNE_WAKE_P99_NS", saved_wake_p99);
+    test_restore_env_value("LLAM_AUTOTUNE_SAMPLE_PERIOD", saved_sample_period);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF", saved_handoff);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_BURST", saved_burst);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_ALLOW_TIMERS", saved_allow_timers);
+    test_restore_env_value("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT", saved_live_limit);
+    test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
+    test_restore_env_value("LLAM_RUN_TIMING", saved_run_timing);
+    test_restore_env_value("LLAM_WAKE_LATENCY_METRICS", saved_wake_latency);
+    test_restore_env_value("LLAM_TASK_LIST_EAGER", saved_task_list);
+    test_restore_env_value("LLAM_STRICT_SAFEPOINT", saved_strict);
+    test_restore_env_value("LLAM_DIAG_LIGHT_SAFEPOINT", saved_light_safepoint);
+    test_restore_env_value("LLAM_STACK_SAMPLING", saved_stack_sampling);
+    test_restore_env_value("LLAM_RUNTIME_PROFILE", saved_profile);
+    return rc;
+}
+
 static int test_unsigned_runtime_env_rejects_malformed_input(void) {
     char *saved_preempt_poll = test_dup_env_value("LLAM_PREEMPT_POLL_PERIOD");
     char *saved_preempt_quantum = test_dup_env_value("LLAM_PREEMPT_QUANTUM_NS");
@@ -3336,22 +3926,1515 @@ static int test_concurrent_spawn_contract(void) {
     llam_runtime_shutdown();
     return 0;
 }
+
+typedef struct active_op_release_state {
+    _Atomic size_t active_ops;
+    unsigned values[2];
+} active_op_release_state_t;
+
+typedef struct active_op_release_call {
+    active_op_release_state_t *state;
+    unsigned index;
+} active_op_release_call_t;
+
+static void *active_op_release_thread(void *opaque) {
+    active_op_release_call_t *call = opaque;
+
+    call->state->values[call->index] = call->index + 1U;
+    llam_public_active_op_end(&call->state->active_ops);
+    return NULL;
+}
+
+static int test_public_active_op_release_sequence(void) {
+    active_op_release_state_t state;
+    active_op_release_call_t calls[2];
+    pthread_t threads[2];
+    unsigned started = 0U;
+    bool values_visible;
+
+    memset(&state, 0, sizeof(state));
+    llam_public_active_op_init(&state.active_ops);
+    if (llam_public_active_op_try_begin(&state.active_ops) != 0 ||
+        llam_public_active_op_try_begin(&state.active_ops) != 0) {
+        return test_fail_errno("active-op release-sequence setup failed");
+    }
+    for (started = 0U; started < 2U; ++started) {
+        int rc;
+
+        calls[started].state = &state;
+        calls[started].index = started;
+        rc = pthread_create(&threads[started],
+                            NULL,
+                            active_op_release_thread,
+                            &calls[started]);
+        if (rc != 0) {
+            errno = rc;
+            for (unsigned i = started; i < 2U; ++i) {
+                llam_public_active_op_end(&state.active_ops);
+            }
+            for (unsigned i = 0U; i < started; ++i) {
+                (void)pthread_join(threads[i], NULL);
+            }
+            return test_fail_errno("active-op release-sequence pthread_create failed");
+        }
+    }
+    while (llam_public_active_op_count(&state.active_ops) != 0U) {
+        test_host_thread_yield();
+    }
+    /* This read is ordered only by the release-RMW/acquire-zero protocol. */
+    values_visible = state.values[0] == 1U && state.values[1] == 2U;
+    for (unsigned i = 0U; i < 2U; ++i) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            return test_fail_errno("active-op release-sequence pthread_join failed");
+        }
+    }
+    if (!values_visible) {
+        return test_fail("active-op acquire-zero missed a protected writer");
+    }
+    return 0;
+}
+
+enum { GROUP_PROMISE_SPAWNS = 33U };
+
+typedef struct group_promise_call {
+    llam_task_group_t *group;
+    atomic_uint *ready;
+    atomic_uint *start;
+    llam_task_t *result;
+    int result_errno;
+} group_promise_call_t;
+
+static void *group_promise_spawn_thread(void *opaque) {
+    group_promise_call_t *call = opaque;
+
+    atomic_fetch_add_explicit(call->ready, 1U, memory_order_release);
+    while (atomic_load_explicit(call->start, memory_order_acquire) == 0U) {
+        test_host_thread_yield();
+    }
+    errno = 0;
+    call->result = llam_task_group_spawn(call->group,
+                                         spawn_race_noop_task,
+                                         NULL,
+                                         NULL);
+    call->result_errno = errno;
+    return NULL;
+}
+
+static void group_promise_lock_allocators(llam_runtime_t *rt) {
+    for (unsigned i = 0U; i < rt->active_shards; ++i) {
+        pthread_mutex_lock(&rt->shards[i].allocator.lock);
+    }
+}
+
+static void group_promise_unlock_allocators(llam_runtime_t *rt) {
+    for (unsigned i = rt->active_shards; i > 0U; --i) {
+        pthread_mutex_unlock(&rt->shards[i - 1U].allocator.lock);
+    }
+}
+
+static int test_task_group_unique_spawn_reservations(void) {
+    pthread_t threads[GROUP_PROMISE_SPAWNS];
+    group_promise_call_t calls[GROUP_PROMISE_SPAWNS];
+    atomic_uint ready;
+    atomic_uint start;
+    llam_task_group_t *group = NULL;
+    llam_task_group_t *raw_group = NULL;
+    llam_runtime_t *rt = NULL;
+    unsigned started = 0U;
+    bool allocators_locked = false;
+    bool spawn_failed = false;
+    int result = 1;
+
+    memset(calls, 0, sizeof(calls));
+    atomic_init(&ready, 0U);
+    atomic_init(&start, 0U);
+    if (llam_runtime_init(NULL) != 0) {
+        return test_fail_errno("group promise runtime init failed");
+    }
+    group = llam_task_group_create();
+    raw_group = group != NULL ? llam_task_group_resolve_public_handle(group) : NULL;
+    if (raw_group == NULL || raw_group->owner_runtime == NULL) {
+        (void)llam_task_group_destroy(group);
+        llam_runtime_shutdown();
+        return test_fail_errno("group promise raw observation setup failed");
+    }
+    rt = raw_group->owner_runtime;
+    group_promise_lock_allocators(rt);
+    allocators_locked = true;
+    for (started = 0U; started < GROUP_PROMISE_SPAWNS; ++started) {
+        int rc;
+
+        calls[started].group = group;
+        calls[started].ready = &ready;
+        calls[started].start = &start;
+        rc = pthread_create(&threads[started],
+                            NULL,
+                            group_promise_spawn_thread,
+                            &calls[started]);
+        if (rc != 0) {
+            errno = rc;
+            goto cleanup;
+        }
+    }
+    while (atomic_load_explicit(&ready, memory_order_acquire) !=
+           GROUP_PROMISE_SPAWNS) {
+        test_host_thread_yield();
+    }
+    atomic_store_explicit(&start, 1U, memory_order_release);
+    for (unsigned attempt = 0U; attempt < 50000U; ++attempt) {
+        size_t active;
+
+        pthread_mutex_lock(&raw_group->lock);
+        active = raw_group->active_spawns;
+        pthread_mutex_unlock(&raw_group->lock);
+        if (active == GROUP_PROMISE_SPAWNS) {
+            break;
+        }
+        if (attempt + 1U == 50000U) {
+            goto cleanup;
+        }
+        test_host_thread_yield();
+    }
+    pthread_mutex_lock(&raw_group->lock);
+    if (raw_group->count != 0U ||
+        raw_group->active_spawns != GROUP_PROMISE_SPAWNS ||
+        raw_group->capacity < raw_group->count + raw_group->active_spawns) {
+        pthread_mutex_unlock(&raw_group->lock);
+        goto cleanup;
+    }
+    pthread_mutex_unlock(&raw_group->lock);
+    group_promise_unlock_allocators(rt);
+    allocators_locked = false;
+    for (unsigned i = 0U; i < started; ++i) {
+        if (pthread_join(threads[i], NULL) != 0 || calls[i].result == NULL) {
+            spawn_failed = true;
+        }
+    }
+    started = 0U;
+    if (spawn_failed) {
+        goto cleanup;
+    }
+    llam_task_group_end_public_op(raw_group);
+    raw_group = NULL;
+    if (llam_run() != 0 || llam_task_group_join(group) != 0) {
+        goto cleanup;
+    }
+    if (llam_task_group_destroy(group) != 0) {
+        goto cleanup;
+    }
+    group = NULL;
+    result = 0;
+
+cleanup:
+    atomic_store_explicit(&start, 1U, memory_order_release);
+    if (allocators_locked) {
+        group_promise_unlock_allocators(rt);
+    }
+    for (unsigned i = 0U; i < started; ++i) {
+        (void)pthread_join(threads[i], NULL);
+    }
+    if (raw_group != NULL) {
+        llam_task_group_end_public_op(raw_group);
+    }
+    if (group != NULL) {
+        (void)llam_run();
+        (void)llam_task_group_join(group);
+        (void)llam_task_group_destroy(group);
+    }
+    llam_runtime_shutdown();
+    if (result != 0) {
+        return test_fail("task-group promised capacity did not cover all active spawns");
+    }
+    return 0;
+}
+#endif
+
+typedef struct timer_ownership_contract_state {
+    llam_channel_t *channel;
+    atomic_uint failures;
+} timer_ownership_contract_state_t;
+
+static void timer_ownership_contract_task(void *opaque) {
+    timer_ownership_contract_state_t *state = opaque;
+    llam_task_t *task = g_llam_tls_task;
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_channel_t *channel;
+    llam_wait_node_t *node;
+    llam_timer_node_t *timer;
+    llam_channel_select_state_t select_state;
+    uint64_t generation;
+
+    channel = llam_channel_resolve_public_handle(state->channel);
+    node = llam_sync_wait_node_acquire(shard);
+    if (channel == NULL || node == NULL) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        if (channel != NULL) {
+            llam_channel_end_public_op(channel);
+        }
+        return;
+    }
+    llam_task_set_wait_node_tracking(task,
+                                     node,
+                                     &channel->recv_waiters,
+                                     &channel->lock,
+                                     &channel->active_ops,
+                                     shard->id,
+                                     LLAM_WAIT_CHANNEL_RECV);
+    if (llam_arm_task_wait_deadline(task,
+                                    shard,
+                                    llam_now_ns() + UINT64_C(60000000000)) != 0) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    } else {
+        bool valid;
+        bool removed;
+
+        pthread_mutex_lock(&shard->lock);
+        timer = task->active_timer;
+        generation = (uint64_t)atomic_load_explicit(&task->wait_generation,
+                                                    memory_order_acquire);
+        valid = timer != NULL && timer != &task->embedded_timer_node &&
+                timer->task == task && timer->wait_generation == generation &&
+                timer->wait_lifetime_ops == &channel->active_ops &&
+                timer->select_state == NULL && !timer->holds_task_ref &&
+                llam_public_active_op_count(&channel->active_ops) == 2U;
+        removed = llam_timer_remove_locked(shard, task);
+        if (!valid || !removed ||
+            llam_public_active_op_count(&channel->active_ops) != 1U) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        }
+        pthread_mutex_unlock(&shard->lock);
+    }
+    task->state = LLAM_TASK_STATE_RUNNING;
+    task->wait_reason = LLAM_WAIT_NONE;
+    llam_task_clear_wait_tracking_or_abort(task);
+    llam_sync_wait_node_release(shard, node);
+    llam_channel_end_public_op(channel);
+
+    memset(&select_state, 0, sizeof(select_state));
+    atomic_init(&select_state.completed, LLAM_SELECT_PENDING);
+    atomic_init(&select_state.wake_armed, 0U);
+    atomic_init(&select_state.wake_queued, 0U);
+    atomic_init(&select_state.timer_refs, 0U);
+    llam_task_set_select_tracking(task,
+                                  &select_state,
+                                  shard->id,
+                                  LLAM_WAIT_CHANNEL_RECV);
+    if (llam_arm_task_wait_deadline(task,
+                                    shard,
+                                    llam_now_ns() + UINT64_C(60000000000)) != 0) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    } else {
+        bool valid;
+        bool removed;
+
+        pthread_mutex_lock(&shard->lock);
+        timer = task->active_timer;
+        valid = timer != NULL && timer->select_state == &select_state &&
+                atomic_load_explicit(&select_state.timer_refs,
+                                     memory_order_acquire) == 1U;
+        removed = llam_timer_remove_locked(shard, task);
+        if (!valid || !removed ||
+            atomic_load_explicit(&select_state.timer_refs,
+                                 memory_order_acquire) != 0U) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        }
+        pthread_mutex_unlock(&shard->lock);
+    }
+    task->state = LLAM_TASK_STATE_RUNNING;
+    task->wait_reason = LLAM_WAIT_NONE;
+    llam_task_clear_wait_tracking_or_abort(task);
+}
+
+static int test_timer_wait_ownership_contract(void) {
+    timer_ownership_contract_state_t state;
+    llam_task_t *task;
+    int result = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    if (llam_runtime_init(NULL) != 0) {
+        return test_fail_errno("timer ownership runtime init failed");
+    }
+    state.channel = llam_channel_create(1U);
+    task = state.channel != NULL
+               ? llam_spawn(timer_ownership_contract_task, &state, NULL)
+               : NULL;
+    if (task == NULL || llam_run() != 0 || llam_join(task) != 0 ||
+        atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        result = 1;
+    }
+    if (state.channel != NULL && llam_channel_destroy(state.channel) != 0) {
+        result = 1;
+    }
+    llam_runtime_shutdown();
+    return result != 0
+               ? test_fail_errno("timer ownership/generation contract failed")
+               : 0;
+}
+
+static int test_select_completion_ownership_contract(void) {
+    llam_task_t task;
+    llam_wait_node_t node;
+    llam_wait_node_t queued_node;
+    llam_channel_select_state_t state;
+    llam_channel_select_state_t queued_state;
+
+    memset(&task, 0, sizeof(task));
+    memset(&node, 0, sizeof(node));
+    memset(&state, 0, sizeof(state));
+    memset(&queued_node, 0, sizeof(queued_node));
+    memset(&queued_state, 0, sizeof(queued_state));
+    atomic_init(&task.state, LLAM_TASK_STATE_PARKED);
+    atomic_init(&state.completed, LLAM_SELECT_PENDING);
+    atomic_init(&state.wake_armed, 0U);
+    atomic_init(&state.wake_queued, 0U);
+    node.task = &task;
+    node.select_state = &state;
+    if (llam_channel_select_complete_node(&node, NULL, 0) !=
+            LLAM_SELECT_COMPLETION_INLINE ||
+        atomic_load_explicit(&state.completed, memory_order_acquire) !=
+            LLAM_SELECT_COMPLETED_INLINE ||
+        llam_channel_select_arm_wait(&state) != LLAM_SELECT_COMPLETED_INLINE ||
+        llam_channel_select_complete_node(&node, NULL, 0) !=
+            LLAM_SELECT_COMPLETION_LOST) {
+        return test_fail("select completion-before-arm ownership was ambiguous");
+    }
+    atomic_init(&queued_state.completed, LLAM_SELECT_PENDING);
+    atomic_init(&queued_state.wake_armed, 0U);
+    atomic_init(&queued_state.wake_queued, 0U);
+    queued_node.task = &task;
+    queued_node.select_state = &queued_state;
+    if (llam_channel_select_arm_wait(&queued_state) != LLAM_SELECT_ARMED ||
+        atomic_load_explicit(&queued_state.wake_armed, memory_order_acquire) != 1U ||
+        llam_channel_select_complete_node(&queued_node, NULL, 0) !=
+            LLAM_SELECT_COMPLETION_QUEUED ||
+        atomic_load_explicit(&queued_state.completed, memory_order_acquire) !=
+            LLAM_SELECT_COMPLETED_QUEUED ||
+        atomic_load_explicit(&queued_state.wake_queued, memory_order_acquire) !=
+            1U) {
+        return test_fail("select arm-before-completion lost its required wake");
+    }
+    return 0;
+}
+
+#if LLAM_PLATFORM_POSIX
+#define WAIT_RESOLVER_TEST_SPINS 20000U
+
+typedef struct wait_resolver_close_call {
+    llam_task_t *task;
+    atomic_uint done;
+    bool result;
+} wait_resolver_close_call_t;
+
+typedef struct wait_resolver_cleanup_call {
+    llam_task_t *task;
+    llam_wait_node_t *node;
+    atomic_uint done;
+} wait_resolver_cleanup_call_t;
+
+typedef struct wait_resolver_cancel_call {
+    llam_task_t *task;
+    atomic_uint done;
+} wait_resolver_cancel_call_t;
+
+typedef struct wait_resolver_block_release_call {
+    llam_runtime_t *runtime;
+    llam_block_job_t *job;
+    atomic_uint done;
+} wait_resolver_block_release_call_t;
+
+static void wait_resolver_test_task_init(llam_task_t *task, llam_runtime_t *rt) {
+    memset(task, 0, sizeof(*task));
+    task->owner_runtime = rt;
+    atomic_init(&task->active_ops, 0U);
+    atomic_init(&task->state, LLAM_TASK_STATE_NEW);
+    atomic_init(&task->wait_reason, LLAM_WAIT_NONE);
+    atomic_init(&task->last_shard, 0U);
+    atomic_init(&task->scan_refs, 0U);
+    atomic_init(&task->join_waiter_hint, 0U);
+    atomic_init(&task->join_target, NULL);
+    atomic_init(&task->active_wait_node, NULL);
+    atomic_init(&task->active_wait_queue, NULL);
+    atomic_init(&task->active_wait_queue_lock, NULL);
+    atomic_init(&task->active_select_state, NULL);
+    atomic_init(&task->active_wait_lifetime_ops, NULL);
+    atomic_init(&task->wait_resolver_state, LLAM_WAIT_RESOLVER_CLOSED_BIT);
+    atomic_init(&task->wait_generation, 0U);
+    atomic_init(&task->active_io_req, NULL);
+    atomic_init(&task->active_io_generation, 0U);
+    atomic_init(&task->active_block_job, NULL);
+    atomic_init(&task->wake_error_code, 0);
+}
+
+static void wait_resolver_test_node_init(llam_wait_node_t *node,
+                                         llam_runtime_t *rt,
+                                         llam_task_t *task) {
+    memset(node, 0, sizeof(*node));
+    node->owner_runtime = rt;
+    node->task = task;
+    atomic_init(&node->wake_armed, 0U);
+    atomic_init(&node->wake_completed, 0U);
+    atomic_init(&node->wake_queued, 0U);
+}
+
+static bool wait_resolver_test_uint_reaches(atomic_uint *value,
+                                            unsigned mask,
+                                            unsigned expected) {
+    const struct timespec interval = {.tv_sec = 0, .tv_nsec = 100000L};
+    unsigned i;
+
+    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
+        if ((atomic_load_explicit(value, memory_order_acquire) & mask) == expected) {
+            return true;
+        }
+        (void)nanosleep(&interval, NULL);
+    }
+    return false;
+}
+
+static void *wait_resolver_close_main(void *opaque) {
+    wait_resolver_close_call_t *call = opaque;
+
+    call->result = llam_task_close_wait_resolvers(call->task);
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *wait_resolver_cleanup_main(void *opaque) {
+    wait_resolver_cleanup_call_t *call = opaque;
+
+    llam_task_clear_wait_tracking_or_abort(call->task);
+    atomic_store_explicit(&call->task->state,
+                          LLAM_TASK_STATE_RUNNING,
+                          memory_order_release);
+    atomic_store_explicit(&call->task->wait_reason,
+                          LLAM_WAIT_NONE,
+                          memory_order_release);
+    if (call->node != NULL) {
+        llam_wait_node_reset(call->node, call->task->owner_runtime, UINT_MAX);
+    }
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *wait_resolver_cancel_main(void *opaque) {
+    wait_resolver_cancel_call_t *call = opaque;
+
+    llam_cancel_task_wait(call->task);
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *wait_resolver_block_release_main(void *opaque) {
+    wait_resolver_block_release_call_t *call = opaque;
+
+    llam_block_job_release(call->runtime, call->job);
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static int test_wait_resolver_gate_contract(void) {
+    llam_task_t task;
+    wait_resolver_close_call_t close_call;
+    pthread_t closer;
+
+    wait_resolver_test_task_init(&task, NULL);
+    if (llam_task_wait_resolver_try_begin(&task) ||
+        !llam_task_publish_wait_tracking(&task) ||
+        !llam_task_wait_resolver_try_begin(&task) ||
+        !llam_task_wait_resolver_try_begin(&task)) {
+        return test_fail_errno("wait resolver gate did not publish/claim cleanly");
+    }
+    memset(&close_call, 0, sizeof(close_call));
+    close_call.task = &task;
+    atomic_init(&close_call.done, 0U);
+    if (pthread_create(&closer, NULL, wait_resolver_close_main, &close_call) != 0) {
+        llam_task_wait_resolver_end(&task);
+        llam_task_wait_resolver_end(&task);
+        return test_fail("wait resolver close thread creation failed");
+    }
+    if (!wait_resolver_test_uint_reaches(&task.wait_resolver_state,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT) ||
+        atomic_load_explicit(&close_call.done, memory_order_acquire) != 0U ||
+        llam_task_wait_resolver_try_begin(&task)) {
+        llam_task_wait_resolver_end(&task);
+        llam_task_wait_resolver_end(&task);
+        (void)pthread_join(closer, NULL);
+        return test_fail("closed wait resolver gate admitted or failed to drain claims");
+    }
+    llam_task_wait_resolver_end(&task);
+    if (atomic_load_explicit(&close_call.done, memory_order_acquire) != 0U) {
+        llam_task_wait_resolver_end(&task);
+        (void)pthread_join(closer, NULL);
+        return test_fail("wait resolver close returned before its final claim drained");
+    }
+    llam_task_wait_resolver_end(&task);
+    if (pthread_join(closer, NULL) != 0 || !close_call.result ||
+        atomic_load_explicit(&task.wait_resolver_state, memory_order_acquire) !=
+            LLAM_WAIT_RESOLVER_CLOSED_BIT) {
+        return test_fail("wait resolver close did not reach quiescence");
+    }
+
+    atomic_store_explicit(&task.wait_resolver_state, UINT_MAX, memory_order_release);
+    errno = 0;
+    if (llam_task_close_wait_resolvers(&task) || errno != EOVERFLOW) {
+        return test_fail("saturated wait resolver gate did not fail closed");
+    }
+    atomic_store_explicit(&task.wait_resolver_state,
+                          LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                          memory_order_release);
+    return 0;
+}
+
+static bool wait_tracking_owner_snapshot_matches(const llam_task_t *task,
+                                                 const llam_wait_node_t *node,
+                                                 const llam_wait_queue_t *queue,
+                                                 pthread_mutex_t *queue_lock,
+                                                 const llam_channel_select_state_t *select_state,
+                                                 const llam_block_job_t *job,
+                                                 const llam_task_t *join_target,
+                                                 unsigned state,
+                                                 llam_wait_reason_t reason) {
+    return atomic_load_explicit(&((llam_task_t *)task)->active_wait_node,
+                                memory_order_acquire) == node &&
+           atomic_load_explicit(&((llam_task_t *)task)->active_wait_queue,
+                                memory_order_acquire) == queue &&
+           atomic_load_explicit(&((llam_task_t *)task)->active_wait_queue_lock,
+                                memory_order_acquire) == queue_lock &&
+           atomic_load_explicit(&((llam_task_t *)task)->active_select_state,
+                                memory_order_acquire) == select_state &&
+           atomic_load_explicit(&((llam_task_t *)task)->active_block_job,
+                                memory_order_acquire) == job &&
+           atomic_load_explicit(&((llam_task_t *)task)->join_target,
+                                memory_order_acquire) == join_target &&
+           atomic_load_explicit(&((llam_task_t *)task)->state,
+                                memory_order_acquire) == state &&
+           atomic_load_explicit(&((llam_task_t *)task)->wait_reason,
+                                memory_order_acquire) == (unsigned)reason;
+}
+
+static int test_wait_tracking_setters_fail_closed_on_saturation(void) {
+    llam_task_t task;
+    llam_task_t join_target;
+    llam_wait_node_t old_node;
+    llam_wait_node_t new_node;
+    llam_wait_queue_t old_queue = {0};
+    llam_wait_queue_t new_queue = {0};
+    llam_channel_select_state_t old_select;
+    llam_channel_select_state_t new_select;
+    llam_block_job_t old_job;
+    llam_block_job_t new_job;
+    llam_io_req_t req;
+    pthread_mutex_t old_lock;
+    pthread_mutex_t new_lock;
+    uint64_t generation;
+
+    memset(&join_target, 0, sizeof(join_target));
+    memset(&old_select, 0, sizeof(old_select));
+    memset(&new_select, 0, sizeof(new_select));
+    memset(&old_job, 0, sizeof(old_job));
+    memset(&new_job, 0, sizeof(new_job));
+    memset(&req, 0, sizeof(req));
+    if (pthread_mutex_init(&old_lock, NULL) != 0 ||
+        pthread_mutex_init(&new_lock, NULL) != 0) {
+        return test_fail("wait tracking saturation lock initialization failed");
+    }
+    wait_resolver_test_task_init(&task, NULL);
+    wait_resolver_test_node_init(&old_node, NULL, &task);
+    wait_resolver_test_node_init(&new_node, NULL, &task);
+    atomic_init(&req.operation_generation, 9U);
+    atomic_store_explicit(&task.active_wait_node, &old_node, memory_order_release);
+    atomic_store_explicit(&task.active_wait_queue, &old_queue, memory_order_release);
+    atomic_store_explicit(&task.active_wait_queue_lock, &old_lock, memory_order_release);
+    atomic_store_explicit(&task.active_select_state, &old_select, memory_order_release);
+    atomic_store_explicit(&task.active_block_job, &old_job, memory_order_release);
+    atomic_store_explicit(&task.join_target, &join_target, memory_order_release);
+    atomic_store_explicit(&task.state, LLAM_TASK_STATE_RUNNING, memory_order_release);
+    atomic_store_explicit(&task.wait_reason, LLAM_WAIT_JOIN, memory_order_release);
+    atomic_store_explicit(&task.wait_generation, 41U, memory_order_release);
+    generation = atomic_load_explicit(&task.wait_generation, memory_order_acquire);
+    atomic_store_explicit(&task.wait_resolver_state, UINT_MAX, memory_order_release);
+
+#define EXPECT_SATURATED_SETTER_FAILURE(expr)                                                     \
+    do {                                                                                          \
+        errno = 0;                                                                                \
+        if ((expr) || errno != EOVERFLOW ||                                                       \
+            !wait_tracking_owner_snapshot_matches(&task,                                         \
+                                                  &old_node,                                      \
+                                                  &old_queue,                                     \
+                                                  &old_lock,                                      \
+                                                  &old_select,                                    \
+                                                  &old_job,                                       \
+                                                  &join_target,                                   \
+                                                  LLAM_TASK_STATE_RUNNING,                        \
+                                                  LLAM_WAIT_JOIN) ||                              \
+            atomic_load_explicit(&task.wait_generation, memory_order_acquire) != generation) {   \
+            (void)pthread_mutex_destroy(&new_lock);                                               \
+            (void)pthread_mutex_destroy(&old_lock);                                               \
+            return test_fail("saturated wait setter overwrote its prior owner");                 \
+        }                                                                                         \
+    } while (0)
+
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_set_wait_node_tracking(&task,
+                                                                     &new_node,
+                                                                     &new_queue,
+                                                                     &new_lock,
+                                                                     NULL,
+                                                                     3U,
+                                                                     LLAM_WAIT_MUTEX));
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_set_select_tracking(&task,
+                                                                  &new_select,
+                                                                  3U,
+                                                                  LLAM_WAIT_CHANNEL_RECV));
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_set_join_tracking(&task, &task, 3U));
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_set_sleep_tracking(&task, &new_node, 3U));
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_set_block_tracking(&task, &new_job, 3U));
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_set_io_tracking(&task, &req, 3U));
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_clear_wait_tracking(&task));
+
+    atomic_store_explicit(&task.wait_resolver_state,
+                          LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                          memory_order_release);
+    atomic_store_explicit(&task.wait_generation, UINT64_MAX, memory_order_release);
+    generation = UINT64_MAX;
+    EXPECT_SATURATED_SETTER_FAILURE(llam_task_set_sleep_tracking(&task, &new_node, 3U));
+#undef EXPECT_SATURATED_SETTER_FAILURE
+
+    (void)pthread_mutex_destroy(&new_lock);
+    (void)pthread_mutex_destroy(&old_lock);
+    return 0;
+}
+
+static int test_wait_tracking_lock_safe_overflow(void) {
+    llam_runtime_t rt;
+    llam_shard_t shard;
+    llam_task_t task;
+    atomic_uint counter;
+    pid_t child;
+    int status;
+
+    memset(&rt, 0, sizeof(rt));
+    memset(&shard, 0, sizeof(shard));
+    atomic_init(&rt.initialized, 1U);
+    atomic_init(&rt.fatal_errno, 0);
+    atomic_init(&rt.deferred_fatal_pending, 0U);
+    rt.active_shards = 1U;
+    rt.shards = &shard;
+    shard.runtime = &rt;
+    if (pthread_mutex_init(&shard.lock, NULL) != 0) {
+        return test_fail("wait overflow shard lock initialization failed");
+    }
+    wait_resolver_test_task_init(&task, &rt);
+    child = fork();
+    if (child < 0) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail_errno("wait overflow fork failed");
+    }
+    if (child == 0) {
+        atomic_store_explicit(&task.wait_resolver_state,
+                              LLAM_WAIT_RESOLVER_REF_MASK - 1U,
+                              memory_order_release);
+        pthread_mutex_lock(&shard.lock);
+        (void)llam_task_wait_resolver_try_begin(&task);
+        _exit(2);
+    }
+    if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) ||
+        WTERMSIG(status) != SIGABRT) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("open wait resolver saturation did not hard-fail lock-safely");
+    }
+
+    child = fork();
+    if (child < 0) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail_errno("closed wait overflow fork failed");
+    }
+    if (child == 0) {
+        atomic_store_explicit(&task.wait_resolver_state, UINT_MAX, memory_order_release);
+        pthread_mutex_lock(&shard.lock);
+        (void)llam_task_wait_resolver_try_begin(&task);
+        _exit(2);
+    }
+    if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) ||
+        WTERMSIG(status) != SIGABRT) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("closed wait resolver saturation did not hard-fail lock-safely");
+    }
+
+    child = fork();
+    if (child < 0) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail_errno("wait underflow fork failed");
+    }
+    if (child == 0) {
+        atomic_store_explicit(&task.wait_resolver_state,
+                              LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                              memory_order_release);
+        pthread_mutex_lock(&shard.lock);
+        llam_task_wait_resolver_end(&task);
+        _exit(2);
+    }
+    if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) ||
+        WTERMSIG(status) != SIGABRT) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("wait resolver underflow did not hard-fail lock-safely");
+    }
+
+    atomic_store_explicit(&task.wait_resolver_state, UINT_MAX, memory_order_release);
+    pthread_mutex_lock(&shard.lock);
+    errno = 0;
+    if (llam_task_close_wait_resolvers(&task) || errno != EOVERFLOW) {
+        pthread_mutex_unlock(&shard.lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("wait resolver close overflow did not return under owner lock");
+    }
+    pthread_mutex_unlock(&shard.lock);
+    if (atomic_load_explicit(&rt.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("wait resolver overflow was not recorded lock-safely");
+    }
+
+    atomic_init(&counter, UINT_MAX);
+    atomic_store_explicit(&rt.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&rt.deferred_fatal_pending, 0U, memory_order_release);
+    pthread_mutex_lock(&shard.lock);
+    errno = 0;
+    if (llam_sync_note_inflight_waiter(&rt, &counter, 1U) ||
+        errno != EOVERFLOW) {
+        pthread_mutex_unlock(&shard.lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("inflight waiter overflow did not return under owner lock");
+    }
+    pthread_mutex_unlock(&shard.lock);
+    if (atomic_load_explicit(&counter, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&rt.fatal_errno, memory_order_acquire) != EOVERFLOW ||
+        atomic_load_explicit(&rt.deferred_fatal_pending, memory_order_acquire) == 0U) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("inflight waiter overflow was not deferred lock-safely");
+    }
+
+    atomic_store_explicit(&counter, 0U, memory_order_release);
+    atomic_store_explicit(&rt.fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&rt.deferred_fatal_pending, 0U, memory_order_release);
+    pthread_mutex_lock(&shard.lock);
+    errno = 0;
+    if (llam_sync_complete_inflight_waiter(&rt, &counter, 1U) || errno != EINVAL) {
+        pthread_mutex_unlock(&shard.lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("inflight waiter underflow did not return under owner lock");
+    }
+    pthread_mutex_unlock(&shard.lock);
+    if (atomic_load_explicit(&counter, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&rt.fatal_errno, memory_order_acquire) != EINVAL ||
+        atomic_load_explicit(&rt.deferred_fatal_pending, memory_order_acquire) == 0U) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("inflight waiter underflow was not deferred lock-safely");
+    }
+    (void)pthread_mutex_destroy(&shard.lock);
+    return 0;
+}
+
+typedef struct saturated_channel_wait_state {
+    llam_channel_t *channel;
+    atomic_uint failures;
+} saturated_channel_wait_state_t;
+
+static void saturated_channel_wait_task(void *opaque) {
+    saturated_channel_wait_state_t *state = opaque;
+    llam_task_t *task = g_llam_tls_task;
+    llam_channel_t *channel;
+    void *value = NULL;
+
+    atomic_store_explicit(&task->wait_resolver_state, UINT_MAX, memory_order_release);
+    errno = 0;
+    if (llam_channel_recv_result(state->channel, &value) == 0 || errno != EOVERFLOW ||
+        atomic_load_explicit(&task->state, memory_order_acquire) != LLAM_TASK_STATE_RUNNING ||
+        atomic_load_explicit(&task->wait_reason, memory_order_acquire) != LLAM_WAIT_NONE ||
+        atomic_load_explicit(&task->active_wait_node, memory_order_acquire) != NULL) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    }
+    channel = llam_channel_resolve_public_handle(state->channel);
+    if (channel == NULL) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    } else {
+        pthread_mutex_lock(&channel->lock);
+        if (channel->recv_waiters.head != NULL || channel->recv_waiters.tail != NULL) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        }
+        pthread_mutex_unlock(&channel->lock);
+        llam_channel_end_public_op(channel);
+    }
+    atomic_store_explicit(&task->wait_resolver_state,
+                          LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                          memory_order_release);
+    atomic_store_explicit(&task->owner_runtime->fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&task->owner_runtime->deferred_fatal_pending,
+                          0U,
+                          memory_order_release);
+}
+
+static int test_wait_tracking_caller_rolls_back_saturation(void) {
+    saturated_channel_wait_state_t state;
+    llam_task_t *task;
+    int result = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    if (llam_runtime_init(NULL) != 0) {
+        return test_fail_errno("wait saturation caller runtime init failed");
+    }
+    state.channel = llam_channel_create(1U);
+    task = state.channel != NULL
+               ? llam_spawn(saturated_channel_wait_task, &state, NULL)
+               : NULL;
+    if (task == NULL || llam_run() != 0 || llam_join(task) != 0 ||
+        atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        result = 1;
+    }
+    if (state.channel != NULL && llam_channel_destroy(state.channel) != 0) {
+        result = 1;
+    }
+    llam_runtime_shutdown();
+    return result != 0
+               ? test_fail_errno("saturated wait caller failed to unlink its queue node")
+               : 0;
+}
+
+static int test_active_io_tracking_counter_saturation_rolls_back(void) {
+    llam_runtime_t rt;
+    llam_task_t task;
+    llam_io_req_t req;
+
+    memset(&rt, 0, sizeof(rt));
+    memset(&req, 0, sizeof(req));
+    atomic_init(&rt.initialized, 1U);
+    atomic_init(&rt.active_io_waiters, UINT_MAX);
+    atomic_init(&rt.fatal_errno, 0);
+    atomic_init(&rt.deferred_fatal_pending, 0U);
+    wait_resolver_test_task_init(&task, &rt);
+    atomic_init(&req.operation_generation, 11U);
+    atomic_store_explicit(&task.state, LLAM_TASK_STATE_RUNNING, memory_order_release);
+    errno = 0;
+    if (llam_task_set_io_tracking(&task, &req, 0U) || errno != EOVERFLOW ||
+        atomic_load_explicit(&rt.active_io_waiters, memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&rt.fatal_errno, memory_order_acquire) != EOVERFLOW ||
+        atomic_load_explicit(&task.active_io_req, memory_order_acquire) != NULL ||
+        atomic_load_explicit(&task.active_io_generation, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&task.state, memory_order_acquire) != LLAM_TASK_STATE_RUNNING ||
+        atomic_load_explicit(&task.wait_reason, memory_order_acquire) != LLAM_WAIT_NONE ||
+        atomic_load_explicit(&task.wait_resolver_state, memory_order_acquire) !=
+            LLAM_WAIT_RESOLVER_CLOSED_BIT) {
+        return test_fail("active I/O tracking counter saturation was not rolled back");
+    }
+    return 0;
+}
+
+typedef struct deferred_fatal_wait_state {
+    llam_channel_t *wait_channel;
+    llam_channel_t *trigger_channel;
+    _Atomic(llam_task_t *) raw_waiter;
+    atomic_uint helper_failed;
+    atomic_uint fallback_stop;
+} deferred_fatal_wait_state_t;
+
+static void deferred_fatal_parked_task(void *opaque) {
+    deferred_fatal_wait_state_t *state = opaque;
+    void *value = NULL;
+
+    atomic_store_explicit(&state->raw_waiter, g_llam_tls_task, memory_order_release);
+    if (llam_channel_recv_result(state->wait_channel, &value) == 0 || errno != ECANCELED) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+    }
+}
+
+static void deferred_fatal_trigger_task(void *opaque) {
+    deferred_fatal_wait_state_t *state = opaque;
+    llam_task_t *waiter = NULL;
+    void *value = NULL;
+    unsigned i;
+
+    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
+        waiter = atomic_load_explicit(&state->raw_waiter, memory_order_acquire);
+        if (waiter != NULL &&
+            atomic_load_explicit(&waiter->state, memory_order_acquire) ==
+                LLAM_TASK_STATE_PARKED &&
+            atomic_load_explicit(&waiter->active_wait_node, memory_order_acquire) != NULL) {
+            break;
+        }
+        (void)llam_yield();
+    }
+    if (waiter == NULL || i == WAIT_RESOLVER_TEST_SPINS) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+        return;
+    }
+
+    atomic_store_explicit(&g_llam_tls_task->wait_generation,
+                          UINT64_MAX,
+                          memory_order_release);
+    errno = 0;
+    if (llam_channel_recv_result(state->trigger_channel, &value) == 0 ||
+        errno != EOVERFLOW ||
+        atomic_load_explicit(&g_llam_tls_task->state, memory_order_acquire) !=
+            LLAM_TASK_STATE_RUNNING ||
+        atomic_load_explicit(&g_llam_tls_task->active_wait_node,
+                             memory_order_acquire) != NULL) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+    }
+}
+
+static void *deferred_fatal_monitor_main(void *opaque) {
+    deferred_fatal_wait_state_t *state = opaque;
+    llam_runtime_t *rt = llam_runtime_default_storage();
+    unsigned i;
+
+    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
+        if (atomic_load_explicit(&rt->fatal_errno, memory_order_acquire) == EOVERFLOW) {
+            break;
+        }
+        test_host_thread_yield();
+    }
+    if (i == WAIT_RESOLVER_TEST_SPINS) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+        llam_request_stop(rt);
+        return NULL;
+    }
+    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
+        if (atomic_load_explicit(&rt->stop_requested, memory_order_acquire)) {
+            return NULL;
+        }
+        test_host_thread_yield();
+    }
+
+    /* Bound a regression: the test must never leave its scheduler hung. */
+    atomic_store_explicit(&state->fallback_stop, 1U, memory_order_release);
+    llam_request_stop(rt);
+    return NULL;
+}
+
+static int test_deferred_fatal_stops_and_drains_parked_wait(void) {
+    deferred_fatal_wait_state_t state;
+    llam_runtime_t *rt;
+    llam_task_t *waiter;
+    llam_task_t *trigger;
+    pthread_t monitor;
+    int run_rc;
+    int run_errno;
+    int result = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.raw_waiter, NULL);
+    atomic_init(&state.helper_failed, 0U);
+    atomic_init(&state.fallback_stop, 0U);
+    if (llam_runtime_init(NULL) != 0) {
+        return test_fail_errno("deferred fatal runtime init failed");
+    }
+    rt = llam_runtime_default_storage();
+    state.wait_channel = llam_channel_create(1U);
+    state.trigger_channel = llam_channel_create(1U);
+    waiter = state.wait_channel != NULL && state.trigger_channel != NULL
+               ? llam_spawn(deferred_fatal_parked_task, &state, NULL)
+               : NULL;
+    trigger = waiter != NULL
+                  ? llam_spawn(deferred_fatal_trigger_task, &state, NULL)
+                  : NULL;
+    if (trigger == NULL ||
+        pthread_create(&monitor, NULL, deferred_fatal_monitor_main, &state) != 0) {
+        if (waiter != NULL) {
+            llam_request_stop(rt);
+        }
+        if (state.wait_channel != NULL) {
+            (void)llam_channel_destroy(state.wait_channel);
+        }
+        if (state.trigger_channel != NULL) {
+            (void)llam_channel_destroy(state.trigger_channel);
+        }
+        llam_runtime_shutdown();
+        return test_fail("deferred fatal drain setup failed");
+    }
+
+    errno = 0;
+    run_rc = llam_run();
+    run_errno = errno;
+    if (pthread_join(monitor, NULL) != 0 || run_rc == 0 || run_errno != EOVERFLOW ||
+        atomic_load_explicit(&state.fallback_stop, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.helper_failed, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&rt->live_tasks, memory_order_acquire) != 0U) {
+        result = 1;
+    }
+    /* The fatal runtime is terminal to public calls; clear only to reclaim test handles. */
+    atomic_store_explicit(&rt->fatal_errno, 0, memory_order_release);
+    {
+        int waiter_join = llam_join(waiter);
+        int trigger_join = llam_join(trigger);
+        unsigned live = atomic_load_explicit(&rt->live_tasks, memory_order_acquire);
+
+        if (waiter_join != 0 || trigger_join != 0 || live != 0U) {
+            result = 1;
+        }
+    }
+    if (state.wait_channel != NULL && llam_channel_destroy(state.wait_channel) != 0) {
+        result = 1;
+    }
+    if (state.trigger_channel != NULL && llam_channel_destroy(state.trigger_channel) != 0) {
+        result = 1;
+    }
+    llam_runtime_shutdown();
+    return result != 0
+               ? test_fail_errno("deferred fatal did not stop and drain a parked wait")
+               : 0;
+}
+
+typedef struct prestopped_deferred_fatal_state {
+    llam_channel_t *channel;
+    _Atomic(llam_task_t *) raw_waiter;
+    atomic_uint helper_failed;
+    atomic_uint fallback_wake;
+} prestopped_deferred_fatal_state_t;
+
+static void prestopped_deferred_fatal_waiter(void *opaque) {
+    prestopped_deferred_fatal_state_t *state = opaque;
+    void *value = NULL;
+
+    atomic_store_explicit(&state->raw_waiter, g_llam_tls_task, memory_order_release);
+    if (llam_channel_recv_result(state->channel, &value) == 0 || errno != ECANCELED) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+    }
+}
+
+static void *prestopped_deferred_fatal_main(void *opaque) {
+    prestopped_deferred_fatal_state_t *state = opaque;
+    llam_runtime_t *rt = llam_runtime_default_storage();
+    llam_task_t *waiter = NULL;
+    unsigned i;
+
+    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
+        waiter = atomic_load_explicit(&state->raw_waiter, memory_order_acquire);
+        if (waiter != NULL &&
+            atomic_load_explicit(&waiter->state, memory_order_acquire) ==
+                LLAM_TASK_STATE_PARKED &&
+            atomic_load_explicit(&waiter->active_wait_node, memory_order_acquire) != NULL) {
+            break;
+        }
+        test_host_thread_yield();
+    }
+    if (waiter == NULL || i == WAIT_RESOLVER_TEST_SPINS) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+        llam_request_stop(rt);
+        return NULL;
+    }
+
+    /* Model a stop flag that was published without the wake side effects. */
+    atomic_store_explicit(&rt->stop_requested, true, memory_order_release);
+    atomic_store_explicit(&rt->active_io_waiters, UINT_MAX, memory_order_release);
+    if (llam_runtime_note_active_io_waiter(rt, 1)) {
+        atomic_store_explicit(&state->helper_failed, 1U, memory_order_release);
+    }
+    for (i = 0U; i < WAIT_RESOLVER_TEST_SPINS; ++i) {
+        if (atomic_load_explicit(&waiter->state, memory_order_acquire) !=
+                LLAM_TASK_STATE_PARKED ||
+            atomic_load_explicit(&waiter->active_wait_node, memory_order_acquire) == NULL) {
+            return NULL;
+        }
+        test_host_thread_yield();
+    }
+
+    atomic_store_explicit(&state->fallback_wake, 1U, memory_order_release);
+    llam_request_stop(rt);
+    return NULL;
+}
+
+static int test_deferred_fatal_rewakes_prestopped_runtime(void) {
+    prestopped_deferred_fatal_state_t state;
+    llam_runtime_t *rt;
+    llam_task_t *waiter;
+    pthread_t injector;
+    int run_rc;
+    int run_errno;
+    int result = 0;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.raw_waiter, NULL);
+    atomic_init(&state.helper_failed, 0U);
+    atomic_init(&state.fallback_wake, 0U);
+    if (llam_runtime_init(NULL) != 0) {
+        return test_fail_errno("pre-stopped deferred fatal runtime init failed");
+    }
+    rt = llam_runtime_default_storage();
+    state.channel = llam_channel_create(1U);
+    waiter = state.channel != NULL
+                 ? llam_spawn(prestopped_deferred_fatal_waiter, &state, NULL)
+                 : NULL;
+    if (waiter == NULL ||
+        pthread_create(&injector, NULL, prestopped_deferred_fatal_main, &state) != 0) {
+        if (waiter != NULL) {
+            llam_request_stop(rt);
+        }
+        if (state.channel != NULL) {
+            (void)llam_channel_destroy(state.channel);
+        }
+        llam_runtime_shutdown();
+        return test_fail("pre-stopped deferred fatal setup failed");
+    }
+
+    errno = 0;
+    run_rc = llam_run();
+    run_errno = errno;
+    if (pthread_join(injector, NULL) != 0 || run_rc == 0 || run_errno != EOVERFLOW ||
+        atomic_load_explicit(&state.helper_failed, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.fallback_wake, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&rt->live_tasks, memory_order_acquire) != 0U) {
+        result = 1;
+    }
+    atomic_store_explicit(&rt->fatal_errno, 0, memory_order_release);
+    atomic_store_explicit(&rt->active_io_waiters, 0U, memory_order_release);
+    if (llam_join(waiter) != 0) {
+        result = 1;
+    }
+    if (state.channel != NULL && llam_channel_destroy(state.channel) != 0) {
+        result = 1;
+    }
+    llam_runtime_shutdown();
+    return result != 0
+               ? test_fail_errno("deferred fatal did not re-wake a pre-stopped runtime")
+               : 0;
+}
+
+static int test_wait_resolver_scalar_cancel_drain(void) {
+    llam_runtime_t rt;
+    llam_shard_t shard;
+    llam_task_t task;
+    llam_wait_node_t node;
+    llam_wait_queue_t queue = {0};
+    pthread_mutex_t queue_lock;
+    wait_resolver_cancel_call_t cancel_call;
+    wait_resolver_cleanup_call_t cleanup_call;
+    pthread_t canceller;
+    pthread_t cleanup;
+    uint64_t generation;
+    bool removed;
+
+    memset(&rt, 0, sizeof(rt));
+    memset(&shard, 0, sizeof(shard));
+    atomic_init(&rt.initialized, 0U);
+    rt.active_shards = 1U;
+    rt.shards = &shard;
+    shard.runtime = &rt;
+    shard.id = 0U;
+    if (pthread_mutex_init(&shard.lock, NULL) != 0) {
+        return test_fail("scalar resolver lock initialization failed");
+    }
+    if (pthread_mutex_init(&queue_lock, NULL) != 0) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("scalar resolver lock initialization failed");
+    }
+    wait_resolver_test_task_init(&task, &rt);
+    wait_resolver_test_node_init(&node, &rt, &task);
+    llam_wait_queue_push_tail(&queue, &node);
+    llam_task_set_wait_node_tracking(&task,
+                                     &node,
+                                     &queue,
+                                     &queue_lock,
+                                     NULL,
+                                     0U,
+                                     LLAM_WAIT_MUTEX);
+    generation = atomic_load_explicit(&task.wait_generation, memory_order_acquire);
+
+    memset(&cancel_call, 0, sizeof(cancel_call));
+    cancel_call.task = &task;
+    atomic_init(&cancel_call.done, 0U);
+    memset(&cleanup_call, 0, sizeof(cleanup_call));
+    cleanup_call.task = &task;
+    cleanup_call.node = &node;
+    atomic_init(&cleanup_call.done, 0U);
+
+    pthread_mutex_lock(&queue_lock);
+    if (pthread_create(&canceller, NULL, wait_resolver_cancel_main, &cancel_call) != 0) {
+        pthread_mutex_unlock(&queue_lock);
+        llam_task_clear_wait_tracking_or_abort(&task);
+        llam_wait_node_reset(&node, &rt, UINT_MAX);
+        (void)pthread_mutex_destroy(&queue_lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("scalar resolver race setup failed");
+    }
+    if (!wait_resolver_test_uint_reaches(&task.wait_resolver_state,
+                                         LLAM_WAIT_RESOLVER_REF_MASK,
+                                         1U)) {
+        (void)llam_wait_queue_remove(&queue, &node);
+        atomic_store_explicit(&task.state, LLAM_TASK_STATE_RUNNING, memory_order_release);
+        atomic_store_explicit(&task.wait_reason, LLAM_WAIT_NONE, memory_order_release);
+        pthread_mutex_unlock(&queue_lock);
+        (void)pthread_join(canceller, NULL);
+        llam_task_clear_wait_tracking_or_abort(&task);
+        llam_wait_node_reset(&node, &rt, UINT_MAX);
+        (void)pthread_mutex_destroy(&queue_lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("scalar cancellation resolver did not claim the wait");
+    }
+    if (pthread_create(&cleanup, NULL, wait_resolver_cleanup_main, &cleanup_call) != 0) {
+        (void)llam_wait_queue_remove(&queue, &node);
+        atomic_store_explicit(&task.state, LLAM_TASK_STATE_RUNNING, memory_order_release);
+        atomic_store_explicit(&task.wait_reason, LLAM_WAIT_NONE, memory_order_release);
+        pthread_mutex_unlock(&queue_lock);
+        (void)pthread_join(canceller, NULL);
+        llam_task_clear_wait_tracking_or_abort(&task);
+        llam_wait_node_reset(&node, &rt, UINT_MAX);
+        (void)pthread_mutex_destroy(&queue_lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("scalar cleanup thread creation failed");
+    }
+    if (!wait_resolver_test_uint_reaches(&task.wait_resolver_state,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT) ||
+        atomic_load_explicit(&cleanup_call.done, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&task.active_wait_node, memory_order_acquire) != &node ||
+        atomic_load_explicit(&task.wait_generation, memory_order_acquire) != generation) {
+        pthread_mutex_unlock(&queue_lock);
+        (void)pthread_join(canceller, NULL);
+        (void)pthread_join(cleanup, NULL);
+        return test_fail("scalar wait owner was cleared before resolver quiescence");
+    }
+    removed = llam_wait_queue_remove(&queue, &node);
+    pthread_mutex_unlock(&queue_lock);
+    if (pthread_join(canceller, NULL) != 0 || pthread_join(cleanup, NULL) != 0 ||
+        !removed || atomic_load_explicit(&cancel_call.done, memory_order_acquire) == 0U ||
+        atomic_load_explicit(&cleanup_call.done, memory_order_acquire) == 0U ||
+        atomic_load_explicit(&task.active_wait_node, memory_order_acquire) != NULL ||
+        atomic_load_explicit(&task.wait_resolver_state, memory_order_acquire) !=
+            LLAM_WAIT_RESOLVER_CLOSED_BIT ||
+        queue.head != NULL || node.task != NULL) {
+        return test_fail("scalar cancellation resolver outlived recycled wait state");
+    }
+    (void)pthread_mutex_destroy(&queue_lock);
+    (void)pthread_mutex_destroy(&shard.lock);
+    return 0;
+}
+
+static int test_wait_resolver_select_cancel_drain(void) {
+    llam_runtime_t rt;
+    llam_shard_t shard;
+    llam_task_t task;
+    llam_channel_t channel;
+    llam_wait_node_t node;
+    llam_channel_select_state_t state;
+    llam_select_op_t op;
+    llam_wait_node_t *nodes[1] = {&node};
+    llam_channel_t *channels[1] = {&channel};
+    llam_channel_t *op_channels[1] = {&channel};
+    wait_resolver_cancel_call_t cancel_call;
+    wait_resolver_cleanup_call_t cleanup_call;
+    pthread_t canceller;
+    pthread_t cleanup;
+
+    memset(&rt, 0, sizeof(rt));
+    memset(&shard, 0, sizeof(shard));
+    memset(&channel, 0, sizeof(channel));
+    memset(&state, 0, sizeof(state));
+    memset(&op, 0, sizeof(op));
+    atomic_init(&rt.initialized, 0U);
+    rt.active_shards = 1U;
+    rt.shards = &shard;
+    shard.runtime = &rt;
+    shard.id = 0U;
+    channel.owner_runtime = &rt;
+    if (pthread_mutex_init(&shard.lock, NULL) != 0) {
+        return test_fail("select resolver lock initialization failed");
+    }
+    if (pthread_mutex_init(&channel.lock, NULL) != 0) {
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("select resolver lock initialization failed");
+    }
+    wait_resolver_test_task_init(&task, &rt);
+    wait_resolver_test_node_init(&node, &rt, &task);
+    op.kind = LLAM_SELECT_OP_RECV;
+    node.select_state = &state;
+    state.owner_runtime = &rt;
+    state.ops = &op;
+    state.nodes = nodes;
+    state.channels = channels;
+    state.op_channels = op_channels;
+    state.op_count = 1U;
+    state.channel_count = 1U;
+    state.selected_index = SIZE_MAX;
+    atomic_init(&state.completed, LLAM_SELECT_PENDING);
+    atomic_init(&state.wake_armed, 0U);
+    atomic_init(&state.wake_queued, 0U);
+    atomic_init(&state.timer_refs, 0U);
+    llam_wait_queue_push_tail(&channel.recv_waiters, &node);
+    llam_task_set_select_tracking(&task, &state, 0U, LLAM_WAIT_CHANNEL_RECV);
+
+    memset(&cancel_call, 0, sizeof(cancel_call));
+    cancel_call.task = &task;
+    atomic_init(&cancel_call.done, 0U);
+    memset(&cleanup_call, 0, sizeof(cleanup_call));
+    cleanup_call.task = &task;
+    cleanup_call.node = &node;
+    atomic_init(&cleanup_call.done, 0U);
+
+    pthread_mutex_lock(&channel.lock);
+    if (pthread_create(&canceller, NULL, wait_resolver_cancel_main, &cancel_call) != 0) {
+        (void)llam_wait_queue_remove(&channel.recv_waiters, &node);
+        pthread_mutex_unlock(&channel.lock);
+        llam_task_clear_wait_tracking_or_abort(&task);
+        llam_wait_node_reset(&node, &rt, UINT_MAX);
+        (void)pthread_mutex_destroy(&channel.lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("select resolver race setup failed");
+    }
+    if (!wait_resolver_test_uint_reaches(&state.completed,
+                                         UINT_MAX,
+                                         LLAM_SELECT_COMPLETING)) {
+        (void)llam_wait_queue_remove(&channel.recv_waiters, &node);
+        atomic_store_explicit(&task.state, LLAM_TASK_STATE_RUNNING, memory_order_release);
+        atomic_store_explicit(&task.wait_reason, LLAM_WAIT_NONE, memory_order_release);
+        pthread_mutex_unlock(&channel.lock);
+        (void)pthread_join(canceller, NULL);
+        llam_task_clear_wait_tracking_or_abort(&task);
+        llam_wait_node_reset(&node, &rt, UINT_MAX);
+        (void)pthread_mutex_destroy(&channel.lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("select cancellation resolver did not enter cleanup");
+    }
+    if (pthread_create(&cleanup, NULL, wait_resolver_cleanup_main, &cleanup_call) != 0) {
+        (void)llam_wait_queue_remove(&channel.recv_waiters, &node);
+        atomic_store_explicit(&task.state, LLAM_TASK_STATE_RUNNING, memory_order_release);
+        atomic_store_explicit(&task.wait_reason, LLAM_WAIT_NONE, memory_order_release);
+        pthread_mutex_unlock(&channel.lock);
+        (void)pthread_join(canceller, NULL);
+        llam_task_clear_wait_tracking_or_abort(&task);
+        llam_wait_node_reset(&node, &rt, UINT_MAX);
+        (void)pthread_mutex_destroy(&channel.lock);
+        (void)pthread_mutex_destroy(&shard.lock);
+        return test_fail("select cleanup thread creation failed");
+    }
+    if (!wait_resolver_test_uint_reaches(&task.wait_resolver_state,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT) ||
+        atomic_load_explicit(&cleanup_call.done, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&task.active_select_state, memory_order_acquire) != &state ||
+        node.select_state != &state) {
+        pthread_mutex_unlock(&channel.lock);
+        (void)pthread_join(canceller, NULL);
+        (void)pthread_join(cleanup, NULL);
+        return test_fail("select state was cleared before resolver quiescence");
+    }
+    pthread_mutex_unlock(&channel.lock);
+    if (pthread_join(canceller, NULL) != 0 || pthread_join(cleanup, NULL) != 0 ||
+        atomic_load_explicit(&state.completed, memory_order_acquire) !=
+            LLAM_SELECT_COMPLETED_INLINE ||
+        state.error_code != ECANCELED || channel.recv_waiters.head != NULL ||
+        atomic_load_explicit(&task.active_select_state, memory_order_acquire) != NULL ||
+        atomic_load_explicit(&task.wait_resolver_state, memory_order_acquire) !=
+            LLAM_WAIT_RESOLVER_CLOSED_BIT ||
+        node.select_state != NULL) {
+        return test_fail("select cancellation resolver outlived stack wait state");
+    }
+    (void)pthread_mutex_destroy(&channel.lock);
+    (void)pthread_mutex_destroy(&shard.lock);
+    return 0;
+}
+
+static int test_wait_resolver_block_job_recycle_drain(void) {
+    llam_runtime_t rt;
+    llam_task_t task;
+    llam_wait_node_t node;
+    llam_block_job_t job;
+    llam_block_job_t *reused;
+    wait_resolver_block_release_call_t release_call;
+    pthread_t releaser;
+
+    memset(&rt, 0, sizeof(rt));
+    memset(&job, 0, sizeof(job));
+    atomic_init(&rt.initialized, 0U);
+    atomic_init(&rt.block_job_free, NULL);
+    if (pthread_mutex_init(&rt.block_lock, NULL) != 0) {
+        return test_fail("block resolver lock initialization failed");
+    }
+    wait_resolver_test_task_init(&task, &rt);
+    wait_resolver_test_node_init(&node, &rt, &task);
+    atomic_store_explicit(&task.scan_refs, 1U, memory_order_release);
+    atomic_init(&job.result, NULL);
+    atomic_init(&job.error_code, 0);
+    atomic_init(&job.state, LLAM_BLOCK_JOB_QUEUED);
+    job.task = &task;
+    job.wait_node = &node;
+    job.holds_task_ref = true;
+    llam_task_set_block_tracking(&task, &job, 0U);
+    if (!llam_task_wait_resolver_try_begin(&task)) {
+        return test_fail_errno("block resolver claim failed");
+    }
+
+    memset(&release_call, 0, sizeof(release_call));
+    release_call.runtime = &rt;
+    release_call.job = &job;
+    atomic_init(&release_call.done, 0U);
+    if (pthread_create(&releaser, NULL, wait_resolver_block_release_main, &release_call) != 0) {
+        llam_task_wait_resolver_end(&task);
+        return test_fail("block release thread creation failed");
+    }
+    if (!wait_resolver_test_uint_reaches(&task.wait_resolver_state,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                                         LLAM_WAIT_RESOLVER_CLOSED_BIT) ||
+        llam_task_active_block_job_load(&task) != NULL ||
+        atomic_load_explicit(&release_call.done, memory_order_acquire) != 0U ||
+        job.task != &task || job.wait_node != &node ||
+        atomic_load_explicit(&rt.block_job_free, memory_order_acquire) != NULL) {
+        llam_task_wait_resolver_end(&task);
+        (void)pthread_join(releaser, NULL);
+        return test_fail("blocking job recycled before resolver quiescence");
+    }
+    llam_task_wait_resolver_end(&task);
+    if (pthread_join(releaser, NULL) != 0 ||
+        atomic_load_explicit(&release_call.done, memory_order_acquire) == 0U ||
+        job.task != NULL || job.wait_node != NULL || job.holds_task_ref ||
+        atomic_load_explicit(&task.scan_refs, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&rt.block_job_free, memory_order_acquire) != &job) {
+        return test_fail("blocking job was not recycled after resolver drain");
+    }
+    reused = llam_block_job_alloc(&rt);
+    if (reused != &job || reused->task != NULL || reused->wait_node != NULL) {
+        return test_fail("blocking job pool did not safely reuse the drained slot");
+    }
+    llam_block_job_release(&rt, reused);
+    (void)pthread_mutex_destroy(&rt.block_lock);
+    return 0;
+}
 #endif
 
 int main(void) {
     RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
     RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
+#if LLAM_PLATFORM_POSIX
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
     RUN_RUNTIME_CORE_TEST(test_direct_yield_timer_policy_is_bounded);
+    RUN_RUNTIME_CORE_TEST(test_autotune_handoff_budget_actuates);
+    RUN_RUNTIME_CORE_TEST(test_autotune_handoff_freezes_no_work_low_hit);
+    RUN_RUNTIME_CORE_TEST(test_autotune_handoff_probe_defers_low_sample);
+    RUN_RUNTIME_CORE_TEST(test_autotune_handoff_wake_guardrail_rolls_back);
     RUN_RUNTIME_CORE_TEST(test_unsigned_runtime_env_rejects_malformed_input);
     RUN_RUNTIME_CORE_TEST(test_runtime_env_flags_accept_false_tokens);
+#endif
     RUN_RUNTIME_CORE_TEST(test_runtime_handle_api);
     RUN_RUNTIME_CORE_TEST(test_runtime_lifecycle_and_task_contracts);
     RUN_RUNTIME_CORE_TEST(test_request_stop_returns_success);
     RUN_RUNTIME_CORE_TEST(test_shutdown_from_task_requests_stop);
     RUN_RUNTIME_CORE_TEST(test_runtime_owner_mismatch_diagnostics);
+    RUN_RUNTIME_CORE_TEST(test_timer_wait_ownership_contract);
+    RUN_RUNTIME_CORE_TEST(test_select_completion_ownership_contract);
 #if LLAM_PLATFORM_POSIX
+    RUN_RUNTIME_CORE_TEST(test_wait_resolver_gate_contract);
+    RUN_RUNTIME_CORE_TEST(test_wait_tracking_setters_fail_closed_on_saturation);
+    RUN_RUNTIME_CORE_TEST(test_wait_tracking_lock_safe_overflow);
+    RUN_RUNTIME_CORE_TEST(test_wait_tracking_caller_rolls_back_saturation);
+    RUN_RUNTIME_CORE_TEST(test_active_io_tracking_counter_saturation_rolls_back);
+    RUN_RUNTIME_CORE_TEST(test_deferred_fatal_stops_and_drains_parked_wait);
+    RUN_RUNTIME_CORE_TEST(test_deferred_fatal_rewakes_prestopped_runtime);
+    RUN_RUNTIME_CORE_TEST(test_wait_resolver_scalar_cancel_drain);
+    RUN_RUNTIME_CORE_TEST(test_wait_resolver_select_cancel_drain);
+    RUN_RUNTIME_CORE_TEST(test_wait_resolver_block_job_recycle_drain);
+    RUN_RUNTIME_CORE_TEST(test_public_active_op_release_sequence);
+    RUN_RUNTIME_CORE_TEST(test_task_group_unique_spawn_reservations);
     RUN_RUNTIME_CORE_TEST(test_runtime_dump_while_blocking_job_active);
     RUN_RUNTIME_CORE_TEST(test_concurrent_runtime_init_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_shutdown_contract);

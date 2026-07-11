@@ -238,6 +238,7 @@ int llam_open_async(const char *path, int flags, uint32_t mode, llam_handle_t *o
     return 0;
 }
 
+#if LLAM_PLATFORM_POSIX
 static uint64_t llam_unix_seconds_to_ns(int64_t seconds) {
     if (seconds <= 0) {
         return 0U;
@@ -249,7 +250,6 @@ static uint64_t llam_unix_seconds_to_ns(int64_t seconds) {
 }
 
 static uint32_t llam_file_type_from_mode(uint32_t mode) {
-#if LLAM_PLATFORM_POSIX
     if (S_ISREG((mode_t)mode)) {
         return LLAM_FILE_TYPE_REGULAR;
     }
@@ -261,11 +261,9 @@ static uint32_t llam_file_type_from_mode(uint32_t mode) {
         return LLAM_FILE_TYPE_SYMLINK;
     }
 #endif
-#else
-    (void)mode;
-#endif
     return LLAM_FILE_TYPE_OTHER;
 }
+#endif
 
 #if LLAM_RUNTIME_BACKEND_WINDOWS
 static uint64_t llam_windows_filetime_to_unix_ns(const FILETIME *filetime) {

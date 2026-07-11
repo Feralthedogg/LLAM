@@ -32,14 +32,25 @@
 /*
  * Request cancellation and parking ownership.
  */
-bool llam_abort_io_wait(llam_task_t *task, llam_io_abort_reason_t reason);
+bool llam_abort_io_wait(llam_task_t *task,
+                        llam_io_abort_reason_t reason,
+                        uint64_t wait_generation);
+bool llam_abort_io_wait_claimed(llam_task_t *task,
+                                llam_io_abort_reason_t reason,
+                                uint64_t wait_generation);
 llam_wait_reason_t llam_io_abort_wait_reason(llam_io_abort_reason_t reason);
 void llam_io_set_abort_result(llam_io_req_t *req, llam_io_abort_reason_t reason);
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard);
 uint64_t llam_hash_watch_identity_u64(uint64_t value);
 bool llam_runtime_note_active_io_waiter(llam_runtime_t *rt, int delta);
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
-void llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
+bool llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_io_submit_detach_snapshot_hook_fn)(llam_io_req_t *req,
+                                                        unsigned node_index);
+void llam_io_test_set_submit_detach_snapshot_hook(
+    llam_io_submit_detach_snapshot_hook_fn hook);
+#endif
 
 static inline bool llam_io_req_abort_requested(const llam_io_req_t *req) {
     return req != NULL &&
@@ -93,15 +104,28 @@ void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch)
 void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch);
 void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
 void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
-void llam_forget_closed_fd_watch_state(llam_runtime_t *rt, llam_fd_t fd);
-void llam_accept_watch_splice_ready(llam_accept_watch_t *target, llam_accept_watch_t *source);
-void llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *source);
+void llam_poll_watch_pin_locked(llam_poll_watch_t *watch);
+void llam_poll_watch_unpin_locked(llam_node_t *node, llam_poll_watch_t *watch);
+void llam_accept_watch_pin_locked(llam_accept_watch_t *watch);
+void llam_accept_watch_unpin_locked(llam_node_t *node, llam_accept_watch_t *watch);
+void llam_recv_watch_pin_locked(llam_recv_watch_t *watch);
+void llam_recv_watch_unpin_locked(llam_node_t *node, llam_recv_watch_t *watch);
+int llam_forget_closed_fd_watch_state(llam_runtime_t *rt, llam_fd_t fd);
+void llam_fd_watch_lifecycle_lock(void);
+void llam_fd_watch_lifecycle_unlock(void);
+bool llam_accept_watch_splice_ready(llam_accept_watch_t *target, llam_accept_watch_t *source);
+bool llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *source);
+bool llam_io_req_backend_event_pin(llam_io_req_t *req);
+void llam_io_req_backend_event_unpin(llam_io_req_t *req);
 
 /*
  * Request allocation, capability checks, and submission queues.
  */
 bool llam_io_capability_error(int error_code);
 void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsigned owner_shard, unsigned alloc_owner_shard);
+bool llam_io_req_lifetime_activate(llam_io_req_t *req);
+bool llam_io_req_lifetime_try_acquire(llam_io_req_t *req);
+bool llam_io_req_lifetime_release(llam_io_req_t *req);
 llam_io_req_t *llam_io_req_alloc(llam_shard_t *shard);
 void llam_io_req_free(llam_shard_t *shard, llam_io_req_t *req);
 int llam_io_req_node_index(const llam_io_req_t *req);
@@ -112,7 +136,17 @@ bool llam_io_completion_begin(llam_node_t *node, llam_io_req_t *req, bool decrem
 bool llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_node_submit_io_req(llam_node_t *node, llam_io_req_t *req);
 bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
+llam_io_submit_detach_result_t llam_detach_submit_req_current(
+    llam_io_req_t *req,
+    unsigned *node_index_out);
 llam_io_req_t *llam_take_node_submissions(llam_node_t *node);
+void llam_io_control_op_destroy(llam_node_t *node, llam_io_control_op_t *op);
+#if LLAM_RUNTIME_BACKEND_LINUX
+void llam_linux_track_backend_control(llam_node_t *node, llam_io_control_op_t *op);
+bool llam_linux_untrack_backend_control(llam_node_t *node, llam_io_control_op_t *op);
+void llam_linux_retire_backend_controls(llam_node_t *node);
+void llam_linux_retire_backend_watch_refs(llam_node_t *node);
+#endif
 
 /*
  * Live watch and waiter rehome support for dynamic shard/node movement.

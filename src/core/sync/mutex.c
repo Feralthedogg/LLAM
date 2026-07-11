@@ -111,6 +111,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
     llam_wait_node_t *node;
     uintptr_t expected = 0U;
     uintptr_t current;
+    bool wait_tracking_published = false;
     int rc = 0;
 
     llam_task_safepoint();
@@ -161,9 +162,31 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
     llam_wait_queue_push_tail(&mutex->waiters, node);
     pthread_mutex_unlock(&mutex->lock);
     llam_task_ensure_listed(task);
-    llam_task_set_wait_node_tracking(task, node, &mutex->waiters, &mutex->lock, shard->id);
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_MUTEX;
+    if (!llam_task_set_wait_node_tracking(task,
+                                          node,
+                                          &mutex->waiters,
+                                          &mutex->lock,
+                                          &mutex->active_ops,
+                                          shard->id,
+                                          LLAM_WAIT_MUTEX)) {
+        int saved_errno = errno;
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
+        pthread_mutex_lock(&mutex->lock);
+        removed = llam_wait_queue_remove(&mutex->waiters, node);
+        pthread_mutex_unlock(&mutex->lock);
+        if (!removed) {
+            /* Unlock transferred ownership while setup was rolling back. */
+            goto wait_ready;
+        }
+        llam_sync_wait_node_release(shard, node);
+        errno = saved_errno;
+        return -1;
+    }
+    wait_tracking_published = true;
     if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
         bool removed;
 
@@ -179,7 +202,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
         }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(task);
+        llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
         return -1;
     }
@@ -199,7 +222,7 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
         }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(task);
+        llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
         return -1;
     }
@@ -220,7 +243,9 @@ wait_ready:
     if (register_cancel) {
         llam_cancel_token_unregister_task(task);
     }
-    llam_task_clear_wait_tracking(task);
+    if (wait_tracking_published) {
+        llam_task_clear_wait_tracking_or_abort(task);
+    }
     rc = node->error_code;
     llam_sync_wait_node_release(shard, node);
     if (rc != 0) {
@@ -320,7 +345,7 @@ int llam_mutex_unlock(llam_mutex_t *mutex) {
 
     if (node != NULL) {
         node->error_code = 0;
-        llam_wake_wait_node(node, true, LLAM_WAIT_MUTEX);
+        (void)llam_wake_wait_node_and_maybe_handoff(node, true, LLAM_WAIT_MUTEX, true);
     }
     llam_mutex_end_public_op(mutex);
     return 0;

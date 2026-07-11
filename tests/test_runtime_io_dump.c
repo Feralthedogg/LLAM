@@ -120,10 +120,22 @@ static bool dump_contains_pending_io_or_blocking_fallback(const char *dump, int 
     char fd_pattern[32];
 
     (void)snprintf(fd_pattern, sizeof(fd_pattern), "fd=%d", read_fd);
+    /*
+     * Live diagnostics must never read mutable task/backend fields without
+     * their writer's synchronization.  Keep their omission explicit so a
+     * future formatting change cannot silently reintroduce racy snapshots.
+     */
+    if (strstr(dump, "home=unavailable") == NULL ||
+        strstr(dump, "deadline_ns=unavailable") == NULL ||
+        strstr(dump, "cancel_registered=unavailable") == NULL ||
+        strstr(dump, "run_timing=unavailable") == NULL) {
+        return false;
+    }
     if (strstr(dump, "wait_owner=io_req") != NULL &&
         strstr(dump, "kind=poll") != NULL &&
         strstr(dump, fd_pattern) != NULL &&
         strstr(dump, "wait_mode=") != NULL &&
+        strstr(dump, "mutable_state=unavailable") != NULL &&
         strstr(dump, "active_io_waiters=") != NULL) {
         return true;
     }

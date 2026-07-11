@@ -27,6 +27,87 @@
 #include "runtime_internal.h"
 #include "runtime_debug_dump_helpers.h"
 
+typedef struct llam_debug_io_wait_snapshot {
+    void *address;
+    llam_io_kind_t kind;
+    llam_fd_t fd;
+    llam_handle_t handle;
+    unsigned alloc_owner_shard;
+    unsigned attached_node_index;
+    unsigned inflight_owner_shard;
+    unsigned wait_mode;
+    unsigned abort_reason;
+    unsigned cancel_queued;
+    short poll_events;
+    void *owned_buffer;
+} llam_debug_io_wait_snapshot_t;
+
+typedef struct llam_debug_block_wait_snapshot {
+    void *address;
+    unsigned state;
+    int error_code;
+    void *result;
+} llam_debug_block_wait_snapshot_t;
+
+/** @brief Copy recyclable wait-owner fields while a short resolver claim pins them. */
+static const char *llam_debug_snapshot_wait_owners(
+    llam_task_t *task,
+    llam_debug_io_wait_snapshot_t *io_snapshot,
+    llam_debug_block_wait_snapshot_t *block_snapshot) {
+    llam_io_req_t *req;
+    llam_block_job_t *job;
+    const char *wait_owner = "none";
+
+    memset(io_snapshot, 0, sizeof(*io_snapshot));
+    memset(block_snapshot, 0, sizeof(*block_snapshot));
+    /* The dump caller already holds the task-owner shard lock: keep lock -> gate. */
+    if (!llam_task_wait_resolver_try_begin(task)) {
+        return wait_owner;
+    }
+
+    wait_owner = llam_task_wait_owner_name_diag(task);
+    req = llam_task_active_io_req_load(task);
+    if (req != NULL) {
+        /*
+         * The resolver claim pins recyclable storage; it does not serialize
+         * backend completion or dynamic rehome.  Only copy fields that are
+         * immutable for the published operation or explicitly atomic.
+         */
+        io_snapshot->address = req;
+        io_snapshot->kind = req->kind;
+        io_snapshot->fd = req->fd;
+        io_snapshot->handle = req->handle;
+        io_snapshot->alloc_owner_shard = req->alloc_owner_shard;
+        io_snapshot->attached_node_index = atomic_load_explicit(
+            &req->attached_node_index,
+            memory_order_acquire);
+        io_snapshot->inflight_owner_shard = atomic_load_explicit(
+            &req->inflight_owner_shard,
+            memory_order_acquire);
+        io_snapshot->wait_mode = atomic_load_explicit(&req->wait_mode,
+                                                      memory_order_acquire);
+        io_snapshot->abort_reason = atomic_load_explicit(&req->abort_reason,
+                                                         memory_order_acquire);
+        io_snapshot->cancel_queued = atomic_load_explicit(&req->cancel_queued,
+                                                          memory_order_acquire);
+        io_snapshot->poll_events = req->poll_events;
+        io_snapshot->owned_buffer = req->owned_buffer;
+    }
+
+    job = llam_task_active_block_job_load(task);
+    if (job != NULL) {
+        block_snapshot->address = job;
+        block_snapshot->state = atomic_load_explicit(&job->state,
+                                                     memory_order_acquire);
+        block_snapshot->error_code = atomic_load_explicit(&job->error_code,
+                                                          memory_order_acquire);
+        block_snapshot->result = atomic_load_explicit(&job->result,
+                                                      memory_order_acquire);
+    }
+    llam_task_wait_resolver_end(task);
+    return wait_owner;
+}
+
 /** @brief Return a task's runtime-assigned id, or 0 for invalid/foreign handles. */
 uint64_t llam_task_id(const llam_task_t *task) {
     uint64_t id = 0U;
@@ -152,6 +233,11 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
             stats->yield_direct_fail_no_work += shard->metrics.yield_direct_fail_no_work;
             stats->yield_direct_fail_self += shard->metrics.yield_direct_fail_self;
             stats->yield_direct_fail_push += shard->metrics.yield_direct_fail_push;
+            stats->wake_handoff_attempts += shard->metrics.wake_handoff_attempts;
+            stats->wake_handoff_hits += shard->metrics.wake_handoff_hits;
+            stats->wake_handoff_fail_context += shard->metrics.wake_handoff_fail_context;
+            stats->wake_handoff_fail_policy += shard->metrics.wake_handoff_fail_policy;
+            stats->wake_handoff_fail_race += shard->metrics.wake_handoff_fail_race;
             stats->preempt_requests += shard->metrics.preempt_requests;
             stats->preempt_yields += shard->metrics.preempt_yields;
             stats->preempt_suppressed += shard->metrics.preempt_suppressed;
@@ -551,7 +637,7 @@ void llam_dump_runtime_state(int fd) {
                 rt->preempt_poll_period,
                 (unsigned long long)rt->preempt_quantum_ns);
         dprintf(fd,
-                "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) direct_yield(attempts=%llu fast=%llu locked=%llu context=%llu policy=%llu no_work=%llu self=%llu push=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
+                "    metrics block_calls=%llu block_done=%llu io_submits=%llu io_done=%llu io_fallbacks=%llu io_latency_ns=%llu io_samples=%llu idle_polls=%llu idle_spin(loops=%llu hits=%llu fallbacks=%llu ns=%llu) direct_yield(attempts=%llu fast=%llu locked=%llu context=%llu policy=%llu no_work=%llu self=%llu push=%llu) wake_handoff(attempts=%llu hits=%llu context=%llu policy=%llu race=%llu) watchdog_hits=%llu long_no_safepoint=%llu opaque_comp=%llu opaque_redirects=%llu queue_overflows=%llu deadlock_suspicions=%llu run_ns=%llu\n",
                 (unsigned long long)shard->metrics.blocking_calls,
                 (unsigned long long)shard->metrics.blocking_completions,
                 (unsigned long long)shard->metrics.io_submits,
@@ -572,6 +658,11 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->metrics.yield_direct_fail_no_work,
                 (unsigned long long)shard->metrics.yield_direct_fail_self,
                 (unsigned long long)shard->metrics.yield_direct_fail_push,
+                (unsigned long long)shard->metrics.wake_handoff_attempts,
+                (unsigned long long)shard->metrics.wake_handoff_hits,
+                (unsigned long long)shard->metrics.wake_handoff_fail_context,
+                (unsigned long long)shard->metrics.wake_handoff_fail_policy,
+                (unsigned long long)shard->metrics.wake_handoff_fail_race,
                 (unsigned long long)shard->metrics.watchdog_hits,
                 (unsigned long long)shard->metrics.long_no_safepoint,
                 (unsigned long long)shard->metrics.opaque_compensations,
@@ -669,29 +760,29 @@ void llam_dump_runtime_state(int fd) {
             continue;
         }
         for (llam_task_t *task = shard->all_tasks; task != NULL; task = task->all_next) {
-            llam_io_req_t *req = llam_task_active_io_req_load(task);
-            llam_block_job_t *job = llam_task_active_block_job_load(task);
+            llam_debug_io_wait_snapshot_t io_snapshot;
+            llam_debug_block_wait_snapshot_t block_snapshot;
+            const char *wait_owner = llam_debug_snapshot_wait_owners(task,
+                                                                      &io_snapshot,
+                                                                      &block_snapshot);
 
             dprintf(fd,
-                    "  id=%llu state=%s class=%d flags=0x%x home=%u live=%u last=%u parked=%u wait=%s wait_owner=%s wait_node=%p select=%p join_target=%llu timer=%p deadline_ns=%llu cancel_token=%p cancel_registered=%u wake_error=%d completed=%u join_claimed=%u detached=%u stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s last_run_ns=%llu total_run_ns=%llu opaque_last_ns=%llu opaque_max_ns=%llu opaque_count=%llu\n",
+                    "  id=%llu state=%s class=%d flags=0x%x home=unavailable live=%u last=%u parked=%u wait=%s wait_owner=%s wait_node=%p select=%p join_target=%llu timer=%p deadline_ns=unavailable cancel_token=%p cancel_registered=unavailable wake_error=%d completed=%u join_claimed=%u detached=%u stack=%zu stack_used=%zu stack_peak=%zu stack_hint=%s run_timing=unavailable\n",
                     (unsigned long long)task->id,
                     llam_state_name_from_id(task->state),
                     (int)atomic_load_explicit(&task->task_class, memory_order_acquire),
                     task->flags,
-                    task->home_shard,
                     task->live_shard,
                     atomic_load_explicit(&task->last_shard, memory_order_relaxed),
                     atomic_load_explicit(&task->parked_shard, memory_order_relaxed),
                     llam_wait_reason_name(
                         (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire)),
-                    llam_task_wait_owner_name_diag(task),
+                    wait_owner,
                     (void *)NULL,
                     (void *)NULL,
                     0ULL,
                     (void *)NULL,
-                    (unsigned long long)task->deadline_ns,
                     (void *)task->cancel_token,
-                    task->cancel_registered ? 1U : 0U,
                     atomic_load_explicit(&task->wake_error_code, memory_order_acquire),
                     atomic_load_explicit(&task->completed, memory_order_acquire),
                     atomic_load_explicit(&task->join_claimed, memory_order_acquire),
@@ -699,46 +790,32 @@ void llam_dump_runtime_state(int fd) {
                     task->stack_size,
                     atomic_load_explicit(&task->last_stack_used, memory_order_acquire),
                     atomic_load_explicit(&task->stack_high_water, memory_order_acquire),
-                    llam_stack_profile_hint(task),
-                    (unsigned long long)task->last_run_ns,
-                    (unsigned long long)task->total_run_ns,
-                    (unsigned long long)task->last_opaque_block_ns,
-                    (unsigned long long)task->max_opaque_block_ns,
-                    (unsigned long long)task->opaque_block_count);
-            if (req != NULL) {
-                unsigned wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
-                unsigned abort_reason = atomic_load_explicit(&req->abort_reason, memory_order_acquire);
-                unsigned inflight_owner = atomic_load_explicit(&req->inflight_owner_shard, memory_order_acquire);
-
+                    llam_stack_profile_hint(task));
+            if (io_snapshot.address != NULL) {
                 dprintf(fd,
-                        "    io_req=%p kind=%s fd=%lld handle=0x%llx owner_shard=%u alloc_owner=%u attached_node=%u inflight_owner=%u wait_mode=%s abort=%s cancel_queued=%u deadline_ns=%llu result=%lld errno=%d poll(events=0x%x revents=0x%x) owned_buffer=%p\n",
-                        (void *)req,
-                        llam_io_kind_name_diag(req->kind),
-                        (long long)req->fd,
-                        (unsigned long long)(uintptr_t)req->handle,
-                        req->owner_shard,
-                        req->alloc_owner_shard,
-                        req->attached_node_index,
-                        inflight_owner,
-                        llam_io_wait_mode_name_diag(wait_mode),
-                        llam_io_abort_reason_name_diag(abort_reason),
-                        atomic_load_explicit(&req->cancel_queued, memory_order_acquire),
-                        (unsigned long long)req->deadline_ns,
-                        (long long)req->result,
-                        req->error_code,
-                        req->poll_events,
-                        req->poll_revents,
-                        (void *)req->owned_buffer);
+                        "    io_req=%p kind=%s fd=%lld handle=0x%llx alloc_owner=%u attached_node=%u inflight_owner=%u wait_mode=%s abort=%s cancel_queued=%u deadline_ns=unavailable poll_events=0x%x owned_buffer=%p mutable_state=unavailable\n",
+                        io_snapshot.address,
+                        llam_io_kind_name_diag(io_snapshot.kind),
+                        (long long)io_snapshot.fd,
+                        (unsigned long long)(uintptr_t)io_snapshot.handle,
+                        io_snapshot.alloc_owner_shard,
+                        io_snapshot.attached_node_index,
+                        io_snapshot.inflight_owner_shard,
+                        llam_io_wait_mode_name_diag(io_snapshot.wait_mode),
+                        llam_io_abort_reason_name_diag(io_snapshot.abort_reason),
+                        io_snapshot.cancel_queued,
+                        io_snapshot.poll_events,
+                        io_snapshot.owned_buffer);
             } else {
                 dprintf(fd, "    io_req=none\n");
             }
-            if (job != NULL) {
+            if (block_snapshot.address != NULL) {
                 dprintf(fd,
                         "    block_job=%p state=%s errno=%d result=%p\n",
-                        (void *)job,
-                        llam_block_job_state_name_diag(atomic_load_explicit(&job->state, memory_order_acquire)),
-                        atomic_load_explicit(&job->error_code, memory_order_acquire),
-                        atomic_load_explicit(&job->result, memory_order_acquire));
+                        block_snapshot.address,
+                        llam_block_job_state_name_diag(block_snapshot.state),
+                        block_snapshot.error_code,
+                        block_snapshot.result);
             } else {
                 dprintf(fd, "    block_job=none\n");
             }

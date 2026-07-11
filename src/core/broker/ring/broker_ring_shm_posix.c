@@ -35,6 +35,48 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if LLAM_PLATFORM_LINUX
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+#endif
+
+int llam_broker_ring_mapping_require_fixed_extent(const llam_broker_ring_mapping_t *mapping) {
+    if (LLAM_UNLIKELY(mapping == NULL || mapping->fd < 0)) {
+        errno = EINVAL;
+        return -1;
+    }
+#if LLAM_PLATFORM_LINUX && defined(F_GET_SEALS) && defined(F_SEAL_SHRINK) && \
+    defined(F_SEAL_GROW) && defined(F_SEAL_SEAL)
+    {
+        int required = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
+        int seals = fcntl(mapping->fd, F_GET_SEALS);
+
+        if (seals < 0) {
+            return -1;
+        }
+        if ((seals & required) != required) {
+            errno = ENOTSUP;
+            return -1;
+        }
+    }
+    return 0;
+#elif LLAM_PLATFORM_DARWIN
+    /* Darwin rejects shrinking a live shared-memory object (EINVAL); the
+     * validated truncation primitive is therefore unavailable on this target. */
+    return 0;
+#else
+    /* On other POSIX targets the extent cannot be proven immutable with the
+     * available API. Keep standalone mapping compatibility, but do not admit
+     * an unprovable mapping to a hostile broker session. */
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+
 static int llam_broker_ring_shm_open_cloexec(const char *name, int oflag, mode_t mode) {
     int fd;
 
@@ -193,6 +235,55 @@ int llam_broker_ring_create_shm(const char *name, llam_broker_ring_mapping_t *ou
 }
 
 int llam_broker_ring_create_private_fd(llam_broker_ring_mapping_t *out_mapping) {
+#if LLAM_PLATFORM_LINUX && defined(F_ADD_SEALS) && defined(F_GET_SEALS) && \
+    defined(F_SEAL_SHRINK) && defined(F_SEAL_GROW) && defined(F_SEAL_SEAL)
+    int fd;
+    int required = F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL;
+    int seals;
+    size_t bytes = sizeof(llam_broker_ring_t);
+
+    if (out_mapping != NULL) {
+        llam_broker_ring_mapping_reset(out_mapping);
+    }
+    if (LLAM_UNLIKELY(out_mapping == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    fd = memfd_create("llam-broker-ring", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (fd < 0) {
+        return -1;
+    }
+    if (ftruncate(fd, (off_t)bytes) != 0 || fcntl(fd, F_ADD_SEALS, required) != 0) {
+        int saved_errno = errno;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    seals = fcntl(fd, F_GET_SEALS);
+    if (seals < 0 || (seals & required) != required) {
+        int saved_errno = seals < 0 ? errno : ENOTSUP;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (llam_broker_ring_map_posix_fd("", fd, true, out_mapping) != 0) {
+        int saved_errno = errno;
+
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+    if (llam_broker_ring_init(out_mapping->ring) != 0) {
+        int saved_errno = errno;
+
+        llam_broker_ring_unmap(out_mapping);
+        errno = saved_errno;
+        return -1;
+    }
+    return 0;
+#else
     char name[sizeof(((llam_broker_ring_mapping_t *)0)->name)];
     size_t attempt;
 
@@ -255,6 +346,7 @@ int llam_broker_ring_create_private_fd(llam_broker_ring_mapping_t *out_mapping) 
     }
     errno = EEXIST;
     return -1;
+#endif
 }
 
 int llam_broker_ring_open_shm(const char *name, llam_broker_ring_mapping_t *out_mapping) {

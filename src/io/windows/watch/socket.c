@@ -35,20 +35,17 @@ static llam_windows_fd_assoc_t *llam_windows_find_assoc_locked(llam_node_t *node
 }
 
 static unsigned llam_windows_try_skip_completion_on_success(llam_node_t *node, HANDLE handle) {
-    if (node == NULL || handle == NULL || node->windows_use_skip_completion_on_success == 0U) {
-        return 0U;
-    }
     /*
-     * Windows 11 tuning can skip IOCP packets for immediately successful
-     * overlapped requests.  That removes a completion-port round trip on the
-     * hot direct-success path; submit.c completes those requests inline only
-     * when this per-handle opt-in succeeded.
+     * Never suppress the normal IOCP packet. The submit path used to decide
+     * whether to complete an immediately successful overlapped request inline
+     * by looking up mutable association metadata after the OS call returned.
+     * A concurrent close could erase that metadata in between, leaving neither
+     * an inline completion nor a kernel packet. Keeping skip mode disabled
+     * makes the kernel completion packet the single authoritative path across
+     * association teardown and handle reuse.
      */
-    if (SetFileCompletionNotificationModes(handle, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)) {
-        atomic_fetch_add_explicit(&node->windows_skip_completion_handles, 1U, memory_order_relaxed);
-        return 1U;
-    }
-    atomic_fetch_add_explicit(&node->windows_skip_completion_failures, 1U, memory_order_relaxed);
+    (void)node;
+    (void)handle;
     return 0U;
 }
 
@@ -74,9 +71,11 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
      * watch_lock so slow Windows association calls cannot block the worker from
      * draining watch tables or control packets.
      */
+    llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&node->windows_assoc_lock);
     if (llam_windows_find_assoc_locked(node, (uintptr_t)fd) != NULL) {
         pthread_mutex_unlock(&node->windows_assoc_lock);
+        llam_fd_watch_lifecycle_unlock();
         free(assoc);
         return 0;
     }
@@ -84,6 +83,7 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
     if (handle == NULL) {
         error_code = GetLastError();
         pthread_mutex_unlock(&node->windows_assoc_lock);
+        llam_fd_watch_lifecycle_unlock();
         free(assoc);
         errno = error_code == ERROR_NOT_ENOUGH_MEMORY ? ENOMEM : EINVAL;
         return -1;
@@ -93,6 +93,7 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
     assoc->next = node->windows_fd_assoc_head;
     node->windows_fd_assoc_head = assoc;
     pthread_mutex_unlock(&node->windows_assoc_lock);
+    llam_fd_watch_lifecycle_unlock();
     return 0;
 }
 
@@ -113,9 +114,11 @@ int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
         return -1;
     }
 
+    llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&node->windows_assoc_lock);
     if (llam_windows_find_assoc_locked(node, key) != NULL) {
         pthread_mutex_unlock(&node->windows_assoc_lock);
+        llam_fd_watch_lifecycle_unlock();
         free(assoc);
         return 0;
     }
@@ -123,6 +126,7 @@ int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
     if (handle == NULL) {
         error_code = GetLastError();
         pthread_mutex_unlock(&node->windows_assoc_lock);
+        llam_fd_watch_lifecycle_unlock();
         free(assoc);
         errno = llam_windows_system_error_to_errno(error_code);
         return -1;
@@ -132,7 +136,53 @@ int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
     assoc->next = node->windows_fd_assoc_head;
     node->windows_fd_assoc_head = assoc;
     pthread_mutex_unlock(&node->windows_assoc_lock);
+    llam_fd_watch_lifecycle_unlock();
     return 0;
+}
+
+llam_windows_fd_assoc_t *llam_windows_fd_assoc_pin(llam_node_t *node, uintptr_t key) {
+    llam_windows_fd_assoc_t *assoc;
+
+    if (node == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node->windows_assoc_lock);
+    assoc = llam_windows_find_assoc_locked(node, key);
+    if (assoc == NULL || assoc->closing) {
+        assoc = NULL;
+        errno = EBADF;
+    } else if (assoc->inflight_ops == UINT_MAX) {
+        assoc = NULL;
+        errno = EOVERFLOW;
+    } else {
+        assoc->inflight_ops += 1U;
+    }
+    pthread_mutex_unlock(&node->windows_assoc_lock);
+    llam_fd_watch_lifecycle_unlock();
+    return assoc;
+}
+
+void llam_windows_fd_assoc_unpin(llam_node_t *node, llam_windows_fd_assoc_t *assoc) {
+    bool free_assoc = false;
+
+    if (node == NULL || assoc == NULL) {
+        return;
+    }
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node->windows_assoc_lock);
+    if (assoc->inflight_ops == 0U) {
+        llam_record_fatal(node->runtime, EINVAL);
+    } else {
+        assoc->inflight_ops -= 1U;
+        free_assoc = assoc->closing && assoc->inflight_ops == 0U;
+    }
+    pthread_mutex_unlock(&node->windows_assoc_lock);
+    if (free_assoc) {
+        free(assoc);
+    }
+    llam_fd_watch_lifecycle_unlock();
 }
 
 void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
@@ -141,10 +191,12 @@ void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
     if (rt == NULL || rt->nodes == NULL) {
         return;
     }
+    llam_fd_watch_lifecycle_lock();
     for (unsigned i = 0U; i < rt->active_nodes; ++i) {
         llam_node_t *node = &rt->nodes[i];
         llam_windows_fd_assoc_t *prev = NULL;
         llam_windows_fd_assoc_t *assoc;
+        llam_windows_fd_assoc_t *retired = NULL;
 
         pthread_mutex_lock(&node->windows_assoc_lock);
         assoc = node->windows_fd_assoc_head;
@@ -155,14 +207,20 @@ void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
                 } else {
                     node->windows_fd_assoc_head = assoc->next;
                 }
-                free(assoc);
+                assoc->next = NULL;
+                assoc->closing = true;
+                if (assoc->inflight_ops == 0U) {
+                    retired = assoc;
+                }
                 break;
             }
             prev = assoc;
             assoc = assoc->next;
         }
         pthread_mutex_unlock(&node->windows_assoc_lock);
+        free(retired);
     }
+    llam_fd_watch_lifecycle_unlock();
 }
 
 bool llam_windows_fd_skips_completion_on_success(llam_node_t *node, llam_fd_t fd) {

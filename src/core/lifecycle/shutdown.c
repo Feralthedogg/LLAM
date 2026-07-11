@@ -131,13 +131,35 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
          */
         llam_io_buffer_public_detach_runtime_storage(rt);
         for (i = 0; i < rt->active_nodes; ++i) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+            /*
+             * Every encoded control and multishot watch pointer remains
+             * kernel-reachable until the ring is dismantled, even when its
+             * logical pending slot was already balanced by the opposite side
+             * of a cancel race.  Tear the ring down before freeing watch-table
+             * storage, then retire controls before their target watch refs.
+             */
+            if (rt->nodes[i].ring_ready) {
+                llam_node_unregister_cq_eventfd(&rt->nodes[i]);
+                llam_node_destroy_recv_buf_ring(&rt->nodes[i]);
+                io_uring_queue_exit(&rt->nodes[i].ring);
+                rt->nodes[i].ring_ready = false;
+            }
+            if (rt->nodes[i].watch_lock_initialized) {
+                llam_linux_retire_backend_controls(&rt->nodes[i]);
+                llam_linux_retire_backend_watch_refs(&rt->nodes[i]);
+            }
+#endif
             if (rt->nodes[i].watch_lock_initialized) {
                 pthread_mutex_lock(&rt->nodes[i].watch_lock);
                 // Control operations are heap-allocated command nodes owned by the
                 // I/O node after enqueue.
                 while (rt->nodes[i].control_head != NULL) {
-                    llam_io_control_op_t *next = rt->nodes[i].control_head->next;
-                    free(rt->nodes[i].control_head);
+                    llam_io_control_op_t *op = rt->nodes[i].control_head;
+                    llam_io_control_op_t *next = op->next;
+
+                    op->next = NULL;
+                    llam_io_control_op_destroy(&rt->nodes[i], op);
                     rt->nodes[i].control_head = next;
                 }
                 // Watch tables own their watch objects and any buffered readiness
@@ -186,6 +208,47 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                     }
                     free(rt->nodes[i].recv_watches);
                     rt->nodes[i].recv_watches = next;
+                }
+                while (rt->nodes[i].retired_poll_watches != NULL) {
+                    llam_poll_watch_t *next = rt->nodes[i].retired_poll_watches->next;
+
+                    free(rt->nodes[i].retired_poll_watches);
+                    rt->nodes[i].retired_poll_watches = next;
+                }
+                while (rt->nodes[i].retired_accept_watches != NULL) {
+                    llam_accept_watch_t *next = rt->nodes[i].retired_accept_watches->next;
+
+                    while (rt->nodes[i].retired_accept_watches->ready_head != NULL) {
+                        llam_accept_ready_t *ready_next = rt->nodes[i].retired_accept_watches->ready_head->next;
+
+                        llam_runtime_close_ready_fd(rt->nodes[i].retired_accept_watches->ready_head->fd);
+                        free(rt->nodes[i].retired_accept_watches->ready_head);
+                        rt->nodes[i].retired_accept_watches->ready_head = ready_next;
+                    }
+                    free(rt->nodes[i].retired_accept_watches);
+                    rt->nodes[i].retired_accept_watches = next;
+                }
+                while (rt->nodes[i].retired_recv_watches != NULL) {
+                    llam_recv_watch_t *next = rt->nodes[i].retired_recv_watches->next;
+
+                    while (rt->nodes[i].retired_recv_watches->ready_head != NULL) {
+                        llam_recv_ready_t *ready_next = rt->nodes[i].retired_recv_watches->ready_head->next;
+                        llam_node_t *owner = &rt->nodes[i];
+
+                        if (rt->nodes[i].retired_recv_watches->ready_head->has_buffer &&
+                            rt->nodes[i].retired_recv_watches->ready_head->node_index < rt->active_nodes) {
+                            owner = &rt->nodes[rt->nodes[i].retired_recv_watches->ready_head->node_index];
+                        }
+                        if (owner->ring_ready && owner->supports_provided_buffers &&
+                            rt->nodes[i].retired_recv_watches->ready_head->has_buffer) {
+                            (void)llam_node_recycle_recv_buffer(owner, rt->nodes[i].retired_recv_watches->ready_head->bid);
+                        }
+                        free(rt->nodes[i].retired_recv_watches->ready_head->copy_data);
+                        free(rt->nodes[i].retired_recv_watches->ready_head);
+                        rt->nodes[i].retired_recv_watches->ready_head = ready_next;
+                    }
+                    free(rt->nodes[i].retired_recv_watches);
+                    rt->nodes[i].retired_recv_watches = next;
                 }
                 pthread_mutex_unlock(&rt->nodes[i].watch_lock);
             }

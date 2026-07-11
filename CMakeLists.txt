@@ -151,6 +151,7 @@ set(LLAM_RUNTIME_SOURCES
     src/engine/scheduler/block.c
     src/engine/scheduler/scheduler_engine.c
     src/engine/watchdog/watchdog.c
+    src/engine/watchdog/watchdog_autotune.c
     src/engine/watchdog/watchdog_merge.c
     src/engine/watchdog/watchdog_probe.c
     src/engine/watchdog/watchdog_rehome.c
@@ -517,6 +518,9 @@ target_link_libraries(test_multi_runtime_core PRIVATE llam_runtime)
 add_executable(test_runtime_api_edges ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_runtime_api_edges.c
 )
+target_include_directories(test_runtime_api_edges PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 target_link_libraries(test_runtime_api_edges PRIVATE llam_runtime)
 
 add_executable(test_runtime_select_edges
@@ -560,7 +564,8 @@ add_executable(test_runtime_shutdown_internal
 target_include_directories(test_runtime_shutdown_internal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime)
+target_compile_definitions(test_runtime_shutdown_internal PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime_testhooks)
 
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c

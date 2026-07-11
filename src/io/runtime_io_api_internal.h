@@ -38,6 +38,11 @@
 /* Request ownership helpers used by public I/O entry points. */
 llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard);
 void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+bool llam_io_test_abort_published_io_setup(llam_io_req_t *req,
+                                           llam_io_abort_reason_t reason,
+                                           bool *wait_for_completion);
+#endif
 
 /* Direct syscall and poll probes used before parking a task. */
 static inline ssize_t llam_platform_read_fd(llam_fd_t fd, void *buf, size_t count) {

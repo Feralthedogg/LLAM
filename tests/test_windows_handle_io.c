@@ -179,6 +179,13 @@ typedef struct pending_handle_cancel_state {
     atomic_uint canceller_done;
 } pending_handle_cancel_state_t;
 
+typedef struct pending_handle_close_state {
+    windows_handle_state_t pipe;
+    atomic_uint closer_done;
+    int close_rc;
+    int close_errno;
+} pending_handle_close_state_t;
+
 static void cross_runtime_close_handle_task(void *arg) {
     cross_runtime_close_handle_state_t *state = arg;
 
@@ -221,6 +228,39 @@ static void pending_handle_cancel_trigger_task(void *arg) {
         return;
     }
     atomic_fetch_add_explicit(&state->canceller_done, 1U, memory_order_relaxed);
+}
+
+static void pending_handle_close_reader_task(void *arg) {
+    pending_handle_close_state_t *state = arg;
+    char buf[4];
+    ssize_t nread;
+
+    nread = llam_read_handle(state->pipe.pipe_reader, buf, sizeof(buf));
+    if (nread != -1 || errno != ECANCELED) {
+        task_fail(&state->pipe,
+                  "pending llam_read_handle did not retire on close",
+                  nread == -1 && errno != 0 ? errno : EIO);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->pipe.reader_done, 1U, memory_order_relaxed);
+}
+
+static void pending_handle_close_trigger_task(void *arg) {
+    pending_handle_close_state_t *state = arg;
+
+    if (llam_sleep_ns(100000000ULL) != 0) {
+        task_fail(&state->pipe, "sleep before pending handle close", errno != 0 ? errno : EIO);
+        return;
+    }
+    state->close_rc = llam_close_handle(state->pipe.pipe_reader);
+    state->close_errno = errno;
+    if (state->close_rc != 0) {
+        task_fail(&state->pipe,
+                  "close pending handle read",
+                  state->close_errno != 0 ? state->close_errno : EIO);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->closer_done, 1U, memory_order_relaxed);
 }
 
 static bool runtime_assoc_contains_handle(llam_runtime_t *runtime, llam_handle_t handle) {
@@ -349,6 +389,7 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
     llam_runtime_t *assoc_runtime = NULL;
     llam_runtime_opts_t opts;
     llam_handle_t closed_handle = LLAM_INVALID_HANDLE;
+    llam_windows_fd_assoc_t *pinned_assoc = NULL;
     int failed = 0;
 
     memset(&pipe_state, 0, sizeof(pipe_state));
@@ -382,6 +423,12 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
         failed = 1;
         goto cleanup;
     }
+    pinned_assoc = llam_windows_fd_assoc_pin(&assoc_runtime->nodes[0],
+                                             (uintptr_t)pipe_state.pipe_reader);
+    if (pinned_assoc == NULL || pinned_assoc->inflight_ops != 1U || pinned_assoc->closing) {
+        failed = fail_errno("host close association generation pin failed");
+        goto cleanup;
+    }
 
     /*
      * Embedders can close HANDLEs from unmanaged host threads.  That path must
@@ -399,8 +446,19 @@ static int test_host_close_handle_purges_peer_runtime_assoc(void) {
         failed = 1;
         goto cleanup;
     }
+    if (!pinned_assoc->closing || pinned_assoc->inflight_ops != 1U) {
+        fprintf(stderr,
+                "[test_windows_handle_io] close did not retain and mark the pinned association generation\n");
+        failed = 1;
+        goto cleanup;
+    }
+    llam_windows_fd_assoc_unpin(&assoc_runtime->nodes[0], pinned_assoc);
+    pinned_assoc = NULL;
 
 cleanup:
+    if (pinned_assoc != NULL) {
+        llam_windows_fd_assoc_unpin(&assoc_runtime->nodes[0], pinned_assoc);
+    }
     if (!LLAM_HANDLE_IS_INVALID(pipe_state.pipe_reader)) {
         CloseHandle((HANDLE)pipe_state.pipe_reader);
     }
@@ -532,6 +590,76 @@ cleanup:
     return failed;
 }
 
+static int test_pending_handle_read_close(void) {
+    pending_handle_close_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *reader = NULL;
+    llam_task_t *closer = NULL;
+    int failed = 0;
+
+    memset(&state, 0, sizeof(state));
+    init_handle_state(&state.pipe);
+    atomic_init(&state.closer_done, 0U);
+    state.close_rc = -1;
+
+    if (setup_pipe(&state.pipe) != 0) {
+        return fail_errno("pending close pipe setup failed");
+    }
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        failed = fail_errno("pending close opts init failed");
+        goto cleanup;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        failed = fail_errno("pending close runtime init failed");
+        goto cleanup;
+    }
+
+    reader = llam_spawn(pending_handle_close_reader_task, &state, NULL);
+    closer = llam_spawn(pending_handle_close_trigger_task, &state, NULL);
+    if (reader == NULL || closer == NULL || llam_run() != 0) {
+        failed = fail_errno("pending close run failed");
+        goto shutdown;
+    }
+    if (llam_join(reader) != 0 || llam_join(closer) != 0) {
+        failed = fail_errno("pending close join failed");
+        goto shutdown;
+    }
+    reader = NULL;
+    closer = NULL;
+    if (atomic_load_explicit(&state.pipe.failures, memory_order_relaxed) != 0U) {
+        fprintf(stderr,
+                "[test_windows_handle_io] pending close failed at %s errno=%d\n",
+                state.pipe.first_case,
+                state.pipe.first_errno);
+        failed = 1;
+    } else if (atomic_load_explicit(&state.pipe.reader_done, memory_order_relaxed) != 1U ||
+               atomic_load_explicit(&state.closer_done, memory_order_relaxed) != 1U) {
+        fprintf(stderr, "[test_windows_handle_io] pending close missing completion\n");
+        failed = 1;
+    }
+
+shutdown:
+    if (reader != NULL) {
+        (void)llam_join(reader);
+    }
+    if (closer != NULL) {
+        (void)llam_join(closer);
+    }
+    if (state.close_rc == 0) {
+        state.pipe.pipe_reader = LLAM_INVALID_HANDLE;
+    }
+    llam_runtime_shutdown();
+cleanup:
+    if (!LLAM_HANDLE_IS_INVALID(state.pipe.pipe_writer)) {
+        CloseHandle((HANDLE)state.pipe.pipe_writer);
+    }
+    if (!LLAM_HANDLE_IS_INVALID(state.pipe.pipe_reader)) {
+        CloseHandle((HANDLE)state.pipe.pipe_reader);
+    }
+    return failed;
+}
+
 int main(void) {
     windows_handle_state_t state;
     llam_runtime_opts_t opts;
@@ -545,6 +673,7 @@ int main(void) {
 
     if (test_host_close_handle_purges_peer_runtime_assoc() != 0 ||
         test_managed_close_handle_purges_peer_runtime_assoc() != 0 ||
+        test_pending_handle_read_close() != 0 ||
         test_pending_handle_read_cancel() != 0) {
         return 1;
     }

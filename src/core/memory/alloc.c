@@ -435,6 +435,7 @@ llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt) {
 void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
     llam_block_job_t *head;
     llam_task_t *task;
+    llam_block_job_t *expected_job;
     bool release_task_ref;
 
     if (rt == NULL || job == NULL) {
@@ -443,18 +444,36 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
 
     task = job->task;
     release_task_ref = job->holds_task_ref;
+    if (release_task_ref && task != NULL) {
+        /*
+         * Stop new cancellation resolvers from discovering this job, then wait
+         * for every resolver that already loaded it.  The job's task scan ref is
+         * retained through the drain so both the gate and embedded wait node stay
+         * addressable.  Only after quiescence may this pool slot represent a
+         * different blocking operation.
+         */
+        expected_job = job;
+        if (atomic_compare_exchange_strong_explicit(&task->active_block_job,
+                                                    &expected_job,
+                                                    NULL,
+                                                    memory_order_acq_rel,
+                                                    memory_order_acquire) &&
+            !llam_task_close_wait_resolvers(task)) {
+            return;
+        }
+    }
     job->holds_task_ref = false;
     job->task = NULL;
     job->wait_node = NULL;
-    if (release_task_ref && task != NULL) {
-        (void)llam_task_scan_ref_release(rt, task);
-    }
 
     pthread_mutex_lock(&rt->block_lock);
     head = atomic_load_explicit(&rt->block_job_free, memory_order_relaxed);
     job->next = head;
     atomic_store_explicit(&rt->block_job_free, job, memory_order_release);
     pthread_mutex_unlock(&rt->block_lock);
+    if (release_task_ref && task != NULL) {
+        (void)llam_task_scan_ref_release(rt, task);
+    }
 }
 
 /**

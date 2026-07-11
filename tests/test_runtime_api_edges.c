@@ -20,11 +20,16 @@
 
 #include "llam/runtime.h"
 #include "runtime_internal.h"
+#if LLAM_PLATFORM_WINDOWS
+#include "../src/io/windows/runtime_io_watch_windows_internal.h"
+#endif
 
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#if !LLAM_PLATFORM_WINDOWS
 #include <pthread.h>
+#endif
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -117,6 +122,145 @@ typedef struct timer_heap_overflow_state {
     int sleep_rc;
     int sleep_errno;
 } timer_heap_overflow_state_t;
+
+static int fail_msg(const char *message);
+
+#if LLAM_PLATFORM_WINDOWS
+static int test_windows_skip_completion_policy_is_disabled(void) {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    OVERLAPPED read_ov;
+    OVERLAPPED *completed_ov = NULL;
+    HANDLE iocp = NULL;
+    HANDLE server = INVALID_HANDLE_VALUE;
+    HANDLE client = INVALID_HANDLE_VALUE;
+    DWORD sync_bytes = 0U;
+    DWORD completed_bytes = 0U;
+    ULONG_PTR completion_key = 0U;
+    DWORD error_code;
+    char pipe_name[160];
+    char byte = 0;
+    bool associated = false;
+    int lock_initialized = 0;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&read_ov, 0, sizeof(read_ov));
+    if (pthread_mutex_init(&node.windows_assoc_lock, NULL) != 0) {
+        return fail_msg("Windows skip-completion assoc lock init failed");
+    }
+    lock_initialized = 1;
+    iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0U, 1U);
+    if (iocp == NULL) {
+        goto cleanup;
+    }
+    node.windows_iocp_handle = iocp;
+    node.windows_use_skip_completion_on_success = 1U;
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+
+    (void)snprintf(pipe_name,
+                   sizeof(pipe_name),
+                   "\\\\.\\pipe\\llam-skip-completion-%lu-%llu",
+                   (unsigned long)GetCurrentProcessId(),
+                   (unsigned long long)GetTickCount64());
+    server = CreateNamedPipeA(pipe_name,
+                              PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                              1U,
+                              64U,
+                              64U,
+                              0U,
+                              NULL);
+    if (server == INVALID_HANDLE_VALUE) {
+        goto cleanup;
+    }
+    client = CreateFileA(pipe_name,
+                         GENERIC_WRITE,
+                         0U,
+                         NULL,
+                         OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL,
+                         NULL);
+    if (client == INVALID_HANDLE_VALUE) {
+        goto cleanup;
+    }
+    if (!ConnectNamedPipe(server, NULL)) {
+        error_code = GetLastError();
+        if (error_code != ERROR_PIPE_CONNECTED) {
+            goto cleanup;
+        }
+    }
+    if (llam_windows_associate_handle(&node, (llam_handle_t)server) != 0) {
+        goto cleanup;
+    }
+    associated = true;
+    if (llam_windows_handle_skips_completion_on_success(&node,
+                                                         (llam_handle_t)server)) {
+        goto cleanup;
+    }
+    if (!WriteFile(client, "x", 1U, &sync_bytes, NULL) || sync_bytes != 1U) {
+        goto cleanup;
+    }
+    sync_bytes = 0U;
+    if (!ReadFile(server, &byte, 1U, &sync_bytes, &read_ov) ||
+        sync_bytes != 1U || byte != 'x') {
+        goto cleanup;
+    }
+
+    /*
+     * Forget and close immediately after synchronous success, before the IOCP
+     * queue is drained. With skip-on-success disabled, association teardown
+     * cannot orphan the request: one normal kernel packet remains authoritative.
+     */
+    llam_windows_forget_fd_assoc(&runtime, (llam_fd_t)(uintptr_t)server);
+    associated = false;
+    CloseHandle(server);
+    server = INVALID_HANDLE_VALUE;
+    if (!GetQueuedCompletionStatus(iocp,
+                                   &completed_bytes,
+                                   &completion_key,
+                                   &completed_ov,
+                                   1000U) ||
+        completed_bytes != 1U ||
+        completed_ov != &read_ov) {
+        goto cleanup;
+    }
+    completed_ov = NULL;
+    if (GetQueuedCompletionStatus(iocp,
+                                  &completed_bytes,
+                                  &completion_key,
+                                  &completed_ov,
+                                  0U) ||
+        GetLastError() != WAIT_TIMEOUT ||
+        completed_ov != NULL) {
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (associated) {
+        llam_windows_forget_fd_assoc(&runtime, (llam_fd_t)(uintptr_t)server);
+    }
+    if (client != INVALID_HANDLE_VALUE) {
+        CloseHandle(client);
+    }
+    if (server != INVALID_HANDLE_VALUE) {
+        CloseHandle(server);
+    }
+    if (iocp != NULL) {
+        CloseHandle(iocp);
+    }
+    if (lock_initialized != 0) {
+        pthread_mutex_destroy(&node.windows_assoc_lock);
+    }
+    if (rc != 0) {
+        return fail_msg("Windows skip-completion synchronous success was not exactly-once");
+    }
+    return 0;
+}
+#endif
 
 static void ownership_task(void *arg);
 
@@ -310,8 +454,8 @@ static int test_cancel_token_destroy_race(void) {
 
     for (unsigned i = 0U; i < rounds; ++i) {
         cancel_destroy_race_state_t state;
-        pthread_t canceler;
-        pthread_t destroyer;
+        pthread_t canceler = (pthread_t)0;
+        pthread_t destroyer = (pthread_t)0;
 
         memset(&state, 0, sizeof(state));
         atomic_init(&state.ready, 0U);
@@ -2513,7 +2657,7 @@ static int test_unmanaged_channel_try_drain_after_shutdown(void) {
 static int test_unmanaged_try_send_wakes_parked_channel_waiter(void) {
     edge_state_t state;
     llam_task_t *waiter = NULL;
-    pthread_t runner;
+    pthread_t runner = (pthread_t)0;
     int runner_created = 0;
     int runner_joined = 0;
     int rc = 1;
@@ -3471,7 +3615,7 @@ cleanup_no_runtime:
 static int test_cond_owner_recheck_unlinks_waiter(void) {
     cond_owner_recheck_state_t state;
     llam_spawn_opts_t spawn_opts;
-    pthread_t corrupter;
+    pthread_t corrupter = (pthread_t)0;
     llam_task_t *task = NULL;
     bool corrupter_started = false;
     int rc = 1;
@@ -5953,6 +6097,12 @@ int main(void) {
                       test_align_up_overflow_fails_closed) != 0) {
         return 1;
     }
+#if LLAM_PLATFORM_WINDOWS
+    if (run_edge_case("windows_skip_completion_policy_is_disabled",
+                      test_windows_skip_completion_policy_is_disabled) != 0) {
+        return 1;
+    }
+#endif
 #if !LLAM_PLATFORM_WINDOWS
     if (run_edge_case("task_public_op_sentinel_teardown_does_not_hang",
                       test_task_public_op_sentinel_teardown_does_not_hang) != 0) {

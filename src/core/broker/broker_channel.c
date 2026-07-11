@@ -39,6 +39,23 @@ void llam_broker_clear_channels(llam_broker_t *broker) {
     }
 }
 
+void llam_broker_reclaim_subject_channels(llam_broker_t *broker, uint64_t subject_id) {
+    size_t i;
+
+    if (broker == NULL || broker->channels == NULL || subject_id == 0U ||
+        llam_broker_lock(broker) != 0) {
+        return;
+    }
+    for (i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
+        llam_broker_channel_slot_t *slot = &broker->channels[i];
+
+        if (slot->active && slot->subject_id == subject_id) {
+            memset(slot, 0, sizeof(*slot));
+        }
+    }
+    llam_broker_unlock(broker);
+}
+
 llam_broker_channel_slot_t *llam_broker_find_channel_unlocked(llam_broker_t *broker,
                                                               const llam_capability_token_t *token,
                                                               uint64_t required_rights) {
@@ -107,7 +124,8 @@ int llam_broker_create_channel(llam_broker_t *broker,
         return -1;
     }
     for (i = 0U; i < LLAM_BROKER_CHANNEL_SLOTS; ++i) {
-        if (!broker->channels[i].active) {
+        if (!broker->channels[i].active ||
+            (broker->channels[i].closed && broker->channels[i].count == 0U)) {
             slot = &broker->channels[i];
             break;
         }
@@ -129,6 +147,7 @@ int llam_broker_create_channel(llam_broker_t *broker,
     slot->id = broker->next_channel_id++;
     slot->generation = 1U;
     slot->rights = rights;
+    slot->subject_id = llam_broker_current_subject(broker);
     slot->active = true;
     if (llam_broker_issue_object_cap_unlocked(broker,
                                               LLAM_BROKER_CAP_FAMILY_CHANNEL,

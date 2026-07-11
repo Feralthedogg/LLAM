@@ -40,6 +40,7 @@ bool llam_dynamic_trace_enabled(void);
 void llam_watchdog_check_shard(llam_shard_t *shard, uint64_t now_ns);
 void llam_watchdog_pause_briefly(void);
 unsigned llam_watchdog_snapshot_shard_load(llam_shard_t *shard);
+void llam_watchdog_autotune_tick(llam_runtime_t *rt, uint64_t now_ns);
 
 // Runtime-level pressure signals used by deadlock detection and dynamic scaling.
 bool llam_runtime_has_pending_timers(llam_runtime_t *rt);
@@ -95,6 +96,11 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
                                         llam_shard_t *source,
                                         llam_shard_t *target,
                                         unsigned *migrated_out);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_submit_evacuation_unlocked_hook_fn)(void);
+void llam_io_test_set_submit_evacuation_unlocked_hook(
+    llam_submit_evacuation_unlocked_hook_fn hook);
+#endif
 bool llam_rehome_runtime_watch_waiters(llam_runtime_t *rt,
                                      llam_shard_t *source,
                                      llam_shard_t *target,

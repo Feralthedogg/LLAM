@@ -40,6 +40,15 @@ static int llam_broker_ring_windows_errno(DWORD error_code) {
     return llam_windows_system_error_to_errno(error_code);
 }
 
+int llam_broker_ring_mapping_require_fixed_extent(const llam_broker_ring_mapping_t *mapping) {
+    if (LLAM_UNLIKELY(mapping == NULL || LLAM_HANDLE_IS_INVALID(mapping->mapping_handle))) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* A pagefile-backed section has a fixed maximum extent for its lifetime. */
+    return 0;
+}
+
 static int llam_broker_ring_map_windows_handle(const char *name,
                                                HANDLE handle,
                                                bool owner,

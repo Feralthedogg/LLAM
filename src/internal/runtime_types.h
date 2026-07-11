@@ -31,6 +31,9 @@
 #include "llam_internal.h"
 #include "runtime_platform.h"
 
+#define LLAM_WAIT_RESOLVER_CLOSED_BIT (UINT_MAX - (UINT_MAX >> 1U))
+#define LLAM_WAIT_RESOLVER_REF_MASK (UINT_MAX >> 1U)
+
 #include <errno.h>
 #include <limits.h>
 #if LLAM_RUNTIME_BACKEND_WINDOWS
@@ -175,6 +178,10 @@ typedef struct llam_cpu_set {
 #define LLAM_DYNAMIC_SCALE_DOWN_STREAK 12U
 /** Cooldown ticks after changing dynamic worker online count. */
 #define LLAM_DYNAMIC_SCALE_COOLDOWN_TICKS 4U
+/** Power-of-two buckets used by the watchdog-local runnable latency sketch. */
+#define LLAM_AUTOTUNE_WAKE_LATENCY_BUCKETS 48U
+/** Default power-of-two downsampling period for watchdog-local autotune telemetry. */
+#define LLAM_AUTOTUNE_DEFAULT_SAMPLE_PERIOD 64U
 /** Internal alias for a pinned task flag. */
 #define LLAM_TASK_FLAG_PINNED LLAM_SPAWN_F_PINNED
 /** Internal alias for no-preempt task flag. */
@@ -289,6 +296,8 @@ typedef struct llam_metrics {
     atomic_uint_fast64_t inject_enqueues;
     atomic_uint_fast64_t wake_latency_ns;
     atomic_uint_fast64_t wake_samples;
+    atomic_uint_fast64_t autotune_wake_latency_samples;
+    atomic_uint_fast64_t autotune_wake_latency_buckets[LLAM_AUTOTUNE_WAKE_LATENCY_BUCKETS];
     atomic_uint_fast64_t idle_polls;
     atomic_uint_fast64_t idle_spin_loops;
     atomic_uint_fast64_t idle_spin_hits;
@@ -305,9 +314,16 @@ typedef struct llam_metrics {
     atomic_uint_fast64_t yield_direct_locked_hits;
     atomic_uint_fast64_t yield_direct_fail_context;
     atomic_uint_fast64_t yield_direct_fail_policy;
+    atomic_uint_fast64_t yield_direct_fail_budget;
     atomic_uint_fast64_t yield_direct_fail_no_work;
     atomic_uint_fast64_t yield_direct_fail_self;
     atomic_uint_fast64_t yield_direct_fail_push;
+    atomic_uint_fast64_t wake_handoff_attempts;
+    atomic_uint_fast64_t wake_handoff_hits;
+    atomic_uint_fast64_t wake_handoff_fail_context;
+    atomic_uint_fast64_t wake_handoff_fail_policy;
+    atomic_uint_fast64_t wake_handoff_fail_budget;
+    atomic_uint_fast64_t wake_handoff_fail_race;
     atomic_uint_fast64_t opaque_compensations;
     atomic_uint_fast64_t deadlock_suspicions;
     atomic_uint_fast64_t queue_overflows;
@@ -327,6 +343,116 @@ typedef struct llam_metrics {
     atomic_uint_fast64_t opaque_redirect_activations;
     atomic_uint_fast64_t wake_reason_hist[LLAM_WAIT_TIMEOUT + 1U];
 } llam_metrics_t;
+
+/** @brief Internal auto-tune mode selected by environment/configuration. */
+typedef enum llam_autotune_internal_mode {
+    LLAM_AUTOTUNE_INTERNAL_OFF = 0,
+    LLAM_AUTOTUNE_INTERNAL_OBSERVE = 1,
+    LLAM_AUTOTUNE_INTERNAL_ON = 2,
+    LLAM_AUTOTUNE_INTERNAL_FROZEN = 3,
+} llam_autotune_internal_mode_t;
+
+/** @brief Internal auto-tune controller phase. */
+typedef enum llam_autotune_internal_phase {
+    LLAM_AUTOTUNE_INTERNAL_PHASE_OFF = 0,
+    LLAM_AUTOTUNE_INTERNAL_PHASE_WARMUP = 1,
+    LLAM_AUTOTUNE_INTERNAL_PHASE_HOLD = 2,
+    LLAM_AUTOTUNE_INTERNAL_PHASE_PROBE = 3,
+    LLAM_AUTOTUNE_INTERNAL_PHASE_EVALUATE = 4,
+    LLAM_AUTOTUNE_INTERNAL_PHASE_BACKOFF = 5,
+    LLAM_AUTOTUNE_INTERNAL_PHASE_SUSPENDED = 6,
+} llam_autotune_internal_phase_t;
+
+enum {
+    LLAM_AUTOTUNE_INTERNAL_DOMAIN_WORKERS = UINT64_C(1) << 0,
+    LLAM_AUTOTUNE_INTERNAL_DOMAIN_IDLE = UINT64_C(1) << 1,
+    LLAM_AUTOTUNE_INTERNAL_DOMAIN_HANDOFF = UINT64_C(1) << 2,
+    LLAM_AUTOTUNE_INTERNAL_DOMAIN_PREEMPT = UINT64_C(1) << 3,
+    LLAM_AUTOTUNE_INTERNAL_DOMAIN_IO = UINT64_C(1) << 4,
+};
+
+enum {
+    LLAM_AUTOTUNE_INTERNAL_REASON_NONE = 0,
+    LLAM_AUTOTUNE_INTERNAL_REASON_IDLE_SPIN = UINT64_C(1) << 0,
+    LLAM_AUTOTUNE_INTERNAL_REASON_HANDOFF = UINT64_C(1) << 1,
+    LLAM_AUTOTUNE_INTERNAL_REASON_QUEUE_OVERFLOW = UINT64_C(1) << 2,
+    LLAM_AUTOTUNE_INTERNAL_REASON_DYNAMIC_WORKERS = UINT64_C(1) << 3,
+    LLAM_AUTOTUNE_INTERNAL_REASON_WAKE_LATENCY = UINT64_C(1) << 4,
+};
+
+#define LLAM_AUTOTUNE_DEFAULT_DECISION_INTERVAL_NS (100ULL * 1000ULL * 1000ULL)
+#define LLAM_AUTOTUNE_DEFAULT_MIN_HOLD_NS (500ULL * 1000ULL * 1000ULL)
+#define LLAM_AUTOTUNE_HANDOFF_MIN_HIT_PPM 950000ULL
+#define LLAM_AUTOTUNE_HANDOFF_PROBE_MIN_GAIN_PPM 10000ULL
+#define LLAM_AUTOTUNE_HANDOFF_PROBE_MIN_ATTEMPTS 32ULL
+#define LLAM_AUTOTUNE_HANDOFF_PROBE_MIN_HITS 16ULL
+
+/**
+ * @brief Runtime-local online auto-tune governor state.
+ *
+ * The watchdog owns the control loop. Fields read by diagnostics are atomic so
+ * JSON/state dumps can observe live runtimes without racing the controller.
+ * The @c previous_* counters are watchdog-private window cursors.
+ */
+typedef struct llam_autotune_control {
+    atomic_uint mode;
+    atomic_uint phase;
+    atomic_uint_fast64_t supported_domains;
+    atomic_uint_fast64_t active_domains;
+    atomic_uint_fast64_t suspended_domains;
+    atomic_uint_fast64_t policy_epoch;
+    atomic_uint_fast64_t decisions;
+    atomic_uint_fast64_t commits;
+    atomic_uint_fast64_t rollbacks;
+    atomic_uint_fast64_t guardrail_trips;
+    atomic_uint_fast64_t decision_interval_ns;
+    atomic_uint_fast64_t min_hold_ns;
+    atomic_uint_fast64_t target_wake_p99_ns;
+    atomic_uint_fast64_t next_decision_ns;
+    atomic_uint_fast64_t last_decision_ns;
+    atomic_uint_fast64_t last_change_ns;
+    atomic_uint_fast64_t last_reason_mask;
+    atomic_uint target_online_workers;
+    atomic_uint_fast64_t sampled_yield_handoff_attempts;
+    atomic_uint_fast64_t sampled_yield_handoff_hits;
+    atomic_uint_fast64_t sampled_yield_handoff_fail_policy;
+    atomic_uint_fast64_t sampled_yield_handoff_fail_no_work;
+    atomic_uint_fast64_t sampled_yield_handoff_fail_push;
+    atomic_uint_fast64_t sampled_wake_handoff_attempts;
+    atomic_uint_fast64_t sampled_wake_handoff_hits;
+    atomic_uint_fast64_t sampled_wake_handoff_fail_policy;
+    atomic_uint_fast64_t sampled_wake_handoff_fail_race;
+    atomic_uint_fast64_t sampled_wake_latency_samples;
+    atomic_uint_fast64_t sampled_wake_latency_p50_ns;
+    atomic_uint_fast64_t sampled_wake_latency_p99_ns;
+    atomic_uint_fast64_t sampled_idle_spin_hits;
+    atomic_uint_fast64_t sampled_idle_spin_fallbacks;
+    atomic_uint_fast64_t sampled_idle_spin_ns;
+    atomic_uint_fast64_t sampled_queue_overflows;
+    uint64_t previous_yield_handoff_attempts;
+    uint64_t previous_yield_handoff_hits;
+    uint64_t previous_yield_handoff_fail_policy;
+    uint64_t previous_yield_handoff_fail_budget;
+    uint64_t previous_yield_handoff_fail_no_work;
+    uint64_t previous_yield_handoff_fail_push;
+    uint64_t previous_wake_handoff_attempts;
+    uint64_t previous_wake_handoff_hits;
+    uint64_t previous_wake_handoff_fail_policy;
+    uint64_t previous_wake_handoff_fail_budget;
+    uint64_t previous_wake_handoff_fail_race;
+    uint64_t previous_wake_latency_samples;
+    uint64_t previous_wake_latency_buckets[LLAM_AUTOTUNE_WAKE_LATENCY_BUCKETS];
+    uint64_t previous_idle_spin_hits;
+    uint64_t previous_idle_spin_fallbacks;
+    uint64_t previous_idle_spin_ns;
+    uint64_t previous_queue_overflows;
+    uint64_t handoff_probe_baseline_hit_ppm;
+    uint64_t handoff_probe_attempts;
+    uint64_t handoff_probe_hits;
+    unsigned handoff_probe_previous_budget;
+    unsigned handoff_probe_budget;
+    bool has_previous_sample;
+} llam_autotune_control_t;
 
 /** @brief Logical I/O operation kind. */
 typedef enum llam_io_kind {
@@ -352,6 +478,13 @@ typedef enum llam_io_wait_mode {
     LLAM_IO_WAIT_MODE_ACCEPT_WATCH = 4,
     LLAM_IO_WAIT_MODE_RECV_WATCH = 5,
 } llam_io_wait_mode_t;
+
+/** @brief Result of resolving a request across every submit queue. */
+typedef enum llam_io_submit_detach_result {
+    LLAM_IO_SUBMIT_DETACH_OWNER_CHANGED = 0,
+    LLAM_IO_SUBMIT_DETACH_REMOVED = 1,
+    LLAM_IO_SUBMIT_DETACH_NOT_FOUND = 2,
+} llam_io_submit_detach_result_t;
 
 /** @brief Reason an I/O request was aborted before normal completion. */
 typedef enum llam_io_abort_reason {
@@ -417,9 +550,15 @@ typedef struct llam_io_req {
     llam_accept_watch_t *accept_watch;
     llam_recv_watch_t *recv_watch;
     llam_io_buffer_t *owned_buffer;
-    unsigned owner_shard;
+    /* Dynamic rehome publishes the scheduler shard read by completion paths. */
+    atomic_uint owner_shard;
     unsigned alloc_owner_shard;
-    unsigned attached_node_index;
+    /*
+     * Current backend-node owner. Submit evacuation rewrites this while
+     * cancellation and diagnostics resolve ownership without the migration
+     * locks, so publication must be atomic.
+     */
+    atomic_uint attached_node_index;
     atomic_uint inflight_owner_shard;
     uint64_t submit_ts_ns;
     uint64_t deadline_ns;
@@ -427,9 +566,15 @@ typedef struct llam_io_req {
     void *platform_data;
     atomic_uint wait_mode;
     atomic_uint abort_reason;
+    /* Unique nonzero identity for this activation of recyclable request storage. */
+    atomic_uint_fast64_t operation_generation;
+    /* API, returned-event, and cancel-control owners share one publication count. */
+    atomic_uint lifetime_refs;
     atomic_uint cancel_queued;
     atomic_uint cancel_submitted;
     atomic_uint free_after_cancel;
+    atomic_uint backend_event_refs;
+    atomic_uint release_after_event;
     bool use_recv_op;
     bool use_provided_buffer;
 } llam_io_req_t;
@@ -477,6 +622,8 @@ struct llam_channel_select_state {
     atomic_uint completed;
     atomic_uint wake_armed;
     atomic_uint wake_queued;
+    /* Timers pin this stack-backed state until their final callback access. */
+    atomic_uint timer_refs;
 };
 
 /** @brief Control messages processed by an I/O node thread. */
@@ -494,7 +641,17 @@ typedef enum llam_io_control_kind {
 struct llam_io_control_op {
     llam_io_control_kind_t kind;
     void *target;
+    llam_task_t *task_ref;
+    bool holds_request_ref;
+    bool holds_task_ref;
+#if LLAM_RUNTIME_BACKEND_LINUX
+    /* Linux keeps encoded user_data owners here until CQE or ring teardown. */
+    bool linux_backend_tracked;
+#endif
     llam_io_control_op_t *next;
+#if LLAM_RUNTIME_BACKEND_LINUX
+    llam_io_control_op_t *linux_backend_next;
+#endif
 };
 
 /** @brief Completed accept results buffered by a watch until a task consumes them. */
@@ -532,7 +689,12 @@ struct llam_poll_watch {
     short events;
     short sticky_revents;
     unsigned migrate_target_node_index;
+    unsigned lifetime_refs;
+    unsigned backend_refs;
+    bool accepts_waiters;
     bool live_transferred;
+    bool retired;
+    bool destroy_pending;
     bool active;
     bool activating;
     bool deactivate_queued;
@@ -556,7 +718,12 @@ struct llam_accept_watch {
     socklen_t local_addrlen;
     bool has_local_addr;
     unsigned migrate_target_node_index;
+    unsigned lifetime_refs;
+    unsigned backend_refs;
+    bool accepts_waiters;
     bool live_transferred;
+    bool retired;
+    bool destroy_pending;
     bool active;
     bool activating;
     bool deactivate_queued;
@@ -574,7 +741,12 @@ struct llam_recv_watch {
     dev_t st_dev;
     ino_t st_ino;
     unsigned migrate_target_node_index;
+    unsigned lifetime_refs;
+    unsigned backend_refs;
+    bool accepts_waiters;
     bool live_transferred;
+    bool retired;
+    bool destroy_pending;
     bool active;
     bool activating;
     bool deactivate_queued;
@@ -591,11 +763,15 @@ struct llam_recv_watch {
 typedef struct llam_timer_node {
     llam_runtime_t *owner_runtime;
     llam_task_t *task;
+    llam_channel_select_state_t *select_state;
+    _Atomic size_t *wait_lifetime_ops;
     uint64_t deadline_ns;
+    uint64_t wait_generation;
     struct llam_timer_node *next;
     struct llam_timer_node *alloc_next;
     size_t heap_index;
     unsigned owner_shard;
+    bool holds_task_ref;
 } llam_timer_node_t;
 
 /**
@@ -815,11 +991,23 @@ struct llam_task {
     _Atomic(llam_wait_queue_t *) active_wait_queue;
     _Atomic(pthread_mutex_t *) active_wait_queue_lock;
     _Atomic(llam_channel_select_state_t *) active_select_state;
+    _Atomic(void *) active_wait_lifetime_ops;
+    /*
+     * The high bit closes wait-owner publication; the remaining bits count
+     * cancellation resolvers that may still hold raw owner pointers.  A close
+     * prevents new resolver claims and drains old claims before recyclable wait
+     * state is cleared or returned to an allocator.
+     */
+    atomic_uint wait_resolver_state;
+    atomic_uint_fast64_t wait_generation;
     llam_io_req_t embedded_io_req;
     _Atomic(llam_io_req_t *) active_io_req;
+    /* Operation generation published with active_io_req to reject address ABA. */
+    atomic_uint_fast64_t active_io_generation;
     _Atomic(llam_block_job_t *) active_block_job;
     llam_task_local_entry_t *task_locals;
     bool cancel_registered;
+    bool handoff_sample_current;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
     bool alloc_external_pool;
@@ -975,6 +1163,9 @@ struct llam_shard {
     atomic_uint norm_depth;
     unsigned hot_streak;
     unsigned direct_handoff_streak;
+    unsigned autotune_handoff_sample_seq;
+    unsigned autotune_wake_latency_sample_countdown;
+    bool autotune_handoff_sample_current;
     llam_allocator_t allocator;
     llam_metrics_t metrics;
     llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
@@ -1040,9 +1231,16 @@ struct llam_node {
     llam_io_req_t *submit_tail;
     llam_io_control_op_t *control_head;
     llam_io_control_op_t *control_tail;
+#if LLAM_RUNTIME_BACKEND_LINUX
+    llam_io_control_op_t *linux_backend_control_head;
+    llam_io_control_op_t *linux_backend_control_tail;
+#endif
     llam_poll_watch_t *poll_watches;
     llam_accept_watch_t *accept_watches;
     llam_recv_watch_t *recv_watches;
+    llam_poll_watch_t *retired_poll_watches;
+    llam_accept_watch_t *retired_accept_watches;
+    llam_recv_watch_t *retired_recv_watches;
     struct io_uring ring;
     struct io_uring_buf_ring *recv_buf_ring;
     unsigned char *recv_buf_storage;
@@ -1051,6 +1249,14 @@ struct llam_node {
     int recv_buf_group;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint pending_ops;
     bool sqpoll_enabled;
+#if LLAM_RUNTIME_BACKEND_LINUX
+    bool linux_submit_retry;
+    bool linux_submit_terminal;
+    int (*linux_submit_override)(struct llam_node *node,
+                                 unsigned expected,
+                                 void *arg);
+    void *linux_submit_override_arg;
+#endif
     unsigned sqpoll_cpu;
     atomic_uint_fast64_t submit_batches;
     atomic_uint_fast64_t submit_entries;
@@ -1174,6 +1380,7 @@ struct llam_runtime {
     atomic_bool stop_requested;
     atomic_bool shutdown_requested;
     atomic_int fatal_errno;
+    atomic_uint deferred_fatal_pending;
     uint64_t deadlock_progress_snapshot;
     unsigned deadlock_probe_streak;
     unsigned dynamic_scale_up_streak;
@@ -1181,13 +1388,18 @@ struct llam_runtime {
     unsigned dynamic_scale_cooldown;
     unsigned trace_events_enabled;
     unsigned wake_latency_metrics_enabled;
+    unsigned autotune_wake_latency_enabled;
+    unsigned autotune_wake_latency_sample_mask;
     unsigned run_timing_enabled;
     unsigned stack_sampling_enabled;
     unsigned task_list_eager;
     unsigned direct_handoff_stats_enabled;
+    unsigned direct_handoff_stats_sample_mask;
     unsigned direct_handoff_burst;
+    atomic_uint direct_handoff_budget;
     unsigned direct_handoff_live_limit;
     unsigned direct_handoff_allow_timers;
+    unsigned wake_handoff_enabled;
     unsigned cheap_safepoint;
     unsigned safepoint_clock_period;
     unsigned preempt_mode;
@@ -1198,9 +1410,139 @@ struct llam_runtime {
     unsigned spawn_fanout_adaptive;
     unsigned channel_local_handoff_enabled;
     unsigned channel_safepoint_interval;
+    llam_autotune_control_t autotune;
     atomic_uint steal_pause_active;
 };
 
+
+static inline unsigned llam_runtime_direct_handoff_budget(const llam_runtime_t *rt) {
+    return rt != NULL ? atomic_load_explicit(&rt->direct_handoff_budget, memory_order_relaxed) : 0U;
+}
+
+static inline bool llam_runtime_runnable_latency_enabled(const llam_runtime_t *rt) {
+    return rt != NULL &&
+           (rt->wake_latency_metrics_enabled != 0U ||
+            rt->autotune_wake_latency_enabled != 0U);
+}
+
+static inline bool llam_autotune_sample_countdown(unsigned *countdown, unsigned mask) {
+    unsigned remaining;
+
+    if (mask == 0U) {
+        return true;
+    }
+    remaining = *countdown;
+    if (remaining == 0U) {
+        *countdown = mask;
+        return true;
+    }
+    *countdown = remaining - 1U;
+    return false;
+}
+
+static inline unsigned llam_autotune_sample_xorshift(unsigned state, unsigned seed) {
+    if (state == 0U) {
+        state = 0x9E3779B9U ^ (seed * 0x85EBCA6BU);
+        if (state == 0U) {
+            state = 0x9E3779B9U;
+        }
+    }
+    state ^= state << 13U;
+    state ^= state >> 17U;
+    state ^= state << 5U;
+    return state;
+}
+
+static inline bool llam_runtime_should_record_handoff_stats(llam_shard_t *shard) {
+    unsigned mask;
+    unsigned state;
+
+    if (shard == NULL ||
+        shard->runtime == NULL ||
+        shard->runtime->direct_handoff_stats_enabled == 0U) {
+        return false;
+    }
+    mask = shard->runtime->direct_handoff_stats_sample_mask;
+    if (mask == 0U) {
+        return true;
+    }
+    state = llam_autotune_sample_xorshift(shard->autotune_handoff_sample_seq, shard->id + 1U);
+    shard->autotune_handoff_sample_seq = state;
+    return (state & mask) == 0U;
+}
+
+static inline bool llam_runtime_should_stamp_runnable_latency(llam_shard_t *shard) {
+    unsigned mask;
+
+    if (shard == NULL || shard->runtime == NULL) {
+        return false;
+    }
+    if (shard->runtime->wake_latency_metrics_enabled != 0U) {
+        return true;
+    }
+    if (shard->runtime->autotune_wake_latency_enabled == 0U) {
+        return false;
+    }
+    mask = shard->runtime->autotune_wake_latency_sample_mask;
+    return llam_autotune_sample_countdown(&shard->autotune_wake_latency_sample_countdown, mask);
+}
+
+static inline unsigned llam_autotune_wake_latency_bucket_index(uint64_t latency_ns) {
+    unsigned bucket = 0U;
+    uint64_t upper_ns = 1U;
+
+    while (bucket + 1U < LLAM_AUTOTUNE_WAKE_LATENCY_BUCKETS &&
+           latency_ns > upper_ns) {
+        upper_ns <<= 1U;
+        ++bucket;
+    }
+    return bucket;
+}
+
+static inline void llam_runtime_record_autotune_wake_latency(llam_shard_t *shard,
+                                                             uint64_t latency_ns) {
+    unsigned bucket;
+
+    if (shard == NULL ||
+        shard->runtime == NULL ||
+        shard->runtime->autotune_wake_latency_enabled == 0U) {
+        return;
+    }
+    bucket = llam_autotune_wake_latency_bucket_index(latency_ns);
+    atomic_fetch_add_explicit(&shard->metrics.autotune_wake_latency_samples, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&shard->metrics.autotune_wake_latency_buckets[bucket], 1U, memory_order_relaxed);
+}
+
+static inline uint64_t llam_runtime_dispatch_now_ns(const llam_task_t *task,
+                                                    uint64_t reusable_now_ns) {
+    if (task == NULL || task->last_runnable_ns == 0U || reusable_now_ns != 0U) {
+        return reusable_now_ns;
+    }
+    return llam_now_ns();
+}
+
+static inline void llam_runtime_record_dispatch_latency(llam_shard_t *shard,
+                                                        llam_task_t *task,
+                                                        uint64_t now_ns) {
+    uint64_t last_runnable_ns;
+    uint64_t latency_ns;
+
+    if (shard == NULL || task == NULL || now_ns == 0U) {
+        return;
+    }
+    last_runnable_ns = task->last_runnable_ns;
+    if (last_runnable_ns == 0U || now_ns < last_runnable_ns) {
+        task->last_runnable_ns = 0U;
+        return;
+    }
+    latency_ns = now_ns - last_runnable_ns;
+    if (shard->runtime != NULL && shard->runtime->wake_latency_metrics_enabled != 0U) {
+        atomic_fetch_add_explicit(&shard->metrics.wake_latency_ns, latency_ns, memory_order_relaxed);
+        atomic_fetch_add_explicit(&shard->metrics.wake_samples, 1U, memory_order_relaxed);
+    }
+    llam_runtime_record_autotune_wake_latency(shard, latency_ns);
+    task->last_runnable_ns = 0U;
+}
 
 
 #endif

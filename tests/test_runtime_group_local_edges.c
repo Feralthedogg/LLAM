@@ -114,6 +114,7 @@ static int init_runtime(void) {
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
 
+#if LLAM_PLATFORM_POSIX
 static void *task_group_run_thread(void *arg) {
     task_group_run_thread_state_t *state = arg;
 
@@ -128,6 +129,7 @@ static void task_group_spawn_mark_fail(task_group_spawn_mark_race_state_t *state
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
     }
 }
+#endif
 
 static void task_local_isolation_task(void *arg) {
     local_task_args_t *args = arg;
@@ -813,6 +815,7 @@ cleanup_group:
     return rc;
 }
 
+#if LLAM_PLATFORM_POSIX
 static void task_group_spawn_mark_keepalive_task(void *arg) {
     task_group_spawn_mark_race_state_t *state = arg;
 
@@ -845,6 +848,7 @@ static void task_group_spawn_mark_self_detach_task(void *arg) {
         task_group_spawn_mark_fail(state, "group-owned child self-detach errno", errno);
     }
 }
+#endif
 
 static int test_task_group_spawn_marks_child_before_execution(void) {
 #if LLAM_PLATFORM_POSIX

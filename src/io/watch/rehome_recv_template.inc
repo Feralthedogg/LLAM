@@ -26,11 +26,17 @@
 
 llam_recv_watch_t **cursor = &source_locked->recv_watches;
 
-while (*cursor != NULL) {
-    llam_recv_watch_t *watch = *cursor;
-    unsigned desired_target_index;
+    while (*cursor != NULL) {
+        llam_recv_watch_t *watch = *cursor;
+        unsigned desired_target_index;
 
-    if (only_marked && watch->migrate_target_node_index == UINT_MAX) {
+        if (!watch->accepts_waiters) {
+            watch->migrate_target_node_index = UINT_MAX;
+            watch->live_transferred = false;
+            cursor = &watch->next;
+            continue;
+        }
+        if (only_marked && watch->migrate_target_node_index == UINT_MAX) {
         cursor = &watch->next;
         continue;
     }

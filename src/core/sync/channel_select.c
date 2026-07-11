@@ -37,6 +37,74 @@ static unsigned llam_channel_select_completed_state(llam_channel_select_state_t 
     return completed;
 }
 
+/** @brief Claim the one select completion and report whether parking was armed. */
+static bool llam_channel_select_begin_completion(llam_channel_select_state_t *state,
+                                                 bool *armed_out) {
+    unsigned expected;
+
+    if (state == NULL || armed_out == NULL) {
+        return false;
+    }
+    expected = atomic_load_explicit(&state->completed, memory_order_acquire);
+    for (;;) {
+        bool armed;
+
+        if (expected != LLAM_SELECT_PENDING && expected != LLAM_SELECT_ARMED) {
+            return false;
+        }
+        armed = expected == LLAM_SELECT_ARMED;
+        if (atomic_compare_exchange_weak_explicit(&state->completed,
+                                                  &expected,
+                                                  LLAM_SELECT_COMPLETING,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            *armed_out = armed;
+            return true;
+        }
+    }
+}
+
+/**
+ * @brief Atomically commit a select waiter to parking or observe completion.
+ *
+ * Completion and parking share the single @c completed atomic. If this CAS
+ * wins, every later completer observes ARMED and must queue a wake. If it
+ * loses, the completer already owns the state and the waiter consumes its
+ * final INLINE/QUEUED result without parking on a stale PENDING observation.
+ */
+unsigned llam_channel_select_arm_wait(llam_channel_select_state_t *state) {
+    unsigned expected = LLAM_SELECT_PENDING;
+
+    if (state == NULL) {
+        return LLAM_SELECT_COMPLETED_INLINE;
+    }
+    if (atomic_compare_exchange_strong_explicit(&state->completed,
+                                                &expected,
+                                                LLAM_SELECT_ARMED,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire)) {
+        atomic_store_explicit(&state->wake_armed, 1U, memory_order_release);
+        return LLAM_SELECT_ARMED;
+    }
+    return llam_channel_select_completed_state(state);
+}
+
+/** @brief Keep stack-backed select state alive until timer callbacks drain. */
+static void llam_channel_select_wait_timer_refs(llam_channel_select_state_t *state) {
+    if (state == NULL) {
+        return;
+    }
+    while (atomic_load_explicit(&state->timer_refs, memory_order_acquire) != 0U) {
+        if (g_llam_tls_task != NULL) {
+            llam_yield();
+        } else {
+            struct timespec interval = {.tv_sec = 0, .tv_nsec = 100000L};
+
+            (void)nanosleep(&interval, NULL);
+        }
+    }
+}
+
 static void llam_channel_select_sort_channels(llam_channel_t **channels, size_t count) {
     size_t i;
 
@@ -276,28 +344,6 @@ static void llam_channel_select_enqueue_nodes_locked(llam_channel_select_state_t
     }
 }
 
-static void llam_channel_select_set_task_tracking(llam_task_t *task,
-                                                  llam_channel_select_state_t *state,
-                                                  unsigned parked_shard,
-                                                  llam_wait_reason_t reason) {
-    /*
-     * Select waits are not I/O waits.  Clear any stale active I/O owner through
-     * the centralized exchange helper so dynamic rehome and completion threads
-     * cannot race on task->active_io_req.
-     */
-    llam_task_clear_wait_tracking(task);
-    atomic_store_explicit(&task->active_wait_node, NULL, memory_order_release);
-    atomic_store_explicit(&task->active_wait_queue, NULL, memory_order_release);
-    atomic_store_explicit(&task->active_wait_queue_lock, NULL, memory_order_release);
-    atomic_store_explicit(&task->active_select_state, state, memory_order_release);
-    atomic_store_explicit(&task->active_block_job, NULL, memory_order_release);
-    atomic_store_explicit(&task->join_target, NULL, memory_order_release);
-    task->parked_shard = parked_shard;
-    atomic_store_explicit(&task->wake_error_code, 0, memory_order_release);
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = reason;
-}
-
 static int llam_channel_select_finish(llam_channel_select_state_t *state, size_t *selected_index) {
     if (state->selected_index == SIZE_MAX) {
         errno = state->error_code != 0 ? state->error_code : ECANCELED;
@@ -315,23 +361,21 @@ static int llam_channel_select_finish(llam_channel_select_state_t *state, size_t
     return 0;
 }
 
-bool llam_channel_select_complete_node(llam_wait_node_t *node, void *value, int error_code) {
+llam_select_completion_result_t llam_channel_select_complete_node(llam_wait_node_t *node,
+                                                                  void *value,
+                                                                  int error_code) {
     llam_channel_select_state_t *state;
-    unsigned expected = LLAM_SELECT_PENDING;
     size_t selected;
+    bool armed;
     bool should_queue;
 
     if (node == NULL || node->select_state == NULL) {
-        return false;
+        return LLAM_SELECT_COMPLETION_LOST;
     }
 
     state = node->select_state;
-    if (!atomic_compare_exchange_strong_explicit(&state->completed,
-                                                 &expected,
-                                                 LLAM_SELECT_COMPLETING,
-                                                 memory_order_acq_rel,
-                                                 memory_order_acquire)) {
-        return false;
+    if (!llam_channel_select_begin_completion(state, &armed)) {
+        return LLAM_SELECT_COMPLETION_LOST;
     }
 
     selected = (size_t)node->scalar_value;
@@ -340,8 +384,7 @@ bool llam_channel_select_complete_node(llam_wait_node_t *node, void *value, int 
     state->error_code = error_code;
     node->value = value;
     node->error_code = error_code;
-    should_queue = atomic_load_explicit(&state->wake_armed, memory_order_acquire) != 0U &&
-                   node->task != NULL &&
+    should_queue = armed && node->task != NULL &&
                    node->task->state == LLAM_TASK_STATE_PARKED;
     if (should_queue) {
         atomic_store_explicit(&state->wake_queued, 1U, memory_order_release);
@@ -355,7 +398,8 @@ bool llam_channel_select_complete_node(llam_wait_node_t *node, void *value, int 
     atomic_store_explicit(&state->completed,
                           should_queue ? LLAM_SELECT_COMPLETED_QUEUED : LLAM_SELECT_COMPLETED_INLINE,
                           memory_order_release);
-    return true;
+    return should_queue ? LLAM_SELECT_COMPLETION_QUEUED
+                        : LLAM_SELECT_COMPLETION_INLINE;
 }
 
 bool llam_channel_select_node_should_wake(llam_wait_node_t *node) {
@@ -372,22 +416,20 @@ bool llam_channel_select_node_should_wake(llam_wait_node_t *node) {
            node->task->state == LLAM_TASK_STATE_PARKED;
 }
 
-bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam_wait_reason_t reason) {
-    llam_channel_select_state_t *state;
-    unsigned expected = LLAM_SELECT_PENDING;
+static llam_select_completion_result_t llam_channel_select_abort_state(
+    llam_task_t *task,
+    llam_channel_select_state_t *state,
+    int error_code,
+    llam_wait_reason_t reason,
+    bool reinject) {
+    bool armed;
     bool should_queue;
 
-    if (task == NULL) { return false; }
-    state = atomic_load_explicit(&task->active_select_state, memory_order_acquire);
-    if (state == NULL) {
-        return false;
+    if (task == NULL || state == NULL) {
+        return LLAM_SELECT_COMPLETION_LOST;
     }
-    if (!atomic_compare_exchange_strong_explicit(&state->completed,
-                                                 &expected,
-                                                 LLAM_SELECT_COMPLETING,
-                                                 memory_order_acq_rel,
-                                                 memory_order_acquire)) {
-        return false;
+    if (!llam_channel_select_begin_completion(state, &armed)) {
+        return LLAM_SELECT_COMPLETION_LOST;
     }
 
     state->selected_index = SIZE_MAX;
@@ -395,15 +437,14 @@ bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam
     state->error_code = error_code;
     llam_channel_select_cleanup_nodes(state);
     atomic_store_explicit(&task->wake_error_code, error_code, memory_order_release);
-    should_queue = atomic_load_explicit(&state->wake_armed, memory_order_acquire) != 0U &&
-                   task->state == LLAM_TASK_STATE_PARKED;
+    should_queue = armed && task->state == LLAM_TASK_STATE_PARKED;
     if (should_queue) {
         atomic_store_explicit(&state->wake_queued, 1U, memory_order_release);
     }
     atomic_store_explicit(&state->completed,
                           should_queue ? LLAM_SELECT_COMPLETED_QUEUED : LLAM_SELECT_COMPLETED_INLINE,
                           memory_order_release);
-    if (should_queue) {
+    if (should_queue && reinject) {
         llam_runtime_t *rt = task->owner_runtime;
 
         if (rt != NULL) {
@@ -415,7 +456,52 @@ bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam
                                       reason);
         }
     }
-    return true;
+    return should_queue ? LLAM_SELECT_COMPLETION_QUEUED
+                        : LLAM_SELECT_COMPLETION_INLINE;
+}
+
+bool llam_channel_select_abort_task_wait_generation(llam_task_t *task,
+                                                    llam_channel_select_state_t *expected_state,
+                                                    uint64_t wait_generation,
+                                                    int error_code,
+                                                    llam_wait_reason_t reason) {
+    if (task == NULL || expected_state == NULL || wait_generation == 0U ||
+        atomic_load_explicit(&task->wait_generation, memory_order_acquire) !=
+            wait_generation ||
+        atomic_load_explicit(&task->active_select_state, memory_order_acquire) !=
+            expected_state ||
+        atomic_load_explicit(&task->wait_generation, memory_order_acquire) !=
+            wait_generation) {
+        return false;
+    }
+    return llam_channel_select_abort_state(task,
+                                           expected_state,
+                                           error_code,
+                                           reason,
+                                           true) != LLAM_SELECT_COMPLETION_LOST;
+}
+
+llam_select_completion_result_t llam_channel_select_abort_task_wait_claimed(
+    llam_task_t *task,
+    llam_channel_select_state_t *expected_state,
+    uint64_t wait_generation,
+    int error_code) {
+    if (task == NULL || expected_state == NULL || wait_generation == 0U ||
+        atomic_load_explicit(&task->wait_generation, memory_order_acquire) !=
+            wait_generation ||
+        atomic_load_explicit(&task->active_select_state, memory_order_acquire) !=
+            expected_state ||
+        atomic_load_explicit(&task->state, memory_order_acquire) !=
+            LLAM_TASK_STATE_PARKED ||
+        atomic_load_explicit(&task->wait_generation, memory_order_acquire) !=
+            wait_generation) {
+        return LLAM_SELECT_COMPLETION_LOST;
+    }
+    return llam_channel_select_abort_state(task,
+                                           expected_state,
+                                           error_code,
+                                           LLAM_WAIT_CANCEL,
+                                           false);
 }
 
 int llam_channel_select(llam_select_op_t *ops,
@@ -435,6 +521,7 @@ int llam_channel_select(llam_select_op_t *ops,
     size_t start = 0U;
     size_t i;
     bool heap_arrays;
+    bool wait_tracking_published;
     int rc;
 
     if (ops == NULL || op_count == 0U || op_count > (size_t)LLAM_CHANNEL_SELECT_MAX_OPS || selected_index == NULL) {
@@ -530,6 +617,7 @@ int llam_channel_select(llam_select_op_t *ops,
             }
         }
 select_not_ready:
+        wait_tracking_published = false;
         if (deadline_ns == 0U || llam_deadline_passed(deadline_ns)) {
             errno = ETIMEDOUT;
             return -1;
@@ -564,6 +652,7 @@ select_not_ready:
         atomic_init(&state.completed, LLAM_SELECT_PENDING);
         atomic_init(&state.wake_armed, 0U);
         atomic_init(&state.wake_queued, 0U);
+        atomic_init(&state.timer_refs, 0U);
 
         if (llam_channel_select_collect_channels(ops, op_count, channels, op_channels, &channel_count) != 0) {
             if (heap_arrays) {
@@ -602,10 +691,32 @@ select_not_ready:
         llam_channel_select_unlock_channels(channels, channel_count);
 
         llam_task_ensure_listed(task);
-        llam_channel_select_set_task_tracking(task,
-                                             &state,
-                                             shard->id,
-                                             ops[0].kind == LLAM_SELECT_OP_SEND ? LLAM_WAIT_CHANNEL_SEND : LLAM_WAIT_CHANNEL_RECV);
+        if (!llam_task_set_select_tracking(task,
+                                           &state,
+                                           shard->id,
+                                           ops[0].kind == LLAM_SELECT_OP_SEND
+                                               ? LLAM_WAIT_CHANNEL_SEND
+                                               : LLAM_WAIT_CHANNEL_RECV)) {
+            int saved_errno = errno;
+
+            if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
+                goto select_ready;
+            }
+            llam_channel_select_cleanup_nodes(&state);
+            if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
+                goto select_ready;
+            }
+            llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_channels(channels, channel_count);
+            if (heap_arrays) {
+                free(nodes);
+                free(channels);
+                free(op_channels);
+            }
+            errno = saved_errno;
+            return -1;
+        }
+        wait_tracking_published = true;
         if (deadline_ns != UINT64_MAX && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
             if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
                 goto select_ready;
@@ -622,7 +733,7 @@ select_not_ready:
             }
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
-            llam_task_clear_wait_tracking(task);
+            llam_task_clear_wait_tracking_or_abort(task);
             llam_channel_select_release_nodes(shard, task, nodes, op_count);
             llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
@@ -637,6 +748,7 @@ select_not_ready:
                 goto select_ready;
             }
             llam_disarm_task_wait_deadline(task);
+            llam_channel_select_wait_timer_refs(&state);
             llam_channel_select_cleanup_nodes(&state);
             if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
                 /*
@@ -648,7 +760,7 @@ select_not_ready:
             }
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
-            llam_task_clear_wait_tracking(task);
+            llam_task_clear_wait_tracking_or_abort(task);
             llam_channel_select_release_nodes(shard, task, nodes, op_count);
             llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
@@ -665,10 +777,9 @@ select_ready:
             unsigned completed = llam_channel_select_completed_state(&state);
 
             if (completed == LLAM_SELECT_PENDING) {
-                atomic_store_explicit(&state.wake_armed, 1U, memory_order_release);
-                completed = llam_channel_select_completed_state(&state);
+                completed = llam_channel_select_arm_wait(&state);
             }
-            if (completed == LLAM_SELECT_PENDING || completed == LLAM_SELECT_COMPLETED_QUEUED) {
+            if (completed == LLAM_SELECT_ARMED || completed == LLAM_SELECT_COMPLETED_QUEUED) {
                 llam_park_current_task(task->wait_reason, LLAM_TRACE_STATE);
             } else {
                 task->state = LLAM_TASK_STATE_RUNNING;
@@ -679,9 +790,12 @@ select_ready:
             // Select completion may happen before the waiter fully commits to
             // parking; remove any deadline not observed by the wake path.
             llam_disarm_task_wait_deadline(task);
+            llam_channel_select_wait_timer_refs(&state);
         }
         llam_cancel_token_unregister_task(task);
-        llam_task_clear_wait_tracking(task);
+        if (wait_tracking_published) {
+            llam_task_clear_wait_tracking_or_abort(task);
+        }
         llam_channel_select_cleanup_nodes(&state);
         rc = llam_channel_select_finish(&state, selected_index);
         if (state.selected_index != SIZE_MAX && state.selected_index < op_count) {

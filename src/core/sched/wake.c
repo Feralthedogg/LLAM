@@ -1019,6 +1019,18 @@ void llam_request_stop(llam_runtime_t *rt) {
     llam_wake_all_nodes(rt);
 }
 
+/** @brief Latch a fatal error for the controller to consume outside owner locks. */
+void llam_record_fatal_deferred(llam_runtime_t *rt, int err) {
+    int expected = 0;
+
+    if (rt == NULL || err == 0) {
+        return;
+    }
+
+    (void)atomic_compare_exchange_strong(&rt->fatal_errno, &expected, err);
+    atomic_store_explicit(&rt->deferred_fatal_pending, 1U, memory_order_release);
+}
+
 /**
  * @brief Record the first fatal runtime error and request shutdown.
  *
@@ -1028,7 +1040,7 @@ void llam_request_stop(llam_runtime_t *rt) {
 void llam_record_fatal(llam_runtime_t *rt, int err) {
     int expected = 0;
 
-    if (err == 0) {
+    if (rt == NULL || err == 0) {
         return;
     }
 

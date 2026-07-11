@@ -167,7 +167,6 @@ void llam_fiber_alignment_violation(uint64_t rsp) {
  */
 void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
     llam_runtime_t *rt;
-    int node_index;
 
     if (task == NULL || req == NULL) {
         return;
@@ -176,24 +175,54 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
     rt = llam_io_request_runtime(req);
     llam_cancel_token_unregister_task(task);
     llam_disarm_task_wait_deadline(task);
-    node_index = llam_io_req_node_index(req);
-    if (node_index >= 0 && rt != NULL && (unsigned)node_index < rt->active_nodes) {
-        llam_node_t *node = &rt->nodes[node_index];
-        unsigned mode = atomic_load(&req->wait_mode);
+    if (rt != NULL) {
+        for (;;) {
+            unsigned mode = atomic_load_explicit(&req->wait_mode,
+                                                 memory_order_acquire);
 
-        if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
-            bool removed;
+            if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+                llam_io_submit_detach_result_t result =
+                    llam_detach_submit_req_current(req, NULL);
 
-            pthread_mutex_lock(&node->submit_lock);
-            removed = llam_remove_node_submit_locked(node, req);
-            pthread_mutex_unlock(&node->submit_lock);
-            if (removed) {
-                (void)llam_node_complete_pending_ops(node, 1U);
+                if (result == LLAM_IO_SUBMIT_DETACH_OWNER_CHANGED) {
+                    continue;
+                }
+                break;
             }
-        } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
-                   mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
-                   mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
-            (void)llam_remove_watch_waiter_after_abort(node, req, mode, false);
+            if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
+                /* This cleanup API has no completion handoff result. */
+                llam_record_fatal_deferred(rt, EPROTO);
+                abort();
+            }
+            if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
+                mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
+                mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
+                int node_index = llam_io_req_node_index(req);
+
+                if (node_index >= 0 &&
+                    (unsigned)node_index < rt->active_nodes) {
+                    llam_node_t *node = &rt->nodes[(unsigned)node_index];
+
+                    if (!llam_remove_watch_waiter_after_abort(node,
+                                                              req,
+                                                              mode,
+                                                              false)) {
+                        unsigned attached_node_index = atomic_load_explicit(
+                            &req->attached_node_index,
+                            memory_order_acquire);
+
+                        if (atomic_load_explicit(&req->wait_mode,
+                                                 memory_order_acquire) != mode ||
+                            (attached_node_index < rt->active_nodes &&
+                             attached_node_index != (unsigned)node_index) ||
+                            (attached_node_index >= rt->active_nodes &&
+                             llam_io_req_node_index(req) != node_index)) {
+                            continue;
+                        }
+                    }
+                }
+            }
+            break;
         }
     }
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
@@ -206,7 +235,7 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
     req->deadline_ns = 0U;
     task->state = LLAM_TASK_STATE_RUNNING;
     task->wait_reason = LLAM_WAIT_NONE;
-    llam_task_clear_wait_tracking(task);
+    llam_task_clear_wait_tracking_or_abort(task);
 }
 
 /**
@@ -220,30 +249,61 @@ void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req) {
 static bool llam_abort_inflight_io_setup(llam_io_req_t *req, llam_io_abort_reason_t reason) {
     llam_runtime_t *rt;
     int node_index;
-    llam_node_t *node;
 
-    if (req == NULL ||
-        atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_INFLIGHT) {
+    if (req == NULL) {
         return false;
     }
-    node_index = llam_io_req_node_index(req);
     rt = llam_io_request_runtime(req);
-    if (node_index < 0 || rt == NULL || (unsigned)node_index >= rt->active_nodes) {
+    if (rt == NULL) {
         return false;
     }
-    node = &rt->nodes[node_index];
-    atomic_store_explicit(&req->abort_reason, (unsigned)reason, memory_order_release);
-    if (atomic_exchange_explicit(&req->cancel_queued, 1U, memory_order_acq_rel) == 0U &&
-        llam_node_queue_control(node, LLAM_IO_CONTROL_REQ_CANCEL, req) != 0) {
-        /*
-         * The request is already backend-owned.  Returning false here would make
-         * setup cleanup release memory that the kernel/backend may still touch.
-         * Keep the task parked; a later abort attempt or the natural completion
-         * is the only safe owner transition after control allocation failure.
-         */
-        atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
+    for (;;) {
+        unsigned attached_node_index;
+        llam_node_t *node;
+
+        if (atomic_load_explicit(&req->wait_mode,
+                                 memory_order_acquire) !=
+            LLAM_IO_WAIT_MODE_INFLIGHT) {
+            return false;
+        }
+        node_index = llam_io_req_node_index(req);
+        if (node_index < 0 || (unsigned)node_index >= rt->active_nodes) {
+            return false;
+        }
+        attached_node_index = atomic_load_explicit(&req->attached_node_index,
+                                                   memory_order_acquire);
+        if (attached_node_index < rt->active_nodes &&
+            attached_node_index != (unsigned)node_index) {
+            continue;
+        }
+        node = &rt->nodes[(unsigned)node_index];
+        atomic_store_explicit(&req->abort_reason,
+                              (unsigned)reason,
+                              memory_order_release);
+        if (atomic_load_explicit(&req->wait_mode,
+                                 memory_order_acquire) !=
+                LLAM_IO_WAIT_MODE_INFLIGHT ||
+            atomic_load_explicit(&req->attached_node_index,
+                                 memory_order_acquire) !=
+                attached_node_index) {
+            continue;
+        }
+        if (atomic_exchange_explicit(&req->cancel_queued,
+                                     1U,
+                                     memory_order_acq_rel) == 0U &&
+            llam_node_queue_control(node,
+                                    LLAM_IO_CONTROL_REQ_CANCEL,
+                                    req) != 0) {
+            /*
+             * The request is already backend-owned. Returning false here would
+             * let setup cleanup release storage still used by the backend.
+             */
+            atomic_store_explicit(&req->cancel_queued,
+                                  0U,
+                                  memory_order_release);
+        }
+        return true;
     }
-    return true;
 }
 
 /**
@@ -263,10 +323,6 @@ static bool llam_abort_published_io_setup(llam_io_req_t *req,
                                           llam_io_abort_reason_t reason,
                                           bool *wait_for_completion) {
     llam_runtime_t *rt;
-    int node_index;
-    llam_node_t *node;
-    unsigned mode;
-    bool removed = false;
 
     if (wait_for_completion != NULL) {
         *wait_for_completion = false;
@@ -275,70 +331,90 @@ static bool llam_abort_published_io_setup(llam_io_req_t *req,
         return false;
     }
 
-    mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
-    if (mode == LLAM_IO_WAIT_MODE_NONE) {
-        if (wait_for_completion != NULL) {
-            *wait_for_completion = true;
-        }
-        return true;
-    }
-
-    node_index = llam_io_req_node_index(req);
     rt = llam_io_request_runtime(req);
-    if (node_index < 0 || rt == NULL || (unsigned)node_index >= rt->active_nodes) {
+    if (rt == NULL) {
         return false;
     }
-    node = &rt->nodes[node_index];
+    for (;;) {
+        unsigned mode = atomic_load_explicit(&req->wait_mode,
+                                             memory_order_acquire);
 
-    if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
-        if (!llam_abort_inflight_io_setup(req, reason)) {
+        if (mode == LLAM_IO_WAIT_MODE_NONE) {
+            if (wait_for_completion != NULL) {
+                *wait_for_completion = true;
+            }
+            return true;
+        }
+        if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
+            if (!llam_abort_inflight_io_setup(req, reason)) {
+                continue;
+            }
+            if (wait_for_completion != NULL) {
+                *wait_for_completion = true;
+            }
+            return true;
+        }
+        if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+            llam_io_submit_detach_result_t result =
+                llam_detach_submit_req_current(req, NULL);
+
+            if (result == LLAM_IO_SUBMIT_DETACH_OWNER_CHANGED) {
+                continue;
+            }
+            if (result == LLAM_IO_SUBMIT_DETACH_REMOVED) {
+                llam_io_set_abort_result(req, reason);
+                return true;
+            }
+            /* All submit locks proved that no backend queue owns this setup. */
             return false;
         }
-        if (wait_for_completion != NULL) {
-            *wait_for_completion = true;
-        }
-        return true;
-    }
+        if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
+            mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
+            mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
+            int node_index = llam_io_req_node_index(req);
 
-    if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
-        pthread_mutex_lock(&node->submit_lock);
-        removed = llam_remove_node_submit_locked(node, req);
-        if (removed) {
-            atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE, memory_order_release);
-            atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
-        }
-        pthread_mutex_unlock(&node->submit_lock);
-        if (removed) {
-            (void)llam_node_complete_pending_ops(node, 1U);
-        }
-    } else if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH ||
-               mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH ||
-               mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
-        removed = llam_remove_watch_waiter_after_abort(node, req, mode, true);
-    }
+            if (node_index < 0 || (unsigned)node_index >= rt->active_nodes) {
+                return false;
+            }
+            if (llam_remove_watch_waiter_after_abort(
+                    &rt->nodes[(unsigned)node_index],
+                    req,
+                    mode,
+                    true)) {
+                llam_io_set_abort_result(req, reason);
+                return true;
+            }
+            {
+                unsigned attached_node_index = atomic_load_explicit(
+                    &req->attached_node_index,
+                    memory_order_acquire);
 
-    if (removed) {
-        llam_io_set_abort_result(req, reason);
-        return true;
-    }
-    mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
-    if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
-        if (!llam_abort_inflight_io_setup(req, reason)) {
-            return false;
+                if (atomic_load_explicit(&req->wait_mode,
+                                         memory_order_acquire) != mode ||
+                    (attached_node_index < rt->active_nodes &&
+                     attached_node_index != (unsigned)node_index) ||
+                    (attached_node_index >= rt->active_nodes &&
+                     llam_io_req_node_index(req) != node_index)) {
+                    continue;
+                }
+            }
+            /* A completion detached this waiter and owns the final wake. */
+            if (wait_for_completion != NULL) {
+                *wait_for_completion = true;
+            }
+            return true;
         }
-        if (wait_for_completion != NULL) {
-            *wait_for_completion = true;
-        }
-        return true;
+        return false;
     }
-    if (mode == LLAM_IO_WAIT_MODE_NONE) {
-        if (wait_for_completion != NULL) {
-            *wait_for_completion = true;
-        }
-        return true;
-    }
-    return false;
 }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+bool llam_io_test_abort_published_io_setup(llam_io_req_t *req,
+                                           llam_io_abort_reason_t reason,
+                                           bool *wait_for_completion) {
+    return llam_abort_published_io_setup(req, reason, wait_for_completion);
+}
+#endif
 
 /**
  * @brief Prepare the current task before publishing it to a backend wait owner.
@@ -363,20 +439,29 @@ static int llam_prepare_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wait_mod
         return -1;
     }
 
-    llam_task_ensure_listed(task);
-    llam_task_set_io_tracking(task, req, shard->id);
     req->task = task;
     req->result = -1;
     req->error_code = 0;
-    req->owner_shard = shard->id;
+    atomic_store_explicit(&req->owner_shard,
+                          shard->id,
+                          memory_order_release);
     req->submit_ts_ns = llam_now_ns();
     req->deadline_ns = deadline_ns;
     atomic_store(&req->wait_mode, wait_mode);
     atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->cancel_queued, 0U);
 
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_IO;
+    llam_task_ensure_listed(task);
+    if (!llam_task_set_io_tracking(task, req, shard->id)) {
+        int saved_errno = errno;
+
+        atomic_store_explicit(&req->wait_mode,
+                              LLAM_IO_WAIT_MODE_NONE,
+                              memory_order_release);
+        req->task = NULL;
+        errno = saved_errno;
+        return -1;
+    }
     shard->metrics.io_submits += 1U;
     shard->metrics.parks += 1U;
     llam_trace_shard(shard, task, LLAM_TRACE_IO_SUBMIT, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_IO);
@@ -423,17 +508,26 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
                               LLAM_WAIT_IO) ||
                          wait_mode == LLAM_IO_WAIT_MODE_NONE));
     if (!already_prepared) {
-        llam_task_ensure_listed(task);
-        llam_task_set_io_tracking(task, req, shard->id);
         req->task = task;
         req->result = -1;
         req->error_code = 0;
-        req->owner_shard = shard->id;
+        atomic_store_explicit(&req->owner_shard,
+                              shard->id,
+                              memory_order_release);
         req->submit_ts_ns = llam_now_ns();
         req->deadline_ns = has_deadline ? deadline_ns : 0U;
 
-        task->state = LLAM_TASK_STATE_PARKED;
-        task->wait_reason = LLAM_WAIT_IO;
+        llam_task_ensure_listed(task);
+        if (!llam_task_set_io_tracking(task, req, shard->id)) {
+            int saved_errno = errno;
+
+            atomic_store_explicit(&req->wait_mode,
+                                  LLAM_IO_WAIT_MODE_NONE,
+                                  memory_order_release);
+            req->task = NULL;
+            errno = saved_errno;
+            return -1;
+        }
         shard->metrics.io_submits += 1U;
         shard->metrics.parks += 1U;
         llam_trace_shard(shard, task, LLAM_TRACE_IO_SUBMIT, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_PARKED, LLAM_WAIT_IO);
@@ -498,7 +592,7 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
         llam_disarm_task_wait_deadline(task);
     }
     llam_cancel_token_unregister_task(task);
-    llam_task_clear_wait_tracking(task);
+    llam_task_clear_wait_tracking_or_abort(task);
     shard->metrics.io_completions += 1U;
     errno = req->error_code;
     return req->error_code == 0 ? 0 : -1;
@@ -546,14 +640,18 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
         errno = EAGAIN;
         return -1;
     }
-    req->attached_node_index = node->index;
+    atomic_store_explicit(&req->attached_node_index,
+                          node->index,
+                          memory_order_release);
 
+    llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&node->watch_lock);
     watch = llam_get_or_create_poll_watch_locked(node, req->fd, req->poll_events);
     if (watch == NULL) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return llam_fail_io_setup_req(req, saved_errno != 0 ? saved_errno : ENOMEM);
     }
     if (watch->migrate_target_node_index != UINT_MAX && watch->migrate_target_node_index != node->index) {
@@ -571,16 +669,8 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
             watch->deactivate_queued = false;
         }
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return 0;
-    }
-
-    if (watch->deactivate_queued) {
-        if (!llam_drop_node_control_locked(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch)) {
-            pthread_mutex_unlock(&node->watch_lock);
-            errno = EAGAIN;
-            return -1;
-        }
-        watch->deactivate_queued = false;
     }
 
     /*
@@ -593,6 +683,7 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         if (immediate_rc > 0) {
             req->result = 1;
             req->error_code = 0;
@@ -606,14 +697,6 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
         return -1;
     }
 
-    if (!watch->active && !watch->activating) {
-        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch) != 0) {
-            pthread_mutex_unlock(&node->watch_lock);
-            return llam_fail_io_setup_req(req, ENOMEM);
-        }
-        watch->activating = true;
-        kick = true;
-    }
     req->poll_watch = watch;
     req->accept_watch = NULL;
     req->recv_watch = NULL;
@@ -621,10 +704,33 @@ int llam_issue_multishot_poll(llam_io_req_t *req) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return llam_fail_io_setup_req(req, saved_errno);
+    }
+    if (watch->deactivate_queued) {
+        if (!llam_drop_node_control_locked(node, LLAM_IO_CONTROL_POLL_DEACTIVATE, watch)) {
+            pthread_mutex_unlock(&node->watch_lock);
+            llam_fd_watch_lifecycle_unlock();
+            llam_cleanup_io_wait_setup(g_llam_tls_task, req);
+            return llam_fail_io_setup_req(req, EAGAIN);
+        }
+        watch->deactivate_queued = false;
+    }
+    if (!watch->active && !watch->activating) {
+        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch) != 0) {
+            int saved_errno = errno != 0 ? errno : ENOMEM;
+
+            pthread_mutex_unlock(&node->watch_lock);
+            llam_fd_watch_lifecycle_unlock();
+            llam_cleanup_io_wait_setup(g_llam_tls_task, req);
+            return llam_fail_io_setup_req(req, saved_errno);
+        }
+        watch->activating = true;
+        kick = true;
     }
     llam_poll_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
+    llam_fd_watch_lifecycle_unlock();
     if (kick) {
         llam_kick_node(node);
     }
@@ -664,12 +770,16 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
         errno = EAGAIN;
         return -1;
     }
-    req->attached_node_index = node->index;
+    atomic_store_explicit(&req->attached_node_index,
+                          node->index,
+                          memory_order_release);
 
+    llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&node->watch_lock);
     watch = llam_get_or_create_accept_watch_locked(node, req->fd);
     if (watch == NULL) {
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return llam_fail_io_setup_req(req, ENOMEM);
     }
     if (watch->migrate_target_node_index != UINT_MAX && watch->migrate_target_node_index != node->index) {
@@ -682,17 +792,18 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
         req->result = ready_fd;
         req->error_code = 0;
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return 0;
     }
 
-    if (!watch->active && !watch->activating) {
-        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_ACCEPT_ACTIVATE, watch) != 0) {
-            pthread_mutex_unlock(&node->watch_lock);
-            return llam_fail_io_setup_req(req, ENOMEM);
-        }
-        watch->activating = true;
-        kick = true;
-    }
+    /*
+     * A terminal target CQE can arrive before its already-submitted cancel CQE.
+     * Do not let a new accept activation reuse the watch state while that older
+     * control can still clear active/pending ownership for a different backend
+     * generation.  A queued (not yet submitted) cancel is safe to withdraw only
+     * while the original target is still active; otherwise use the one-shot
+     * fallback until the control CQE retires it.
+     */
     req->poll_watch = NULL;
     req->accept_watch = watch;
     req->recv_watch = NULL;
@@ -700,10 +811,35 @@ int llam_issue_multishot_accept(llam_io_req_t *req) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return llam_fail_io_setup_req(req, saved_errno);
+    }
+    if (watch->deactivate_queued) {
+        if (!watch->active ||
+            !llam_drop_node_control_locked(node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch)) {
+            pthread_mutex_unlock(&node->watch_lock);
+            llam_fd_watch_lifecycle_unlock();
+            llam_cleanup_io_wait_setup(g_llam_tls_task, req);
+            return llam_fail_io_setup_req(req, EAGAIN);
+        }
+        watch->deactivate_queued = false;
+    }
+
+    if (!watch->active && !watch->activating) {
+        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_ACCEPT_ACTIVATE, watch) != 0) {
+            int saved_errno = errno != 0 ? errno : ENOMEM;
+
+            pthread_mutex_unlock(&node->watch_lock);
+            llam_fd_watch_lifecycle_unlock();
+            llam_cleanup_io_wait_setup(g_llam_tls_task, req);
+            return llam_fail_io_setup_req(req, saved_errno);
+        }
+        watch->activating = true;
+        kick = true;
     }
     llam_accept_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
+    llam_fd_watch_lifecycle_unlock();
     if (kick) {
         llam_kick_node(node);
     }
@@ -751,14 +887,18 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
         errno = EAGAIN;
         return -1;
     }
-    req->attached_node_index = node->index;
+    atomic_store_explicit(&req->attached_node_index,
+                          node->index,
+                          memory_order_release);
 
+    llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&node->watch_lock);
     watch = llam_get_or_create_recv_watch_locked(node, req->fd);
     if (watch == NULL) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return llam_fail_io_setup_req(req, saved_errno != 0 ? saved_errno : ENOMEM);
     }
     if (watch->migrate_target_node_index != UINT_MAX && watch->migrate_target_node_index != node->index) {
@@ -809,26 +949,10 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
         req->provided_bid = ready_has_buffer ? ready_bid : 0U;
         llam_maybe_destroy_recv_watch_locked(node, watch);
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return 0;
     }
 
-    if (watch->deactivate_queued) {
-        if (!watch->active || !llam_drop_node_control_locked(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch)) {
-            pthread_mutex_unlock(&node->watch_lock);
-            errno = EAGAIN;
-            return -1;
-        }
-        watch->deactivate_queued = false;
-    }
-
-    if (!watch->active && !watch->activating) {
-        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_RECV_ACTIVATE, watch) != 0) {
-            pthread_mutex_unlock(&node->watch_lock);
-            return llam_fail_io_setup_req(req, ENOMEM);
-        }
-        watch->activating = true;
-        kick = true;
-    }
     req->poll_watch = NULL;
     req->accept_watch = NULL;
     req->recv_watch = watch;
@@ -836,10 +960,34 @@ int llam_issue_multishot_recv(llam_io_req_t *req) {
         int saved_errno = errno;
 
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
         return llam_fail_io_setup_req(req, saved_errno);
+    }
+    if (watch->deactivate_queued) {
+        if (!watch->active || !llam_drop_node_control_locked(node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch)) {
+            pthread_mutex_unlock(&node->watch_lock);
+            llam_fd_watch_lifecycle_unlock();
+            llam_cleanup_io_wait_setup(g_llam_tls_task, req);
+            return llam_fail_io_setup_req(req, EAGAIN);
+        }
+        watch->deactivate_queued = false;
+    }
+
+    if (!watch->active && !watch->activating) {
+        if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_RECV_ACTIVATE, watch) != 0) {
+            int saved_errno = errno != 0 ? errno : ENOMEM;
+
+            pthread_mutex_unlock(&node->watch_lock);
+            llam_fd_watch_lifecycle_unlock();
+            llam_cleanup_io_wait_setup(g_llam_tls_task, req);
+            return llam_fail_io_setup_req(req, saved_errno);
+        }
+        watch->activating = true;
+        kick = true;
     }
     llam_recv_watch_enqueue_waiter(watch, req);
     pthread_mutex_unlock(&node->watch_lock);
+    llam_fd_watch_lifecycle_unlock();
     if (kick) {
         llam_kick_node(node);
     }
@@ -897,8 +1045,12 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     req->task = task;
     req->result = -1;
     req->error_code = 0;
-    req->owner_shard = shard->id;
-    req->attached_node_index = node->index;
+    atomic_store_explicit(&req->owner_shard,
+                          shard->id,
+                          memory_order_release);
+    atomic_store_explicit(&req->attached_node_index,
+                          node->index,
+                          memory_order_release);
     req->submit_ts_ns = llam_now_ns();
     atomic_store(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->cancel_queued, 0U);

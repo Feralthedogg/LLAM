@@ -87,6 +87,12 @@ bool llam_io_rehome_watch_state_filtered(llam_node_t *source, llam_node_t *targe
                 llam_poll_watch_t *watch = *cursor;
                 unsigned desired_target_index;
 
+                if (!watch->accepts_waiters) {
+                    watch->migrate_target_node_index = UINT_MAX;
+                    watch->live_transferred = false;
+                    cursor = &watch->next;
+                    continue;
+                }
                 if (only_marked && watch->migrate_target_node_index == UINT_MAX) {
                     cursor = &watch->next;
                     continue;
@@ -276,6 +282,14 @@ bool llam_io_rehome_watch_state_filtered(llam_node_t *source, llam_node_t *targe
 #include "rehome_recv_template.inc"
         }
 
+        if (deferred_kind == LLAM_DEFER_POLL) {
+            llam_poll_watch_pin_locked(deferred_watch);
+        } else if (deferred_kind == LLAM_DEFER_ACCEPT) {
+            llam_accept_watch_pin_locked(deferred_watch);
+        } else if (deferred_kind == LLAM_DEFER_RECV) {
+            llam_recv_watch_pin_locked(deferred_watch);
+        }
+
         llam_io_unlock_rehome_pair(source, target);
 
         if (kick_source) {
@@ -312,6 +326,15 @@ bool llam_io_rehome_watch_state_filtered(llam_node_t *source, llam_node_t *targe
                 ok = false;
                 break;
             }
+            pthread_mutex_lock(&source->watch_lock);
+            if (deferred_kind == LLAM_DEFER_POLL) {
+                llam_poll_watch_unpin_locked(source, deferred_watch);
+            } else if (deferred_kind == LLAM_DEFER_ACCEPT) {
+                llam_accept_watch_unpin_locked(source, deferred_watch);
+            } else if (deferred_kind == LLAM_DEFER_RECV) {
+                llam_recv_watch_unpin_locked(source, deferred_watch);
+            }
+            pthread_mutex_unlock(&source->watch_lock);
             if (!ok) {
                 return false;
             }

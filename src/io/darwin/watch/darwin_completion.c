@@ -79,7 +79,8 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, bool d
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
-        completion_owner = req->owner_shard;
+        completion_owner = atomic_load_explicit(&req->owner_shard,
+                                                memory_order_acquire);
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);

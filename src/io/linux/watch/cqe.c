@@ -46,6 +46,70 @@ static bool llam_queue_deactivate_control_locked(llam_node_t *node,
     return false;
 }
 
+/** Detach every waiter from an accept/recv watch while watch_lock is held. */
+static llam_io_req_t *llam_take_watch_waiters_locked(llam_io_req_t **head,
+                                                     llam_io_req_t **tail) {
+    llam_io_req_t *waiters;
+
+    if (head == NULL || tail == NULL) {
+        return NULL;
+    }
+    waiters = *head;
+    *head = NULL;
+    *tail = NULL;
+    return waiters;
+}
+
+/** Normalize a failed watch rearm into a stable backend error. */
+static int llam_watch_rearm_error(void) {
+    int error = errno;
+
+    if (error <= 0) {
+        error = ENOMEM;
+    }
+    return -error;
+}
+
+/* A deferred migration callback must own storage after dropping watch_lock. */
+static bool llam_poll_watch_deferred_pin_locked(llam_node_t *node,
+                                                llam_poll_watch_t *watch) {
+    if (watch == NULL || watch->lifetime_refs == UINT_MAX) {
+        if (node != NULL) {
+            llam_record_fatal(node->runtime, EOVERFLOW);
+        }
+        errno = EOVERFLOW;
+        return false;
+    }
+    llam_poll_watch_pin_locked(watch);
+    return true;
+}
+
+static bool llam_accept_watch_deferred_pin_locked(llam_node_t *node,
+                                                  llam_accept_watch_t *watch) {
+    if (watch == NULL || watch->lifetime_refs == UINT_MAX) {
+        if (node != NULL) {
+            llam_record_fatal(node->runtime, EOVERFLOW);
+        }
+        errno = EOVERFLOW;
+        return false;
+    }
+    llam_accept_watch_pin_locked(watch);
+    return true;
+}
+
+static bool llam_recv_watch_deferred_pin_locked(llam_node_t *node,
+                                                llam_recv_watch_t *watch) {
+    if (watch == NULL || watch->lifetime_refs == UINT_MAX) {
+        if (node != NULL) {
+            llam_record_fatal(node->runtime, EOVERFLOW);
+        }
+        errno = EOVERFLOW;
+        return false;
+    }
+    llam_recv_watch_pin_locked(watch);
+    return true;
+}
+
 /**
  * @brief Dispatch one io_uring completion queue entry.
  *
@@ -72,10 +136,12 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
         }
         case LLAM_IO_UDATA_POLL_WATCH: {
             llam_poll_watch_t *watch = llam_io_udata_ptr(user_data);
+            llam_poll_watch_t *backend_watch = watch;
             llam_io_req_t *waiters = NULL;
             bool release_pending = false;
             bool queue_activate = false;
             bool kick_deactivate = false;
+            bool terminal = (cqe_flags & IORING_CQE_F_MORE) == 0U;
             unsigned live_target = UINT_MAX;
             int live_fd = -1;
             short live_events = 0;
@@ -86,35 +152,68 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             }
 
             pthread_mutex_lock(&node->watch_lock);
+            if (watch->retired) {
+                if (terminal && watch->active) {
+                    watch->active = false;
+                    release_pending = true;
+                }
+                if (terminal && watch->backend_refs != 0U) {
+                    llam_linux_poll_watch_backend_unpin_locked(node, watch);
+                }
+                pthread_mutex_unlock(&node->watch_lock);
+                if (release_pending) {
+                    (void)llam_node_complete_pending_ops(node, 1U);
+                }
+                break;
+            }
+            if (watch->destroy_pending || !watch->accepts_waiters) {
+                watch->activating = false;
+                if (terminal && watch->active) {
+                    watch->active = false;
+                    release_pending = true;
+                }
+                if (terminal && !watch->deactivate_queued && !watch->accepts_waiters) {
+                    llam_destroy_poll_watch_locked(node, watch);
+                }
+                if (terminal) {
+                    llam_linux_poll_watch_backend_unpin_locked(node, watch);
+                }
+                pthread_mutex_unlock(&node->watch_lock);
+                if (release_pending) {
+                    (void)llam_node_complete_pending_ops(node, 1U);
+                }
+                break;
+            }
             was_activating = watch->activating;
             watch->activating = false;
             if (res < 0) {
-                if (res == -ECANCELED && watch->wait_head != NULL) {
+                if (res == -ECANCELED && watch->wait_head != NULL && watch->accepts_waiters) {
                     // A cancel racing with new waiters re-arms the watch so
                     // waiters do not get stranded after a transient teardown.
                     watch->sticky_revents = 0;
-                    if (watch->active) {
+                    if (terminal && watch->active) {
                         watch->active = false;
                         release_pending = true;
                     }
-                    watch->deactivate_queued = false;
-                    if (was_activating) {
-                        watch->activating = true;
-                    } else if (llam_node_queue_control_locked(node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch) == 0) {
-                        watch->activating = true;
-                        queue_activate = true;
-                    } else {
-                        waiters = llam_poll_watch_take_waiters(watch);
-                        res = -ENOMEM;
+                    if (!watch->deactivate_queued) {
+                        if (was_activating) {
+                            watch->activating = true;
+                        } else if (llam_node_queue_control_locked(
+                                       node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch) == 0) {
+                            watch->activating = true;
+                            queue_activate = true;
+                        } else {
+                            waiters = llam_poll_watch_take_waiters(watch);
+                            res = -ENOMEM;
+                        }
                     }
                 } else {
                     waiters = llam_poll_watch_take_waiters(watch);
                     watch->sticky_revents = 0;
-                    if (watch->active) {
+                    if (terminal && watch->active) {
                         watch->active = false;
                         release_pending = true;
                     }
-                    watch->deactivate_queued = false;
                     if (res == -EINVAL || res == -EOPNOTSUPP || res == -ENOSYS) {
                         // Kernel does not support this multishot path; future
                         // calls should use the fallback issue path.
@@ -122,7 +221,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     }
                 }
             } else {
-                if ((cqe_flags & IORING_CQE_F_MORE) == 0U && watch->active) {
+                if (terminal && watch->active) {
                     watch->active = false;
                     release_pending = true;
                 }
@@ -191,14 +290,23 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 llam_io_complete_req(node, waiters, res, cqe_flags, false);
                 waiters = next;
             }
+            if (terminal) {
+                pthread_mutex_lock(&node->watch_lock);
+                llam_linux_poll_watch_backend_unpin_locked(node, backend_watch);
+                pthread_mutex_unlock(&node->watch_lock);
+            }
             break;
         }
         case LLAM_IO_UDATA_ACCEPT_WATCH: {
             llam_accept_watch_t *watch = llam_io_udata_ptr(user_data);
+            llam_accept_watch_t *backend_watch = watch;
             llam_io_req_t *waiter = NULL;
             llam_io_req_t *waiters = NULL;
             bool release_pending = false;
             bool kick_deactivate = false;
+            bool kick_reactivate = false;
+            bool terminal = (cqe_flags & IORING_CQE_F_MORE) == 0U;
+            int waiters_result = res;
             unsigned live_target = UINT_MAX;
             int live_fd = -1;
             bool live_consumed = false;
@@ -208,24 +316,75 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
             }
 
             pthread_mutex_lock(&node->watch_lock);
-            watch->activating = false;
-            if (res < 0) {
-                // Multishot accept failed: wake all waiters with the backend
-                // error and disable the feature for recoverable capability
-                // failures.
-                waiters = watch->wait_head;
-                watch->wait_head = NULL;
-                watch->wait_tail = NULL;
-                if (watch->active) {
+            if (watch->retired) {
+                if (terminal && watch->active) {
                     watch->active = false;
                     release_pending = true;
                 }
-                watch->deactivate_queued = false;
-                if (res == -EINVAL || res == -EOPNOTSUPP || res == -ENOSYS) {
-                    node->supports_multishot_accept = false;
+                if (terminal && watch->backend_refs != 0U) {
+                    llam_linux_accept_watch_backend_unpin_locked(node, watch);
+                }
+                pthread_mutex_unlock(&node->watch_lock);
+                if (release_pending) {
+                    (void)llam_node_complete_pending_ops(node, 1U);
+                }
+                if (res >= 0) {
+                    close(res);
+                }
+                break;
+            }
+            if (watch->destroy_pending || !watch->accepts_waiters) {
+                watch->activating = false;
+                if (terminal && watch->active) {
+                    watch->active = false;
+                    release_pending = true;
+                }
+                if (terminal && !watch->deactivate_queued && !watch->accepts_waiters) {
+                    llam_destroy_accept_watch_locked(node, watch);
+                }
+                if (terminal) {
+                    llam_linux_accept_watch_backend_unpin_locked(node, watch);
+                }
+                pthread_mutex_unlock(&node->watch_lock);
+                if (release_pending) {
+                    (void)llam_node_complete_pending_ops(node, 1U);
+                }
+                if (res >= 0) {
+                    close(res);
+                }
+                break;
+            }
+            watch->activating = false;
+            if (res < 0) {
+                if (terminal && watch->active) {
+                    watch->active = false;
+                    release_pending = true;
+                }
+                if (terminal && res == -ECANCELED && watch->wait_head != NULL &&
+                    watch->accepts_waiters) {
+                    /*
+                     * A submitted deactivate may complete before or after the
+                     * target's terminal CQE.  Preserve waiters across that
+                     * bookkeeping CQE and rearm once no older deactivate owns
+                     * the shared state.
+                     */
+                    if (!watch->deactivate_queued &&
+                        !llam_arm_accept_watch_locked(node, watch, &kick_reactivate)) {
+                        waiters = llam_take_watch_waiters_locked(&watch->wait_head,
+                                                                 &watch->wait_tail);
+                        waiters_result = llam_watch_rearm_error();
+                    }
+                } else {
+                    // A real multishot accept failure is delivered to every
+                    // waiter; unlike a cancel CQE it cannot be rearmed safely.
+                    waiters = llam_take_watch_waiters_locked(&watch->wait_head,
+                                                             &watch->wait_tail);
+                    if (res == -EINVAL || res == -EOPNOTSUPP || res == -ENOSYS) {
+                        node->supports_multishot_accept = false;
+                    }
                 }
             } else {
-                if ((cqe_flags & IORING_CQE_F_MORE) == 0U && watch->active) {
+                if (terminal && watch->active) {
                     watch->active = false;
                     release_pending = true;
                 }
@@ -248,6 +407,13 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                                 node, LLAM_IO_CONTROL_ACCEPT_DEACTIVATE, watch, &watch->deactivate_queued);
                         }
                     }
+                }
+                if (terminal && watch->wait_head != NULL && !watch->deactivate_queued &&
+                    !llam_arm_accept_watch_locked(node, watch, &kick_reactivate)) {
+                    /* One successful accept belongs to exactly one waiter. */
+                    waiters = llam_take_watch_waiters_locked(&watch->wait_head,
+                                                             &watch->wait_tail);
+                    waiters_result = llam_watch_rearm_error();
                 }
             }
             pthread_mutex_unlock(&node->watch_lock);
@@ -282,19 +448,31 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 llam_io_req_t *next = waiters->next;
 
                 waiters->next = NULL;
-                llam_io_complete_req(node, waiters, res, cqe_flags, false);
+                llam_io_complete_req(node, waiters, waiters_result, 0U, false);
                 waiters = next;
+            }
+            if (terminal) {
+                pthread_mutex_lock(&node->watch_lock);
+                llam_linux_accept_watch_backend_unpin_locked(node, backend_watch);
+                pthread_mutex_unlock(&node->watch_lock);
+            }
+            if (kick_reactivate) {
+                llam_kick_node(node);
             }
             break;
         }
         case LLAM_IO_UDATA_RECV_WATCH: {
             llam_recv_watch_t *watch = llam_io_udata_ptr(user_data);
+            llam_recv_watch_t *backend_watch = watch;
             llam_io_req_t *waiter = NULL;
             llam_io_req_t *waiters = NULL;
             bool release_pending = false;
             bool kick_deactivate = false;
+            bool kick_reactivate = false;
             bool queued_ready = false;
             bool has_buffer = false;
+            bool terminal = (cqe_flags & IORING_CQE_F_MORE) == 0U;
+            int waiters_result = res;
             unsigned short bid = 0U;
             unsigned live_target = UINT_MAX;
             unsigned live_node_index = UINT_MAX;
@@ -326,23 +504,70 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 // usable for the owned-buffer API, so treat it as backend error.
                 res = -EIO;
             }
+            waiters_result = res;
 
             pthread_mutex_lock(&node->watch_lock);
-            watch->activating = false;
-            if (res < 0) {
-                waiters = watch->wait_head;
-                watch->wait_head = NULL;
-                watch->wait_tail = NULL;
-                if (watch->active) {
+            if (watch->retired) {
+                if (terminal && watch->active) {
                     watch->active = false;
                     release_pending = true;
                 }
-                watch->deactivate_queued = false;
-                if (res == -EAGAIN || res == -EINVAL || res == -EOPNOTSUPP || res == -ENOSYS) {
-                    node->supports_multishot_recv = false;
+                if (terminal && watch->backend_refs != 0U) {
+                    llam_linux_recv_watch_backend_unpin_locked(node, watch);
+                }
+                pthread_mutex_unlock(&node->watch_lock);
+                if (release_pending) {
+                    (void)llam_node_complete_pending_ops(node, 1U);
+                }
+                if (has_buffer) {
+                    (void)llam_node_recycle_recv_buffer(node, bid);
+                }
+                break;
+            }
+            if (watch->destroy_pending || !watch->accepts_waiters) {
+                watch->activating = false;
+                if (terminal && watch->active) {
+                    watch->active = false;
+                    release_pending = true;
+                }
+                if (terminal && !watch->deactivate_queued && !watch->accepts_waiters) {
+                    llam_destroy_recv_watch_locked(node, watch);
+                }
+                if (terminal) {
+                    llam_linux_recv_watch_backend_unpin_locked(node, watch);
+                }
+                pthread_mutex_unlock(&node->watch_lock);
+                if (release_pending) {
+                    (void)llam_node_complete_pending_ops(node, 1U);
+                }
+                if (has_buffer) {
+                    (void)llam_node_recycle_recv_buffer(node, bid);
+                }
+                break;
+            }
+            watch->activating = false;
+            if (res < 0) {
+                if (terminal && watch->active) {
+                    watch->active = false;
+                    release_pending = true;
+                }
+                if (terminal && res == -ECANCELED && watch->wait_head != NULL &&
+                    watch->accepts_waiters) {
+                    if (!watch->deactivate_queued &&
+                        !llam_arm_recv_watch_locked(node, watch, &kick_reactivate)) {
+                        waiters = llam_take_watch_waiters_locked(&watch->wait_head,
+                                                                 &watch->wait_tail);
+                        waiters_result = llam_watch_rearm_error();
+                    }
+                } else {
+                    waiters = llam_take_watch_waiters_locked(&watch->wait_head,
+                                                             &watch->wait_tail);
+                    if (res == -EAGAIN || res == -EINVAL || res == -EOPNOTSUPP || res == -ENOSYS) {
+                        node->supports_multishot_recv = false;
+                    }
                 }
             } else {
-                if ((cqe_flags & IORING_CQE_F_MORE) == 0U && watch->active) {
+                if (terminal && watch->active) {
                     watch->active = false;
                     release_pending = true;
                 }
@@ -373,6 +598,13 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     // no waiter remains.
                     kick_deactivate = llam_queue_deactivate_control_locked(
                         node, LLAM_IO_CONTROL_RECV_DEACTIVATE, watch, &watch->deactivate_queued);
+                }
+                if (terminal && watch->wait_head != NULL && !watch->deactivate_queued &&
+                    !llam_arm_recv_watch_locked(node, watch, &kick_reactivate)) {
+                    /* A zero-byte datagram/EOF result is consumed only once. */
+                    waiters = llam_take_watch_waiters_locked(&watch->wait_head,
+                                                             &watch->wait_tail);
+                    waiters_result = llam_watch_rearm_error();
                 }
             }
             if (!kick_deactivate) {
@@ -434,8 +666,16 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 llam_io_req_t *next = waiters->next;
 
                 waiters->next = NULL;
-                llam_io_complete_req(node, waiters, res, cqe_flags, false);
+                llam_io_complete_req(node, waiters, waiters_result, 0U, false);
                 waiters = next;
+            }
+            if (terminal) {
+                pthread_mutex_lock(&node->watch_lock);
+                llam_linux_recv_watch_backend_unpin_locked(node, backend_watch);
+                pthread_mutex_unlock(&node->watch_lock);
+            }
+            if (kick_reactivate) {
+                llam_kick_node(node);
             }
             break;
         }
@@ -446,9 +686,13 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 unsigned poll_migrate_target = UINT_MAX;
                 unsigned accept_migrate_target = UINT_MAX;
                 unsigned recv_migrate_target = UINT_MAX;
+                llam_io_req_t *rearm_failed_waiters = NULL;
                 bool kick_target = false;
-                llam_io_req_t *retired_cancel_req = NULL;
-                bool free_retired_cancel_req = false;
+                bool kick_reactivate = false;
+                bool poll_migrate_pinned = false;
+                bool accept_migrate_pinned = false;
+                bool recv_migrate_pinned = false;
+                int rearm_failure = -ENOMEM;
 
                 pthread_mutex_lock(&node->watch_lock);
                 // Control completions finalize deactivate/cancel state and then
@@ -457,14 +701,25 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 case LLAM_IO_CONTROL_POLL_DEACTIVATE: {
                     llam_poll_watch_t *watch = op->target;
 
-                    if (watch != NULL) {
+                    if (watch != NULL && !watch->retired) {
                         watch->deactivate_queued = false;
                         if (watch->active) {
                             watch->active = false;
                             (void)llam_node_complete_pending_ops(node, 1U);
                         }
-                        if (watch->migrate_target_node_index != UINT_MAX) {
-                            poll_migrate_target = watch->migrate_target_node_index;
+                        if (watch->accepts_waiters && watch->wait_head != NULL) {
+                            if (!watch->destroy_pending && watch->backend_refs == 0U &&
+                                !llam_arm_poll_watch_locked(node, watch, &kick_reactivate)) {
+                                rearm_failed_waiters = llam_poll_watch_take_waiters(watch);
+                                rearm_failure = llam_watch_rearm_error();
+                            }
+                        } else if (watch->migrate_target_node_index != UINT_MAX) {
+                            if (llam_poll_watch_deferred_pin_locked(node, watch)) {
+                                poll_migrate_target = watch->migrate_target_node_index;
+                                poll_migrate_pinned = true;
+                            }
+                        } else if (!watch->accepts_waiters) {
+                            llam_destroy_poll_watch_locked(node, watch);
                         }
                     }
                     break;
@@ -472,14 +727,27 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE: {
                     llam_accept_watch_t *watch = op->target;
 
-                    if (watch != NULL) {
+                    if (watch != NULL && !watch->retired) {
                         watch->deactivate_queued = false;
                         if (watch->active) {
                             watch->active = false;
                             (void)llam_node_complete_pending_ops(node, 1U);
                         }
-                        if (watch->migrate_target_node_index != UINT_MAX) {
-                            accept_migrate_target = watch->migrate_target_node_index;
+                        if (watch->accepts_waiters && watch->wait_head != NULL) {
+                            if (!watch->destroy_pending && watch->backend_refs == 0U &&
+                                !llam_arm_accept_watch_locked(node, watch, &kick_reactivate)) {
+                                rearm_failed_waiters =
+                                    llam_take_watch_waiters_locked(&watch->wait_head,
+                                                                   &watch->wait_tail);
+                                rearm_failure = llam_watch_rearm_error();
+                            }
+                        } else if (watch->migrate_target_node_index != UINT_MAX) {
+                            if (llam_accept_watch_deferred_pin_locked(node, watch)) {
+                                accept_migrate_target = watch->migrate_target_node_index;
+                                accept_migrate_pinned = true;
+                            }
+                        } else if (!watch->accepts_waiters) {
+                            llam_destroy_accept_watch_locked(node, watch);
                         }
                     }
                     break;
@@ -487,14 +755,27 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 case LLAM_IO_CONTROL_RECV_DEACTIVATE: {
                     llam_recv_watch_t *watch = op->target;
 
-                    if (watch != NULL) {
+                    if (watch != NULL && !watch->retired) {
                         watch->deactivate_queued = false;
                         if (watch->active) {
                             watch->active = false;
                             (void)llam_node_complete_pending_ops(node, 1U);
                         }
-                        if (watch->migrate_target_node_index != UINT_MAX) {
-                            recv_migrate_target = watch->migrate_target_node_index;
+                        if (watch->accepts_waiters && watch->wait_head != NULL) {
+                            if (!watch->destroy_pending && watch->backend_refs == 0U &&
+                                !llam_arm_recv_watch_locked(node, watch, &kick_reactivate)) {
+                                rearm_failed_waiters =
+                                    llam_take_watch_waiters_locked(&watch->wait_head,
+                                                                   &watch->wait_tail);
+                                rearm_failure = llam_watch_rearm_error();
+                            }
+                        } else if (watch->migrate_target_node_index != UINT_MAX) {
+                            if (llam_recv_watch_deferred_pin_locked(node, watch)) {
+                                recv_migrate_target = watch->migrate_target_node_index;
+                                recv_migrate_pinned = true;
+                            }
+                        } else if (!watch->accepts_waiters) {
+                            llam_destroy_recv_watch_locked(node, watch);
                         } else {
                             llam_maybe_destroy_recv_watch_locked(node, watch);
                         }
@@ -507,9 +788,7 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     if (req != NULL) {
                         atomic_store_explicit(&req->cancel_queued, 0U, memory_order_release);
                         atomic_store_explicit(&req->cancel_submitted, 0U, memory_order_release);
-                        free_retired_cancel_req =
-                            atomic_exchange_explicit(&req->free_after_cancel, 0U, memory_order_acq_rel) != 0U;
-                        retired_cancel_req = free_retired_cancel_req ? req : NULL;
+                        atomic_store_explicit(&req->free_after_cancel, 0U, memory_order_release);
                     }
                     break;
                 }
@@ -517,12 +796,35 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                     break;
                 }
                 pthread_mutex_unlock(&node->watch_lock);
+                if (kick_reactivate) {
+                    llam_kick_node(node);
+                }
                 if (poll_migrate_target != UINT_MAX) {
                     (void)llam_finalize_poll_watch_migration(node, op->target, poll_migrate_target, &kick_target);
                 } else if (accept_migrate_target != UINT_MAX) {
                     (void)llam_finalize_accept_watch_migration(node, op->target, accept_migrate_target, &kick_target);
                 } else if (recv_migrate_target != UINT_MAX) {
                     (void)llam_finalize_recv_watch_migration(node, op->target, recv_migrate_target, &kick_target);
+                }
+                if (poll_migrate_pinned) {
+                    pthread_mutex_lock(&node->watch_lock);
+                    llam_poll_watch_unpin_locked(node, op->target);
+                    pthread_mutex_unlock(&node->watch_lock);
+                } else if (accept_migrate_pinned) {
+                    pthread_mutex_lock(&node->watch_lock);
+                    llam_accept_watch_unpin_locked(node, op->target);
+                    pthread_mutex_unlock(&node->watch_lock);
+                } else if (recv_migrate_pinned) {
+                    pthread_mutex_lock(&node->watch_lock);
+                    llam_recv_watch_unpin_locked(node, op->target);
+                    pthread_mutex_unlock(&node->watch_lock);
+                }
+                while (rearm_failed_waiters != NULL) {
+                    llam_io_req_t *next = rearm_failed_waiters->next;
+
+                    rearm_failed_waiters->next = NULL;
+                    llam_io_complete_req(node, rearm_failed_waiters, rearm_failure, 0U, false);
+                    rearm_failed_waiters = next;
                 }
                 if (kick_target) {
                     unsigned target_index = poll_migrate_target != UINT_MAX ? poll_migrate_target :
@@ -532,10 +834,12 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                         llam_kick_node(&node->runtime->nodes[target_index]);
                     }
                 }
-                if (retired_cancel_req != NULL) {
-                    llam_io_req_free(NULL, retired_cancel_req);
+                if (!llam_linux_untrack_backend_control(node, op)) {
+                    llam_record_fatal(node->runtime, EINVAL);
                 }
-                free(op);
+                /* Balance the completion-lifetime slot acquired before SQE encoding. */
+                (void)llam_node_complete_pending_ops(node, 1U);
+                llam_io_control_op_destroy(node, op);
             }
             break;
         }

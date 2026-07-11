@@ -316,6 +316,11 @@ typedef struct llam_runtime_stats {
     uint32_t preempt_mode;              /**< Active ::llam_preempt_mode_t policy. */
     uint32_t preempt_poll_period;       /**< Active preempt flag-poll period. */
     uint64_t preempt_quantum_ns;        /**< Active global preempt slice override, or 0 for task-class budgets. */
+    uint64_t wake_handoff_attempts;     /**< Same-shard wake-to-task handoff attempts. */
+    uint64_t wake_handoff_hits;         /**< Same-shard wake-to-task handoffs that switched directly. */
+    uint64_t wake_handoff_fail_context; /**< Wake handoffs rejected by caller/task context. */
+    uint64_t wake_handoff_fail_policy;  /**< Wake handoffs rejected by runtime policy guards. */
+    uint64_t wake_handoff_fail_race;    /**< Wake handoffs that lost a queue/state race and fell back. */
 } llam_runtime_stats_t;
 
 /** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */
@@ -363,7 +368,11 @@ LLAM_API int llam_spawn_opts_init(llam_spawn_opts_t *opts, size_t opts_size);
  * This is the ABI-stable form preferred by dynamic loaders and FFI bindings.
  * LLAM copies only the overlapping prefix of @p opts and treats missing tail
  * fields as runtime defaults, so older bindings can run against newer
- * libraries that appended fields to ::llam_runtime_opts_t.
+ * libraries that appended fields to ::llam_runtime_opts_t. Embedders that own
+ * scheduler lifetime should prefer the explicit handle lifecycle:
+ * ::llam_runtime_create, ::llam_runtime_spawn_ex,
+ * ::llam_runtime_run_handle, and ::llam_runtime_destroy. The process-default
+ * lifecycle remains a convenience path for simple single-runtime programs.
  *
  * @param opts Optional runtime options; pass NULL for defaults.
  * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
@@ -374,7 +383,8 @@ LLAM_API int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_s
 /**
  * @brief Initialize the process-default runtime.
  * @param opts Optional runtime options; pass NULL for defaults.
- * @details Convenience wrapper around ::llam_runtime_init_ex.
+ * @details Convenience wrapper around ::llam_runtime_init_ex. New embedding
+ * code should prefer ::llam_runtime_create and drive the returned handle.
  * @return 0 on success, -1 on failure with errno set.
  */
 LLAM_API int llam_runtime_init(const llam_runtime_opts_t *opts);
@@ -470,11 +480,12 @@ LLAM_API llam_runtime_t *llam_runtime_default(void);
  * @brief Create an explicit runtime handle.
  *
  * @details
- * Allocates and initializes an independent runtime instance. The returned
- * handle owns scheduler state, caches, blocking pool, and backend resources.
- * Public registries validate owner-stamped objects without exposing raw storage
- * addresses. Multiple explicit runtimes may run concurrently on different host
- * threads. Cross-runtime object use fails with @c EXDEV.
+ * Canonical embedding entry point. Allocates and initializes an independent
+ * runtime instance. The returned handle owns scheduler state, caches, blocking
+ * pool, and backend resources. Public registries validate owner-stamped objects
+ * without exposing raw storage addresses. Multiple explicit runtimes may run
+ * concurrently on different host threads. Cross-runtime object use fails with
+ * @c EXDEV.
  *
  * @param opts Optional runtime options; pass NULL for defaults.
  * @param opts_size Size of the caller's ::llam_runtime_opts_t definition.
@@ -511,9 +522,9 @@ LLAM_API llam_task_t *llam_runtime_spawn_ex(llam_runtime_t *runtime,
  * @brief Run a runtime handle.
  *
  * @details
- * Drives the scheduler associated with @p runtime until all work drains,
- * cooperative stop is requested, or a backend/runtime error is recorded.
- * Passing NULL fails with @c EINVAL.
+ * Canonical embedding scheduler driver. Drives the scheduler associated with
+ * @p runtime until all work drains, cooperative stop is requested, or a
+ * backend/runtime error is recorded. Passing NULL fails with @c EINVAL.
  */
 LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
 
@@ -521,8 +532,9 @@ LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
  * @brief Destroy a runtime handle.
  *
  * @details
- * Requests cooperative stop, tears down runtime-owned resources, and
- * invalidates the handle. Heap-backed handle storage returned by
+ * Canonical embedding teardown. Requests cooperative stop, tears down
+ * runtime-owned resources, and invalidates the handle. Heap-backed handle
+ * storage returned by
  * ::llam_runtime_create is retired for the process lifetime rather than
  * immediately reused, so stale raw pointers cannot alias a later runtime.
  * Passing NULL is a legacy default-runtime shutdown alias. Managed tasks may

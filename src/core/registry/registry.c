@@ -144,6 +144,13 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
     }
     heap_allocated = rt->heap_allocated;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    /*
+     * Existing host-side public operations may be parked in a no-deadline
+     * runtime-owned wait while holding active_ops. Publish stop before waiting
+     * for the counter to drain so those operations can observe cancellation and
+     * release their lifecycle pin.
+     */
+    llam_request_stop(rt);
     do {
         active_ops = atomic_load_explicit(&rt->active_ops, memory_order_acquire);
         if (LLAM_UNLIKELY(llam_public_active_op_is_saturated(active_ops))) {

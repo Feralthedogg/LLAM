@@ -160,9 +160,13 @@ void llam_recv_watch_push_waiter_front(llam_recv_watch_t *watch, llam_io_req_t *
     }
 }
 
-void llam_accept_watch_splice_ready(llam_accept_watch_t *target, llam_accept_watch_t *source) {
+bool llam_accept_watch_splice_ready(llam_accept_watch_t *target, llam_accept_watch_t *source) {
     if (target == NULL || source == NULL || source->ready_head == NULL) {
-        return;
+        return true;
+    }
+    if (source->ready_depth > LLAM_WATCH_READY_DEPTH_MAX ||
+        target->ready_depth > LLAM_WATCH_READY_DEPTH_MAX - source->ready_depth) {
+        return false;
     }
 
     if (target->ready_tail != NULL) {
@@ -175,11 +179,18 @@ void llam_accept_watch_splice_ready(llam_accept_watch_t *target, llam_accept_wat
     source->ready_head = NULL;
     source->ready_tail = NULL;
     source->ready_depth = 0U;
+    return true;
 }
 
-void llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *source) {
+bool llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *source) {
     if (target == NULL || source == NULL || source->ready_head == NULL) {
-        return;
+        return true;
+    }
+    if (source->ready_depth > LLAM_WATCH_READY_DEPTH_MAX ||
+        target->ready_depth > LLAM_WATCH_READY_DEPTH_MAX - source->ready_depth ||
+        source->ready_bytes > LLAM_RECV_WATCH_READY_BYTES_MAX ||
+        target->ready_bytes > LLAM_RECV_WATCH_READY_BYTES_MAX - source->ready_bytes) {
+        return false;
     }
 
     if (target->ready_tail != NULL) {
@@ -194,6 +205,7 @@ void llam_recv_watch_splice_ready(llam_recv_watch_t *target, llam_recv_watch_t *
     source->ready_tail = NULL;
     source->ready_depth = 0U;
     source->ready_bytes = 0U;
+    return true;
 }
 
 bool llam_recv_watch_pop_ready_shared(llam_recv_watch_t *watch,
@@ -346,6 +358,23 @@ bool llam_remove_watch_waiter_after_abort(llam_node_t *node,
     }
 
     pthread_mutex_lock(&node->watch_lock);
+    if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) != mode) {
+        pthread_mutex_unlock(&node->watch_lock);
+        return false;
+    }
+    {
+        unsigned attached_node_index = atomic_load_explicit(
+            &req->attached_node_index,
+            memory_order_acquire);
+        llam_runtime_t *rt = req->owner_runtime;
+
+        if (attached_node_index != node->index &&
+            (rt == NULL || attached_node_index < rt->active_nodes ||
+             llam_io_req_node_index(req) != (int)node->index)) {
+            pthread_mutex_unlock(&node->watch_lock);
+            return false;
+        }
+    }
     if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH && req->poll_watch != NULL) {
         removed = llam_poll_watch_remove_waiter(req->poll_watch, req);
         if (removed) {
@@ -409,7 +438,7 @@ bool llam_arm_watch_locked_common(llam_node_t *node,
 }
 
 bool llam_arm_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch, bool *kick_node) {
-    if (node == NULL || watch == NULL) {
+    if (node == NULL || watch == NULL || !watch->accepts_waiters) {
         return false;
     }
     return llam_arm_watch_locked_common(node,
@@ -423,7 +452,7 @@ bool llam_arm_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch, boo
 }
 
 bool llam_arm_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch, bool *kick_node) {
-    if (node == NULL || watch == NULL) {
+    if (node == NULL || watch == NULL || !watch->accepts_waiters) {
         return false;
     }
     return llam_arm_watch_locked_common(node,
@@ -437,7 +466,7 @@ bool llam_arm_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch,
 }
 
 bool llam_arm_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch, bool *kick_node) {
-    if (node == NULL || watch == NULL) {
+    if (node == NULL || watch == NULL || !watch->accepts_waiters) {
         return false;
     }
     return llam_arm_watch_locked_common(node,

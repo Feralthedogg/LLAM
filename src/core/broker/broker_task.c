@@ -111,6 +111,46 @@ static bool llam_broker_has_pending_sleep_task_locked(const llam_broker_t *broke
     return false;
 }
 
+static size_t llam_broker_subject_task_count_locked(const llam_broker_t *broker, uint64_t subject_id) {
+    size_t count = 0U;
+    size_t i;
+
+    if (broker == NULL || subject_id == 0U) {
+        return 0U;
+    }
+    for (i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
+        const llam_broker_task_slot_t *slot = &broker->tasks[i];
+
+        if (slot->active && slot->subject_id == subject_id) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static size_t llam_broker_long_sleep_task_count_locked(const llam_broker_t *broker) {
+    size_t count = 0U;
+    size_t i;
+
+    if (broker == NULL) {
+        return 0U;
+    }
+    for (i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
+        const llam_broker_task_slot_t *slot = &broker->tasks[i];
+        uint32_t state;
+
+        if (!slot->active || slot->kind != LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64) {
+            continue;
+        }
+        state = atomic_load_explicit(&slot->state, memory_order_acquire);
+        if (state == LLAM_BROKER_TASK_STATE_SPAWNED ||
+            state == LLAM_BROKER_TASK_STATE_DETACHED) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 static void llam_broker_task_compute(uint32_t kind,
                                      uint64_t arg0,
                                      uint64_t *out_result0,
@@ -215,12 +255,65 @@ void llam_broker_clear_tasks(llam_broker_t *broker) {
     }
 }
 
+void llam_broker_reclaim_subject_tasks(llam_broker_t *broker, uint64_t subject_id) {
+    llam_task_t *detach_tasks[LLAM_BROKER_TASK_SLOTS];
+    size_t detach_count = 0U;
+    size_t i;
+
+    if (broker == NULL || subject_id == 0U) {
+        return;
+    }
+    if (llam_broker_lock(broker) != 0) {
+        return;
+    }
+    for (i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
+        llam_broker_task_slot_t *slot = &broker->tasks[i];
+        uint32_t state;
+
+        if (!slot->active || slot->subject_id != subject_id) {
+            continue;
+        }
+        state = atomic_load_explicit(&slot->state, memory_order_acquire);
+        if (state == LLAM_BROKER_TASK_STATE_SPAWNED) {
+            uint32_t expected = LLAM_BROKER_TASK_STATE_SPAWNED;
+
+            if (atomic_compare_exchange_strong_explicit(&slot->state,
+                                                        &expected,
+                                                        LLAM_BROKER_TASK_STATE_DETACHED,
+                                                        memory_order_acq_rel,
+                                                        memory_order_acquire)) {
+                slot->rights = 0U;
+                continue;
+            }
+            state = expected;
+            if (state == LLAM_BROKER_TASK_STATE_SPAWNED) {
+                continue;
+            }
+        }
+        if (state == LLAM_BROKER_TASK_STATE_DETACHED) {
+            slot->rights = 0U;
+            continue;
+        }
+        if (slot->task != NULL && detach_count < LLAM_BROKER_TASK_SLOTS) {
+            detach_tasks[detach_count++] = slot->task;
+            slot->task = NULL;
+        }
+        llam_broker_task_slot_reset(slot);
+    }
+    llam_broker_unlock(broker);
+
+    for (i = 0U; i < detach_count; ++i) {
+        (void)llam_detach(detach_tasks[i]);
+    }
+}
+
 int llam_broker_spawn_task(llam_broker_t *broker,
                            uint32_t kind,
                            uint64_t arg0,
                            uint64_t rights,
                            llam_capability_token_t *out_token) {
     llam_broker_task_slot_t *slot = NULL;
+    uint64_t subject_id;
     size_t i;
 
     if (out_token != NULL) {
@@ -239,6 +332,11 @@ int llam_broker_spawn_task(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
+    if (LLAM_UNLIKELY(kind == (uint32_t)LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64 &&
+                      arg0 > LLAM_BROKER_SLEEP_MAX_NS)) {
+        errno = EINVAL;
+        return -1;
+    }
     if (llam_broker_begin_op(broker) != 0) {
         return -1;
     }
@@ -250,6 +348,21 @@ int llam_broker_spawn_task(llam_broker_t *broker,
         llam_broker_unlock(broker);
         llam_broker_end_op(broker);
         errno = EINVAL;
+        return -1;
+    }
+    subject_id = llam_broker_current_subject(broker);
+    if (kind == (uint32_t)LLAM_BROKER_TASK_KIND_SLEEP_NS_RETURN_U64 &&
+        llam_broker_long_sleep_task_count_locked(broker) >= LLAM_BROKER_LONG_SLEEP_TASKS_MAX) {
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
+        errno = ENOSPC;
+        return -1;
+    }
+    if (subject_id != 0U &&
+        llam_broker_subject_task_count_locked(broker, subject_id) >= LLAM_BROKER_TASKS_PER_SUBJECT) {
+        llam_broker_unlock(broker);
+        llam_broker_end_op(broker);
+        errno = ENOSPC;
         return -1;
     }
     for (i = 0U; i < LLAM_BROKER_TASK_SLOTS; ++i) {
@@ -278,6 +391,7 @@ int llam_broker_spawn_task(llam_broker_t *broker,
     slot->id = broker->next_task_id++;
     slot->generation = 1U;
     slot->rights = rights;
+    slot->subject_id = subject_id;
     slot->active = true;
     llam_broker_unlock(broker);
     if (llam_broker_issue_object_cap(broker,

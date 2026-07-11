@@ -28,17 +28,22 @@ when you need field-level or binary-compatibility rules.
 
 ## Lifecycle
 
+Embedding code should use the handle-scoped lifecycle:
+`llam_runtime_create()`, `llam_runtime_spawn_ex()`,
+`llam_runtime_run_handle()`, and `llam_runtime_destroy()`. The process-default
+APIs are compatibility wrappers for simple single-runtime programs.
+
 | API | Purpose |
 | --- | --- |
 | `llam_runtime_opts_init` | Fill runtime options with ABI-safe defaults. |
-| `llam_runtime_init_ex` | Initialize the process-default runtime with an explicit option size. |
+| `llam_runtime_init_ex` | Initialize the process-default compatibility runtime with an explicit option size. |
 | `llam_runtime_init` | Convenience default-runtime initializer. |
 | `llam_runtime_default` | Return the default runtime handle. |
-| `llam_runtime_create` | Create an explicit runtime handle for embedders. |
-| `llam_runtime_run_handle` | Drive an explicit runtime. |
-| `llam_run` | Drive the process-default runtime. |
+| `llam_runtime_create` | Canonical embedding entry point for an explicit runtime handle. |
+| `llam_runtime_run_handle` | Canonical embedding scheduler driver for one runtime handle. |
+| `llam_run` | Drive the process-default compatibility runtime. |
 | `llam_runtime_request_stop` | Request cooperative stop and wake workers. |
-| `llam_runtime_destroy` | Destroy an explicit runtime. Passing `NULL` aliases default shutdown. |
+| `llam_runtime_destroy` | Canonical embedding teardown. Passing `NULL` aliases default shutdown. |
 | `llam_runtime_shutdown` | Stop and release default-runtime resources. |
 
 ## Tasks

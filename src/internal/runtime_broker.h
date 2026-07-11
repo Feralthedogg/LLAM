@@ -47,6 +47,9 @@
 #define LLAM_BROKER_DESCRIPTOR_SLOTS 64U
 #define LLAM_BROKER_CHANNEL_SLOTS 64U
 #define LLAM_BROKER_TASK_SLOTS 64U
+#define LLAM_BROKER_TASKS_PER_SUBJECT 16U
+#define LLAM_BROKER_LONG_SLEEP_TASKS_MAX 16U
+#define LLAM_BROKER_SLEEP_MAX_NS (60ULL * 1000ULL * 1000ULL * 1000ULL)
 #define LLAM_BROKER_RING_SESSIONS 16U
 #define LLAM_BROKER_RING_MAPPING_NAME_BYTES 128U
 #define LLAM_BROKER_TRANSPORT_SESSIONS 64U
@@ -54,6 +57,8 @@
 #define LLAM_BROKER_CHANNEL_CAPACITY 64U
 #define LLAM_BROKER_CHANNEL_MESSAGE_BYTES 256U
 #define LLAM_BROKER_WIRE_DATA_BYTES 256U
+#define LLAM_BROKER_SESSION_REQUEST_MAX 64U
+#define LLAM_BROKER_SESSION_LIFETIME_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
 /*
  * Broker active_ops is a bounded lifecycle gate, not a request counter. The
  * high half is reserved as corrupted/exhausted state so destroy can fail closed
@@ -94,6 +99,7 @@ typedef struct llam_broker_buffer_slot {
     uint64_t id;
     uint64_t generation;
     uint64_t rights;
+    uint64_t subject_id;
     bool active;
 } llam_broker_buffer_slot_t;
 
@@ -106,6 +112,7 @@ typedef struct llam_broker_descriptor_slot {
     uint64_t id;
     uint64_t generation;
     uint64_t rights;
+    uint64_t subject_id;
     bool active;
     bool close_on_destroy;
 } llam_broker_descriptor_slot_t;
@@ -124,6 +131,7 @@ typedef struct llam_broker_channel_slot {
     uint64_t id;
     uint64_t generation;
     uint64_t rights;
+    uint64_t subject_id;
     bool active;
     bool closed;
 } llam_broker_channel_slot_t;
@@ -136,6 +144,7 @@ typedef struct llam_broker_task_slot {
     uint64_t id;
     uint64_t generation;
     uint64_t rights;
+    uint64_t subject_id;
     uint64_t arg0;
     uint64_t result0;
     int error_code;
@@ -154,6 +163,7 @@ typedef struct llam_broker_ring_session {
     bool active;
     bool busy;
     bool owns_mapping;
+    bool reclaim_pending;
 } llam_broker_ring_session_t;
 
 typedef struct llam_broker_transport_session {
@@ -356,6 +366,7 @@ int llam_broker_write_buffer(llam_broker_t *broker,
                              size_t length);
 void llam_broker_clear_buffers(llam_broker_t *broker);
 void llam_broker_buffer_slot_reset(llam_broker_buffer_slot_t *slot);
+void llam_broker_reclaim_subject_buffers(llam_broker_t *broker, uint64_t subject_id);
 llam_broker_buffer_slot_t *llam_broker_find_buffer_unlocked(llam_broker_t *broker,
                                                             const llam_capability_token_t *token,
                                                             uint64_t required_rights);
@@ -370,6 +381,7 @@ int llam_broker_register_handle(llam_broker_t *broker,
                                 bool close_on_destroy,
                                 llam_capability_token_t *out_token);
 void llam_broker_clear_descriptors(llam_broker_t *broker);
+void llam_broker_reclaim_subject_descriptors(llam_broker_t *broker, uint64_t subject_id);
 ssize_t llam_broker_read_fd(llam_broker_t *broker,
                             const llam_capability_token_t *token,
                             void *out_data,
@@ -400,6 +412,7 @@ ssize_t llam_broker_channel_recv(llam_broker_t *broker,
                                  size_t capacity);
 int llam_broker_channel_close(llam_broker_t *broker, const llam_capability_token_t *token);
 void llam_broker_clear_channels(llam_broker_t *broker);
+void llam_broker_reclaim_subject_channels(llam_broker_t *broker, uint64_t subject_id);
 llam_broker_channel_slot_t *llam_broker_find_channel_unlocked(llam_broker_t *broker,
                                                               const llam_capability_token_t *token,
                                                               uint64_t required_rights);
@@ -416,6 +429,8 @@ int llam_broker_join_task(llam_broker_t *broker,
                           uint64_t *out_result0);
 int llam_broker_detach_task(llam_broker_t *broker, const llam_capability_token_t *token);
 void llam_broker_clear_tasks(llam_broker_t *broker);
+void llam_broker_reclaim_subject_tasks(llam_broker_t *broker, uint64_t subject_id);
+void llam_broker_reclaim_subject_objects(llam_broker_t *broker, uint64_t subject_id);
 
 int llam_broker_serve_one_fd(llam_broker_t *broker, int fd, bool *out_should_close);
 int llam_broker_serve_fd(llam_broker_t *broker, int fd);
@@ -426,10 +441,18 @@ int llam_broker_request_fd_with_descriptor(int fd,
                                            const llam_broker_wire_request_t *request,
                                            int descriptor_fd,
                                            llam_broker_wire_response_t *response);
+int llam_broker_request_fd_with_descriptor_trusted(int fd,
+                                                   const llam_broker_wire_request_t *request,
+                                                   int descriptor_fd,
+                                                   llam_broker_wire_response_t *response);
 int llam_broker_request_fd_with_response_descriptor(int fd,
                                                     const llam_broker_wire_request_t *request,
                                                     llam_broker_wire_response_t *response,
                                                     int *out_descriptor_fd);
+int llam_broker_request_fd_with_response_descriptor_trusted(int fd,
+                                                            const llam_broker_wire_request_t *request,
+                                                            llam_broker_wire_response_t *response,
+                                                            int *out_descriptor_fd);
 int llam_broker_read_request_fd(int fd,
                                 llam_broker_wire_request_t *request,
                                 int *out_descriptor_fd);
@@ -485,6 +508,11 @@ LLAM_INTERNAL_API uint64_t llam_broker_test_buffer_free_count(void);
 LLAM_INTERNAL_API void llam_broker_test_buffer_free_count_reset(void);
 LLAM_INTERNAL_API void llam_broker_test_force_subject_entropy_failure(bool enabled);
 LLAM_INTERNAL_API void llam_broker_test_force_subject_value(bool enabled, uint64_t subject_id);
+#if !LLAM_PLATFORM_WINDOWS
+LLAM_INTERNAL_API void llam_broker_test_set_scm_rights_receive_limit(size_t max_fds);
+#endif
+LLAM_INTERNAL_API void llam_broker_test_pause_subject_reclaim(bool enabled);
+LLAM_INTERNAL_API bool llam_broker_test_subject_reclaim_paused(void);
 #endif
 
 #endif

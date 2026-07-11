@@ -87,6 +87,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
     llam_task_t *task;
     llam_wait_node_t *node;
     llam_wait_node_t *mutex_waiter;
+    bool wait_tracking_published = false;
     uintptr_t owner;
     int rc;
 
@@ -173,9 +174,34 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
     }
     pthread_mutex_unlock(&cond->lock);
     llam_task_ensure_listed(task);
-    llam_task_set_wait_node_tracking(task, node, &cond->waiters, &cond->lock, shard->id);
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_COND;
+    if (!llam_task_set_wait_node_tracking(task,
+                                          node,
+                                          &cond->waiters,
+                                          &cond->lock,
+                                          &cond->active_ops,
+                                          shard->id,
+                                          LLAM_WAIT_COND)) {
+        int saved_errno = errno;
+        bool removed;
+
+        if (llam_wait_node_completed(node)) {
+            goto wait_ready;
+        }
+        pthread_mutex_lock(&cond->lock);
+        removed = llam_wait_queue_remove(&cond->waiters, node);
+        pthread_mutex_unlock(&cond->lock);
+        if (!removed) {
+            /* A signal raced setup failure; consume it and reacquire below. */
+            goto wait_ready;
+        }
+        llam_sync_wait_node_release(shard, node);
+        (void)llam_cond_reacquire_mutex(mutex, task);
+        llam_cond_end_public_op(cond);
+        llam_mutex_end_public_op(mutex);
+        errno = saved_errno;
+        return -1;
+    }
+    wait_tracking_published = true;
     if (has_deadline && llam_arm_task_wait_deadline(task, shard, deadline_ns) != 0) {
         bool removed;
 
@@ -191,7 +217,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(task);
+        llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
         (void)llam_cond_reacquire_mutex(mutex, task);
         llam_cond_end_public_op(cond);
@@ -214,7 +240,7 @@ int llam_cond_wait_impl(llam_cond_t *cond, llam_mutex_t *mutex, bool has_deadlin
         }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(task);
+        llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
         (void)llam_cond_reacquire_mutex(mutex, task);
         llam_cond_end_public_op(cond);
@@ -232,7 +258,9 @@ wait_ready:
         llam_disarm_task_wait_deadline(task);
     }
     llam_cancel_token_unregister_task(task);
-    llam_task_clear_wait_tracking(task);
+    if (wait_tracking_published) {
+        llam_task_clear_wait_tracking_or_abort(task);
+    }
     rc = node->error_code;
     llam_cond_waiter_consumed(cond, node);
     llam_sync_wait_node_release(shard, node);
@@ -310,7 +338,7 @@ int llam_cond_signal(llam_cond_t *cond) {
 
     if (node != NULL) {
         node->error_code = 0;
-        llam_wake_wait_node(node, true, LLAM_WAIT_COND);
+        (void)llam_wake_wait_node_and_maybe_handoff(node, true, LLAM_WAIT_COND, true);
     }
     llam_runtime_end_public_op(pinned_runtime);
     llam_cond_end_public_op(cond);
@@ -327,6 +355,8 @@ int llam_cond_signal(llam_cond_t *cond) {
  */
 int llam_cond_broadcast(llam_cond_t *cond) {
     llam_wait_node_t *node;
+    llam_wait_node_t *wake_head = NULL;
+    llam_wait_node_t *wake_tail = NULL;
     llam_runtime_t *pinned_runtime = NULL;
 
     cond = llam_cond_resolve_public_handle(cond);
@@ -342,9 +372,21 @@ int llam_cond_broadcast(llam_cond_t *cond) {
     while ((node = llam_wait_queue_pop_head(&cond->waiters)) != NULL) {
         llam_cond_waiter_popped(cond, node);
         node->error_code = 0;
-        llam_wake_wait_node(node, true, LLAM_WAIT_COND);
+        node->next = NULL;
+        if (wake_tail != NULL) {
+            wake_tail->next = node;
+        } else {
+            wake_head = node;
+        }
+        wake_tail = node;
     }
     pthread_mutex_unlock(&cond->lock);
+    while (wake_head != NULL) {
+        node = wake_head;
+        wake_head = node->next;
+        node->next = NULL;
+        llam_wake_wait_node(node, true, LLAM_WAIT_COND);
+    }
     llam_runtime_end_public_op(pinned_runtime);
     llam_cond_end_public_op(cond);
     return 0;

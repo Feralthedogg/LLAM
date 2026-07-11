@@ -71,6 +71,10 @@ static void llam_metrics_init(llam_metrics_t *metrics) {
     atomic_init(&metrics->inject_enqueues, 0U);
     atomic_init(&metrics->wake_latency_ns, 0U);
     atomic_init(&metrics->wake_samples, 0U);
+    atomic_init(&metrics->autotune_wake_latency_samples, 0U);
+    for (i = 0U; i < LLAM_AUTOTUNE_WAKE_LATENCY_BUCKETS; ++i) {
+        atomic_init(&metrics->autotune_wake_latency_buckets[i], 0U);
+    }
     atomic_init(&metrics->idle_polls, 0U);
     atomic_init(&metrics->idle_spin_loops, 0U);
     atomic_init(&metrics->idle_spin_hits, 0U);
@@ -87,9 +91,16 @@ static void llam_metrics_init(llam_metrics_t *metrics) {
     atomic_init(&metrics->yield_direct_locked_hits, 0U);
     atomic_init(&metrics->yield_direct_fail_context, 0U);
     atomic_init(&metrics->yield_direct_fail_policy, 0U);
+    atomic_init(&metrics->yield_direct_fail_budget, 0U);
     atomic_init(&metrics->yield_direct_fail_no_work, 0U);
     atomic_init(&metrics->yield_direct_fail_self, 0U);
     atomic_init(&metrics->yield_direct_fail_push, 0U);
+    atomic_init(&metrics->wake_handoff_attempts, 0U);
+    atomic_init(&metrics->wake_handoff_hits, 0U);
+    atomic_init(&metrics->wake_handoff_fail_context, 0U);
+    atomic_init(&metrics->wake_handoff_fail_policy, 0U);
+    atomic_init(&metrics->wake_handoff_fail_budget, 0U);
+    atomic_init(&metrics->wake_handoff_fail_race, 0U);
     atomic_init(&metrics->opaque_compensations, 0U);
     atomic_init(&metrics->deadlock_suspicions, 0U);
     atomic_init(&metrics->queue_overflows, 0U);
@@ -644,6 +655,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->task_list_eager = task_list_eager_default;
     }
     rt->direct_handoff_stats_enabled = llam_runtime_env_flag("LLAM_DIRECT_HANDOFF_STATS", 0U);
+    rt->direct_handoff_stats_sample_mask = 0U;
+    rt->autotune_wake_latency_sample_mask = 0U;
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 64U, 65535U);
 #elif LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_KQUEUE
@@ -651,6 +664,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 #else
     rt->direct_handoff_burst = llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_BURST", 0U, 65535U);
 #endif
+    atomic_init(&rt->direct_handoff_budget, rt->direct_handoff_burst);
 #if defined(__APPLE__)
     /*
      * Darwin sleep fanout benefits from direct handoff while timers are armed,
@@ -705,9 +719,11 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->preempt_poll_period = 1U;
         rt->safepoint_clock_period = 1U;
     }
-    rt->channel_local_handoff_enabled =
-        llam_runtime_env_flag("LLAM_CHANNEL_LOCAL_HANDOFF",
+    rt->wake_handoff_enabled =
+        llam_runtime_env_flag("LLAM_WAKE_HANDOFF",
                             rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 1U);
+    rt->channel_local_handoff_enabled =
+        llam_runtime_env_flag("LLAM_CHANNEL_LOCAL_HANDOFF", rt->wake_handoff_enabled);
     rt->channel_safepoint_interval =
         rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE
             ? 1U
@@ -792,6 +808,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_store(&rt->live_tasks, 0U);
     atomic_store(&rt->live_task_shards, 0U);
     atomic_store(&rt->active_io_waiters, 0U);
+    atomic_store(&rt->deferred_fatal_pending, 0U);
     atomic_store_explicit(&rt->next_spawn_shard, 0U, memory_order_relaxed);
     rt->allowed_cpus = cpus;
     (void)llam_detect_xsave_support(rt);
@@ -995,6 +1012,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     llam_runtime_prewarm_task_allocators(rt);
 
     rt->active_nodes = rt->experimental_shard_rings != 0U ? rt->active_shards : locality_nodes;
+    llam_autotune_init(rt);
 
     rt->kernel_node_ids = calloc(rt->active_nodes, sizeof(*rt->kernel_node_ids));
     if (rt->kernel_node_ids == NULL) {

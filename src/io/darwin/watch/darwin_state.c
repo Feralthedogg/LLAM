@@ -152,6 +152,11 @@ void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch)
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
+            if (watch->lifetime_refs != 0U || watch->backend_refs != 0U ||
+                watch->active || watch->activating || watch->deactivate_queued) {
+                watch->destroy_pending = true;
+                return;
+            }
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
                 llam_recv_ready_t *next = watch->ready_head->next;
@@ -165,6 +170,9 @@ void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch)
                 free(watch->ready_head);
                 watch->ready_head = next;
             }
+            watch->ready_tail = NULL;
+            watch->ready_depth = 0U;
+            watch->ready_bytes = 0U;
             free(watch);
             return;
         }
@@ -334,7 +342,7 @@ bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kin
             if (node->control_tail == cur) {
                 node->control_tail = prev;
             }
-            free(cur);
+            llam_io_control_op_destroy(node, cur);
             return true;
         }
         prev = cur;

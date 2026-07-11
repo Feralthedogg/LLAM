@@ -91,7 +91,8 @@ bool llam_forward_live_poll_watch_event(llam_node_t *source,
     target = &rt->nodes[target_index];
     llam_io_lock_rehome_pair(source, target, &source_locked, &target_locked);
     source_watch = llam_find_poll_watch_locked(source_locked, fd, events);
-    if (source_watch != NULL && source_watch->migrate_target_node_index != target_index) {
+    if (source_watch == NULL || !source_watch->accepts_waiters ||
+        source_watch->migrate_target_node_index != target_index) {
         goto out;
     }
     target_watch = llam_get_or_create_poll_watch_locked(target_locked, fd, events);
@@ -150,7 +151,8 @@ bool llam_forward_live_accept_watch_ready(llam_node_t *source, int fd, unsigned 
     target = &rt->nodes[target_index];
     llam_io_lock_rehome_pair(source, target, &source_locked, &target_locked);
     source_watch = llam_find_accept_watch_locked(source_locked, fd);
-    if (source_watch != NULL && source_watch->migrate_target_node_index != target_index) {
+    if (source_watch == NULL || !source_watch->accepts_waiters ||
+        source_watch->migrate_target_node_index != target_index) {
         goto out;
     }
     target_watch = llam_get_or_create_accept_watch_locked(target_locked, fd);
@@ -217,7 +219,8 @@ bool llam_forward_live_recv_watch_ready(llam_node_t *source,
     target = &rt->nodes[target_index];
     llam_io_lock_rehome_pair(source, target, &source_locked, &target_locked);
     source_watch = llam_find_recv_watch_locked(source_locked, fd, st_dev, st_ino);
-    if (source_watch != NULL && source_watch->migrate_target_node_index != target_index) {
+    if (source_watch == NULL || !source_watch->accepts_waiters ||
+        source_watch->migrate_target_node_index != target_index) {
         goto out;
     }
     if (!llam_capture_fd_watch_identity(fd, &target_st_dev, &target_st_ino) ||

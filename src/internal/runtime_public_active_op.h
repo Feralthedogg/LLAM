@@ -51,37 +51,47 @@ static inline void llam_public_active_op_begin(_Atomic size_t *active_ops) {
 
 static inline void llam_public_active_op_end(_Atomic size_t *active_ops) {
     size_t current;
-    size_t previous;
 
     if (active_ops == NULL) {
         return;
     }
     current = atomic_load_explicit(active_ops, memory_order_relaxed);
-    if (current == 0U) {
-        return;
-    }
-    if (LLAM_UNLIKELY(current >= LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD)) {
+    for (;;) {
+        if (current == 0U) {
+            return;
+        }
+        if (LLAM_UNLIKELY(current >= LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD)) {
+            /*
+             * Saturated/corrupt counters are permanent EBUSY sentinels. Do not
+             * decrement that state into an apparently ordinary active count.
+             */
+            atomic_store_explicit(active_ops,
+                                  LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL,
+                                  memory_order_relaxed);
+            return;
+        }
         /*
-         * Saturated/corrupt counters are permanent EBUSY sentinels. Do not use
-         * fetch_sub on that state: SIZE_MAX - 1 would look like a huge but
-         * different active count instead of the canonical sentinel.
+         * Release publishes every protected scalar/object access before its
+         * pin is dropped. Consecutive release RMWs form release sequences, so
+         * an acquire load that observes the final zero imports all completed
+         * public operations before destructive reuse begins.
          */
-        atomic_store_explicit(active_ops, LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL, memory_order_relaxed);
-        return;
+        if (atomic_compare_exchange_weak_explicit(active_ops,
+                                                  &current,
+                                                  current - 1U,
+                                                  memory_order_release,
+                                                  memory_order_relaxed)) {
+            return;
+        }
     }
-    previous = atomic_fetch_sub_explicit(active_ops, 1U, memory_order_relaxed);
-    if (LLAM_LIKELY(previous > 0U && previous < LLAM_PUBLIC_ACTIVE_OP_RESERVED_THRESHOLD)) {
-        return;
-    }
-    if (previous == 0U) {
-        (void)atomic_fetch_add_explicit(active_ops, 1U, memory_order_relaxed);
-        return;
-    }
-    atomic_store_explicit(active_ops, LLAM_PUBLIC_ACTIVE_OP_BUSY_SENTINEL, memory_order_relaxed);
 }
 
 static inline size_t llam_public_active_op_count(const _Atomic size_t *active_ops) {
-    return active_ops != NULL ? atomic_load_explicit(active_ops, memory_order_relaxed) : 0U;
+    /*
+     * Destructive users wait for zero through this helper. Acquire pairs with
+     * the release decrement that published the final protected access.
+     */
+    return active_ops != NULL ? atomic_load_explicit(active_ops, memory_order_acquire) : 0U;
 }
 
 static inline bool llam_public_active_op_is_saturated(size_t active_ops) {
