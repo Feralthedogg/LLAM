@@ -32,7 +32,7 @@
  * so stale readers can distinguish two operations that used the same storage.
  * Saturation is terminal: wrapping to zero would reintroduce ABA.
  */
-static atomic_uint_fast64_t g_llam_io_operation_generation = ATOMIC_VAR_INIT(0U);
+static atomic_uint_fast64_t g_llam_io_operation_generation = 0;
 
 static uint64_t llam_io_req_next_operation_generation(llam_runtime_t *rt) {
     uint_fast64_t current = atomic_load_explicit(&g_llam_io_operation_generation,

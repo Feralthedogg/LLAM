@@ -30,9 +30,7 @@
 
 #include <limits.h>
 #include <string.h>
-#if LLAM_PLATFORM_WINDOWS
-#include <winternl.h>
-#else
+#if !LLAM_PLATFORM_WINDOWS
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -82,21 +80,45 @@ static bool llam_broker_descriptor_handle_invalid(llam_handle_t handle) {
 }
 
 #if LLAM_PLATFORM_WINDOWS
-typedef NTSTATUS(NTAPI *llam_broker_nt_query_information_file_fn)(
+/*
+ * Keep the ntdll query ABI local instead of including winternl.h after the
+ * security headers pulled in by runtime_internal.h.  Recent Windows SDKs
+ * declare STRING/UNICODE_STRING in both header families with incompatible
+ * typedef forms, and FILE_MODE_INFORMATION is not part of the stable Win32
+ * surface.  These layouts and numeric values are the documented NT ABI used
+ * by NtQueryInformationFile.
+ */
+typedef struct llam_broker_io_status_block {
+    union {
+        LONG status;
+        PVOID pointer;
+    } value;
+    ULONG_PTR information;
+} llam_broker_io_status_block_t;
+
+typedef struct llam_broker_file_mode_information {
+    ULONG mode;
+} llam_broker_file_mode_information_t;
+
+#define LLAM_BROKER_FILE_MODE_INFORMATION_CLASS 16UL
+#define LLAM_BROKER_FILE_SYNCHRONOUS_IO_ALERT 0x10UL
+#define LLAM_BROKER_FILE_SYNCHRONOUS_IO_NONALERT 0x20UL
+
+typedef LONG(NTAPI *llam_broker_nt_query_information_file_fn)(
     HANDLE,
-    PIO_STATUS_BLOCK,
+    llam_broker_io_status_block_t *,
     PVOID,
     ULONG,
-    FILE_INFORMATION_CLASS);
+    ULONG);
 
 static int llam_broker_descriptor_require_overlapped(HANDLE handle) {
-    FILE_MODE_INFORMATION mode;
-    IO_STATUS_BLOCK io_status;
+    llam_broker_file_mode_information_t mode;
+    llam_broker_io_status_block_t io_status;
     llam_broker_nt_query_information_file_fn query_information_file = NULL;
     DWORD pipe_flags;
     HMODULE ntdll;
     FARPROC symbol;
-    NTSTATUS status;
+    LONG status;
 
     if (LLAM_UNLIKELY(handle == NULL || handle == INVALID_HANDLE_VALUE)) {
         errno = EINVAL;
@@ -123,9 +145,10 @@ static int llam_broker_descriptor_require_overlapped(HANDLE handle) {
                                     &io_status,
                                     &mode,
                                     (ULONG)sizeof(mode),
-                                    FileModeInformation);
+                                    LLAM_BROKER_FILE_MODE_INFORMATION_CLASS);
     if (status < 0 ||
-        (mode.Mode & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) != 0U) {
+        (mode.mode & (LLAM_BROKER_FILE_SYNCHRONOUS_IO_ALERT |
+                      LLAM_BROKER_FILE_SYNCHRONOUS_IO_NONALERT)) != 0U) {
         /*
          * Passing OVERLAPPED to a synchronous handle does not make the initial
          * ReadFile/WriteFile call asynchronous.  A client-selected pipe could
