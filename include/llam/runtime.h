@@ -54,7 +54,7 @@ extern "C" {
 #endif
 
 #define LLAM_VERSION_MAJOR 2U
-#define LLAM_VERSION_MINOR 1U
+#define LLAM_VERSION_MINOR 2U
 #define LLAM_VERSION_PATCH 0U
 
 #define LLAM_ABI_VERSION_MAJOR 2U
