@@ -82,13 +82,25 @@ void *llam_io_worker_main(void *arg) {
         llam_io_drain_completions(node);
 
         if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
-            pending == 0U &&
-            atomic_load(&node->pending_ops) == 0U) {
+            (node->linux_submit_terminal ||
+             (pending == 0U && atomic_load(&node->pending_ops) == 0U))) {
             break;
         }
 
         pending = atomic_load(&node->pending_ops);
         if (pending == 0U) {
+            (void)llam_node_wait_eventfd(node, LLAM_IDLE_POLL_TIMEOUT_MS);
+            continue;
+        }
+
+        if (node->linux_submit_terminal || node->linux_submit_retry ||
+            io_uring_sq_ready(&node->ring) > 0U) {
+            /*
+             * A prior short/error submit left SQEs ring-visible, or a terminal
+             * submit failure is waiting for explicit shutdown teardown. Avoid
+             * the indefinite SQPOLL sleep and keep completion/stop checks
+             * bounded.
+             */
             (void)llam_node_wait_eventfd(node, LLAM_IDLE_POLL_TIMEOUT_MS);
             continue;
         }

@@ -56,6 +56,13 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
     llam_io_kind_t kind = req->kind;
     struct io_uring_sqe *sqe;
 
+    if (node->linux_submit_terminal) {
+        int error = atomic_load_explicit(&node->runtime->fatal_errno,
+                                         memory_order_acquire);
+
+        llam_io_complete_req(node, req, -(error != 0 ? error : EIO), 0U, true);
+        return;
+    }
     if (!llam_linux_io_req_kind_supported(kind)) {
         /*
          * Unsupported requests complete locally.  Reject before SQE acquisition
@@ -98,6 +105,9 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
     if (sqe == NULL) {
         int rc = llam_node_submit_ring(node);
         if (rc < 0) {
+            if (node->linux_submit_terminal) {
+                llam_record_fatal(node->runtime, -rc);
+            }
             llam_io_complete_req(node, req, rc, 0U, true);
             return;
         }
@@ -168,9 +178,14 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
  * @param node Node whose pending queues should be flushed into the ring.
  */
 void llam_io_submit_batch(llam_node_t *node) {
-    llam_io_control_op_t *controls = llam_take_node_controls(node);
-    llam_io_req_t *reqs = llam_take_node_submissions(node);
+    llam_io_control_op_t *controls;
+    llam_io_req_t *reqs;
     unsigned submitted = 0U;
+
+    /* Keep fd resolution at io_uring_enter inside the public close boundary. */
+    llam_fd_watch_lifecycle_lock();
+    controls = llam_take_node_controls(node);
+    reqs = llam_take_node_submissions(node);
 
     while (controls != NULL) {
         llam_io_control_op_t *next = controls->next;
@@ -190,13 +205,23 @@ void llam_io_submit_batch(llam_node_t *node) {
         submitted += 1U;
     }
 
-    if (submitted > 0U) {
+    /*
+     * A short or failed io_uring_enter can leave already-prepared SQEs pending
+     * after their source queues have been detached.  Retry ring-visible work
+     * even when this pass did not dequeue a new request or control.
+     */
+    if (!node->linux_submit_terminal &&
+        (submitted > 0U || node->linux_submit_retry ||
+         io_uring_sq_ready(&node->ring) > 0U)) {
         int rc = llam_node_submit_ring(node);
-        if (rc < 0) {
+        if (rc < 0 && node->linux_submit_terminal) {
             llam_record_fatal(node->runtime, -rc);
         }
+    }
+    if (submitted > 0U) {
         atomic_fetch_add_explicit(&node->submit_batches, 1U, memory_order_relaxed);
         atomic_fetch_add_explicit(&node->submit_entries, submitted, memory_order_relaxed);
         llam_atomic_update_peak(&node->max_submit_batch, submitted);
     }
+    llam_fd_watch_lifecycle_unlock();
 }

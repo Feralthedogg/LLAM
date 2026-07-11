@@ -280,55 +280,26 @@ static llam_fd_t llam_accept_req_result(const llam_io_req_t *req) {
 }
 
 /**
- * @brief Read bytes from a descriptor without blocking the scheduler worker.
+ * @brief Submit one managed read without re-entering the direct/readiness loop.
  *
- * Managed tasks attempt direct non-blocking completion before submitting an
- * async read. Unsupported async paths fall back to the blocking worker pool.
- * Calls outside the runtime delegate to @c read directly.
- *
- * @param fd    File descriptor to read from.
- * @param buf   Destination buffer.
- * @param count Maximum bytes to read.
- *
- * @return Number of bytes read, or -1 with @c errno set.
+ * Generic POSIX descriptors have no portable per-call nonblocking read flag.
+ * Once the direct helper classifies a descriptor as non-socket, this is the
+ * only scheduler-safe continuation: a capable backend owns the read and its
+ * absolute deadline, or the bounded blocking-worker pool owns the syscall.
  */
-ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
+static ssize_t llam_submit_managed_read(llam_fd_t fd,
+                                        void *buf,
+                                        size_t count,
+                                        bool has_deadline,
+                                        uint64_t deadline_ns) {
     llam_io_req_t *req;
     ssize_t result;
 
-    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
-        return llam_platform_read_fd(fd, buf, count);
-    }
-    {
-        ssize_t direct_result;
-        int direct_rc = llam_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
-
-        if (direct_rc > 0) {
-            return direct_result;
-        }
-        if (direct_rc < 0) {
-            return -1;
-        }
-        llam_task_safepoint();
-        if (llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
-            llam_yield();
-            direct_rc = llam_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
-            if (direct_rc > 0) {
-                return direct_result;
-            }
-            if (direct_rc < 0) {
-                return -1;
-            }
-        }
-        direct_rc = llam_try_direct_blocking_rw(fd, buf, count, false, false, 0, &direct_result);
-        if (direct_rc > 0) {
-            return direct_result;
-        }
-        if (direct_rc < 0) {
-            return -1;
-        }
-    }
     if (llam_validate_async_rw_count(count) != 0) {
+        return -1;
+    }
+    if (has_deadline && llam_now_ns() >= deadline_ns) {
+        errno = ETIMEDOUT;
         return -1;
     }
 
@@ -343,9 +314,17 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
     req->buf = buf;
     req->count = count;
     req->recv_watch = NULL;
-    if (llam_issue_io(req, false, 0U) != 0) {
+    if (llam_issue_io(req, has_deadline, has_deadline ? deadline_ns : 0U) != 0) {
         if (!llam_io_capability_error(errno)) {
+            int saved_errno = errno;
+
             llam_api_io_req_release(g_llam_tls_shard, req);
+            errno = saved_errno;
+            return -1;
+        }
+        if (has_deadline && llam_now_ns() >= deadline_ns) {
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            errno = ETIMEDOUT;
             return -1;
         }
         req->kind = LLAM_IO_KIND_READ;
@@ -368,6 +347,77 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
     result = req->result;
     llam_api_io_req_release(g_llam_tls_shard, req);
     return result;
+}
+
+/**
+ * @brief Read bytes from a descriptor without blocking the scheduler worker.
+ *
+ * Managed tasks attempt direct non-blocking completion before submitting an
+ * async read. Unsupported async paths fall back to the blocking worker pool.
+ * Calls outside the runtime delegate to @c read directly.
+ *
+ * @param fd    File descriptor to read from.
+ * @param buf   Destination buffer.
+ * @param count Maximum bytes to read.
+ *
+ * @return Number of bytes read, or -1 with @c errno set.
+ */
+ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
+    if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
+        return llam_platform_read_fd(fd, buf, count);
+    }
+    {
+        ssize_t direct_result;
+        bool direct_socket = false;
+        int direct_rc = llam_try_direct_rw(fd,
+                                           buf,
+                                           count,
+                                           false,
+                                           false,
+                                           0,
+                                           &direct_result,
+                                           &direct_socket);
+
+        if (direct_rc > 0) {
+            return direct_result;
+        }
+        if (direct_rc < 0) {
+            return -1;
+        }
+        llam_task_safepoint();
+        if (!direct_socket) {
+            return llam_submit_managed_read(fd, buf, count, false, 0U);
+        }
+        if (llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
+            llam_yield();
+            direct_socket = false;
+            direct_rc = llam_try_direct_rw(fd,
+                                           buf,
+                                           count,
+                                           false,
+                                           false,
+                                           0,
+                                           &direct_result,
+                                           &direct_socket);
+            if (direct_rc > 0) {
+                return direct_result;
+            }
+            if (direct_rc < 0) {
+                return -1;
+            }
+            if (!direct_socket) {
+                return llam_submit_managed_read(fd, buf, count, false, 0U);
+            }
+        }
+        direct_rc = llam_try_direct_blocking_rw(fd, buf, count, false, false, 0, &direct_result);
+        if (direct_rc > 0) {
+            return direct_result;
+        }
+        if (direct_rc < 0) {
+            return -1;
+        }
+    }
+    return llam_submit_managed_read(fd, buf, count, false, 0U);
 }
 
 /**
@@ -494,13 +544,45 @@ ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_
 
     for (;;) {
         ssize_t direct_result;
-        int direct_rc = llam_try_direct_rw(fd, buf, count, false, false, 0, &direct_result, NULL);
+        bool direct_socket = false;
+        int direct_rc = llam_try_direct_rw(fd,
+                                           buf,
+                                           count,
+                                           false,
+                                           false,
+                                           0,
+                                           &direct_result,
+                                           &direct_socket);
 
         if (direct_rc > 0) {
             return direct_result;
         }
         if (direct_rc < 0) {
             return -1;
+        }
+        if (!direct_socket) {
+            if (timeout_ms == 0) {
+                short revents = 0;
+                int poll_rc = llam_poll_fd(fd, POLLIN, 0, &revents);
+
+                if (poll_rc < 0) {
+                    return -1;
+                }
+                if (poll_rc == 0) {
+                    errno = ETIMEDOUT;
+                    return -1;
+                }
+                if ((revents & (POLLIN | POLLHUP | POLLERR)) == 0) {
+                    errno = EIO;
+                    return -1;
+                }
+                return llam_submit_managed_read(fd, buf, count, false, 0U);
+            }
+            return llam_submit_managed_read(fd,
+                                            buf,
+                                            count,
+                                            timeout_ms >= 0,
+                                            deadline_ns);
         }
         if (timeout_ms < 0 && llam_read_ready_direct_blocking_enabled()) {
             direct_rc = llam_try_direct_blocking_rw_forced(fd, buf, count, false, false, 0, &direct_result);
@@ -568,13 +650,15 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
             return -1;
         }
         llam_task_safepoint();
-        direct_rc = llam_try_direct_blocking_rw(fd, (void *)buf, count, true, false, 0, &direct_result);
-        if (direct_rc > 0) {
-            llam_maybe_handoff_after_socket_write(fd, (size_t)direct_result, false);
-            return direct_result;
-        }
-        if (direct_rc < 0) {
-            return -1;
+        if (direct_socket) {
+            direct_rc = llam_try_direct_blocking_rw(fd, (void *)buf, count, true, false, 0, &direct_result);
+            if (direct_rc > 0) {
+                llam_maybe_handoff_after_socket_write(fd, (size_t)direct_result, false);
+                return direct_result;
+            }
+            if (direct_rc < 0) {
+                return -1;
+            }
         }
     }
     if (llam_validate_async_rw_count(count) != 0) {
@@ -681,7 +765,7 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
             return -1;
         }
         llam_task_safepoint();
-        if (llam_poll_fd(fd, POLLOUT, -1, NULL) > 0) {
+        if (direct_socket && llam_poll_fd(fd, POLLOUT, -1, NULL) > 0) {
             direct_rc = llam_try_direct_writev(fd, iov, iovcnt, &direct_result, &direct_socket);
             if (direct_rc > 0) {
                 llam_maybe_handoff_after_socket_write(fd, (size_t)direct_result, direct_socket);
@@ -690,7 +774,7 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
             if (direct_rc < 0) {
                 return -1;
             }
-        } else if (errno != EINTR) {
+        } else if (direct_socket && errno != EINTR) {
             return -1;
         }
     }
@@ -725,13 +809,19 @@ ssize_t llam_writev(llam_fd_t fd, const llam_iovec_t *iov, int iovcnt) {
     return total;
 }
 
+typedef struct llam_forget_closed_fd_context {
+    llam_fd_t fd;
+    int first_error;
+} llam_forget_closed_fd_context_t;
+
 static void llam_forget_closed_fd_state_for_runtime(llam_runtime_t *rt, void *arg) {
+    llam_forget_closed_fd_context_t *context = arg;
     llam_fd_t fd;
 
-    if (rt == NULL || arg == NULL) {
+    if (rt == NULL || context == NULL) {
         return;
     }
-    fd = *(const llam_fd_t *)arg;
+    fd = context->fd;
     if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
 #if LLAM_RUNTIME_BACKEND_WINDOWS
         /*
@@ -742,13 +832,17 @@ static void llam_forget_closed_fd_state_for_runtime(llam_runtime_t *rt, void *ar
         llam_windows_socket_nonblocking_forget(rt, fd);
         llam_windows_forget_fd_assoc(rt, fd);
 #else
-        llam_forget_closed_fd_watch_state(rt, fd);
+        if (llam_forget_closed_fd_watch_state(rt, fd) != 0 && context->first_error == 0) {
+            context->first_error = errno != 0 ? errno : ENOMEM;
+        }
 #endif
     }
 }
 
-static void llam_forget_closed_fd_state(llam_fd_t fd) {
+static int llam_forget_closed_fd_state(llam_fd_t fd) {
+    llam_forget_closed_fd_context_t context;
     int saved_errno = errno;
+    int rc;
 
     /*
      * fd/socket numbers are process-global, not runtime-owned capabilities.
@@ -756,23 +850,51 @@ static void llam_forget_closed_fd_state(llam_fd_t fd) {
      * descriptor that runtime B has idle readiness/cache state for.  Scan all
      * live runtimes under active-op pins before the OS can recycle the value.
      */
-    (void)llam_runtime_for_each_live(llam_forget_closed_fd_state_for_runtime, &fd);
-    errno = saved_errno;
+    context.fd = fd;
+    context.first_error = 0;
+    rc = llam_runtime_for_each_live(llam_forget_closed_fd_state_for_runtime, &context);
+    if (rc == 0 && context.first_error != 0) {
+        errno = context.first_error;
+        return -1;
+    }
+    if (rc == 0) {
+        errno = saved_errno;
+    }
+    return rc;
 }
 
 int llam_close(llam_fd_t fd) {
+    int rc;
+
     if (LLAM_FD_IS_INVALID(fd)) {
         errno = EBADF;
         return -1;
     }
-    llam_forget_closed_fd_state(fd);
-    return llam_platform_close_fd(fd);
+    /*
+     * Keep descriptor-watch invalidation adjacent to the kernel close.  Watch
+     * attach/association and migration take the same recursive lock on every
+     * platform, so no new old-generation watch or IOCP association can appear
+     * after the runtime scan but before numeric handle reuse becomes possible.
+     */
+    llam_fd_watch_lifecycle_lock();
+    if (llam_forget_closed_fd_state(fd) != 0) {
+        int saved_errno = errno;
+
+        llam_fd_watch_lifecycle_unlock();
+        errno = saved_errno;
+        return -1;
+    }
+    rc = llam_platform_close_fd(fd);
+    llam_fd_watch_lifecycle_unlock();
+    return rc;
 }
 
 int llam_close_handle(llam_handle_t handle) {
 #if LLAM_PLATFORM_POSIX
     return llam_close((llam_fd_t)handle);
 #else
+    int rc;
+
     if (LLAM_HANDLE_IS_INVALID(handle)) {
         errno = EBADF;
         return -1;
@@ -782,12 +904,22 @@ int llam_close_handle(llam_handle_t handle) {
      * be closed by any managed runtime or host thread while another runtime has
      * IOCP skip-completion metadata cached for the same numeric value.
      */
-    llam_forget_closed_fd_state((llam_fd_t)(uintptr_t)handle);
-    if (!CloseHandle((HANDLE)handle)) {
-        errno = llam_windows_system_error_to_errno(GetLastError());
+    llam_fd_watch_lifecycle_lock();
+    if (llam_forget_closed_fd_state((llam_fd_t)(uintptr_t)handle) != 0) {
+        int saved_errno = errno;
+
+        llam_fd_watch_lifecycle_unlock();
+        errno = saved_errno;
         return -1;
     }
-    return 0;
+    if (!CloseHandle((HANDLE)handle)) {
+        errno = llam_windows_system_error_to_errno(GetLastError());
+        rc = -1;
+    } else {
+        rc = 0;
+    }
+    llam_fd_watch_lifecycle_unlock();
+    return rc;
 #endif
 }
 

@@ -226,7 +226,7 @@ static DWORD WINAPI dump_thread_main(LPVOID arg) {
     }
 
     if (atomic_load_explicit(&state->dump_seen, memory_order_acquire) == 0U) {
-        task_fail(state, "runtime dump did not expose pending IOCP accept");
+        task_fail(state, "runtime dump did not expose pending IOCP accept", EPROTO);
     }
     if (connect_once(state) != 0) {
         task_fail(state, "failed to release pending accept", errno);

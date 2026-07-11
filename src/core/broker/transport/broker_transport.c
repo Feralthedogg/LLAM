@@ -25,6 +25,7 @@
 
 #include "runtime_internal.h"
 #include "runtime_broker.h"
+#include "runtime_broker_ring.h"
 
 #include <string.h>
 
@@ -32,6 +33,9 @@
 static atomic_bool g_llam_broker_force_subject_entropy_failure;
 static atomic_bool g_llam_broker_force_subject_value_enabled;
 static atomic_uint_fast64_t g_llam_broker_forced_subject_value;
+static atomic_bool g_llam_broker_pause_subject_reclaim;
+static atomic_bool g_llam_broker_subject_reclaim_entered;
+static atomic_bool g_llam_broker_release_subject_reclaim;
 
 static bool llam_broker_subject_entropy_forced_failure(void) {
     return atomic_load_explicit(&g_llam_broker_force_subject_entropy_failure, memory_order_relaxed);
@@ -53,6 +57,32 @@ void llam_broker_test_force_subject_value(bool enabled, uint64_t subject_id) {
     atomic_store_explicit(&g_llam_broker_forced_subject_value, subject_id, memory_order_relaxed);
     atomic_store_explicit(&g_llam_broker_force_subject_value_enabled, enabled, memory_order_relaxed);
 }
+
+void llam_broker_test_pause_subject_reclaim(bool enabled) {
+    if (enabled) {
+        atomic_store_explicit(&g_llam_broker_release_subject_reclaim, false, memory_order_relaxed);
+        atomic_store_explicit(&g_llam_broker_subject_reclaim_entered, false, memory_order_relaxed);
+        atomic_store_explicit(&g_llam_broker_pause_subject_reclaim, true, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&g_llam_broker_pause_subject_reclaim, false, memory_order_relaxed);
+    atomic_store_explicit(&g_llam_broker_release_subject_reclaim, true, memory_order_release);
+}
+
+bool llam_broker_test_subject_reclaim_paused(void) {
+    return atomic_load_explicit(&g_llam_broker_subject_reclaim_entered, memory_order_acquire);
+}
+
+static void llam_broker_test_pause_before_subject_reclaim(void) {
+    if (!atomic_load_explicit(&g_llam_broker_pause_subject_reclaim, memory_order_acquire)) {
+        return;
+    }
+    atomic_store_explicit(&g_llam_broker_subject_reclaim_entered, true, memory_order_release);
+    while (!atomic_load_explicit(&g_llam_broker_release_subject_reclaim, memory_order_acquire)) {
+        llam_pause_cpu();
+    }
+    atomic_store_explicit(&g_llam_broker_subject_reclaim_entered, false, memory_order_release);
+}
 #else
 static bool llam_broker_subject_entropy_forced_failure(void) {
     return false;
@@ -61,6 +91,9 @@ static bool llam_broker_subject_entropy_forced_failure(void) {
 static bool llam_broker_subject_forced_value(uint64_t *out_subject) {
     (void)out_subject;
     return false;
+}
+
+static void llam_broker_test_pause_before_subject_reclaim(void) {
 }
 #endif
 
@@ -206,17 +239,48 @@ int llam_broker_transport_subject(llam_broker_t *broker,
 
 void llam_broker_forget_transport_subject(llam_broker_t *broker, uintptr_t transport_id) {
     size_t i;
+    uint64_t subject_id = 0U;
 
-    if (broker == NULL || llam_broker_lock(broker) != 0) {
+    if (broker == NULL || llam_broker_begin_op(broker) != 0) {
+        return;
+    }
+    if (llam_broker_lock(broker) != 0) {
+        llam_broker_end_op(broker);
         return;
     }
     for (i = 0U; i < LLAM_BROKER_TRANSPORT_SESSIONS; ++i) {
         llam_broker_transport_session_t *session = &broker->transport_sessions[i];
 
         if (session->active && session->transport_id == transport_id) {
+            subject_id = session->subject_id;
             memset(session, 0, sizeof(*session));
             break;
         }
     }
     llam_broker_unlock(broker);
+    if (subject_id != 0U) {
+        llam_broker_test_pause_before_subject_reclaim();
+        llam_broker_reclaim_subject_objects(broker, subject_id);
+    }
+    llam_broker_end_op(broker);
+}
+
+void llam_broker_reclaim_subject_objects(llam_broker_t *broker, uint64_t subject_id) {
+    if (broker == NULL || subject_id == 0U) {
+        return;
+    }
+    /*
+     * A busy ring session has already accepted immutable work for this
+     * subject and may still validate a descriptor/channel/buffer token after
+     * dropping the broker table lock.  Mark every owned ring for deferred
+     * teardown first; the last busy completion retries this whole reclaim once
+     * no in-flight session can consume the subject's grants.
+     */
+    if (llam_broker_reclaim_subject_rings(broker, subject_id)) {
+        return;
+    }
+    llam_broker_reclaim_subject_buffers(broker, subject_id);
+    llam_broker_reclaim_subject_descriptors(broker, subject_id);
+    llam_broker_reclaim_subject_channels(broker, subject_id);
+    llam_broker_reclaim_subject_tasks(broker, subject_id);
 }

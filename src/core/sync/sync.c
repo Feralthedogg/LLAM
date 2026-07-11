@@ -120,7 +120,7 @@ bool llam_sync_note_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter, un
     if (rt == NULL || counter == NULL) {
         errno = EINVAL;
         if (rt != NULL) {
-            llam_record_fatal(rt, EINVAL);
+            llam_record_fatal_deferred(rt, EINVAL);
         }
         return false;
     }
@@ -128,7 +128,7 @@ bool llam_sync_note_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter, un
     current = atomic_load_explicit(counter, memory_order_acquire);
     for (;;) {
         if (UINT_MAX - current < amount) {
-            llam_record_fatal(rt, EOVERFLOW);
+            llam_record_fatal_deferred(rt, EOVERFLOW);
             errno = EOVERFLOW;
             return false;
         }
@@ -166,7 +166,7 @@ bool llam_sync_complete_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter
     if (rt == NULL || counter == NULL) {
         errno = EINVAL;
         if (rt != NULL) {
-            llam_record_fatal(rt, EINVAL);
+            llam_record_fatal_deferred(rt, EINVAL);
         }
         return false;
     }
@@ -182,7 +182,7 @@ bool llam_sync_complete_inflight_waiter(llam_runtime_t *rt, atomic_uint *counter
         }
     }
 
-    llam_record_fatal(rt, EINVAL);
+    llam_record_fatal_deferred(rt, EINVAL);
     errno = EINVAL;
     return false;
 }

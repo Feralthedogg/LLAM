@@ -26,7 +26,291 @@
 
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
 
+void llam_darwin_pin_event_batch(llam_node_t *node, struct kevent *events, unsigned count) {
+    if (node == NULL || events == NULL || count == 0U) {
+        return;
+    }
+
+    pthread_mutex_lock(&node->watch_lock);
+    for (unsigned i = 0U; i < count; ++i) {
+        uint64_t user_data;
+        void *ptr;
+
+        if (llam_kqueue_is_worker_wake_event(&events[i])) {
+            continue;
+        }
+        user_data = (uint64_t)(uintptr_t)events[i].udata;
+        ptr = llam_io_udata_ptr(user_data);
+        switch (llam_io_udata_tag(user_data)) {
+        case LLAM_IO_UDATA_POLL_WATCH:
+            if (ptr != NULL && !((llam_poll_watch_t *)ptr)->retired) {
+                llam_poll_watch_pin_locked(ptr);
+            }
+            break;
+        case LLAM_IO_UDATA_ACCEPT_WATCH:
+            if (ptr != NULL && !((llam_accept_watch_t *)ptr)->retired) {
+                llam_accept_watch_pin_locked(ptr);
+            }
+            break;
+        case LLAM_IO_UDATA_RECV_WATCH:
+            if (ptr != NULL && !((llam_recv_watch_t *)ptr)->retired) {
+                llam_recv_watch_pin_locked(ptr);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+
+    for (unsigned i = 0U; i < count; ++i) {
+        uint64_t user_data;
+
+        if (llam_kqueue_is_worker_wake_event(&events[i])) {
+            continue;
+        }
+        user_data = (uint64_t)(uintptr_t)events[i].udata;
+        if (llam_io_udata_tag(user_data) == LLAM_IO_UDATA_REQ) {
+            if (!llam_io_req_backend_event_pin(llam_io_udata_ptr(user_data))) {
+                /* Suppress an event that could not acquire all parent storage pins. */
+                events[i].udata = (void *)(uintptr_t)llam_io_udata_encode(NULL, LLAM_IO_UDATA_CONTROL);
+            }
+        }
+    }
+}
+
+void llam_darwin_unpin_event_batch(llam_node_t *node, const struct kevent *events, unsigned count) {
+    if (node == NULL || events == NULL || count == 0U) {
+        return;
+    }
+
+    pthread_mutex_lock(&node->watch_lock);
+    for (unsigned i = 0U; i < count; ++i) {
+        uint64_t user_data;
+        void *ptr;
+
+        if (llam_kqueue_is_worker_wake_event(&events[i])) {
+            continue;
+        }
+        user_data = (uint64_t)(uintptr_t)events[i].udata;
+        ptr = llam_io_udata_ptr(user_data);
+        switch (llam_io_udata_tag(user_data)) {
+        case LLAM_IO_UDATA_POLL_WATCH:
+            llam_poll_watch_unpin_locked(node, ptr);
+            break;
+        case LLAM_IO_UDATA_ACCEPT_WATCH:
+            llam_accept_watch_unpin_locked(node, ptr);
+            break;
+        case LLAM_IO_UDATA_RECV_WATCH:
+            llam_recv_watch_unpin_locked(node, ptr);
+            break;
+        default:
+            break;
+        }
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+
+    for (unsigned i = 0U; i < count; ++i) {
+        uint64_t user_data;
+
+        if (llam_kqueue_is_worker_wake_event(&events[i])) {
+            continue;
+        }
+        user_data = (uint64_t)(uintptr_t)events[i].udata;
+        if (llam_io_udata_tag(user_data) == LLAM_IO_UDATA_REQ) {
+            llam_io_req_backend_event_unpin(llam_io_udata_ptr(user_data));
+        }
+    }
+}
+
 /** @brief Apply one queued Darwin control operation. */
+static bool llam_darwin_control_guards_fd_lifecycle(const llam_io_control_op_t *op) {
+    return op != NULL &&
+           (op->kind == LLAM_IO_CONTROL_POLL_ACTIVATE ||
+            op->kind == LLAM_IO_CONTROL_POLL_DEACTIVATE ||
+            op->kind == LLAM_IO_CONTROL_ACCEPT_ACTIVATE ||
+            op->kind == LLAM_IO_CONTROL_ACCEPT_DEACTIVATE ||
+            op->kind == LLAM_IO_CONTROL_RECV_ACTIVATE ||
+            op->kind == LLAM_IO_CONTROL_RECV_DEACTIVATE);
+}
+
+static bool llam_darwin_has_attachable_read_replacement_locked(const llam_node_t *node,
+                                                                int fd,
+                                                                const void *closed_watch) {
+    const llam_poll_watch_t *poll_watch;
+    const llam_accept_watch_t *accept_watch;
+    const llam_recv_watch_t *recv_watch;
+
+    if (node == NULL) {
+        return false;
+    }
+    for (poll_watch = node->poll_watches; poll_watch != NULL; poll_watch = poll_watch->next) {
+        if ((const void *)poll_watch != closed_watch && poll_watch->fd == fd &&
+            (poll_watch->events & (POLLIN | POLLPRI)) != 0 &&
+            poll_watch->accepts_waiters && !poll_watch->retired && !poll_watch->destroy_pending) {
+            return true;
+        }
+    }
+    for (accept_watch = node->accept_watches; accept_watch != NULL; accept_watch = accept_watch->next) {
+        if ((const void *)accept_watch != closed_watch && accept_watch->fd == fd &&
+            accept_watch->accepts_waiters && !accept_watch->retired && !accept_watch->destroy_pending) {
+            return true;
+        }
+    }
+    for (recv_watch = node->recv_watches; recv_watch != NULL; recv_watch = recv_watch->next) {
+        if ((const void *)recv_watch != closed_watch && recv_watch->fd == fd &&
+            recv_watch->accepts_waiters && !recv_watch->retired && !recv_watch->destroy_pending) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool llam_darwin_has_attachable_write_replacement_locked(const llam_node_t *node,
+                                                                 int fd,
+                                                                 const void *closed_watch) {
+    const llam_poll_watch_t *poll_watch;
+
+    if (node == NULL) {
+        return false;
+    }
+    for (poll_watch = node->poll_watches; poll_watch != NULL; poll_watch = poll_watch->next) {
+        if ((const void *)poll_watch != closed_watch && poll_watch->fd == fd &&
+            (poll_watch->events & POLLOUT) != 0 && poll_watch->accepts_waiters &&
+            !poll_watch->retired && !poll_watch->destroy_pending) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool llam_darwin_closed_fd_identity_matches(int fd, dev_t st_dev, ino_t st_ino) {
+    dev_t current_dev = 0;
+    ino_t current_ino = 0;
+
+    return llam_capture_fd_watch_identity(fd, &current_dev, &current_ino) &&
+           current_dev == st_dev && current_ino == st_ino;
+}
+
+static bool llam_darwin_closed_accept_identity_matches(const llam_accept_watch_t *watch) {
+    struct sockaddr_storage local_addr;
+    socklen_t local_addrlen = (socklen_t)sizeof(local_addr);
+    bool has_local_addr = false;
+
+    if (watch == NULL ||
+        !llam_darwin_closed_fd_identity_matches(watch->fd, watch->st_dev, watch->st_ino)) {
+        return false;
+    }
+    memset(&local_addr, 0, sizeof(local_addr));
+    if (getsockname(watch->fd,
+                    (struct sockaddr *)(void *)&local_addr,
+                    &local_addrlen) == 0 &&
+        local_addrlen <= (socklen_t)sizeof(local_addr)) {
+        has_local_addr = true;
+    } else {
+        local_addrlen = 0U;
+    }
+    if (watch->has_local_addr != has_local_addr) {
+        return false;
+    }
+    return !has_local_addr ||
+           (watch->local_addrlen == local_addrlen &&
+            memcmp(&watch->local_addr, &local_addr, (size_t)local_addrlen) == 0);
+}
+
+static bool llam_darwin_closed_poll_delete_plan_locked(const llam_node_t *node,
+                                                        const llam_poll_watch_t *watch,
+                                                        bool *delete_read,
+                                                        bool *delete_write) {
+    if (delete_read != NULL) {
+        *delete_read = false;
+    }
+    if (delete_write != NULL) {
+        *delete_write = false;
+    }
+    if (watch == NULL ||
+        !llam_darwin_closed_fd_identity_matches(watch->fd, watch->st_dev, watch->st_ino)) {
+        return false;
+    }
+    if (delete_read != NULL && (watch->events & (POLLIN | POLLPRI)) != 0) {
+        *delete_read = !llam_darwin_has_attachable_read_replacement_locked(node,
+                                                                           watch->fd,
+                                                                           watch);
+    }
+    if (delete_write != NULL && (watch->events & POLLOUT) != 0) {
+        *delete_write = !llam_darwin_has_attachable_write_replacement_locked(node,
+                                                                             watch->fd,
+                                                                             watch);
+    }
+    return (delete_read != NULL && *delete_read) ||
+           (delete_write != NULL && *delete_write);
+}
+
+static bool llam_darwin_closed_accept_needs_delete_locked(const llam_node_t *node,
+                                                           const llam_accept_watch_t *watch) {
+    return watch != NULL &&
+           !llam_darwin_has_attachable_read_replacement_locked(node, watch->fd, watch) &&
+           llam_darwin_closed_accept_identity_matches(watch);
+}
+
+static bool llam_darwin_closed_recv_needs_delete_locked(const llam_node_t *node,
+                                                         const llam_recv_watch_t *watch) {
+    return watch != NULL &&
+           !llam_darwin_has_attachable_read_replacement_locked(node, watch->fd, watch) &&
+           llam_darwin_closed_fd_identity_matches(watch->fd, watch->st_dev, watch->st_ino);
+}
+
+static int llam_darwin_poll_watch_delete_filters(llam_node_t *node,
+                                                  llam_poll_watch_t *watch,
+                                                  bool delete_read,
+                                                  bool delete_write) {
+    struct kevent change;
+
+    if (delete_read) {
+        int rc;
+
+        EV_SET(&change,
+               (uintptr_t)watch->fd,
+               EVFILT_READ,
+               EV_DELETE,
+               0U,
+               0,
+               (void *)(uintptr_t)llam_io_udata_encode(watch, LLAM_IO_UDATA_POLL_WATCH));
+        rc = llam_darwin_kevent_apply(node, &change, 1);
+        if (rc != 0 && errno != ENOENT && errno != EBADF) {
+            return -1;
+        }
+    }
+    if (delete_write) {
+        int rc;
+
+        EV_SET(&change,
+               (uintptr_t)watch->fd,
+               EVFILT_WRITE,
+               EV_DELETE,
+               0U,
+               0,
+               (void *)(uintptr_t)llam_io_udata_encode(watch, LLAM_IO_UDATA_POLL_WATCH));
+        rc = llam_darwin_kevent_apply(node, &change, 1);
+        if (rc != 0 && errno != ENOENT && errno != EBADF) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static bool llam_darwin_delete_definitively_complete(int rc, int cleanup_error, bool attempted) {
+    return !attempted || rc == 0 || cleanup_error == ENOENT || cleanup_error == EBADF;
+}
+
+static bool llam_darwin_cleanup_error_retryable(int cleanup_error) {
+    return cleanup_error == EAGAIN
+#if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
+           || cleanup_error == EWOULDBLOCK
+#endif
+        ;
+}
+
 void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
     int rc = 0;
 
@@ -34,29 +318,41 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
     case LLAM_IO_CONTROL_POLL_ACTIVATE: {
         llam_poll_watch_t *watch = op->target;
         llam_io_req_t *waiters = NULL;
+        int activation_error = 0;
+        bool eligible;
 
-        rc = llam_darwin_poll_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS);
+        pthread_mutex_lock(&node->watch_lock);
+        eligible = watch->accepts_waiters;
+        pthread_mutex_unlock(&node->watch_lock);
+        if (eligible) {
+            rc = llam_darwin_poll_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS);
+        } else {
+            errno = EBADF;
+            rc = -1;
+        }
+        activation_error = rc == 0 ? 0 : errno;
         pthread_mutex_lock(&node->watch_lock);
         if (rc == 0) {
             // Kqueue one-shot delivery disables the watch until the event
             // handler explicitly re-enables it.
             watch->active = true;
             watch->activating = false;
-            watch->deactivate_queued = false;
             (void)llam_node_note_pending_ops(node, 1U);
         } else {
             watch->active = false;
             watch->activating = false;
-            watch->deactivate_queued = false;
             watch->sticky_revents = 0;
             waiters = llam_poll_watch_take_waiters(watch);
+            if (!watch->accepts_waiters && !watch->deactivate_queued) {
+                llam_destroy_poll_watch_locked(node, watch);
+            }
         }
         pthread_mutex_unlock(&node->watch_lock);
         while (waiters != NULL) {
             llam_io_req_t *next = waiters->next;
 
             waiters->next = NULL;
-            llam_io_complete_req(node, waiters, -errno, false);
+            llam_io_complete_req(node, waiters, -activation_error, false);
             waiters = next;
         }
         break;
@@ -65,21 +361,75 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         llam_poll_watch_t *watch = op->target;
         unsigned migrate_target = UINT_MAX;
         bool kick_target = false;
+        bool retry_queued = false;
+        bool attempted_delete;
+        bool cleanup_complete;
+        bool closed;
+        bool delete_read = false;
+        bool delete_write = false;
+        int cleanup_error = 0;
+        int retry_error = 0;
 
-        rc = llam_darwin_poll_watch_change(node, watch, EV_DELETE);
+        pthread_mutex_lock(&node->watch_lock);
+        closed = !watch->accepts_waiters;
+        if (closed) {
+            attempted_delete = llam_darwin_closed_poll_delete_plan_locked(node,
+                                                                           watch,
+                                                                           &delete_read,
+                                                                           &delete_write);
+        } else {
+            delete_read = (watch->events & (POLLIN | POLLPRI)) != 0;
+            delete_write = (watch->events & POLLOUT) != 0;
+            attempted_delete = delete_read || delete_write;
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        rc = attempted_delete ? llam_darwin_poll_watch_delete_filters(node,
+                                                                       watch,
+                                                                       delete_read,
+                                                                       delete_write) : 0;
+        cleanup_error = rc == 0 ? 0 : errno;
+        cleanup_complete = llam_darwin_delete_definitively_complete(rc,
+                                                                    cleanup_error,
+                                                                    attempted_delete);
         pthread_mutex_lock(&node->watch_lock);
         watch->activating = false;
         watch->deactivate_queued = false;
+        if (!cleanup_complete) {
+            if (llam_darwin_cleanup_error_retryable(cleanup_error)) {
+                watch->deactivate_queued = true;
+                if (llam_node_queue_control_locked(node,
+                                                   LLAM_IO_CONTROL_POLL_DEACTIVATE,
+                                                   watch) == 0) {
+                    retry_queued = true;
+                } else {
+                    watch->deactivate_queued = false;
+                    retry_error = errno != 0 ? errno : ENOMEM;
+                }
+            }
+            pthread_mutex_unlock(&node->watch_lock);
+            if (retry_queued) {
+                llam_kick_node(node);
+            } else if (retry_error != 0) {
+                llam_record_fatal(node->runtime, retry_error);
+            } else if (llam_darwin_kevent_cleanup_error_is_fatal(cleanup_error)) {
+                llam_record_fatal(node->runtime, cleanup_error);
+            }
+            break;
+        }
         if (watch->active) {
             watch->active = false;
             (void)llam_node_complete_pending_ops(node, 1U);
         }
-        if (watch->migrate_target_node_index != UINT_MAX) {
+        if (!closed && watch->migrate_target_node_index != UINT_MAX) {
             migrate_target = watch->migrate_target_node_index;
         }
+        if (closed) {
+            llam_destroy_poll_watch_locked(node, watch);
+        }
         pthread_mutex_unlock(&node->watch_lock);
-        if (rc != 0 && llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
-            llam_record_fatal(node->runtime, errno);
+        if (rc != 0 && cleanup_error != EBADF &&
+            llam_darwin_kevent_cleanup_error_is_fatal(cleanup_error)) {
+            llam_record_fatal(node->runtime, cleanup_error);
         }
         if (migrate_target != UINT_MAX &&
             llam_finalize_poll_watch_migration(node, watch, migrate_target, &kick_target) &&
@@ -92,28 +442,40 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
     case LLAM_IO_CONTROL_ACCEPT_ACTIVATE: {
         llam_accept_watch_t *watch = op->target;
         llam_io_req_t *waiters = NULL;
+        int activation_error = 0;
+        bool eligible;
 
-        rc = llam_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
+        pthread_mutex_lock(&node->watch_lock);
+        eligible = watch->accepts_waiters;
+        pthread_mutex_unlock(&node->watch_lock);
+        if (eligible) {
+            rc = llam_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
+        } else {
+            errno = EBADF;
+            rc = -1;
+        }
+        activation_error = rc == 0 ? 0 : errno;
         pthread_mutex_lock(&node->watch_lock);
         if (rc == 0) {
             watch->active = true;
             watch->activating = false;
-            watch->deactivate_queued = false;
             (void)llam_node_note_pending_ops(node, 1U);
         } else {
             watch->active = false;
             watch->activating = false;
-            watch->deactivate_queued = false;
             waiters = watch->wait_head;
             watch->wait_head = NULL;
             watch->wait_tail = NULL;
+            if (!watch->accepts_waiters && !watch->deactivate_queued) {
+                llam_destroy_accept_watch_locked(node, watch);
+            }
         }
         pthread_mutex_unlock(&node->watch_lock);
         while (waiters != NULL) {
             llam_io_req_t *next = waiters->next;
 
             waiters->next = NULL;
-            llam_io_complete_req(node, waiters, -errno, false);
+            llam_io_complete_req(node, waiters, -activation_error, false);
             waiters = next;
         }
         break;
@@ -122,21 +484,61 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         llam_accept_watch_t *watch = op->target;
         unsigned migrate_target = UINT_MAX;
         bool kick_target = false;
+        bool retry_queued = false;
+        bool attempted_delete;
+        bool cleanup_complete;
+        bool closed;
+        int cleanup_error = 0;
+        int retry_error = 0;
 
-        rc = llam_darwin_accept_watch_change(node, watch, EV_DELETE);
+        pthread_mutex_lock(&node->watch_lock);
+        closed = !watch->accepts_waiters;
+        attempted_delete = !closed || llam_darwin_closed_accept_needs_delete_locked(node, watch);
+        pthread_mutex_unlock(&node->watch_lock);
+        rc = attempted_delete ? llam_darwin_accept_watch_change(node, watch, EV_DELETE) : 0;
+        cleanup_error = rc == 0 ? 0 : errno;
+        cleanup_complete = llam_darwin_delete_definitively_complete(rc,
+                                                                    cleanup_error,
+                                                                    attempted_delete);
         pthread_mutex_lock(&node->watch_lock);
         watch->activating = false;
         watch->deactivate_queued = false;
+        if (!cleanup_complete) {
+            if (llam_darwin_cleanup_error_retryable(cleanup_error)) {
+                watch->deactivate_queued = true;
+                if (llam_node_queue_control_locked(node,
+                                                   LLAM_IO_CONTROL_ACCEPT_DEACTIVATE,
+                                                   watch) == 0) {
+                    retry_queued = true;
+                } else {
+                    watch->deactivate_queued = false;
+                    retry_error = errno != 0 ? errno : ENOMEM;
+                }
+            }
+            pthread_mutex_unlock(&node->watch_lock);
+            if (retry_queued) {
+                llam_kick_node(node);
+            } else if (retry_error != 0) {
+                llam_record_fatal(node->runtime, retry_error);
+            } else if (llam_darwin_kevent_cleanup_error_is_fatal(cleanup_error)) {
+                llam_record_fatal(node->runtime, cleanup_error);
+            }
+            break;
+        }
         if (watch->active) {
             watch->active = false;
             (void)llam_node_complete_pending_ops(node, 1U);
         }
-        if (watch->migrate_target_node_index != UINT_MAX) {
+        if (!closed && watch->migrate_target_node_index != UINT_MAX) {
             migrate_target = watch->migrate_target_node_index;
         }
+        if (closed) {
+            llam_destroy_accept_watch_locked(node, watch);
+        }
         pthread_mutex_unlock(&node->watch_lock);
-        if (rc != 0 && llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
-            llam_record_fatal(node->runtime, errno);
+        if (rc != 0 && cleanup_error != EBADF &&
+            llam_darwin_kevent_cleanup_error_is_fatal(cleanup_error)) {
+            llam_record_fatal(node->runtime, cleanup_error);
         }
         if (migrate_target != UINT_MAX &&
             llam_finalize_accept_watch_migration(node, watch, migrate_target, &kick_target) &&
@@ -149,28 +551,40 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
     case LLAM_IO_CONTROL_RECV_ACTIVATE: {
         llam_recv_watch_t *watch = op->target;
         llam_io_req_t *waiters = NULL;
+        int activation_error = 0;
+        bool eligible;
 
-        rc = llam_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
+        pthread_mutex_lock(&node->watch_lock);
+        eligible = watch->accepts_waiters;
+        pthread_mutex_unlock(&node->watch_lock);
+        if (eligible) {
+            rc = llam_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
+        } else {
+            errno = EBADF;
+            rc = -1;
+        }
+        activation_error = rc == 0 ? 0 : errno;
         pthread_mutex_lock(&node->watch_lock);
         if (rc == 0) {
             watch->active = true;
             watch->activating = false;
-            watch->deactivate_queued = false;
             (void)llam_node_note_pending_ops(node, 1U);
         } else {
             watch->active = false;
             watch->activating = false;
-            watch->deactivate_queued = false;
             waiters = watch->wait_head;
             watch->wait_head = NULL;
             watch->wait_tail = NULL;
+            if (!watch->accepts_waiters && !watch->deactivate_queued) {
+                llam_destroy_recv_watch_locked(node, watch);
+            }
         }
         pthread_mutex_unlock(&node->watch_lock);
         while (waiters != NULL) {
             llam_io_req_t *next = waiters->next;
 
             waiters->next = NULL;
-            llam_io_complete_req(node, waiters, -errno, false);
+            llam_io_complete_req(node, waiters, -activation_error, false);
             waiters = next;
         }
         break;
@@ -179,23 +593,62 @@ void llam_darwin_process_control(llam_node_t *node, llam_io_control_op_t *op) {
         llam_recv_watch_t *watch = op->target;
         unsigned migrate_target = UINT_MAX;
         bool kick_target = false;
+        bool retry_queued = false;
+        bool attempted_delete;
+        bool cleanup_complete;
+        bool closed;
+        int cleanup_error = 0;
+        int retry_error = 0;
 
-        rc = llam_darwin_recv_watch_change(node, watch, EV_DELETE);
+        pthread_mutex_lock(&node->watch_lock);
+        closed = !watch->accepts_waiters;
+        attempted_delete = !closed || llam_darwin_closed_recv_needs_delete_locked(node, watch);
+        pthread_mutex_unlock(&node->watch_lock);
+        rc = attempted_delete ? llam_darwin_recv_watch_change(node, watch, EV_DELETE) : 0;
+        cleanup_error = rc == 0 ? 0 : errno;
+        cleanup_complete = llam_darwin_delete_definitively_complete(rc,
+                                                                    cleanup_error,
+                                                                    attempted_delete);
         pthread_mutex_lock(&node->watch_lock);
         watch->activating = false;
         watch->deactivate_queued = false;
+        if (!cleanup_complete) {
+            if (llam_darwin_cleanup_error_retryable(cleanup_error)) {
+                watch->deactivate_queued = true;
+                if (llam_node_queue_control_locked(node,
+                                                   LLAM_IO_CONTROL_RECV_DEACTIVATE,
+                                                   watch) == 0) {
+                    retry_queued = true;
+                } else {
+                    watch->deactivate_queued = false;
+                    retry_error = errno != 0 ? errno : ENOMEM;
+                }
+            }
+            pthread_mutex_unlock(&node->watch_lock);
+            if (retry_queued) {
+                llam_kick_node(node);
+            } else if (retry_error != 0) {
+                llam_record_fatal(node->runtime, retry_error);
+            } else if (llam_darwin_kevent_cleanup_error_is_fatal(cleanup_error)) {
+                llam_record_fatal(node->runtime, cleanup_error);
+            }
+            break;
+        }
         if (watch->active) {
             watch->active = false;
             (void)llam_node_complete_pending_ops(node, 1U);
         }
-        if (watch->migrate_target_node_index != UINT_MAX) {
+        if (closed) {
+            llam_destroy_recv_watch_locked(node, watch);
+        } else if (watch->migrate_target_node_index != UINT_MAX) {
             migrate_target = watch->migrate_target_node_index;
         } else {
             llam_maybe_destroy_recv_watch_locked(node, watch);
         }
         pthread_mutex_unlock(&node->watch_lock);
-        if (rc != 0 && llam_darwin_kevent_cleanup_error_is_fatal(errno)) {
-            llam_record_fatal(node->runtime, errno);
+        if (rc != 0 && cleanup_error != EBADF &&
+            llam_darwin_kevent_cleanup_error_is_fatal(cleanup_error)) {
+            llam_record_fatal(node->runtime, cleanup_error);
         }
         if (migrate_target != UINT_MAX &&
             llam_finalize_recv_watch_migration(node, watch, migrate_target, &kick_target) &&
@@ -269,14 +722,23 @@ void *llam_io_worker_main(void *arg) {
 
             while (controls != NULL) {
                 llam_io_control_op_t *next = controls->next;
+                bool guards_fd = llam_darwin_control_guards_fd_lifecycle(controls);
 
                 controls->next = NULL;
+                if (guards_fd) {
+                    llam_fd_watch_lifecycle_lock();
+                }
                 llam_darwin_process_control(node, controls);
-                free(controls);
+                if (guards_fd) {
+                    llam_fd_watch_lifecycle_unlock();
+                }
+                llam_io_control_op_destroy(node, controls);
                 controls = next;
             }
         }
+        llam_fd_watch_lifecycle_lock();
         llam_darwin_process_submissions(node);
+        llam_fd_watch_lifecycle_unlock();
 
         pending = atomic_load(&node->pending_ops);
         if (atomic_load_explicit(&rt->shutdown_requested, memory_order_acquire) &&
@@ -318,6 +780,7 @@ void *llam_io_worker_main(void *arg) {
             break;
         }
 
+        llam_darwin_pin_event_batch(node, events, (unsigned)count);
         for (i = 0; i < (unsigned)count; ++i) {
             uint64_t user_data;
             unsigned tag;
@@ -343,6 +806,7 @@ void *llam_io_worker_main(void *arg) {
                 llam_darwin_handle_req_event(node, llam_io_udata_ptr(user_data), &events[i]);
             }
         }
+        llam_darwin_unpin_event_batch(node, events, (unsigned)count);
     }
 
     return NULL;

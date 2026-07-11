@@ -46,7 +46,8 @@ void llam_windows_complete_req(llam_node_t *node, llam_io_req_t *req, int res, b
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
-        completion_owner = req->owner_shard;
+        completion_owner = atomic_load_explicit(&req->owner_shard,
+                                                memory_order_acquire);
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
@@ -198,10 +199,19 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
     req = op->req;
     node = op->node;
     transferred = completion->bytes;
-    if (req->kind == LLAM_IO_KIND_HANDLE_READ ||
-        req->kind == LLAM_IO_KIND_HANDLE_WRITE ||
-        req->kind == LLAM_IO_KIND_HANDLE_PREAD ||
-        req->kind == LLAM_IO_KIND_HANDLE_PWRITE) {
+    llam_fd_watch_lifecycle_lock();
+    if (op->association == NULL || op->association->closing) {
+        /*
+         * Public close has already invalidated this exact association
+         * generation.  The completion packet still owns op/request lifetime,
+         * but every numeric HANDLE/SOCKET field may now name a replacement
+         * object.  Retire as canceled without touching that numeric value.
+         */
+        err = ECANCELED;
+    } else if (req->kind == LLAM_IO_KIND_HANDLE_READ ||
+               req->kind == LLAM_IO_KIND_HANDLE_WRITE ||
+               req->kind == LLAM_IO_KIND_HANDLE_PREAD ||
+               req->kind == LLAM_IO_KIND_HANDLE_PWRITE) {
         if (!GetOverlappedResult((HANDLE)req->handle, &op->overlapped, &transferred, FALSE)) {
             err = llam_windows_system_error_to_errno(GetLastError());
         }
@@ -225,6 +235,7 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
     } else {
         result = (int)transferred;
     }
+    llam_fd_watch_lifecycle_unlock();
 
     if (err != 0) {
         if (req->kind == LLAM_IO_KIND_ACCEPT) {

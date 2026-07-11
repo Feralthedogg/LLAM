@@ -13,7 +13,7 @@ TESTHOOK_OBJDIR ?= $(OBJDIR)-testhooks
 SHARED_CPPFLAGS ?= $(CPPFLAGS) -DLLAM_BUILD_SHARED
 PICFLAGS ?= -fPIC -fvisibility=hidden
 LLAM_ABI_MAJOR ?= 2
-LLAM_VERSION ?= 2.1.0
+LLAM_VERSION ?= 2.2.0
 SANITIZER_TARGETS_ENABLED ?= 0
 BUILD_SIGNATURE = $(OBJDIR)/.build-signature
 SHARED_BUILD_SIGNATURE = $(SHARED_OBJDIR)/.build-signature
@@ -278,6 +278,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 	$(OBJDIR)/src/engine/watchdog/watchdog_scale.o \
 	$(OBJDIR)/src/engine/watchdog/watchdog_worker.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_autotune.o \
 	$(OBJDIR)/src/core/api/core_api.o \
 	$(OBJDIR)/src/core/task/spawn.o \
 	$(OBJDIR)/src/core/task/yield_join_sleep.o \
@@ -332,7 +333,7 @@ RUNTIME_COMMON_OBJS = \
 
 ifeq ($(HOST_PLATFORM),linux)
 LDLIBS += -lm
-LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '%b' '\043include <liburing.h>\012int main\050void\051 \173 void *p = \050void *\051io_uring_setup_buf_ring; return p == 0; \175\012' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '%b' '\043include <liburing.h>\012int main\050void\051 \173 struct io_uring_buf_ring *\050*p\051\050struct io_uring *, unsigned int, int, unsigned int, int *\051 = io_uring_setup_buf_ring; return p == 0; \175\012' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
 ifeq ($(LLAM_HAVE_IO_URING_BUF_RING_HELPERS),1)
 CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
 endif
@@ -428,13 +429,21 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/broker_buffer.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport.o \
-	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o
+	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
+	$(TESTHOOK_OBJDIR)/src/core/registry/registry.o \
+	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
+	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
 		$(OBJDIR)/src/core/registry/capability.o \
 		$(OBJDIR)/src/core/broker/broker_buffer.o \
 		$(OBJDIR)/src/core/broker/transport/broker_transport.o \
-		$(OBJDIR)/src/core/registry/registry.o, \
+		$(OBJDIR)/src/core/broker/transport/broker_transport_posix_message.o \
+		$(OBJDIR)/src/core/registry/registry.o \
+		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
+		$(OBJDIR)/src/io/api/issue.o \
+		$(OBJDIR)/src/io/watch/watch_queue.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)
 DEMO_OBJS = \
@@ -938,9 +947,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.1.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.0\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) ln -s libllam_runtime.2.dylib "$$tmp_dir/pkg/lib/libllam_runtime.dylib" ;; \
 		Linux) ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so" ;; \
@@ -960,9 +969,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.1.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.0\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.999.dylib"; \
@@ -991,20 +1000,20 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.1.0\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.0\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
 	case "$$(uname -s)" in \
 		Darwin) \
 			: > "$$tmp_dir/pkg/lib/libllam_runtime.2.dylib"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.dylib"; \
 			;; \
 		Linux) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.1.0"; \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.0"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
 		FreeBSD|OpenBSD|NetBSD|DragonFly) \
-			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.1.0"; \
+			: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.0"; \
 			printf 'not a symlink\n' > "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 			;; \
 		*) echo "unsupported installer regular lib-link smoke host" >&2; exit 1 ;; \
@@ -1022,16 +1031,16 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/pkg/include/llam" "$$tmp_dir/pkg/lib"; \
 	cp scripts/install.sh "$$tmp_dir/pkg/install.sh"; \
 	: > "$$tmp_dir/pkg/include/llam/runtime.h"; \
-	printf '2.1.0-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
+	printf '2.2.0-rc.1\n' > "$$tmp_dir/pkg/VERSION"; \
 	printf '2\n' > "$$tmp_dir/pkg/ABI_MAJOR"; \
-	printf '2.1.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
-	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.1.0"; \
-	ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
+	printf '2.2.0\n' > "$$tmp_dir/pkg/LIBRARY_VERSION"; \
+	: > "$$tmp_dir/pkg/lib/libllam_runtime.so.2.2.0"; \
+	ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/pkg/lib/libllam_runtime.so.2"; \
 	ln -s libllam_runtime.so.2 "$$tmp_dir/pkg/lib/libllam_runtime.so"; \
 	sh "$$tmp_dir/pkg/install.sh" --prefix "$$tmp_dir/prefix" --force >"$$tmp_dir/install.out" 2>&1; \
 	test -L "$$tmp_dir/prefix/lib/libllam_runtime.so"; \
-	grep '^2.1.0-rc.1$$' "$$tmp_dir/prefix/share/llam/VERSION" >/dev/null; \
-	grep '^2.1.0$$' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION" >/dev/null
+	grep '^2.2.0-rc.1$$' "$$tmp_dir/prefix/share/llam/VERSION" >/dev/null; \
+	grep '^2.2.0$$' "$$tmp_dir/prefix/share/llam/LIBRARY_VERSION" >/dev/null
 	@tmp_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/llam-package-output-symlink.XXXXXX")"; \
 	trap 'rm -rf "$$tmp_dir"' 0 1 2 3 15; \
 	case "$$(uname -s)-$$(uname -m)" in \
@@ -1069,10 +1078,10 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	ln -s "$$tmp_dir/outside" "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release output path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1098,7 +1107,7 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	mkdir -p "$$tmp_dir/repo/scripts"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/target"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted a non-directory release output path component" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1141,10 +1150,10 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
 	chmod 666 "$$tmp_dir/repo/README.md"; \
-	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
+	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unsafe release stage mode" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1188,9 +1197,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	ln -s "$$tmp_dir/outside/README.md" "$$tmp_dir/repo/README.md"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh followed a symlink release input path" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1236,9 +1245,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	ln "$$tmp_dir/outside-runtime.h" "$$tmp_dir/repo/include/llam/runtime.h"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s libllam_runtime.2.dylib "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s libllam_runtime.so.2 "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh copied a hard-linked release input file" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1281,9 +1290,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; ln -s libllam_runtime.so.2.1.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; ln -s libllam_runtime.so.2.2.0 "$$tmp_dir/repo/libllam_runtime.so.2"; ln -s README.md "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted an unexpected library symlink target" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -1327,9 +1336,9 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	: > "$$tmp_dir/repo/libllam_runtime.a"; \
 	case "$$package_target" in \
 		macos-*) : > "$$tmp_dir/repo/libllam_runtime.2.dylib"; : > "$$tmp_dir/repo/libllam_runtime.dylib" ;; \
-		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.1.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
+		linux-*|freebsd-*|openbsd-*|netbsd-*|dragonflybsd-*) : > "$$tmp_dir/repo/libllam_runtime.so.2.2.0"; : > "$$tmp_dir/repo/libllam_runtime.so.2"; : > "$$tmp_dir/repo/libllam_runtime.so" ;; \
 	esac; \
-	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.1.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
+	if LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target" >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted non-symlink shared-library link artifacts" >&2; \
 		cat "$$tmp_dir/package.out" >&2; \
 		exit 1; \
@@ -2013,8 +2022,8 @@ test_runtime_fuzz: $(RUNTIME_OBJS) $(TEST_RUNTIME_FUZZ_OBJS)
 test_runtime_invariants: $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_INVARIANTS_OBJS) $(LDLIBS)
 
-test_runtime_shutdown_internal: $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
+test_runtime_shutdown_internal: $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
 
 test_sync_primitives: $(RUNTIME_OBJS) $(TEST_SYNC_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_SYNC_OBJS) $(LDLIBS)
@@ -2034,8 +2043,8 @@ noowner-test_runtime_select_edges: $(RUNTIME_OBJS) $(TEST_RUNTIME_SELECT_EDGES_O
 asan-test_io_buffers: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_IO_BUFFERS_OBJS) $(LDLIBS)
 
-asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
+asan-test_runtime_shutdown_internal tsan-test_runtime_shutdown_internal: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_RUNTIME_SHUTDOWN_INTERNAL_OBJS) $(LDLIBS)
 
 asan-test_multi_runtime_core tsan-test_multi_runtime_core: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_MULTI_RUNTIME_CORE_OBJS) $(LDLIBS)
@@ -2072,6 +2081,14 @@ $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 $(TESTHOOK_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(TESTHOOK_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(TESTHOOK_OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 
@@ -2247,6 +2264,10 @@ $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
 

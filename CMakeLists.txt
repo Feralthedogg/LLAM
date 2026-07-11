@@ -3,7 +3,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(llam VERSION 2.1.0 LANGUAGES C ASM)
+project(llam VERSION 2.2.0 LANGUAGES C ASM)
 
 set(LLAM_ABI_VERSION_MAJOR 2)
 set(LLAM_ABI_VERSION_MINOR 0)
@@ -151,6 +151,7 @@ set(LLAM_RUNTIME_SOURCES
     src/engine/scheduler/block.c
     src/engine/scheduler/scheduler_engine.c
     src/engine/watchdog/watchdog.c
+    src/engine/watchdog/watchdog_autotune.c
     src/engine/watchdog/watchdog_merge.c
     src/engine/watchdog/watchdog_probe.c
     src/engine/watchdog/watchdog_rehome.c
@@ -259,8 +260,14 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # liburing exposes sigset_t-dependent declarations only when the normal
+    # GNU/POSIX feature namespace is visible. Match the runtime targets here so
+    # the configure probe does not misclassify current buffer-ring helpers as
+    # unavailable under strict C11 mode.
+    set(CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
     set(CMAKE_REQUIRED_LIBRARIES uring)
     check_symbol_exists(io_uring_setup_buf_ring "liburing.h" LLAM_HAVE_IO_URING_SETUP_BUF_RING)
+    unset(CMAKE_REQUIRED_DEFINITIONS)
     unset(CMAKE_REQUIRED_LIBRARIES)
 endif()
 
@@ -517,6 +524,9 @@ target_link_libraries(test_multi_runtime_core PRIVATE llam_runtime)
 add_executable(test_runtime_api_edges ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_runtime_api_edges.c
 )
+target_include_directories(test_runtime_api_edges PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
 target_link_libraries(test_runtime_api_edges PRIVATE llam_runtime)
 
 add_executable(test_runtime_select_edges
@@ -560,7 +570,11 @@ add_executable(test_runtime_shutdown_internal
 target_include_directories(test_runtime_shutdown_internal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime)
+target_compile_definitions(test_runtime_shutdown_internal PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_HAVE_IO_URING_SETUP_BUF_RING)
+    target_compile_definitions(test_runtime_shutdown_internal PRIVATE LLAM_HAVE_IO_URING_BUF_RING_HELPERS=1)
+endif()
+target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime_testhooks)
 
 add_executable(test_sync_primitives
     tests/test_sync_primitives.c

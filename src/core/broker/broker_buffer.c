@@ -72,6 +72,22 @@ void llam_broker_clear_buffers(llam_broker_t *broker) {
     }
 }
 
+void llam_broker_reclaim_subject_buffers(llam_broker_t *broker, uint64_t subject_id) {
+    size_t i;
+
+    if (broker == NULL || subject_id == 0U || llam_broker_lock(broker) != 0) {
+        return;
+    }
+    for (i = 0U; i < LLAM_BROKER_BUFFER_SLOTS; ++i) {
+        llam_broker_buffer_slot_t *slot = &broker->buffers[i];
+
+        if (slot->subject_id == subject_id && (slot->active || slot->data != NULL)) {
+            llam_broker_buffer_slot_reset(slot);
+        }
+    }
+    llam_broker_unlock(broker);
+}
+
 llam_broker_buffer_slot_t *llam_broker_find_buffer_unlocked(llam_broker_t *broker,
                                                             const llam_capability_token_t *token,
                                                             uint64_t required_rights) {
@@ -179,6 +195,7 @@ int llam_broker_register_buffer(llam_broker_t *broker,
     slot->id = broker->next_buffer_id++;
     slot->generation = 1U;
     slot->rights = rights;
+    slot->subject_id = llam_broker_current_subject(broker);
     slot->active = true;
     if (llam_broker_issue_object_cap_unlocked(broker,
                                               LLAM_BROKER_CAP_FAMILY_BUFFER,

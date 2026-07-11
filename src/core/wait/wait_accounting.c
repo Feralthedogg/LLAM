@@ -43,7 +43,8 @@ bool llam_runtime_note_active_io_waiter(llam_runtime_t *rt, int delta) {
                 return true;
             }
         }
-        llam_record_fatal(rt, EOVERFLOW);
+        /* May run while an owner queue lock is held; shutdown is deferred. */
+        llam_record_fatal_deferred(rt, EOVERFLOW);
         return false;
     }
 
@@ -56,6 +57,7 @@ bool llam_runtime_note_active_io_waiter(llam_runtime_t *rt, int delta) {
             return true;
         }
     }
-    llam_record_fatal(rt, EINVAL);
+    /* May run while an owner queue lock is held; shutdown is deferred. */
+    llam_record_fatal_deferred(rt, EINVAL);
     return false;
 }

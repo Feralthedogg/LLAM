@@ -26,6 +26,7 @@
 
 #include "runtime_internal.h"
 #include "engine/runtime_watchdog_internal.h"
+#include "io/runtime_io_api_internal.h"
 
 #if LLAM_RUNTIME_BACKEND_KQUEUE
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
@@ -40,7 +41,9 @@
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sched.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include <stdio.h>
@@ -515,6 +518,705 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
     return 0;
 }
 
+static int exercise_closed_watch_generation_is_deferred_and_not_reused(void) {
+#if LLAM_PLATFORM_WINDOWS
+    return 0;
+#else
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_poll_watch_t *old_watch = NULL;
+    llam_poll_watch_t *replacement = NULL;
+    int fds[2] = {-1, -1};
+    bool old_pinned = false;
+    bool replacement_created = false;
+    int rc = -1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    if (pipe(fds) != 0 || pthread_mutex_init(&node.watch_lock, NULL) != 0) {
+        goto done;
+    }
+    node.watch_lock_initialized = true;
+
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node.watch_lock);
+    old_watch = llam_get_or_create_poll_watch_locked(&node, fds[0], POLLIN);
+    if (old_watch != NULL) {
+        llam_poll_watch_pin_locked(old_watch);
+        old_pinned = true;
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    llam_fd_watch_lifecycle_unlock();
+    if (old_watch == NULL) {
+        goto done;
+    }
+
+    /* Model the public close boundary before the kernel may recycle the number. */
+    llam_fd_watch_lifecycle_lock();
+    if (llam_forget_closed_fd_watch_state(&runtime, fds[0]) != 0) {
+        llam_fd_watch_lifecycle_unlock();
+        goto done;
+    }
+    llam_fd_watch_lifecycle_unlock();
+    if (node.poll_watches != old_watch || !old_watch->destroy_pending ||
+        old_watch->accepts_waiters || old_watch->lifetime_refs != 1U) {
+        fprintf(stderr, "pinned closed watch was freed or remained attachable\n");
+        goto done;
+    }
+
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node.watch_lock);
+    replacement = llam_get_or_create_poll_watch_locked(&node, fds[0], POLLIN);
+    if (replacement != NULL && replacement != old_watch && replacement->accepts_waiters) {
+        replacement_created = true;
+        llam_poll_watch_unpin_locked(&node, old_watch);
+        old_pinned = false;
+        old_watch = NULL;
+        llam_destroy_poll_watch_locked(&node, replacement);
+        replacement = NULL;
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    llam_fd_watch_lifecycle_unlock();
+    if (!replacement_created || node.poll_watches != NULL ||
+        node.retired_poll_watches != NULL) {
+        fprintf(stderr, "closed watch generation was reused or not reclaimed safely\n");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (node.watch_lock_initialized) {
+        pthread_mutex_lock(&node.watch_lock);
+        if (old_pinned && old_watch != NULL) {
+            llam_poll_watch_unpin_locked(&node, old_watch);
+        }
+        while (node.poll_watches != NULL) {
+            llam_poll_watch_t *watch = node.poll_watches;
+
+            llam_destroy_poll_watch_locked(&node, watch);
+            if (node.poll_watches == watch) {
+                break;
+            }
+        }
+        while (node.retired_poll_watches != NULL) {
+            llam_poll_watch_t *next = node.retired_poll_watches->next;
+
+            free(node.retired_poll_watches);
+            node.retired_poll_watches = next;
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    if (fds[0] >= 0) {
+        close(fds[0]);
+    }
+    if (fds[1] >= 0) {
+        close(fds[1]);
+    }
+    return rc;
+#endif
+}
+
+static int exercise_active_closed_watch_queues_one_deactivate(void) {
+#if LLAM_PLATFORM_WINDOWS
+    return 0;
+#else
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_poll_watch_t *poll_watch = NULL;
+    llam_accept_watch_t *accept_watch = NULL;
+    llam_recv_watch_t *recv_watch = NULL;
+    llam_io_control_op_t *control_head;
+    int listener = -1;
+    int rc = -1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.event_fd = -1;
+    if (make_loopback_listener(&listener) != 0 || pthread_mutex_init(&node.watch_lock, NULL) != 0) {
+        goto done;
+    }
+    node.watch_lock_initialized = true;
+
+    pthread_mutex_lock(&node.watch_lock);
+    poll_watch = llam_get_or_create_poll_watch_locked(&node, listener, POLLIN);
+    accept_watch = llam_get_or_create_accept_watch_locked(&node, listener);
+    recv_watch = llam_get_or_create_recv_watch_locked(&node, listener);
+    if (poll_watch != NULL && accept_watch != NULL && recv_watch != NULL) {
+        poll_watch->active = true;
+        accept_watch->active = true;
+        recv_watch->active = true;
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    if (poll_watch == NULL || accept_watch == NULL || recv_watch == NULL) {
+        goto done;
+    }
+
+    llam_fd_watch_lifecycle_lock();
+    if (llam_forget_closed_fd_watch_state(&runtime, listener) != 0) {
+        llam_fd_watch_lifecycle_unlock();
+        goto done;
+    }
+    llam_fd_watch_lifecycle_unlock();
+    control_head = node.control_head;
+    if (poll_watch->accepts_waiters || !poll_watch->active || !poll_watch->deactivate_queued ||
+        accept_watch->accepts_waiters || !accept_watch->active || !accept_watch->deactivate_queued ||
+        recv_watch->accepts_waiters || !recv_watch->active || !recv_watch->deactivate_queued) {
+        fprintf(stderr, "active closed watches did not enter teardown state\n");
+        goto done;
+    }
+    {
+        unsigned seen = 0U;
+        unsigned count = 0U;
+
+        for (llam_io_control_op_t *op = control_head; op != NULL; op = op->next) {
+            count += 1U;
+            if (op->kind == LLAM_IO_CONTROL_POLL_DEACTIVATE && op->target == poll_watch) {
+                seen |= 1U;
+            } else if (op->kind == LLAM_IO_CONTROL_ACCEPT_DEACTIVATE && op->target == accept_watch) {
+                seen |= 2U;
+            } else if (op->kind == LLAM_IO_CONTROL_RECV_DEACTIVATE && op->target == recv_watch) {
+                seen |= 4U;
+            }
+        }
+        if (count != 3U || seen != 7U) {
+            fprintf(stderr, "active closed watches did not queue exactly one deactivation each\n");
+            goto done;
+        }
+    }
+
+    llam_fd_watch_lifecycle_lock();
+    if (llam_forget_closed_fd_watch_state(&runtime, listener) != 0) {
+        llam_fd_watch_lifecycle_unlock();
+        goto done;
+    }
+    llam_fd_watch_lifecycle_unlock();
+    if (node.control_head != control_head) {
+        fprintf(stderr, "repeated close-state purge queued duplicate deactivation\n");
+        goto done;
+    }
+    {
+        unsigned count = 0U;
+
+        for (llam_io_control_op_t *op = node.control_head; op != NULL; op = op->next) {
+            count += 1U;
+        }
+        if (count != 3U) {
+            fprintf(stderr, "repeated close-state purge changed deactivation count\n");
+            goto done;
+        }
+    }
+    rc = 0;
+
+done:
+    if (node.watch_lock_initialized) {
+        pthread_mutex_lock(&node.watch_lock);
+        while (node.control_head != NULL) {
+            llam_io_control_op_t *next = node.control_head->next;
+
+            node.control_head->next = NULL;
+            llam_io_control_op_destroy(&node, node.control_head);
+            node.control_head = next;
+        }
+        node.control_tail = NULL;
+        if (poll_watch != NULL && node.poll_watches == poll_watch) {
+            poll_watch->active = false;
+            poll_watch->activating = false;
+            poll_watch->deactivate_queued = false;
+            llam_destroy_poll_watch_locked(&node, poll_watch);
+        }
+        if (accept_watch != NULL && node.accept_watches == accept_watch) {
+            accept_watch->active = false;
+            accept_watch->activating = false;
+            accept_watch->deactivate_queued = false;
+            llam_destroy_accept_watch_locked(&node, accept_watch);
+        }
+        if (recv_watch != NULL && node.recv_watches == recv_watch) {
+            recv_watch->active = false;
+            recv_watch->activating = false;
+            recv_watch->deactivate_queued = false;
+            llam_destroy_recv_watch_locked(&node, recv_watch);
+        }
+        while (node.retired_poll_watches != NULL) {
+            llam_poll_watch_t *next = node.retired_poll_watches->next;
+
+            free(node.retired_poll_watches);
+            node.retired_poll_watches = next;
+        }
+        while (node.retired_accept_watches != NULL) {
+            llam_accept_watch_t *next = node.retired_accept_watches->next;
+
+            free(node.retired_accept_watches);
+            node.retired_accept_watches = next;
+        }
+        while (node.retired_recv_watches != NULL) {
+            llam_recv_watch_t *next = node.retired_recv_watches->next;
+
+            free(node.retired_recv_watches);
+            node.retired_recv_watches = next;
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    close_if_valid(&listener);
+    return rc;
+#endif
+}
+
+static int exercise_closed_watch_reclamation_stays_bounded(void) {
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
+    llam_runtime_t runtime;
+    llam_node_t node;
+    int sockets[2] = {-1, -1};
+    int rc = -1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.event_fd = -1;
+    if (pthread_mutex_init(&node.watch_lock, NULL) != 0) {
+        return fail_errno("watch lock init failed for bounded reclamation");
+    }
+    node.watch_lock_initialized = true;
+
+    for (unsigned generation = 0U; generation < 1024U; ++generation) {
+        llam_poll_watch_t *poll_watch;
+        llam_accept_watch_t *accept_watch;
+        llam_recv_watch_t *recv_watch;
+
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+            goto done;
+        }
+        pthread_mutex_lock(&node.watch_lock);
+        poll_watch = llam_get_or_create_poll_watch_locked(&node, sockets[0], POLLIN);
+        accept_watch = llam_get_or_create_accept_watch_locked(&node, sockets[0]);
+        recv_watch = llam_get_or_create_recv_watch_locked(&node, sockets[0]);
+        if (poll_watch != NULL && accept_watch != NULL && recv_watch != NULL) {
+            /* Model a returned backend batch retaining each pointer across close. */
+            llam_poll_watch_pin_locked(poll_watch);
+            llam_accept_watch_pin_locked(accept_watch);
+            llam_recv_watch_pin_locked(recv_watch);
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        if (poll_watch == NULL || accept_watch == NULL || recv_watch == NULL) {
+            goto done;
+        }
+
+        llam_fd_watch_lifecycle_lock();
+        if (llam_forget_closed_fd_watch_state(&runtime, sockets[0]) != 0) {
+            llam_fd_watch_lifecycle_unlock();
+            goto done;
+        }
+        llam_fd_watch_lifecycle_unlock();
+
+        pthread_mutex_lock(&node.watch_lock);
+        llam_poll_watch_unpin_locked(&node, poll_watch);
+        llam_accept_watch_unpin_locked(&node, accept_watch);
+        llam_recv_watch_unpin_locked(&node, recv_watch);
+        if (node.poll_watches != NULL || node.accept_watches != NULL ||
+            node.recv_watches != NULL || node.retired_poll_watches != NULL ||
+            node.retired_accept_watches != NULL || node.retired_recv_watches != NULL) {
+            pthread_mutex_unlock(&node.watch_lock);
+            fprintf(stderr, "closed watch quarantine grew at generation %u\n", generation);
+            goto done;
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        close_if_valid(&sockets[0]);
+        close_if_valid(&sockets[1]);
+    }
+    rc = 0;
+
+done:
+    close_if_valid(&sockets[0]);
+    close_if_valid(&sockets[1]);
+    pthread_mutex_destroy(&node.watch_lock);
+    return rc;
+#else
+    return 0;
+#endif
+}
+
+static int exercise_darwin_closed_live_generation_deletes_knote(void) {
+#if LLAM_RUNTIME_BACKEND_KQUEUE
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_poll_watch_t *watch = NULL;
+    llam_io_control_op_t control;
+    struct kevent event;
+    struct timespec timeout = {0, 0};
+    int fds[2] = {-1, -1};
+    int event_count;
+    int rc = -1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&control, 0, sizeof(control));
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.event_fd = -1;
+    atomic_init(&node.pending_ops, 1U);
+    if (pipe(fds) != 0 || pthread_mutex_init(&node.watch_lock, NULL) != 0) {
+        goto done;
+    }
+    node.watch_lock_initialized = true;
+    node.event_fd = kqueue();
+    if (node.event_fd < 0) {
+        goto done;
+    }
+
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node.watch_lock);
+    watch = llam_get_or_create_poll_watch_locked(&node, fds[0], POLLIN);
+    if (watch != NULL) {
+        watch->active = true;
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    if (watch == NULL ||
+        llam_darwin_poll_watch_change(&node,
+                                      watch,
+                                      EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS) != 0) {
+        llam_fd_watch_lifecycle_unlock();
+        goto done;
+    }
+
+    /*
+     * Model platform close failure: close-boundary state was invalidated, but
+     * the descriptor and its old-generation knote are still live.  Deactivate
+     * must prove that identity and issue EV_DELETE before reclaiming storage.
+     */
+    pthread_mutex_lock(&node.watch_lock);
+    watch->accepts_waiters = false;
+    watch->deactivate_queued = true;
+    pthread_mutex_unlock(&node.watch_lock);
+    control.kind = LLAM_IO_CONTROL_POLL_DEACTIVATE;
+    control.target = watch;
+    llam_darwin_process_control(&node, &control);
+    llam_fd_watch_lifecycle_unlock();
+    watch = NULL;
+
+    if (node.poll_watches != NULL ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U) {
+        fprintf(stderr, "live closed fd generation was not safely reclaimed\n");
+        goto done;
+    }
+    if (write(fds[1], "x", 1U) != 1) {
+        goto done;
+    }
+    do {
+        event_count = kevent(node.event_fd, NULL, 0, &event, 1, &timeout);
+    } while (event_count < 0 && errno == EINTR);
+    if (event_count != 0) {
+        fprintf(stderr, "closed live fd generation retained a dangling knote\n");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (node.event_fd >= 0) {
+        close(node.event_fd);
+        node.event_fd = -1;
+    }
+    if (node.watch_lock_initialized) {
+        pthread_mutex_lock(&node.watch_lock);
+        while (node.poll_watches != NULL) {
+            llam_poll_watch_t *next = node.poll_watches->next;
+
+            node.poll_watches->active = false;
+            node.poll_watches->activating = false;
+            node.poll_watches->deactivate_queued = false;
+            node.poll_watches->lifetime_refs = 0U;
+            llam_destroy_poll_watch_locked(&node, node.poll_watches);
+            if (node.poll_watches != next) {
+                break;
+            }
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    close_if_valid(&fds[0]);
+    close_if_valid(&fds[1]);
+    return rc;
+#else
+    return 0;
+#endif
+}
+
+#if LLAM_RUNTIME_BACKEND_KQUEUE
+static int exercise_darwin_poll_filter_replacement_case(bool mixed_read_write) {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_poll_watch_t *old_watch = NULL;
+    llam_recv_watch_t *read_replacement = NULL;
+    llam_io_control_op_t control;
+    struct kevent events[4];
+    struct timespec timeout = {0, 0};
+    int sockets[2] = {-1, -1};
+    bool replacement_registered = false;
+    int event_count;
+    int rc = -1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&control, 0, sizeof(control));
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.event_fd = -1;
+    atomic_init(&node.pending_ops, 1U);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0 ||
+        pthread_mutex_init(&node.watch_lock, NULL) != 0) {
+        goto done;
+    }
+    node.watch_lock_initialized = true;
+    node.event_fd = kqueue();
+    if (node.event_fd < 0) {
+        goto done;
+    }
+
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node.watch_lock);
+    old_watch = llam_get_or_create_poll_watch_locked(&node,
+                                                      sockets[0],
+                                                      mixed_read_write ? (POLLIN | POLLOUT) : POLLOUT);
+    read_replacement = llam_get_or_create_recv_watch_locked(&node, sockets[0]);
+    if (old_watch != NULL && read_replacement != NULL) {
+        old_watch->active = true;
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    if (old_watch == NULL || read_replacement == NULL ||
+        llam_darwin_poll_watch_change(&node,
+                                      old_watch,
+                                      EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS) != 0) {
+        llam_fd_watch_lifecycle_unlock();
+        goto done;
+    }
+    if (mixed_read_write) {
+        if (llam_darwin_recv_watch_change(&node,
+                                          read_replacement,
+                                          EV_ADD | EV_ENABLE |
+                                              LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR) != 0) {
+            llam_fd_watch_lifecycle_unlock();
+            goto done;
+        }
+        replacement_registered = true;
+    }
+
+    pthread_mutex_lock(&node.watch_lock);
+    old_watch->accepts_waiters = false;
+    old_watch->deactivate_queued = true;
+    pthread_mutex_unlock(&node.watch_lock);
+    control.kind = LLAM_IO_CONTROL_POLL_DEACTIVATE;
+    control.target = old_watch;
+    llam_darwin_process_control(&node, &control);
+    llam_fd_watch_lifecycle_unlock();
+    old_watch = NULL;
+
+    if (node.poll_watches != NULL || node.recv_watches != read_replacement ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U) {
+        fprintf(stderr, "filter-specific closed poll teardown retained old state\n");
+        goto done;
+    }
+    if (!mixed_read_write) {
+        do {
+            event_count = kevent(node.event_fd, NULL, 0, events, 4, &timeout);
+        } while (event_count < 0 && errno == EINTR);
+        if (event_count != 0) {
+            fprintf(stderr, "read-only replacement suppressed required EVFILT_WRITE delete\n");
+            goto done;
+        }
+    } else {
+        if (write(sockets[1], "r", 1U) != 1) {
+            goto done;
+        }
+        do {
+            event_count = kevent(node.event_fd, NULL, 0, events, 4, &timeout);
+        } while (event_count < 0 && errno == EINTR);
+        if (event_count != 1 || events[0].filter != EVFILT_READ ||
+            llam_io_udata_tag((uint64_t)(uintptr_t)events[0].udata) != LLAM_IO_UDATA_RECV_WATCH ||
+            llam_io_udata_ptr((uint64_t)(uintptr_t)events[0].udata) != read_replacement) {
+            fprintf(stderr, "mixed poll teardown deleted replacement READ or retained old WRITE\n");
+            goto done;
+        }
+    }
+    rc = 0;
+
+done:
+    if (replacement_registered && node.event_fd >= 0 && read_replacement != NULL) {
+        (void)llam_darwin_recv_watch_change(&node, read_replacement, EV_DELETE);
+    }
+    if (node.event_fd >= 0) {
+        close(node.event_fd);
+        node.event_fd = -1;
+    }
+    if (node.watch_lock_initialized) {
+        pthread_mutex_lock(&node.watch_lock);
+        while (node.poll_watches != NULL) {
+            node.poll_watches->active = false;
+            node.poll_watches->activating = false;
+            node.poll_watches->deactivate_queued = false;
+            node.poll_watches->lifetime_refs = 0U;
+            llam_destroy_poll_watch_locked(&node, node.poll_watches);
+        }
+        while (node.recv_watches != NULL) {
+            node.recv_watches->active = false;
+            node.recv_watches->activating = false;
+            node.recv_watches->deactivate_queued = false;
+            node.recv_watches->lifetime_refs = 0U;
+            llam_destroy_recv_watch_locked(&node, node.recv_watches);
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    close_if_valid(&sockets[0]);
+    close_if_valid(&sockets[1]);
+    return rc;
+}
+#endif
+
+static int exercise_darwin_poll_filter_specific_replacement(void) {
+#if LLAM_RUNTIME_BACKEND_KQUEUE
+    if (exercise_darwin_poll_filter_replacement_case(false) != 0 ||
+        exercise_darwin_poll_filter_replacement_case(true) != 0) {
+        return 1;
+    }
+#endif
+    return 0;
+}
+
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
+typedef struct close_waiter_state {
+    int read_fd;
+    atomic_uint waiter_entered;
+    int poll_rc;
+    int poll_error;
+    short poll_revents;
+    int close_rc;
+    int close_error;
+    bool observed_watch_waiter;
+} close_waiter_state_t;
+
+static void closed_watch_waiter_task(void *arg) {
+    close_waiter_state_t *state = arg;
+
+    atomic_store_explicit(&state->waiter_entered, 1U, memory_order_release);
+    errno = 0;
+    state->poll_revents = (short)0x7fff;
+    state->poll_rc = llam_poll_fd(state->read_fd, POLLIN, -1, &state->poll_revents);
+    state->poll_error = errno;
+}
+
+static void closed_watch_closer_task(void *arg) {
+    close_waiter_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->waiter_entered, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    for (unsigned attempt = 0U; attempt < 10000U && !state->observed_watch_waiter; ++attempt) {
+        for (unsigned i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+            llam_node_t *node = &g_llam_runtime.nodes[i];
+            llam_poll_watch_t *watch;
+
+            pthread_mutex_lock(&node->watch_lock);
+            watch = node->poll_watches;
+            while (watch != NULL) {
+                if (watch->fd == state->read_fd && watch->accepts_waiters &&
+                    watch->wait_head != NULL) {
+                    state->observed_watch_waiter = true;
+                    break;
+                }
+                watch = watch->next;
+            }
+            pthread_mutex_unlock(&node->watch_lock);
+            if (state->observed_watch_waiter) {
+                break;
+            }
+        }
+        if (!state->observed_watch_waiter) {
+            llam_yield();
+        }
+    }
+
+    errno = 0;
+    state->close_rc = llam_close(state->read_fd);
+    state->close_error = errno;
+}
+#endif
+
+static int exercise_close_completes_parked_watch_waiter(void) {
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
+    close_waiter_state_t state;
+    llam_task_t *waiter;
+    llam_task_t *closer;
+    int fds[2] = {-1, -1};
+    bool supports_multishot = false;
+    int run_rc;
+
+    memset(&state, 0, sizeof(state));
+    state.read_fd = -1;
+    state.poll_rc = INT_MIN;
+    state.close_rc = INT_MIN;
+    atomic_init(&state.waiter_entered, 0U);
+    if (pipe(fds) != 0) {
+        return fail_errno("pipe setup failed for close waiter completion");
+    }
+    if (init_runtime() != 0) {
+        close_if_valid(&fds[0]);
+        close_if_valid(&fds[1]);
+        return fail_errno("runtime init failed for close waiter completion");
+    }
+    for (unsigned i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+        if (g_llam_runtime.nodes[i].supports_multishot_poll) {
+            supports_multishot = true;
+            break;
+        }
+    }
+    if (!supports_multishot) {
+        llam_runtime_shutdown();
+        close_if_valid(&fds[0]);
+        close_if_valid(&fds[1]);
+        return 0;
+    }
+
+    state.read_fd = fds[0];
+    waiter = llam_spawn(closed_watch_waiter_task, &state, NULL);
+    closer = llam_spawn(closed_watch_closer_task, &state, NULL);
+    if (waiter == NULL || closer == NULL) {
+        llam_runtime_shutdown();
+        close_if_valid(&fds[0]);
+        close_if_valid(&fds[1]);
+        return fail_errno("task spawn failed for close waiter completion");
+    }
+    run_rc = llam_run();
+    llam_runtime_shutdown();
+    fds[0] = -1;
+    close_if_valid(&fds[1]);
+
+    if (run_rc != 0 || !state.observed_watch_waiter || state.close_rc != 0 ||
+        state.poll_rc != -1 || state.poll_error != EBADF || state.poll_revents != 0) {
+        fprintf(stderr,
+                "close waiter completion failed: run=%d observed=%u close=%d/%d poll=%d/%d revents=%d\n",
+                run_rc,
+                state.observed_watch_waiter ? 1U : 0U,
+                state.close_rc,
+                state.close_error,
+                state.poll_rc,
+                state.poll_error,
+                (int)state.poll_revents);
+        return 1;
+    }
+#endif
+    return 0;
+}
+
 #if LLAM_RUNTIME_BACKEND_LINUX
 static bool io_uring_unavailable_for_direct_internal_test(int rc) {
     int err = -rc;
@@ -627,7 +1329,7 @@ static int exercise_linux_invalid_control_preserves_sq_tail(void) {
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t runtime;
     llam_node_t node;
-    llam_io_control_op_t *op;
+    llam_io_control_op_t *op = NULL;
     int rc;
 
     memset(&runtime, 0, sizeof(runtime));
@@ -670,6 +1372,1734 @@ static int exercise_linux_invalid_control_preserves_sq_tail(void) {
 
     io_uring_queue_exit(&node.ring);
     pthread_mutex_destroy(&node.watch_lock);
+#endif
+    return 0;
+}
+
+#if LLAM_RUNTIME_BACKEND_LINUX
+typedef struct linux_submit_fault_state {
+    int forced_result;
+    unsigned calls;
+    unsigned expected;
+} linux_submit_fault_state_t;
+
+static int force_one_linux_submit_result(llam_node_t *node,
+                                         unsigned expected,
+                                         void *arg) {
+    linux_submit_fault_state_t *state = arg;
+
+    state->calls += 1U;
+    state->expected = expected;
+    node->linux_submit_override = NULL;
+    node->linux_submit_override_arg = NULL;
+    return state->forced_result;
+}
+
+static int exercise_linux_staged_cancel_submit_fault(int forced_result,
+                                                     bool expect_terminal) {
+    llam_runtime_t runtime;
+    llam_shard_t shard;
+    llam_node_t node;
+    llam_task_t task;
+    llam_io_req_t *req;
+    llam_io_control_op_t *op = NULL;
+    llam_io_control_op_t *encoded_op;
+    linux_submit_fault_state_t fault;
+    struct io_uring_cqe *cqe = NULL;
+    struct __kernel_timespec timeout = {.tv_sec = 1, .tv_nsec = 0};
+    bool ring_ready = false;
+    bool watch_lock_ready = false;
+    bool submit_lock_ready = false;
+    bool req_activated = false;
+    int init_rc;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&shard, 0, sizeof(shard));
+    memset(&node, 0, sizeof(node));
+    memset(&task, 0, sizeof(task));
+    memset(&fault, 0, sizeof(fault));
+    fault.forced_result = forced_result;
+
+    init_rc = pthread_mutex_init(&node.watch_lock, NULL);
+    if (init_rc != 0) {
+        errno = init_rc;
+        return fail_errno("watch lock init for staged cancel control failed");
+    }
+    watch_lock_ready = true;
+    init_rc = pthread_mutex_init(&node.submit_lock, NULL);
+    if (init_rc != 0) {
+        errno = init_rc;
+        rc = fail_errno("submit lock init for staged cancel control failed");
+        goto done;
+    }
+    submit_lock_ready = true;
+    init_rc = io_uring_queue_init(4U, &node.ring, 0U);
+    if (init_rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(init_rc)) {
+            rc = 0;
+            goto done;
+        }
+        errno = -init_rc;
+        rc = fail_errno("io_uring init for staged cancel control failed");
+        goto done;
+    }
+    ring_ready = true;
+
+    runtime.shards = &shard;
+    runtime.active_shards = 1U;
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    shard.runtime = &runtime;
+    shard.id = 0U;
+    node.runtime = &runtime;
+    node.watch_lock_initialized = true;
+    node.submit_lock_initialized = true;
+    atomic_init(&node.pending_ops, 0U);
+    task.owner_runtime = &runtime;
+    atomic_init(&task.scan_refs, 0U);
+    atomic_init(&task.active_io_req, NULL);
+    req = &task.embedded_io_req;
+    llam_io_req_reset(req, &runtime, UINT_MAX, UINT_MAX);
+    if (!llam_io_req_lifetime_activate(req)) {
+        rc = fail_errno("request activation for staged cancel control failed");
+        goto done;
+    }
+    req_activated = true;
+    req->task = &task;
+    atomic_store_explicit(&req->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT, memory_order_release);
+    atomic_store_explicit(&req->cancel_queued, 1U, memory_order_release);
+
+    pthread_mutex_lock(&node.watch_lock);
+    if (llam_node_queue_control_locked(&node, LLAM_IO_CONTROL_REQ_CANCEL, req) != 0) {
+        pthread_mutex_unlock(&node.watch_lock);
+        rc = fail_errno("queue staged cancel control failed");
+        goto done;
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    op = llam_take_node_controls(&node);
+    if (op == NULL || op->next != NULL) {
+        rc = fail_msg("staged cancel control did not detach exactly one op");
+        goto done;
+    }
+    encoded_op = op;
+
+    /*
+     * Encode first, then force the normal submit wrapper to report a real
+     * negative/short result without flushing the SQ.  This fixes the hostile
+     * state precisely: source queue empty, SQE still live, and the only heap
+     * owner reachable through encoded user_data plus the backend-control list.
+     */
+    llam_io_submit_control_op(&node, op);
+    op = NULL;
+    if (io_uring_sq_ready(&node.ring) != 1U ||
+        node.linux_backend_control_head != encoded_op ||
+        node.linux_backend_control_tail != encoded_op ||
+        !encoded_op->linux_backend_tracked) {
+        rc = fail_msg("staged cancel control did not retain a ring SQE");
+        goto done;
+    }
+    if (atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&req->lifetime_refs, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&task.scan_refs, memory_order_acquire) != 1U) {
+        rc = fail_msg("staged cancel control was not tracked through backend ownership");
+        goto done;
+    }
+
+    node.linux_submit_override = force_one_linux_submit_result;
+    node.linux_submit_override_arg = &fault;
+    init_rc = llam_node_submit_ring(&node);
+    if (init_rc != forced_result || fault.calls != 1U || fault.expected != 1U ||
+        node.linux_submit_retry == expect_terminal ||
+        node.linux_submit_terminal != expect_terminal ||
+        node.linux_backend_control_head != encoded_op ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&req->lifetime_refs, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&task.scan_refs, memory_order_acquire) != 1U) {
+        rc = fail_msg("faulted Linux control submit lost retry/ownership state");
+        goto done;
+    }
+
+    if (expect_terminal) {
+        /* No kernel reference survives queue_exit; teardown may now roll back. */
+        io_uring_queue_exit(&node.ring);
+        ring_ready = false;
+        llam_linux_retire_backend_controls(&node);
+        if (node.linux_backend_control_head != NULL ||
+            node.linux_backend_control_tail != NULL ||
+            atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&req->lifetime_refs, memory_order_acquire) != 1U ||
+            atomic_load_explicit(&task.scan_refs, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&req->cancel_queued, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&req->cancel_submitted, memory_order_acquire) != 0U) {
+            rc = fail_msg("terminal Linux ring teardown did not retire encoded control ownership");
+            goto done;
+        }
+    } else {
+        /* No newly dequeued work exists; the explicit retry bit drives enter. */
+        llam_io_submit_batch(&node);
+        if (node.linux_submit_retry || node.linux_submit_terminal) {
+            rc = fail_msg("empty Linux batch did not clear submit retry state");
+            goto done;
+        }
+        init_rc = io_uring_wait_cqe_timeout(&node.ring, &cqe, &timeout);
+        if (init_rc != 0 || cqe == NULL) {
+            errno = init_rc < 0 ? -init_rc : ETIMEDOUT;
+            rc = fail_errno("empty Linux batch did not resubmit staged cancel control");
+            goto done;
+        }
+        llam_io_handle_cqe(&node, cqe);
+        if (node.linux_backend_control_head != NULL ||
+            node.linux_backend_control_tail != NULL ||
+            atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&req->lifetime_refs, memory_order_acquire) != 1U ||
+            atomic_load_explicit(&task.scan_refs, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&req->cancel_queued, memory_order_acquire) != 0U ||
+            atomic_load_explicit(&req->cancel_submitted, memory_order_acquire) != 0U) {
+            rc = fail_msg("cancel control CQE did not balance backend/request/task ownership");
+            goto done;
+        }
+    }
+
+    if (!llam_io_req_lifetime_release(req)) {
+        rc = fail_errno("base request release after submit fault failed");
+        goto done;
+    }
+    req_activated = false;
+    if (atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&task.embedded_io_req.lifetime_refs,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&task.scan_refs, memory_order_acquire) != 0U) {
+        rc = fail_msg("submit fault terminal left request or pending ownership live");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (ring_ready) {
+        io_uring_queue_exit(&node.ring);
+        ring_ready = false;
+    }
+    if (node.linux_backend_control_head != NULL) {
+        llam_linux_retire_backend_controls(&node);
+    }
+    while (op != NULL) {
+        llam_io_control_op_t *next = op->next;
+
+        op->next = NULL;
+        llam_io_control_op_destroy(&node, op);
+        op = next;
+    }
+    if (req_activated &&
+        atomic_load_explicit(&task.embedded_io_req.lifetime_refs, memory_order_acquire) != 0U) {
+        (void)llam_io_req_lifetime_release(&task.embedded_io_req);
+    }
+    if (submit_lock_ready) {
+        pthread_mutex_destroy(&node.submit_lock);
+    }
+    if (watch_lock_ready) {
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    return rc;
+}
+
+typedef enum linux_watch_lifetime_test_kind {
+    LINUX_WATCH_LIFETIME_POLL = 0,
+    LINUX_WATCH_LIFETIME_ACCEPT = 1,
+    LINUX_WATCH_LIFETIME_RECV = 2,
+} linux_watch_lifetime_test_kind_t;
+
+static bool linux_watch_lifetime_test_is_linked(const llam_node_t *node,
+                                                linux_watch_lifetime_test_kind_t kind,
+                                                const void *watch) {
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL:
+        return node->poll_watches == watch;
+    case LINUX_WATCH_LIFETIME_ACCEPT:
+        return node->accept_watches == watch;
+    case LINUX_WATCH_LIFETIME_RECV:
+        return node->recv_watches == watch;
+    default:
+        return false;
+    }
+}
+
+static unsigned linux_watch_lifetime_test_backend_refs(linux_watch_lifetime_test_kind_t kind,
+                                                       const void *watch) {
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL:
+        return ((const llam_poll_watch_t *)watch)->backend_refs;
+    case LINUX_WATCH_LIFETIME_ACCEPT:
+        return ((const llam_accept_watch_t *)watch)->backend_refs;
+    case LINUX_WATCH_LIFETIME_RECV:
+        return ((const llam_recv_watch_t *)watch)->backend_refs;
+    default:
+        return UINT_MAX;
+    }
+}
+
+static bool linux_watch_lifetime_test_active(linux_watch_lifetime_test_kind_t kind,
+                                             const void *watch) {
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL:
+        return ((const llam_poll_watch_t *)watch)->active;
+    case LINUX_WATCH_LIFETIME_ACCEPT:
+        return ((const llam_accept_watch_t *)watch)->active;
+    case LINUX_WATCH_LIFETIME_RECV:
+        return ((const llam_recv_watch_t *)watch)->active;
+    default:
+        return false;
+    }
+}
+
+static bool linux_watch_lifetime_test_deactivate_queued(linux_watch_lifetime_test_kind_t kind,
+                                                        const void *watch) {
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL:
+        return ((const llam_poll_watch_t *)watch)->deactivate_queued;
+    case LINUX_WATCH_LIFETIME_ACCEPT:
+        return ((const llam_accept_watch_t *)watch)->deactivate_queued;
+    case LINUX_WATCH_LIFETIME_RECV:
+        return ((const llam_recv_watch_t *)watch)->deactivate_queued;
+    default:
+        return false;
+    }
+}
+
+static bool linux_watch_lifetime_test_destroy_pending(linux_watch_lifetime_test_kind_t kind,
+                                                      const void *watch) {
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL:
+        return ((const llam_poll_watch_t *)watch)->destroy_pending;
+    case LINUX_WATCH_LIFETIME_ACCEPT:
+        return ((const llam_accept_watch_t *)watch)->destroy_pending;
+    case LINUX_WATCH_LIFETIME_RECV:
+        return ((const llam_recv_watch_t *)watch)->destroy_pending;
+    default:
+        return false;
+    }
+}
+
+static void linux_watch_lifetime_test_destroy_locked(llam_node_t *node,
+                                                     linux_watch_lifetime_test_kind_t kind,
+                                                     void *watch) {
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL: {
+        llam_poll_watch_t *poll_watch = watch;
+
+        poll_watch->retired = false;
+        poll_watch->active = false;
+        poll_watch->activating = false;
+        poll_watch->deactivate_queued = false;
+        poll_watch->backend_refs = 0U;
+        llam_destroy_poll_watch_locked(node, poll_watch);
+        break;
+    }
+    case LINUX_WATCH_LIFETIME_ACCEPT: {
+        llam_accept_watch_t *accept_watch = watch;
+
+        accept_watch->retired = false;
+        accept_watch->active = false;
+        accept_watch->activating = false;
+        accept_watch->deactivate_queued = false;
+        accept_watch->backend_refs = 0U;
+        llam_destroy_accept_watch_locked(node, accept_watch);
+        break;
+    }
+    case LINUX_WATCH_LIFETIME_RECV: {
+        llam_recv_watch_t *recv_watch = watch;
+
+        recv_watch->retired = false;
+        recv_watch->active = false;
+        recv_watch->activating = false;
+        recv_watch->deactivate_queued = false;
+        recv_watch->backend_refs = 0U;
+        llam_destroy_recv_watch_locked(node, recv_watch);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static int exercise_linux_closed_watch_cqe_order_one(linux_watch_lifetime_test_kind_t kind,
+                                                     bool cancel_control_first,
+                                                     bool retired_terminal_only) {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_control_op_t *op = NULL;
+    llam_io_control_op_t *encoded_op = NULL;
+    struct io_uring_cqe target_cqe;
+    struct io_uring_cqe control_cqe;
+    struct io_uring_buf_ring *recv_buf_ring = NULL;
+    unsigned char *recv_buf_storage = NULL;
+    void *watch = NULL;
+    int accepted_pipe[2] = {-1, -1};
+    bool watch_lock_ready = false;
+    bool recv_lock_ready = false;
+    bool ring_ready = false;
+    bool expect_provided_buffer = false;
+    int init_rc;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&target_cqe, 0, sizeof(target_cqe));
+    memset(&control_cqe, 0, sizeof(control_cqe));
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&node.pending_ops, retired_terminal_only ? 1U : 2U);
+    atomic_init(&node.provided_buf_acquires, 0U);
+    atomic_init(&node.provided_buf_returns, 0U);
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.index = 0U;
+    node.event_fd = -1;
+
+    init_rc = pthread_mutex_init(&node.watch_lock, NULL);
+    if (init_rc != 0) {
+        errno = init_rc;
+        return fail_errno("watch lock init for Linux watch CQE ordering failed");
+    }
+    watch_lock_ready = true;
+    init_rc = pthread_mutex_init(&node.recv_buf_lock, NULL);
+    if (init_rc != 0) {
+        errno = init_rc;
+        rc = fail_errno("recv lock init for Linux watch CQE ordering failed");
+        goto done;
+    }
+    recv_lock_ready = true;
+    init_rc = io_uring_queue_init(8U, &node.ring, 0U);
+    if (init_rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(init_rc)) {
+            rc = 0;
+            goto done;
+        }
+        errno = -init_rc;
+        rc = fail_errno("io_uring init for Linux watch CQE ordering failed");
+        goto done;
+    }
+    ring_ready = true;
+    node.ring_ready = true;
+
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL: {
+        llam_poll_watch_t *poll_watch = calloc(1U, sizeof(*poll_watch));
+
+        if (poll_watch == NULL) {
+            goto done;
+        }
+        poll_watch->fd = -1;
+        poll_watch->events = POLLIN;
+        poll_watch->migrate_target_node_index = UINT_MAX;
+        poll_watch->active = true;
+        poll_watch->deactivate_queued = true;
+        poll_watch->backend_refs = 1U;
+        node.poll_watches = poll_watch;
+        watch = poll_watch;
+        target_cqe.user_data = llam_io_udata_encode(watch, LLAM_IO_UDATA_POLL_WATCH);
+        target_cqe.res = -ECANCELED;
+        break;
+    }
+    case LINUX_WATCH_LIFETIME_ACCEPT: {
+        llam_accept_watch_t *accept_watch = calloc(1U, sizeof(*accept_watch));
+
+        if (accept_watch == NULL || pipe(accepted_pipe) != 0) {
+            free(accept_watch);
+            goto done;
+        }
+        accept_watch->fd = -1;
+        accept_watch->migrate_target_node_index = UINT_MAX;
+        accept_watch->active = true;
+        accept_watch->deactivate_queued = true;
+        accept_watch->backend_refs = 1U;
+        node.accept_watches = accept_watch;
+        watch = accept_watch;
+        target_cqe.user_data = llam_io_udata_encode(watch, LLAM_IO_UDATA_ACCEPT_WATCH);
+        target_cqe.res = accepted_pipe[0];
+        break;
+    }
+    case LINUX_WATCH_LIFETIME_RECV: {
+        llam_recv_watch_t *recv_watch = calloc(1U, sizeof(*recv_watch));
+
+        recv_buf_ring = calloc(1U, sizeof(*recv_buf_ring));
+        recv_buf_storage = calloc(1U, LLAM_IO_BUFFER_INLINE_BYTES);
+        if (recv_watch == NULL || recv_buf_ring == NULL || recv_buf_storage == NULL) {
+            free(recv_watch);
+            goto done;
+        }
+        recv_watch->fd = -1;
+        recv_watch->migrate_target_node_index = UINT_MAX;
+        recv_watch->active = true;
+        recv_watch->deactivate_queued = true;
+        recv_watch->backend_refs = 1U;
+        node.recv_watches = recv_watch;
+        node.recv_buf_ring = recv_buf_ring;
+        node.recv_buf_storage = recv_buf_storage;
+        node.recv_buf_entries = 1U;
+        node.recv_buf_mask = 0U;
+        node.supports_provided_buffers = true;
+#if defined(LLAM_HAVE_IO_URING_BUF_RING_HELPERS)
+        expect_provided_buffer = true;
+#endif
+        watch = recv_watch;
+        target_cqe.user_data = llam_io_udata_encode(watch, LLAM_IO_UDATA_RECV_WATCH);
+        target_cqe.res = 8;
+        target_cqe.flags = IORING_CQE_F_BUFFER;
+        break;
+    }
+    default:
+        goto done;
+    }
+
+    if (retired_terminal_only) {
+        switch (kind) {
+        case LINUX_WATCH_LIFETIME_POLL:
+            ((llam_poll_watch_t *)watch)->retired = true;
+            break;
+        case LINUX_WATCH_LIFETIME_ACCEPT:
+            ((llam_accept_watch_t *)watch)->retired = true;
+            break;
+        case LINUX_WATCH_LIFETIME_RECV:
+            ((llam_recv_watch_t *)watch)->retired = true;
+            break;
+        default:
+            goto done;
+        }
+        llam_io_handle_cqe(&node, &target_cqe);
+        if (!linux_watch_lifetime_test_is_linked(&node, kind, watch) ||
+            linux_watch_lifetime_test_backend_refs(kind, watch) != 0U ||
+            linux_watch_lifetime_test_active(kind, watch) ||
+            atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U) {
+            rc = fail_msg("retired Linux terminal CQE did not release backend ownership");
+            goto done;
+        }
+        if (kind == LINUX_WATCH_LIFETIME_ACCEPT) {
+            errno = 0;
+            if (fcntl(accepted_pipe[0], F_GETFD) != -1 || errno != EBADF) {
+                rc = fail_msg("retired Linux accept CQE did not close late accepted fd");
+                goto done;
+            }
+            accepted_pipe[0] = -1;
+        } else if (kind == LINUX_WATCH_LIFETIME_RECV && expect_provided_buffer &&
+                   (atomic_load_explicit(&node.provided_buf_acquires, memory_order_acquire) != 1U ||
+                    atomic_load_explicit(&node.provided_buf_returns, memory_order_acquire) != 1U)) {
+            rc = fail_msg("retired Linux recv CQE did not recycle late provided buffer");
+            goto done;
+        }
+        rc = 0;
+        goto done;
+    }
+
+    op = calloc(1U, sizeof(*op));
+    if (op == NULL) {
+        goto done;
+    }
+    op->target = watch;
+    op->kind = kind == LINUX_WATCH_LIFETIME_POLL ? LLAM_IO_CONTROL_POLL_DEACTIVATE :
+               (kind == LINUX_WATCH_LIFETIME_ACCEPT ? LLAM_IO_CONTROL_ACCEPT_DEACTIVATE :
+                                                      LLAM_IO_CONTROL_RECV_DEACTIVATE);
+    encoded_op = op;
+    llam_linux_track_backend_control(&node, op);
+    op = NULL;
+    control_cqe.user_data = llam_io_udata_encode(encoded_op, LLAM_IO_UDATA_CONTROL);
+    control_cqe.res = 0;
+
+    if (cancel_control_first) {
+        llam_io_handle_cqe(&node, &control_cqe);
+        encoded_op = NULL;
+        if (!linux_watch_lifetime_test_is_linked(&node, kind, watch) ||
+            linux_watch_lifetime_test_backend_refs(kind, watch) != 1U ||
+            linux_watch_lifetime_test_active(kind, watch) ||
+            linux_watch_lifetime_test_deactivate_queued(kind, watch) ||
+            !linux_watch_lifetime_test_destroy_pending(kind, watch) ||
+            atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U) {
+            rc = fail_msg("cancel-first Linux watch CQE did not retain terminal backend ownership");
+            goto done;
+        }
+        llam_io_handle_cqe(&node, &target_cqe);
+    } else {
+        llam_io_handle_cqe(&node, &target_cqe);
+        if (!linux_watch_lifetime_test_is_linked(&node, kind, watch) ||
+            linux_watch_lifetime_test_backend_refs(kind, watch) != 0U ||
+            linux_watch_lifetime_test_active(kind, watch) ||
+            !linux_watch_lifetime_test_deactivate_queued(kind, watch) ||
+            linux_watch_lifetime_test_destroy_pending(kind, watch) ||
+            atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 1U) {
+            rc = fail_msg("target-first Linux watch CQE released control-target ownership early");
+            goto done;
+        }
+        llam_io_handle_cqe(&node, &control_cqe);
+        encoded_op = NULL;
+    }
+
+    if (linux_watch_lifetime_test_is_linked(&node, kind, watch) ||
+        node.retired_poll_watches != NULL || node.retired_accept_watches != NULL ||
+        node.retired_recv_watches != NULL || node.linux_backend_control_head != NULL ||
+        node.linux_backend_control_tail != NULL ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U) {
+        bool still_linked = linux_watch_lifetime_test_is_linked(&node, kind, watch);
+
+        fprintf(stderr,
+                "Linux watch CQE ordering state kind=%u cancel_first=%u linked=%u pending=%u "
+                "controls=%p/%p retired=%p/%p/%p\n",
+                (unsigned)kind,
+                cancel_control_first ? 1U : 0U,
+                still_linked ? 1U : 0U,
+                atomic_load_explicit(&node.pending_ops, memory_order_acquire),
+                (void *)node.linux_backend_control_head,
+                (void *)node.linux_backend_control_tail,
+                (void *)node.retired_poll_watches,
+                (void *)node.retired_accept_watches,
+                (void *)node.retired_recv_watches);
+        if (still_linked) {
+            unsigned lifetime_refs = kind == LINUX_WATCH_LIFETIME_POLL
+                                         ? ((llam_poll_watch_t *)watch)->lifetime_refs
+                                         : (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                                ? ((llam_accept_watch_t *)watch)->lifetime_refs
+                                                : ((llam_recv_watch_t *)watch)->lifetime_refs);
+            bool accepts_waiters = kind == LINUX_WATCH_LIFETIME_POLL
+                                       ? ((llam_poll_watch_t *)watch)->accepts_waiters
+                                       : (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                              ? ((llam_accept_watch_t *)watch)->accepts_waiters
+                                              : ((llam_recv_watch_t *)watch)->accepts_waiters);
+            bool retired = kind == LINUX_WATCH_LIFETIME_POLL
+                               ? ((llam_poll_watch_t *)watch)->retired
+                               : (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                      ? ((llam_accept_watch_t *)watch)->retired
+                                      : ((llam_recv_watch_t *)watch)->retired);
+            bool activating = kind == LINUX_WATCH_LIFETIME_POLL
+                                  ? ((llam_poll_watch_t *)watch)->activating
+                                  : (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                         ? ((llam_accept_watch_t *)watch)->activating
+                                         : ((llam_recv_watch_t *)watch)->activating);
+
+            fprintf(stderr,
+                    "Linux watch CQE ordering watch refs=%u lifetime=%u active=%u activating=%u "
+                    "deactivate=%u destroy=%u accepts=%u retired=%u\n",
+                    linux_watch_lifetime_test_backend_refs(kind, watch),
+                    lifetime_refs,
+                    linux_watch_lifetime_test_active(kind, watch) ? 1U : 0U,
+                    activating ? 1U : 0U,
+                    linux_watch_lifetime_test_deactivate_queued(kind, watch) ? 1U : 0U,
+                    linux_watch_lifetime_test_destroy_pending(kind, watch) ? 1U : 0U,
+                    accepts_waiters ? 1U : 0U,
+                    retired ? 1U : 0U);
+        }
+        rc = fail_msg("Linux watch CQE ordering did not reclaim and balance final ownership");
+        goto done;
+    }
+    watch = NULL;
+    if (kind == LINUX_WATCH_LIFETIME_ACCEPT) {
+        errno = 0;
+        if (fcntl(accepted_pipe[0], F_GETFD) != -1 || errno != EBADF) {
+            rc = fail_msg("late accepted fd was not closed during watch teardown");
+            goto done;
+        }
+        accepted_pipe[0] = -1;
+    } else if (kind == LINUX_WATCH_LIFETIME_RECV && expect_provided_buffer &&
+               (atomic_load_explicit(&node.provided_buf_acquires, memory_order_acquire) != 1U ||
+                atomic_load_explicit(&node.provided_buf_returns, memory_order_acquire) != 1U)) {
+        fprintf(stderr,
+                "Linux watch recv cleanup state cancel_first=%u acquires=%llu returns=%llu ring_ready=%u "
+                "buffers=%u entries=%u\n",
+                cancel_control_first ? 1U : 0U,
+                (unsigned long long)atomic_load_explicit(&node.provided_buf_acquires,
+                                                         memory_order_acquire),
+                (unsigned long long)atomic_load_explicit(&node.provided_buf_returns,
+                                                         memory_order_acquire),
+                node.ring_ready ? 1U : 0U,
+                node.supports_provided_buffers ? 1U : 0U,
+                node.recv_buf_entries);
+        rc = fail_msg("late recv provided buffer was not recycled during watch teardown");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (ring_ready) {
+        io_uring_queue_exit(&node.ring);
+        ring_ready = false;
+        node.ring_ready = false;
+    }
+    if (watch_lock_ready) {
+        llam_linux_retire_backend_controls(&node);
+        llam_linux_retire_backend_watch_refs(&node);
+        pthread_mutex_lock(&node.watch_lock);
+        if (watch != NULL && linux_watch_lifetime_test_is_linked(&node, kind, watch)) {
+            linux_watch_lifetime_test_destroy_locked(&node, kind, watch);
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+    }
+    free(op);
+    close_if_valid(&accepted_pipe[0]);
+    close_if_valid(&accepted_pipe[1]);
+    free(recv_buf_ring);
+    free(recv_buf_storage);
+    if (recv_lock_ready) {
+        pthread_mutex_destroy(&node.recv_buf_lock);
+    }
+    if (watch_lock_ready) {
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    return rc;
+}
+
+static int exercise_linux_closed_watch_cqe_orders(void) {
+    for (unsigned kind = LINUX_WATCH_LIFETIME_POLL;
+         kind <= LINUX_WATCH_LIFETIME_RECV;
+         ++kind) {
+        if (exercise_linux_closed_watch_cqe_order_one(
+                (linux_watch_lifetime_test_kind_t)kind, false, false) != 0 ||
+            exercise_linux_closed_watch_cqe_order_one(
+                (linux_watch_lifetime_test_kind_t)kind, true, false) != 0 ||
+            exercise_linux_closed_watch_cqe_order_one(
+                (linux_watch_lifetime_test_kind_t)kind, false, true) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+enum {
+    LINUX_WATCH_REARM_NATURAL_TERMINAL = 0,
+    LINUX_WATCH_REARM_TARGET_FIRST = 1,
+    LINUX_WATCH_REARM_CONTROL_FIRST = 2,
+};
+
+static int exercise_linux_accept_rejects_stale_deactivate_overlap(void) {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_shard_t shard;
+    llam_task_t task;
+    llam_io_req_t req;
+    llam_accept_watch_t *watch = NULL;
+    llam_shard_t *saved_shard = g_llam_tls_shard;
+    llam_task_t *saved_task = g_llam_tls_task;
+    int listener = -1;
+    bool lock_ready = false;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&shard, 0, sizeof(shard));
+    memset(&task, 0, sizeof(task));
+    memset(&req, 0, sizeof(req));
+    atomic_init(&runtime.fatal_errno, 0);
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.index = 0U;
+    node.event_fd = -1;
+    node.ring_ready = true;
+    node.supports_multishot_accept = true;
+    shard.runtime = &runtime;
+    shard.id = 0U;
+    shard.io_node_index = 0U;
+    task.owner_runtime = &runtime;
+    llam_io_req_reset(&req, &runtime, UINT_MAX, UINT_MAX);
+
+    if (make_loopback_listener(&listener) != 0) {
+        return fail_errno("listener setup for stale accept deactivate gate failed");
+    }
+    if (pthread_mutex_init(&node.watch_lock, NULL) != 0) {
+        goto done;
+    }
+    lock_ready = true;
+    node.watch_lock_initialized = true;
+
+    pthread_mutex_lock(&node.watch_lock);
+    watch = llam_get_or_create_accept_watch_locked(&node, listener);
+    if (watch != NULL) {
+        /* Model target-terminal-first with its old cancel already ring-backed. */
+        watch->active = false;
+        watch->deactivate_queued = true;
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    if (watch == NULL) {
+        goto done;
+    }
+    req.fd = listener;
+
+    g_llam_tls_shard = &shard;
+    g_llam_tls_task = &task;
+    errno = 0;
+    {
+        int issue_rc = llam_issue_multishot_accept(&req);
+        int issue_error = errno;
+
+        if (issue_rc != -1 || issue_error != EAGAIN) {
+            fprintf(stderr,
+                    "stale accept deactivate result rc=%d errno=%d active=%u activating=%u "
+                    "deactivate=%u queued=%p\n",
+                    issue_rc,
+                    issue_error,
+                    watch->active ? 1U : 0U,
+                    watch->activating ? 1U : 0U,
+                    watch->deactivate_queued ? 1U : 0U,
+                    (void *)node.control_head);
+            g_llam_tls_shard = saved_shard;
+            g_llam_tls_task = saved_task;
+            rc = fail_msg("accept overlapped a ring-backed stale deactivate");
+            goto done;
+        }
+    }
+    g_llam_tls_shard = saved_shard;
+    g_llam_tls_task = saved_task;
+    if (node.control_head != NULL || watch->activating || watch->active ||
+        !watch->deactivate_queued) {
+        rc = fail_msg("stale accept deactivate gate mutated backend generation state");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    g_llam_tls_shard = saved_shard;
+    g_llam_tls_task = saved_task;
+    node.ring_ready = false;
+    if (lock_ready) {
+        pthread_mutex_lock(&node.watch_lock);
+        if (watch != NULL && node.accept_watches == watch) {
+            watch->active = false;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            watch->backend_refs = 0U;
+            watch->lifetime_refs = 0U;
+            llam_destroy_accept_watch_locked(&node, watch);
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    close_if_valid(&listener);
+    return rc;
+}
+
+static int exercise_linux_terminal_watch_rearm_one(linux_watch_lifetime_test_kind_t kind,
+                                                   unsigned ordering) {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_req_t first;
+    llam_io_req_t second;
+    llam_io_control_op_t *encoded_op = NULL;
+    struct io_uring_cqe target_cqe;
+    struct io_uring_cqe control_cqe;
+    void *watch = NULL;
+    int accepted_pipe[2] = {-1, -1};
+    bool watch_lock_ready = false;
+    bool ring_ready = false;
+    int init_rc;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    memset(&target_cqe, 0, sizeof(target_cqe));
+    memset(&control_cqe, 0, sizeof(control_cqe));
+    atomic_init(&runtime.fatal_errno, 0);
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.index = 0U;
+    node.event_fd = -1;
+    atomic_init(&node.pending_ops,
+                ordering == LINUX_WATCH_REARM_NATURAL_TERMINAL ? 1U : 2U);
+
+    init_rc = pthread_mutex_init(&node.watch_lock, NULL);
+    if (init_rc != 0) {
+        errno = init_rc;
+        return fail_errno("watch lock init for terminal rearm failed");
+    }
+    watch_lock_ready = true;
+    node.watch_lock_initialized = true;
+    init_rc = io_uring_queue_init(8U, &node.ring, 0U);
+    if (init_rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(init_rc)) {
+            rc = 0;
+            goto done;
+        }
+        errno = -init_rc;
+        rc = fail_errno("io_uring init for terminal rearm failed");
+        goto done;
+    }
+    ring_ready = true;
+    node.ring_ready = true;
+
+    llam_io_req_reset(&first, &runtime, UINT_MAX, UINT_MAX);
+    llam_io_req_reset(&second, &runtime, UINT_MAX, UINT_MAX);
+    first.result = -101;
+    second.result = -202;
+    first.next = &second;
+    if (kind == LINUX_WATCH_LIFETIME_ACCEPT) {
+        llam_accept_watch_t *accept_watch = calloc(1U, sizeof(*accept_watch));
+
+        if (accept_watch == NULL ||
+            (ordering == LINUX_WATCH_REARM_NATURAL_TERMINAL && pipe(accepted_pipe) != 0)) {
+            free(accept_watch);
+            goto done;
+        }
+        accept_watch->fd = -1;
+        accept_watch->migrate_target_node_index =
+            ordering == LINUX_WATCH_REARM_NATURAL_TERMINAL ? UINT_MAX : 1U;
+        accept_watch->accepts_waiters = true;
+        accept_watch->active = true;
+        accept_watch->backend_refs = 1U;
+        accept_watch->deactivate_queued = ordering != LINUX_WATCH_REARM_NATURAL_TERMINAL;
+        accept_watch->wait_head = &first;
+        accept_watch->wait_tail = &second;
+        node.accept_watches = accept_watch;
+        watch = accept_watch;
+        first.kind = LLAM_IO_KIND_ACCEPT;
+        second.kind = LLAM_IO_KIND_ACCEPT;
+        first.accept_watch = accept_watch;
+        second.accept_watch = accept_watch;
+        atomic_store_explicit(&first.wait_mode, LLAM_IO_WAIT_MODE_ACCEPT_WATCH, memory_order_release);
+        atomic_store_explicit(&second.wait_mode, LLAM_IO_WAIT_MODE_ACCEPT_WATCH, memory_order_release);
+        target_cqe.user_data = llam_io_udata_encode(watch, LLAM_IO_UDATA_ACCEPT_WATCH);
+        target_cqe.res = ordering == LINUX_WATCH_REARM_NATURAL_TERMINAL
+                             ? accepted_pipe[0]
+                             : -ECANCELED;
+    } else if (kind == LINUX_WATCH_LIFETIME_RECV) {
+        llam_recv_watch_t *recv_watch = calloc(1U, sizeof(*recv_watch));
+
+        if (recv_watch == NULL) {
+            goto done;
+        }
+        recv_watch->fd = -1;
+        recv_watch->migrate_target_node_index =
+            ordering == LINUX_WATCH_REARM_NATURAL_TERMINAL ? UINT_MAX : 1U;
+        recv_watch->accepts_waiters = true;
+        recv_watch->active = true;
+        recv_watch->backend_refs = 1U;
+        recv_watch->deactivate_queued = ordering != LINUX_WATCH_REARM_NATURAL_TERMINAL;
+        recv_watch->wait_head = &first;
+        recv_watch->wait_tail = &second;
+        node.recv_watches = recv_watch;
+        watch = recv_watch;
+        first.recv_watch = recv_watch;
+        second.recv_watch = recv_watch;
+        atomic_store_explicit(&first.wait_mode, LLAM_IO_WAIT_MODE_RECV_WATCH, memory_order_release);
+        atomic_store_explicit(&second.wait_mode, LLAM_IO_WAIT_MODE_RECV_WATCH, memory_order_release);
+        target_cqe.user_data = llam_io_udata_encode(watch, LLAM_IO_UDATA_RECV_WATCH);
+        /* Zero is one datagram/EOF result, never a broadcast to both waiters. */
+        target_cqe.res = ordering == LINUX_WATCH_REARM_NATURAL_TERMINAL ? 0 : -ECANCELED;
+    } else {
+        goto done;
+    }
+
+    if (ordering != LINUX_WATCH_REARM_NATURAL_TERMINAL) {
+        encoded_op = calloc(1U, sizeof(*encoded_op));
+        if (encoded_op == NULL) {
+            goto done;
+        }
+        encoded_op->target = watch;
+        encoded_op->kind = kind == LINUX_WATCH_LIFETIME_ACCEPT
+                               ? LLAM_IO_CONTROL_ACCEPT_DEACTIVATE
+                               : LLAM_IO_CONTROL_RECV_DEACTIVATE;
+        llam_linux_track_backend_control(&node, encoded_op);
+        control_cqe.user_data = llam_io_udata_encode(encoded_op, LLAM_IO_UDATA_CONTROL);
+        control_cqe.res = 0;
+    }
+
+    if (ordering == LINUX_WATCH_REARM_CONTROL_FIRST) {
+        llam_io_handle_cqe(&node, &control_cqe);
+        encoded_op = NULL;
+        llam_io_handle_cqe(&node, &target_cqe);
+    } else {
+        llam_io_handle_cqe(&node, &target_cqe);
+        if (ordering == LINUX_WATCH_REARM_TARGET_FIRST) {
+            llam_io_handle_cqe(&node, &control_cqe);
+            encoded_op = NULL;
+        }
+    }
+
+    if (!linux_watch_lifetime_test_is_linked(&node, kind, watch) ||
+        linux_watch_lifetime_test_backend_refs(kind, watch) != 0U ||
+        linux_watch_lifetime_test_active(kind, watch) ||
+        linux_watch_lifetime_test_deactivate_queued(kind, watch) ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U ||
+        node.control_head == NULL || node.control_head->next != NULL ||
+        node.control_head->kind != (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                        ? LLAM_IO_CONTROL_ACCEPT_ACTIVATE
+                                        : LLAM_IO_CONTROL_RECV_ACTIVATE)) {
+        rc = fail_msg("terminal/control watch ordering did not queue one reactivation");
+        goto done;
+    }
+    if (ordering == LINUX_WATCH_REARM_NATURAL_TERMINAL) {
+        bool first_consumed = kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                  ? first.result == accepted_pipe[0]
+                                  : first.result == 0;
+        llam_io_req_t *remaining = kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                       ? ((llam_accept_watch_t *)watch)->wait_head
+                                       : ((llam_recv_watch_t *)watch)->wait_head;
+
+        if (!first_consumed || second.result != -202 || remaining != &second || second.next != NULL) {
+            rc = fail_msg("terminal success was duplicated or failed to preserve remaining waiter");
+            goto done;
+        }
+        {
+            llam_io_control_op_t *activation = llam_take_node_controls(&node);
+
+            if (activation == NULL || activation->next != NULL) {
+                rc = fail_msg("terminal rearm did not expose exactly one activation control");
+                goto done;
+            }
+            node.linux_submit_terminal = true;
+            llam_io_submit_control_op(&node, activation);
+            node.linux_submit_terminal = false;
+            remaining = kind == LINUX_WATCH_LIFETIME_ACCEPT
+                            ? ((llam_accept_watch_t *)watch)->wait_head
+                            : node.recv_watches != NULL ? node.recv_watches->wait_head : NULL;
+            if (remaining != NULL || second.result != -1 || second.error_code != EAGAIN ||
+                (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                     ? ((llam_accept_watch_t *)watch)->activating
+                     : node.recv_watches != NULL)) {
+                rc = fail_msg("failed terminal reactivation did not error-complete remaining waiter");
+                goto done;
+            }
+            if (kind == LINUX_WATCH_LIFETIME_RECV) {
+                watch = NULL;
+            }
+        }
+    } else {
+        llam_io_req_t *remaining = kind == LINUX_WATCH_LIFETIME_ACCEPT
+                                       ? ((llam_accept_watch_t *)watch)->wait_head
+                                       : ((llam_recv_watch_t *)watch)->wait_head;
+
+        if (first.result != -101 || second.result != -202 || remaining != &first || first.next != &second) {
+            rc = fail_msg("deactivate terminal CQE consumed a waiter instead of rearming");
+            goto done;
+        }
+    }
+    rc = 0;
+
+done:
+    if (ring_ready) {
+        io_uring_queue_exit(&node.ring);
+        ring_ready = false;
+        node.ring_ready = false;
+    }
+    if (watch_lock_ready) {
+        if (node.linux_backend_control_head != NULL) {
+            llam_linux_retire_backend_controls(&node);
+        }
+        llam_linux_retire_backend_watch_refs(&node);
+        pthread_mutex_lock(&node.watch_lock);
+        while (node.control_head != NULL) {
+            llam_io_control_op_t *next = node.control_head->next;
+
+            node.control_head->next = NULL;
+            llam_io_control_op_destroy(&node, node.control_head);
+            node.control_head = next;
+        }
+        node.control_tail = NULL;
+        if (watch != NULL && linux_watch_lifetime_test_is_linked(&node, kind, watch)) {
+            if (kind == LINUX_WATCH_LIFETIME_ACCEPT) {
+                ((llam_accept_watch_t *)watch)->wait_head = NULL;
+                ((llam_accept_watch_t *)watch)->wait_tail = NULL;
+            } else if (kind == LINUX_WATCH_LIFETIME_RECV) {
+                ((llam_recv_watch_t *)watch)->wait_head = NULL;
+                ((llam_recv_watch_t *)watch)->wait_tail = NULL;
+            }
+            linux_watch_lifetime_test_destroy_locked(&node, kind, watch);
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    free(encoded_op);
+    close_if_valid(&accepted_pipe[0]);
+    close_if_valid(&accepted_pipe[1]);
+    return rc;
+}
+
+static int exercise_linux_terminal_watch_rearms(void) {
+    for (unsigned kind = LINUX_WATCH_LIFETIME_ACCEPT;
+         kind <= LINUX_WATCH_LIFETIME_RECV;
+         ++kind) {
+        for (unsigned ordering = LINUX_WATCH_REARM_NATURAL_TERMINAL;
+             ordering <= LINUX_WATCH_REARM_CONTROL_FIRST;
+             ++ordering) {
+            if (exercise_linux_terminal_watch_rearm_one(
+                    (linux_watch_lifetime_test_kind_t)kind, ordering) != 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int exercise_linux_activation_rejects_deactivate_overlap(void) {
+    for (unsigned kind = LINUX_WATCH_LIFETIME_POLL;
+         kind <= LINUX_WATCH_LIFETIME_RECV;
+         ++kind) {
+        llam_runtime_t runtime;
+        llam_node_t node;
+        llam_io_control_op_t *op = NULL;
+        void *watch = NULL;
+        int init_rc;
+
+        memset(&runtime, 0, sizeof(runtime));
+        memset(&node, 0, sizeof(node));
+        atomic_init(&runtime.fatal_errno, 0);
+        atomic_init(&node.pending_ops, 0U);
+        node.runtime = &runtime;
+        node.event_fd = -1;
+        init_rc = pthread_mutex_init(&node.watch_lock, NULL);
+        if (init_rc != 0) {
+            errno = init_rc;
+            return fail_errno("watch lock init for activation/deactivate overlap failed");
+        }
+        init_rc = io_uring_queue_init(4U, &node.ring, 0U);
+        if (init_rc != 0) {
+            pthread_mutex_destroy(&node.watch_lock);
+            if (io_uring_unavailable_for_direct_internal_test(init_rc)) {
+                return 0;
+            }
+            errno = -init_rc;
+            return fail_errno("io_uring init for activation/deactivate overlap failed");
+        }
+        node.ring_ready = true;
+        if (kind == LINUX_WATCH_LIFETIME_POLL) {
+            llam_poll_watch_t *poll_watch = calloc(1U, sizeof(*poll_watch));
+
+            if (poll_watch != NULL) {
+                poll_watch->accepts_waiters = true;
+                poll_watch->activating = true;
+                poll_watch->deactivate_queued = true;
+                poll_watch->migrate_target_node_index = UINT_MAX;
+                node.poll_watches = poll_watch;
+            }
+            watch = poll_watch;
+        } else if (kind == LINUX_WATCH_LIFETIME_ACCEPT) {
+            llam_accept_watch_t *accept_watch = calloc(1U, sizeof(*accept_watch));
+
+            if (accept_watch != NULL) {
+                accept_watch->accepts_waiters = true;
+                accept_watch->activating = true;
+                accept_watch->deactivate_queued = true;
+                accept_watch->migrate_target_node_index = UINT_MAX;
+                node.accept_watches = accept_watch;
+            }
+            watch = accept_watch;
+        } else {
+            llam_recv_watch_t *recv_watch = calloc(1U, sizeof(*recv_watch));
+
+            if (recv_watch != NULL) {
+                recv_watch->accepts_waiters = true;
+                recv_watch->activating = true;
+                recv_watch->deactivate_queued = true;
+                recv_watch->migrate_target_node_index = UINT_MAX;
+                node.recv_watches = recv_watch;
+            }
+            watch = recv_watch;
+        }
+        op = calloc(1U, sizeof(*op));
+        if (watch == NULL || op == NULL) {
+            free(op);
+            io_uring_queue_exit(&node.ring);
+            pthread_mutex_lock(&node.watch_lock);
+            if (watch != NULL) {
+                linux_watch_lifetime_test_destroy_locked(
+                    &node, (linux_watch_lifetime_test_kind_t)kind, watch);
+            }
+            pthread_mutex_unlock(&node.watch_lock);
+            pthread_mutex_destroy(&node.watch_lock);
+            return fail_errno("activation/deactivate overlap allocation failed");
+        }
+        op->kind = kind == LINUX_WATCH_LIFETIME_POLL
+                       ? LLAM_IO_CONTROL_POLL_ACTIVATE
+                       : (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                              ? LLAM_IO_CONTROL_ACCEPT_ACTIVATE
+                              : LLAM_IO_CONTROL_RECV_ACTIVATE);
+        op->target = watch;
+        llam_io_submit_control_op(&node, op);
+        op = NULL;
+        if (io_uring_sq_ready(&node.ring) != 0U ||
+            linux_watch_lifetime_test_backend_refs(
+                (linux_watch_lifetime_test_kind_t)kind, watch) != 0U ||
+            linux_watch_lifetime_test_active((linux_watch_lifetime_test_kind_t)kind, watch) ||
+            atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U) {
+            io_uring_queue_exit(&node.ring);
+            pthread_mutex_lock(&node.watch_lock);
+            linux_watch_lifetime_test_destroy_locked(
+                &node, (linux_watch_lifetime_test_kind_t)kind, watch);
+            pthread_mutex_unlock(&node.watch_lock);
+            pthread_mutex_destroy(&node.watch_lock);
+            return fail_msg("activation crossed an older deactivate generation");
+        }
+        pthread_mutex_lock(&node.watch_lock);
+        linux_watch_lifetime_test_destroy_locked(
+            &node, (linux_watch_lifetime_test_kind_t)kind, watch);
+        pthread_mutex_unlock(&node.watch_lock);
+        watch = NULL;
+
+        if (kind == LINUX_WATCH_LIFETIME_POLL) {
+            llam_poll_watch_t *poll_watch = calloc(1U, sizeof(*poll_watch));
+
+            if (poll_watch != NULL) {
+                poll_watch->accepts_waiters = false;
+                poll_watch->destroy_pending = true;
+                poll_watch->activating = true;
+                poll_watch->migrate_target_node_index = UINT_MAX;
+                node.poll_watches = poll_watch;
+            }
+            watch = poll_watch;
+        } else if (kind == LINUX_WATCH_LIFETIME_ACCEPT) {
+            llam_accept_watch_t *accept_watch = calloc(1U, sizeof(*accept_watch));
+
+            if (accept_watch != NULL) {
+                accept_watch->accepts_waiters = false;
+                accept_watch->destroy_pending = true;
+                accept_watch->activating = true;
+                accept_watch->migrate_target_node_index = UINT_MAX;
+                node.accept_watches = accept_watch;
+            }
+            watch = accept_watch;
+        } else {
+            llam_recv_watch_t *recv_watch = calloc(1U, sizeof(*recv_watch));
+
+            if (recv_watch != NULL) {
+                recv_watch->accepts_waiters = false;
+                recv_watch->destroy_pending = true;
+                recv_watch->activating = true;
+                recv_watch->migrate_target_node_index = UINT_MAX;
+                node.recv_watches = recv_watch;
+            }
+            watch = recv_watch;
+        }
+        op = calloc(1U, sizeof(*op));
+        if (watch == NULL || op == NULL) {
+            free(op);
+            io_uring_queue_exit(&node.ring);
+            pthread_mutex_lock(&node.watch_lock);
+            if (watch != NULL) {
+                linux_watch_lifetime_test_destroy_locked(
+                    &node, (linux_watch_lifetime_test_kind_t)kind, watch);
+            }
+            pthread_mutex_unlock(&node.watch_lock);
+            pthread_mutex_destroy(&node.watch_lock);
+            return fail_errno("closed activation failure allocation failed");
+        }
+        op->kind = kind == LINUX_WATCH_LIFETIME_POLL
+                       ? LLAM_IO_CONTROL_POLL_ACTIVATE
+                       : (kind == LINUX_WATCH_LIFETIME_ACCEPT
+                              ? LLAM_IO_CONTROL_ACCEPT_ACTIVATE
+                              : LLAM_IO_CONTROL_RECV_ACTIVATE);
+        op->target = watch;
+        llam_io_submit_control_op(&node, op);
+        op = NULL;
+        if (linux_watch_lifetime_test_is_linked(
+                &node, (linux_watch_lifetime_test_kind_t)kind, watch) ||
+            io_uring_sq_ready(&node.ring) != 0U ||
+            atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U) {
+            io_uring_queue_exit(&node.ring);
+            pthread_mutex_lock(&node.watch_lock);
+            if (linux_watch_lifetime_test_is_linked(
+                    &node, (linux_watch_lifetime_test_kind_t)kind, watch)) {
+                linux_watch_lifetime_test_destroy_locked(
+                    &node, (linux_watch_lifetime_test_kind_t)kind, watch);
+            }
+            pthread_mutex_unlock(&node.watch_lock);
+            pthread_mutex_destroy(&node.watch_lock);
+            return fail_msg("failed closed activation left a detached watch resident");
+        }
+        watch = NULL;
+        io_uring_queue_exit(&node.ring);
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    return 0;
+}
+
+typedef struct linux_migration_cqe_thread_context {
+    llam_node_t *node;
+    struct io_uring_cqe *cqe;
+    atomic_uint done;
+} linux_migration_cqe_thread_context_t;
+
+static void *linux_migration_cqe_thread_main(void *arg) {
+    linux_migration_cqe_thread_context_t *context = arg;
+
+    if (context != NULL && context->node != NULL && context->cqe != NULL) {
+        llam_io_handle_cqe(context->node, context->cqe);
+    }
+    if (context != NULL) {
+        atomic_store_explicit(&context->done, 1U, memory_order_release);
+    }
+    return NULL;
+}
+
+static int exercise_linux_migration_finalize_holds_watch_pin(void) {
+    llam_runtime_t runtime;
+    llam_node_t nodes[2];
+    llam_accept_watch_t *watch = NULL;
+    llam_io_control_op_t *encoded_op = NULL;
+    struct io_uring_cqe control_cqe;
+    linux_migration_cqe_thread_context_t context;
+    pthread_t thread;
+    int listener = -1;
+    bool locks_ready[2] = {false, false};
+    bool ring_ready = false;
+    bool lifecycle_locked = false;
+    bool thread_started = false;
+    bool observed_deferred = false;
+    int init_rc;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(nodes, 0, sizeof(nodes));
+    memset(&control_cqe, 0, sizeof(control_cqe));
+    memset(&context, 0, sizeof(context));
+    atomic_init(&runtime.fatal_errno, 0);
+    runtime.nodes = nodes;
+    runtime.active_nodes = 2U;
+    for (unsigned i = 0U; i < 2U; ++i) {
+        nodes[i].runtime = &runtime;
+        nodes[i].index = i;
+        nodes[i].event_fd = -1;
+        atomic_init(&nodes[i].pending_ops, i == 0U ? 1U : 0U);
+        init_rc = pthread_mutex_init(&nodes[i].watch_lock, NULL);
+        if (init_rc != 0) {
+            errno = init_rc;
+            goto done;
+        }
+        locks_ready[i] = true;
+        nodes[i].watch_lock_initialized = true;
+    }
+    init_rc = io_uring_queue_init(8U, &nodes[0].ring, 0U);
+    if (init_rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(init_rc)) {
+            rc = 0;
+            goto done;
+        }
+        errno = -init_rc;
+        goto done;
+    }
+    ring_ready = true;
+    nodes[0].ring_ready = true;
+    if (make_loopback_listener(&listener) != 0) {
+        goto done;
+    }
+
+    pthread_mutex_lock(&nodes[0].watch_lock);
+    watch = llam_get_or_create_accept_watch_locked(&nodes[0], listener);
+    if (watch != NULL) {
+        watch->active = false;
+        watch->deactivate_queued = true;
+        watch->backend_refs = 0U;
+        watch->migrate_target_node_index = 1U;
+    }
+    pthread_mutex_unlock(&nodes[0].watch_lock);
+    if (watch == NULL) {
+        goto done;
+    }
+    encoded_op = calloc(1U, sizeof(*encoded_op));
+    if (encoded_op == NULL) {
+        goto done;
+    }
+    encoded_op->kind = LLAM_IO_CONTROL_ACCEPT_DEACTIVATE;
+    encoded_op->target = watch;
+    llam_linux_track_backend_control(&nodes[0], encoded_op);
+    control_cqe.user_data = llam_io_udata_encode(encoded_op, LLAM_IO_UDATA_CONTROL);
+    control_cqe.res = 0;
+    context.node = &nodes[0];
+    context.cqe = &control_cqe;
+    atomic_init(&context.done, 0U);
+
+    llam_fd_watch_lifecycle_lock();
+    lifecycle_locked = true;
+    init_rc = pthread_create(&thread, NULL, linux_migration_cqe_thread_main, &context);
+    if (init_rc != 0) {
+        errno = init_rc;
+        goto done;
+    }
+    thread_started = true;
+    for (unsigned spin = 0U; spin < 100000U; ++spin) {
+        unsigned refs;
+        bool deactivate_queued;
+
+        pthread_mutex_lock(&nodes[0].watch_lock);
+        refs = watch->lifetime_refs;
+        deactivate_queued = watch->deactivate_queued;
+        pthread_mutex_unlock(&nodes[0].watch_lock);
+        if (!deactivate_queued) {
+            observed_deferred = refs == 1U;
+            break;
+        }
+        sched_yield();
+    }
+    if (!observed_deferred) {
+        rc = fail_msg("migration control did not pin watch before deferred finalize");
+        goto done;
+    }
+
+    if (llam_forget_closed_fd_watch_state(&runtime, listener) != 0) {
+        rc = fail_errno("close-state purge during deferred migration failed");
+        goto done;
+    }
+    pthread_mutex_lock(&nodes[0].watch_lock);
+    if (nodes[0].accept_watches != watch || watch->lifetime_refs != 1U ||
+        !watch->destroy_pending || watch->accepts_waiters) {
+        pthread_mutex_unlock(&nodes[0].watch_lock);
+        rc = fail_msg("close reclaimed migration watch before deferred finalize released its pin");
+        goto done;
+    }
+    pthread_mutex_unlock(&nodes[0].watch_lock);
+
+    llam_fd_watch_lifecycle_unlock();
+    lifecycle_locked = false;
+    pthread_join(thread, NULL);
+    thread_started = false;
+    encoded_op = NULL;
+    watch = NULL;
+    if (nodes[0].accept_watches != NULL || nodes[1].accept_watches != NULL ||
+        nodes[0].linux_backend_control_head != NULL ||
+        atomic_load_explicit(&nodes[0].pending_ops, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != 0) {
+        rc = fail_msg("deferred migration pin did not reclaim and balance after close");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (lifecycle_locked) {
+        llam_fd_watch_lifecycle_unlock();
+        lifecycle_locked = false;
+    }
+    if (thread_started) {
+        pthread_join(thread, NULL);
+        thread_started = false;
+        encoded_op = NULL;
+    }
+    if (ring_ready) {
+        io_uring_queue_exit(&nodes[0].ring);
+        ring_ready = false;
+        nodes[0].ring_ready = false;
+    }
+    if (locks_ready[0] && nodes[0].linux_backend_control_head != NULL) {
+        llam_linux_retire_backend_controls(&nodes[0]);
+        encoded_op = NULL;
+    }
+    if (locks_ready[0]) {
+        llam_linux_retire_backend_watch_refs(&nodes[0]);
+        pthread_mutex_lock(&nodes[0].watch_lock);
+        if (watch != NULL && nodes[0].accept_watches == watch) {
+            watch->active = false;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            watch->backend_refs = 0U;
+            watch->lifetime_refs = 0U;
+            llam_destroy_accept_watch_locked(&nodes[0], watch);
+        }
+        pthread_mutex_unlock(&nodes[0].watch_lock);
+    }
+    free(encoded_op);
+    close_if_valid(&listener);
+    for (unsigned i = 0U; i < 2U; ++i) {
+        if (locks_ready[i]) {
+            pthread_mutex_destroy(&nodes[i].watch_lock);
+        }
+    }
+    return rc;
+}
+
+static int exercise_linux_migration_pin_saturation_fails_closed(void) {
+    llam_runtime_t runtime;
+    llam_node_t nodes[2];
+    llam_accept_watch_t *watch = NULL;
+    llam_io_control_op_t *encoded_op = NULL;
+    struct io_uring_cqe control_cqe;
+    bool locks_ready[2] = {false, false};
+    bool ring_ready = false;
+    int listener = -1;
+    int init_rc;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(nodes, 0, sizeof(nodes));
+    memset(&control_cqe, 0, sizeof(control_cqe));
+    atomic_init(&runtime.fatal_errno, 0);
+    runtime.nodes = nodes;
+    runtime.active_nodes = 2U;
+    for (unsigned i = 0U; i < 2U; ++i) {
+        nodes[i].runtime = &runtime;
+        nodes[i].index = i;
+        nodes[i].event_fd = -1;
+        atomic_init(&nodes[i].pending_ops, i == 0U ? 1U : 0U);
+        init_rc = pthread_mutex_init(&nodes[i].watch_lock, NULL);
+        if (init_rc != 0) {
+            errno = init_rc;
+            goto done;
+        }
+        locks_ready[i] = true;
+        nodes[i].watch_lock_initialized = true;
+    }
+    init_rc = io_uring_queue_init(8U, &nodes[0].ring, 0U);
+    if (init_rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(init_rc)) {
+            rc = 0;
+            goto done;
+        }
+        errno = -init_rc;
+        goto done;
+    }
+    ring_ready = true;
+    nodes[0].ring_ready = true;
+    if (make_loopback_listener(&listener) != 0) {
+        goto done;
+    }
+    pthread_mutex_lock(&nodes[0].watch_lock);
+    watch = llam_get_or_create_accept_watch_locked(&nodes[0], listener);
+    if (watch != NULL) {
+        watch->active = false;
+        watch->deactivate_queued = true;
+        watch->migrate_target_node_index = 1U;
+        watch->lifetime_refs = UINT_MAX;
+    }
+    pthread_mutex_unlock(&nodes[0].watch_lock);
+    if (watch == NULL) {
+        goto done;
+    }
+    encoded_op = calloc(1U, sizeof(*encoded_op));
+    if (encoded_op == NULL) {
+        goto done;
+    }
+    encoded_op->kind = LLAM_IO_CONTROL_ACCEPT_DEACTIVATE;
+    encoded_op->target = watch;
+    llam_linux_track_backend_control(&nodes[0], encoded_op);
+    control_cqe.user_data = llam_io_udata_encode(encoded_op, LLAM_IO_UDATA_CONTROL);
+    llam_io_handle_cqe(&nodes[0], &control_cqe);
+    encoded_op = NULL;
+    if (nodes[0].accept_watches != watch || nodes[1].accept_watches != NULL ||
+        watch->lifetime_refs != UINT_MAX || watch->deactivate_queued ||
+        nodes[0].linux_backend_control_head != NULL ||
+        atomic_load_explicit(&nodes[0].pending_ops, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
+        rc = fail_msg("saturated migration pin did not fail closed before deferred dereference");
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (ring_ready) {
+        io_uring_queue_exit(&nodes[0].ring);
+        nodes[0].ring_ready = false;
+    }
+    if (locks_ready[0] && nodes[0].linux_backend_control_head != NULL) {
+        llam_linux_retire_backend_controls(&nodes[0]);
+        encoded_op = NULL;
+    }
+    if (locks_ready[0]) {
+        pthread_mutex_lock(&nodes[0].watch_lock);
+        if (watch != NULL && nodes[0].accept_watches == watch) {
+            watch->active = false;
+            watch->activating = false;
+            watch->deactivate_queued = false;
+            watch->backend_refs = 0U;
+            watch->lifetime_refs = 0U;
+            watch->migrate_target_node_index = UINT_MAX;
+            llam_destroy_accept_watch_locked(&nodes[0], watch);
+        }
+        pthread_mutex_unlock(&nodes[0].watch_lock);
+    }
+    free(encoded_op);
+    close_if_valid(&listener);
+    for (unsigned i = 0U; i < 2U; ++i) {
+        if (locks_ready[i]) {
+            pthread_mutex_destroy(&nodes[i].watch_lock);
+        }
+    }
+    return rc;
+}
+
+static int exercise_linux_activation_terminal_teardown_one(linux_watch_lifetime_test_kind_t kind) {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_control_op_t *op = NULL;
+    linux_submit_fault_state_t fault;
+    void *watch = NULL;
+    bool watch_lock_ready = false;
+    bool submit_lock_ready = false;
+    bool ring_ready = false;
+    int init_rc;
+    int rc = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&fault, 0, sizeof(fault));
+    fault.forced_result = -EBADF;
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&node.pending_ops, 0U);
+    runtime.nodes = &node;
+    runtime.active_nodes = 1U;
+    node.runtime = &runtime;
+    node.event_fd = -1;
+
+    init_rc = pthread_mutex_init(&node.watch_lock, NULL);
+    if (init_rc != 0) {
+        errno = init_rc;
+        return fail_errno("watch lock init for Linux activation teardown failed");
+    }
+    watch_lock_ready = true;
+    init_rc = pthread_mutex_init(&node.submit_lock, NULL);
+    if (init_rc != 0) {
+        errno = init_rc;
+        rc = fail_errno("submit lock init for Linux activation teardown failed");
+        goto done;
+    }
+    submit_lock_ready = true;
+    init_rc = io_uring_queue_init(4U, &node.ring, 0U);
+    if (init_rc != 0) {
+        if (io_uring_unavailable_for_direct_internal_test(init_rc)) {
+            rc = 0;
+            goto done;
+        }
+        errno = -init_rc;
+        rc = fail_errno("io_uring init for Linux activation teardown failed");
+        goto done;
+    }
+    ring_ready = true;
+    node.ring_ready = true;
+
+    switch (kind) {
+    case LINUX_WATCH_LIFETIME_POLL: {
+        llam_poll_watch_t *poll_watch = calloc(1U, sizeof(*poll_watch));
+
+        if (poll_watch == NULL) {
+            goto done;
+        }
+        poll_watch->fd = -1;
+        poll_watch->events = POLLIN;
+        poll_watch->accepts_waiters = true;
+        poll_watch->activating = true;
+        node.poll_watches = poll_watch;
+        watch = poll_watch;
+        break;
+    }
+    case LINUX_WATCH_LIFETIME_ACCEPT: {
+        llam_accept_watch_t *accept_watch = calloc(1U, sizeof(*accept_watch));
+
+        if (accept_watch == NULL) {
+            goto done;
+        }
+        accept_watch->fd = -1;
+        accept_watch->accepts_waiters = true;
+        accept_watch->activating = true;
+        node.accept_watches = accept_watch;
+        watch = accept_watch;
+        break;
+    }
+    case LINUX_WATCH_LIFETIME_RECV: {
+        llam_recv_watch_t *recv_watch = calloc(1U, sizeof(*recv_watch));
+
+        if (recv_watch == NULL) {
+            goto done;
+        }
+        recv_watch->fd = -1;
+        recv_watch->accepts_waiters = true;
+        recv_watch->activating = true;
+        node.recv_watches = recv_watch;
+        watch = recv_watch;
+        break;
+    }
+    default:
+        goto done;
+    }
+
+    op = calloc(1U, sizeof(*op));
+    if (op == NULL) {
+        goto done;
+    }
+    op->target = watch;
+    op->kind = kind == LINUX_WATCH_LIFETIME_POLL ? LLAM_IO_CONTROL_POLL_ACTIVATE :
+               (kind == LINUX_WATCH_LIFETIME_ACCEPT ? LLAM_IO_CONTROL_ACCEPT_ACTIVATE :
+                                                      LLAM_IO_CONTROL_RECV_ACTIVATE);
+    llam_io_submit_control_op(&node, op);
+    op = NULL;
+    if (io_uring_sq_ready(&node.ring) != 1U ||
+        linux_watch_lifetime_test_backend_refs(kind, watch) != 1U ||
+        !linux_watch_lifetime_test_active(kind, watch) ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 1U) {
+        rc = fail_msg("Linux activation SQE did not acquire backend watch ownership");
+        goto done;
+    }
+
+    node.linux_submit_override = force_one_linux_submit_result;
+    node.linux_submit_override_arg = &fault;
+    init_rc = llam_node_submit_ring(&node);
+    if (init_rc != -EBADF || fault.calls != 1U || fault.expected != 1U ||
+        !node.linux_submit_terminal) {
+        rc = fail_msg("Linux activation terminal submit fault was not retained for teardown");
+        goto done;
+    }
+    io_uring_queue_exit(&node.ring);
+    ring_ready = false;
+    node.ring_ready = false;
+    llam_linux_retire_backend_controls(&node);
+    llam_linux_retire_backend_watch_refs(&node);
+    if (!linux_watch_lifetime_test_is_linked(&node, kind, watch) ||
+        linux_watch_lifetime_test_backend_refs(kind, watch) != 0U ||
+        linux_watch_lifetime_test_active(kind, watch) ||
+        atomic_load_explicit(&node.pending_ops, memory_order_acquire) != 0U ||
+        node.retired_poll_watches != NULL || node.retired_accept_watches != NULL ||
+        node.retired_recv_watches != NULL) {
+        rc = fail_msg("Linux ring teardown did not retire activation watch ownership");
+        goto done;
+    }
+    pthread_mutex_lock(&node.watch_lock);
+    linux_watch_lifetime_test_destroy_locked(&node, kind, watch);
+    pthread_mutex_unlock(&node.watch_lock);
+    watch = NULL;
+    rc = 0;
+
+done:
+    if (ring_ready) {
+        io_uring_queue_exit(&node.ring);
+        ring_ready = false;
+        node.ring_ready = false;
+    }
+    if (watch_lock_ready) {
+        llam_linux_retire_backend_controls(&node);
+        llam_linux_retire_backend_watch_refs(&node);
+        pthread_mutex_lock(&node.watch_lock);
+        if (watch != NULL && linux_watch_lifetime_test_is_linked(&node, kind, watch)) {
+            linux_watch_lifetime_test_destroy_locked(&node, kind, watch);
+        }
+        pthread_mutex_unlock(&node.watch_lock);
+    }
+    free(op);
+    if (submit_lock_ready) {
+        pthread_mutex_destroy(&node.submit_lock);
+    }
+    if (watch_lock_ready) {
+        pthread_mutex_destroy(&node.watch_lock);
+    }
+    return rc;
+}
+
+static int exercise_linux_activation_terminal_teardown(void) {
+    for (unsigned kind = LINUX_WATCH_LIFETIME_POLL;
+         kind <= LINUX_WATCH_LIFETIME_RECV;
+         ++kind) {
+        if (exercise_linux_activation_terminal_teardown_one(
+                (linux_watch_lifetime_test_kind_t)kind) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
+static int exercise_linux_staged_cancel_control_retries_and_retires(void) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+    if (exercise_linux_staged_cancel_submit_fault(-EAGAIN, false) != 0) {
+        return 1;
+    }
+    if (exercise_linux_staged_cancel_submit_fault(0, false) != 0) {
+        return 1;
+    }
+    if (exercise_linux_staged_cancel_submit_fault(-EBADF, true) != 0) {
+        return 1;
+    }
 #endif
     return 0;
 }
@@ -815,13 +3245,15 @@ static int exercise_completion_drops_stale_cancel_control(void) {
 
     node = &g_llam_runtime.nodes[0];
     memset(&req, 0, sizeof(req));
+    llam_io_req_reset(&req, &g_llam_runtime, UINT_MAX, UINT_MAX);
+    if (!llam_io_req_lifetime_activate(&req)) {
+        llam_runtime_shutdown();
+        return fail_errno("activate request for cancel-control completion race failed");
+    }
     req.kind = LLAM_IO_KIND_READ;
-    req.owner_runtime = &g_llam_runtime;
     req.owner_shard = UINT_MAX;
-    atomic_init(&req.wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
-    atomic_init(&req.inflight_owner_shard, UINT_MAX);
-    atomic_init(&req.abort_reason, LLAM_IO_ABORT_NONE);
-    atomic_init(&req.cancel_queued, 1U);
+    atomic_store_explicit(&req.wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT, memory_order_release);
+    atomic_store_explicit(&req.cancel_queued, 1U, memory_order_release);
 
     lock_rc = pthread_mutex_lock(&node->watch_lock);
     if (lock_rc != 0) {
@@ -974,6 +3406,37 @@ static int exercise_completion_rejects_unmatched_pending_decrement(void) {
         return fail_msg("unmatched completion pending decrement was not rejected");
     }
 
+    llam_runtime_shutdown();
+#endif
+    return 0;
+}
+
+static int exercise_pending_underflow_defers_fatal_under_watch_lock(void) {
+#if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_WINDOWS
+    llam_node_t *node;
+
+    if (init_runtime() != 0) {
+        return fail_errno("runtime init failed for locked pending underflow check");
+    }
+    if (g_llam_runtime.nodes == NULL || g_llam_runtime.active_nodes == 0U) {
+        llam_runtime_shutdown();
+        return fail_msg("runtime initialized without an I/O node for locked pending underflow check");
+    }
+    node = &g_llam_runtime.nodes[0];
+    pthread_mutex_lock(&node->watch_lock);
+    if (llam_node_complete_pending_ops(node, 1U)) {
+        pthread_mutex_unlock(&node->watch_lock);
+        llam_runtime_shutdown();
+        return fail_msg("pending underflow succeeded under watch lock");
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+    if (atomic_load_explicit(&node->pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.fatal_errno,
+                             memory_order_acquire) != EINVAL) {
+        llam_runtime_shutdown();
+        return fail_msg("locked pending underflow was not deferred safely");
+    }
     llam_runtime_shutdown();
 #endif
     return 0;
@@ -1454,7 +3917,9 @@ static int exercise_inflight_waiter_counter_underflow_is_rejected(void) {
      * must not wrap the unsigned counter to UINT_MAX, otherwise diagnostics and
      * scaling decisions can believe the shard has permanent I/O pressure.
      */
+    pthread_mutex_lock(&g_llam_runtime.shards[0].lock);
     llam_shard_note_inflight_io_waiter(&g_llam_runtime, 0U, -1);
+    pthread_mutex_unlock(&g_llam_runtime.shards[0].lock);
     if (atomic_load_explicit(&g_llam_runtime.shards[0].inflight_io_waiters, memory_order_acquire) != 0U ||
         atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EINVAL) {
         llam_runtime_shutdown();
@@ -1475,7 +3940,9 @@ static int exercise_inflight_waiter_counter_overflow_is_rejected(void) {
     }
 
     atomic_store_explicit(&g_llam_runtime.shards[0].inflight_io_waiters, UINT_MAX, memory_order_release);
+    pthread_mutex_lock(&g_llam_runtime.shards[0].lock);
     llam_shard_note_inflight_io_waiter(&g_llam_runtime, 0U, 1);
+    pthread_mutex_unlock(&g_llam_runtime.shards[0].lock);
     if (atomic_load_explicit(&g_llam_runtime.shards[0].inflight_io_waiters, memory_order_acquire) != UINT_MAX ||
         atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EOVERFLOW) {
         llam_runtime_shutdown();
@@ -1539,7 +4006,7 @@ static int exercise_active_io_waiter_counter_underflow_is_rejected(void) {
      * cleared so teardown can make progress after recording the invariant
      * violation.
      */
-    llam_task_clear_wait_tracking(&task);
+    llam_task_clear_wait_tracking_or_abort(&task);
     if (atomic_load_explicit(&g_llam_runtime.active_io_waiters, memory_order_acquire) != 0U ||
         atomic_load_explicit(&g_llam_runtime.fatal_errno, memory_order_acquire) != EINVAL ||
         atomic_load_explicit(&task.active_io_req, memory_order_acquire) != NULL) {
@@ -1723,7 +4190,682 @@ done:
     return rc;
 }
 
+static int exercise_io_lifetime_invariants_are_lock_safe(void) {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_req_t req;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&node, 0, sizeof(node));
+    memset(&req, 0, sizeof(req));
+    atomic_init(&runtime.fatal_errno, 0);
+    node.runtime = &runtime;
+    if (pthread_mutex_init(&node.watch_lock, NULL) != 0) {
+        return fail_errno("lifetime invariant watch lock init failed");
+    }
+    req.owner_runtime = &runtime;
+    atomic_init(&req.lifetime_refs, UINT_MAX - 1U);
+    pthread_mutex_lock(&node.watch_lock);
+    errno = 0;
+    if (llam_io_req_lifetime_try_acquire(&req) || errno != EOVERFLOW) {
+        pthread_mutex_unlock(&node.watch_lock);
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("lifetime ref saturation was not rejected under owner lock");
+    }
+    pthread_mutex_unlock(&node.watch_lock);
+    if (atomic_load_explicit(&runtime.fatal_errno,
+                             memory_order_acquire) != EOVERFLOW ||
+        atomic_load_explicit(&req.lifetime_refs,
+                             memory_order_acquire) != UINT_MAX - 1U) {
+        pthread_mutex_destroy(&node.watch_lock);
+        return fail_msg("lifetime ref saturation did not latch safely");
+    }
+    pthread_mutex_destroy(&node.watch_lock);
+
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+    for (unsigned i = 0U; i < 2U; ++i) {
+        pid_t pid = fork();
+        int status = 0;
+
+        if (pid < 0) {
+            return fail_errno("lifetime invariant fork failed");
+        }
+        if (pid == 0) {
+            llam_runtime_t child_runtime;
+            llam_node_t child_node;
+            llam_io_req_t child_req;
+
+            (void)alarm(3U);
+            memset(&child_runtime, 0, sizeof(child_runtime));
+            memset(&child_node, 0, sizeof(child_node));
+            memset(&child_req, 0, sizeof(child_req));
+            child_req.owner_runtime = &child_runtime;
+            atomic_init(&child_req.lifetime_refs,
+                        i == 0U ? 0U : UINT_MAX);
+            if (pthread_mutex_init(&child_node.watch_lock, NULL) != 0) {
+                _exit(2);
+            }
+            pthread_mutex_lock(&child_node.watch_lock);
+            (void)llam_io_req_lifetime_release(&child_req);
+            _exit(3);
+        }
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGABRT) {
+            return fail_msg("invalid lifetime release did not abort under owner lock");
+        }
+    }
+#endif
+    return 0;
+}
+
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+typedef struct submit_rehome_fixture {
+    llam_runtime_t runtime;
+    llam_shard_t shards[2];
+    llam_node_t nodes[2];
+    llam_task_t task;
+    llam_task_t caller;
+    llam_io_req_t req;
+} submit_rehome_fixture_t;
+
+typedef struct public_cancel_call {
+    llam_cancel_token_t *token;
+    llam_task_t *caller;
+    llam_shard_t *caller_shard;
+    int rc;
+} public_cancel_call_t;
+
+typedef struct setup_abort_call {
+    llam_io_req_t *req;
+    bool wait_for_completion;
+    bool rc;
+} setup_abort_call_t;
+
+typedef struct submit_evacuation_call {
+    submit_rehome_fixture_t *fixture;
+    unsigned migrated;
+    bool rc;
+} submit_evacuation_call_t;
+
+static pthread_mutex_t g_submit_detach_hook_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_submit_detach_hook_cv = PTHREAD_COND_INITIALIZER;
+static llam_io_req_t *g_submit_detach_hook_req;
+static bool g_submit_detach_hook_reached;
+static bool g_submit_detach_hook_release;
+static pthread_mutex_t g_submit_evacuation_hook_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_submit_evacuation_hook_cv = PTHREAD_COND_INITIALIZER;
+static bool g_submit_evacuation_hook_reached;
+static bool g_submit_evacuation_hook_release;
+
+static void submit_detach_snapshot_hook(llam_io_req_t *req,
+                                        unsigned node_index) {
+    pthread_mutex_lock(&g_submit_detach_hook_lock);
+    if (req == g_submit_detach_hook_req && node_index == 0U) {
+        g_submit_detach_hook_reached = true;
+        pthread_cond_broadcast(&g_submit_detach_hook_cv);
+        while (!g_submit_detach_hook_release) {
+            pthread_cond_wait(&g_submit_detach_hook_cv,
+                              &g_submit_detach_hook_lock);
+        }
+    }
+    pthread_mutex_unlock(&g_submit_detach_hook_lock);
+}
+
+static void arm_submit_detach_hook(llam_io_req_t *req) {
+    pthread_mutex_lock(&g_submit_detach_hook_lock);
+    g_submit_detach_hook_req = req;
+    g_submit_detach_hook_reached = false;
+    g_submit_detach_hook_release = false;
+    pthread_mutex_unlock(&g_submit_detach_hook_lock);
+    llam_io_test_set_submit_detach_snapshot_hook(submit_detach_snapshot_hook);
+}
+
+static void wait_submit_detach_hook(void) {
+    pthread_mutex_lock(&g_submit_detach_hook_lock);
+    while (!g_submit_detach_hook_reached) {
+        pthread_cond_wait(&g_submit_detach_hook_cv,
+                          &g_submit_detach_hook_lock);
+    }
+    pthread_mutex_unlock(&g_submit_detach_hook_lock);
+}
+
+static void release_submit_detach_hook(void) {
+    pthread_mutex_lock(&g_submit_detach_hook_lock);
+    g_submit_detach_hook_release = true;
+    pthread_cond_broadcast(&g_submit_detach_hook_cv);
+    pthread_mutex_unlock(&g_submit_detach_hook_lock);
+}
+
+static void clear_submit_detach_hook(void) {
+    llam_io_test_set_submit_detach_snapshot_hook(NULL);
+    pthread_mutex_lock(&g_submit_detach_hook_lock);
+    g_submit_detach_hook_req = NULL;
+    g_submit_detach_hook_reached = false;
+    g_submit_detach_hook_release = false;
+    pthread_mutex_unlock(&g_submit_detach_hook_lock);
+}
+
+static void submit_evacuation_unlocked_hook(void) {
+    pthread_mutex_lock(&g_submit_evacuation_hook_lock);
+    g_submit_evacuation_hook_reached = true;
+    pthread_cond_broadcast(&g_submit_evacuation_hook_cv);
+    while (!g_submit_evacuation_hook_release) {
+        pthread_cond_wait(&g_submit_evacuation_hook_cv,
+                          &g_submit_evacuation_hook_lock);
+    }
+    pthread_mutex_unlock(&g_submit_evacuation_hook_lock);
+}
+
+static void arm_submit_evacuation_hook(void) {
+    pthread_mutex_lock(&g_submit_evacuation_hook_lock);
+    g_submit_evacuation_hook_reached = false;
+    g_submit_evacuation_hook_release = false;
+    pthread_mutex_unlock(&g_submit_evacuation_hook_lock);
+    llam_io_test_set_submit_evacuation_unlocked_hook(
+        submit_evacuation_unlocked_hook);
+}
+
+static void wait_submit_evacuation_hook(void) {
+    pthread_mutex_lock(&g_submit_evacuation_hook_lock);
+    while (!g_submit_evacuation_hook_reached) {
+        pthread_cond_wait(&g_submit_evacuation_hook_cv,
+                          &g_submit_evacuation_hook_lock);
+    }
+    pthread_mutex_unlock(&g_submit_evacuation_hook_lock);
+}
+
+static void release_submit_evacuation_hook(void) {
+    pthread_mutex_lock(&g_submit_evacuation_hook_lock);
+    g_submit_evacuation_hook_release = true;
+    pthread_cond_broadcast(&g_submit_evacuation_hook_cv);
+    pthread_mutex_unlock(&g_submit_evacuation_hook_lock);
+}
+
+static void clear_submit_evacuation_hook(void) {
+    llam_io_test_set_submit_evacuation_unlocked_hook(NULL);
+    pthread_mutex_lock(&g_submit_evacuation_hook_lock);
+    g_submit_evacuation_hook_reached = false;
+    g_submit_evacuation_hook_release = false;
+    pthread_mutex_unlock(&g_submit_evacuation_hook_lock);
+}
+
+static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
+                                      bool published) {
+    llam_runtime_t *rt;
+    llam_task_t *task;
+    llam_io_req_t *req;
+
+    if (fixture == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(fixture, 0, sizeof(*fixture));
+    rt = &fixture->runtime;
+    task = &fixture->task;
+    req = &fixture->req;
+    rt->shards = fixture->shards;
+    rt->nodes = fixture->nodes;
+    rt->active_shards = 2U;
+    rt->active_nodes = 2U;
+    atomic_init(&rt->initialized, false);
+    atomic_init(&rt->fatal_errno, 0);
+    atomic_init(&rt->overflow_depth, 0U);
+    atomic_init(&rt->active_io_waiters, 0U);
+
+    for (unsigned i = 0U; i < 2U; ++i) {
+        llam_shard_t *shard = &fixture->shards[i];
+        llam_node_t *node = &fixture->nodes[i];
+
+        shard->runtime = rt;
+        shard->id = i;
+        shard->io_node_index = i;
+        shard->event_fd = LLAM_INVALID_FD;
+        atomic_init(&shard->online, 1U);
+        atomic_init(&shard->merge_pause_requested, 0U);
+        atomic_init(&shard->inject_depth, 0U);
+        atomic_init(&shard->timer_count, 0U);
+        atomic_init(&shard->timer_callbacks_active, 0U);
+        if (pthread_mutex_init(&shard->lock, NULL) != 0) {
+            return -1;
+        }
+
+        node->runtime = rt;
+        node->index = i;
+        node->event_fd = LLAM_INVALID_FD;
+        node->ring_ready = true;
+        node->supports_read = true;
+        atomic_init(&node->pending_ops, 0U);
+        if (pthread_mutex_init(&node->submit_lock, NULL) != 0) {
+            return -1;
+        }
+    }
+
+    task->owner_runtime = rt;
+    task->home_shard = 0U;
+    task->alloc_owner_shard = UINT_MAX;
+    atomic_init(&task->state, LLAM_TASK_STATE_PARKED);
+    atomic_init(&task->wait_reason, LLAM_WAIT_IO);
+    atomic_init(&task->last_shard, 0U);
+    atomic_init(&task->parked_shard, 0U);
+    atomic_init(&task->task_class, LLAM_TASK_CLASS_DEFAULT);
+    atomic_init(&task->wake_error_code, 0);
+    atomic_init(&task->wait_resolver_state, 0U);
+    atomic_init(&task->wait_generation, 1U);
+    atomic_init(&task->scan_refs, 0U);
+    atomic_init(&task->active_wait_node, NULL);
+    atomic_init(&task->active_wait_queue, NULL);
+    atomic_init(&task->active_wait_queue_lock, NULL);
+    atomic_init(&task->active_select_state, NULL);
+    atomic_init(&task->active_wait_lifetime_ops, NULL);
+    atomic_init(&task->active_block_job, NULL);
+    atomic_init(&task->join_target, NULL);
+    task->active_timer = NULL;
+    atomic_init(&task->active_io_generation, 1U);
+    atomic_init(&task->active_io_req, req);
+
+    req->owner_runtime = rt;
+    req->kind = LLAM_IO_KIND_READ;
+    req->fd = LLAM_INVALID_FD;
+    req->handle = LLAM_INVALID_HANDLE;
+    req->task = task;
+    req->alloc_owner_shard = UINT_MAX;
+    atomic_init(&req->owner_shard, 0U);
+    atomic_init(&req->attached_node_index, 0U);
+    atomic_init(&req->inflight_owner_shard, UINT_MAX);
+    atomic_init(&req->wait_mode, LLAM_IO_WAIT_MODE_SUBMIT_QUEUE);
+    atomic_init(&req->abort_reason, LLAM_IO_ABORT_NONE);
+    atomic_init(&req->operation_generation, 1U);
+    atomic_init(&req->lifetime_refs, 1U);
+    atomic_init(&req->cancel_queued, 0U);
+    if (published) {
+        fixture->nodes[0].submit_head = req;
+        fixture->nodes[0].submit_tail = req;
+        atomic_store_explicit(&fixture->nodes[0].pending_ops,
+                              1U,
+                              memory_order_release);
+    }
+
+    fixture->caller.owner_runtime = rt;
+    atomic_init(&fixture->caller.state, LLAM_TASK_STATE_RUNNING);
+    return 0;
+}
+
+static void destroy_submit_rehome_fixture(submit_rehome_fixture_t *fixture) {
+    if (fixture == NULL) {
+        return;
+    }
+    for (unsigned i = 0U; i < 2U; ++i) {
+        pthread_mutex_destroy(&fixture->nodes[i].submit_lock);
+        pthread_mutex_destroy(&fixture->shards[i].lock);
+    }
+}
+
+static bool migrate_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
+                                          unsigned *rehomed_out,
+                                          unsigned *evacuated_out) {
+    bool rehomed;
+    bool evacuated;
+
+    rehomed = llam_rehome_node_submit_waiters(&fixture->nodes[0],
+                                              &fixture->shards[0],
+                                              &fixture->shards[1],
+                                              rehomed_out);
+    evacuated = llam_evacuate_rehomed_submit_waiters(&fixture->nodes[0],
+                                                     &fixture->nodes[1],
+                                                     &fixture->shards[0],
+                                                     &fixture->shards[1],
+                                                     evacuated_out);
+    return rehomed && evacuated;
+}
+
+static void *public_cancel_thread_main(void *opaque) {
+    public_cancel_call_t *call = opaque;
+
+    g_llam_tls_task = call->caller;
+    g_llam_tls_shard = call->caller_shard;
+    call->rc = llam_cancel_token_cancel(call->token);
+    g_llam_tls_task = NULL;
+    g_llam_tls_shard = NULL;
+    return NULL;
+}
+
+static void *setup_abort_thread_main(void *opaque) {
+    setup_abort_call_t *call = opaque;
+
+    call->rc = llam_io_test_abort_published_io_setup(
+        call->req,
+        LLAM_IO_ABORT_CANCEL,
+        &call->wait_for_completion);
+    return NULL;
+}
+
+static void *submit_evacuation_thread_main(void *opaque) {
+    submit_evacuation_call_t *call = opaque;
+    submit_rehome_fixture_t *fixture = call->fixture;
+
+    call->rc = llam_evacuate_rehomed_submit_waiters(
+        &fixture->nodes[0],
+        &fixture->nodes[1],
+        &fixture->shards[0],
+        &fixture->shards[1],
+        &call->migrated);
+    return NULL;
+}
+
+static int run_public_cancel_submit_case(bool migrate) {
+    submit_rehome_fixture_t fixture;
+    llam_cancel_token_t *token;
+    llam_cancel_token_t *raw_token = NULL;
+    public_cancel_call_t call;
+    pthread_t thread;
+    unsigned rehomed = 0U;
+    unsigned evacuated = 0U;
+    unsigned target_index = migrate ? 1U : 0U;
+    int rc = 1;
+
+    if (init_submit_rehome_fixture(&fixture, true) != 0) {
+        return fail_errno("submit rehome fixture init failed");
+    }
+    g_llam_tls_task = &fixture.caller;
+    g_llam_tls_shard = &fixture.shards[1];
+    token = llam_cancel_token_create();
+    if (token == NULL ||
+        llam_cancel_token_retain_task_ref(token, &raw_token) != 0) {
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_errno("cancel token setup failed for submit rehome");
+    }
+    fixture.task.cancel_token = raw_token;
+    if (llam_cancel_token_register_task(&fixture.task) != 0) {
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_errno("cancel token register failed for submit rehome");
+    }
+    g_llam_tls_task = NULL;
+    g_llam_tls_shard = NULL;
+
+    call.token = token;
+    call.caller = &fixture.caller;
+    call.caller_shard = &fixture.shards[1];
+    call.rc = -1;
+    if (migrate) {
+        arm_submit_detach_hook(&fixture.req);
+        if (pthread_create(&thread, NULL, public_cancel_thread_main, &call) != 0) {
+            clear_submit_detach_hook();
+            goto cleanup_token;
+        }
+        wait_submit_detach_hook();
+        if (!migrate_submit_rehome_fixture(&fixture,
+                                           &rehomed,
+                                           &evacuated)) {
+            release_submit_detach_hook();
+            pthread_join(thread, NULL);
+            clear_submit_detach_hook();
+            goto cleanup_token;
+        }
+        release_submit_detach_hook();
+        pthread_join(thread, NULL);
+        clear_submit_detach_hook();
+    } else {
+        (void)public_cancel_thread_main(&call);
+    }
+
+    if (call.rc != 0 || fixture.task.cancel_registered ||
+        (migrate && (rehomed != 1U || evacuated != 1U)) ||
+        fixture.nodes[0].submit_head != NULL ||
+        fixture.nodes[1].submit_head != NULL ||
+        atomic_load_explicit(&fixture.nodes[0].pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.nodes[1].pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.req.wait_mode,
+                             memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE ||
+        fixture.req.result != -1 || fixture.req.error_code != ECANCELED ||
+        atomic_load_explicit(&fixture.task.state,
+                             memory_order_acquire) != LLAM_TASK_STATE_RUNNABLE ||
+        llam_task_active_io_req_load(&fixture.task) != NULL ||
+        (fixture.shards[target_index].inject_q.head != &fixture.task &&
+         fixture.shards[target_index].hot_q.head != &fixture.task &&
+         fixture.shards[target_index].norm_q.head != &fixture.task) ||
+        atomic_load_explicit(&fixture.req.lifetime_refs,
+                             memory_order_acquire) != 1U ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != 0) {
+        fprintf(stderr,
+                "submit cancel diag migrate=%d rc=%d registered=%d rehomed=%u evacuated=%u "
+                "heads=%p/%p pending=%u/%u mode=%u result=%lld error=%d state=%u active=%p "
+                "inject=%p hot=%p norm=%p refs=%u fatal=%d\n",
+                migrate,
+                call.rc,
+                fixture.task.cancel_registered,
+                rehomed,
+                evacuated,
+                (void *)fixture.nodes[0].submit_head,
+                (void *)fixture.nodes[1].submit_head,
+                atomic_load_explicit(&fixture.nodes[0].pending_ops, memory_order_acquire),
+                atomic_load_explicit(&fixture.nodes[1].pending_ops, memory_order_acquire),
+                atomic_load_explicit(&fixture.req.wait_mode, memory_order_acquire),
+                (long long)fixture.req.result,
+                fixture.req.error_code,
+                atomic_load_explicit(&fixture.task.state, memory_order_acquire),
+                (void *)llam_task_active_io_req_load(&fixture.task),
+                (void *)fixture.shards[target_index].inject_q.head,
+                (void *)fixture.shards[target_index].hot_q.head,
+                (void *)fixture.shards[target_index].norm_q.head,
+                atomic_load_explicit(&fixture.req.lifetime_refs, memory_order_acquire),
+                atomic_load_explicit(&fixture.runtime.fatal_errno, memory_order_acquire));
+        goto cleanup_token;
+    }
+    fixture.shards[target_index].inject_q.head = NULL;
+    fixture.shards[target_index].inject_q.tail = NULL;
+    fixture.shards[target_index].inject_q.depth = 0U;
+    fixture.shards[target_index].hot_q.head = NULL;
+    fixture.shards[target_index].hot_q.tail = NULL;
+    fixture.shards[target_index].hot_q.depth = 0U;
+    fixture.shards[target_index].norm_q.head = NULL;
+    fixture.shards[target_index].norm_q.tail = NULL;
+    fixture.shards[target_index].norm_q.depth = 0U;
+    atomic_store_explicit(&fixture.shards[target_index].inject_depth,
+                          0U,
+                          memory_order_release);
+    rc = 0;
+
+cleanup_token:
+    fixture.task.cancel_token = NULL;
+    llam_cancel_token_release_task_ref(raw_token);
+    g_llam_tls_task = &fixture.caller;
+    g_llam_tls_shard = &fixture.shards[1];
+    if (llam_cancel_token_destroy(token) != 0) {
+        rc = 1;
+    }
+    g_llam_tls_task = NULL;
+    g_llam_tls_shard = NULL;
+    destroy_submit_rehome_fixture(&fixture);
+    if (rc != 0) {
+        return fail_msg(migrate
+                            ? "public cancel lost an evacuated submit request"
+                            : "public cancel submit control failed");
+    }
+    return 0;
+}
+
+static int run_setup_abort_submit_case(bool migrate) {
+    submit_rehome_fixture_t fixture;
+    setup_abort_call_t call;
+    pthread_t thread;
+    unsigned rehomed = 0U;
+    unsigned evacuated = 0U;
+
+    if (init_submit_rehome_fixture(&fixture, true) != 0) {
+        return fail_errno("setup abort fixture init failed");
+    }
+    call.req = &fixture.req;
+    call.wait_for_completion = true;
+    call.rc = false;
+    if (migrate) {
+        arm_submit_detach_hook(&fixture.req);
+        if (pthread_create(&thread, NULL, setup_abort_thread_main, &call) != 0) {
+            clear_submit_detach_hook();
+            destroy_submit_rehome_fixture(&fixture);
+            return fail_errno("setup abort thread create failed");
+        }
+        wait_submit_detach_hook();
+        if (!migrate_submit_rehome_fixture(&fixture,
+                                           &rehomed,
+                                           &evacuated)) {
+            release_submit_detach_hook();
+            pthread_join(thread, NULL);
+            clear_submit_detach_hook();
+            destroy_submit_rehome_fixture(&fixture);
+            return fail_msg("setup abort rehome failed");
+        }
+        release_submit_detach_hook();
+        pthread_join(thread, NULL);
+        clear_submit_detach_hook();
+    } else {
+        (void)setup_abort_thread_main(&call);
+    }
+
+    if (!call.rc || call.wait_for_completion ||
+        (migrate && (rehomed != 1U || evacuated != 1U)) ||
+        fixture.nodes[0].submit_head != NULL ||
+        fixture.nodes[1].submit_head != NULL ||
+        atomic_load_explicit(&fixture.nodes[0].pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.nodes[1].pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.req.wait_mode,
+                             memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE ||
+        fixture.req.result != -1 || fixture.req.error_code != ECANCELED ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != 0) {
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_msg(migrate
+                            ? "setup abort left an evacuated request owned"
+                            : "setup abort submit control failed");
+    }
+    llam_cleanup_io_wait_setup(&fixture.task, &fixture.req);
+    destroy_submit_rehome_fixture(&fixture);
+    return 0;
+}
+
+static int exercise_prepublication_cancel_rejects_late_submit(void) {
+    submit_rehome_fixture_t fixture;
+
+    if (init_submit_rehome_fixture(&fixture, false) != 0) {
+        return fail_errno("prepublication cancel fixture init failed");
+    }
+    llam_cancel_task_wait(&fixture.task);
+    errno = 0;
+    if (atomic_load_explicit(&fixture.req.abort_reason,
+                             memory_order_acquire) != LLAM_IO_ABORT_CANCEL ||
+        llam_node_submit_io_req(&fixture.nodes[0], &fixture.req) ||
+        errno != ECANCELED ||
+        fixture.nodes[0].submit_head != NULL ||
+        atomic_load_explicit(&fixture.nodes[0].pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != 0) {
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_msg("prepublication cancellation was lost to late submit");
+    }
+    llam_cleanup_io_wait_setup(&fixture.task, &fixture.req);
+    if (atomic_load_explicit(&fixture.task.state,
+                             memory_order_acquire) != LLAM_TASK_STATE_RUNNING ||
+        llam_task_active_io_req_load(&fixture.task) != NULL ||
+        atomic_load_explicit(&fixture.req.wait_mode,
+                             memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE) {
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_msg("prepublication cancellation cleanup failed");
+    }
+    destroy_submit_rehome_fixture(&fixture);
+    return 0;
+}
+
+static int exercise_evacuation_pending_transfer_is_atomic(void) {
+    submit_rehome_fixture_t fixture;
+    submit_evacuation_call_t call;
+    pthread_t thread;
+    unsigned rehomed = 0U;
+    unsigned detached_node = UINT_MAX;
+    llam_io_submit_detach_result_t detach_result;
+
+    if (init_submit_rehome_fixture(&fixture, true) != 0) {
+        return fail_errno("evacuation accounting fixture init failed");
+    }
+    if (!llam_rehome_node_submit_waiters(&fixture.nodes[0],
+                                         &fixture.shards[0],
+                                         &fixture.shards[1],
+                                         &rehomed) ||
+        rehomed != 1U) {
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_msg("evacuation accounting rehome failed");
+    }
+    call.fixture = &fixture;
+    call.migrated = 0U;
+    call.rc = false;
+    arm_submit_evacuation_hook();
+    if (pthread_create(&thread,
+                       NULL,
+                       submit_evacuation_thread_main,
+                       &call) != 0) {
+        clear_submit_evacuation_hook();
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_errno("evacuation accounting thread create failed");
+    }
+    wait_submit_evacuation_hook();
+    detach_result = llam_detach_submit_req_current(&fixture.req,
+                                                   &detached_node);
+    release_submit_evacuation_hook();
+    pthread_join(thread, NULL);
+    clear_submit_evacuation_hook();
+
+    if (!call.rc || call.migrated != 1U ||
+        detach_result != LLAM_IO_SUBMIT_DETACH_REMOVED ||
+        detached_node != 1U ||
+        fixture.nodes[0].submit_head != NULL ||
+        fixture.nodes[1].submit_head != NULL ||
+        atomic_load_explicit(&fixture.nodes[0].pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.nodes[1].pending_ops,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != 0) {
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_msg("evacuation exposed queue/pending accounting gap");
+    }
+    llam_cleanup_io_wait_setup(&fixture.task, &fixture.req);
+    destroy_submit_rehome_fixture(&fixture);
+    return 0;
+}
+
+static int exercise_submit_cancel_rehome_regressions(void) {
+    if (run_public_cancel_submit_case(false) != 0 ||
+        run_public_cancel_submit_case(true) != 0 ||
+        run_setup_abort_submit_case(false) != 0 ||
+        run_setup_abort_submit_case(true) != 0 ||
+        exercise_prepublication_cancel_rejects_late_submit() != 0 ||
+        exercise_evacuation_pending_transfer_is_atomic() != 0) {
+        return 1;
+    }
+    return 0;
+}
+#else
+static int exercise_submit_cancel_rehome_regressions(void) {
+    return 0;
+}
+#endif
+
 int main(void) {
+    if (exercise_io_lifetime_invariants_are_lock_safe() != 0) {
+        return 1;
+    }
+    if (exercise_submit_cancel_rehome_regressions() != 0) {
+        return 1;
+    }
     if (exercise_recv_ready_copy_payload_shutdown() != 0) {
         return 1;
     }
@@ -1739,6 +4881,24 @@ int main(void) {
     if (exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds() != 0) {
         return 1;
     }
+    if (exercise_closed_watch_generation_is_deferred_and_not_reused() != 0) {
+        return 1;
+    }
+    if (exercise_active_closed_watch_queues_one_deactivate() != 0) {
+        return 1;
+    }
+    if (exercise_closed_watch_reclamation_stays_bounded() != 0) {
+        return 1;
+    }
+    if (exercise_darwin_closed_live_generation_deletes_knote() != 0) {
+        return 1;
+    }
+    if (exercise_darwin_poll_filter_specific_replacement() != 0) {
+        return 1;
+    }
+    if (exercise_close_completes_parked_watch_waiter() != 0) {
+        return 1;
+    }
     if (exercise_linux_oversized_submit_preserves_sq_tail() != 0) {
         return 1;
     }
@@ -1748,6 +4908,32 @@ int main(void) {
     if (exercise_linux_invalid_control_preserves_sq_tail() != 0) {
         return 1;
     }
+    if (exercise_linux_staged_cancel_control_retries_and_retires() != 0) {
+        return 1;
+    }
+#if LLAM_RUNTIME_BACKEND_LINUX
+    if (exercise_linux_accept_rejects_stale_deactivate_overlap() != 0) {
+        return 1;
+    }
+    if (exercise_linux_terminal_watch_rearms() != 0) {
+        return 1;
+    }
+    if (exercise_linux_activation_rejects_deactivate_overlap() != 0) {
+        return 1;
+    }
+    if (exercise_linux_migration_finalize_holds_watch_pin() != 0) {
+        return 1;
+    }
+    if (exercise_linux_migration_pin_saturation_fails_closed() != 0) {
+        return 1;
+    }
+    if (exercise_linux_closed_watch_cqe_orders() != 0) {
+        return 1;
+    }
+    if (exercise_linux_activation_terminal_teardown() != 0) {
+        return 1;
+    }
+#endif
     if (exercise_linux_wait_cqe_interrupt_policy() != 0) {
         return 1;
     }
@@ -1761,6 +4947,9 @@ int main(void) {
         return 1;
     }
     if (exercise_completion_rejects_unmatched_pending_decrement() != 0) {
+        return 1;
+    }
+    if (exercise_pending_underflow_defers_fatal_under_watch_lock() != 0) {
         return 1;
     }
     if (exercise_submit_queue_rejects_foreign_runtime_request() != 0) {

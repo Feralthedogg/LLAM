@@ -61,7 +61,8 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->wait_reason = LLAM_WAIT_NONE;
     task->enqueue_hot = hot ? 1U : 0U;
-    task->last_runnable_ns = shard->runtime->wake_latency_metrics_enabled != 0U ? llam_now_ns() : 0U;
+    task->last_runnable_ns =
+        llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
     if (shard->opaque_redirect_active) {
         // A shard in opaque-block redirect mode should not receive local work;
@@ -147,7 +148,7 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
     llam_disarm_task_wait_deadline(task);
     // Wake ownership transfers from the wait primitive/I/O request back to the
     // scheduler queue before the task becomes runnable.
-    llam_task_clear_wait_tracking(task);
+    llam_task_clear_wait_tracking_or_abort(task);
     pthread_mutex_lock(&target->lock);
     effective_hot = llam_should_enqueue_hot_locked(target, task, effective_hot, pressure);
     llam_mark_runnable_locked(target, task, effective_hot, kind, reason, direct_local);
@@ -211,6 +212,8 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         (rt->direct_handoff_allow_timers != 0U ||
          atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U)) {
         if (llam_norm_queue_push_yield_unlocked(target, current)) {
+            uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
+
             /*
              * This is the first point where direct handoff has committed.  The
              * try path can still fail before this and must leave wait ownership
@@ -221,13 +224,17 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             current->state = LLAM_TASK_STATE_RUNNABLE;
             current->wait_reason = LLAM_WAIT_NONE;
             current->last_yield_ns = 0U;
-            llam_task_clear_wait_tracking(task);
+            current->last_runnable_ns = now_ns;
+            llam_task_clear_wait_tracking_or_abort(task);
             task_from = task->state;
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
             task->enqueue_hot = effective_hot ? 1U : 0U;
             atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
             task->last_started_ns = 0U;
+            if (now_ns != 0U) {
+                llam_runtime_record_autotune_wake_latency(target, 0U);
+            }
             atomic_store_explicit(&target->current, task, memory_order_release);
             g_llam_tls_task = task;
             target->metrics.wakes += 1U;
@@ -236,6 +243,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             }
             target->metrics.yields += 1U;
             target->metrics.ctx_switches += 1U;
+            target->direct_handoff_streak += 1U;
             (void)kind;
             (void)task_from;
             llam_thread_errno_store(caller_errno);
@@ -258,22 +266,30 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         pthread_mutex_unlock(&target->lock);
         return false;
     }
-    /*
-     * The locked path has committed once the current task is queued.  Keep both
-     * the current task state and the woken task's wait ownership untouched until
-     * that point so failed try paths remain invisible to the caller.
-     */
-    current->forced_yield_budget = rt->forced_yield_every;
-    current->state = LLAM_TASK_STATE_RUNNABLE;
-    current->wait_reason = LLAM_WAIT_NONE;
-    current->last_yield_ns = 0U;
-    llam_task_clear_wait_tracking(task);
-    task_from = task->state;
-    task->state = LLAM_TASK_STATE_RUNNING;
-    task->wait_reason = LLAM_WAIT_NONE;
-    task->enqueue_hot = effective_hot ? 1U : 0U;
-    atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
-    task->last_started_ns = 0U;
+    {
+        uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
+
+        /*
+         * The locked path has committed once the current task is queued.  Keep both
+         * the current task state and the woken task's wait ownership untouched until
+         * that point so failed try paths remain invisible to the caller.
+         */
+        current->forced_yield_budget = rt->forced_yield_every;
+        current->state = LLAM_TASK_STATE_RUNNABLE;
+        current->wait_reason = LLAM_WAIT_NONE;
+        current->last_yield_ns = 0U;
+        current->last_runnable_ns = now_ns;
+        llam_task_clear_wait_tracking_or_abort(task);
+        task_from = task->state;
+        task->state = LLAM_TASK_STATE_RUNNING;
+        task->wait_reason = LLAM_WAIT_NONE;
+        task->enqueue_hot = effective_hot ? 1U : 0U;
+        atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
+        task->last_started_ns = 0U;
+        if (now_ns != 0U) {
+            llam_runtime_record_autotune_wake_latency(target, 0U);
+        }
+    }
     atomic_store_explicit(&target->current, task, memory_order_release);
     g_llam_tls_task = task;
     target->metrics.wakes += 1U;
@@ -282,6 +298,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     }
     target->metrics.yields += 1U;
     target->metrics.ctx_switches += 1U;
+    target->direct_handoff_streak += 1U;
     llam_trace_shard(target, task, kind, task_from, LLAM_TASK_STATE_RUNNING, reason);
     llam_trace_shard(target, current, LLAM_TRACE_STATE, LLAM_TASK_STATE_RUNNING, LLAM_TASK_STATE_RUNNABLE, LLAM_WAIT_YIELD);
     pthread_mutex_unlock(&target->lock);

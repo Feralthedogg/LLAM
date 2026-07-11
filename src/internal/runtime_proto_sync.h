@@ -49,12 +49,19 @@ int llam_require_task_context(void);
 
 #define LLAM_CHANNEL_SELECT_INLINE_OPS 8U
 #define LLAM_SELECT_PENDING 0U
-#define LLAM_SELECT_COMPLETING 1U
-#define LLAM_SELECT_COMPLETED_INLINE 2U
-#define LLAM_SELECT_COMPLETED_QUEUED 3U
+#define LLAM_SELECT_ARMED 1U
+#define LLAM_SELECT_COMPLETING 2U
+#define LLAM_SELECT_COMPLETED_INLINE 3U
+#define LLAM_SELECT_COMPLETED_QUEUED 4U
 #define LLAM_SELECT_TRY_NOT_READY 0
 #define LLAM_SELECT_TRY_SELECTED 1
 #define LLAM_SELECT_TRY_FALLBACK 2
+
+typedef enum llam_select_completion_result {
+    LLAM_SELECT_COMPLETION_LOST = 0,
+    LLAM_SELECT_COMPLETION_INLINE,
+    LLAM_SELECT_COMPLETION_QUEUED,
+} llam_select_completion_result_t;
 
 llam_mutex_t *llam_mutex_resolve_public_handle(const llam_mutex_t *handle);
 void llam_mutex_end_public_op(llam_mutex_t *mutex);
@@ -138,11 +145,17 @@ int llam_mutex_lock_resolved_impl(llam_mutex_t *mutex,
  */
 llam_wait_node_t *llam_sync_wait_node_acquire(llam_shard_t *shard);
 void llam_sync_wait_node_release(llam_shard_t *shard, llam_wait_node_t *node);
-void llam_task_set_wait_node_tracking(llam_task_t *task,
-                                    llam_wait_node_t *node,
-                                    llam_wait_queue_t *queue,
-                                    pthread_mutex_t *queue_lock,
-                                    unsigned parked_shard);
+bool llam_task_set_wait_node_tracking(llam_task_t *task,
+                                     llam_wait_node_t *node,
+                                     llam_wait_queue_t *queue,
+                                     pthread_mutex_t *queue_lock,
+                                     _Atomic size_t *lifetime_ops,
+                                     unsigned parked_shard,
+                                     llam_wait_reason_t reason);
+bool llam_task_set_select_tracking(llam_task_t *task,
+                                   llam_channel_select_state_t *state,
+                                   unsigned parked_shard,
+                                   llam_wait_reason_t reason);
 llam_wait_node_t *llam_wait_node_alloc(llam_shard_t *shard);
 void llam_wait_node_free(llam_shard_t *shard, llam_wait_node_t *node);
 void llam_wait_node_reset(llam_wait_node_t *node, llam_runtime_t *owner_runtime, unsigned owner_shard);
@@ -170,10 +183,26 @@ int llam_channel_select_try_one(llam_select_op_t *op);
 llam_wait_node_t *llam_wait_queue_pop_head(llam_wait_queue_t *queue);
 void llam_wait_queue_push_tail(llam_wait_queue_t *queue, llam_wait_node_t *node);
 bool llam_wait_queue_remove(llam_wait_queue_t *queue, llam_wait_node_t *node);
+bool llam_wake_wait_node_and_maybe_handoff(llam_wait_node_t *node,
+                                           bool hot,
+                                           llam_wait_reason_t reason,
+                                           bool allow_handoff);
 void llam_wake_wait_node(llam_wait_node_t *node, bool hot, llam_wait_reason_t reason);
 void llam_wake_wait_queue_all(llam_wait_queue_t *queue, int error_code, llam_wait_reason_t reason);
-bool llam_channel_select_complete_node(llam_wait_node_t *node, void *value, int error_code);
+llam_select_completion_result_t llam_channel_select_complete_node(llam_wait_node_t *node,
+                                                                  void *value,
+                                                                  int error_code);
+unsigned llam_channel_select_arm_wait(llam_channel_select_state_t *state);
 bool llam_channel_select_node_should_wake(llam_wait_node_t *node);
-bool llam_channel_select_abort_task_wait(llam_task_t *task, int error_code, llam_wait_reason_t reason);
+bool llam_channel_select_abort_task_wait_generation(llam_task_t *task,
+                                                    llam_channel_select_state_t *expected_state,
+                                                    uint64_t wait_generation,
+                                                    int error_code,
+                                                    llam_wait_reason_t reason);
+llam_select_completion_result_t llam_channel_select_abort_task_wait_claimed(
+    llam_task_t *task,
+    llam_channel_select_state_t *expected_state,
+    uint64_t wait_generation,
+    int error_code);
 
 #endif

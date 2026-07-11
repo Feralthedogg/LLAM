@@ -226,6 +226,7 @@ static int llam_windows_submit_poll(llam_node_t *node, llam_io_req_t *req, llam_
 }
 
 static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
+    llam_windows_fd_assoc_t *association;
     llam_windows_io_op_t *op;
     int rc = -1;
     int saved_errno;
@@ -241,25 +242,59 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
     }
 
     /*
+     * HANDLE/SOCKET values can be recycled immediately after close.  Keep the
+     * process-wide lifecycle gate from lazy IOCP association through the
+     * actual OVERLAPPED system call, so public close cannot invalidate and
+     * recycle the numeric value in between those two steps.  Association uses
+     * the same recursive gate internally and keeps the lock order lifecycle ->
+     * windows_assoc_lock.
+     */
+    llam_fd_watch_lifecycle_lock();
+
+    /*
      * Associate the descriptor/handle lazily on first use.  This keeps public
      * direct paths cheap while still allowing backend submissions to complete on
      * the node's IOCP once the request leaves the caller thread.
      */
     if (llam_windows_req_is_handle_rw(req)) {
         if (llam_windows_associate_handle(node, req->handle) != 0) {
+            int associate_errno = errno;
+
+            llam_fd_watch_lifecycle_unlock();
+            errno = associate_errno;
             llam_windows_complete_submit_error(node, req, errno);
             return;
         }
     } else if (llam_windows_associate_fd(node, req->fd) != 0) {
+        int associate_errno = errno;
+
+        llam_fd_watch_lifecycle_unlock();
+        errno = associate_errno;
         llam_windows_complete_submit_error(node, req, errno);
         return;
     }
 
+    association = llam_windows_fd_assoc_pin(
+        node,
+        llam_windows_req_is_handle_rw(req) ? (uintptr_t)req->handle : (uintptr_t)req->fd);
+    if (association == NULL) {
+        int association_errno = errno;
+
+        llam_fd_watch_lifecycle_unlock();
+        llam_windows_complete_submit_error(node, req, association_errno);
+        return;
+    }
     op = llam_windows_io_op_create(node, req);
     if (op == NULL) {
+        int allocation_errno = errno;
+
+        llam_windows_fd_assoc_unpin(node, association);
+        llam_fd_watch_lifecycle_unlock();
+        errno = allocation_errno;
         llam_windows_complete_submit_error(node, req, errno);
         return;
     }
+    op->association = association;
 
     switch (req->kind) {
     case LLAM_IO_KIND_READ:
@@ -296,6 +331,7 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
     }
 
     if (rc >= 0) {
+        llam_fd_watch_lifecycle_unlock();
         atomic_fetch_add_explicit(&node->submit_calls, 1U, memory_order_relaxed);
         atomic_fetch_add_explicit(&node->submit_syscalls, 1U, memory_order_relaxed);
         if (rc > 0) {
@@ -307,6 +343,7 @@ static void llam_windows_submit_req(llam_node_t *node, llam_io_req_t *req) {
     saved_errno = errno != 0 ? errno : EIO;
     req->platform_data = NULL;
     llam_windows_io_op_free(op);
+    llam_fd_watch_lifecycle_unlock();
     llam_windows_complete_submit_error(node, req, saved_errno);
 }
 

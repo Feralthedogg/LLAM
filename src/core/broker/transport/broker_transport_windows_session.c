@@ -32,37 +32,6 @@
 
 #include <string.h>
 
-static bool llam_broker_pipe_listen_retryable_errno(int error_code) {
-    return error_code == EACCES || error_code == EAGAIN || error_code == EIO;
-}
-
-static int llam_broker_listen_pipe_session(const char *path,
-                                           llam_handle_t *out_pipe,
-                                           size_t served_sessions) {
-    ULONGLONG deadline;
-
-    /*
-     * CreateNamedPipeA(FILE_FLAG_FIRST_PIPE_INSTANCE) can briefly fail after a
-     * just-closed instance while the pipe namespace retires the previous kernel
-     * object. Only retry after this broker has already accepted at least one
-     * session; an initial collision still means the requested endpoint is not
-     * exclusively ours and must fail closed.
-     */
-    if (served_sessions == 0U) {
-        return llam_broker_listen_pipe_instance(path, true, out_pipe);
-    }
-    deadline = GetTickCount64() + 500U;
-    for (;;) {
-        if (llam_broker_listen_pipe_instance(path, false, out_pipe) == 0) {
-            return 0;
-        }
-        if (!llam_broker_pipe_listen_retryable_errno(errno) || GetTickCount64() >= deadline) {
-            return -1;
-        }
-        Sleep(5U);
-    }
-}
-
 static int llam_broker_connect_pipe_server(llam_handle_t pipe) {
     OVERLAPPED overlapped;
     HANDLE event;
@@ -105,7 +74,6 @@ int llam_broker_client_self_test_unix(const char *path) {
 
 int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t max_connections) {
     llam_handle_t pipe = LLAM_INVALID_HANDLE;
-    llam_handle_t next_pipe = LLAM_INVALID_HANDLE;
     int rc = -1;
     int last_session_errno = 0;
     size_t served = 0U;
@@ -115,7 +83,7 @@ int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t ma
         errno = EINVAL;
         return -1;
     }
-    if (llam_broker_listen_pipe_session(path, &pipe, 0U) != 0) {
+    if (llam_broker_listen_pipe_instance(path, true, &pipe) != 0) {
         return -1;
     }
     while (served < max_connections) {
@@ -123,25 +91,19 @@ int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t ma
             if (errno == EPIPE) {
                 last_session_errno = EPIPE;
                 (void)DisconnectNamedPipe((HANDLE)pipe);
-                llam_broker_close_handle(pipe);
-                pipe = next_pipe;
-                next_pipe = LLAM_INVALID_HANDLE;
                 served++;
                 continue;
             }
             llam_broker_close_handle(pipe);
             return -1;
         }
-        if (served + 1U < max_connections &&
-            llam_broker_listen_pipe_session(path, &next_pipe, served + 1U) != 0) {
-            last_session_errno = errno;
-        }
         /*
-         * Named pipes create one kernel pipe instance per accepted session.
-         * STOP closes only that session; the broker can create a fresh instance
-         * for the next client without sharing subject ids or HANDLE authority.
-         * Malformed clients therefore fail their own session without terminating
-         * the long-running broker process.
+         * Keep the exclusive first server instance alive and reconnect it after
+         * each client.  The endpoint DACL intentionally withholds
+         * FILE_CREATE_PIPE_INSTANCE from clients (including same-user peers),
+         * so creating another instance through the pipe namespace would also
+         * deny the broker.  Reusing this server-owned handle preserves the
+         * narrow DACL and still gives every session a fresh subject lifetime.
          */
         rc = llam_broker_serve_handle(broker, pipe);
         if (rc == 0) {
@@ -150,21 +112,9 @@ int llam_broker_serve_local_n(llam_broker_t *broker, const char *path, size_t ma
             last_session_errno = errno != 0 ? errno : EIO;
         }
         (void)DisconnectNamedPipe((HANDLE)pipe);
-        llam_broker_close_handle(pipe);
-        pipe = next_pipe;
-        next_pipe = LLAM_INVALID_HANDLE;
         served++;
-        if (served < max_connections && llam_handle_is_invalid(pipe)) {
-            errno = last_session_errno != 0 ? last_session_errno : EIO;
-            return successful > 0U ? 0 : -1;
-        }
     }
-    if (!llam_handle_is_invalid(pipe)) {
-        llam_broker_close_handle(pipe);
-    }
-    if (!llam_handle_is_invalid(next_pipe)) {
-        llam_broker_close_handle(next_pipe);
-    }
+    llam_broker_close_handle(pipe);
     if (successful == 0U) {
         errno = last_session_errno != 0 ? last_session_errno : EPIPE;
         return -1;

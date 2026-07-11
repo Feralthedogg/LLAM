@@ -13,7 +13,9 @@ if [ -n "${DOCKER_RUN_FLAGS:-}" ]; then
     # Intentionally split trusted local runner flags such as "-v path:path -e K=V".
     # shellcheck disable=SC2086
     set -- $DOCKER_RUN_FLAGS
-else
+elif [ "${ALLOW_PRIVILEGED_DOCKER:-0}" = "1" ]; then
     set -- --privileged
+else
+    set -- --security-opt=no-new-privileges --cap-drop=ALL
 fi
 docker run --rm "$@" "$IMAGE" sh -lc "$VERIFY_CMD"

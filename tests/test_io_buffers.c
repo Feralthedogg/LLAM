@@ -33,6 +33,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if LLAM_PLATFORM_POSIX
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#endif
 #include <sys/socket.h>
 #if LLAM_PLATFORM_POSIX
 #include <sys/wait.h>
@@ -174,6 +178,221 @@ static int write_all_native(int fd, const char *data, size_t len) {
     }
     return 0;
 }
+
+#if LLAM_PLATFORM_POSIX
+static int test_direct_accept_declined_with_mode(bool initially_nonblocking) {
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+    llam_fd_t direct_fd = LLAM_INVALID_FD;
+    int listener = -1;
+    int client = -1;
+    int accepted = -1;
+    int original_flags;
+    struct pollfd listener_poll;
+    const char *stage = "socket setup";
+    int rc = 1;
+
+    listener = socket(AF_INET, SOCK_STREAM, 0);
+    client = socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0 || client < 0) {
+        goto cleanup;
+    }
+    memset(&addr, 0, sizeof(addr));
+    stage = "listener setup";
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(listener, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 4) != 0 ||
+        getsockname(listener, (struct sockaddr *)&addr, &addr_len) != 0 ||
+        connect(client, (struct sockaddr *)&addr, addr_len) != 0) {
+        goto cleanup;
+    }
+    original_flags = fcntl(listener, F_GETFL, 0);
+    stage = "initial listener flags";
+    if (original_flags < 0) {
+        goto cleanup;
+    }
+    if (initially_nonblocking && fcntl(listener, F_SETFL, original_flags | O_NONBLOCK) != 0) {
+        goto cleanup;
+    }
+    stage = "effective listener flags";
+    original_flags = fcntl(listener, F_GETFL, 0);
+    if (original_flags < 0) {
+        goto cleanup;
+    }
+    memset(&listener_poll, 0, sizeof(listener_poll));
+    listener_poll.fd = listener;
+    listener_poll.events = POLLIN;
+    stage = "pending listener readiness";
+    if (poll(&listener_poll, 1, 1000) != 1 || (listener_poll.revents & POLLIN) == 0) {
+        goto cleanup;
+    }
+
+    errno = 0;
+    stage = "direct accept decline";
+    if (llam_try_direct_accept((llam_fd_t)listener, NULL, NULL, &direct_fd) != 0 ||
+        !LLAM_FD_IS_INVALID(direct_fd) ||
+        (fcntl(listener, F_GETFL, 0) & O_NONBLOCK) != (original_flags & O_NONBLOCK)) {
+        goto cleanup;
+    }
+    stage = "pending native accept";
+    for (;;) {
+        accepted = accept(listener, NULL, NULL);
+        if (accepted >= 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            listener_poll.revents = 0;
+            if (poll(&listener_poll, 1, 1000) == 1 &&
+                (listener_poll.revents & POLLIN) != 0) {
+                continue;
+            }
+        }
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    close_if_valid(&accepted);
+    close_if_valid(&client);
+    close_if_valid(&listener);
+    if (rc != 0) {
+        fprintf(stderr,
+                "[test_io_buffers] direct accept policy stage=%s initially_nonblocking=%u errno=%d\n",
+                stage,
+                initially_nonblocking ? 1U : 0U,
+                errno);
+    }
+    return rc;
+}
+
+static int test_direct_scheduler_safe_descriptor_policy(void) {
+    llam_iovec_t iov[2];
+    int pipe_fds[2] = {-1, -1};
+    int sockets[2] = {-1, -1};
+    int original_read_flags;
+    int original_write_flags;
+    ssize_t direct_result = -1;
+    bool socket_op = true;
+    char byte = 0;
+    char pair[2] = {0};
+    short revents = 0;
+    const char *stage = "pipe setup";
+    int rc = 1;
+
+    if (pipe(pipe_fds) != 0) {
+        return test_fail_errno("direct policy pipe setup failed");
+    }
+    original_read_flags = fcntl(pipe_fds[0], F_GETFL, 0);
+    stage = "pipe flags/preload";
+    original_write_flags = fcntl(pipe_fds[1], F_GETFL, 0);
+    if (original_read_flags < 0 || original_write_flags < 0 ||
+        write_all_native(pipe_fds[1], "r", 1U) != 0) {
+        goto cleanup;
+    }
+
+    socket_op = true;
+    stage = "pipe direct read decline";
+    if (llam_try_direct_rw(pipe_fds[0], &byte, 1U, false, false, 0, &direct_result, &socket_op) != 0 ||
+        socket_op ||
+        (fcntl(pipe_fds[0], F_GETFL, 0) & O_NONBLOCK) != (original_read_flags & O_NONBLOCK) ||
+        read(pipe_fds[0], &byte, 1U) != 1 || byte != 'r') {
+        goto cleanup;
+    }
+    socket_op = true;
+    stage = "pipe direct write decline";
+    {
+        int direct_rc = llam_try_direct_rw(pipe_fds[1],
+                                           &byte,
+                                           1U,
+                                           true,
+                                           false,
+                                           0,
+                                           &direct_result,
+                                           &socket_op);
+        int after_flags = fcntl(pipe_fds[1], F_GETFL, 0);
+        int ready = poll(&(struct pollfd){.fd = pipe_fds[0], .events = POLLIN}, 1, 0);
+
+        if (direct_rc != 0 ||
+            socket_op ||
+            (after_flags & O_NONBLOCK) != (original_write_flags & O_NONBLOCK) ||
+            ready != 0) {
+            fprintf(stderr,
+                    "[test_io_buffers] pipe direct write rc=%d socket=%u flags=%d/%d ready=%d\n",
+                    direct_rc,
+                    socket_op ? 1U : 0U,
+                    after_flags,
+                    original_write_flags,
+                    ready);
+            goto cleanup;
+        }
+    }
+    iov[0].iov_base = "v";
+    iov[0].iov_len = 1U;
+    iov[1].iov_base = "w";
+    iov[1].iov_len = 1U;
+    socket_op = true;
+    stage = "pipe direct writev decline";
+    if (llam_try_direct_writev(pipe_fds[1], iov, 2, &direct_result, &socket_op) != 0 ||
+        socket_op ||
+        (fcntl(pipe_fds[1], F_GETFL, 0) & O_NONBLOCK) != (original_write_flags & O_NONBLOCK) ||
+        poll(&(struct pollfd){.fd = pipe_fds[0], .events = POLLIN}, 1, 0) != 0) {
+        goto cleanup;
+    }
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+        goto cleanup;
+    }
+    socket_op = false;
+    stage = "socket direct read would-block";
+    if (llam_try_direct_rw(sockets[0], &byte, 1U, false, false, 0, &direct_result, &socket_op) != 0 ||
+        !socket_op) {
+        goto cleanup;
+    }
+    socket_op = false;
+    stage = "socket direct write";
+    if (llam_try_direct_rw(sockets[0], &byte, 1U, true, false, 0, &direct_result, &socket_op) != 1 ||
+        direct_result != 1 || !socket_op ||
+        read(sockets[1], &byte, 1U) != 1) {
+        goto cleanup;
+    }
+    socket_op = false;
+    stage = "socket direct writev";
+    if (llam_try_direct_writev(sockets[0], iov, 2, &direct_result, &socket_op) != 1 ||
+        direct_result != 2 || !socket_op ||
+        read(sockets[1], pair, sizeof(pair)) != 2 || memcmp(pair, "vw", 2U) != 0) {
+        goto cleanup;
+    }
+    if (llam_platform_poll_fd(sockets[0], POLLIN, 0, &revents) != 0 || revents != 0) {
+        goto cleanup;
+    }
+    stage = "POSIX direct accept policy";
+    if (test_direct_accept_declined_with_mode(false) != 0 ||
+        test_direct_accept_declined_with_mode(true) != 0) {
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    close_if_valid(&sockets[0]);
+    close_if_valid(&sockets[1]);
+    close_if_valid(&pipe_fds[0]);
+    close_if_valid(&pipe_fds[1]);
+    if (rc != 0) {
+        fprintf(stderr,
+                "[test_io_buffers] direct scheduler-safe policy stage=%s errno=%d (%s)\n",
+                stage,
+                errno,
+                strerror(errno));
+        return 1;
+    }
+    return 0;
+}
+#endif
 
 static int test_direct_owned_read_and_poll(void) {
     llam_io_buffer_t *buffer = NULL;
@@ -1104,9 +1323,14 @@ static void io_reader_task(void *arg) {
     llam_io_buffer_t *buffer = NULL;
     llam_iovec_t huge_tail_iov[17];
     llam_iovec_t null_tail_iov[2];
+    llam_iovec_t pipe_iov[3];
     int close_pipe_fds[2] = {-1, -1};
+    int managed_pipe_fds[2] = {-1, -1};
     int closed_poll_fd = -1;
+    int managed_pipe_read_flags;
+    int managed_pipe_write_flags;
     char hello[5];
+    char pipe_bytes[8] = {0};
     char one = 'x';
     short revents = 0;
     ssize_t bytes;
@@ -1153,6 +1377,71 @@ static void io_reader_task(void *arg) {
         return;
     }
     close_if_valid(&close_pipe_fds[1]);
+
+    if (pipe(managed_pipe_fds) != 0) {
+        task_fail(state, "managed non-socket pipe setup", errno);
+        return;
+    }
+    managed_pipe_read_flags = fcntl(managed_pipe_fds[0], F_GETFL, 0);
+    managed_pipe_write_flags = fcntl(managed_pipe_fds[1], F_GETFL, 0);
+    if (managed_pipe_read_flags < 0 || managed_pipe_write_flags < 0) {
+        task_fail(state, "managed non-socket pipe flags", errno);
+        close_if_valid(&managed_pipe_fds[0]);
+        close_if_valid(&managed_pipe_fds[1]);
+        return;
+    }
+    errno = 0;
+    if (llam_read_when_ready(managed_pipe_fds[0], pipe_bytes, 1U, 0) != -1 ||
+        errno != ETIMEDOUT) {
+        task_fail(state, "managed non-socket zero-timeout read", errno);
+        close_if_valid(&managed_pipe_fds[0]);
+        close_if_valid(&managed_pipe_fds[1]);
+        return;
+    }
+    if (llam_write(managed_pipe_fds[1], "plain", 5U) != 5 ||
+        llam_read(managed_pipe_fds[0], pipe_bytes, 5U) != 5 ||
+        memcmp(pipe_bytes, "plain", 5U) != 0) {
+        task_fail(state, "managed non-socket scalar read/write", errno);
+        close_if_valid(&managed_pipe_fds[0]);
+        close_if_valid(&managed_pipe_fds[1]);
+        return;
+    }
+    memset(pipe_bytes, 0, sizeof(pipe_bytes));
+    if (llam_write(managed_pipe_fds[1], "ready", 5U) != 5 ||
+        llam_read_when_ready(managed_pipe_fds[0], pipe_bytes, 5U, 1000) != 5 ||
+        memcmp(pipe_bytes, "ready", 5U) != 0) {
+        task_fail(state, "managed non-socket deadline read", errno);
+        close_if_valid(&managed_pipe_fds[0]);
+        close_if_valid(&managed_pipe_fds[1]);
+        return;
+    }
+    pipe_iov[0].iov_base = "a";
+    pipe_iov[0].iov_len = 1U;
+    pipe_iov[1].iov_base = "bc";
+    pipe_iov[1].iov_len = 2U;
+    pipe_iov[2].iov_base = "def";
+    pipe_iov[2].iov_len = 3U;
+    memset(pipe_bytes, 0, sizeof(pipe_bytes));
+    if (llam_writev(managed_pipe_fds[1], pipe_iov, 3) != 6 ||
+        llam_read_when_ready(managed_pipe_fds[0], pipe_bytes, 6U, 1000) != 6 ||
+        memcmp(pipe_bytes, "abcdef", 6U) != 0) {
+        task_fail(state, "managed non-socket writev prefix", errno);
+        close_if_valid(&managed_pipe_fds[0]);
+        close_if_valid(&managed_pipe_fds[1]);
+        return;
+    }
+    if ((fcntl(managed_pipe_fds[0], F_GETFL, 0) & O_NONBLOCK) !=
+            (managed_pipe_read_flags & O_NONBLOCK) ||
+        (fcntl(managed_pipe_fds[1], F_GETFL, 0) & O_NONBLOCK) !=
+            (managed_pipe_write_flags & O_NONBLOCK)) {
+        task_fail(state, "managed non-socket mode changed", errno);
+        close_if_valid(&managed_pipe_fds[0]);
+        close_if_valid(&managed_pipe_fds[1]);
+        return;
+    }
+    close_if_valid(&managed_pipe_fds[0]);
+    close_if_valid(&managed_pipe_fds[1]);
+
     /*
      * Owned-buffer zero-byte operations are API-level no-ops. They must not
      * allocate, inspect the descriptor, or fail inside managed task context.
@@ -1181,12 +1470,13 @@ static void io_reader_task(void *arg) {
     null_tail_iov[1].iov_len = 1U;
     errno = 0;
     /*
-     * The native direct writev fast path should make the same decision as the
-     * kernel for descriptors such as /dev/null. Fallback-only validation is
-     * still tested below with an iovec count that bypasses the direct path.
+     * Managed generic descriptors intentionally bypass native direct writev:
+     * no portable per-call nonblocking flag can make it scheduler-safe. The
+     * prevalidated per-slice fallback therefore rejects a non-empty NULL slice.
+     * Unmanaged native /dev/null behavior remains covered above.
      */
-    if (llam_writev((llam_fd_t)state->null_fd, null_tail_iov, 2) != 2) {
-        task_fail(state, "managed direct writev devnull null tail", errno);
+    if (llam_writev((llam_fd_t)state->null_fd, null_tail_iov, 2) != -1 || errno != EINVAL) {
+        task_fail(state, "managed fallback writev devnull null tail", errno);
         return;
     }
     errno = 0;
@@ -2309,7 +2599,11 @@ cleanup:
 }
 
 int main(void) {
-    if (test_direct_owned_read_and_poll() != 0 ||
+    if (
+#if LLAM_PLATFORM_POSIX
+        test_direct_scheduler_safe_descriptor_policy() != 0 ||
+#endif
+        test_direct_owned_read_and_poll() != 0 ||
         test_positional_io_and_aligned_buffers() != 0 ||
 #if defined(__linux__)
         test_read_owned_invalid_fd_before_allocation() != 0 ||

@@ -94,6 +94,10 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     atomic_init(&task->active_wait_queue, NULL);
     atomic_init(&task->active_wait_queue_lock, NULL);
     atomic_init(&task->active_select_state, NULL);
+    atomic_init(&task->active_wait_lifetime_ops, NULL);
+    atomic_init(&task->wait_resolver_state,
+                UINT_MAX - (UINT_MAX >> 1U));
+    atomic_init(&task->wait_generation, 0U);
     llam_io_req_reset(&task->embedded_io_req, owner_runtime, UINT_MAX, UINT_MAX);
     /*
      * active_io_req is an atomic ownership boundary between I/O completion and
@@ -101,9 +105,11 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
      * tail of the task object, which also contains other atomics.
      */
     atomic_init(&task->active_io_req, NULL);
+    atomic_init(&task->active_io_generation, 0U);
     atomic_init(&task->active_block_job, NULL);
     task->task_locals = NULL;
     task->cancel_registered = false;
+    task->handoff_sample_current = false;
     task->enqueue_hot = 0U;
     task->last_runnable_ns = 0U;
     task->last_yield_ns = 0U;

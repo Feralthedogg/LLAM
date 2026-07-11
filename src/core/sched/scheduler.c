@@ -96,7 +96,7 @@ static void llam_shard_publish_preempt_thread(llam_shard_t *shard, pthread_t thr
  */
 static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     bool run_timing = shard->runtime->run_timing_enabled != 0U;
-    bool wake_timing = task->last_runnable_ns > 0U && shard->runtime->wake_latency_metrics_enabled != 0U;
+    bool wake_timing = task->last_runnable_ns > 0U;
     bool preempt_timing = shard->runtime->preempt_mode >= LLAM_PREEMPT_AUTO;
     bool sample_safepoint = shard->runtime->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ||
                             (shard->metrics.ctx_switches & 63ULL) == 0U;
@@ -108,9 +108,8 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     atomic_store_explicit(&task->last_shard, shard->id, memory_order_relaxed);
     task->state = LLAM_TASK_STATE_RUNNING;
     task->last_started_ns = now_ns;
-    if (wake_timing && now_ns >= task->last_runnable_ns) {
-        shard->metrics.wake_latency_ns += now_ns - task->last_runnable_ns;
-        shard->metrics.wake_samples += 1U;
+    if (wake_timing) {
+        llam_runtime_record_dispatch_latency(shard, task, now_ns);
     }
     atomic_store(&shard->last_run_started_ns, run_timing ? now_ns : 0U);
     if (now_ns != 0U) {

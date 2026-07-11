@@ -35,6 +35,10 @@
 #define PIPE_REJECT_REMOTE_CLIENTS 0x00000008U
 #endif
 
+#define LLAM_BROKER_PIPE_CLIENT_ACCESS \
+    (FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE)
+#define LLAM_BROKER_PIPE_INSTANCE_COUNT 1U
+
 static int llam_broker_pipe_name(const char *path, char *out, size_t out_size) {
     int written;
 
@@ -72,7 +76,7 @@ int llam_broker_listen_pipe_instance(const char *name, bool first_instance, llam
     if (llam_broker_pipe_name(name, pipe_name, sizeof(pipe_name)) != 0) {
         return -1;
     }
-    if (llam_broker_windows_security_init(&security, GENERIC_ALL) != 0) {
+    if (llam_broker_windows_security_init(&security, LLAM_BROKER_PIPE_CLIENT_ACCESS) != 0) {
         return -1;
     }
     if (first_instance) {
@@ -81,7 +85,7 @@ int llam_broker_listen_pipe_instance(const char *name, bool first_instance, llam
     handle = CreateNamedPipeA(pipe_name,
                               open_mode,
                               PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                              PIPE_UNLIMITED_INSTANCES,
+                              LLAM_BROKER_PIPE_INSTANCE_COUNT,
                               (DWORD)(sizeof(llam_broker_wire_response_t) * 4U),
                               (DWORD)(sizeof(llam_broker_wire_request_t) * 4U),
                               5000U,
@@ -117,7 +121,7 @@ int llam_broker_connect_pipe(const char *name, llam_handle_t *out_handle) {
     deadline = GetTickCount64() + 5000U;
     for (;;) {
         HANDLE handle = CreateFileA(pipe_name,
-                                    GENERIC_READ | GENERIC_WRITE,
+                                    LLAM_BROKER_PIPE_CLIENT_ACCESS,
                                     0U,
                                     NULL,
                                     OPEN_EXISTING,

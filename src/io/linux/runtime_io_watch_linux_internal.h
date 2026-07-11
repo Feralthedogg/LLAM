@@ -91,6 +91,13 @@ llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short 
 llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd);
 llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t st_dev, ino_t st_ino);
 void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
+bool llam_linux_poll_watch_backend_pin_locked(llam_poll_watch_t *watch);
+bool llam_linux_accept_watch_backend_pin_locked(llam_accept_watch_t *watch);
+bool llam_linux_recv_watch_backend_pin_locked(llam_recv_watch_t *watch);
+void llam_linux_poll_watch_backend_unpin_locked(llam_node_t *node, llam_poll_watch_t *watch);
+void llam_linux_accept_watch_backend_unpin_locked(llam_node_t *node, llam_accept_watch_t *watch);
+void llam_linux_recv_watch_backend_unpin_locked(llam_node_t *node, llam_recv_watch_t *watch);
+void llam_linux_retire_backend_watch_refs(llam_node_t *node);
 bool llam_accept_watch_completion_push(llam_accept_watch_completion_t **head,
                                      llam_accept_watch_completion_t **tail,
                                      llam_io_req_t *req,

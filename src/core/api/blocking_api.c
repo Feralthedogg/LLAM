@@ -305,9 +305,14 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     task->blocking_result = NULL;
     task->blocking_errno = 0;
     llam_task_ensure_listed(task);
-    llam_task_set_block_tracking(task, job, g_llam_tls_shard->id);
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_BLOCKING;
+    if (!llam_task_set_block_tracking(task, job, g_llam_tls_shard->id)) {
+        int saved_errno = errno;
+
+        llam_sync_wait_node_release(g_llam_tls_shard, node);
+        llam_block_job_release(rt, job);
+        errno = saved_errno;
+        return -1;
+    }
     token = task->cancel_token;
 
     if (token != NULL) {
@@ -316,7 +321,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
             pthread_mutex_unlock(&token->lock);
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
-            llam_task_clear_wait_tracking(task);
+            llam_task_clear_wait_tracking_or_abort(task);
             llam_sync_wait_node_release(g_llam_tls_shard, node);
             llam_block_job_release(rt, job);
             errno = ECANCELED;
@@ -357,7 +362,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
         }
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(task);
+        llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(g_llam_tls_shard, node);
         llam_block_job_release(rt, job);
         errno = saved_errno;
@@ -401,7 +406,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
                                     g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &g_llam_tls_shard->scheduler_ctx);
     }
     llam_cancel_token_unregister_task(task);
-    llam_task_clear_wait_tracking(task);
+    llam_task_clear_wait_tracking_or_abort(task);
     llam_sync_wait_node_release(g_llam_tls_shard, node);
     wake_error = llam_consume_task_wake_error(task);
     if (wake_error != 0) {

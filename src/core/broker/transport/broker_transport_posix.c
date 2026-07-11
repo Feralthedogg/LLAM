@@ -142,6 +142,8 @@ int llam_broker_serve_fd(llam_broker_t *broker, int fd) {
     bool should_close = false;
     uintptr_t transport_id;
     uint64_t subject_id;
+    uint64_t session_start_ns;
+    size_t request_count = 0U;
     int rc = 0;
 
     if (llam_broker_fd_transport_id(fd, &transport_id) != 0) {
@@ -150,11 +152,21 @@ int llam_broker_serve_fd(llam_broker_t *broker, int fd) {
     if (llam_broker_transport_subject(broker, transport_id, &subject_id) != 0) {
         return -1;
     }
+    session_start_ns = llam_now_ns();
     while (!should_close) {
+        uint64_t now_ns = llam_now_ns();
+
+        if (request_count >= LLAM_BROKER_SESSION_REQUEST_MAX ||
+            (session_start_ns != 0U && now_ns != 0U &&
+             now_ns >= session_start_ns &&
+             now_ns - session_start_ns >= LLAM_BROKER_SESSION_LIFETIME_NS)) {
+            break;
+        }
         if (llam_broker_serve_one_fd_subject(broker, fd, subject_id, &should_close) != 0) {
             rc = -1;
             break;
         }
+        ++request_count;
     }
     llam_broker_forget_transport_subject(broker, transport_id);
     return rc;

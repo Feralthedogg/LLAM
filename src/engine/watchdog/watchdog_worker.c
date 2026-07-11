@@ -299,12 +299,26 @@ void *llam_ctrl_worker_main(void *arg) {
             break;
         }
 
+        /*
+         * Lock-order-sensitive wait/accounting paths can only latch a fatal
+         * errno: requesting stop there may synchronously reacquire the owner
+         * shard/watch lock.  The controller owns the guaranteed lock-free
+         * consumption point that turns that latch into cancellation and wakes.
+         */
+        if (atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
+            atomic_exchange_explicit(&rt->deferred_fatal_pending,
+                                     0U,
+                                     memory_order_acq_rel) != 0U) {
+            llam_request_stop(rt);
+        }
+
         for (i = 0; i < rt->active_shards; ++i) {
             llam_watchdog_check_shard(&rt->shards[i], now_ns);
         }
 
         llam_runtime_nudge_marked_watch_migrations(rt);
         llam_runtime_adjust_online_shards(rt);
+        llam_watchdog_autotune_tick(rt, now_ns);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
         if (llam_runtime_has_pending_timers(rt) || llam_runtime_has_runnable_backlog(rt)) {
             llam_watchdog_nudge_pending_shards(rt);

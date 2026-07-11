@@ -36,6 +36,11 @@ void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch)
 
     while (*cursor != NULL) {
         if (*cursor == watch) {
+            if (watch->lifetime_refs != 0U || watch->backend_refs != 0U ||
+                watch->active || watch->activating || watch->deactivate_queued) {
+                watch->destroy_pending = true;
+                return;
+            }
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
                 llam_recv_ready_t *next = watch->ready_head->next;
@@ -43,10 +48,221 @@ void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch)
                 llam_release_recv_ready(node->runtime, node, watch->ready_head);
                 watch->ready_head = next;
             }
+            watch->ready_tail = NULL;
+            watch->ready_depth = 0U;
+            watch->ready_bytes = 0U;
             free(watch);
             return;
         }
         cursor = &(*cursor)->next;
+    }
+}
+
+bool llam_linux_poll_watch_backend_pin_locked(llam_poll_watch_t *watch) {
+    if (watch == NULL || watch->backend_refs != 0U) {
+        return false;
+    }
+    watch->backend_refs = 1U;
+    return true;
+}
+
+bool llam_linux_accept_watch_backend_pin_locked(llam_accept_watch_t *watch) {
+    if (watch == NULL || watch->backend_refs != 0U) {
+        return false;
+    }
+    watch->backend_refs = 1U;
+    return true;
+}
+
+bool llam_linux_recv_watch_backend_pin_locked(llam_recv_watch_t *watch) {
+    if (watch == NULL || watch->backend_refs != 0U) {
+        return false;
+    }
+    watch->backend_refs = 1U;
+    return true;
+}
+
+void llam_linux_poll_watch_backend_unpin_locked(llam_node_t *node, llam_poll_watch_t *watch) {
+    if (node == NULL || watch == NULL || watch->backend_refs == 0U) {
+        if (node != NULL) {
+            llam_record_fatal(node->runtime, EINVAL);
+        }
+        return;
+    }
+    watch->backend_refs -= 1U;
+    if (watch->backend_refs == 0U && watch->lifetime_refs == 0U && watch->destroy_pending) {
+        llam_destroy_poll_watch_locked(node, watch);
+    }
+}
+
+void llam_linux_accept_watch_backend_unpin_locked(llam_node_t *node, llam_accept_watch_t *watch) {
+    if (node == NULL || watch == NULL || watch->backend_refs == 0U) {
+        if (node != NULL) {
+            llam_record_fatal(node->runtime, EINVAL);
+        }
+        return;
+    }
+    watch->backend_refs -= 1U;
+    if (watch->backend_refs == 0U && watch->lifetime_refs == 0U && watch->destroy_pending) {
+        llam_destroy_accept_watch_locked(node, watch);
+    }
+}
+
+void llam_linux_recv_watch_backend_unpin_locked(llam_node_t *node, llam_recv_watch_t *watch) {
+    if (node == NULL || watch == NULL || watch->backend_refs == 0U) {
+        if (node != NULL) {
+            llam_record_fatal(node->runtime, EINVAL);
+        }
+        return;
+    }
+    watch->backend_refs -= 1U;
+    if (watch->backend_refs == 0U && watch->lifetime_refs == 0U && watch->destroy_pending) {
+        llam_destroy_recv_watch_locked(node, watch);
+    }
+}
+
+/**
+ * Drop every watch reference whose encoded user_data became unreachable when
+ * the caller dismantled the io_uring.  Encoded deactivate controls must be
+ * retired first so their target pointers remain protected during rollback.
+ */
+void llam_linux_retire_backend_watch_refs(llam_node_t *node) {
+    unsigned pending_to_release = 0U;
+
+    if (node == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&node->watch_lock);
+    {
+        llam_poll_watch_t *watch = node->poll_watches;
+
+        while (watch != NULL) {
+            llam_poll_watch_t *next = watch->next;
+
+            if (watch->backend_refs != 0U) {
+                if (watch->backend_refs != 1U) {
+                    llam_record_fatal(node->runtime, EOVERFLOW);
+                }
+                watch->backend_refs = 0U;
+                watch->activating = false;
+                if (watch->active) {
+                    watch->active = false;
+                    pending_to_release += 1U;
+                }
+                if ((watch->destroy_pending || !watch->accepts_waiters) &&
+                    watch->lifetime_refs == 0U) {
+                    llam_destroy_poll_watch_locked(node, watch);
+                }
+            }
+            watch = next;
+        }
+    }
+    {
+        llam_accept_watch_t *watch = node->accept_watches;
+
+        while (watch != NULL) {
+            llam_accept_watch_t *next = watch->next;
+
+            if (watch->backend_refs != 0U) {
+                if (watch->backend_refs != 1U) {
+                    llam_record_fatal(node->runtime, EOVERFLOW);
+                }
+                watch->backend_refs = 0U;
+                watch->activating = false;
+                if (watch->active) {
+                    watch->active = false;
+                    pending_to_release += 1U;
+                }
+                if ((watch->destroy_pending || !watch->accepts_waiters) &&
+                    watch->lifetime_refs == 0U) {
+                    llam_destroy_accept_watch_locked(node, watch);
+                }
+            }
+            watch = next;
+        }
+    }
+    {
+        llam_recv_watch_t *watch = node->recv_watches;
+
+        while (watch != NULL) {
+            llam_recv_watch_t *next = watch->next;
+
+            if (watch->backend_refs != 0U) {
+                if (watch->backend_refs != 1U) {
+                    llam_record_fatal(node->runtime, EOVERFLOW);
+                }
+                watch->backend_refs = 0U;
+                watch->activating = false;
+                if (watch->active) {
+                    watch->active = false;
+                    pending_to_release += 1U;
+                }
+                if ((watch->destroy_pending || !watch->accepts_waiters) &&
+                    watch->lifetime_refs == 0U) {
+                    llam_destroy_recv_watch_locked(node, watch);
+                }
+            }
+            watch = next;
+        }
+    }
+    {
+        llam_poll_watch_t *watch = node->retired_poll_watches;
+
+        while (watch != NULL) {
+            if (watch->backend_refs != 0U) {
+                if (watch->backend_refs != 1U) {
+                    llam_record_fatal(node->runtime, EOVERFLOW);
+                }
+                watch->backend_refs = 0U;
+                watch->activating = false;
+                if (watch->active) {
+                    watch->active = false;
+                    pending_to_release += 1U;
+                }
+            }
+            watch = watch->next;
+        }
+    }
+    {
+        llam_accept_watch_t *watch = node->retired_accept_watches;
+
+        while (watch != NULL) {
+            if (watch->backend_refs != 0U) {
+                if (watch->backend_refs != 1U) {
+                    llam_record_fatal(node->runtime, EOVERFLOW);
+                }
+                watch->backend_refs = 0U;
+                watch->activating = false;
+                if (watch->active) {
+                    watch->active = false;
+                    pending_to_release += 1U;
+                }
+            }
+            watch = watch->next;
+        }
+    }
+    {
+        llam_recv_watch_t *watch = node->retired_recv_watches;
+
+        while (watch != NULL) {
+            if (watch->backend_refs != 0U) {
+                if (watch->backend_refs != 1U) {
+                    llam_record_fatal(node->runtime, EOVERFLOW);
+                }
+                watch->backend_refs = 0U;
+                watch->activating = false;
+                if (watch->active) {
+                    watch->active = false;
+                    pending_to_release += 1U;
+                }
+            }
+            watch = watch->next;
+        }
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+
+    if (pending_to_release != 0U) {
+        (void)llam_node_complete_pending_ops(node, pending_to_release);
     }
 }
 
@@ -228,7 +444,7 @@ bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kin
             if (node->control_tail == cur) {
                 node->control_tail = prev;
             }
-            free(cur);
+            llam_io_control_op_destroy(node, cur);
             return true;
         }
         prev = cur;

@@ -161,16 +161,22 @@ llam_windows_io_op_t *llam_windows_io_op_create(llam_node_t *node, llam_io_req_t
 
 void llam_windows_io_op_free(llam_windows_io_op_t *op) {
     llam_node_t *node;
+    llam_windows_fd_assoc_t *association;
     unsigned max_free;
 
     if (op == NULL) {
         return;
     }
     node = op->node;
+    association = op->association;
+    op->association = NULL;
     op->magic = 0U;
     if (op->accept_socket != INVALID_SOCKET) {
         (void)closesocket(op->accept_socket);
         op->accept_socket = INVALID_SOCKET;
+    }
+    if (association != NULL && node != NULL) {
+        llam_windows_fd_assoc_unpin(node, association);
     }
     if (node != NULL) {
         max_free = node->windows_io_op_free_max != 0U ? node->windows_io_op_free_max : 64U;

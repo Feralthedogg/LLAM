@@ -27,23 +27,37 @@ Use `llam_runtime_shared` when a host loads LLAM dynamically.
 
 ## Own The Runtime
 
-Embedders should use explicit runtime handles:
+The official embedding path is the explicit runtime-handle lifecycle:
+
+1. Create a handle with `llam_runtime_create()`.
+2. Attach root work with `llam_runtime_spawn_ex()`.
+3. Drive only that handle with `llam_runtime_run_handle()`.
+4. Join or detach returned task handles.
+5. Release the runtime with `llam_runtime_destroy()`.
 
 ```c
 llam_runtime_t *rt = NULL;
-llam_runtime_create(NULL, 0, &rt);
+if (llam_runtime_create(NULL, 0, &rt) != 0) {
+    return 1;
+}
 
 llam_task_t *root_task = llam_runtime_spawn_ex(rt, root, user_data, NULL, 0);
-llam_runtime_run_handle(rt);
+if (root_task == NULL || llam_runtime_run_handle(rt) != 0) {
+    llam_runtime_destroy(rt);
+    return 1;
+}
 
-if (root_task != NULL) {
-    llam_join(root_task);
+if (llam_join(root_task) != 0) {
+    llam_runtime_destroy(rt);
+    return 1;
 }
 llam_runtime_destroy(rt);
 ```
 
-Avoid repeated concurrent init/shutdown of the legacy default runtime from host
-threads. Use one explicit runtime per independent embedding boundary.
+Use one explicit runtime per independent embedding boundary. The legacy
+process-default lifecycle remains a convenience path for simple LLAM-owned
+programs, but hosts should not repeatedly initialize and shut it down from
+concurrent embedding threads.
 
 ## Dynamic Loading
 

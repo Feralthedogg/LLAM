@@ -130,10 +130,11 @@ static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
 
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->enqueue_hot = 0U;
+    llam_runtime_note_task_live(rt, target);
     if (!llam_norm_queue_push_owner_unlocked(target, task)) {
+        (void)llam_runtime_note_task_dead(rt, task);
         return false;
     }
-    llam_runtime_note_task_live(rt, target);
     *wake_fanout = llam_spawn_should_wake_fanout(rt, target);
     return true;
 }
@@ -252,6 +253,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
     bool local_spawn;
     bool task_list_eager;
     bool wake_fanout = false;
+    llam_task_t *public_handle;
 
     if (opts != NULL) {
         if (LLAM_UNLIKELY(opts_size == 0U)) {
@@ -361,8 +363,14 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         return NULL;
     }
 
-    task->last_runnable_ns = rt->wake_latency_metrics_enabled != 0U ? llam_now_ns() : 0U;
+    task->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
     task_list_eager = llam_task_list_eager_enabled(rt);
+    /*
+     * Capture the generation-bearing token before runnable publication. A
+     * self-detaching child may invalidate and recycle its task immediately
+     * after enqueue; the spawning thread must never re-read that container.
+     */
+    public_handle = llam_task_public_handle(task);
 
     if (!task_list_eager &&
         llam_spawn_try_local_unlocked(rt, target, task, &wake_fanout)) {
@@ -407,7 +415,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
             llam_wake_all_shards(rt);
         }
     }
-    return llam_task_public_handle(task);
+    return public_handle;
 }
 
 static llam_task_t *llam_spawn_on_runtime(llam_runtime_t *rt,

@@ -22,6 +22,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -57,6 +58,27 @@ typedef struct datagram_state {
     int first_errno;
     char first_case[96];
 } datagram_state_t;
+
+typedef struct datagram_race_state {
+    int recv_fd;
+    int send_fd;
+    struct sockaddr_storage recv_addr;
+    socklen_t recv_addrlen;
+    struct sockaddr_storage send_addr;
+    socklen_t send_addrlen;
+    atomic_uint receivers_started;
+    atomic_uint receivers_done;
+    atomic_uint payload_mask;
+    atomic_uint observer_ticks;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[96];
+} datagram_race_state_t;
+
+typedef struct datagram_race_receiver_arg {
+    datagram_race_state_t *state;
+    unsigned index;
+} datagram_race_receiver_arg_t;
 
 #if defined(__APPLE__)
 typedef struct accept_reuse_state {
@@ -103,6 +125,13 @@ static void task_fail(connect_state_t *state, const char *where, int err) {
 }
 
 static void datagram_fail(datagram_state_t *state, const char *where, int err) {
+    if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = err;
+        (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static void datagram_race_fail(datagram_race_state_t *state, const char *where, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
         state->first_errno = err;
         (void)snprintf(state->first_case, sizeof(state->first_case), "%s", where);
@@ -580,6 +609,7 @@ static void datagram_receiver_task(void *arg) {
     socklen_t peer_len = (socklen_t)sizeof(peer_addr);
     ssize_t nread;
     const char *data;
+    char scalar[8];
 
     memset(&peer_addr, 0, sizeof(peer_addr));
     nread = llam_recvfrom_owned(state->recv_fd,
@@ -602,6 +632,42 @@ static void datagram_receiver_task(void *arg) {
         return;
     }
     llam_io_buffer_release(buffer);
+
+    memset(scalar, 0, sizeof(scalar));
+    memset(&peer_addr, 0, sizeof(peer_addr));
+    peer_len = (socklen_t)sizeof(peer_addr);
+    nread = llam_recvfrom(state->recv_fd,
+                          scalar,
+                          sizeof(scalar),
+                          MSG_PEEK,
+                          (struct sockaddr *)(void *)&peer_addr,
+                          &peer_len);
+    if (nread != 4 || memcmp(scalar, "peek", 4U) != 0 || peer_len == 0U) {
+        datagram_fail(state, "llam_recvfrom MSG_PEEK", nread < 0 ? errno : EPROTO);
+        return;
+    }
+    memset(scalar, 0, sizeof(scalar));
+    peer_len = (socklen_t)sizeof(peer_addr);
+    nread = llam_recvfrom(state->recv_fd,
+                          scalar,
+                          sizeof(scalar),
+                          0,
+                          (struct sockaddr *)(void *)&peer_addr,
+                          &peer_len);
+    if (nread != 4 || memcmp(scalar, "peek", 4U) != 0 || peer_len == 0U) {
+        datagram_fail(state, "llam_recvfrom after MSG_PEEK", nread < 0 ? errno : EPROTO);
+        return;
+    }
+    peer_len = (socklen_t)sizeof(peer_addr);
+    nread = llam_recvfrom(state->recv_fd,
+                          scalar,
+                          sizeof(scalar),
+                          0,
+                          (struct sockaddr *)(void *)&peer_addr,
+                          &peer_len);
+    if (nread != 0 || peer_len == 0U) {
+        datagram_fail(state, "llam_recvfrom zero datagram", nread < 0 ? errno : EPROTO);
+    }
 }
 
 static void datagram_sender_task(void *arg) {
@@ -621,12 +687,34 @@ static void datagram_sender_task(void *arg) {
                            state->recv_addrlen);
     if (nwritten != 4) {
         datagram_fail(state, "llam_sendto", nwritten < 0 ? errno : EINVAL);
+        return;
+    }
+    nwritten = llam_sendto(state->send_fd,
+                           "peek",
+                           4U,
+                           0,
+                           (const struct sockaddr *)(const void *)&state->recv_addr,
+                           state->recv_addrlen);
+    if (nwritten != 4) {
+        datagram_fail(state, "llam_sendto peek", nwritten < 0 ? errno : EINVAL);
+        return;
+    }
+    nwritten = llam_sendto(state->send_fd,
+                           "",
+                           0U,
+                           0,
+                           (const struct sockaddr *)(const void *)&state->recv_addr,
+                           state->recv_addrlen);
+    if (nwritten != 0) {
+        datagram_fail(state, "llam_sendto zero datagram", nwritten < 0 ? errno : EINVAL);
     }
 }
 
 static int test_managed_datagram_send_recv(void) {
     datagram_state_t state;
     llam_runtime_opts_t opts;
+    int recv_flags;
+    int send_flags;
     int rc = 0;
 
     memset(&state, 0, sizeof(state));
@@ -641,6 +729,13 @@ static int test_managed_datagram_send_recv(void) {
     if (state.send_fd < 0) {
         close_if_valid(&state.recv_fd);
         return test_fail_errno("datagram send socket setup failed");
+    }
+    recv_flags = fcntl(state.recv_fd, F_GETFL, 0);
+    send_flags = fcntl(state.send_fd, F_GETFL, 0);
+    if (recv_flags < 0 || send_flags < 0) {
+        close_if_valid(&state.recv_fd);
+        close_if_valid(&state.send_fd);
+        return test_fail_errno("datagram socket flags failed");
     }
     opts.deterministic = 1U;
     opts.forced_yield_every = 1U;
@@ -657,6 +752,10 @@ static int test_managed_datagram_send_recv(void) {
         rc = test_fail_errno("datagram runtime run failed");
     }
     llam_runtime_shutdown();
+    if (fcntl(state.recv_fd, F_GETFL, 0) != recv_flags ||
+        fcntl(state.send_fd, F_GETFL, 0) != send_flags) {
+        rc = test_fail("managed datagram changed shared socket mode");
+    }
     close_if_valid(&state.recv_fd);
     close_if_valid(&state.send_fd);
     if (rc != 0) {
@@ -671,6 +770,169 @@ static int test_managed_datagram_send_recv(void) {
         return 1;
     }
     return 0;
+}
+
+static void datagram_race_receiver_task(void *arg) {
+    datagram_race_receiver_arg_t *receiver = arg;
+    datagram_race_state_t *state = receiver->state;
+    struct sockaddr_storage peer;
+    const struct sockaddr_in *actual;
+    const struct sockaddr_in *expected;
+    socklen_t peer_len = (socklen_t)sizeof(peer);
+    char payload[4];
+    ssize_t nread;
+    unsigned bit = 0U;
+
+    (void)receiver->index;
+    atomic_fetch_add_explicit(&state->receivers_started, 1U, memory_order_release);
+    memset(&peer, 0xA5, sizeof(peer));
+    nread = llam_recvfrom(state->recv_fd,
+                          payload,
+                          sizeof(payload),
+                          0,
+                          (struct sockaddr *)(void *)&peer,
+                          &peer_len);
+    if (nread != 4) {
+        datagram_race_fail(state, "shared recvfrom result", nread < 0 ? errno : EPROTO);
+        goto done;
+    }
+    if (memcmp(payload, "bait", 4U) == 0) {
+        bit = 1U;
+    } else if (memcmp(payload, "save", 4U) == 0) {
+        bit = 2U;
+    } else {
+        datagram_race_fail(state, "shared recvfrom payload", EPROTO);
+        goto done;
+    }
+    actual = (const struct sockaddr_in *)(const void *)&peer;
+    expected = (const struct sockaddr_in *)(const void *)&state->send_addr;
+    if (peer_len != (socklen_t)sizeof(*actual) ||
+        actual->sin_family != AF_INET ||
+        actual->sin_port != expected->sin_port ||
+        actual->sin_addr.s_addr != expected->sin_addr.s_addr) {
+        datagram_race_fail(state, "shared recvfrom source", EPROTO);
+        goto done;
+    }
+    if ((atomic_fetch_or_explicit(&state->payload_mask, bit, memory_order_relaxed) & bit) != 0U) {
+        datagram_race_fail(state, "shared recvfrom duplicate payload", EPROTO);
+    }
+
+done:
+    atomic_fetch_add_explicit(&state->receivers_done, 1U, memory_order_release);
+}
+
+static void datagram_race_sender_task(void *arg) {
+    datagram_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->receivers_started, memory_order_acquire) != 2U) {
+        llam_yield();
+    }
+    if (llam_sendto(state->send_fd,
+                    "bait",
+                    4U,
+                    0,
+                    (const struct sockaddr *)(const void *)&state->recv_addr,
+                    state->recv_addrlen) != 4) {
+        datagram_race_fail(state, "shared sendto bait", errno);
+        (void)llam_runtime_request_stop();
+        return;
+    }
+    while (atomic_load_explicit(&state->receivers_done, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    if (llam_sendto(state->send_fd,
+                    "save",
+                    4U,
+                    0,
+                    (const struct sockaddr *)(const void *)&state->recv_addr,
+                    state->recv_addrlen) != 4) {
+        datagram_race_fail(state, "shared sendto rescue", errno);
+        (void)llam_runtime_request_stop();
+    }
+}
+
+static void datagram_race_observer_task(void *arg) {
+    datagram_race_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->receivers_done, memory_order_acquire) != 2U) {
+        atomic_fetch_add_explicit(&state->observer_ticks, 1U, memory_order_relaxed);
+        llam_yield();
+    }
+}
+
+static int test_managed_datagram_shared_readiness_retry(void) {
+    datagram_race_state_t state;
+    datagram_race_receiver_arg_t receiver_args[2];
+    llam_runtime_opts_t opts;
+    int recv_flags;
+    int send_flags;
+    int rc = 0;
+
+    memset(&state, 0, sizeof(state));
+    memset(&opts, 0, sizeof(opts));
+    state.recv_fd = -1;
+    state.send_fd = -1;
+    atomic_init(&state.receivers_started, 0U);
+    atomic_init(&state.receivers_done, 0U);
+    atomic_init(&state.payload_mask, 0U);
+    atomic_init(&state.observer_ticks, 0U);
+    atomic_init(&state.failures, 0U);
+    if (make_loopback_udp_socket(&state.recv_fd, &state.recv_addr, &state.recv_addrlen) != 0 ||
+        make_loopback_udp_socket(&state.send_fd, &state.send_addr, &state.send_addrlen) != 0) {
+        rc = test_fail_errno("shared datagram socket setup failed");
+        goto cleanup;
+    }
+    recv_flags = fcntl(state.recv_fd, F_GETFL, 0);
+    send_flags = fcntl(state.send_fd, F_GETFL, 0);
+    if (recv_flags < 0 || send_flags < 0) {
+        rc = test_fail_errno("shared datagram flags failed");
+        goto cleanup;
+    }
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    opts.experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&opts) != 0) {
+        rc = test_fail_errno("shared datagram runtime init failed");
+        goto cleanup;
+    }
+    for (unsigned i = 0U; i < 2U; ++i) {
+        receiver_args[i].state = &state;
+        receiver_args[i].index = i;
+        if (llam_spawn(datagram_race_receiver_task, &receiver_args[i], NULL) == NULL) {
+            rc = test_fail_errno("shared datagram receiver spawn failed");
+            break;
+        }
+    }
+    if (rc == 0 &&
+        (llam_spawn(datagram_race_sender_task, &state, NULL) == NULL ||
+         llam_spawn(datagram_race_observer_task, &state, NULL) == NULL)) {
+        rc = test_fail_errno("shared datagram support task spawn failed");
+    }
+    if (rc == 0 && llam_run() != 0) {
+        rc = test_fail_errno("shared datagram runtime run failed");
+    }
+    llam_runtime_shutdown();
+    if (rc == 0 &&
+        (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+         atomic_load_explicit(&state.receivers_done, memory_order_relaxed) != 2U ||
+         atomic_load_explicit(&state.payload_mask, memory_order_relaxed) != 3U ||
+         atomic_load_explicit(&state.observer_ticks, memory_order_relaxed) == 0U ||
+         fcntl(state.recv_fd, F_GETFL, 0) != recv_flags ||
+         fcntl(state.send_fd, F_GETFL, 0) != send_flags)) {
+        fprintf(stderr,
+                "[test_connect_io] shared datagram failed at %s errno=%d done=%u mask=%u ticks=%u\n",
+                state.first_case,
+                state.first_errno,
+                atomic_load_explicit(&state.receivers_done, memory_order_relaxed),
+                atomic_load_explicit(&state.payload_mask, memory_order_relaxed),
+                atomic_load_explicit(&state.observer_ticks, memory_order_relaxed));
+        rc = 1;
+    }
+
+cleanup:
+    close_if_valid(&state.recv_fd);
+    close_if_valid(&state.send_fd);
+    return rc;
 }
 
 static int test_managed_accept_watch_rejects_reused_listener_fd(void) {
@@ -788,6 +1050,7 @@ int main(void) {
         test_direct_connect_success() != 0 ||
         test_managed_connect_success_and_invalid() != 0 ||
         test_managed_datagram_send_recv() != 0 ||
+        test_managed_datagram_shared_readiness_retry() != 0 ||
         test_managed_accept_watch_rejects_reused_listener_fd() != 0) {
         return 1;
     }

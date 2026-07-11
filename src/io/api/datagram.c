@@ -39,6 +39,22 @@
 #define POLLOUT 0x0004
 #endif
 
+static size_t llam_datagram_owned_count_max(void) {
+#if LLAM_PLATFORM_DARWIN
+    return (size_t)INT_MAX;
+#elif LLAM_RUNTIME_BACKEND_LINUX
+    return (size_t)UINT_MAX;
+#elif LLAM_RUNTIME_BACKEND_WINDOWS
+    return (size_t)ULONG_MAX;
+#else
+#ifdef SSIZE_MAX
+    return (size_t)SSIZE_MAX;
+#else
+    return SIZE_MAX >> 1U;
+#endif
+#endif
+}
+
 static int llam_datagram_validate_addr_pair(const struct sockaddr *addr, const socklen_t *addrlen) {
     if ((addr == NULL) != (addrlen == NULL)) {
         errno = EINVAL;
@@ -132,8 +148,6 @@ ssize_t llam_recvfrom(llam_fd_t fd,
                       int flags,
                       struct sockaddr *src_addr,
                       socklen_t *addrlen) {
-    short revents = 0;
-
     if (llam_datagram_validate_addr_pair(src_addr, addrlen) != 0) {
         return -1;
     }
@@ -141,8 +155,67 @@ ssize_t llam_recvfrom(llam_fd_t fd,
     if (g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
         return llam_platform_recvfrom_fd(fd, buf, count, flags, src_addr, addrlen);
     }
+#if LLAM_PLATFORM_POSIX && defined(MSG_DONTWAIT)
+    {
+        const int managed_flags = flags | MSG_DONTWAIT;
+        const socklen_t address_capacity = addrlen != NULL ? *addrlen : 0U;
+
+        for (;;) {
+            struct sockaddr_storage attempt_addr;
+            socklen_t attempt_len = address_capacity;
+            ssize_t nread;
+
+            if ((size_t)attempt_len > sizeof(attempt_addr)) {
+                attempt_len = (socklen_t)sizeof(attempt_addr);
+            }
+            nread = llam_platform_recvfrom_fd(fd,
+                                              buf,
+                                              count,
+                                              managed_flags,
+                                              src_addr != NULL ? (struct sockaddr *)&attempt_addr : NULL,
+                                              src_addr != NULL ? &attempt_len : NULL);
+            if (nread >= 0) {
+                if (src_addr != NULL) {
+                    size_t copy_len = (size_t)attempt_len;
+
+                    if (copy_len > (size_t)address_capacity) {
+                        copy_len = (size_t)address_capacity;
+                    }
+                    if (copy_len > sizeof(attempt_addr)) {
+                        copy_len = sizeof(attempt_addr);
+                    }
+                    if (copy_len != 0U) {
+                        memcpy(src_addr, &attempt_addr, copy_len);
+                    }
+                    *addrlen = attempt_len;
+                }
+                return nread;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                if (addrlen != NULL) {
+                    *addrlen = address_capacity;
+                }
+                return -1;
+            }
+            if (llam_poll_fd(fd, POLLIN, -1, NULL) < 0) {
+                if (addrlen != NULL) {
+                    *addrlen = address_capacity;
+                }
+                return -1;
+            }
+        }
+    }
+#elif LLAM_PLATFORM_POSIX
+    /* A readiness snapshot alone cannot make a later blocking recvfrom safe. */
+    errno = ENOTSUP;
+    return -1;
+#else
     for (;;) {
         ssize_t nread;
+        short revents = 0;
 
         if (llam_poll_fd(fd, POLLIN, -1, &revents) < 0) {
             return -1;
@@ -155,6 +228,7 @@ ssize_t llam_recvfrom(llam_fd_t fd,
             return -1;
         }
     }
+#endif
 }
 
 ssize_t llam_sendto(llam_fd_t fd,
@@ -163,14 +237,45 @@ ssize_t llam_sendto(llam_fd_t fd,
                     int flags,
                     const struct sockaddr *dst_addr,
                     socklen_t addrlen) {
-    short revents = 0;
-
     llam_task_safepoint();
     if (g_llam_tls_task == NULL || g_llam_tls_shard == NULL) {
         return llam_platform_sendto_fd(fd, buf, count, flags, dst_addr, addrlen);
     }
+#if LLAM_PLATFORM_POSIX && defined(MSG_DONTWAIT)
+    {
+        const int managed_flags = flags | MSG_DONTWAIT;
+
+        for (;;) {
+            ssize_t nwritten = llam_platform_sendto_fd(fd,
+                                                       buf,
+                                                       count,
+                                                       managed_flags,
+                                                       dst_addr,
+                                                       addrlen);
+
+            if (nwritten >= 0) {
+                llam_maybe_handoff_after_socket_write(fd, (size_t)nwritten, true);
+                return nwritten;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                return -1;
+            }
+            if (llam_poll_fd(fd, POLLOUT, -1, NULL) < 0) {
+                return -1;
+            }
+        }
+    }
+#elif LLAM_PLATFORM_POSIX
+    /* A readiness snapshot alone cannot make a later blocking sendto safe. */
+    errno = ENOTSUP;
+    return -1;
+#else
     for (;;) {
         ssize_t nwritten;
+        short revents = 0;
 
         if (llam_poll_fd(fd, POLLOUT, -1, &revents) < 0) {
             return -1;
@@ -184,6 +289,7 @@ ssize_t llam_sendto(llam_fd_t fd,
             return -1;
         }
     }
+#endif
 }
 
 ssize_t llam_recvfrom_owned(llam_fd_t fd,
@@ -203,6 +309,10 @@ ssize_t llam_recvfrom_owned(llam_fd_t fd,
     }
     *out = NULL;
     if (llam_datagram_validate_addr_pair(src_addr, addrlen) != 0) {
+        return -1;
+    }
+    if (max_count > llam_datagram_owned_count_max()) {
+        errno = EINVAL;
         return -1;
     }
     if (max_count == 0U) {

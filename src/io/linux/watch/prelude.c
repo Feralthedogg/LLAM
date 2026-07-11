@@ -113,13 +113,46 @@ bool llam_node_submit_needs_syscall(llam_node_t *node) {
  * @return liburing submit result.
  */
 int llam_node_submit_ring(llam_node_t *node) {
+    unsigned expected;
     int rc;
 
+    if (node == NULL) {
+        return -EINVAL;
+    }
+    if (node->linux_submit_terminal) {
+        return -EIO;
+    }
+    /*
+     * Capture the real kernel-consumption distance before io_uring_submit()
+     * flushes the userspace SQ head.  A negative or short enter must leave an
+     * explicit retry obligation even when no source queue still owns the SQEs.
+     */
+    expected = io_uring_sq_ready(&node->ring);
     atomic_fetch_add_explicit(&node->submit_calls, 1U, memory_order_relaxed);
     if (llam_node_submit_needs_syscall(node)) {
         atomic_fetch_add_explicit(&node->submit_syscalls, 1U, memory_order_relaxed);
     }
-    rc = io_uring_submit(&node->ring);
+    if (node->linux_submit_override != NULL) {
+        rc = node->linux_submit_override(node,
+                                         expected,
+                                         node->linux_submit_override_arg);
+    } else {
+        rc = io_uring_submit(&node->ring);
+    }
+    if (rc < 0) {
+        int err = -rc;
+
+        if (err == EINTR || err == EAGAIN || err == EBUSY) {
+            node->linux_submit_retry = true;
+        } else {
+            node->linux_submit_retry = false;
+            node->linux_submit_terminal = true;
+        }
+    } else if ((unsigned)rc < expected) {
+        node->linux_submit_retry = true;
+    } else {
+        node->linux_submit_retry = false;
+    }
     return rc;
 }
 

@@ -1,5 +1,56 @@
 # LLAM ChangeLog
 
+## 2.2.0 - 2026-07-12
+
+### Security
+
+* bind broker buffers, channels, descriptors, tasks, and ring sessions to their
+  creating subject and reclaim quotas, mappings, handles, and task slots on
+  disconnect, failed response publication, cancellation, and teardown.
+
+* enforce bounded nonblocking descriptor, ring, direct, datagram, and accept
+  I/O; seal or reject shrinkable shared-ring backing; harden ancillary fd
+  parsing, endpoint replacement policy, Windows named-pipe admission, and
+  whole-frame deadlines.
+
+* close task, wait-node, channel-select, timer, cancellation, I/O request, and
+  watch lifetime races with explicit references, generations, owner
+  revalidation, and single-atomic park/completion handshakes.
+
+* harden io_uring cancellation, multishot completion, live watch migration,
+  kqueue close purging, Windows IOCP completion ownership, and cross-node
+  pending-operation accounting against stale completion, UAF, leak, lost-wake,
+  and cancellation-loss paths.
+
+* make counter saturation and impossible lifetime transitions fail closed
+  without re-entering owner locks, deferring runtime stop and wake propagation
+  to the watchdog controller.
+
+### Added
+
+* add watchdog-attached autotune telemetry and a guarded direct-handoff budget
+  controller, including wake-handoff counters in size-aware runtime statistics
+  and JSON diagnostics.
+
+* add deterministic and stress regression coverage for broker resource
+  recovery, wait/cancel teardown, select arm/completion races, dynamic I/O
+  rehome, backend completion ordering, and platform-specific transport policy.
+
+### Fixed
+
+* restore native MSVC compatibility by avoiding conflicting private NT SDK
+  declarations and using a constant static atomic initializer.
+
+* align CMake's liburing buffer-ring feature probe with the runtime's GNU/POSIX
+  feature namespace and keep shutdown tests valid with both new and legacy
+  liburing configurations.
+
+### Changed
+
+* refresh version, installer, packaging, workflow, shared-library, and
+  documentation metadata for the `2.2.0` security release while retaining the
+  public ABI at `2.0`.
+
 ## 2.1.0 - 2026-06-23
 
 ### Security

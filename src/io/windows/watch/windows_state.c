@@ -59,7 +59,7 @@ bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kin
             if (node->control_tail == cur) {
                 node->control_tail = prev;
             }
-            free(cur);
+            llam_io_control_op_destroy(node, cur);
             return true;
         }
         prev = cur;

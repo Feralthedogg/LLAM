@@ -125,6 +125,9 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
     size_t copy_size;
     llam_task_t *task;
     llam_runtime_t *owner_runtime;
+    size_t max_items;
+    size_t available;
+    size_t needed;
 
     if (group == NULL || fn == NULL) {
         errno = EINVAL;
@@ -176,7 +179,8 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
         errno = EBUSY;
         return NULL;
     }
-    if (group->count >= SIZE_MAX / sizeof(*group->tasks)) {
+    max_items = SIZE_MAX / sizeof(*group->tasks);
+    if (group->count >= max_items) {
         /*
          * Keep corrupted or future-imported group state from wrapping
          * group->count + 1 to zero and then writing a spawned child through a
@@ -186,18 +190,19 @@ llam_task_t *llam_task_group_spawn_ex(llam_task_group_t *group,
         errno = ENOMEM;
         return NULL;
     }
-    if (group->active_spawns >= (SIZE_MAX / 2U)) {
+    available = max_items - group->count;
+    if (group->active_spawns >= available) {
         /*
-         * active_spawns is a destruction gate while spawn runs outside
-         * group->lock.  Values this large are not reachable through normal API
-         * use; treat them as corrupted/exhausted state rather than allowing
-         * active_spawns + 1 to wrap to zero and open a destroy race.
+         * Every active spawn is a unique promised append slot. Subtraction
+         * keeps the check defined even for corrupted/imported near-SIZE_MAX
+         * state and prevents a new promise from exceeding the maximum array.
          */
         pthread_mutex_unlock(&group->lock);
         errno = ENOMEM;
         return NULL;
     }
-    if (llam_task_group_reserve_locked(group, group->count + 1U) != 0) {
+    needed = group->count + group->active_spawns + 1U;
+    if (llam_task_group_reserve_locked(group, needed) != 0) {
         pthread_mutex_unlock(&group->lock);
         return NULL;
     }

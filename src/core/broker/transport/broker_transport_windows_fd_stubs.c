@@ -97,6 +97,13 @@ int llam_broker_request_fd_with_descriptor(int fd,
                                          ENOTSUP);
 }
 
+int llam_broker_request_fd_with_descriptor_trusted(int fd,
+                                                   const llam_broker_wire_request_t *request,
+                                                   int descriptor_fd,
+                                                   llam_broker_wire_response_t *response) {
+    return llam_broker_request_fd_with_descriptor(fd, request, descriptor_fd, response);
+}
+
 int llam_broker_request_fd_with_response_descriptor(int fd,
                                                     const llam_broker_wire_request_t *request,
                                                     llam_broker_wire_response_t *response,
@@ -109,6 +116,13 @@ int llam_broker_request_fd_with_response_descriptor(int fd,
     return llam_broker_fail_clear_output(response,
                                          response != NULL ? sizeof(*response) : 0U,
                                          ENOTSUP);
+}
+
+int llam_broker_request_fd_with_response_descriptor_trusted(int fd,
+                                                            const llam_broker_wire_request_t *request,
+                                                            llam_broker_wire_response_t *response,
+                                                            int *out_descriptor_fd) {
+    return llam_broker_request_fd_with_response_descriptor(fd, request, response, out_descriptor_fd);
 }
 
 int llam_broker_listen_unix(const char *path, int *out_fd) {

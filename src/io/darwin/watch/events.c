@@ -33,9 +33,27 @@ void llam_darwin_handle_poll_watch_event(llam_node_t *node, llam_poll_watch_t *w
     unsigned finalize_target = UINT_MAX;
     bool kick_target = false;
 
+    if (watch == NULL) {
+        return;
+    }
+    llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&node->watch_lock);
-    if (watch == NULL || !watch->active) {
+    if (watch->retired || watch->destroy_pending || !watch->active) {
         pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
+        return;
+    }
+    if (!watch->accepts_waiters) {
+        watch->active = false;
+        watch->activating = false;
+        release_pending = true;
+        if (!watch->deactivate_queued) {
+            /* The event-batch pin defers the actual free until batch release. */
+            llam_destroy_poll_watch_locked(node, watch);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        (void)llam_node_complete_pending_ops(node, 1U);
+        llam_fd_watch_lifecycle_unlock();
         return;
     }
     waiters = llam_poll_watch_take_waiters(watch);
@@ -79,6 +97,7 @@ void llam_darwin_handle_poll_watch_event(llam_node_t *node, llam_poll_watch_t *w
         finalize_target < node->runtime->active_nodes) {
         llam_kick_node(&node->runtime->nodes[finalize_target]);
     }
+    llam_fd_watch_lifecycle_unlock();
 
     while (waiters != NULL) {
         llam_io_req_t *next = waiters->next;
@@ -95,6 +114,7 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
     llam_darwin_accept_completion_t *completion_tail = NULL;
     int saved_flags = 0;
     bool restore_flags = false;
+    unsigned drained = 0U;
     bool rearm = false;
     bool release_pending = false;
     int accept_error = 0;
@@ -104,6 +124,26 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
     if (watch == NULL) {
         return;
     }
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node->watch_lock);
+    if (watch->retired || watch->destroy_pending || !watch->active) {
+        pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
+        return;
+    }
+    if (!watch->accepts_waiters) {
+        watch->active = false;
+        watch->activating = false;
+        release_pending = true;
+        if (!watch->deactivate_queued) {
+            llam_destroy_accept_watch_locked(node, watch);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        (void)llam_node_complete_pending_ops(node, 1U);
+        llam_fd_watch_lifecycle_unlock();
+        return;
+    }
+    pthread_mutex_unlock(&node->watch_lock);
 
     if (llam_darwin_fd_set_nonblocking(watch->fd, &saved_flags, &restore_flags) != 0) {
         accept_error = errno;
@@ -115,6 +155,8 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
             accepted_fd = accept(watch->fd, NULL, NULL);
             if (accepted_fd >= 0) {
                 unsigned live_target = UINT_MAX;
+
+                drained += 1U;
 
                 pthread_mutex_lock(&node->watch_lock);
                 waiter = llam_accept_watch_pop_waiter(watch);
@@ -133,6 +175,9 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
                         llam_accept_watch_push_ready(watch, accepted_fd);
                         pthread_mutex_unlock(&node->watch_lock);
                     }
+                    if (drained >= LLAM_WATCH_READY_DEPTH_MAX) {
+                        break;
+                    }
                     continue;
                 }
                 pthread_mutex_unlock(&node->watch_lock);
@@ -140,6 +185,9 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
                 if (!llam_darwin_accept_completion_push(&completion_head, &completion_tail, waiter, accepted_fd)) {
                     close(accepted_fd);
                     accept_error = ENOMEM;
+                    break;
+                }
+                if (drained >= LLAM_WATCH_READY_DEPTH_MAX) {
                     break;
                 }
                 continue;
@@ -158,7 +206,7 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
 
     pthread_mutex_lock(&node->watch_lock);
     if (watch->active) {
-        if (accept_error == 0 && watch->wait_head != NULL) {
+        if (accept_error == 0 && watch->wait_head != NULL && watch->accepts_waiters) {
             rearm = true;
         } else {
             watch->active = false;
@@ -198,10 +246,26 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
             waiters = next;
         }
     } else if (rearm) {
+        int rearm_errno = 0;
+        int rearm_rc;
+        bool eligible;
+
         // One-shot kqueue delivery disables the watch after delivery, so
         // re-enable it if waiters remain and no error occurred.
-        if (llam_darwin_accept_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR) != 0) {
-            int rearm_errno = errno;
+        llam_fd_watch_lifecycle_lock();
+        pthread_mutex_lock(&node->watch_lock);
+        eligible = watch->accepts_waiters && watch->active && watch->wait_head != NULL;
+        pthread_mutex_unlock(&node->watch_lock);
+        if (eligible) {
+            rearm_rc = llam_darwin_accept_watch_change(
+                node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
+            rearm_errno = rearm_rc == 0 ? 0 : errno;
+        } else {
+            rearm_rc = -1;
+            rearm_errno = EBADF;
+        }
+        llam_fd_watch_lifecycle_unlock();
+        if (rearm_rc != 0) {
             llam_io_req_t *waiters;
 
             pthread_mutex_lock(&node->watch_lock);
@@ -233,6 +297,7 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
         llam_kick_node(&node->runtime->nodes[finalize_target]);
     }
 
+    llam_fd_watch_lifecycle_unlock();
     llam_darwin_complete_accept_completions(node, completion_head);
 }
 
@@ -244,6 +309,7 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
 #endif
     bool rearm = false;
     bool release_pending = false;
+    unsigned drained = 0U;
     int recv_error = 0;
     unsigned char packet[LLAM_IO_BUFFER_INLINE_BYTES];
     unsigned finalize_target = UINT_MAX;
@@ -252,6 +318,26 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
     if (watch == NULL) {
         return;
     }
+    llam_fd_watch_lifecycle_lock();
+    pthread_mutex_lock(&node->watch_lock);
+    if (watch->retired || watch->destroy_pending || !watch->active) {
+        pthread_mutex_unlock(&node->watch_lock);
+        llam_fd_watch_lifecycle_unlock();
+        return;
+    }
+    if (!watch->accepts_waiters) {
+        watch->active = false;
+        watch->activating = false;
+        release_pending = true;
+        if (!watch->deactivate_queued) {
+            llam_destroy_recv_watch_locked(node, watch);
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        (void)llam_node_complete_pending_ops(node, 1U);
+        llam_fd_watch_lifecycle_unlock();
+        return;
+    }
+    pthread_mutex_unlock(&node->watch_lock);
 
 #if !defined(MSG_DONTWAIT)
     if (llam_darwin_fd_set_nonblocking(watch->fd, &saved_flags, &restore_flags) != 0) {
@@ -269,6 +355,7 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
             received = recv(watch->fd, packet, sizeof(packet), 0);
 #endif
             if (received >= 0) {
+                drained += 1U;
                 pthread_mutex_lock(&node->watch_lock);
                 waiter = llam_recv_watch_pop_waiter(watch);
                 if (waiter == NULL) {
@@ -297,6 +384,9 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
                     if (recv_error != 0) {
                         break;
                     }
+                    if (drained >= LLAM_WATCH_READY_DEPTH_MAX) {
+                        break;
+                    }
                     continue;
                 }
                 pthread_mutex_unlock(&node->watch_lock);
@@ -308,6 +398,9 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
                 }
                 waiter->use_provided_buffer = false;
                 llam_io_complete_req(node, waiter, (int)received, false);
+                if (drained >= LLAM_WATCH_READY_DEPTH_MAX) {
+                    break;
+                }
                 continue;
             }
             if (errno == EINTR) {
@@ -326,7 +419,7 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
 
     pthread_mutex_lock(&node->watch_lock);
     if (watch->active) {
-        if (recv_error == 0 && watch->wait_head != NULL) {
+        if (recv_error == 0 && watch->wait_head != NULL && watch->accepts_waiters) {
             rearm = true;
         } else {
             watch->active = false;
@@ -366,9 +459,25 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
             waiters = next;
         }
     } else if (rearm) {
+        int rearm_errno = 0;
+        int rearm_rc;
+        bool eligible;
+
         // One-shot kqueue delivery requires explicit re-enable when waiters remain.
-        if (llam_darwin_recv_watch_change(node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR) != 0) {
-            int rearm_errno = errno;
+        llam_fd_watch_lifecycle_lock();
+        pthread_mutex_lock(&node->watch_lock);
+        eligible = watch->accepts_waiters && watch->active && watch->wait_head != NULL;
+        pthread_mutex_unlock(&node->watch_lock);
+        if (eligible) {
+            rearm_rc = llam_darwin_recv_watch_change(
+                node, watch, EV_ADD | EV_ENABLE | LLAM_KQUEUE_WATCH_ONESHOT_FLAGS | EV_CLEAR);
+            rearm_errno = rearm_rc == 0 ? 0 : errno;
+        } else {
+            rearm_rc = -1;
+            rearm_errno = EBADF;
+        }
+        llam_fd_watch_lifecycle_unlock();
+        if (rearm_rc != 0) {
             llam_io_req_t *waiters;
 
             pthread_mutex_lock(&node->watch_lock);
@@ -403,6 +512,7 @@ void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *w
     pthread_mutex_lock(&node->watch_lock);
     llam_maybe_destroy_recv_watch_locked(node, watch);
     pthread_mutex_unlock(&node->watch_lock);
+    llam_fd_watch_lifecycle_unlock();
 }
 
 /** @brief Handle a one-shot request kevent. */
@@ -463,15 +573,20 @@ void llam_darwin_handle_req_event(llam_node_t *node, llam_io_req_t *req, const s
 /** @brief Submit one request to the Darwin backend. */
 void llam_darwin_submit_req(llam_node_t *node, llam_io_req_t *req) {
     int result = 0;
+    unsigned owner_shard;
 
     if (node == NULL || req == NULL) {
         return;
     }
 
     if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) != LLAM_IO_WAIT_MODE_INFLIGHT) {
-        atomic_store_explicit(&req->inflight_owner_shard, req->owner_shard, memory_order_release);
+        owner_shard = atomic_load_explicit(&req->owner_shard,
+                                           memory_order_acquire);
+        atomic_store_explicit(&req->inflight_owner_shard,
+                              owner_shard,
+                              memory_order_release);
         atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_INFLIGHT);
-        llam_shard_note_inflight_io_waiter(req->owner_runtime, req->owner_shard, 1);
+        llam_shard_note_inflight_io_waiter(req->owner_runtime, owner_shard, 1);
     }
     if (llam_io_req_abort_requested(req)) {
         // Cancel can arrive before a kqueue filter exists, so finish locally.

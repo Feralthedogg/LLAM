@@ -158,13 +158,28 @@ static int llam_windows_ensure_socket_nonblocking(llam_fd_t fd) {
  * @return Request object on success, or @c NULL with @c errno set by the
  *         allocator.
  */
+static bool llam_api_embedded_io_req_reusable(const llam_io_req_t *req) {
+    return req != NULL &&
+           atomic_load_explicit(&req->lifetime_refs, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&req->cancel_queued, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&req->cancel_submitted, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&req->free_after_cancel, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&req->backend_event_refs, memory_order_acquire) == 0U &&
+           atomic_load_explicit(&req->release_after_event, memory_order_acquire) == 0U;
+}
+
 llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard) {
     llam_task_t *task = g_llam_tls_task;
     llam_io_req_t *req;
 
-    if (task != NULL && llam_task_active_io_req_load(task) == NULL) {
+    if (task != NULL &&
+        llam_task_active_io_req_load(task) == NULL &&
+        llam_api_embedded_io_req_reusable(&task->embedded_io_req)) {
         req = &task->embedded_io_req;
         llam_io_req_reset(req, task->owner_runtime, shard != NULL ? shard->id : UINT_MAX, UINT_MAX);
+        if (!llam_io_req_lifetime_activate(req)) {
+            return llam_io_req_alloc(shard);
+        }
         req->task = task;
         return req;
     }
@@ -183,10 +198,6 @@ llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard) {
  */
 void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req) {
     if (req == NULL) {
-        return;
-    }
-    if (req->alloc_owner_shard == UINT_MAX) {
-        llam_io_req_reset(req, req->owner_runtime, UINT_MAX, UINT_MAX);
         return;
     }
     llam_io_req_free(shard, req);
@@ -388,26 +399,6 @@ int llam_platform_poll_now(llam_fd_t fd, short events, short *revents) {
 }
 
 /**
- * @brief Restore temporary nonblocking flags without clobbering syscall errno.
- */
-static void llam_direct_restore_flags_preserve_errno(llam_fd_t fd, bool restore_flags, int saved_flags) {
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-    int saved_errno;
-
-    if (!restore_flags) {
-        return;
-    }
-    saved_errno = errno;
-    (void)fcntl(fd, F_SETFL, saved_flags);
-    errno = saved_errno;
-#else
-    (void)fd;
-    (void)restore_flags;
-    (void)saved_flags;
-#endif
-}
-
-/**
  * @brief Try a read/write/recv operation as an immediate non-blocking syscall.
  *
  * Return values are tri-state:
@@ -417,8 +408,9 @@ static void llam_direct_restore_flags_preserve_errno(llam_fd_t fd, bool restore_
  *  - negative means a hard syscall/setup error with @c errno preserved.
  *
  * Socket descriptors use @c MSG_DONTWAIT when available to avoid changing file
- * status flags. Non-socket descriptors temporarily enable @c O_NONBLOCK and
- * restore the original flags before returning.
+ * status flags. Non-socket descriptors are deliberately declined: changing a
+ * shared open-file-description's @c O_NONBLOCK bit cannot make a scheduler
+ * thread syscall race-free when another owner can change that bit concurrently.
  *
  * @param fd            Descriptor to operate on.
  * @param buf           Source or destination buffer.
@@ -427,7 +419,8 @@ static void llam_direct_restore_flags_preserve_errno(llam_fd_t fd, bool restore_
  * @param recv_op       Whether the read side should use @c recv.
  * @param recv_flags    Flags passed to @c recv.
  * @param result_out    Optional syscall result output.
- * @param socket_op_out Optional flag set when the socket fast path was used.
+ * @param socket_op_out Optional flag set when the descriptor was classified as
+ *                      a socket, including a socket that would block.
  *
  * @return 1 for completed, 0 for would-block, or -1 for hard error.
  */
@@ -439,9 +432,9 @@ int llam_try_direct_rw(llam_fd_t fd,
                             int recv_flags,
                             ssize_t *result_out,
                             bool *socket_op_out) {
-    int saved_flags;
-    bool restore_flags = false;
     ssize_t rc;
+
+    (void)recv_op;
 
     if (result_out != NULL) {
         *result_out = -1;
@@ -466,15 +459,15 @@ int llam_try_direct_rw(llam_fd_t fd,
             return -1;
         }
         if (nonblock_rc > 0) {
+            if (socket_op_out != NULL) {
+                *socket_op_out = true;
+            }
             for (;;) {
                 rc = write_op ? llam_platform_send_fd(fd, buf, count, 0)
                               : llam_platform_recv_fd(fd, buf, count, recv_flags);
                 if (rc >= 0) {
                     if (result_out != NULL) {
                         *result_out = rc;
-                    }
-                    if (socket_op_out != NULL) {
-                        *socket_op_out = true;
                     }
                     return 1;
                 }
@@ -509,6 +502,9 @@ int llam_try_direct_rw(llam_fd_t fd,
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (socket_op_out != NULL) {
+                *socket_op_out = true;
+            }
             return 0;
         }
         if (errno != ENOTSOCK && errno != EOPNOTSUPP
@@ -521,42 +517,7 @@ int llam_try_direct_rw(llam_fd_t fd,
         break;
     }
 #endif
-    saved_flags = fcntl(fd, F_GETFL, 0);
-    if (saved_flags < 0) {
-        return -1;
-    }
-    if ((saved_flags & O_NONBLOCK) == 0) {
-        if (fcntl(fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
-            return -1;
-        }
-        restore_flags = true;
-    }
-
-    for (;;) {
-        if (write_op) {
-            rc = llam_platform_write_fd(fd, buf, count);
-        } else if (recv_op) {
-            rc = llam_platform_recv_fd(fd, buf, count, recv_flags);
-        } else {
-            rc = llam_platform_read_fd(fd, buf, count);
-        }
-        if (rc >= 0) {
-            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-            if (result_out != NULL) {
-                *result_out = rc;
-            }
-            return 1;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-            return 0;
-        }
-        llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-        return -1;
-    }
+    return 0;
 }
 
 /**
@@ -573,8 +534,6 @@ int llam_try_direct_writev(llam_fd_t fd,
                            bool *socket_out) {
 #if LLAM_PLATFORM_POSIX
     struct iovec native_iov[16];
-    int saved_flags;
-    bool restore_flags = false;
     ssize_t rc;
 
     if (result_out != NULL) {
@@ -613,6 +572,9 @@ int llam_try_direct_writev(llam_fd_t fd,
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (socket_out != NULL) {
+                    *socket_out = true;
+                }
                 return 0;
             }
             if (errno != ENOTSOCK && errno != EOPNOTSUPP
@@ -627,36 +589,7 @@ int llam_try_direct_writev(llam_fd_t fd,
     }
 #endif
 
-    saved_flags = fcntl(fd, F_GETFL, 0);
-    if (saved_flags < 0) {
-        return -1;
-    }
-    if ((saved_flags & O_NONBLOCK) == 0) {
-        if (fcntl(fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
-            return -1;
-        }
-        restore_flags = true;
-    }
-
-    for (;;) {
-        rc = writev(fd, native_iov, iovcnt);
-        if (rc >= 0) {
-            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-            if (result_out != NULL) {
-                *result_out = rc;
-            }
-            return 1;
-        }
-        if (errno == EINTR) {
-            continue;
-        }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-            return 0;
-        }
-        llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-        return -1;
-    }
+    return 0;
 #else
     (void)fd;
     (void)iov;
@@ -674,28 +607,32 @@ int llam_try_direct_writev(llam_fd_t fd,
 /**
  * @brief Try accepting a pending connection without parking the current task.
  *
- * Serial accept/connect workloads often have a connection already queued in
- * the kernel backlog by the time the managed task calls ::llam_accept.  Taking
- * that descriptor directly avoids an I/O worker round trip and removes a
- * backend re-arm dependency from the hot accept path.
+ * Windows can make a socket nonblocking without mutating a POSIX-style shared
+ * open-file-description. POSIX direct accept is deliberately declined because
+ * neither a readiness observation nor a prior @c O_NONBLOCK observation can
+ * prevent another retained owner from draining the backlog and clearing the
+ * shared flag before accept enters the kernel.
  *
  * @return 1 for an accepted descriptor, 0 for would-block, or -1 for hard
  *         accept/setup errors with @c errno preserved.
  */
 int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen, llam_fd_t *result_out) {
-#if LLAM_RUNTIME_BACKEND_WINDOWS
-    int nonblock_rc;
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+    if (result_out != NULL) {
+        *result_out = LLAM_INVALID_FD;
+    }
+    (void)fd;
+    (void)addr;
+    (void)addrlen;
+    return 0;
 #else
-    int saved_flags;
-    bool restore_flags = false;
-#endif
+    int nonblock_rc;
     llam_fd_t accepted;
 
     if (result_out != NULL) {
         *result_out = LLAM_INVALID_FD;
     }
 
-#if LLAM_RUNTIME_BACKEND_WINDOWS
     nonblock_rc = llam_windows_ensure_socket_nonblocking(fd);
     if (nonblock_rc < 0) {
         return -1;
@@ -703,44 +640,9 @@ int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrl
     if (nonblock_rc == 0) {
         return 0;
     }
-#else
-    saved_flags = fcntl(fd, F_GETFL, 0);
-    if (saved_flags < 0) {
-        return -1;
-    }
-    if ((saved_flags & O_NONBLOCK) == 0) {
-        short revents = 0;
-        int poll_rc = llam_platform_poll_now(fd, POLLIN, &revents);
-
-        /*
-         * Never enter accept(2) on a blocking listener unless the kernel has
-         * already reported a queued connection.  Darwin stress found that the
-         * previous "temporarily flip O_NONBLOCK then accept" fast path could
-         * still strand a scheduler worker in __accept under heavy watcher churn.
-         */
-        if (poll_rc < 0) {
-            return -1;
-        }
-        if (poll_rc == 0 || (revents & POLLIN) == 0) {
-            if ((revents & POLLNVAL) != 0) {
-                errno = EBADF;
-                return -1;
-            }
-            return 0;
-        }
-        if (fcntl(fd, F_SETFL, saved_flags | O_NONBLOCK) != 0) {
-            return -1;
-        }
-        restore_flags = true;
-    }
-#endif
-
     for (;;) {
         accepted = llam_platform_accept_fd(fd, addr, addrlen);
         if (!LLAM_FD_IS_INVALID(accepted)) {
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-#endif
             if (result_out != NULL) {
                 *result_out = accepted;
             }
@@ -750,16 +652,11 @@ int llam_try_direct_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrl
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-            llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-#endif
             return 0;
         }
-#if !LLAM_RUNTIME_BACKEND_WINDOWS
-        llam_direct_restore_flags_preserve_errno(fd, restore_flags, saved_flags);
-#endif
         return -1;
     }
+#endif
 }
 
 /**

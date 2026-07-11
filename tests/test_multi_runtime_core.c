@@ -163,6 +163,64 @@ typedef struct multi_blocking_isolation_state {
     char first_case[64];
 } multi_blocking_isolation_state_t;
 
+typedef struct explicit_embedding_shutdown_state {
+    atomic_uint sleeper_entered;
+    atomic_uint sleeper_errno;
+    atomic_uint stopper_failed;
+    int stopper_errno;
+} explicit_embedding_shutdown_state_t;
+
+typedef struct explicit_embedding_cancel_state {
+    llam_cancel_token_t *token;
+    atomic_uint failures;
+    atomic_uint waiter_entered;
+    atomic_uint waiter_errno;
+    atomic_uint canceller_done;
+    int first_errno;
+} explicit_embedding_cancel_state_t;
+
+typedef struct explicit_embedding_channel_state {
+    llam_channel_t *channel;
+    uintptr_t payload;
+    atomic_uint failures;
+    atomic_uint receiver_entered;
+    atomic_uint received;
+    int first_errno;
+} explicit_embedding_channel_state_t;
+
+#define EXPLICIT_SELECT_FANOUT 5U
+
+typedef struct explicit_embedding_select_state {
+    llam_channel_t *channels[EXPLICIT_SELECT_FANOUT];
+    atomic_uint waiters_ready;
+    atomic_uint selected_count;
+    atomic_uint selected_sum;
+    atomic_uint trigger_done;
+    atomic_uint failures;
+    int first_errno;
+} explicit_embedding_select_state_t;
+
+typedef struct explicit_embedding_blocking_state {
+    atomic_uint callback_started;
+    atomic_uint callback_done;
+    atomic_uint task_done;
+    atomic_uint failures;
+    int first_errno;
+} explicit_embedding_blocking_state_t;
+
+#if LLAM_PLATFORM_POSIX
+typedef struct explicit_embedding_io_state {
+    int read_fd;
+    int write_fd;
+    unsigned char payload;
+    atomic_uint reader_entered;
+    atomic_uint reader_done;
+    atomic_uint writer_done;
+    atomic_uint failures;
+    int first_errno;
+} explicit_embedding_io_state_t;
+#endif
+
 #if LLAM_PLATFORM_POSIX
 #define HOST_TRY_RACE_ITERS 4000U
 
@@ -433,13 +491,13 @@ static int write_all_native(int fd, const void *data, size_t len) {
     }
     return 0;
 }
-#endif
 
 static void owned_buffer_task_fail(explicit_owned_buffer_state_t *state, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
         state->first_errno = err;
     }
 }
+#endif
 
 static void post_destroy_cleanup_task_fail(post_destroy_cleanup_state_t *state, int err) {
     if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
@@ -848,6 +906,7 @@ cleanup:
     }
 }
 
+#if LLAM_PLATFORM_POSIX
 static void io_client_task(void *arg) {
     multi_io_state_t *state = arg;
     unsigned char value = 0U;
@@ -889,6 +948,7 @@ static void explicit_owned_buffer_reader_task(void *arg) {
     }
     atomic_fetch_add_explicit(&state->produced, 1U, memory_order_relaxed);
 }
+#endif
 
 #if LLAM_PLATFORM_POSIX
 static void io_destroy_cancel_read_task(void *arg) {
@@ -1006,6 +1066,219 @@ static void multi_blocking_peer_task(void *arg) {
     atomic_store_explicit(&state->b_task_done, 1U, memory_order_release);
     atomic_store_explicit(&state->a_can_finish, 1U, memory_order_release);
 }
+
+static void explicit_embedding_shutdown_sleeper_task(void *arg) {
+    explicit_embedding_shutdown_state_t *state = arg;
+
+    atomic_store_explicit(&state->sleeper_entered, 1U, memory_order_release);
+    if (llam_sleep_ns(1000000000ULL) != 0) {
+        atomic_store_explicit(&state->sleeper_errno, (unsigned)errno, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->sleeper_errno, 0U, memory_order_release);
+}
+
+static void explicit_embedding_shutdown_stopper_task(void *arg) {
+    explicit_embedding_shutdown_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->sleeper_entered, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    (void)llam_sleep_ns(1000000ULL);
+    if (llam_runtime_request_stop() != 0) {
+        state->stopper_errno = errno;
+        atomic_store_explicit(&state->stopper_failed, 1U, memory_order_release);
+    }
+}
+
+static void explicit_embedding_cancel_token_creator_task(void *arg) {
+    explicit_embedding_cancel_state_t *state = arg;
+
+    state->token = llam_cancel_token_create();
+    if (state->token == NULL &&
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = errno;
+    }
+}
+
+static void explicit_embedding_cancel_waiter_task(void *arg) {
+    explicit_embedding_cancel_state_t *state = arg;
+
+    atomic_store_explicit(&state->waiter_entered, 1U, memory_order_release);
+    if (llam_sleep_ns(1000000000ULL) != 0) {
+        atomic_store_explicit(&state->waiter_errno, (unsigned)errno, memory_order_release);
+        return;
+    }
+    atomic_store_explicit(&state->waiter_errno, 0U, memory_order_release);
+}
+
+static void explicit_embedding_cancel_requester_task(void *arg) {
+    explicit_embedding_cancel_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->waiter_entered, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    (void)llam_sleep_ns(1000000ULL);
+    if (llam_cancel_token_cancel(state->token) != 0 &&
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = errno;
+        return;
+    }
+    atomic_store_explicit(&state->canceller_done, 1U, memory_order_release);
+}
+
+static void explicit_embedding_channel_creator_task(void *arg) {
+    explicit_embedding_channel_state_t *state = arg;
+
+    state->channel = llam_channel_create(1U);
+    if (state->channel == NULL &&
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = errno;
+    }
+}
+
+static void explicit_embedding_channel_receiver_task(void *arg) {
+    explicit_embedding_channel_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + 200000000ULL;
+    void *out = NULL;
+
+    atomic_store_explicit(&state->receiver_entered, 1U, memory_order_release);
+    if (llam_channel_recv_until_result(state->channel, deadline_ns, &out) != 0 ||
+        (uintptr_t)out != state->payload) {
+        if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+            state->first_errno = errno != 0 ? errno : EPROTO;
+        }
+        return;
+    }
+    atomic_store_explicit(&state->received, 1U, memory_order_release);
+}
+
+static void explicit_embedding_channel_sender_task(void *arg) {
+    explicit_embedding_channel_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->receiver_entered, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    (void)llam_sleep_ns(1000000ULL);
+    if (llam_channel_send(state->channel, (void *)state->payload) != 0 &&
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = errno;
+    }
+}
+
+static void explicit_embedding_select_creator_task(void *arg) {
+    explicit_embedding_select_state_t *state = arg;
+
+    for (unsigned i = 0U; i < EXPLICIT_SELECT_FANOUT; ++i) {
+        state->channels[i] = llam_channel_create(1U);
+        if (state->channels[i] == NULL &&
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+            state->first_errno = errno;
+            return;
+        }
+    }
+}
+
+static void explicit_embedding_select_waiter_task(void *arg) {
+    explicit_embedding_select_state_t *state = arg;
+    llam_select_op_t ops[EXPLICIT_SELECT_FANOUT];
+    void *outs[EXPLICIT_SELECT_FANOUT];
+    size_t selected = SIZE_MAX;
+    uint64_t deadline_ns = llam_now_ns() + 300000000ULL;
+
+    memset(ops, 0, sizeof(ops));
+    memset(outs, 0, sizeof(outs));
+    for (unsigned i = 0U; i < EXPLICIT_SELECT_FANOUT; ++i) {
+        ops[i].kind = LLAM_SELECT_OP_RECV;
+        ops[i].channel = state->channels[i];
+        ops[i].recv_out = &outs[i];
+    }
+    atomic_fetch_add_explicit(&state->waiters_ready, 1U, memory_order_acq_rel);
+    if (llam_channel_select(ops, EXPLICIT_SELECT_FANOUT, deadline_ns, &selected) != 0 ||
+        selected >= EXPLICIT_SELECT_FANOUT ||
+        ops[selected].result_errno != 0 ||
+        outs[selected] == NULL) {
+        if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+            state->first_errno = errno != 0 ? errno : EPROTO;
+        }
+        return;
+    }
+    atomic_fetch_add_explicit(&state->selected_count, 1U, memory_order_acq_rel);
+    atomic_fetch_add_explicit(&state->selected_sum, (unsigned)(uintptr_t)outs[selected], memory_order_acq_rel);
+}
+
+static void explicit_embedding_select_trigger_task(void *arg) {
+    explicit_embedding_select_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->waiters_ready, memory_order_acquire) < EXPLICIT_SELECT_FANOUT) {
+        llam_yield();
+    }
+    (void)llam_sleep_ns(1000000ULL);
+    for (unsigned i = 0U; i < EXPLICIT_SELECT_FANOUT; ++i) {
+        uintptr_t payload = (uintptr_t)(i + 1U);
+
+        if (llam_channel_send(state->channels[i], (void *)payload) != 0 &&
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+            state->first_errno = errno;
+            return;
+        }
+    }
+    atomic_store_explicit(&state->trigger_done, 1U, memory_order_release);
+}
+
+static void *explicit_embedding_blocking_callback(void *arg) {
+    explicit_embedding_blocking_state_t *state = arg;
+
+    atomic_store_explicit(&state->callback_started, 1U, memory_order_release);
+    atomic_store_explicit(&state->callback_done, 1U, memory_order_release);
+    return state;
+}
+
+static void explicit_embedding_blocking_task(void *arg) {
+    explicit_embedding_blocking_state_t *state = arg;
+    void *out = NULL;
+
+    if (llam_call_blocking_result(explicit_embedding_blocking_callback, state, &out) != 0 ||
+        out != state) {
+        if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+            state->first_errno = errno != 0 ? errno : EPROTO;
+        }
+        return;
+    }
+    atomic_store_explicit(&state->task_done, 1U, memory_order_release);
+}
+
+#if LLAM_PLATFORM_POSIX
+static void explicit_embedding_io_reader_task(void *arg) {
+    explicit_embedding_io_state_t *state = arg;
+    unsigned char byte = 0U;
+
+    atomic_store_explicit(&state->reader_entered, 1U, memory_order_release);
+    if (llam_read(state->read_fd, &byte, 1U) != 1 || byte != state->payload) {
+        if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+            state->first_errno = errno != 0 ? errno : EPROTO;
+        }
+        return;
+    }
+    atomic_store_explicit(&state->reader_done, 1U, memory_order_release);
+}
+
+static void explicit_embedding_io_writer_task(void *arg) {
+    explicit_embedding_io_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->reader_entered, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    (void)llam_sleep_ns(1000000ULL);
+    if (llam_write(state->write_fd, &state->payload, 1U) != 1) {
+        if (atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed) == 0U) {
+            state->first_errno = errno != 0 ? errno : EPROTO;
+        }
+        return;
+    }
+    atomic_store_explicit(&state->writer_done, 1U, memory_order_release);
+}
+#endif
 
 #if LLAM_PLATFORM_POSIX
 static void *run_runtime_thread(void *arg) {
@@ -3060,7 +3333,8 @@ static int test_unmanaged_join_races_runtime_destroy(void) {
         }
         if (state.join_errno != EINVAL &&
             state.join_errno != ETIMEDOUT &&
-            state.join_errno != ECANCELED) {
+            state.join_errno != ECANCELED &&
+            state.join_errno != EXDEV) {
             errno = state.join_errno;
             return test_fail_errno("unmanaged join/destroy race returned unexpected errno");
         }
@@ -3602,6 +3876,437 @@ cleanup:
     return rc;
 }
 
+static int test_explicit_embedding_shutdown_path(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *sleeper = NULL;
+    llam_task_t *stopper = NULL;
+    explicit_embedding_shutdown_state_t state;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.sleeper_entered, 0U);
+    atomic_init(&state.sleeper_errno, 0U);
+    atomic_init(&state.stopper_failed, 0U);
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("explicit embedding shutdown runtime create failed");
+    }
+    sleeper = llam_runtime_spawn_ex(runtime, explicit_embedding_shutdown_sleeper_task, &state, NULL, 0U);
+    stopper = llam_runtime_spawn_ex(runtime, explicit_embedding_shutdown_stopper_task, &state, NULL, 0U);
+    if (sleeper == NULL || stopper == NULL) {
+        rc = test_fail_errno("explicit embedding shutdown spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0) {
+        rc = test_fail_errno("explicit embedding shutdown run failed");
+        goto cleanup;
+    }
+    if (llam_join(stopper) != 0 || llam_join(sleeper) != 0) {
+        rc = test_fail_errno("explicit embedding shutdown join failed");
+        stopper = NULL;
+        sleeper = NULL;
+        goto cleanup;
+    }
+    stopper = NULL;
+    sleeper = NULL;
+    if (atomic_load_explicit(&state.stopper_failed, memory_order_acquire) != 0U) {
+        errno = state.stopper_errno;
+        rc = test_fail_errno("explicit embedding shutdown stop request failed");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&state.sleeper_errno, memory_order_acquire) != (unsigned)ECANCELED) {
+        rc = test_fail("explicit embedding shutdown did not cancel parked sleeper");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (stopper != NULL) {
+        (void)llam_detach(stopper);
+    }
+    if (sleeper != NULL) {
+        (void)llam_detach(sleeper);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int test_explicit_embedding_cancellation_path(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *creator = NULL;
+    llam_task_t *waiter = NULL;
+    llam_task_t *canceller = NULL;
+    explicit_embedding_cancel_state_t state;
+    llam_spawn_opts_t spawn_opts;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.waiter_entered, 0U);
+    atomic_init(&state.waiter_errno, 0U);
+    atomic_init(&state.canceller_done, 0U);
+    if (init_runtime_opts(&opts) != 0 ||
+        llam_spawn_opts_init(&spawn_opts, LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("explicit embedding cancellation opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("explicit embedding cancellation runtime create failed");
+    }
+    creator = llam_runtime_spawn_ex(runtime, explicit_embedding_cancel_token_creator_task, &state, NULL, 0U);
+    if (creator == NULL ||
+        llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(creator) != 0 ||
+        state.token == NULL ||
+        atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        creator = NULL;
+        errno = state.first_errno != 0 ? state.first_errno : errno;
+        rc = test_fail_errno("explicit embedding cancellation token setup failed");
+        goto cleanup;
+    }
+    creator = NULL;
+
+    spawn_opts.cancel_token = state.token;
+    waiter = llam_runtime_spawn_ex(runtime,
+                                   explicit_embedding_cancel_waiter_task,
+                                   &state,
+                                   &spawn_opts,
+                                   LLAM_SPAWN_OPTS_CURRENT_SIZE);
+    canceller = llam_runtime_spawn_ex(runtime, explicit_embedding_cancel_requester_task, &state, NULL, 0U);
+    if (waiter == NULL || canceller == NULL) {
+        rc = test_fail_errno("explicit embedding cancellation spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(canceller) != 0 ||
+        llam_join(waiter) != 0) {
+        canceller = NULL;
+        waiter = NULL;
+        rc = test_fail_errno("explicit embedding cancellation run/join failed");
+        goto cleanup;
+    }
+    canceller = NULL;
+    waiter = NULL;
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        errno = state.first_errno;
+        rc = test_fail_errno("explicit embedding cancellation task failed");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&state.canceller_done, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.waiter_errno, memory_order_acquire) != (unsigned)ECANCELED) {
+        rc = test_fail("explicit embedding cancellation did not wake token waiter");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (canceller != NULL) {
+        (void)llam_detach(canceller);
+    }
+    if (waiter != NULL) {
+        (void)llam_detach(waiter);
+    }
+    if (creator != NULL) {
+        (void)llam_detach(creator);
+    }
+    if (state.token != NULL) {
+        (void)llam_cancel_token_destroy(state.token);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int test_explicit_embedding_channel_lost_wakeup(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *creator = NULL;
+    llam_task_t *receiver = NULL;
+    llam_task_t *sender = NULL;
+    explicit_embedding_channel_state_t state;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.payload = (uintptr_t)0xC0FFEEU;
+    atomic_init(&state.failures, 0U);
+    atomic_init(&state.receiver_entered, 0U);
+    atomic_init(&state.received, 0U);
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("explicit embedding wakeup runtime create failed");
+    }
+    creator = llam_runtime_spawn_ex(runtime, explicit_embedding_channel_creator_task, &state, NULL, 0U);
+    if (creator == NULL ||
+        llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(creator) != 0 ||
+        state.channel == NULL ||
+        atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        creator = NULL;
+        errno = state.first_errno != 0 ? state.first_errno : errno;
+        rc = test_fail_errno("explicit embedding wakeup channel setup failed");
+        goto cleanup;
+    }
+    creator = NULL;
+
+    receiver = llam_runtime_spawn_ex(runtime, explicit_embedding_channel_receiver_task, &state, NULL, 0U);
+    sender = llam_runtime_spawn_ex(runtime, explicit_embedding_channel_sender_task, &state, NULL, 0U);
+    if (receiver == NULL || sender == NULL) {
+        rc = test_fail_errno("explicit embedding wakeup spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(sender) != 0 ||
+        llam_join(receiver) != 0) {
+        sender = NULL;
+        receiver = NULL;
+        rc = test_fail_errno("explicit embedding wakeup run/join failed");
+        goto cleanup;
+    }
+    sender = NULL;
+    receiver = NULL;
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.received, memory_order_acquire) != 1U) {
+        errno = state.first_errno;
+        rc = test_fail_errno("explicit embedding channel wakeup regression failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (sender != NULL) {
+        (void)llam_detach(sender);
+    }
+    if (receiver != NULL) {
+        (void)llam_detach(receiver);
+    }
+    if (creator != NULL) {
+        (void)llam_detach(creator);
+    }
+    if (state.channel != NULL) {
+        (void)llam_channel_destroy(state.channel);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int test_explicit_embedding_select_fanout(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *creator = NULL;
+    llam_task_t *waiters[EXPLICIT_SELECT_FANOUT];
+    llam_task_t *trigger = NULL;
+    explicit_embedding_select_state_t state;
+    unsigned expected_sum = 0U;
+    int rc = 1;
+
+    memset(waiters, 0, sizeof(waiters));
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.waiters_ready, 0U);
+    atomic_init(&state.selected_count, 0U);
+    atomic_init(&state.selected_sum, 0U);
+    atomic_init(&state.trigger_done, 0U);
+    atomic_init(&state.failures, 0U);
+    for (unsigned i = 0U; i < EXPLICIT_SELECT_FANOUT; ++i) {
+        expected_sum += i + 1U;
+    }
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("explicit embedding select runtime create failed");
+    }
+    creator = llam_runtime_spawn_ex(runtime, explicit_embedding_select_creator_task, &state, NULL, 0U);
+    if (creator == NULL ||
+        llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(creator) != 0 ||
+        atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U) {
+        creator = NULL;
+        errno = state.first_errno != 0 ? state.first_errno : errno;
+        rc = test_fail_errno("explicit embedding select channel setup failed");
+        goto cleanup;
+    }
+    creator = NULL;
+
+    for (unsigned i = 0U; i < EXPLICIT_SELECT_FANOUT; ++i) {
+        waiters[i] = llam_runtime_spawn_ex(runtime, explicit_embedding_select_waiter_task, &state, NULL, 0U);
+        if (waiters[i] == NULL) {
+            rc = test_fail_errno("explicit embedding select waiter spawn failed");
+            goto cleanup;
+        }
+    }
+    trigger = llam_runtime_spawn_ex(runtime, explicit_embedding_select_trigger_task, &state, NULL, 0U);
+    if (trigger == NULL) {
+        rc = test_fail_errno("explicit embedding select trigger spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(trigger) != 0) {
+        trigger = NULL;
+        rc = test_fail_errno("explicit embedding select run/trigger join failed");
+        goto cleanup;
+    }
+    trigger = NULL;
+    for (unsigned i = 0U; i < EXPLICIT_SELECT_FANOUT; ++i) {
+        if (llam_join(waiters[i]) != 0) {
+            rc = test_fail_errno("explicit embedding select waiter join failed");
+            goto cleanup;
+        }
+        waiters[i] = NULL;
+    }
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.trigger_done, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.selected_count, memory_order_acquire) != EXPLICIT_SELECT_FANOUT ||
+        atomic_load_explicit(&state.selected_sum, memory_order_acquire) != expected_sum) {
+        errno = state.first_errno;
+        rc = test_fail_errno("explicit embedding select fanout failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (trigger != NULL) {
+        (void)llam_detach(trigger);
+    }
+    for (unsigned i = 0U; i < EXPLICIT_SELECT_FANOUT; ++i) {
+        if (waiters[i] != NULL) {
+            (void)llam_detach(waiters[i]);
+        }
+        if (state.channels[i] != NULL) {
+            (void)llam_channel_destroy(state.channels[i]);
+        }
+    }
+    if (creator != NULL) {
+        (void)llam_detach(creator);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int test_explicit_embedding_blocking_helper(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    explicit_embedding_blocking_state_t state;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.callback_started, 0U);
+    atomic_init(&state.callback_done, 0U);
+    atomic_init(&state.task_done, 0U);
+    atomic_init(&state.failures, 0U);
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("explicit embedding blocking runtime create failed");
+    }
+    task = llam_runtime_spawn_ex(runtime, explicit_embedding_blocking_task, &state, NULL, 0U);
+    if (task == NULL) {
+        rc = test_fail_errno("explicit embedding blocking spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
+        task = NULL;
+        rc = test_fail_errno("explicit embedding blocking run/join failed");
+        goto cleanup;
+    }
+    task = NULL;
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.callback_started, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.callback_done, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.task_done, memory_order_acquire) != 1U) {
+        errno = state.first_errno;
+        rc = test_fail_errno("explicit embedding blocking helper failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int test_explicit_embedding_io_ownership(void) {
+#if LLAM_PLATFORM_POSIX
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *reader = NULL;
+    llam_task_t *writer = NULL;
+    explicit_embedding_io_state_t state;
+    int sv[2] = {-1, -1};
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.read_fd = -1;
+    state.write_fd = -1;
+    state.payload = 0x9bU;
+    atomic_init(&state.reader_entered, 0U);
+    atomic_init(&state.reader_done, 0U);
+    atomic_init(&state.writer_done, 0U);
+    atomic_init(&state.failures, 0U);
+    if (init_runtime_opts(&opts) != 0) {
+        return test_fail_errno("runtime opts init failed");
+    }
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        return test_fail_errno("explicit embedding I/O socketpair failed");
+    }
+    state.read_fd = sv[0];
+    state.write_fd = sv[1];
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        rc = test_fail_errno("explicit embedding I/O runtime create failed");
+        goto cleanup;
+    }
+    reader = llam_runtime_spawn_ex(runtime, explicit_embedding_io_reader_task, &state, NULL, 0U);
+    writer = llam_runtime_spawn_ex(runtime, explicit_embedding_io_writer_task, &state, NULL, 0U);
+    if (reader == NULL || writer == NULL) {
+        rc = test_fail_errno("explicit embedding I/O spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(writer) != 0 ||
+        llam_join(reader) != 0) {
+        writer = NULL;
+        reader = NULL;
+        rc = test_fail_errno("explicit embedding I/O run/join failed");
+        goto cleanup;
+    }
+    writer = NULL;
+    reader = NULL;
+    if (atomic_load_explicit(&state.failures, memory_order_relaxed) != 0U ||
+        atomic_load_explicit(&state.reader_done, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.writer_done, memory_order_acquire) != 1U) {
+        errno = state.first_errno;
+        rc = test_fail_errno("explicit embedding I/O owner path failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (writer != NULL) {
+        (void)llam_detach(writer);
+    }
+    if (reader != NULL) {
+        (void)llam_detach(reader);
+    }
+    if (sv[0] >= 0) {
+        close(sv[0]);
+    }
+    if (sv[1] >= 0) {
+        close(sv[1]);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
+#else
+    return 0;
+#endif
+}
+
 static int test_concurrent_blocking_pool_isolation(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime_a = NULL;
@@ -3713,6 +4418,12 @@ int main(void) {
         {"explicit_channel_drain_after_owner_runtime_destroy", test_explicit_channel_drain_after_owner_runtime_destroy},
         {"legacy_stop_wrappers_target_current_runtime", test_legacy_stop_wrappers_target_current_runtime},
         {"managed_destroy_foreign_runtime_does_not_stop_peer", test_managed_destroy_foreign_runtime_does_not_stop_peer},
+        {"explicit_embedding_shutdown_path", test_explicit_embedding_shutdown_path},
+        {"explicit_embedding_cancellation_path", test_explicit_embedding_cancellation_path},
+        {"explicit_embedding_channel_lost_wakeup", test_explicit_embedding_channel_lost_wakeup},
+        {"explicit_embedding_select_fanout", test_explicit_embedding_select_fanout},
+        {"explicit_embedding_blocking_helper", test_explicit_embedding_blocking_helper},
+        {"explicit_embedding_io_ownership", test_explicit_embedding_io_ownership},
         {"concurrent_blocking_pool_isolation", test_concurrent_blocking_pool_isolation},
     };
     size_t i;

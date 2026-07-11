@@ -121,6 +121,12 @@ void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch)
 void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *watch);
 void llam_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
 void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *watch);
+void llam_poll_watch_pin_locked(llam_poll_watch_t *watch);
+void llam_poll_watch_unpin_locked(llam_node_t *node, llam_poll_watch_t *watch);
+void llam_accept_watch_pin_locked(llam_accept_watch_t *watch);
+void llam_accept_watch_unpin_locked(llam_node_t *node, llam_accept_watch_t *watch);
+void llam_recv_watch_pin_locked(llam_recv_watch_t *watch);
+void llam_recv_watch_unpin_locked(llam_node_t *node, llam_recv_watch_t *watch);
 bool llam_darwin_accept_completion_push(llam_darwin_accept_completion_t **head,
                                       llam_darwin_accept_completion_t **tail,
                                       llam_io_req_t *req,
@@ -221,6 +227,8 @@ void llam_darwin_handle_accept_watch_event(llam_node_t *node, llam_accept_watch_
 void llam_darwin_handle_recv_watch_event(llam_node_t *node, llam_recv_watch_t *watch);
 void llam_darwin_handle_req_event(llam_node_t *node, llam_io_req_t *req, const struct kevent *event);
 void llam_darwin_submit_req(llam_node_t *node, llam_io_req_t *req);
+void llam_darwin_pin_event_batch(llam_node_t *node, struct kevent *events, unsigned count);
+void llam_darwin_unpin_event_batch(llam_node_t *node, const struct kevent *events, unsigned count);
 
 unsigned llam_watch_migration_target_index(llam_runtime_t *rt,
                                          unsigned fallback_target_index,

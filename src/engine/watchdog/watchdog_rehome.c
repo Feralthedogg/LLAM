@@ -25,6 +25,25 @@
 
 #include "engine/runtime_watchdog_internal.h"
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static llam_submit_evacuation_unlocked_hook_fn
+    g_llam_submit_evacuation_unlocked_hook;
+
+void llam_io_test_set_submit_evacuation_unlocked_hook(
+    llam_submit_evacuation_unlocked_hook_fn hook) {
+    g_llam_submit_evacuation_unlocked_hook = hook;
+}
+
+static void llam_io_test_submit_evacuation_unlocked(void) {
+    if (g_llam_submit_evacuation_unlocked_hook != NULL) {
+        g_llam_submit_evacuation_unlocked_hook();
+    }
+}
+#else
+static void llam_io_test_submit_evacuation_unlocked(void) {
+}
+#endif
+
 /**
  * @brief Decide whether source shard timers can be merged.
  *
@@ -168,7 +187,9 @@ static bool llam_task_can_rehome_io_wait(const llam_shard_t *source,
         task->parked_shard != source->id) {
         return false;
     }
-    if (llam_task_active_io_req_load(task) != req || req->owner_shard != source->id) {
+    if (llam_task_active_io_req_load(task) != req ||
+        atomic_load_explicit(&req->owner_shard,
+                             memory_order_acquire) != source->id) {
         return false;
     }
     // Wait mode guards against moving a request from the wrong backend list.
@@ -192,7 +213,9 @@ static void llam_rehome_io_wait_req(llam_shard_t *source, llam_shard_t *target, 
     task = req->task;
     // Completion paths read both task->parked_shard and req->owner_shard.
     task->parked_shard = target->id;
-    req->owner_shard = target->id;
+    atomic_store_explicit(&req->owner_shard,
+                          target->id,
+                          memory_order_release);
     llam_merge_rehome_task(source, target, task);
 }
 
@@ -233,7 +256,9 @@ void llam_rehome_inflight_io_waiters(llam_runtime_t *rt, llam_shard_t *source, l
                 continue;
             }
             task->parked_shard = target->id;
-            req->owner_shard = target->id;
+            atomic_store_explicit(&req->owner_shard,
+                                  target->id,
+                                  memory_order_release);
             llam_merge_rehome_task(source, target, task);
             migrated += 1U;
         }
@@ -278,7 +303,8 @@ static bool llam_rehome_io_waiter_list(llam_shard_t *source,
     // Validate the whole list first so a single bad waiter cannot leave a
     // partially rehomed submit/watch queue behind.
     for (req = head; req != NULL; req = req->next) {
-        if (req->owner_shard != source->id) {
+        if (atomic_load_explicit(&req->owner_shard,
+                                 memory_order_acquire) != source->id) {
             continue;
         }
         if (!llam_task_can_rehome_io_wait(source, target, req->task, req, expected_mode)) {
@@ -287,7 +313,8 @@ static bool llam_rehome_io_waiter_list(llam_shard_t *source,
     }
 
     for (req = head; req != NULL; req = req->next) {
-        if (req->owner_shard != source->id) {
+        if (atomic_load_explicit(&req->owner_shard,
+                                 memory_order_acquire) != source->id) {
             continue;
         }
         llam_rehome_io_wait_req(source, target, req);
@@ -315,7 +342,8 @@ static bool llam_io_waiters_all_owned_by_shard(const llam_io_req_t *head, unsign
         return false;
     }
     for (req = head; req != NULL; req = req->next) {
-        if (req->owner_shard != shard_id) {
+        if (atomic_load_explicit(&req->owner_shard,
+                                 memory_order_acquire) != shard_id) {
             return false;
         }
     }
@@ -398,13 +426,15 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
     llam_node_t *target_locked;
     llam_io_req_t *prev = NULL;
     llam_io_req_t *cur;
+    unsigned eligible = 0U;
     unsigned migrated = 0U;
 
     if (migrated_out != NULL) {
         *migrated_out = 0U;
     }
     if (source_node == NULL || target_node == NULL || source_shard == NULL || target_shard == NULL ||
-        source_node == target_node) {
+        source_node == target_node || source_node->runtime == NULL ||
+        source_node->runtime != target_node->runtime) {
         return false;
     }
 
@@ -418,14 +448,45 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
     for (cur = source_locked->submit_head; cur != NULL; cur = cur->next) {
         llam_task_t *task = cur->task;
 
-        if (cur->owner_shard != target_shard->id || cur->attached_node_index != source_locked->index) {
+        if (atomic_load_explicit(&cur->owner_shard,
+                                 memory_order_acquire) != target_shard->id ||
+            atomic_load_explicit(&cur->attached_node_index,
+                                 memory_order_acquire) != source_locked->index) {
             continue;
         }
         if (task == NULL || task->state != LLAM_TASK_STATE_PARKED ||
             (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) != LLAM_WAIT_IO ||
             task->parked_shard != target_shard->id || llam_task_active_io_req_load(task) != cur ||
             atomic_load_explicit(&cur->wait_mode, memory_order_acquire) != (unsigned)LLAM_IO_WAIT_MODE_SUBMIT_QUEUE ||
+            cur->owner_runtime != target_locked->runtime ||
             !llam_node_supports_submit_req(target_locked, cur)) {
+            pthread_mutex_unlock(&second->submit_lock);
+            pthread_mutex_unlock(&first->submit_lock);
+            return false;
+        }
+        if (eligible == UINT_MAX) {
+            llam_record_fatal_deferred(source_locked->runtime, EOVERFLOW);
+            pthread_mutex_unlock(&second->submit_lock);
+            pthread_mutex_unlock(&first->submit_lock);
+            return false;
+        }
+        eligible += 1U;
+    }
+
+    if (eligible > 0U) {
+        /*
+         * Queue ownership and pending credits must move atomically with
+         * respect to cancellation's all-submit-lock detach. Reserve target
+         * capacity first, then consume the matching source credits; roll back
+         * the reservation if corrupted source accounting cannot be consumed.
+         */
+        if (!llam_node_note_pending_ops(target_locked, eligible)) {
+            pthread_mutex_unlock(&second->submit_lock);
+            pthread_mutex_unlock(&first->submit_lock);
+            return false;
+        }
+        if (!llam_node_complete_pending_ops(source_locked, eligible)) {
+            (void)llam_node_complete_pending_ops(target_locked, eligible);
             pthread_mutex_unlock(&second->submit_lock);
             pthread_mutex_unlock(&first->submit_lock);
             return false;
@@ -436,7 +497,10 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
     while (cur != NULL) {
         llam_io_req_t *next = cur->next;
 
-        if (cur->owner_shard != target_shard->id || cur->attached_node_index != source_locked->index) {
+        if (atomic_load_explicit(&cur->owner_shard,
+                                 memory_order_acquire) != target_shard->id ||
+            atomic_load_explicit(&cur->attached_node_index,
+                                 memory_order_acquire) != source_locked->index) {
             prev = cur;
             cur = next;
             continue;
@@ -451,19 +515,24 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
         }
         cur->next = NULL;
         // The request is already target-shard-owned; now move node ownership too.
-        cur->attached_node_index = target_locked->index;
-        llam_queue_node_submit_locked(target_locked, cur);
+        atomic_store_explicit(&cur->attached_node_index,
+                              target_locked->index,
+                              memory_order_release);
+        if (!llam_queue_node_submit_locked(target_locked, cur)) {
+            /* Prevalidated same-runtime ownership makes failure impossible. */
+            abort();
+        }
         migrated += 1U;
         cur = next;
     }
 
     pthread_mutex_unlock(&second->submit_lock);
     pthread_mutex_unlock(&first->submit_lock);
+    llam_io_test_submit_evacuation_unlocked();
 
     if (migrated > 0U) {
-        if (!llam_node_complete_pending_ops(source_node, migrated) ||
-            !llam_node_note_pending_ops(target_node, migrated)) {
-            return false;
+        if (migrated != eligible) {
+            abort();
         }
         source_shard->metrics.migrations += migrated;
     }

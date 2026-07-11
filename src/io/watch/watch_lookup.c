@@ -100,6 +100,54 @@ static bool llam_accept_watch_identity_matches(const llam_accept_watch_t *watch,
            memcmp(&watch->local_addr, local_addr, (size_t)local_addrlen) == 0;
 }
 
+void llam_poll_watch_pin_locked(llam_poll_watch_t *watch) {
+    if (watch != NULL && watch->lifetime_refs < UINT_MAX) {
+        watch->lifetime_refs += 1U;
+    }
+}
+
+void llam_accept_watch_pin_locked(llam_accept_watch_t *watch) {
+    if (watch != NULL && watch->lifetime_refs < UINT_MAX) {
+        watch->lifetime_refs += 1U;
+    }
+}
+
+void llam_recv_watch_pin_locked(llam_recv_watch_t *watch) {
+    if (watch != NULL && watch->lifetime_refs < UINT_MAX) {
+        watch->lifetime_refs += 1U;
+    }
+}
+
+void llam_poll_watch_unpin_locked(llam_node_t *node, llam_poll_watch_t *watch) {
+    if (watch == NULL || watch->lifetime_refs == 0U) {
+        return;
+    }
+    watch->lifetime_refs -= 1U;
+    if (watch->lifetime_refs == 0U && watch->destroy_pending) {
+        llam_destroy_poll_watch_locked(node, watch);
+    }
+}
+
+void llam_accept_watch_unpin_locked(llam_node_t *node, llam_accept_watch_t *watch) {
+    if (watch == NULL || watch->lifetime_refs == 0U) {
+        return;
+    }
+    watch->lifetime_refs -= 1U;
+    if (watch->lifetime_refs == 0U && watch->destroy_pending) {
+        llam_destroy_accept_watch_locked(node, watch);
+    }
+}
+
+void llam_recv_watch_unpin_locked(llam_node_t *node, llam_recv_watch_t *watch) {
+    if (watch == NULL || watch->lifetime_refs == 0U) {
+        return;
+    }
+    watch->lifetime_refs -= 1U;
+    if (watch->lifetime_refs == 0U && watch->destroy_pending) {
+        llam_destroy_recv_watch_locked(node, watch);
+    }
+}
+
 /**
  * @brief Find an existing poll watch while watch_lock is held.
  *
@@ -119,7 +167,13 @@ llam_poll_watch_t *llam_find_poll_watch_locked(llam_node_t *node, int fd, short 
 
     watch = node->poll_watches;
     while (watch != NULL) {
-        if (watch->fd == fd && watch->events == events && watch->st_dev == st_dev && watch->st_ino == st_ino) {
+        if (!watch->retired &&
+            !watch->destroy_pending &&
+            watch->accepts_waiters &&
+            watch->fd == fd &&
+            watch->events == events &&
+            watch->st_dev == st_dev &&
+            watch->st_ino == st_ino) {
             return watch;
         }
         watch = watch->next;
@@ -154,7 +208,10 @@ llam_accept_watch_t *llam_find_accept_watch_locked(llam_node_t *node, int fd) {
 
     watch = node->accept_watches;
     while (watch != NULL) {
-        if (llam_accept_watch_identity_matches(watch,
+        if (!watch->retired &&
+            !watch->destroy_pending &&
+            watch->accepts_waiters &&
+            llam_accept_watch_identity_matches(watch,
                                                fd,
                                                st_dev,
                                                st_ino,
@@ -186,7 +243,12 @@ llam_recv_watch_t *llam_find_recv_watch_locked(llam_node_t *node, int fd, dev_t 
 
     watch = node->recv_watches;
     while (watch != NULL) {
-        if (watch->fd == fd && watch->st_dev == st_dev && watch->st_ino == st_ino) {
+        if (!watch->retired &&
+            !watch->destroy_pending &&
+            watch->accepts_waiters &&
+            watch->fd == fd &&
+            watch->st_dev == st_dev &&
+            watch->st_ino == st_ino) {
             return watch;
         }
         watch = watch->next;
@@ -213,7 +275,13 @@ llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int f
 
     watch = node->poll_watches;
     while (watch != NULL) {
-        if (watch->fd == fd && watch->events == events && watch->st_dev == st_dev && watch->st_ino == st_ino) {
+        if (!watch->retired &&
+            !watch->destroy_pending &&
+            watch->accepts_waiters &&
+            watch->fd == fd &&
+            watch->events == events &&
+            watch->st_dev == st_dev &&
+            watch->st_ino == st_ino) {
             return watch;
         }
         watch = watch->next;
@@ -228,6 +296,7 @@ llam_poll_watch_t *llam_get_or_create_poll_watch_locked(llam_node_t *node, int f
     watch->st_ino = st_ino;
     watch->events = events;
     watch->migrate_target_node_index = UINT_MAX;
+    watch->accepts_waiters = true;
     /*
      * A migrating source watch sets this once the target owns all user-facing
      * state; final backend events still arriving at the source are then
@@ -266,7 +335,10 @@ llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, i
 
     watch = node->accept_watches;
     while (watch != NULL) {
-        if (llam_accept_watch_identity_matches(watch,
+        if (!watch->retired &&
+            !watch->destroy_pending &&
+            watch->accepts_waiters &&
+            llam_accept_watch_identity_matches(watch,
                                                fd,
                                                st_dev,
                                                st_ino,
@@ -290,6 +362,7 @@ llam_accept_watch_t *llam_get_or_create_accept_watch_locked(llam_node_t *node, i
     watch->local_addrlen = local_addrlen;
     watch->has_local_addr = has_local_addr;
     watch->migrate_target_node_index = UINT_MAX;
+    watch->accepts_waiters = true;
     watch->live_transferred = false;
     watch->next = node->accept_watches;
     node->accept_watches = watch;
@@ -312,9 +385,17 @@ llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int f
         return NULL;
     }
 
-    watch = llam_find_recv_watch_locked(node, fd, st_dev, st_ino);
-    if (watch != NULL) {
-        return watch;
+    watch = node->recv_watches;
+    while (watch != NULL) {
+        if (!watch->retired &&
+            !watch->destroy_pending &&
+            watch->accepts_waiters &&
+            watch->fd == fd &&
+            watch->st_dev == st_dev &&
+            watch->st_ino == st_ino) {
+            return watch;
+        }
+        watch = watch->next;
     }
 
     watch = calloc(1, sizeof(*watch));
@@ -325,6 +406,7 @@ llam_recv_watch_t *llam_get_or_create_recv_watch_locked(llam_node_t *node, int f
     watch->st_dev = st_dev;
     watch->st_ino = st_ino;
     watch->migrate_target_node_index = UINT_MAX;
+    watch->accepts_waiters = true;
     watch->live_transferred = false;
     watch->next = node->recv_watches;
     node->recv_watches = watch;
@@ -347,6 +429,11 @@ void llam_destroy_poll_watch_locked(llam_node_t *node, llam_poll_watch_t *watch)
     cursor = &node->poll_watches;
     while (*cursor != NULL) {
         if (*cursor == watch) {
+            if (watch->lifetime_refs != 0U || watch->backend_refs != 0U ||
+                watch->active || watch->activating || watch->deactivate_queued) {
+                watch->destroy_pending = true;
+                return;
+            }
             *cursor = watch->next;
             free(watch);
             return;
@@ -371,6 +458,11 @@ void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *wa
     cursor = &node->accept_watches;
     while (*cursor != NULL) {
         if (*cursor == watch) {
+            if (watch->lifetime_refs != 0U || watch->backend_refs != 0U ||
+                watch->active || watch->activating || watch->deactivate_queued) {
+                watch->destroy_pending = true;
+                return;
+            }
             *cursor = watch->next;
             while (watch->ready_head != NULL) {
                 llam_accept_ready_t *next = watch->ready_head->next;
@@ -379,6 +471,8 @@ void llam_destroy_accept_watch_locked(llam_node_t *node, llam_accept_watch_t *wa
                 free(watch->ready_head);
                 watch->ready_head = next;
             }
+            watch->ready_tail = NULL;
+            watch->ready_depth = 0U;
             free(watch);
             return;
         }
@@ -396,10 +490,17 @@ void llam_maybe_destroy_recv_watch_locked(llam_node_t *node, llam_recv_watch_t *
     if (watch == NULL) {
         return;
     }
+    if (watch->retired || watch->destroy_pending) {
+        return;
+    }
     if (watch->active || watch->activating || watch->deactivate_queued) {
         return;
     }
     if (watch->wait_head != NULL || watch->ready_head != NULL) {
+        return;
+    }
+    if (watch->lifetime_refs != 0U || watch->backend_refs != 0U) {
+        watch->destroy_pending = true;
         return;
     }
     llam_destroy_recv_watch_locked(node, watch);

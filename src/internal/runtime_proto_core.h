@@ -332,6 +332,7 @@ int llam_task_group_join_child_handle(llam_task_t *task,
                                       uint64_t deadline_ns);
 int llam_runtime_write_stats_json_rt(llam_runtime_t *rt, int fd);
 void llam_record_fatal(llam_runtime_t *rt, int err);
+void llam_record_fatal_deferred(llam_runtime_t *rt, int err);
 void llam_request_stop(llam_runtime_t *rt);
 bool llam_runtime_has_live_tasks(llam_runtime_t *rt);
 unsigned llam_runtime_live_tasks(llam_runtime_t *rt);

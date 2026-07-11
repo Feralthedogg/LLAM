@@ -266,6 +266,7 @@ bool llam_broker_ring_session_take_mapping(llam_broker_ring_session_t *session,
 int llam_broker_ring_forget_session(llam_broker_t *broker,
                                     uint64_t session_id,
                                     uint64_t subject_id);
+bool llam_broker_reclaim_subject_rings(llam_broker_t *broker, uint64_t subject_id);
 int llam_broker_ring_serve_session(llam_broker_t *broker,
                                    uint64_t session_id,
                                    uint64_t subject_id);
@@ -287,9 +288,11 @@ void llam_broker_ring_clear_submission_output(llam_broker_ring_t *ring,
 void llam_broker_ring_execute_submission(llam_broker_t *broker,
                                          llam_broker_ring_t *ring,
                                          const llam_broker_ring_submission_t *submission,
-                                         llam_broker_ring_completion_t *completion);
+                                         llam_broker_ring_completion_t *completion,
+                                         llam_capability_token_t *out_created_task_token);
 
 bool llam_broker_ring_mapping_ring_valid(const llam_broker_ring_t *ring);
+int llam_broker_ring_mapping_require_fixed_extent(const llam_broker_ring_mapping_t *mapping);
 bool llam_broker_ring_name_valid(const char *name);
 int llam_broker_ring_private_name(char *out_name, size_t out_name_len);
 void llam_broker_ring_mapping_reset(llam_broker_ring_mapping_t *mapping);

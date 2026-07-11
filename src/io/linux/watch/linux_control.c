@@ -100,7 +100,8 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
         }
     } else {
         atomic_store_explicit(&req->inflight_owner_shard, UINT_MAX, memory_order_release);
-        completion_owner = req->owner_shard;
+        completion_owner = atomic_load_explicit(&req->owner_shard,
+                                                memory_order_acquire);
     }
     abort_reason = (llam_io_abort_reason_t)atomic_exchange(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_store(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
@@ -216,6 +217,9 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
             watch->activating = false;
             waiters = llam_poll_watch_take_waiters(watch);
             watch->sticky_revents = 0;
+            if (!watch->accepts_waiters || watch->destroy_pending) {
+                llam_destroy_poll_watch_locked(node, watch);
+            }
         }
         break;
     }
@@ -227,6 +231,9 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
             waiters = watch->wait_head;
             watch->wait_head = NULL;
             watch->wait_tail = NULL;
+            if (!watch->accepts_waiters || watch->destroy_pending) {
+                llam_destroy_accept_watch_locked(node, watch);
+            }
         }
         break;
     }
@@ -238,7 +245,11 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
             waiters = watch->wait_head;
             watch->wait_head = NULL;
             watch->wait_tail = NULL;
-            llam_maybe_destroy_recv_watch_locked(node, watch);
+            if (!watch->accepts_waiters || watch->destroy_pending) {
+                llam_destroy_recv_watch_locked(node, watch);
+            } else {
+                llam_maybe_destroy_recv_watch_locked(node, watch);
+            }
         }
         break;
     }
@@ -247,6 +258,9 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
 
         if (watch != NULL) {
             watch->deactivate_queued = false;
+            if (!watch->accepts_waiters && !watch->active && !watch->activating) {
+                llam_destroy_poll_watch_locked(node, watch);
+            }
         }
         break;
     }
@@ -255,6 +269,9 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
 
         if (watch != NULL) {
             watch->deactivate_queued = false;
+            if (!watch->accepts_waiters && !watch->active && !watch->activating) {
+                llam_destroy_accept_watch_locked(node, watch);
+            }
         }
         break;
     }
@@ -263,7 +280,11 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
 
         if (watch != NULL) {
             watch->deactivate_queued = false;
-            llam_maybe_destroy_recv_watch_locked(node, watch);
+            if (!watch->accepts_waiters && !watch->active && !watch->activating) {
+                llam_destroy_recv_watch_locked(node, watch);
+            } else {
+                llam_maybe_destroy_recv_watch_locked(node, watch);
+            }
         }
         break;
     }
@@ -292,7 +313,7 @@ static void llam_io_fail_control_op(llam_node_t *node, llam_io_control_op_t *op)
         llam_io_complete_req(node, waiters, error, 0U, false);
         waiters = next;
     }
-    free(op);
+    llam_io_control_op_destroy(node, op);
 }
 
 /**
@@ -321,6 +342,190 @@ static bool llam_io_control_op_ready(const llam_io_control_op_t *op) {
     }
 }
 
+static bool llam_io_control_acquire_activation_backend(llam_node_t *node,
+                                                       const llam_io_control_op_t *op,
+                                                       bool *backend_owned) {
+    bool eligible = true;
+
+    if (backend_owned != NULL) {
+        *backend_owned = false;
+    }
+    if (node == NULL || op == NULL || backend_owned == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&node->watch_lock);
+    switch (op->kind) {
+    case LLAM_IO_CONTROL_POLL_ACTIVATE: {
+        llam_poll_watch_t *watch = op->target;
+
+        eligible = watch->accepts_waiters && !watch->retired && !watch->destroy_pending &&
+                   !watch->deactivate_queued &&
+                   llam_linux_poll_watch_backend_pin_locked(watch);
+        *backend_owned = eligible;
+        break;
+    }
+    case LLAM_IO_CONTROL_ACCEPT_ACTIVATE: {
+        llam_accept_watch_t *watch = op->target;
+
+        eligible = watch->accepts_waiters && !watch->retired && !watch->destroy_pending &&
+                   !watch->deactivate_queued &&
+                   llam_linux_accept_watch_backend_pin_locked(watch);
+        *backend_owned = eligible;
+        break;
+    }
+    case LLAM_IO_CONTROL_RECV_ACTIVATE: {
+        llam_recv_watch_t *watch = op->target;
+
+        eligible = watch->accepts_waiters && !watch->retired && !watch->destroy_pending &&
+                   !watch->deactivate_queued &&
+                   llam_linux_recv_watch_backend_pin_locked(watch);
+        *backend_owned = eligible;
+        break;
+    }
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+    return eligible;
+}
+
+static void llam_io_control_release_activation_backend(llam_node_t *node,
+                                                       llam_io_control_kind_t kind,
+                                                       void *target) {
+    pthread_mutex_lock(&node->watch_lock);
+    switch (kind) {
+    case LLAM_IO_CONTROL_POLL_ACTIVATE:
+        llam_linux_poll_watch_backend_unpin_locked(node, target);
+        break;
+    case LLAM_IO_CONTROL_ACCEPT_ACTIVATE:
+        llam_linux_accept_watch_backend_unpin_locked(node, target);
+        break;
+    case LLAM_IO_CONTROL_RECV_ACTIVATE:
+        llam_linux_recv_watch_backend_unpin_locked(node, target);
+        break;
+    default:
+        break;
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+}
+
+static void llam_io_fail_control_op_with_activation_rollback(llam_node_t *node,
+                                                             llam_io_control_op_t *op,
+                                                             bool activation_backend_owned,
+                                                             bool activation_pending_owned) {
+    llam_io_control_kind_t kind = op != NULL ? op->kind : (llam_io_control_kind_t)UINT_MAX;
+    void *target = op != NULL ? op->target : NULL;
+
+    llam_io_fail_control_op(node, op);
+    if (activation_pending_owned) {
+        (void)llam_node_complete_pending_ops(node, 1U);
+    }
+    if (activation_backend_owned) {
+        llam_io_control_release_activation_backend(node, kind, target);
+    }
+}
+
+/** @brief Return whether a prepared control SQE owns a completion-lifetime slot. */
+static bool llam_io_control_op_has_backend_completion(const llam_io_control_op_t *op) {
+    if (op == NULL) {
+        return false;
+    }
+    switch (op->kind) {
+    case LLAM_IO_CONTROL_POLL_DEACTIVATE:
+    case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE:
+    case LLAM_IO_CONTROL_RECV_DEACTIVATE:
+    case LLAM_IO_CONTROL_REQ_CANCEL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/** Track an encoded control pointer until its CQE or ring teardown retires it. */
+void llam_linux_track_backend_control(llam_node_t *node, llam_io_control_op_t *op) {
+    if (node == NULL || op == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&node->watch_lock);
+    if (op->linux_backend_tracked) {
+        pthread_mutex_unlock(&node->watch_lock);
+        llam_record_fatal(node->runtime, EINVAL);
+        return;
+    }
+    op->linux_backend_tracked = true;
+    op->linux_backend_next = NULL;
+    if (node->linux_backend_control_tail != NULL) {
+        node->linux_backend_control_tail->linux_backend_next = op;
+    } else {
+        node->linux_backend_control_head = op;
+    }
+    node->linux_backend_control_tail = op;
+    pthread_mutex_unlock(&node->watch_lock);
+}
+
+/** Remove a completed control from the encoded-owner list. */
+bool llam_linux_untrack_backend_control(llam_node_t *node, llam_io_control_op_t *op) {
+    llam_io_control_op_t *prev = NULL;
+    llam_io_control_op_t *cur;
+
+    if (node == NULL || op == NULL) {
+        return false;
+    }
+    pthread_mutex_lock(&node->watch_lock);
+    cur = node->linux_backend_control_head;
+    while (cur != NULL) {
+        if (cur == op) {
+            if (prev != NULL) {
+                prev->linux_backend_next = cur->linux_backend_next;
+            } else {
+                node->linux_backend_control_head = cur->linux_backend_next;
+            }
+            if (node->linux_backend_control_tail == cur) {
+                node->linux_backend_control_tail = prev;
+            }
+            cur->linux_backend_next = NULL;
+            cur->linux_backend_tracked = false;
+            pthread_mutex_unlock(&node->watch_lock);
+            return true;
+        }
+        prev = cur;
+        cur = cur->linux_backend_next;
+    }
+    pthread_mutex_unlock(&node->watch_lock);
+    return false;
+}
+
+/**
+ * Retire controls whose user_data can no longer be dereferenced by the kernel.
+ * The caller must first tear down the io_uring instance.
+ */
+void llam_linux_retire_backend_controls(llam_node_t *node) {
+    for (;;) {
+        llam_io_control_op_t *op;
+
+        if (node == NULL) {
+            return;
+        }
+        pthread_mutex_lock(&node->watch_lock);
+        op = node->linux_backend_control_head;
+        if (op != NULL) {
+            node->linux_backend_control_head = op->linux_backend_next;
+            if (node->linux_backend_control_head == NULL) {
+                node->linux_backend_control_tail = NULL;
+            }
+            op->linux_backend_next = NULL;
+            op->linux_backend_tracked = false;
+        }
+        pthread_mutex_unlock(&node->watch_lock);
+        if (op == NULL) {
+            return;
+        }
+        (void)llam_node_complete_pending_ops(node, 1U);
+        llam_io_fail_control_op(node, op);
+    }
+}
+
 /**
  * @brief Prepare one queued Linux control operation as an io_uring SQE.
  *
@@ -330,13 +535,45 @@ static bool llam_io_control_op_ready(const llam_io_control_op_t *op) {
  */
 void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
     struct io_uring_sqe *sqe;
+    bool backend_completion_owned = false;
+    bool activation_backend_owned = false;
+    bool activation_pending_owned = false;
 
-    if (!llam_io_control_op_ready(op)) {
+    if (node == NULL) {
+        llam_io_control_op_destroy(NULL, op);
+        return;
+    }
+    if (node->linux_submit_terminal || !llam_io_control_op_ready(op)) {
         llam_io_fail_control_op(node, op);
         return;
     }
+    if (!llam_io_control_acquire_activation_backend(node, op, &activation_backend_owned)) {
+        llam_io_fail_control_op(node, op);
+        return;
+    }
+    if (activation_backend_owned) {
+        if (!llam_node_note_pending_ops(node, 1U)) {
+            llam_io_fail_control_op_with_activation_rollback(node, op, true, false);
+            return;
+        }
+        activation_pending_owned = true;
+    }
     if (op->kind == LLAM_IO_CONTROL_REQ_CANCEL) {
         atomic_store_explicit(&((llam_io_req_t *)op->target)->cancel_submitted, 1U, memory_order_release);
+    }
+
+    /*
+     * Deactivate/cancel controls retain their heap node, request ref, and
+     * optional task scan ref until their control CQE arrives.  Count that
+     * ownership before reserving an SQE so shutdown cannot observe quiescence
+     * while a control pointer is reachable only through ring user_data.
+     */
+    if (llam_io_control_op_has_backend_completion(op)) {
+        if (!llam_node_note_pending_ops(node, 1U)) {
+            llam_io_fail_control_op(node, op);
+            return;
+        }
+        backend_completion_owned = true;
     }
 
     sqe = io_uring_get_sqe(&node->ring);
@@ -344,15 +581,33 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
     if (sqe == NULL) {
         int rc = llam_node_submit_ring(node);
         if (rc < 0) {
-            llam_record_fatal(node->runtime, -rc);
-            llam_io_fail_control_op(node, op);
+            if (node->linux_submit_terminal) {
+                llam_record_fatal(node->runtime, -rc);
+            }
+            if (backend_completion_owned) {
+                (void)llam_node_complete_pending_ops(node, 1U);
+            }
+            llam_io_fail_control_op_with_activation_rollback(node,
+                                                             op,
+                                                             activation_backend_owned,
+                                                             activation_pending_owned);
             return;
         }
         sqe = io_uring_get_sqe(&node->ring);
     }
     if (sqe == NULL) {
-        llam_io_fail_control_op(node, op);
+        if (backend_completion_owned) {
+            (void)llam_node_complete_pending_ops(node, 1U);
+        }
+        llam_io_fail_control_op_with_activation_rollback(node,
+                                                         op,
+                                                         activation_backend_owned,
+                                                         activation_pending_owned);
         return;
+    }
+
+    if (backend_completion_owned) {
+        llam_linux_track_backend_control(node, op);
     }
 
     switch (op->kind) {
@@ -368,8 +623,7 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         watch->activating = false;
         watch->deactivate_queued = false;
         pthread_mutex_unlock(&node->watch_lock);
-        (void)llam_node_note_pending_ops(node, 1U);
-        free(op);
+        llam_io_control_op_destroy(node, op);
         return;
     }
     case LLAM_IO_CONTROL_POLL_DEACTIVATE: {
@@ -389,8 +643,7 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         watch->activating = false;
         watch->deactivate_queued = false;
         pthread_mutex_unlock(&node->watch_lock);
-        (void)llam_node_note_pending_ops(node, 1U);
-        free(op);
+        llam_io_control_op_destroy(node, op);
         return;
     }
     case LLAM_IO_CONTROL_ACCEPT_DEACTIVATE: {
@@ -414,8 +667,7 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         watch->activating = false;
         watch->deactivate_queued = false;
         pthread_mutex_unlock(&node->watch_lock);
-        (void)llam_node_note_pending_ops(node, 1U);
-        free(op);
+        llam_io_control_op_destroy(node, op);
         return;
     }
     case LLAM_IO_CONTROL_RECV_DEACTIVATE: {
@@ -435,7 +687,7 @@ void llam_io_submit_control_op(llam_node_t *node, llam_io_control_op_t *op) {
         return;
     }
     default:
-        free(op);
+        llam_io_control_op_destroy(node, op);
         return;
     }
 }

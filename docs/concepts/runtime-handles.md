@@ -20,7 +20,7 @@ embedding multiple independent subsystems in one process.
 
 ## Explicit Runtime
 
-Use explicit handles when the host owns lifecycle:
+Use explicit handles for embedding and for any host-owned lifecycle:
 
 ```c
 llam_runtime_t *rt = NULL;

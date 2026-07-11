@@ -6,7 +6,20 @@ when to park, resume, migrate, or wake it.
 
 ## Lifecycle
 
-The default-runtime path is:
+Embedding hosts should treat explicit runtime handles as the primary lifecycle:
+
+```c
+llam_runtime_t *rt = NULL;
+llam_runtime_create(NULL, 0, &rt);
+
+llam_task_t *task = llam_runtime_spawn_ex(rt, root, arg, NULL, 0);
+llam_runtime_run_handle(rt);
+llam_join(task);
+llam_runtime_destroy(rt);
+```
+
+The process-default compatibility path is still available for simple
+single-runtime programs:
 
 ```c
 llam_runtime_init(NULL);
@@ -16,8 +29,8 @@ llam_join(task);
 llam_runtime_shutdown();
 ```
 
-Embedding hosts should usually prefer explicit runtime handles instead of the
-process-default wrappers. See [Runtime Handles](runtime-handles.md).
+See [Runtime Handles](runtime-handles.md) for the owner rules behind that
+boundary.
 
 ## Tasks
 

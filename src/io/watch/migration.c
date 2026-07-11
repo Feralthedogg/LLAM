@@ -44,6 +44,7 @@ void llam_io_lock_rehome_pair(llam_node_t *source,
      */
     first = source->index < target->index ? source : target;
     second = first == source ? target : source;
+    llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&first->watch_lock);
     pthread_mutex_lock(&second->watch_lock);
     *source_locked = source;
@@ -62,6 +63,7 @@ void llam_io_unlock_rehome_pair(llam_node_t *source, llam_node_t *target) {
     second = first == source ? target : source;
     pthread_mutex_unlock(&second->watch_lock);
     pthread_mutex_unlock(&first->watch_lock);
+    llam_fd_watch_lifecycle_unlock();
 }
 
 unsigned llam_watch_migration_target_index(llam_runtime_t *rt,
@@ -114,7 +116,7 @@ static void llam_watch_mark_live_migration_common(unsigned *target_slot,
 void llam_poll_watch_note_waiter_migration(llam_poll_watch_t *watch,
                                            unsigned desired_target_index,
                                            unsigned source_index) {
-    if (watch != NULL) {
+    if (watch != NULL && watch->accepts_waiters) {
         llam_watch_note_waiter_migration_common(&watch->migrate_target_node_index,
                                                 &watch->live_transferred,
                                                 desired_target_index,
@@ -125,7 +127,7 @@ void llam_poll_watch_note_waiter_migration(llam_poll_watch_t *watch,
 void llam_accept_watch_note_waiter_migration(llam_accept_watch_t *watch,
                                              unsigned desired_target_index,
                                              unsigned source_index) {
-    if (watch != NULL) {
+    if (watch != NULL && watch->accepts_waiters) {
         llam_watch_note_waiter_migration_common(&watch->migrate_target_node_index,
                                                 &watch->live_transferred,
                                                 desired_target_index,
@@ -136,7 +138,7 @@ void llam_accept_watch_note_waiter_migration(llam_accept_watch_t *watch,
 void llam_recv_watch_note_waiter_migration(llam_recv_watch_t *watch,
                                            unsigned desired_target_index,
                                            unsigned source_index) {
-    if (watch != NULL) {
+    if (watch != NULL && watch->accepts_waiters) {
         llam_watch_note_waiter_migration_common(&watch->migrate_target_node_index,
                                                 &watch->live_transferred,
                                                 desired_target_index,
@@ -147,7 +149,7 @@ void llam_recv_watch_note_waiter_migration(llam_recv_watch_t *watch,
 void llam_poll_watch_mark_live_migration(llam_poll_watch_t *watch,
                                          unsigned desired_target_index,
                                          unsigned source_index) {
-    if (watch != NULL) {
+    if (watch != NULL && watch->accepts_waiters) {
         llam_watch_mark_live_migration_common(&watch->migrate_target_node_index,
                                               &watch->live_transferred,
                                               desired_target_index,
@@ -158,7 +160,7 @@ void llam_poll_watch_mark_live_migration(llam_poll_watch_t *watch,
 void llam_accept_watch_mark_live_migration(llam_accept_watch_t *watch,
                                            unsigned desired_target_index,
                                            unsigned source_index) {
-    if (watch != NULL) {
+    if (watch != NULL && watch->accepts_waiters) {
         llam_watch_mark_live_migration_common(&watch->migrate_target_node_index,
                                               &watch->live_transferred,
                                               desired_target_index,
@@ -169,7 +171,7 @@ void llam_accept_watch_mark_live_migration(llam_accept_watch_t *watch,
 void llam_recv_watch_mark_live_migration(llam_recv_watch_t *watch,
                                          unsigned desired_target_index,
                                          unsigned source_index) {
-    if (watch != NULL) {
+    if (watch != NULL && watch->accepts_waiters) {
         llam_watch_mark_live_migration_common(&watch->migrate_target_node_index,
                                               &watch->live_transferred,
                                               desired_target_index,

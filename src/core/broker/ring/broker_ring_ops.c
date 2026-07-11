@@ -115,11 +115,15 @@ static void llam_broker_ring_completion_fail_errno(llam_broker_ring_completion_t
 void llam_broker_ring_execute_submission(llam_broker_t *broker,
                                          llam_broker_ring_t *ring,
                                          const llam_broker_ring_submission_t *submission,
-                                         llam_broker_ring_completion_t *completion) {
+                                         llam_broker_ring_completion_t *completion,
+                                         llam_capability_token_t *out_created_task_token) {
     size_t ring_offset;
     size_t length;
 
     memset(completion, 0, sizeof(*completion));
+    if (out_created_task_token != NULL) {
+        memset(out_created_task_token, 0, sizeof(*out_created_task_token));
+    }
     completion->request_id = submission->request_id;
     switch ((llam_broker_ring_op_t)submission->op) {
     case LLAM_BROKER_RING_OP_NOP:
@@ -280,6 +284,9 @@ void llam_broker_ring_execute_submission(llam_broker_t *broker,
                                               LLAM_CAP_RIGHT_JOIN | LLAM_CAP_RIGHT_DETACH,
                                               &task_token) == 0) {
                 memcpy(ring->data + ring_offset, &task_token, sizeof(task_token));
+                if (out_created_task_token != NULL) {
+                    *out_created_task_token = task_token;
+                }
                 completion->status = 0;
                 completion->result0 = (uint64_t)length;
             } else {

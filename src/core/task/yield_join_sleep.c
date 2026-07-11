@@ -46,24 +46,45 @@ typedef enum llam_yield_direct_fail {
     LLAM_YIELD_DIRECT_FAIL_NONE = 0,
     LLAM_YIELD_DIRECT_FAIL_CONTEXT,
     LLAM_YIELD_DIRECT_FAIL_POLICY,
+    LLAM_YIELD_DIRECT_FAIL_BUDGET,
     LLAM_YIELD_DIRECT_FAIL_NO_WORK,
     LLAM_YIELD_DIRECT_FAIL_SELF,
     LLAM_YIELD_DIRECT_FAIL_PUSH,
 } llam_yield_direct_fail_t;
 
 static void llam_yield_direct_record_attempt(llam_shard_t *shard) {
-    if (shard != NULL &&
-        shard->runtime != NULL &&
-        shard->runtime->direct_handoff_stats_enabled != 0U) {
+    llam_task_t *current = g_llam_tls_task;
+    bool sample;
+
+    if (shard == NULL) {
+        return;
+    }
+    sample = llam_runtime_should_record_handoff_stats(shard);
+    if (current != NULL) {
+        current->handoff_sample_current = sample;
+    } else {
+        shard->autotune_handoff_sample_current = sample;
+    }
+    if (sample) {
         shard->metrics.yield_direct_attempts += 1U;
     }
 }
 
 static void llam_yield_direct_record_hit(llam_shard_t *shard, bool fast) {
-    if (shard == NULL ||
-        shard->runtime == NULL ||
-        shard->runtime->direct_handoff_stats_enabled == 0U) {
+    llam_task_t *current = g_llam_tls_task;
+    bool sample;
+
+    if (shard == NULL) {
         return;
+    }
+    sample = current != NULL ? current->handoff_sample_current : shard->autotune_handoff_sample_current;
+    if (!sample) {
+        return;
+    }
+    if (current != NULL) {
+        current->handoff_sample_current = false;
+    } else {
+        shard->autotune_handoff_sample_current = false;
     }
     if (fast) {
         shard->metrics.yield_direct_fast_hits += 1U;
@@ -73,10 +94,20 @@ static void llam_yield_direct_record_hit(llam_shard_t *shard, bool fast) {
 }
 
 static void llam_yield_direct_record_fail(llam_shard_t *shard, llam_yield_direct_fail_t reason) {
-    if (shard == NULL ||
-        shard->runtime == NULL ||
-        shard->runtime->direct_handoff_stats_enabled == 0U) {
+    llam_task_t *current = g_llam_tls_task;
+    bool sample;
+
+    if (shard == NULL) {
         return;
+    }
+    sample = current != NULL ? current->handoff_sample_current : shard->autotune_handoff_sample_current;
+    if (!sample) {
+        return;
+    }
+    if (current != NULL) {
+        current->handoff_sample_current = false;
+    } else {
+        shard->autotune_handoff_sample_current = false;
     }
     switch (reason) {
     case LLAM_YIELD_DIRECT_FAIL_CONTEXT:
@@ -84,6 +115,10 @@ static void llam_yield_direct_record_fail(llam_shard_t *shard, llam_yield_direct
         break;
     case LLAM_YIELD_DIRECT_FAIL_POLICY:
         shard->metrics.yield_direct_fail_policy += 1U;
+        break;
+    case LLAM_YIELD_DIRECT_FAIL_BUDGET:
+        shard->metrics.yield_direct_fail_policy += 1U;
+        shard->metrics.yield_direct_fail_budget += 1U;
         break;
     case LLAM_YIELD_DIRECT_FAIL_NO_WORK:
         shard->metrics.yield_direct_fail_no_work += 1U;
@@ -203,12 +238,16 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         }
         return false;
     }
-    if (rt->direct_handoff_burst != 0U && shard->direct_handoff_streak >= rt->direct_handoff_burst) {
-        shard->direct_handoff_streak = 0U;
-        if (fail_reason != NULL) {
-            *fail_reason = LLAM_YIELD_DIRECT_FAIL_POLICY;
+    {
+        unsigned handoff_budget = llam_runtime_direct_handoff_budget(rt);
+
+        if (handoff_budget != 0U && shard->direct_handoff_streak >= handoff_budget) {
+            shard->direct_handoff_streak = 0U;
+            if (fail_reason != NULL) {
+                *fail_reason = LLAM_YIELD_DIRECT_FAIL_BUDGET;
+            }
+            return false;
         }
-        return false;
     }
     if (!llam_norm_queue_exchange_yield_unlocked(shard, current, &next, &push_failed)) {
         if (fail_reason != NULL) {
@@ -228,14 +267,20 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
      * running task only after that commit point so a failed try path cannot leak
      * RUNNABLE state back to the normal yield fallback.
      */
-    current->forced_yield_budget = rt->forced_yield_every;
-    current->state = LLAM_TASK_STATE_RUNNABLE;
-    current->wait_reason = LLAM_WAIT_NONE;
-    current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
-    next->state = LLAM_TASK_STATE_RUNNING;
-    next->wait_reason = LLAM_WAIT_NONE;
-    atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-    next->last_started_ns = 0U;
+    {
+        uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
+
+        current->forced_yield_budget = rt->forced_yield_every;
+        current->state = LLAM_TASK_STATE_RUNNABLE;
+        current->wait_reason = LLAM_WAIT_NONE;
+        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->last_runnable_ns = now_ns;
+        next->state = LLAM_TASK_STATE_RUNNING;
+        next->wait_reason = LLAM_WAIT_NONE;
+        atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
+        next->last_started_ns = 0U;
+        llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
+    }
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
 
@@ -316,6 +361,7 @@ void llam_yield(void) {
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->wait_reason = LLAM_WAIT_NONE;
     task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+    task->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
     pthread_mutex_lock(&shard->lock);
     (void)llam_norm_queue_push_yield_locked(shard, task);
@@ -409,14 +455,20 @@ bool llam_yield_to_local_runnable(void) {
      * Queue insertion is the direct-handoff commit point.  Leave the currently
      * executing task marked RUNNING on every false return above.
      */
-    current->forced_yield_budget = shard->runtime->forced_yield_every;
-    current->state = LLAM_TASK_STATE_RUNNABLE;
-    current->wait_reason = LLAM_WAIT_NONE;
-    current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
-    next->state = LLAM_TASK_STATE_RUNNING;
-    next->wait_reason = LLAM_WAIT_NONE;
-    atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-    next->last_started_ns = 0U;
+    {
+        uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
+
+        current->forced_yield_budget = shard->runtime->forced_yield_every;
+        current->state = LLAM_TASK_STATE_RUNNABLE;
+        current->wait_reason = LLAM_WAIT_NONE;
+        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->last_runnable_ns = now_ns;
+        next->state = LLAM_TASK_STATE_RUNNING;
+        next->wait_reason = LLAM_WAIT_NONE;
+        atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
+        next->last_started_ns = 0U;
+        llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
+    }
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
 
@@ -471,9 +523,13 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         shard->direct_handoff_streak = 0U;
         return false;
     }
-    if (rt->direct_handoff_burst != 0U && shard->direct_handoff_streak >= rt->direct_handoff_burst) {
-        shard->direct_handoff_streak = 0U;
-        return false;
+    {
+        unsigned handoff_budget = llam_runtime_direct_handoff_budget(rt);
+
+        if (handoff_budget != 0U && shard->direct_handoff_streak >= handoff_budget) {
+            shard->direct_handoff_streak = 0U;
+            return false;
+        }
     }
 
     next = llam_norm_queue_pop_owner_unlocked(shard);
@@ -481,10 +537,15 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         return false;
     }
 
-    next->state = LLAM_TASK_STATE_RUNNING;
-    next->wait_reason = LLAM_WAIT_NONE;
-    atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-    next->last_started_ns = 0U;
+    {
+        uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
+
+        next->state = LLAM_TASK_STATE_RUNNING;
+        next->wait_reason = LLAM_WAIT_NONE;
+        atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
+        next->last_started_ns = 0U;
+        llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
+    }
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
 
@@ -673,14 +734,19 @@ static int llam_join_claimed_impl(llam_task_t *task,
         return -1;
     }
     llam_task_ensure_listed(self);
-    llam_task_set_join_tracking(self, task, g_llam_tls_shard->id);
-    self->state = LLAM_TASK_STATE_PARKED;
-    self->wait_reason = LLAM_WAIT_JOIN;
+    if (!llam_task_set_join_tracking(self, task, g_llam_tls_shard->id)) {
+        int saved_errno = errno;
+
+        pthread_mutex_unlock(&task->lock);
+        llam_task_release_join_claim(task);
+        errno = saved_errno;
+        return -1;
+    }
     if (has_deadline && llam_arm_task_wait_deadline(self, g_llam_tls_shard, deadline_ns) != 0) {
         pthread_mutex_unlock(&task->lock);
         self->state = LLAM_TASK_STATE_RUNNING;
         self->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(self);
+        llam_task_clear_wait_tracking_or_abort(self);
         llam_task_release_join_claim(task);
         return -1;
     }
@@ -689,7 +755,7 @@ static int llam_join_claimed_impl(llam_task_t *task,
         pthread_mutex_unlock(&task->lock);
         self->state = LLAM_TASK_STATE_RUNNING;
         self->wait_reason = LLAM_WAIT_NONE;
-        llam_task_clear_wait_tracking(self);
+        llam_task_clear_wait_tracking_or_abort(self);
         llam_task_release_join_claim(task);
         return -1;
     }
@@ -716,7 +782,7 @@ static int llam_join_claimed_impl(llam_task_t *task,
         llam_disarm_task_wait_deadline(self);
     }
     llam_cancel_token_unregister_task(self);
-    llam_task_clear_wait_tracking(self);
+    llam_task_clear_wait_tracking_or_abort(self);
     {
         int wake_error = llam_consume_task_wake_error(self);
 
@@ -842,6 +908,7 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     int caller_errno = llam_thread_errno_load();
     int rc;
     int node_error;
+    int timer_insert_errno;
     bool traced_sleep = false;
     bool timer_inserted;
     bool timer_completion_pending = false;
@@ -903,20 +970,24 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
     }
 
     llam_task_ensure_listed(task);
-    llam_task_set_sleep_tracking(task, shard->id);
+    if (!llam_task_set_sleep_tracking(task, node, shard->id)) {
+        int saved_errno = errno;
+
+        llam_sync_wait_node_release(shard, node);
+        errno = saved_errno;
+        return -1;
+    }
     /*
      * Sleep timers can expire on another worker before this task reaches the
      * context switch below.  Reuse the wait-node arm/complete handshake so that
      * early timer/cancel completion is consumed inline instead of enqueueing a
      * still-running stack.
      */
-    atomic_store_explicit(&task->active_wait_node, node, memory_order_release);
     task->deadline_ns = deadline_ns;
-    task->state = LLAM_TASK_STATE_PARKED;
-    task->wait_reason = LLAM_WAIT_SLEEP;
 
     pthread_mutex_lock(&shard->lock);
     llam_timer_insert_locked(shard, task);
+    timer_insert_errno = errno;
     /*
      * active_timer is also cleared by timer expiry.  Capture insert success
      * under the heap lock so a concurrent watchdog wake is not misreported as
@@ -934,9 +1005,9 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         task->deadline_ns = 0U;
-        llam_task_clear_wait_tracking(task);
+        llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
-        errno = ENOMEM;
+        errno = timer_insert_errno != 0 ? timer_insert_errno : ENOMEM;
         return -1;
     }
     if (task->cancel_token != NULL && llam_cancel_token_register_task(task) != 0) {
@@ -959,7 +1030,7 @@ static int llam_sleep_until_impl(uint64_t deadline_ns, bool have_now_ns, uint64_
         task->state = LLAM_TASK_STATE_RUNNING;
         task->wait_reason = LLAM_WAIT_NONE;
         task->deadline_ns = 0U;
-        llam_task_clear_wait_tracking(task);
+        llam_task_clear_wait_tracking_or_abort(task);
         llam_sync_wait_node_release(shard, node);
         errno = saved_errno;
         return -1;
@@ -984,7 +1055,7 @@ sleep_wait_ready:
         llam_switch_task_to_scheduler(task, g_llam_tls_scheduler_ctx != NULL ? g_llam_tls_scheduler_ctx : &shard->scheduler_ctx);
     }
     llam_cancel_token_unregister_task(task);
-    llam_task_clear_wait_tracking(task);
+    llam_task_clear_wait_tracking_or_abort(task);
     rc = llam_consume_task_wake_error(task);
     node_error = node->error_code;
     llam_sync_wait_node_release(shard, node);

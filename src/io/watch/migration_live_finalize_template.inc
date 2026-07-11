@@ -88,7 +88,8 @@ bool llam_finalize_poll_watch_migration(llam_node_t *source,
 
     target = &rt->nodes[target_index];
     llam_io_lock_rehome_pair(source, target, &source_locked, &target_locked);
-    if (watch->wait_head == NULL &&
+    if (watch->accepts_waiters &&
+        watch->wait_head == NULL &&
         !watch->active &&
         !watch->activating &&
         !watch->deactivate_queued) {
@@ -155,7 +156,8 @@ bool llam_finalize_accept_watch_migration(llam_node_t *source,
 
     target = &rt->nodes[target_index];
     llam_io_lock_rehome_pair(source, target, &source_locked, &target_locked);
-    if (watch->wait_head == NULL &&
+    if (watch->accepts_waiters &&
+        watch->wait_head == NULL &&
         !watch->active &&
         !watch->activating &&
         !watch->deactivate_queued) {
@@ -182,8 +184,7 @@ bool llam_finalize_accept_watch_migration(llam_node_t *source,
                     watch->ready_depth -= 1U;
                     free(ready);
                 }
-                llam_accept_watch_splice_ready(target_watch, watch);
-                ok = true;
+                ok = llam_accept_watch_splice_ready(target_watch, watch);
             } else {
                 ok = llam_arm_accept_watch_locked(target_locked, target_watch, kick_target);
             }
@@ -229,7 +230,8 @@ bool llam_finalize_recv_watch_migration(llam_node_t *source,
 
     target = &rt->nodes[target_index];
     llam_io_lock_rehome_pair(source, target, &source_locked, &target_locked);
-    if (watch->wait_head == NULL &&
+    if (watch->accepts_waiters &&
+        watch->wait_head == NULL &&
         !watch->active &&
         !watch->activating &&
         !watch->deactivate_queued) {
@@ -257,8 +259,7 @@ bool llam_finalize_recv_watch_migration(llam_node_t *source,
                     watch->ready_depth -= 1U;
                     free(ready);
                 }
-                llam_recv_watch_splice_ready(target_watch, watch);
-                ok = true;
+                ok = llam_recv_watch_splice_ready(target_watch, watch);
             } else {
                 ok = llam_arm_recv_watch_locked(target_locked, target_watch, kick_target);
             }

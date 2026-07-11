@@ -175,6 +175,9 @@ int llam_broker_ring_register_mapping(llam_broker_t *broker,
         errno = EINVAL;
         return -1;
     }
+    if (llam_broker_ring_mapping_require_fixed_extent(mapping) != 0) {
+        return -1;
+    }
     /*
      * Registration transfers mapping ownership into the broker session table.
      * Pin it like other broker operations so destroy cannot clear session state
@@ -272,6 +275,44 @@ int llam_broker_ring_forget_session(llam_broker_t *broker, uint64_t session_id, 
     }
     llam_broker_end_op(broker);
     return 0;
+}
+
+bool llam_broker_reclaim_subject_rings(llam_broker_t *broker, uint64_t subject_id) {
+    llam_broker_ring_mapping_t mappings[LLAM_BROKER_RING_SESSIONS];
+    size_t mapping_count = 0U;
+    size_t i;
+    bool deferred = false;
+
+    if (broker == NULL || subject_id == 0U) {
+        return false;
+    }
+    if (llam_broker_lock(broker) != 0) {
+        return true;
+    }
+    for (i = 0U; i < LLAM_BROKER_RING_SESSIONS; ++i) {
+        llam_broker_ring_session_t *session = &broker->ring_sessions[i];
+
+        if (session->subject_id != subject_id || (!session->active && !session->owns_mapping)) {
+            continue;
+        }
+        if (session->busy) {
+            /* Execution still dereferences the shared mapping outside the table
+             * lock. Revoke future lookup now and let the completion path unmap
+             * only after it has stopped touching client-controlled pages. */
+            session->reclaim_pending = true;
+            deferred = true;
+            continue;
+        }
+        if (llam_broker_ring_session_take_mapping(session, &mappings[mapping_count])) {
+            ++mapping_count;
+        }
+    }
+    llam_broker_unlock(broker);
+
+    for (i = 0U; i < mapping_count; ++i) {
+        llam_broker_ring_unmap(&mappings[i]);
+    }
+    return deferred;
 }
 
 int llam_broker_ring_serve_session_batch(llam_broker_t *broker,

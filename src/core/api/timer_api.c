@@ -269,6 +269,16 @@ static int llam_timer_wait_impl(llam_timer_t *handle, uint64_t caller_deadline_n
         uint64_t slice_deadline_ns;
         int ready;
 
+        if (timer->owner_runtime != NULL &&
+            (atomic_load_explicit(&timer->owner_runtime->stop_requested, memory_order_acquire) ||
+             !atomic_load_explicit(&timer->owner_runtime->initialized, memory_order_acquire))) {
+            if (pinned_runtime != NULL) {
+                llam_runtime_end_public_op(pinned_runtime);
+            }
+            llam_timer_end_public_op(timer);
+            errno = ECANCELED;
+            return -1;
+        }
         pthread_mutex_lock(&timer->lock);
         if (timer->canceled) {
             pthread_mutex_unlock(&timer->lock);

@@ -46,7 +46,7 @@ static llam_io_control_op_t *llam_take_node_controls(llam_node_t *node) {
  *
  * @param op Control operation to process and free.
  */
-static void llam_windows_process_control(llam_io_control_op_t *op) {
+static void llam_windows_process_control(llam_node_t *node, llam_io_control_op_t *op) {
     llam_io_req_t *req;
     llam_windows_io_op_t *io_op;
 
@@ -54,7 +54,7 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
         return;
     }
     if (op->kind != LLAM_IO_CONTROL_REQ_CANCEL) {
-        free(op);
+        llam_io_control_op_destroy(node, op);
         return;
     }
 
@@ -63,6 +63,7 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
         io_op = req->platform_data;
         if (io_op != NULL && io_op->magic == LLAM_WINDOWS_IO_OP_MAGIC) {
             DWORD error_code;
+            bool already_closing;
 
             atomic_fetch_add_explicit(&io_op->node->windows_cancel_controls, 1U, memory_order_relaxed);
             HANDLE cancel_handle = (req->kind == LLAM_IO_KIND_HANDLE_READ ||
@@ -72,7 +73,11 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
                                        (HANDLE)req->handle :
                                        (HANDLE)(uintptr_t)req->fd;
 
-            if (CancelIoEx(cancel_handle, &io_op->overlapped)) {
+            llam_fd_watch_lifecycle_lock();
+            already_closing = io_op->association == NULL || io_op->association->closing;
+            if (already_closing) {
+                atomic_fetch_add_explicit(&io_op->node->windows_cancel_not_found, 1U, memory_order_relaxed);
+            } else if (CancelIoEx(cancel_handle, &io_op->overlapped)) {
                 atomic_fetch_add_explicit(&io_op->node->windows_cancel_success, 1U, memory_order_relaxed);
             } else {
                 error_code = GetLastError();
@@ -81,9 +86,10 @@ static void llam_windows_process_control(llam_io_control_op_t *op) {
                     atomic_fetch_add_explicit(&io_op->node->windows_cancel_not_found, 1U, memory_order_relaxed);
                 }
             }
+            llam_fd_watch_lifecycle_unlock();
         }
     }
-    free(op);
+    llam_io_control_op_destroy(node, op);
 }
 
 /**
@@ -98,7 +104,7 @@ void llam_windows_process_controls(llam_node_t *node) {
         llam_io_control_op_t *next = controls->next;
 
         controls->next = NULL;
-        llam_windows_process_control(controls);
+        llam_windows_process_control(node, controls);
         controls = next;
     }
 }

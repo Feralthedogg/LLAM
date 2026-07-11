@@ -49,6 +49,7 @@ typedef struct sync_state {
     llam_channel_t *select_park_channel;
     llam_channel_t *select_empty_a;
     llam_channel_t *select_empty_b;
+    llam_channel_t *select_many[5];
     llam_channel_t *bounded3_channel;
     llam_task_local_key_t tls_key;
     atomic_uint failures;
@@ -71,6 +72,8 @@ typedef struct sync_state {
     atomic_uint select_checks;
     atomic_uint select_park_waiting;
     atomic_uint select_park_checks;
+    atomic_uint select_many_waiting;
+    atomic_uint select_many_checks;
     atomic_uint tls_checks;
     atomic_uint group_checks;
     atomic_uint bounded_capacity_checks;
@@ -589,6 +592,47 @@ static void select_park_sender_task(void *arg) {
     }
 }
 
+static void select_many_waiter_task(void *arg) {
+    sync_state_t *state = arg;
+    llam_select_op_t ops[5];
+    void *received = NULL;
+    size_t selected = SIZE_MAX;
+
+    memset(ops, 0, sizeof(ops));
+    for (size_t i = 0U; i < 5U; ++i) {
+        ops[i].kind = LLAM_SELECT_OP_RECV;
+        ops[i].channel = state->select_many[i];
+        ops[i].recv_out = &received;
+    }
+    atomic_store_explicit(&state->select_many_waiting, 1U, memory_order_release);
+    if (llam_channel_select(ops,
+                            5U,
+                            llam_now_ns() + UINT64_C(50000000),
+                            &selected) != 0 ||
+        selected != 4U || received != (void *)(uintptr_t)0x5ec7U ||
+        ops[4].result_errno != 0) {
+        task_fail(state, "five-op channel select", errno);
+        return;
+    }
+    atomic_fetch_add_explicit(&state->select_many_checks, 1U, memory_order_relaxed);
+}
+
+static void select_many_sender_task(void *arg) {
+    sync_state_t *state = arg;
+
+    while (atomic_load_explicit(&state->select_many_waiting,
+                                memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    for (unsigned i = 0U; i < 8U; ++i) {
+        llam_yield();
+    }
+    if (llam_channel_send(state->select_many[4],
+                          (void *)(uintptr_t)0x5ec7U) != 0) {
+        task_fail(state, "five-op channel select sender", errno);
+    }
+}
+
 static void task_local_task(void *arg) {
     sync_state_t *state = arg;
     uintptr_t value = 91U;
@@ -659,6 +703,11 @@ static void destroy_sync_state(sync_state_t *state) {
     }
     if (state->select_send_channel != NULL) {
         (void)llam_channel_destroy(state->select_send_channel);
+    }
+    for (size_t i = 0U; i < 5U; ++i) {
+        if (state->select_many[i] != NULL) {
+            (void)llam_channel_destroy(state->select_many[i]);
+        }
     }
     if (state->select_full_channel != NULL) {
         (void)llam_channel_destroy(state->select_full_channel);
@@ -750,6 +799,8 @@ static int init_sync_state(sync_state_t *state) {
     atomic_init(&state->select_checks, 0U);
     atomic_init(&state->select_park_waiting, 0U);
     atomic_init(&state->select_park_checks, 0U);
+    atomic_init(&state->select_many_waiting, 0U);
+    atomic_init(&state->select_many_checks, 0U);
     atomic_init(&state->tls_checks, 0U);
     atomic_init(&state->group_checks, 0U);
     atomic_init(&state->bounded_capacity_checks, 0U);
@@ -777,6 +828,9 @@ static int init_sync_state(sync_state_t *state) {
     state->select_park_channel = llam_channel_create(1U);
     state->select_empty_a = llam_channel_create(1U);
     state->select_empty_b = llam_channel_create(1U);
+    for (size_t i = 0U; i < 5U; ++i) {
+        state->select_many[i] = llam_channel_create(1U);
+    }
     state->bounded3_channel = llam_channel_create(3U);
     if (llam_task_local_key_create(&state->tls_key) != 0) {
         destroy_sync_state(state);
@@ -804,6 +858,11 @@ static int init_sync_state(sync_state_t *state) {
         state->select_park_channel == NULL ||
         state->select_empty_a == NULL ||
         state->select_empty_b == NULL ||
+        state->select_many[0] == NULL ||
+        state->select_many[1] == NULL ||
+        state->select_many[2] == NULL ||
+        state->select_many[3] == NULL ||
+        state->select_many[4] == NULL ||
         state->bounded3_channel == NULL) {
         destroy_sync_state(state);
         return -1;
@@ -928,6 +987,8 @@ int main(void) {
         llam_spawn(select_task, &state, NULL) == NULL ||
         llam_spawn(select_park_waiter_task, &state, NULL) == NULL ||
         llam_spawn(select_park_sender_task, &state, NULL) == NULL ||
+        llam_spawn(select_many_waiter_task, &state, NULL) == NULL ||
+        llam_spawn(select_many_sender_task, &state, NULL) == NULL ||
         llam_spawn(task_local_task, &state, NULL) == NULL ||
         llam_spawn(bounded_capacity_task, &state, NULL) == NULL) {
         (void)llam_task_group_destroy(group);
@@ -974,6 +1035,7 @@ int main(void) {
         atomic_load_explicit(&state.destroy_checks, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.select_checks, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.select_park_checks, memory_order_relaxed) != 1U ||
+        atomic_load_explicit(&state.select_many_checks, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.tls_checks, memory_order_relaxed) != 1U ||
         atomic_load_explicit(&state.group_checks, memory_order_relaxed) != 2U ||
         atomic_load_explicit(&state.bounded_capacity_checks, memory_order_relaxed) != 1U) {
