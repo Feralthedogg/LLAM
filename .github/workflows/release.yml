@@ -169,7 +169,7 @@ jobs:
         shell: pwsh
         run: |
           $dryRun = (& .\scripts\install.ps1 -DryRun -Target "${{ matrix.target }}" 6>&1 | Out-String)
-          if ($dryRun -notmatch "/releases/download/v2\.1\.0/") {
+          if ($dryRun -notmatch "/releases/download/v2\.2\.0/") {
             throw "standalone Windows installer default URL did not use the v2.2.0 release tag"
           }
           $version = "2.2.0"
