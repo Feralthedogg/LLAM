@@ -260,8 +260,14 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # liburing exposes sigset_t-dependent declarations only when the normal
+    # GNU/POSIX feature namespace is visible. Match the runtime targets here so
+    # the configure probe does not misclassify current buffer-ring helpers as
+    # unavailable under strict C11 mode.
+    set(CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
     set(CMAKE_REQUIRED_LIBRARIES uring)
     check_symbol_exists(io_uring_setup_buf_ring "liburing.h" LLAM_HAVE_IO_URING_SETUP_BUF_RING)
+    unset(CMAKE_REQUIRED_DEFINITIONS)
     unset(CMAKE_REQUIRED_LIBRARIES)
 endif()
 
@@ -565,6 +571,9 @@ target_include_directories(test_runtime_shutdown_internal PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_compile_definitions(test_runtime_shutdown_internal PRIVATE LLAM_ENABLE_TEST_HOOKS=1)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LLAM_HAVE_IO_URING_SETUP_BUF_RING)
+    target_compile_definitions(test_runtime_shutdown_internal PRIVATE LLAM_HAVE_IO_URING_BUF_RING_HELPERS=1)
+endif()
 target_link_libraries(test_runtime_shutdown_internal PRIVATE llam_runtime_testhooks)
 
 add_executable(test_sync_primitives

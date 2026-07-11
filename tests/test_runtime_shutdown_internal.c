@@ -1738,6 +1738,7 @@ static int exercise_linux_closed_watch_cqe_order_one(linux_watch_lifetime_test_k
     bool watch_lock_ready = false;
     bool recv_lock_ready = false;
     bool ring_ready = false;
+    bool expect_provided_buffer = false;
     int init_rc;
     int rc = 1;
 
@@ -1838,6 +1839,9 @@ static int exercise_linux_closed_watch_cqe_order_one(linux_watch_lifetime_test_k
         node.recv_buf_entries = 1U;
         node.recv_buf_mask = 0U;
         node.supports_provided_buffers = true;
+#if defined(LLAM_HAVE_IO_URING_BUF_RING_HELPERS)
+        expect_provided_buffer = true;
+#endif
         watch = recv_watch;
         target_cqe.user_data = llam_io_udata_encode(watch, LLAM_IO_UDATA_RECV_WATCH);
         target_cqe.res = 8;
@@ -1877,7 +1881,7 @@ static int exercise_linux_closed_watch_cqe_order_one(linux_watch_lifetime_test_k
                 goto done;
             }
             accepted_pipe[0] = -1;
-        } else if (kind == LINUX_WATCH_LIFETIME_RECV &&
+        } else if (kind == LINUX_WATCH_LIFETIME_RECV && expect_provided_buffer &&
                    (atomic_load_explicit(&node.provided_buf_acquires, memory_order_acquire) != 1U ||
                     atomic_load_explicit(&node.provided_buf_returns, memory_order_acquire) != 1U)) {
             rc = fail_msg("retired Linux recv CQE did not recycle late provided buffer");
@@ -1993,7 +1997,7 @@ static int exercise_linux_closed_watch_cqe_order_one(linux_watch_lifetime_test_k
             goto done;
         }
         accepted_pipe[0] = -1;
-    } else if (kind == LINUX_WATCH_LIFETIME_RECV &&
+    } else if (kind == LINUX_WATCH_LIFETIME_RECV && expect_provided_buffer &&
                (atomic_load_explicit(&node.provided_buf_acquires, memory_order_acquire) != 1U ||
                 atomic_load_explicit(&node.provided_buf_returns, memory_order_acquire) != 1U)) {
         fprintf(stderr,
