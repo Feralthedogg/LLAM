@@ -667,19 +667,30 @@ static int run_benchmark(const bench_options_t *options) {
         fail_message("paired calibration failed");
         goto out;
     }
-    rc = run_measured_pair(
-        options,
-        baseline,
-        candidate,
-        rounds_per_block,
-        &baseline_metrics,
-        &candidate_metrics,
-        &baseline_time,
-        &candidate_time,
-        &checksum);
-    if (rc != 0) {
-        fail_message("paired measurement failed");
-        goto out;
+    for (;;) {
+        rc = run_measured_pair(
+            options,
+            baseline,
+            candidate,
+            rounds_per_block,
+            &baseline_metrics,
+            &candidate_metrics,
+            &baseline_time,
+            &candidate_time,
+            &checksum);
+        if (rc != 0) {
+            fail_message("paired measurement failed");
+            goto out;
+        }
+        if (baseline_time.wall_ns >= options->min_mode_ns &&
+            candidate_time.wall_ns >= options->min_mode_ns) {
+            break;
+        }
+        if (rounds_per_block > UINT64_MAX / UINT64_C(2)) {
+            fail_message("measured duration calibration overflow");
+            goto out;
+        }
+        rounds_per_block *= UINT64_C(2);
     }
     if (rounds_per_block > UINT64_MAX / UINT64_C(2)) {
         fail_message("measured round count overflow");
@@ -693,9 +704,7 @@ static int run_benchmark(const bench_options_t *options) {
     }
     ops_per_mode =
         measured_rounds * (uint64_t)options->instances;
-    if (baseline_time.wall_ns < options->min_mode_ns ||
-        candidate_time.wall_ns < options->min_mode_ns ||
-        baseline_time.cpu_ns == 0U ||
+    if (baseline_time.cpu_ns == 0U ||
         candidate_time.cpu_ns == 0U ||
         verify_metrics(
             options,
@@ -731,7 +740,7 @@ static int run_benchmark(const bench_options_t *options) {
         "rounds_per_block=%" PRIu64 " ops_per_mode=%" PRIu64 " "
         "baseline_wall_ns=%" PRIu64 " candidate_wall_ns=%" PRIu64 " "
         "baseline_cpu_ns=%" PRIu64 " candidate_cpu_ns=%" PRIu64 " "
-        "wall_speedup=%.9f cpu_ratio=%.9f "
+        "wall_speedup=%.12f cpu_ratio=%.12f "
         "baseline_fair_p99_ns=%" PRIu64 " "
         "candidate_fair_p99_ns=%" PRIu64 " "
         "checksum=%016" PRIx64 " hot_allocations=%" PRIu64 " "
