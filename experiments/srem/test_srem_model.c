@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "srem_model_internal.h"
+#include "srem_platform.h"
 
 #include <errno.h>
 #include <inttypes.h>
@@ -543,27 +544,280 @@ static void test_vector_and_adaptive_crossover(void) {
     srem_model_batch_destroy(batch);
 }
 
-static void test_unimplemented_modes_are_explicit(void) {
-    static const srem_model_mode_t MODES[] = {
-        SREM_MODEL_REMOTE_WAKER_FRAME,
-        SREM_MODEL_REMOTE_ADAPTIVE,
-    };
-    size_t i;
+typedef struct platform_smoke_context {
+    srem_platform_event_t *event;
+} platform_smoke_context_t;
 
-    for (i = 0U; i < sizeof(MODES) / sizeof(MODES[0]); ++i) {
-        srem_model_config_t config = valid_config();
-        srem_model_batch_t *batch = NULL;
-        srem_model_metrics_t metrics = {0};
+static int platform_smoke_thread(void *opaque) {
+    platform_smoke_context_t *context = opaque;
 
-        config.mode = MODES[i];
-        if (MODES[i] == SREM_MODEL_REMOTE_WAKER_FRAME ||
-            MODES[i] == SREM_MODEL_REMOTE_ADAPTIVE) {
-            config.remote_producers = SREM_MODEL_REMOTE_PRODUCER_COUNT;
+    return srem_platform_event_signal(context->event) == 0 ? 73 : EIO;
+}
+
+static void test_platform_contract(void) {
+    platform_smoke_context_t context = {0};
+    srem_platform_thread_t *thread = NULL;
+    uint64_t observed;
+    int result = 0;
+    char description[256];
+
+    CHECK(srem_platform_event_create(&context.event) == 0);
+    observed = srem_platform_event_epoch(context.event);
+    CHECK(observed != UINT64_MAX);
+    CHECK(srem_platform_thread_start(
+              &thread, platform_smoke_thread, &context) == 0);
+    CHECK(srem_platform_event_wait(context.event, observed) == 0);
+    CHECK(srem_platform_thread_join(thread, &result) == 0);
+    CHECK(result == 73);
+    CHECK(srem_platform_monotonic_ns() != 0U);
+    CHECK(srem_platform_process_cpu_ns() != 0U);
+    CHECK(srem_platform_describe(
+              description, sizeof(description)) == 0);
+    CHECK(description[0] != '\0');
+    srem_platform_event_destroy(context.event);
+}
+
+static void check_remote_quiescent(const srem_model_batch_t *batch) {
+    size_t tile;
+    unsigned site;
+
+    CHECK(batch->remote_team.worker_count ==
+          SREM_MODEL_REMOTE_PRODUCER_COUNT);
+    CHECK(atomic_load_explicit(
+              &batch->remote_queue.enqueue_position,
+              memory_order_acquire) ==
+          batch->remote_queue.dequeue_position);
+    for (tile = 0U; tile < batch->tile_count; ++tile) {
+        CHECK(atomic_load_explicit(
+                  &batch->remote_pending_masks[tile],
+                  memory_order_acquire) == 0U);
+        CHECK(atomic_load_explicit(
+                  &batch->remote_published[tile],
+                  memory_order_acquire) == 0U);
+        for (site = 0U; site < SREM_MODEL_MAX_SITES; ++site) {
+            CHECK(atomic_load_explicit(
+                      &batch->remote_ready_masks[
+                          tile * SREM_MODEL_MAX_SITES + site],
+                      memory_order_acquire) == 0U);
         }
-        CHECK(srem_model_batch_create(&config, &batch) == 0);
-        CHECK(srem_model_run_round(batch, &metrics) == ENOTSUP);
-        srem_model_batch_destroy(batch);
     }
+}
+
+static void run_remote_differential_case(
+    srem_model_workload_t workload,
+    size_t instance_count,
+    unsigned tile_width,
+    unsigned active_lanes,
+    unsigned site_count,
+    unsigned divergence_eighths) {
+    srem_model_config_t baseline_config = valid_config();
+    srem_model_config_t candidate_config;
+    srem_model_batch_t *baseline = NULL;
+    srem_model_batch_t *candidate = NULL;
+    srem_model_metrics_t baseline_metrics = {0};
+    srem_model_metrics_t candidate_metrics = {0};
+    srem_platform_thread_t *baseline_threads[
+        SREM_MODEL_REMOTE_PRODUCER_COUNT];
+    srem_platform_thread_t *candidate_threads[
+        SREM_MODEL_REMOTE_PRODUCER_COUNT];
+    const unsigned rounds = 17U;
+    const uint64_t completions =
+        expected_active(&(srem_model_config_t){
+            .instance_count = instance_count,
+            .tile_width = tile_width,
+            .active_lanes = active_lanes,
+        }) * rounds;
+    unsigned worker;
+    unsigned round;
+
+    baseline_config.workload = workload;
+    baseline_config.mode = SREM_MODEL_REMOTE_WAKER_FRAME;
+    baseline_config.instance_count = instance_count;
+    baseline_config.tile_width = tile_width;
+    baseline_config.active_lanes = active_lanes;
+    baseline_config.site_count = site_count;
+    baseline_config.divergence_eighths = divergence_eighths;
+    baseline_config.vector_threshold = tile_width / 2U;
+    baseline_config.remote_producers =
+        SREM_MODEL_REMOTE_PRODUCER_COUNT;
+    candidate_config = baseline_config;
+    candidate_config.mode = SREM_MODEL_REMOTE_ADAPTIVE;
+
+    CHECK(srem_model_batch_create(&baseline_config, &baseline) == 0);
+    CHECK(srem_model_batch_create(&candidate_config, &candidate) == 0);
+    CHECK(srem_model_batch_equal(baseline, candidate));
+    for (worker = 0U;
+         worker < SREM_MODEL_REMOTE_PRODUCER_COUNT;
+         ++worker) {
+        baseline_threads[worker] =
+            baseline->remote_team.workers[worker].thread;
+        candidate_threads[worker] =
+            candidate->remote_team.workers[worker].thread;
+        CHECK(baseline_threads[worker] != NULL);
+        CHECK(candidate_threads[worker] != NULL);
+    }
+
+    for (round = 0U; round < rounds; ++round) {
+        CHECK(srem_model_run_round(baseline, &baseline_metrics) == 0);
+        CHECK(srem_model_run_round(candidate, &candidate_metrics) == 0);
+        CHECK(srem_model_batch_equal(baseline, candidate));
+        CHECK(srem_model_checksum(baseline) ==
+              srem_model_checksum(candidate));
+        check_remote_quiescent(baseline);
+        check_remote_quiescent(candidate);
+        for (worker = 0U;
+             worker < SREM_MODEL_REMOTE_PRODUCER_COUNT;
+             ++worker) {
+            CHECK(baseline->remote_team.workers[worker].thread ==
+                  baseline_threads[worker]);
+            CHECK(candidate->remote_team.workers[worker].thread ==
+                  candidate_threads[worker]);
+        }
+    }
+
+    CHECK(baseline_metrics.completions == completions);
+    CHECK(candidate_metrics.completions == completions);
+    CHECK(baseline_metrics.claims == completions);
+    CHECK(candidate_metrics.claims == completions);
+    CHECK(baseline_metrics.remote_pushes == completions);
+    CHECK(candidate_metrics.remote_pushes == completions);
+    CHECK(baseline_metrics.queue_pushes == completions);
+    CHECK(baseline_metrics.queue_pops == completions);
+    CHECK(baseline_metrics.resume_calls == completions);
+    CHECK(candidate_metrics.queue_pushes <= completions);
+    CHECK(candidate_metrics.queue_pops ==
+          candidate_metrics.tile_dispatches);
+    CHECK(candidate_metrics.scalar_lanes +
+              candidate_metrics.vector_lanes ==
+          completions);
+    CHECK(baseline_metrics.stale_tickets == 0U);
+    CHECK(candidate_metrics.stale_tickets == 0U);
+    CHECK(baseline_metrics.duplicate_tickets == 0U);
+    CHECK(candidate_metrics.duplicate_tickets == 0U);
+    CHECK(baseline_metrics.hot_allocations == 0U);
+    CHECK(candidate_metrics.hot_allocations == 0U);
+
+    CHECK(srem_model_batch_reset(baseline) == 0);
+    CHECK(srem_model_batch_reset(candidate) == 0);
+    CHECK(srem_model_batch_equal(baseline, candidate));
+    CHECK(srem_model_run_round(baseline, &baseline_metrics) == 0);
+    CHECK(srem_model_run_round(candidate, &candidate_metrics) == 0);
+    CHECK(srem_model_batch_equal(baseline, candidate));
+    srem_model_batch_destroy(candidate);
+    srem_model_batch_destroy(baseline);
+}
+
+static void test_remote_differential_and_team_reuse(void) {
+    static const size_t INSTANCES[] = {37U, 257U};
+    static const unsigned WIDTHS[] = {8U, 32U};
+    static const unsigned SITES[] = {1U, 8U};
+    size_t workload;
+    size_t instance_case;
+    size_t width_case;
+    size_t site_case;
+
+    for (workload = SREM_MODEL_HTTP_PIPELINE;
+         workload <= SREM_MODEL_MIXED_FAIRNESS;
+         ++workload) {
+        for (instance_case = 0U;
+             instance_case < sizeof(INSTANCES) / sizeof(INSTANCES[0]);
+             ++instance_case) {
+            for (width_case = 0U;
+                 width_case < sizeof(WIDTHS) / sizeof(WIDTHS[0]);
+                 ++width_case) {
+                for (site_case = 0U;
+                     site_case < sizeof(SITES) / sizeof(SITES[0]);
+                     ++site_case) {
+                    run_remote_differential_case(
+                        (srem_model_workload_t)workload,
+                        INSTANCES[instance_case],
+                        WIDTHS[width_case],
+                        1U,
+                        SITES[site_case],
+                        4U);
+                    run_remote_differential_case(
+                        (srem_model_workload_t)workload,
+                        INSTANCES[instance_case],
+                        WIDTHS[width_case],
+                        WIDTHS[width_case],
+                        SITES[site_case],
+                        1U);
+                }
+            }
+        }
+    }
+}
+
+static void test_remote_tile_publication_coalesces(void) {
+    srem_model_config_t config = valid_config();
+    srem_model_batch_t *batch = NULL;
+    srem_model_metrics_t metrics = {0};
+    const unsigned rounds = 23U;
+    unsigned round;
+
+    config.mode = SREM_MODEL_REMOTE_ADAPTIVE;
+    config.instance_count = 257U;
+    config.tile_width = 32U;
+    config.active_lanes = 32U;
+    config.site_count = 1U;
+    config.divergence_eighths = 0U;
+    config.vector_threshold = 16U;
+    config.remote_producers = SREM_MODEL_REMOTE_PRODUCER_COUNT;
+    CHECK(srem_model_batch_create(&config, &batch) == 0);
+    for (round = 0U; round < rounds; ++round) {
+        CHECK(srem_model_run_round(batch, &metrics) == 0);
+        check_remote_quiescent(batch);
+    }
+    CHECK(metrics.completions == expected_active(&config) * rounds);
+    CHECK(metrics.queue_pushes == batch->tile_count * rounds);
+    CHECK(metrics.queue_pops == batch->tile_count * rounds);
+    CHECK(metrics.vector_lanes + metrics.scalar_lanes ==
+          metrics.completions);
+    CHECK(metrics.vector_blocks ==
+          (batch->tile_count - 1U) * rounds);
+    srem_model_batch_destroy(batch);
+}
+
+static void test_mixed_fairness_service_gap(void) {
+    srem_model_config_t baseline_config = valid_config();
+    srem_model_config_t candidate_config;
+    srem_model_batch_t *baseline = NULL;
+    srem_model_batch_t *candidate = NULL;
+    srem_model_metrics_t baseline_metrics = {0};
+    srem_model_metrics_t candidate_metrics = {0};
+    unsigned round;
+
+    baseline_config.workload = SREM_MODEL_MIXED_FAIRNESS;
+    baseline_config.instance_count = 1024U;
+    baseline_config.tile_width = 16U;
+    baseline_config.active_lanes = 8U;
+    baseline_config.site_count = 8U;
+    baseline_config.divergence_eighths = 1U;
+    baseline_config.vector_threshold = 8U;
+    candidate_config = baseline_config;
+    candidate_config.mode = SREM_MODEL_ADAPTIVE;
+    CHECK(srem_model_batch_create(&baseline_config, &baseline) == 0);
+    CHECK(srem_model_batch_create(&candidate_config, &candidate) == 0);
+    for (round = 0U; round < 31U; ++round) {
+        CHECK(srem_model_run_round(baseline, &baseline_metrics) == 0);
+        CHECK(srem_model_run_round(candidate, &candidate_metrics) == 0);
+        CHECK(srem_model_batch_equal(baseline, candidate));
+    }
+    CHECK(baseline_metrics.fairness_samples != 0U);
+    CHECK(candidate_metrics.fairness_samples ==
+          baseline_metrics.fairness_samples);
+    if (candidate_metrics.fairness_p99_gap >
+        (baseline_metrics.fairness_p99_gap * 110U + 99U) / 100U) {
+        fprintf(stderr,
+                "[test_srem_model] fairness baseline=%" PRIu64
+                " candidate=%" PRIu64 "\n",
+                baseline_metrics.fairness_p99_gap,
+                candidate_metrics.fairness_p99_gap);
+    }
+    CHECK(candidate_metrics.fairness_p99_gap <=
+          (baseline_metrics.fairness_p99_gap * 110U + 99U) / 100U);
+    srem_model_batch_destroy(candidate);
+    srem_model_batch_destroy(baseline);
 }
 
 int main(void) {
@@ -576,7 +830,10 @@ int main(void) {
     test_tile_ticket_identity_and_reuse();
     test_waker_and_tile_modes_are_differential();
     test_vector_and_adaptive_crossover();
-    test_unimplemented_modes_are_explicit();
-    puts("[test_srem_model] tile checks passed");
+    test_platform_contract();
+    test_remote_differential_and_team_reuse();
+    test_remote_tile_publication_coalesces();
+    test_mixed_fairness_service_gap();
+    puts("[test_srem_model] remote and fairness checks passed");
     return 0;
 }
