@@ -1207,6 +1207,27 @@ def _build_parser() -> argparse.ArgumentParser:
         default=250,
     )
     parser.add_argument(
+        "--budget",
+        type=_bounded_int("budget", 1, 1024),
+        choices=(8,),
+        default=8,
+        help="protocol-locked direct-dispatch budget",
+    )
+    parser.add_argument(
+        "--chain",
+        type=_bounded_int("chain", 1, 1024),
+        choices=(18,),
+        default=18,
+        help="protocol-locked budgeted-chain length",
+    )
+    parser.add_argument(
+        "--producers",
+        type=_bounded_int("producers", 1, 2),
+        choices=(2,),
+        default=2,
+        help="protocol-locked remote producer count",
+    )
+    parser.add_argument(
         "--seed",
         type=_bounded_int("seed", 0, 0xFFFF_FFFF_FFFF_FFFF),
         default=7_810_762_890_074_515_045,
@@ -1308,6 +1329,9 @@ def _metadata(
     samples: int,
     instances: int,
     min_mode_ms: int,
+    budget: int,
+    chain: int,
+    producers: int,
     seed: int,
     owner_metadata: dict[str, object],
 ) -> dict[str, object]:
@@ -1336,6 +1360,9 @@ def _metadata(
         "process_samples": samples,
         "instances": instances,
         "min_mode_ms": min_mode_ms,
+        "budget": budget,
+        "chain": chain,
+        "producers": producers,
         "seed": seed,
         "active_processor_count": os.cpu_count(),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1376,6 +1403,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         samples=args.samples,
         instances=args.instances,
         min_mode_ms=args.min_mode_ms,
+        budget=args.budget,
+        chain=args.chain,
+        producers=args.producers,
         seed=args.seed,
         owner_metadata=owner_metadata,
     )

@@ -1988,6 +1988,12 @@ lcwe-model-report: test-lcwe-model
 lccf-model-report: test-lccf-model
 	python3 scripts/bench_lccf_model.py \
 		--binary ./bench_lccf_model \
+		--samples 9 \
+		--instances 65536 \
+		--min-mode-ms 250 \
+		--budget 8 \
+		--chain 18 \
+		--producers 2 \
 		--cc "$(CC)" \
 		--out-dir object/lccf-phase0 \
 		--tracked-report \
