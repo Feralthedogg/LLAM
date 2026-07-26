@@ -1,0 +1,138 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
+name: SREM Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: SREM evidence phase
+        required: true
+        default: screen
+        type: choice
+        options:
+          - screen
+          - gate
+      selected_width:
+        description: Frozen screening width (gate only)
+        required: false
+        default: ""
+      threshold:
+        description: Frozen screening threshold (gate only)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: srem-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: linux-x86_64-${{ inputs.phase }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OUT_DIR: .artifacts/srem-phase0-${{ inputs.phase }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install research toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang
+
+      - name: Build and verify research harness
+        run: |
+          make clean
+          make -j2 test-srem-model \
+            CC=gcc \
+            CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O3 -g -fno-omit-frame-pointer"
+
+      - name: Audit vectorized superblocks
+        run: |
+          mkdir -p "$OUT_DIR"
+          clang -std=c11 -Wall -Wextra -Wpedantic -Werror -O3 \
+            -Rpass=loop-vectorize \
+            -Rpass-missed=loop-vectorize \
+            -Iexperiments/srem \
+            -c experiments/srem/srem_workloads.c \
+            -o "$OUT_DIR/srem_workloads.o" \
+            2> "$OUT_DIR/clang-vectorization.txt"
+          test "$(
+            grep -c 'remark: vectorized loop' \
+              "$OUT_DIR/clang-vectorization.txt"
+          )" -ge 4
+
+      - name: Record runner environment
+        run: |
+          {
+            uname -a
+            lscpu
+            gcc --version
+            python3 --version
+            git rev-parse HEAD
+          } > "$OUT_DIR/environment.txt"
+
+      - name: Run pinned SREM evidence matrix
+        env:
+          PHASE: ${{ inputs.phase }}
+          SELECTED_WIDTH: ${{ inputs.selected_width }}
+          THRESHOLD: ${{ inputs.threshold }}
+        run: |
+          owner_cpu="$(
+            python3 - <<'PY'
+          import os
+          print(min(os.sched_getaffinity(0)))
+          PY
+          )"
+          command=(
+            python3 scripts/bench_srem_model.py
+            --binary ./bench_srem_model
+            --phase "$PHASE"
+            --instances 65536
+            --warmup-rounds 7
+            --owner-cpu "$owner_cpu"
+            --vectorized yes
+            --correctness yes
+            --output-dir "$OUT_DIR"
+            --tracked-report "$OUT_DIR/srem_phase0_tracked_report.md"
+          )
+          if [ "$PHASE" = "screen" ]; then
+            command+=(--samples 5 --min-mode-ms 100)
+          else
+            case "$SELECTED_WIDTH:$THRESHOLD" in
+              8:[1-8]|16:[1-9]|16:1[0-6]|32:[1-9]|32:1[0-9]|32:2[0-9]|32:3[0-2])
+                ;;
+              *)
+                echo "gate requires a valid frozen width and threshold" >&2
+                exit 2
+                ;;
+            esac
+            command+=(
+              --samples 9
+              --min-mode-ms 250
+              --selected-width "$SELECTED_WIDTH"
+              --threshold "$THRESHOLD"
+            )
+          fi
+          taskset -c "$owner_cpu" "${command[@]}"
+          cmp \
+            "$OUT_DIR/srem_phase0_report.md" \
+            "$OUT_DIR/srem_phase0_tracked_report.md"
+
+      - name: Upload SREM evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: srem-phase0-${{ inputs.phase }}-linux-x86_64
+          path: .artifacts/srem-phase0-${{ inputs.phase }}
+          if-no-files-found: error
