@@ -28,6 +28,7 @@ REQUIRED_FIELDS = {
     "min_mode_ns",
     "warmup_rounds",
     "rounds_per_block",
+    "blocks_per_mode",
     "ops_per_mode",
     "baseline_wall_ns",
     "candidate_wall_ns",
@@ -135,7 +136,7 @@ def check_valid(binary: str, pair: str, order: str) -> None:
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     row = parse_row(result.stdout)
-    assert row["version"] == "1"
+    assert row["version"] == "2"
     assert row["candidate"] == pair
     assert row["baseline"] == (
         "remote_waker_frame"
@@ -144,7 +145,11 @@ def check_valid(binary: str, pair: str, order: str) -> None:
     )
     assert row["order"] == order
     assert row["baseline_checksum"] == row["candidate_checksum"]
-    rounds = int(row["rounds_per_block"]) * 2
+    assert int(row["blocks_per_mode"]) == 16
+    rounds = (
+        int(row["rounds_per_block"])
+        * int(row["blocks_per_mode"])
+    )
     operations = (
         expected_active(
             int(row["instances"]),

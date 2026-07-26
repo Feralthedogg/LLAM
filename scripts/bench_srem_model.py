@@ -52,6 +52,7 @@ FULL_SAMPLES = 9
 SCREEN_MIN_MODE_NS = 100_000_000
 FULL_MIN_MODE_NS = 250_000_000
 QUICK_MIN_MODE_NS = 2_000_000
+PAIR_BLOCKS_PER_MODE = 16
 SCREEN_SEED = 6_043_432_235_128_363_791
 FULL_SEED = 12_833_226_585_820_451_329
 QUICK_SEED = 8_909_327_414_507_219_281
@@ -73,6 +74,7 @@ EXPECTED_FIELDS = {
     "min_mode_ns",
     "warmup_rounds",
     "rounds_per_block",
+    "blocks_per_mode",
     "ops_per_mode",
     "baseline_wall_ns",
     "candidate_wall_ns",
@@ -144,6 +146,7 @@ class PairRow:
     min_mode_ns: int
     warmup_rounds: int
     rounds_per_block: int
+    blocks_per_mode: int
     ops_per_mode: int
     baseline_wall_ns: int
     candidate_wall_ns: int
@@ -311,7 +314,7 @@ def _active_per_round(instances: int, width: int, active: int) -> int:
 
 def parse_output(text: str) -> PairRow:
     fields = _split_output(text)
-    if fields["version"] != "1":
+    if fields["version"] != "2":
         raise ValueError("unsupported SREM_PAIR version")
     integers = {
         name: _parse_integer(name, fields[name])
@@ -364,13 +367,19 @@ def parse_output(text: str) -> PairRow:
         raise ValueError("minimum duration out of range")
     if integers["rounds_per_block"] <= 0:
         raise ValueError("non-positive round count")
+    if integers["blocks_per_mode"] != PAIR_BLOCKS_PER_MODE:
+        raise ValueError("unexpected paired block count")
 
     active = _active_per_round(
         integers["instances"],
         integers["tile_width"],
         integers["active_lanes"],
     )
-    expected_ops = active * integers["rounds_per_block"] * 2
+    expected_ops = (
+        active
+        * integers["rounds_per_block"]
+        * integers["blocks_per_mode"]
+    )
     if integers["ops_per_mode"] != expected_ops:
         raise ValueError("operation count mismatch")
     for name in (
@@ -497,6 +506,7 @@ def parse_output(text: str) -> PairRow:
         min_mode_ns=integers["min_mode_ns"],
         warmup_rounds=integers["warmup_rounds"],
         rounds_per_block=integers["rounds_per_block"],
+        blocks_per_mode=integers["blocks_per_mode"],
         ops_per_mode=integers["ops_per_mode"],
         baseline_wall_ns=integers["baseline_wall_ns"],
         candidate_wall_ns=integers["candidate_wall_ns"],

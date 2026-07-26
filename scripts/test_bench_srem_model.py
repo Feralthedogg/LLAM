@@ -35,12 +35,13 @@ from process_utils import run_capture
 
 
 SAMPLE_ROW = (
-    "SREM_PAIR version=1 workload=srem_http_pipeline "
+    "SREM_PAIR version=2 workload=srem_http_pipeline "
     "candidate=adaptive_srem baseline=waker_frame instances=4096 "
     "frame_bytes=128 tile_width=16 active_lanes=8 sites=1 "
     "divergence_eighths=0 threshold=8 producers=0 "
     "seed=6043432235128363791 min_mode_ns=250000000 "
-    "warmup_rounds=7 rounds_per_block=128 ops_per_mode=524288 "
+    "warmup_rounds=7 rounds_per_block=16 blocks_per_mode=16 "
+    "ops_per_mode=524288 "
     "baseline_wall_ns=750000000 candidate_wall_ns=500000000 "
     "baseline_cpu_ns=700000000 candidate_cpu_ns=490000000 "
     "wall_speedup=1.500000000000 cpu_ratio=0.700000000000 "
@@ -75,6 +76,7 @@ def test_exact_parser_contract() -> None:
     assert row.candidate == "adaptive_srem"
     assert row.baseline == "waker_frame"
     assert row.ops_per_mode == 524_288
+    assert row.blocks_per_mode == 16
     assert row.wall_speedup == 1.5
     assert row.cpu_ratio == 0.7
     assert row.baseline_checksum == row.candidate_checksum
@@ -86,10 +88,11 @@ def test_parser_rejections() -> None:
         "",
         "noise\n" + SAMPLE_ROW,
         SAMPLE_ROW + "\n" + SAMPLE_ROW,
-        SAMPLE_ROW.replace("version=1", "version=2"),
+        SAMPLE_ROW.replace("version=2", "version=1"),
         SAMPLE_ROW.replace("wall_speedup=1.500000000000", "wall_speedup=nan"),
         SAMPLE_ROW.replace("candidate_wall_ns=500000000", "candidate_wall_ns=499000000"),
         SAMPLE_ROW.replace("ops_per_mode=524288", "ops_per_mode=524287"),
+        SAMPLE_ROW.replace("blocks_per_mode=16", "blocks_per_mode=2"),
         SAMPLE_ROW.replace(
             "candidate_checksum=0123456789abcdef",
             "candidate_checksum=fedcba9876543210",

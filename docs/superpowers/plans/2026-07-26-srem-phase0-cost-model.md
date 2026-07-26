@@ -87,6 +87,31 @@ ASan/UBSan, TSan where supported, and compiler vectorization remarks.
 - Record compiler, flags, architecture, OS, active CPU count, source commit,
   selected width/threshold, exact command, and raw evidence paths.
 
+## Measurement Repair Amendment
+
+The first complete screening at source commit
+`494321f7a0f9f7c1dc38b9a46c99de7fe9207ae3` produced all 600 required
+samples but was `INCONCLUSIVE`: process-local wall-ratio spread reached
+`5.012050x`, well above the predeclared `1.10x` ceiling. The version 1 driver
+accumulated only two long blocks per mode, so a core migration or
+descheduling interval could dominate one side of a pair. Follow-up 500 ms
+and pinned Linux-container diagnostics still exceeded the stability gate.
+
+This is an integrity repair, not a relaxed gate:
+
+- result schema version 2 records `blocks_per_mode=16`;
+- each process repeats eight balanced ABBA or BAAB quartets while retaining
+  the same minimum accumulated time per mode;
+- operation counts, metrics, checksums, and equality checks cover all 16
+  blocks;
+- the formal `1.50x` wall, `0.70x` CPU, and `1.10x` spread thresholds remain
+  unchanged;
+- authoritative evidence is collected on a manually dispatched Linux x86-64
+  workflow with the benchmark owner pinned to one allowed CPU.
+
+Version 1 rows remain diagnostic evidence only and cannot be mixed with
+version 2 summaries.
+
 ## Formal Verdicts
 
 One screened width receives `CATEGORY` only if all of these pass:

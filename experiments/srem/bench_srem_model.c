@@ -44,6 +44,9 @@ typedef struct block_time {
     uint64_t cpu_ns;
 } block_time_t;
 
+#define SREM_PAIR_QUARTETS 8U
+#define SREM_BLOCKS_PER_MODE (SREM_PAIR_QUARTETS * 2U)
+
 typedef enum option_id {
     OPTION_WORKLOAD = 0,
     OPTION_PAIR,
@@ -457,8 +460,10 @@ static int calibrate_rounds(
     uint64_t min_mode_ns,
     uint64_t *out_rounds) {
     const uint64_t minimum_block_ns =
-        min_mode_ns / UINT64_C(2) +
-        min_mode_ns % UINT64_C(2);
+        min_mode_ns / SREM_BLOCKS_PER_MODE +
+        (min_mode_ns % SREM_BLOCKS_PER_MODE != 0U ?
+             UINT64_C(1) :
+             UINT64_C(0));
     uint64_t rounds = UINT64_C(1);
 
     if (baseline == NULL || candidate == NULL ||
@@ -639,6 +644,7 @@ static int run_measured_pair(
             BAAB_CANDIDATE;
     unsigned baseline_blocks = 0U;
     unsigned candidate_blocks = 0U;
+    unsigned quartet;
     unsigned block;
     int error;
 
@@ -652,50 +658,54 @@ static int run_measured_pair(
         return error;
     }
 
-    for (block = 0U; block < 4U; ++block) {
-        const bool is_candidate = sequence[block];
-        srem_model_batch_t *batch =
-            is_candidate ? candidate : baseline;
-        srem_model_metrics_t *metrics =
-            is_candidate ?
-                candidate_metrics :
-                baseline_metrics;
-        block_time_t *total =
-            is_candidate ?
-                candidate_total :
-                baseline_total;
-        block_time_t measured;
+    for (quartet = 0U;
+         quartet < SREM_PAIR_QUARTETS;
+         ++quartet) {
+        for (block = 0U; block < 4U; ++block) {
+            const bool is_candidate = sequence[block];
+            srem_model_batch_t *batch =
+                is_candidate ? candidate : baseline;
+            srem_model_metrics_t *metrics =
+                is_candidate ?
+                    candidate_metrics :
+                    baseline_metrics;
+            block_time_t *total =
+                is_candidate ?
+                    candidate_total :
+                    baseline_total;
+            block_time_t measured;
 
-        error = measure_block(
-            batch,
-            rounds_per_block,
-            metrics,
-            &measured);
-        if (error != 0 ||
-            add_duration(
-                &total->wall_ns, measured.wall_ns) != 0 ||
-            add_duration(
-                &total->cpu_ns, measured.cpu_ns) != 0) {
-            return error != 0 ? error : EOVERFLOW;
-        }
-        if (is_candidate) {
-            candidate_blocks += 1U;
-        } else {
-            baseline_blocks += 1U;
-        }
-        if (baseline_blocks == candidate_blocks) {
-            error = batches_match(
-                baseline,
-                candidate,
-                out_baseline_checksum,
-                out_candidate_checksum);
-            if (error != 0) {
-                return error;
+            error = measure_block(
+                batch,
+                rounds_per_block,
+                metrics,
+                &measured);
+            if (error != 0 ||
+                add_duration(
+                    &total->wall_ns, measured.wall_ns) != 0 ||
+                add_duration(
+                    &total->cpu_ns, measured.cpu_ns) != 0) {
+                return error != 0 ? error : EOVERFLOW;
+            }
+            if (is_candidate) {
+                candidate_blocks += 1U;
+            } else {
+                baseline_blocks += 1U;
+            }
+            if (baseline_blocks == candidate_blocks) {
+                error = batches_match(
+                    baseline,
+                    candidate,
+                    out_baseline_checksum,
+                    out_candidate_checksum);
+                if (error != 0) {
+                    return error;
+                }
             }
         }
     }
-    return baseline_blocks == 2U &&
-                   candidate_blocks == 2U ?
+    return baseline_blocks == SREM_BLOCKS_PER_MODE &&
+                   candidate_blocks == SREM_BLOCKS_PER_MODE ?
                0 :
                EPROTO;
 }
@@ -876,12 +886,12 @@ static int run_benchmark(const bench_options_t *options) {
         rounds_per_block *= UINT64_C(2);
     }
     if (rounds_per_block >
-        UINT64_MAX / UINT64_C(2)) {
+        UINT64_MAX / SREM_BLOCKS_PER_MODE) {
         fail_message("measured round count overflow");
         goto out;
     }
     measured_rounds =
-        rounds_per_block * UINT64_C(2);
+        rounds_per_block * SREM_BLOCKS_PER_MODE;
     if (expected_active_per_round(
             options, &active_per_round) != 0 ||
         measured_rounds >
@@ -923,12 +933,13 @@ static int run_benchmark(const bench_options_t *options) {
     }
 
     printf(
-        "SREM_PAIR version=1 workload=%s candidate=%s baseline=%s "
+        "SREM_PAIR version=2 workload=%s candidate=%s baseline=%s "
         "instances=%zu frame_bytes=%zu tile_width=%u "
         "active_lanes=%u sites=%u divergence_eighths=%u "
         "threshold=%u producers=%u seed=%" PRIu64 " "
         "min_mode_ns=%" PRIu64 " warmup_rounds=%" PRIu64 " "
-        "rounds_per_block=%" PRIu64 " ops_per_mode=%" PRIu64 " "
+        "rounds_per_block=%" PRIu64 " blocks_per_mode=%u "
+        "ops_per_mode=%" PRIu64 " "
         "baseline_wall_ns=%" PRIu64 " candidate_wall_ns=%" PRIu64 " "
         "baseline_cpu_ns=%" PRIu64 " candidate_cpu_ns=%" PRIu64 " "
         "wall_speedup=%.12f cpu_ratio=%.12f "
@@ -968,6 +979,7 @@ static int run_benchmark(const bench_options_t *options) {
         options->min_mode_ns,
         options->warmup_rounds,
         rounds_per_block,
+        SREM_BLOCKS_PER_MODE,
         ops_per_mode,
         baseline_time.wall_ns,
         candidate_time.wall_ns,
