@@ -1271,7 +1271,7 @@ def benchmark_command(
     if order not in {"ABBA", "BAAB"}:
         raise ValueError("invalid pair order")
     return [
-        str(binary),
+        str(binary.resolve()),
         "--workload",
         cell.workload,
         "--pair",

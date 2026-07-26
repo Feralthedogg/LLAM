@@ -375,6 +375,17 @@ def test_formal_classifier() -> None:
 
 def test_command_binary_smoke_and_cli() -> None:
     cell = quick_matrix(16, 8)[0]
+    relative_command = benchmark_command(
+        Path("bench_srem_model"),
+        cell,
+        instances=4096,
+        min_mode_ms=20,
+        warmup_rounds=3,
+        order="ABBA",
+        owner_cpu="none",
+    )
+    assert Path(relative_command[0]).is_absolute()
+
     command = benchmark_command(
         Path("/tmp/bench_srem_model"),
         cell,
@@ -384,7 +395,7 @@ def test_command_binary_smoke_and_cli() -> None:
         order="ABBA",
         owner_cpu="none",
     )
-    assert command[0] == "/tmp/bench_srem_model"
+    assert command[0] == str(Path("/tmp/bench_srem_model").resolve())
     assert command[command.index("--pair") + 1] == cell.candidate
     assert command[command.index("--order") + 1] == "abba"
 
