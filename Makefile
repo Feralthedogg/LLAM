@@ -37,6 +37,8 @@ CLEAN_FILES = \
 	server \
 	server_lossless \
 	server_flood \
+	test_lcwe_model \
+	bench_lcwe_model \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -81,6 +83,8 @@ CLEAN_FILES = \
 	server.exe \
 	server_lossless.exe \
 	server_flood.exe \
+	test_lcwe_model.exe \
+	bench_lcwe_model.exe \
 	test_abi_contract.exe \
 	test_abi_compat.exe \
 	test_connect_io.exe \
@@ -527,6 +531,13 @@ TEST_SECURITY_CAPABILITY_OBJS = \
 	$(OBJDIR)/tests/test_security_capability.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
+LCWE_MODEL_CORE_OBJS = \
+	$(OBJDIR)/experiments/lcwe/lcwe_model.o \
+	$(OBJDIR)/experiments/lcwe/lcwe_workloads.o
+LCWE_MODEL_TEST_OBJS = \
+	$(OBJDIR)/experiments/lcwe/test_lcwe_model.o
+LCWE_MODEL_BENCH_OBJS = \
+	$(OBJDIR)/experiments/lcwe/bench_lcwe_model.o
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 BUILD_OBJS = \
@@ -558,7 +569,10 @@ BUILD_OBJS = \
 	$(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) \
 	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
 	$(TEST_SECURITY_CAPABILITY_OBJS) \
-	$(TEST_SHARED_LOAD_OBJS)
+	$(TEST_SHARED_LOAD_OBJS) \
+	$(LCWE_MODEL_CORE_OBJS) \
+	$(LCWE_MODEL_TEST_OBJS) \
+	$(LCWE_MODEL_BENCH_OBJS)
 LINK_TARGETS = \
 	demo \
 	stress \
@@ -567,6 +581,8 @@ LINK_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
+	test_lcwe_model \
+	bench_lcwe_model \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -592,7 +608,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -607,7 +623,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -616,6 +632,8 @@ WINDOWS_CMAKE_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
+	test_lcwe_model \
+	bench_lcwe_model \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -652,6 +670,10 @@ shared: windows-cmake-configure
 
 test check: windows-cmake-test
 
+test-lcwe-model: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lcwe_model bench_lcwe_model
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_lcwe_model|test_bench_lcwe_model" $(WINDOWS_CTEST_ARGS)
+
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
 
@@ -661,7 +683,7 @@ package: windows-cmake-build
 bench-matrix: bench
 	python scripts/bench_matrix.py
 
-audit-shared-exports audit-production-test-hooks test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
+audit-shared-exports audit-production-test-hooks lcwe-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening analyze-cppcheck audit-deps server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux: windows-unsupported
 
 platform-status:
 	@echo "host platform: windows"
@@ -801,7 +823,9 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+	./test_lcwe_model
+	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -1922,6 +1946,16 @@ test-fuzz-heavy: test_runtime_fuzz
 	LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=$(FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS) \
 		./test_runtime_fuzz
 
+test-lcwe-model: test_lcwe_model bench_lcwe_model
+	./test_lcwe_model
+	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
+
+lcwe-model-report: test-lcwe-model
+	python3 scripts/bench_lcwe_model.py \
+		--binary ./bench_lcwe_model \
+		--cc "$(CC)" \
+		--out-dir object/lcwe-phase1
+
 test-process-utils:
 	python3 scripts/test_process_utils.py
 	python3 scripts/test_bench_parsers.py
@@ -1982,6 +2016,12 @@ server_lossless: $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS)
 
 server_flood: $(SERVER_FLOOD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SERVER_FLOOD_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+test_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
+
+bench_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
 
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
@@ -2075,6 +2115,12 @@ test_security_capability: $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OB
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
+
+$(OBJDIR)/experiments/lcwe/%.o: experiments/lcwe/%.c \
+		experiments/lcwe/lcwe_model.h \
+		experiments/lcwe/lcwe_model_internal.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lcwe -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
