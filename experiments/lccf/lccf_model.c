@@ -39,6 +39,14 @@ static bool workload_valid(lccf_model_workload_t workload) {
            workload <= LCCF_MODEL_COMPLETION_MIXED_FAIRNESS;
 }
 
+static bool mode_uses_wakers(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_WAKER_QUEUE;
+}
+
+static bool mode_uses_cells(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_CAUSAL_CELL_QUEUE;
+}
+
 static bool frame_bytes_valid(size_t frame_bytes) {
     return frame_bytes == 64U || frame_bytes == 128U ||
            frame_bytes == 256U;
@@ -96,6 +104,31 @@ frame_at(const lccf_model_batch_t *batch, size_t index) {
         batch->frame_storage + index * batch->config.frame_bytes);
 }
 
+lccf_model_cell_hot_t *lccf_model_cell_at(
+    const lccf_model_batch_t *batch,
+    size_t index) {
+    if (batch == NULL || batch->cell_storage == NULL ||
+        index >= batch->config.instance_count) {
+        return NULL;
+    }
+    return (lccf_model_cell_hot_t *)(void *)(
+        batch->cell_storage + index * batch->config.cell_bytes);
+}
+
+lccf_model_ticket_t *lccf_model_ticket_at(
+    const lccf_model_batch_t *batch,
+    size_t instance_index,
+    unsigned ticket_index) {
+    if (batch == NULL || batch->tickets == NULL ||
+        instance_index >= batch->config.instance_count ||
+        ticket_index >= LCCF_MODEL_TICKETS_PER_INSTANCE) {
+        return NULL;
+    }
+    return &batch->tickets[
+        instance_index * LCCF_MODEL_TICKETS_PER_INSTANCE +
+        ticket_index];
+}
+
 static void initialize_frame_bytes(lccf_model_batch_t *batch,
                                    size_t index) {
     unsigned char *bytes =
@@ -115,12 +148,80 @@ static void initialize_frame_bytes(lccf_model_batch_t *batch,
     }
 }
 
-static void initialize_instance(lccf_model_batch_t *batch,
-                                size_t index,
-                                bool initialize_atomic) {
+static unsigned active_ticket_count(const lccf_model_batch_t *batch) {
+    return batch->config.workload ==
+                   LCCF_MODEL_COMPLETION_TIMER_CANCEL ?
+               LCCF_MODEL_TICKETS_PER_INSTANCE :
+               1U;
+}
+
+static uint32_t ticket_event_kind(unsigned ticket_index) {
+    static const uint32_t kinds[LCCF_MODEL_TICKETS_PER_INSTANCE] = {
+        LCCF_MODEL_EVENT_IO,
+        LCCF_MODEL_EVENT_TIMEOUT,
+        LCCF_MODEL_EVENT_CANCEL,
+    };
+
+    return kinds[ticket_index];
+}
+
+static int prepare_causal_generation(lccf_model_batch_t *batch,
+                                     lccf_model_instance_t *instance,
+                                     bool require_retired) {
+    lccf_model_cell_hot_t *cell = instance->cell;
+    lccf_model_event_t base_event;
+    const unsigned count = active_ticket_count(batch);
+    unsigned ticket_index;
+
+    if (cell == NULL ||
+        (require_retired &&
+         atomic_load_explicit(&cell->backend_refs,
+                              memory_order_acquire) != 0U)) {
+        return EBUSY;
+    }
+    lccf_model_derive_event(batch, instance, &base_event);
+    for (ticket_index = 0U;
+         ticket_index < LCCF_MODEL_TICKETS_PER_INSTANCE;
+         ++ticket_index) {
+        lccf_model_ticket_t *ticket = lccf_model_ticket_at(
+            batch, instance->index, ticket_index);
+
+        if (ticket == NULL) {
+            return EPROTO;
+        }
+        memset(ticket, 0, sizeof(*ticket));
+        if (ticket_index < count) {
+            ticket->target = cell;
+            ticket->generation = instance->frame->generation;
+            ticket->event = base_event;
+            if (count > 1U) {
+                ticket->event.kind =
+                    ticket_event_kind(ticket_index);
+            }
+            ticket->instance_index = instance->index;
+            ticket->ticket_index = ticket_index;
+        }
+    }
+    cell->next_site = instance->frame->site;
+    atomic_store_explicit(
+        &cell->backend_refs, count, memory_order_release);
+    atomic_store_explicit(
+        &cell->state_generation,
+        lccf_model_pack_state(instance->frame->generation,
+                              LCCF_MODEL_STATE_ARMED),
+        memory_order_release);
+    return 0;
+}
+
+static int initialize_instance(lccf_model_batch_t *batch,
+                               size_t index,
+                               bool initialize_atomic) {
     lccf_model_instance_t *instance = &batch->instances[index];
     lccf_model_frame_core_t *frame;
-    lccf_model_waker_t *waker = &batch->wakers[index];
+    lccf_model_waker_t *waker =
+        batch->wakers == NULL ? NULL : &batch->wakers[index];
+    lccf_model_cell_hot_t *cell =
+        lccf_model_cell_at(batch, index);
     const uint64_t identity =
         batch->config.seed ^ ((uint64_t)(uint32_t)index << 32U) ^
         (uint64_t)index;
@@ -145,26 +246,52 @@ static void initialize_instance(lccf_model_batch_t *batch,
     instance->batch = batch;
     instance->frame = frame;
     instance->waker = waker;
+    instance->cell = cell;
     memset(&instance->event, 0, sizeof(instance->event));
     memset(&instance->command, 0, sizeof(instance->command));
     instance->index = (uint32_t)index;
     instance->reserved = 0U;
 
-    if (initialize_atomic) {
-        atomic_init(
-            &waker->state_generation,
-            lccf_model_pack_state(frame->generation,
-                                  LCCF_MODEL_STATE_ARMED));
-    } else {
-        atomic_store_explicit(
-            &waker->state_generation,
-            lccf_model_pack_state(frame->generation,
-                                  LCCF_MODEL_STATE_ARMED),
-            memory_order_relaxed);
+    if (waker != NULL) {
+        if (initialize_atomic) {
+            atomic_init(
+                &waker->state_generation,
+                lccf_model_pack_state(frame->generation,
+                                      LCCF_MODEL_STATE_ARMED));
+        } else {
+            atomic_store_explicit(
+                &waker->state_generation,
+                lccf_model_pack_state(frame->generation,
+                                      LCCF_MODEL_STATE_ARMED),
+                memory_order_relaxed);
+        }
+        waker->instance = instance;
+        waker->resume_site = frame->site;
+        waker->reserved = 0U;
     }
-    waker->instance = instance;
-    waker->resume_site = frame->site;
-    waker->reserved = 0U;
+    if (cell != NULL) {
+        if (initialize_atomic) {
+            atomic_init(&cell->state_generation, 0U);
+            atomic_init(&cell->queue_owned, 0U);
+            atomic_init(&cell->backend_refs, 0U);
+        } else {
+            atomic_store_explicit(
+                &cell->state_generation, 0U, memory_order_relaxed);
+            atomic_store_explicit(
+                &cell->queue_owned, 0U, memory_order_relaxed);
+            atomic_store_explicit(
+                &cell->backend_refs, 0U, memory_order_relaxed);
+        }
+        cell->instance = instance;
+        memset(&cell->event, 0, sizeof(cell->event));
+        cell->command_word = 0U;
+        cell->home_shard = 0U;
+        cell->next_site = frame->site;
+        if (prepare_causal_generation(batch, instance, false) != 0) {
+            return EPROTO;
+        }
+    }
+    return 0;
 }
 
 static int queue_push(lccf_model_local_queue_t *queue, void *item) {
@@ -247,6 +374,12 @@ static bool config_valid(const lccf_model_config_t *config) {
                                sizeof(lccf_model_instance_t)) ||
         !allocation_size_valid(config->instance_count,
                                sizeof(lccf_model_waker_t)) ||
+        !allocation_size_valid(
+            config->instance_count,
+            LCCF_MODEL_TICKETS_PER_INSTANCE *
+                sizeof(lccf_model_ticket_t)) ||
+        !allocation_size_valid(config->instance_count,
+                               config->cell_bytes) ||
         config->instance_count >
             SIZE_MAX / (size_t)config->chain_length) {
         return false;
@@ -267,7 +400,8 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
     if (!config_valid(config)) {
         return EINVAL;
     }
-    if (config->mode != LCCF_MODEL_WAKER_QUEUE) {
+    if (!mode_uses_wakers(config->mode) &&
+        !mode_uses_cells(config->mode)) {
         return ENOTSUP;
     }
 
@@ -285,12 +419,26 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
         calloc(config->instance_count, config->frame_bytes);
     batch->instances =
         calloc(config->instance_count, sizeof(*batch->instances));
-    batch->wakers =
-        calloc(config->instance_count, sizeof(*batch->wakers));
+    if (mode_uses_wakers(config->mode)) {
+        batch->wakers =
+            calloc(config->instance_count, sizeof(*batch->wakers));
+    }
+    if (mode_uses_cells(config->mode)) {
+        batch->cell_storage =
+            calloc(config->instance_count, config->cell_bytes);
+        batch->tickets = calloc(
+            config->instance_count *
+                LCCF_MODEL_TICKETS_PER_INSTANCE,
+            sizeof(*batch->tickets));
+    }
     batch->local_queue.slots =
         calloc(queue_capacity, sizeof(*batch->local_queue.slots));
     if (batch->frame_storage == NULL || batch->instances == NULL ||
-        batch->wakers == NULL || batch->local_queue.slots == NULL) {
+        batch->local_queue.slots == NULL ||
+        (mode_uses_wakers(config->mode) &&
+         batch->wakers == NULL) ||
+        (mode_uses_cells(config->mode) &&
+         (batch->cell_storage == NULL || batch->tickets == NULL))) {
         lccf_model_batch_destroy(batch);
         return ENOMEM;
     }
@@ -302,7 +450,10 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
         return EPROTO;
     }
     for (i = 0U; i < config->instance_count; ++i) {
-        initialize_instance(batch, i, true);
+        if (initialize_instance(batch, i, true) != 0) {
+            lccf_model_batch_destroy(batch);
+            return EPROTO;
+        }
     }
     *out_batch = batch;
     return 0;
@@ -313,7 +464,9 @@ void lccf_model_batch_destroy(lccf_model_batch_t *batch) {
         return;
     }
     free(batch->local_queue.slots);
+    free(batch->tickets);
     free(batch->wakers);
+    free(batch->cell_storage);
     free(batch->instances);
     free(batch->frame_storage);
     free(batch);
@@ -334,7 +487,9 @@ int lccf_model_batch_reset(lccf_model_batch_t *batch) {
     batch->local_queue.tail = 0U;
     batch->round = 0U;
     for (i = 0U; i < batch->config.instance_count; ++i) {
-        initialize_instance(batch, i, false);
+        if (initialize_instance(batch, i, false) != 0) {
+            return EPROTO;
+        }
     }
     return 0;
 }
@@ -359,13 +514,18 @@ static int validate_metrics(const lccf_model_batch_t *batch,
         !metric_room(metrics->claims, instances) ||
         !metric_room(metrics->queue_pushes, callback_count) ||
         !metric_room(metrics->queue_pops, callback_count) ||
-        !metric_room(metrics->resume_calls, callback_count)) {
+        !metric_room(metrics->resume_calls, callback_count) ||
+        (mode_uses_cells(batch->config.mode) &&
+         batch->config.workload ==
+             LCCF_MODEL_COMPLETION_TIMER_CANCEL &&
+         !metric_room(metrics->stale_tickets,
+                      instances * UINT64_C(2)))) {
         return EOVERFLOW;
     }
     return 0;
 }
 
-static int validate_wakers(const lccf_model_batch_t *batch) {
+static int validate_instances(const lccf_model_batch_t *batch) {
     size_t i;
 
     if (batch->round == UINT64_MAX) {
@@ -374,22 +534,13 @@ static int validate_wakers(const lccf_model_batch_t *batch) {
     for (i = 0U; i < batch->config.instance_count; ++i) {
         const lccf_model_instance_t *instance =
             &batch->instances[i];
-        const lccf_model_waker_t *waker = &batch->wakers[i];
-        const uint64_t word =
-            atomic_load_explicit(&waker->state_generation,
-                                 memory_order_acquire);
 
         if (instance->batch != batch ||
             instance->frame != frame_at(batch, i) ||
-            instance->waker != waker ||
-            instance->index != i || waker->instance != instance ||
-            waker->resume_site != instance->frame->site ||
+            instance->index != i ||
             instance->frame->generation == 0U ||
             instance->frame->generation > LCCF_MODEL_MAX_GENERATION ||
-            lccf_model_unpack_generation(word) !=
-                instance->frame->generation ||
-            lccf_model_unpack_state(word) !=
-                LCCF_MODEL_STATE_ARMED) {
+            instance->frame->site >= batch->config.site_count) {
             return EPROTO;
         }
         if (instance->frame->generation ==
@@ -397,6 +548,67 @@ static int validate_wakers(const lccf_model_batch_t *batch) {
             instance->frame->steps >
                 UINT32_MAX - batch->config.chain_length) {
             return EOVERFLOW;
+        }
+        if (mode_uses_wakers(batch->config.mode)) {
+            const lccf_model_waker_t *waker = &batch->wakers[i];
+            const uint64_t word = atomic_load_explicit(
+                &waker->state_generation,
+                memory_order_acquire);
+
+            if (instance->waker != waker ||
+                instance->cell != NULL ||
+                waker->instance != instance ||
+                waker->resume_site != instance->frame->site ||
+                lccf_model_unpack_generation(word) !=
+                    instance->frame->generation ||
+                lccf_model_unpack_state(word) !=
+                    LCCF_MODEL_STATE_ARMED) {
+                return EPROTO;
+            }
+        } else if (mode_uses_cells(batch->config.mode)) {
+            const lccf_model_cell_hot_t *cell =
+                lccf_model_cell_at(batch, i);
+            const unsigned refs = active_ticket_count(batch);
+            uint64_t word;
+            unsigned ticket_index;
+
+            if (cell == NULL) {
+                return EPROTO;
+            }
+            word = atomic_load_explicit(
+                &cell->state_generation,
+                memory_order_acquire);
+            if (instance->waker != NULL ||
+                instance->cell != cell ||
+                cell->instance != instance ||
+                cell->next_site != instance->frame->site ||
+                lccf_model_unpack_generation(word) !=
+                    instance->frame->generation ||
+                lccf_model_unpack_state(word) !=
+                    LCCF_MODEL_STATE_ARMED ||
+                atomic_load_explicit(&cell->queue_owned,
+                                     memory_order_acquire) != 0U ||
+                atomic_load_explicit(&cell->backend_refs,
+                                     memory_order_acquire) != refs) {
+                return EPROTO;
+            }
+            for (ticket_index = 0U;
+                 ticket_index < refs;
+                 ++ticket_index) {
+                const lccf_model_ticket_t *ticket =
+                    lccf_model_ticket_at(
+                        batch, i, ticket_index);
+
+                if (ticket == NULL || ticket->target != cell ||
+                    ticket->generation !=
+                        instance->frame->generation ||
+                    ticket->instance_index != i ||
+                    ticket->ticket_index != ticket_index) {
+                    return EPROTO;
+                }
+            }
+        } else {
+            return ENOTSUP;
         }
     }
     return 0;
@@ -515,12 +727,212 @@ static int resume_queued_wakers(lccf_model_batch_t *batch,
     return 0;
 }
 
+static unsigned causal_winner_ticket(
+    const lccf_model_batch_t *batch,
+    const lccf_model_instance_t *instance) {
+    lccf_model_event_t event;
+
+    lccf_model_derive_event(batch, instance, &event);
+    switch (event.kind) {
+        case LCCF_MODEL_EVENT_TIMEOUT:
+            return 1U;
+        case LCCF_MODEL_EVENT_CANCEL:
+            return 2U;
+        case LCCF_MODEL_EVENT_IO:
+        default:
+            return 0U;
+    }
+}
+
+static int retire_backend_reference(lccf_model_cell_hot_t *cell) {
+    uint32_t current = atomic_load_explicit(
+        &cell->backend_refs, memory_order_acquire);
+
+    while (current != 0U) {
+        if (atomic_compare_exchange_weak_explicit(
+                &cell->backend_refs,
+                &current,
+                current - 1U,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            return 0;
+        }
+    }
+    return EPROTO;
+}
+
+static int claim_and_publish_cells(lccf_model_batch_t *batch,
+                                   lccf_model_metrics_t *metrics) {
+    size_t i;
+
+    for (i = 0U; i < batch->config.instance_count; ++i) {
+        lccf_model_instance_t *instance = &batch->instances[i];
+        lccf_model_cell_hot_t *cell = instance->cell;
+        const unsigned count = active_ticket_count(batch);
+        const unsigned first =
+            causal_winner_ticket(batch, instance);
+        unsigned offset;
+        bool won = false;
+
+        for (offset = 0U; offset < count; ++offset) {
+            const unsigned ticket_index =
+                count == 1U ? 0U : (first + offset) % count;
+            const lccf_model_ticket_t *ticket =
+                lccf_model_ticket_at(batch, i, ticket_index);
+            uint64_t expected;
+
+            if (ticket == NULL || ticket->target != cell) {
+                return EPROTO;
+            }
+            expected = lccf_model_pack_state(
+                ticket->generation, LCCF_MODEL_STATE_ARMED);
+            if (atomic_compare_exchange_strong_explicit(
+                    &cell->state_generation,
+                    &expected,
+                    lccf_model_pack_state(
+                        ticket->generation,
+                        LCCF_MODEL_STATE_CLAIMED),
+                    memory_order_acq_rel,
+                    memory_order_acquire)) {
+                if (won) {
+                    return EPROTO;
+                }
+                cell->event = ticket->event;
+                cell->next_site = instance->frame->site;
+                if (atomic_exchange_explicit(
+                        &cell->queue_owned,
+                        1U,
+                        memory_order_acq_rel) != 0U) {
+                    return EPROTO;
+                }
+                atomic_store_explicit(
+                    &cell->state_generation,
+                    lccf_model_pack_state(
+                        ticket->generation,
+                        LCCF_MODEL_STATE_QUEUED),
+                    memory_order_release);
+                if (queue_push(&batch->local_queue, cell) != 0) {
+                    return EOVERFLOW;
+                }
+                metrics->completions += UINT64_C(1);
+                metrics->claims += UINT64_C(1);
+                metrics->queue_pushes += UINT64_C(1);
+                won = true;
+            } else {
+                metrics->stale_tickets += UINT64_C(1);
+            }
+            if (retire_backend_reference(cell) != 0) {
+                return EPROTO;
+            }
+        }
+        if (!won ||
+            atomic_load_explicit(&cell->backend_refs,
+                                 memory_order_acquire) != 0U) {
+            return EPROTO;
+        }
+    }
+    return 0;
+}
+
+static int resume_queued_cells(lccf_model_batch_t *batch,
+                               lccf_model_metrics_t *metrics) {
+    lccf_model_cell_hot_t *cell;
+
+    while ((cell = queue_pop(&batch->local_queue)) != NULL) {
+        lccf_model_instance_t *instance = cell->instance;
+        lccf_model_frame_core_t *frame;
+        uint64_t word;
+        uint64_t generation;
+        unsigned site;
+        lccf_model_resume_fn resume;
+
+        if (instance == NULL || instance->batch != batch ||
+            instance->cell != cell) {
+            return EPROTO;
+        }
+        frame = instance->frame;
+        word = atomic_load_explicit(
+            &cell->state_generation, memory_order_acquire);
+        generation = lccf_model_unpack_generation(word);
+        site = cell->next_site;
+        if (lccf_model_unpack_state(word) !=
+                LCCF_MODEL_STATE_QUEUED ||
+            generation != frame->generation ||
+            site >= batch->config.site_count ||
+            atomic_exchange_explicit(
+                &cell->queue_owned,
+                0U,
+                memory_order_acq_rel) != 1U) {
+            return EPROTO;
+        }
+        atomic_store_explicit(
+            &cell->state_generation,
+            lccf_model_pack_state(generation,
+                                  LCCF_MODEL_STATE_RUNNING),
+            memory_order_release);
+        memset(&instance->command, 0, sizeof(instance->command));
+        resume = batch->ops->resume_sites[site];
+        if (resume == NULL) {
+            return EPROTO;
+        }
+        resume(frame,
+               &cell->event,
+               &instance->command,
+               &batch->config,
+               site);
+        metrics->queue_pops += UINT64_C(1);
+        metrics->resume_calls += UINT64_C(1);
+        if (!command_valid(batch, instance)) {
+            return EPROTO;
+        }
+        frame->command_word =
+            instance->command.output ^
+            ((uint64_t)instance->command.next_site << 32U) ^
+            (uint64_t)instance->command.kind;
+        cell->command_word = frame->command_word;
+        frame->site = instance->command.next_site;
+        cell->next_site = frame->site;
+
+        if (instance->command.kind ==
+            LCCF_MODEL_COMMAND_CONTINUE) {
+            if (atomic_exchange_explicit(
+                    &cell->queue_owned,
+                    1U,
+                    memory_order_acq_rel) != 0U) {
+                return EPROTO;
+            }
+            atomic_store_explicit(
+                &cell->state_generation,
+                lccf_model_pack_state(
+                    generation, LCCF_MODEL_STATE_QUEUED),
+                memory_order_release);
+            if (queue_push(&batch->local_queue, cell) != 0) {
+                return EOVERFLOW;
+            }
+            metrics->queue_pushes += UINT64_C(1);
+        } else {
+            if (atomic_load_explicit(
+                    &cell->backend_refs,
+                    memory_order_acquire) != 0U) {
+                return EBUSY;
+            }
+            frame->generation += UINT64_C(1);
+            if (prepare_causal_generation(
+                    batch, instance, true) != 0) {
+                return EPROTO;
+            }
+        }
+    }
+    return 0;
+}
+
 int lccf_model_run_round(lccf_model_batch_t *batch,
                          lccf_model_metrics_t *metrics) {
     int rc;
 
     if (batch == NULL || metrics == NULL ||
-        batch->config.mode != LCCF_MODEL_WAKER_QUEUE ||
+        (!mode_uses_wakers(batch->config.mode) &&
+         !mode_uses_cells(batch->config.mode)) ||
         batch->local_queue.head != batch->local_queue.tail) {
         return EINVAL;
     }
@@ -528,17 +940,23 @@ int lccf_model_run_round(lccf_model_batch_t *batch,
     if (rc != 0) {
         return rc;
     }
-    rc = validate_wakers(batch);
+    rc = validate_instances(batch);
     if (rc != 0) {
         return rc;
     }
     batch->local_queue.head = 0U;
     batch->local_queue.tail = 0U;
-    rc = claim_and_publish_wakers(batch, metrics);
-    if (rc != 0) {
-        return rc;
+    if (mode_uses_wakers(batch->config.mode)) {
+        rc = claim_and_publish_wakers(batch, metrics);
+        if (rc == 0) {
+            rc = resume_queued_wakers(batch, metrics);
+        }
+    } else {
+        rc = claim_and_publish_cells(batch, metrics);
+        if (rc == 0) {
+            rc = resume_queued_cells(batch, metrics);
+        }
     }
-    rc = resume_queued_wakers(batch, metrics);
     if (rc != 0) {
         return rc;
     }
@@ -555,6 +973,40 @@ static bool canonical_config_equal(const lccf_model_batch_t *lhs,
            lhs->config.site_count == rhs->config.site_count &&
            lhs->config.chain_length == rhs->config.chain_length &&
            lhs->config.seed == rhs->config.seed;
+}
+
+static const lccf_model_event_t *canonical_event(
+    const lccf_model_batch_t *batch,
+    size_t index) {
+    const lccf_model_instance_t *instance =
+        &batch->instances[index];
+
+    return mode_uses_cells(batch->config.mode) ?
+               &instance->cell->event :
+               &instance->event;
+}
+
+static bool canonical_ready(const lccf_model_batch_t *batch,
+                            size_t index) {
+    const lccf_model_instance_t *instance =
+        &batch->instances[index];
+    uint64_t word;
+
+    if (mode_uses_wakers(batch->config.mode)) {
+        word = atomic_load_explicit(
+            &instance->waker->state_generation,
+            memory_order_acquire);
+    } else if (mode_uses_cells(batch->config.mode)) {
+        word = atomic_load_explicit(
+            &instance->cell->state_generation,
+            memory_order_acquire);
+    } else {
+        return false;
+    }
+    return lccf_model_unpack_generation(word) ==
+               instance->frame->generation &&
+           lccf_model_unpack_state(word) ==
+               LCCF_MODEL_STATE_ARMED;
 }
 
 bool lccf_model_batch_equal(const lccf_model_batch_t *lhs,
@@ -576,23 +1028,18 @@ bool lccf_model_batch_equal(const lccf_model_batch_t *lhs,
             lhs->instances[i].frame;
         const lccf_model_frame_core_t *rhs_frame =
             rhs->instances[i].frame;
-        const uint64_t lhs_word = atomic_load_explicit(
-            &lhs->wakers[i].state_generation,
-            memory_order_acquire);
-        const uint64_t rhs_word = atomic_load_explicit(
-            &rhs->wakers[i].state_generation,
-            memory_order_acquire);
 
         if (memcmp(lhs_frame,
                    rhs_frame,
                    lhs->config.frame_bytes) != 0 ||
-            memcmp(&lhs->instances[i].event,
-                   &rhs->instances[i].event,
-                   sizeof(lhs->instances[i].event)) != 0 ||
+            memcmp(canonical_event(lhs, i),
+                   canonical_event(rhs, i),
+                   sizeof(lccf_model_event_t)) != 0 ||
             memcmp(&lhs->instances[i].command,
                    &rhs->instances[i].command,
                    sizeof(lhs->instances[i].command)) != 0 ||
-            lhs_word != rhs_word) {
+            !canonical_ready(lhs, i) ||
+            !canonical_ready(rhs, i)) {
             return false;
         }
     }
@@ -626,23 +1073,18 @@ uint64_t lccf_model_checksum(const lccf_model_batch_t *batch) {
     checksum =
         checksum_bytes(checksum, &batch->round, sizeof(batch->round));
     for (i = 0U; i < batch->config.instance_count; ++i) {
-        const uint64_t word = atomic_load_explicit(
-            &batch->wakers[i].state_generation,
-            memory_order_acquire);
-
         checksum = checksum_bytes(
             checksum,
             batch->instances[i].frame,
             batch->config.frame_bytes);
         checksum = checksum_bytes(
             checksum,
-            &batch->instances[i].event,
-            sizeof(batch->instances[i].event));
+            canonical_event(batch, i),
+            sizeof(lccf_model_event_t));
         checksum = checksum_bytes(
             checksum,
             &batch->instances[i].command,
             sizeof(batch->instances[i].command));
-        checksum = checksum_bytes(checksum, &word, sizeof(word));
     }
     return checksum == 0U ? UINT64_C(1) : checksum;
 }
