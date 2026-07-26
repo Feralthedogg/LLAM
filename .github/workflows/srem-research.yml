@@ -4,17 +4,6 @@
 name: SREM Research
 
 on:
-  push:
-    branches:
-      - codex/srem-phase0
-    paths:
-      - .github/workflows/srem-research.yml
-      - experiments/srem/**
-      - scripts/bench_srem_model.py
-      - scripts/process_utils.py
-      - scripts/safe_output.py
-      - scripts/test_bench_srem_model.py
-      - scripts/test_bench_srem_native.py
   workflow_dispatch:
     inputs:
       phase:
