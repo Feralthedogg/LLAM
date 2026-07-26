@@ -271,6 +271,34 @@ Frames are nonmoving and distinct by default. LLAM calls `drop_frame` exactly
 once after the instance is terminal and all backend and external-waker
 references are retired. Relocatable frames and GC root maps are deferred.
 
+### Wave Frame Layout Research Fork
+
+The baseline callback contract passes an array of frame pointers, but that does
+not guarantee efficient CPU vectorization. Scattered frames can turn every
+vector operation into scalar gather/scatter work, especially on SIMD targets
+without native gather instructions.
+
+Phase 1 therefore compares three layouts:
+
+1. **pointer-array wave:** operate directly on ordinary, potentially scattered
+   frames;
+2. **causal capsule wave:** compiler-generated pack/unpack callbacks copy only
+   private live fields for the current site into temporary structure-of-arrays
+   lane storage;
+3. **site-resident AoSoA:** keep wave-safe state in site-oriented lane blocks as
+   an optimistic upper bound.
+
+The capsule does not move the language frame or copy address-exposed, shared,
+GC-visible, or FFI-visible state. Those values remain in the stable frame and
+can force a site back to scalar execution.
+
+Only the first two layouts are candidates for Executor ABI V1. Site-resident
+AoSoA is an experimental upper bound because moving an instance between sites
+can erase its locality gain. If only the AoSoA upper bound passes the
+performance gates, the LCWE hypothesis is not considered proven. If causal
+capsules are required to pass, the ABI must include compiler-generated
+pack/unpack callbacks and live-field metadata before it is frozen.
+
 ### Events
 
 An event is a small tagged result cell. Initial event kinds cover:
@@ -613,7 +641,8 @@ latency guardrails require wave mode to remain disabled in realistic load.
 ## Research Phases
 
 1. **Cost-model harness:** model resume tickets and measure scalar dispatch,
-   scalar cohort, and hand-written wave callbacks without public ABI changes.
+   scalar cohort, pointer-array wave, causal-capsule wave including pack/unpack,
+   and site-resident AoSoA upper-bound callbacks without public ABI changes.
 2. **Scalar Executor ABI:** prove lifecycle, module ownership, command
    validation, cancellation, and external wake semantics.
 3. **Completion target:** add the generic internal task-or-ticket target and
