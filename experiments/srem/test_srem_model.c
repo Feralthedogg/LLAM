@@ -785,6 +785,8 @@ static void test_mixed_fairness_service_gap(void) {
     srem_model_batch_t *candidate = NULL;
     srem_model_metrics_t baseline_metrics = {0};
     srem_model_metrics_t candidate_metrics = {0};
+    srem_model_metrics_t baseline_warmup = {0};
+    srem_model_metrics_t candidate_warmup = {0};
     unsigned round;
 
     baseline_config.workload = SREM_MODEL_MIXED_FAIRNESS;
@@ -796,8 +798,19 @@ static void test_mixed_fairness_service_gap(void) {
     baseline_config.vector_threshold = 8U;
     candidate_config = baseline_config;
     candidate_config.mode = SREM_MODEL_ADAPTIVE;
+    CHECK(srem_model_batch_begin_measurement(NULL) == EINVAL);
     CHECK(srem_model_batch_create(&baseline_config, &baseline) == 0);
     CHECK(srem_model_batch_create(&candidate_config, &candidate) == 0);
+    for (round = 0U; round < 3U; ++round) {
+        CHECK(srem_model_run_round(
+                  baseline, &baseline_warmup) == 0);
+        CHECK(srem_model_run_round(
+                  candidate, &candidate_warmup) == 0);
+    }
+    CHECK(baseline_warmup.fairness_samples != 0U);
+    CHECK(srem_model_batch_equal(baseline, candidate));
+    CHECK(srem_model_batch_begin_measurement(baseline) == 0);
+    CHECK(srem_model_batch_begin_measurement(candidate) == 0);
     for (round = 0U; round < 31U; ++round) {
         CHECK(srem_model_run_round(baseline, &baseline_metrics) == 0);
         CHECK(srem_model_run_round(candidate, &candidate_metrics) == 0);

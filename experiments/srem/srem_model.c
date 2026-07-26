@@ -625,6 +625,38 @@ int srem_model_batch_reset(srem_model_batch_t *batch) {
     return 0;
 }
 
+int srem_model_batch_begin_measurement(srem_model_batch_t *batch) {
+    size_t index;
+
+    if (batch == NULL) {
+        return EINVAL;
+    }
+    if (batch->local_queue.head != batch->local_queue.tail ||
+        (mode_is_remote(batch->config.mode) &&
+         atomic_load_explicit(
+             &batch->remote_queue.enqueue_position,
+             memory_order_acquire) !=
+             batch->remote_queue.dequeue_position)) {
+        return EBUSY;
+    }
+    if (batch->fairness_due_ticks == NULL) {
+        return 0;
+    }
+    for (index = 0U;
+         index < batch->config.instance_count;
+         ++index) {
+        if (batch->fairness_due_ticks[index] != UINT64_MAX) {
+            return EBUSY;
+        }
+    }
+    memset(batch->fairness_histogram,
+           0,
+           batch->fairness_histogram_size *
+               sizeof(*batch->fairness_histogram));
+    batch->fairness_sample_count = 0U;
+    return 0;
+}
+
 int srem_model_batch_create(const srem_model_config_t *config,
                             srem_model_batch_t **out_batch) {
     srem_model_batch_t *batch;

@@ -69,6 +69,7 @@ int srem_model_batch_create(const srem_model_config_t *config,
                             srem_model_batch_t **out_batch);
 void srem_model_batch_destroy(srem_model_batch_t *batch);
 int srem_model_batch_reset(srem_model_batch_t *batch);
+int srem_model_batch_begin_measurement(srem_model_batch_t *batch);
 int srem_model_run_round(srem_model_batch_t *batch,
                          srem_model_metrics_t *metrics);
 bool srem_model_batch_equal(const srem_model_batch_t *lhs,
