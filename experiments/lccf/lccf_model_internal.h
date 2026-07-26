@@ -5,6 +5,7 @@
 #define LLAM_EXPERIMENTS_LCCF_MODEL_INTERNAL_H
 
 #include "lccf_model.h"
+#include "lccf_platform.h"
 
 #include <stdatomic.h>
 
@@ -87,6 +88,7 @@ typedef struct lccf_model_ticket {
 } lccf_model_ticket_t;
 
 #define LCCF_MODEL_TICKETS_PER_INSTANCE 3U
+#define LCCF_MODEL_REMOTE_PRODUCER_COUNT 2U
 
 typedef void (*lccf_model_resume_fn)(
     lccf_model_frame_core_t *frame,
@@ -118,6 +120,39 @@ typedef struct lccf_model_local_queue {
     size_t tail;
 } lccf_model_local_queue_t;
 
+typedef struct lccf_model_remote_slot {
+    _Atomic size_t sequence;
+    void *item;
+} lccf_model_remote_slot_t;
+
+typedef struct lccf_model_remote_queue {
+    lccf_model_remote_slot_t *slots;
+    size_t capacity;
+    size_t mask;
+    _Atomic size_t enqueue_position;
+    size_t dequeue_position;
+} lccf_model_remote_queue_t;
+
+typedef struct lccf_model_remote_worker {
+    struct lccf_model_batch *batch;
+    lccf_platform_thread_t *thread;
+    lccf_model_metrics_t metrics;
+    unsigned index;
+    int error;
+} lccf_model_remote_worker_t;
+
+typedef struct lccf_model_remote_team {
+    lccf_platform_event_t *start_event;
+    lccf_platform_event_t *ready_event;
+    lccf_platform_event_t *done_event;
+    _Atomic unsigned ready_workers;
+    _Atomic unsigned completed_workers;
+    _Atomic bool stop;
+    unsigned worker_count;
+    lccf_model_remote_worker_t
+        workers[LCCF_MODEL_REMOTE_PRODUCER_COUNT];
+} lccf_model_remote_team_t;
+
 struct lccf_model_batch {
     lccf_model_config_t config;
     uint64_t round;
@@ -127,11 +162,13 @@ struct lccf_model_batch {
     lccf_model_waker_t *wakers;
     lccf_model_ticket_t *tickets;
     lccf_model_local_queue_t local_queue;
+    lccf_model_remote_queue_t remote_queue;
+    lccf_model_remote_team_t remote_team;
     const lccf_model_workload_ops_t *ops;
     unsigned callback_depth;
     unsigned maximum_callback_depth;
     uint64_t fairness_tick;
-    uint64_t fairness_due_tick;
+    uint64_t fairness_due_ns;
     uint64_t fairness_services;
     uint64_t fairness_histogram[64];
     bool fairness_due;
@@ -154,5 +191,12 @@ lccf_model_ticket_t *lccf_model_ticket_at(
     const lccf_model_batch_t *batch,
     size_t instance_index,
     unsigned ticket_index);
+int lccf_model_try_claim_ticket(
+    const lccf_model_ticket_t *ticket,
+    bool *out_won);
+int lccf_model_resume_claimed_cell(
+    lccf_model_batch_t *batch,
+    size_t instance_index,
+    lccf_model_metrics_t *metrics);
 
 #endif
