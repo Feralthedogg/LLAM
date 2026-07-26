@@ -13,6 +13,7 @@ cmake_install.cmake
 compile_commands.json
 /*.plist
 /bench
+/bench_lccf_model
 /bench_lcwe_model
 /demo
 /llam_broker
@@ -24,6 +25,7 @@ test_abi_contract
 test_abi_compat
 test_connect_io
 test_io_buffers
+/test_lccf_model
 test_lcwe_model
 test_multi_runtime_core
 test_nm_compat_runtime
