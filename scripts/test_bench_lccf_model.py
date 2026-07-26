@@ -15,6 +15,7 @@ from bench_lccf_model import (
     PairRow,
     SampleRow,
     SummaryRow,
+    _build_parser,
     benchmark_command,
     classify,
     full_matrix,
@@ -341,6 +342,30 @@ def test_command_and_binary_smoke() -> None:
     assert row.instances == 4096
 
 
+def test_reproduction_cli_contract() -> None:
+    args = _build_parser().parse_args(
+        [
+            "--binary",
+            "/tmp/bench_lccf_model",
+            "--samples",
+            "9",
+            "--instances",
+            "65536",
+            "--min-mode-ms",
+            "250",
+            "--budget",
+            "8",
+            "--chain",
+            "18",
+            "--producers",
+            "2",
+        ]
+    )
+    assert args.budget == 8
+    assert args.chain == 18
+    assert args.producers == 2
+
+
 def test_evidence_contract() -> None:
     rows = verdict_fixture(
         fused_workloads=set(),
@@ -381,6 +406,7 @@ def main() -> int:
     test_median_keeps_one_process_pair()
     test_quick_is_smoke_only()
     test_command_and_binary_smoke()
+    test_reproduction_cli_contract()
     test_evidence_contract()
     print("[test_bench_lccf_model] all checks passed")
     return 0
