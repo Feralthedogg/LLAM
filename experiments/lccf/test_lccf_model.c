@@ -93,6 +93,51 @@ static int test_names_and_parsers(void) {
     return 0;
 }
 
+static int test_candidate_baseline_mapping(void) {
+    static const struct {
+        lccf_model_mode_t candidate;
+        lccf_model_mode_t baseline;
+    } cases[] = {
+        {LCCF_MODEL_CAUSAL_CELL_QUEUE,
+         LCCF_MODEL_WAKER_QUEUE},
+        {LCCF_MODEL_FUSED_CAUSAL_CELL,
+         LCCF_MODEL_WAKER_QUEUE},
+        {LCCF_MODEL_BUDGETED_FUSED_CHAIN,
+         LCCF_MODEL_WAKER_QUEUE},
+        {LCCF_MODEL_REMOTE_CAUSAL_CELL,
+         LCCF_MODEL_REMOTE_WAKER_QUEUE},
+    };
+    size_t index;
+
+    for (index = 0U;
+         index < sizeof(cases) / sizeof(cases[0]);
+         ++index) {
+        lccf_model_mode_t baseline =
+            LCCF_MODEL_REMOTE_CAUSAL_CELL;
+
+        if (lccf_model_candidate_baseline(
+                cases[index].candidate, &baseline) != 0 ||
+            baseline != cases[index].baseline) {
+            return fail("candidate baseline mapping");
+        }
+    }
+    if (lccf_model_candidate_baseline(
+            LCCF_MODEL_WAKER_QUEUE,
+            &(lccf_model_mode_t){0}) != EINVAL ||
+        lccf_model_candidate_baseline(
+            LCCF_MODEL_REMOTE_WAKER_QUEUE,
+            &(lccf_model_mode_t){0}) != EINVAL ||
+        lccf_model_candidate_baseline(
+            (lccf_model_mode_t)99,
+            &(lccf_model_mode_t){0}) != EINVAL ||
+        lccf_model_candidate_baseline(
+            LCCF_MODEL_FUSED_CAUSAL_CELL,
+            NULL) != EINVAL) {
+        return fail("invalid candidate baseline mapping");
+    }
+    return 0;
+}
+
 static int expect_create_error(lccf_model_config_t config, int expected) {
     lccf_model_batch_t *batch =
         (lccf_model_batch_t *)(uintptr_t)1U;
@@ -1284,6 +1329,7 @@ static int test_remote_destroy_after_error(void) {
 
 int main(void) {
     if (test_names_and_parsers() != 0 ||
+        test_candidate_baseline_mapping() != 0 ||
         test_create_validation() != 0 ||
         test_baseline_matrix() != 0 ||
         test_baseline_continue_requeues() != 0 ||
