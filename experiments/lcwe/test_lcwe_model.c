@@ -1,0 +1,261 @@
+// Copyright 2026 Feralthedogg
+// SPDX-License-Identifier: Apache-2.0
+
+#include "lcwe_model.h"
+
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static int fail(const char *message) {
+    fprintf(stderr, "[test_lcwe_model] %s\n", message);
+    return 1;
+}
+
+static int test_names_and_parsers(void) {
+    static const char *const mode_names[] = {
+        "scalar",
+        "cohort",
+        "wave_pointers",
+        "wave_capsule",
+        "wave_aosoa",
+    };
+    static const char *const workload_names[] = {
+        "exec_io_pipeline",
+        "exec_rpc_state",
+        "exec_event_fanout",
+    };
+    size_t i;
+
+    for (i = 0U; i < sizeof(mode_names) / sizeof(mode_names[0]); ++i) {
+        lcwe_model_mode_t parsed = LCWE_MODEL_SCALAR;
+        const lcwe_model_mode_t expected = (lcwe_model_mode_t)i;
+
+        if (lcwe_model_mode_name(expected) == NULL ||
+            strcmp(lcwe_model_mode_name(expected), mode_names[i]) != 0 ||
+            lcwe_model_parse_mode(mode_names[i], &parsed) != 0 ||
+            parsed != expected) {
+            return fail("mode name/parse contract");
+        }
+    }
+    for (i = 0U; i < sizeof(workload_names) / sizeof(workload_names[0]); ++i) {
+        lcwe_model_workload_t parsed = LCWE_MODEL_EXEC_IO_PIPELINE;
+        const lcwe_model_workload_t expected = (lcwe_model_workload_t)i;
+
+        if (lcwe_model_workload_name(expected) == NULL ||
+            strcmp(lcwe_model_workload_name(expected), workload_names[i]) != 0 ||
+            lcwe_model_parse_workload(workload_names[i], &parsed) != 0 ||
+            parsed != expected) {
+            return fail("workload name/parse contract");
+        }
+    }
+    if (lcwe_model_mode_name((lcwe_model_mode_t)99) != NULL ||
+        lcwe_model_workload_name((lcwe_model_workload_t)99) != NULL) {
+        return fail("invalid enum name must be null");
+    }
+    if (lcwe_model_parse_mode(NULL, NULL) != EINVAL ||
+        lcwe_model_parse_mode("scalar", NULL) != EINVAL ||
+        lcwe_model_parse_mode("unknown", &(lcwe_model_mode_t){0}) != EINVAL ||
+        lcwe_model_parse_workload(NULL, NULL) != EINVAL ||
+        lcwe_model_parse_workload("exec_io_pipeline", NULL) != EINVAL ||
+        lcwe_model_parse_workload("unknown",
+                                  &(lcwe_model_workload_t){0}) != EINVAL) {
+        return fail("invalid parser input");
+    }
+    return 0;
+}
+
+static int expect_create_error(lcwe_model_workload_t workload,
+                               lcwe_model_mode_t mode,
+                               size_t instance_count,
+                               unsigned site_count,
+                               int expected) {
+    lcwe_model_batch_t *batch = (lcwe_model_batch_t *)(uintptr_t)1U;
+    const int rc = lcwe_model_batch_create(workload,
+                                           mode,
+                                           instance_count,
+                                           site_count,
+                                           UINT64_C(1),
+                                           &batch);
+
+    if (rc != expected || batch != NULL) {
+        return fail("create error contract");
+    }
+    return 0;
+}
+
+static int test_create_validation(void) {
+    unsigned mode;
+
+    if (expect_create_error((lcwe_model_workload_t)99,
+                            LCWE_MODEL_SCALAR,
+                            1U,
+                            1U,
+                            EINVAL) != 0 ||
+        expect_create_error(LCWE_MODEL_EXEC_IO_PIPELINE,
+                            (lcwe_model_mode_t)99,
+                            1U,
+                            1U,
+                            EINVAL) != 0 ||
+        expect_create_error(LCWE_MODEL_EXEC_IO_PIPELINE,
+                            LCWE_MODEL_SCALAR,
+                            0U,
+                            1U,
+                            EINVAL) != 0 ||
+        expect_create_error(LCWE_MODEL_EXEC_IO_PIPELINE,
+                            LCWE_MODEL_SCALAR,
+                            1U,
+                            0U,
+                            EINVAL) != 0 ||
+        expect_create_error(LCWE_MODEL_EXEC_IO_PIPELINE,
+                            LCWE_MODEL_SCALAR,
+                            1U,
+                            LCWE_MODEL_MAX_SITES + 1U,
+                            EINVAL) != 0) {
+        return 1;
+    }
+
+    for (mode = (unsigned)LCWE_MODEL_COHORT;
+         mode <= (unsigned)LCWE_MODEL_WAVE_AOSOA;
+         ++mode) {
+        if (expect_create_error(LCWE_MODEL_EXEC_IO_PIPELINE,
+                                (lcwe_model_mode_t)mode,
+                                1U,
+                                1U,
+                                ENOTSUP) != 0) {
+            return 1;
+        }
+    }
+
+    if (lcwe_model_batch_create(LCWE_MODEL_EXEC_IO_PIPELINE,
+                                LCWE_MODEL_SCALAR,
+                                1U,
+                                1U,
+                                UINT64_C(1),
+                                NULL) != EINVAL) {
+        return fail("null create output");
+    }
+    return 0;
+}
+
+static int test_scalar_workloads(void) {
+    unsigned workload;
+
+    for (workload = (unsigned)LCWE_MODEL_EXEC_IO_PIPELINE;
+         workload <= (unsigned)LCWE_MODEL_EXEC_EVENT_FANOUT;
+         ++workload) {
+        lcwe_model_batch_t *batch = NULL;
+        lcwe_model_metrics_t metrics = {0};
+        unsigned round;
+
+        if (lcwe_model_batch_create((lcwe_model_workload_t)workload,
+                                    LCWE_MODEL_SCALAR,
+                                    37U,
+                                    3U,
+                                    UINT64_C(0x6c6c616d77617665),
+                                    &batch) != 0 ||
+            batch == NULL) {
+            return fail("scalar create");
+        }
+
+        for (round = 0U; round < 11U; ++round) {
+            if (lcwe_model_run_round(batch, 1U, &metrics) != 0) {
+                lcwe_model_batch_destroy(batch);
+                return fail("scalar round");
+            }
+        }
+
+        if (metrics.admissions != UINT64_C(37) * 11U ||
+            metrics.tickets != UINT64_C(37) * 11U ||
+            metrics.scalar_calls != metrics.tickets ||
+            metrics.wave_calls != 0U ||
+            metrics.pointer_lanes != 0U ||
+            metrics.capsule_lanes != 0U ||
+            metrics.aosoa_lanes != 0U ||
+            metrics.hot_allocations != 0U) {
+            lcwe_model_batch_destroy(batch);
+            return fail("scalar metric invariant");
+        }
+        if (lcwe_model_checksum(batch) == 0U) {
+            lcwe_model_batch_destroy(batch);
+            return fail("scalar checksum must be nonzero");
+        }
+        lcwe_model_batch_destroy(batch);
+    }
+    return 0;
+}
+
+static int test_determinism_and_round_validation(void) {
+    lcwe_model_batch_t *first = NULL;
+    lcwe_model_batch_t *second = NULL;
+    lcwe_model_batch_t *different = NULL;
+    lcwe_model_metrics_t first_metrics = {0};
+    lcwe_model_metrics_t second_metrics = {0};
+    lcwe_model_metrics_t untouched = {0};
+    int rc = 1;
+
+    if (lcwe_model_batch_create(LCWE_MODEL_EXEC_RPC_STATE,
+                                LCWE_MODEL_SCALAR,
+                                19U,
+                                3U,
+                                UINT64_C(7),
+                                &first) != 0 ||
+        lcwe_model_batch_create(LCWE_MODEL_EXEC_RPC_STATE,
+                                LCWE_MODEL_SCALAR,
+                                19U,
+                                3U,
+                                UINT64_C(7),
+                                &second) != 0 ||
+        lcwe_model_batch_create(LCWE_MODEL_EXEC_RPC_STATE,
+                                LCWE_MODEL_SCALAR,
+                                19U,
+                                3U,
+                                UINT64_C(8),
+                                &different) != 0) {
+        fail("determinism create");
+        goto out;
+    }
+    if (!lcwe_model_batch_equal(first, second) ||
+        lcwe_model_batch_equal(first, different) ||
+        lcwe_model_batch_equal(NULL, second) ||
+        lcwe_model_batch_equal(first, NULL)) {
+        fail("initial deterministic equality");
+        goto out;
+    }
+    if (lcwe_model_run_round(first, 1U, &first_metrics) != 0 ||
+        lcwe_model_run_round(second, 1U, &second_metrics) != 0 ||
+        !lcwe_model_batch_equal(first, second) ||
+        lcwe_model_checksum(first) != lcwe_model_checksum(second)) {
+        fail("round deterministic equality");
+        goto out;
+    }
+    if (lcwe_model_run_round(NULL, 1U, &untouched) != EINVAL ||
+        lcwe_model_run_round(first, 1U, NULL) != EINVAL ||
+        lcwe_model_run_round(first, 0U, &untouched) != EINVAL ||
+        lcwe_model_run_round(first, 3U, &untouched) != EINVAL ||
+        lcwe_model_run_round(first, 33U, &untouched) != EINVAL ||
+        memcmp(&untouched, &(lcwe_model_metrics_t){0}, sizeof(untouched)) != 0) {
+        fail("round validation");
+        goto out;
+    }
+    rc = 0;
+
+out:
+    lcwe_model_batch_destroy(different);
+    lcwe_model_batch_destroy(second);
+    lcwe_model_batch_destroy(first);
+    lcwe_model_batch_destroy(NULL);
+    return rc;
+}
+
+int main(void) {
+    if (test_names_and_parsers() != 0 ||
+        test_create_validation() != 0 ||
+        test_scalar_workloads() != 0 ||
+        test_determinism_and_round_validation() != 0) {
+        return 1;
+    }
+    puts("[test_lcwe_model] all checks passed");
+    return 0;
+}
