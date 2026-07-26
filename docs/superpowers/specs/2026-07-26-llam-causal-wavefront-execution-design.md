@@ -49,7 +49,7 @@ A local macOS arm64 diagnostic run showed that the current direct handoff policy
 improved `channel_pingpong` by about 29.6% and `spawn_join` by about 25.6% over
 the all-handoff-off variant. It also reduced `select_park_wake` throughput by
 about 17.7%, while changing `io_echo` by only about 1.4%. These are not general
-competitor claims, but they support two design conclusions:
+competitor claims, but they support three design conclusions:
 
 - avoiding scheduler round trips is valuable for causal pairs;
 - one global handoff policy is not suitable for all wake sites;
@@ -216,6 +216,8 @@ This prevents an experimental compiler contract from destabilizing the existing
 stackful public ABI. The returned table contains module registration,
 instance lifecycle, cancellation, external wake, and stats-query operations.
 Every public input structure starts with `struct_size` and reserved-zero fields.
+The same prefix rule applies to output structures and callback-visible event and
+command structures.
 
 ### Module
 
@@ -241,7 +243,9 @@ A site descriptor contains:
 - scalar callback;
 - optional wave callback;
 - supported lane-width mask;
-- safety and scheduling flags.
+- safety and scheduling flags;
+- optional ready-to-run latency budget, with zero selecting the runtime
+  profile's default.
 
 Conceptual callback forms are:
 
@@ -258,8 +262,10 @@ scalar loop.
 ### Instance And Frame Ownership
 
 The language adapter owns allocation and layout of the frame. LLAM owns the
-instance wrapper, lifecycle word, ready link, ticket, wait ownership, and
-diagnostic state.
+instance wrapper, lifecycle word, ready link, ticket, one reusable event cell,
+one embedded I/O request, one embedded timer node, wait ownership, and
+diagnostic state. One instance may have only one active suspension command, so
+the common wait path does not allocate.
 
 Frames are nonmoving and distinct by default. LLAM calls `drop_frame` exactly
 once after the instance is terminal and all backend and external-waker
@@ -278,6 +284,12 @@ An event is a small tagged result cell. Initial event kinds cover:
 
 Large payloads remain in language- or LLAM-owned buffers referenced by the
 event; the ready path does not copy arbitrary payloads.
+
+Language-owned I/O buffers and address structures passed by a wait command must
+remain pinned and valid until that wait's terminal event. Alternatively, an
+adapter may request an LLAM-owned buffer whose ownership is returned in the
+event. The generation handshake prevents reuse of an embedded request but does
+not make prematurely freed foreign memory safe.
 
 ### Commands
 
@@ -344,6 +356,10 @@ Transitioning to `TERMINAL` prevents new waits and external wakes. Reclamation
 requires terminal state, zero active callback, zero backend references, and zero
 external-waker references.
 
+The lifecycle word uses a 64-bit nonzero generation. Exhausting that generation
+space retires the instance instead of wrapping it back to a value that a stale
+producer could hold.
+
 ## Per-Shard Ready And Wave Structures
 
 Each shard gains a separate executor admission path so existing fiber queue
@@ -371,6 +387,19 @@ A site-table key is:
 Each bucket stores an intrusive FIFO of tickets, count, oldest-ready time,
 target width, deadline, policy state, and sampled counters. Detaching a wave
 does not allocate.
+
+### Shard Placement And Migration
+
+An instance has one home shard at a time. Formed waves are not stolen because
+moving a partially formed site cohort would add synchronization to the common
+path. Load balancing may choose a new home shard only while processing a
+suspension command, before publishing its next ticket.
+
+Dynamic shard offlining first stops new placements, then rehomes waiting
+tickets and their backend owner at a generation-protected boundary. A ready or
+running instance pins its shard online until the next suspension or terminal
+boundary. This preserves exactly-once completion routing without introducing
+mid-callback migration.
 
 ## Admission And Coalescing
 
@@ -425,7 +454,7 @@ This avoids cross-thread mutation of site buckets.
 Sampled inputs include:
 
 - arrival rate and ready width;
-- scalar and wave CPU nanoseconds per lane;
+- scalar and wave callback elapsed nanoseconds per lane;
 - fill ratio;
 - coalescing and ready-to-run latency distributions;
 - callback duration and over-budget count;
@@ -446,6 +475,9 @@ observation. Width changes by one supported step at a time.
 Manual `scalar`, `wave`, and fixed-width modes remain available for benchmarks
 and diagnosis. Autotune results are not accepted without fixed-policy
 comparisons.
+
+Online callback timing uses sampled monotonic elapsed time, not thread CPU time.
+Whole-process CPU nanoseconds per operation remain an offline benchmark metric.
 
 ## I/O Integration
 
@@ -542,6 +574,20 @@ ready-to-run delay, and peak RSS.
 Existing `spawn_join`, channel, select, timer, poll, I/O, blocking, and shutdown
 benchmarks remain regression gates.
 
+The three representative batchable workloads used by the main throughput gate
+are fixed before optimization:
+
+1. `exec_io_pipeline`: batched socket reads, framed-header validation and
+   checksum/state update, followed by a write command;
+2. `exec_rpc_state`: storage/RPC-style completions followed by branch-heavy
+   decode and a multi-step request state transition;
+3. `exec_event_fanout`: timer and external-event fan-in followed by an
+   arithmetic state machine and rescheduling.
+
+Empty callbacks, a single hand-written arithmetic kernel, and workloads whose
+scalar and wave versions implement different semantics cannot satisfy the main
+gate.
+
 ### Research Success Gates
 
 LCWE proceeds beyond experimental status only if all of these hold:
@@ -560,9 +606,9 @@ LCWE proceeds beyond experimental status only if all of these hold:
    primary platforms.
 
 The hypothesis is rejected or redesigned if gains appear only in empty
-microbenchmarks, three representative workloads fail the throughput gate, the
-I/O completion abstraction materially regresses existing fibers, or latency
-guardrails require wave mode to remain disabled in realistic load.
+microbenchmarks, fewer than two representative workloads pass the throughput
+gate, the I/O completion abstraction materially regresses existing fibers, or
+latency guardrails require wave mode to remain disabled in realistic load.
 
 ## Research Phases
 
