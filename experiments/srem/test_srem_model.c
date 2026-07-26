@@ -373,13 +373,18 @@ static void test_tile_ticket_identity_and_reuse(void) {
     srem_model_batch_destroy(batch);
 }
 
-static void test_waker_and_tile_scalar_are_differential(void) {
+static void test_waker_and_tile_modes_are_differential(void) {
     static const size_t INSTANCES[] = {37U, 257U};
     static const size_t FRAME_BYTES[] = {64U, 128U, 256U};
     static const unsigned WIDTHS[] = {8U, 16U, 32U};
     static const unsigned ACTIVE_DIVISORS[] = {1U, 2U, 8U};
     static const unsigned SITES[] = {1U, 8U};
     static const unsigned DIVERGENCE[] = {0U, 1U, 4U};
+    static const srem_model_mode_t CANDIDATES[] = {
+        SREM_MODEL_TILE_SCALAR,
+        SREM_MODEL_TILE_VECTOR,
+        SREM_MODEL_ADAPTIVE,
+    };
     size_t workload;
     size_t instance_case;
     size_t frame_case;
@@ -387,6 +392,7 @@ static void test_waker_and_tile_scalar_are_differential(void) {
     size_t active_case;
     size_t site_case;
     size_t divergence_case;
+    size_t candidate_case;
 
     for (workload = SREM_MODEL_HTTP_PIPELINE;
          workload <= SREM_MODEL_MIXED_FAIRNESS;
@@ -413,59 +419,84 @@ static void test_waker_and_tile_scalar_are_differential(void) {
                                  sizeof(DIVERGENCE) /
                                      sizeof(DIVERGENCE[0]);
                                  ++divergence_case) {
-                                srem_model_config_t baseline_config =
-                                    valid_config();
-                                srem_model_config_t tile_config;
-                                srem_model_batch_t *baseline = NULL;
-                                srem_model_batch_t *tile = NULL;
-                                srem_model_metrics_t baseline_metrics = {0};
-                                srem_model_metrics_t tile_metrics = {0};
-                                unsigned round;
+                                for (candidate_case = 0U;
+                                     candidate_case <
+                                     sizeof(CANDIDATES) /
+                                         sizeof(CANDIDATES[0]);
+                                     ++candidate_case) {
+                                    srem_model_config_t baseline_config =
+                                        valid_config();
+                                    srem_model_config_t tile_config;
+                                    srem_model_batch_t *baseline = NULL;
+                                    srem_model_batch_t *tile = NULL;
+                                    srem_model_metrics_t baseline_metrics = {
+                                        0};
+                                    srem_model_metrics_t tile_metrics = {0};
+                                    unsigned round;
 
-                                baseline_config.workload =
-                                    (srem_model_workload_t)workload;
-                                baseline_config.instance_count =
-                                    INSTANCES[instance_case];
-                                baseline_config.frame_bytes =
-                                    FRAME_BYTES[frame_case];
-                                baseline_config.tile_width =
-                                    WIDTHS[width_case];
-                                baseline_config.active_lanes =
-                                    baseline_config.tile_width /
-                                    ACTIVE_DIVISORS[active_case];
-                                baseline_config.site_count =
-                                    SITES[site_case];
-                                baseline_config.divergence_eighths =
-                                    DIVERGENCE[divergence_case];
-                                baseline_config.vector_threshold =
-                                    baseline_config.tile_width / 2U;
-                                tile_config = baseline_config;
-                                tile_config.mode = SREM_MODEL_TILE_SCALAR;
+                                    baseline_config.workload =
+                                        (srem_model_workload_t)workload;
+                                    baseline_config.instance_count =
+                                        INSTANCES[instance_case];
+                                    baseline_config.frame_bytes =
+                                        FRAME_BYTES[frame_case];
+                                    baseline_config.tile_width =
+                                        WIDTHS[width_case];
+                                    baseline_config.active_lanes =
+                                        baseline_config.tile_width /
+                                        ACTIVE_DIVISORS[active_case];
+                                    baseline_config.site_count =
+                                        SITES[site_case];
+                                    baseline_config.divergence_eighths =
+                                        DIVERGENCE[divergence_case];
+                                    baseline_config.vector_threshold =
+                                        baseline_config.tile_width / 2U;
+                                    tile_config = baseline_config;
+                                    tile_config.mode =
+                                        CANDIDATES[candidate_case];
 
-                                CHECK(srem_model_batch_create(
-                                          &baseline_config,
-                                          &baseline) == 0);
-                                CHECK(srem_model_batch_create(&tile_config,
-                                                              &tile) == 0);
-                                CHECK(srem_model_batch_equal(baseline, tile));
-                                for (round = 0U; round < 19U; ++round) {
-                                    CHECK(srem_model_run_round(
-                                              baseline,
-                                              &baseline_metrics) == 0);
-                                    CHECK(srem_model_run_round(
-                                              tile,
-                                              &tile_metrics) == 0);
+                                    CHECK(srem_model_batch_create(
+                                              &baseline_config,
+                                              &baseline) == 0);
+                                    CHECK(srem_model_batch_create(
+                                              &tile_config,
+                                              &tile) == 0);
                                     CHECK(srem_model_batch_equal(baseline,
                                                                  tile));
-                                    CHECK(srem_model_checksum(baseline) ==
-                                          srem_model_checksum(tile));
+                                    for (round = 0U; round < 19U; ++round) {
+                                        CHECK(srem_model_run_round(
+                                                  baseline,
+                                                  &baseline_metrics) == 0);
+                                        CHECK(srem_model_run_round(
+                                                  tile,
+                                                  &tile_metrics) == 0);
+                                        CHECK(srem_model_batch_equal(
+                                            baseline,
+                                            tile));
+                                        CHECK(srem_model_checksum(baseline) ==
+                                              srem_model_checksum(tile));
+                                    }
+                                    if (tile_config.mode ==
+                                        SREM_MODEL_TILE_SCALAR) {
+                                        CHECK(tile_metrics.scalar_lanes ==
+                                              tile_metrics.completions);
+                                    } else if (tile_config.mode ==
+                                               SREM_MODEL_TILE_VECTOR) {
+                                        CHECK(tile_metrics.vector_lanes ==
+                                              tile_metrics.completions);
+                                        CHECK(tile_metrics.vector_blocks >
+                                              0U);
+                                    } else {
+                                        CHECK(
+                                            tile_metrics.scalar_lanes +
+                                                tile_metrics.vector_lanes ==
+                                            tile_metrics.completions);
+                                    }
+                                    CHECK(tile_metrics.queue_pushes <=
+                                          baseline_metrics.queue_pushes);
+                                    srem_model_batch_destroy(tile);
+                                    srem_model_batch_destroy(baseline);
                                 }
-                                CHECK(tile_metrics.scalar_lanes ==
-                                      tile_metrics.completions);
-                                CHECK(tile_metrics.queue_pushes <=
-                                      baseline_metrics.queue_pushes);
-                                srem_model_batch_destroy(tile);
-                                srem_model_batch_destroy(baseline);
                             }
                         }
                     }
@@ -475,10 +506,45 @@ static void test_waker_and_tile_scalar_are_differential(void) {
     }
 }
 
+static void test_vector_and_adaptive_crossover(void) {
+    srem_model_config_t config = valid_config();
+    srem_model_batch_t *batch = NULL;
+    srem_model_metrics_t metrics = {0};
+
+    config.mode = SREM_MODEL_TILE_VECTOR;
+    config.instance_count = 32U;
+    config.tile_width = 8U;
+    config.active_lanes = 1U;
+    config.vector_threshold = 4U;
+    config.divergence_eighths = 0U;
+    CHECK(srem_model_batch_create(&config, &batch) == 0);
+    CHECK(srem_model_run_round(batch, &metrics) == 0);
+    CHECK(metrics.vector_lanes == metrics.completions);
+    CHECK(metrics.scalar_lanes == 0U);
+    CHECK(metrics.vector_blocks == batch->tile_count);
+    srem_model_batch_destroy(batch);
+
+    memset(&metrics, 0, sizeof(metrics));
+    config.mode = SREM_MODEL_ADAPTIVE;
+    CHECK(srem_model_batch_create(&config, &batch) == 0);
+    CHECK(srem_model_run_round(batch, &metrics) == 0);
+    CHECK(metrics.scalar_lanes == metrics.completions);
+    CHECK(metrics.vector_lanes == 0U);
+    CHECK(metrics.vector_blocks == 0U);
+    srem_model_batch_destroy(batch);
+
+    memset(&metrics, 0, sizeof(metrics));
+    config.active_lanes = 8U;
+    CHECK(srem_model_batch_create(&config, &batch) == 0);
+    CHECK(srem_model_run_round(batch, &metrics) == 0);
+    CHECK(metrics.vector_lanes == metrics.completions);
+    CHECK(metrics.scalar_lanes == 0U);
+    CHECK(metrics.vector_blocks == batch->tile_count);
+    srem_model_batch_destroy(batch);
+}
+
 static void test_unimplemented_modes_are_explicit(void) {
     static const srem_model_mode_t MODES[] = {
-        SREM_MODEL_TILE_VECTOR,
-        SREM_MODEL_ADAPTIVE,
         SREM_MODEL_REMOTE_WAKER_FRAME,
         SREM_MODEL_REMOTE_ADAPTIVE,
     };
@@ -508,8 +574,9 @@ int main(void) {
     test_determinism_and_equality();
     test_tile_scalar_layout_and_coalescing();
     test_tile_ticket_identity_and_reuse();
-    test_waker_and_tile_scalar_are_differential();
+    test_waker_and_tile_modes_are_differential();
+    test_vector_and_adaptive_crossover();
     test_unimplemented_modes_are_explicit();
-    puts("[test_srem_model] scalar tile checks passed");
+    puts("[test_srem_model] tile checks passed");
     return 0;
 }

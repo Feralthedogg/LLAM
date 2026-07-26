@@ -1022,6 +1022,86 @@ static int run_tile_scalar_mask(srem_model_batch_t *batch,
     return 0;
 }
 
+static unsigned popcount_u32(uint32_t value) {
+    unsigned count = 0U;
+
+    while (value != 0U) {
+        value &= value - UINT32_C(1);
+        count += 1U;
+    }
+    return count;
+}
+
+static void make_tile_view(srem_model_batch_t *batch,
+                           size_t tile_index,
+                           unsigned resume_site,
+                           uint32_t mask,
+                           srem_model_tile_view_t *view) {
+    const size_t width = batch->config.tile_width;
+    const size_t base = tile_index * width;
+    unsigned field;
+    unsigned argument;
+
+    memset(view, 0, sizeof(*view));
+    view->width = batch->config.tile_width;
+    view->resume_site = resume_site;
+    view->active_mask = mask;
+    for (field = 0U; field < 6U; ++field) {
+        view->field[field] =
+            &batch->tile_fields[
+                (tile_index * 6U + field) * width];
+    }
+    view->generation = &batch->tile_generations[base];
+    view->site = &batch->tile_sites[base];
+    view->steps = &batch->tile_steps[base];
+    view->terminal = &batch->tile_terminal[base];
+    view->flags = &batch->tile_flags[base];
+    view->event_word0 = &batch->tile_event_word0[base];
+    view->event_word1 = &batch->tile_event_word1[base];
+    view->event_result = &batch->tile_event_result[base];
+    view->event_site = &batch->tile_event_site[base];
+    view->event_kind = &batch->tile_event_kind[base];
+    view->event_divergent =
+        &batch->tile_event_divergent[base];
+    for (argument = 0U; argument < 3U; ++argument) {
+        view->effect_argument[argument] =
+            &batch->tile_effect_arguments[
+                (tile_index * 3U + argument) * width];
+    }
+    view->effect_operation =
+        &batch->tile_effect_operation[base];
+    view->effect_next_site =
+        &batch->tile_effect_next_site[base];
+    view->effect_flags = &batch->tile_effect_flags[base];
+}
+
+static int run_tile_vector_mask(srem_model_batch_t *batch,
+                                size_t tile_index,
+                                unsigned resume_site,
+                                uint32_t mask,
+                                srem_model_metrics_t *metrics) {
+    srem_model_tile_view_t view;
+    const unsigned active_lanes = popcount_u32(mask);
+    int error;
+
+    make_tile_view(batch,
+                   tile_index,
+                   resume_site,
+                   mask,
+                   &view);
+    error = srem_model_run_vector_superblock(
+        batch->config.workload,
+        &batch->config,
+        &view);
+    if (error != 0) {
+        return error;
+    }
+    batch->tiles[tile_index].pending_mask &= ~mask;
+    metrics->vector_lanes += active_lanes;
+    metrics->vector_blocks += 1U;
+    return 0;
+}
+
 int srem_model_tile_drain(srem_model_batch_t *batch,
                           srem_model_metrics_t *metrics) {
     uint32_t tile_index;
@@ -1058,11 +1138,24 @@ int srem_model_tile_drain(srem_model_batch_t *batch,
         }
         metrics->queue_pops += 1U;
         metrics->tile_dispatches += 1U;
-        error = run_tile_scalar_mask(batch,
-                                     tile_index,
-                                     site,
-                                     mask,
-                                     metrics);
+        if (batch->config.mode == SREM_MODEL_TILE_VECTOR ||
+            ((batch->config.mode == SREM_MODEL_ADAPTIVE ||
+              batch->config.mode ==
+                  SREM_MODEL_REMOTE_ADAPTIVE) &&
+             popcount_u32(mask) >=
+                 batch->config.vector_threshold)) {
+            error = run_tile_vector_mask(batch,
+                                         tile_index,
+                                         site,
+                                         mask,
+                                         metrics);
+        } else {
+            error = run_tile_scalar_mask(batch,
+                                         tile_index,
+                                         site,
+                                         mask,
+                                         metrics);
+        }
         tile->running = 0U;
         if (error != 0) {
             return error;
@@ -1086,7 +1179,9 @@ int srem_model_run_round(srem_model_batch_t *batch,
     if (batch == NULL || metrics == NULL) {
         return EINVAL;
     }
-    if (batch->config.mode == SREM_MODEL_TILE_SCALAR) {
+    if (batch->config.mode == SREM_MODEL_TILE_SCALAR ||
+        batch->config.mode == SREM_MODEL_TILE_VECTOR ||
+        batch->config.mode == SREM_MODEL_ADAPTIVE) {
         error = admit_tile_round(batch, metrics);
         if (error == 0) {
             error = srem_model_tile_drain(batch, metrics);

@@ -108,6 +108,28 @@ typedef struct srem_model_tile {
     uint32_t reserved;
 } srem_model_tile_t;
 
+typedef struct srem_model_tile_view {
+    unsigned width;
+    unsigned resume_site;
+    uint32_t active_mask;
+    uint64_t *field[6];
+    uint32_t *generation;
+    uint16_t *site;
+    uint16_t *steps;
+    uint32_t *terminal;
+    uint32_t *flags;
+    uint64_t *event_word0;
+    uint64_t *event_word1;
+    int32_t *event_result;
+    uint16_t *event_site;
+    uint8_t *event_kind;
+    uint8_t *event_divergent;
+    uint64_t *effect_argument[3];
+    uint32_t *effect_operation;
+    uint16_t *effect_next_site;
+    uint16_t *effect_flags;
+} srem_model_tile_view_t;
+
 struct srem_model_batch {
     srem_model_config_t config;
     uint64_t round;
@@ -163,5 +185,9 @@ int srem_model_tile_drain(srem_model_batch_t *batch,
                           srem_model_metrics_t *metrics);
 uint32_t *srem_model_tile_generation_at(srem_model_batch_t *batch,
                                         size_t index);
+int srem_model_run_vector_superblock(
+    srem_model_workload_t workload,
+    const srem_model_config_t *config,
+    srem_model_tile_view_t *view);
 
 #endif
