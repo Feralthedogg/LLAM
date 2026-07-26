@@ -99,6 +99,15 @@ typedef struct srem_model_index_queue {
     size_t tail;
 } srem_model_index_queue_t;
 
+typedef struct srem_model_tile {
+    uint32_t ready_mask[SREM_MODEL_MAX_SITES];
+    uint32_t pending_mask;
+    uint32_t valid_mask;
+    uint32_t queued;
+    uint32_t running;
+    uint32_t reserved;
+} srem_model_tile_t;
+
 struct srem_model_batch {
     srem_model_config_t config;
     uint64_t round;
@@ -109,6 +118,25 @@ struct srem_model_batch {
     srem_model_ticket_t *tickets;
     srem_model_index_queue_t local_queue;
     const srem_model_workload_ops_t *ops;
+    size_t tile_count;
+    size_t tile_slot_count;
+    srem_model_tile_t *tiles;
+    uint64_t *tile_fields;
+    uint32_t *tile_generations;
+    uint16_t *tile_sites;
+    uint16_t *tile_steps;
+    uint32_t *tile_terminal;
+    uint32_t *tile_flags;
+    uint64_t *tile_event_word0;
+    uint64_t *tile_event_word1;
+    int32_t *tile_event_result;
+    uint16_t *tile_event_site;
+    uint8_t *tile_event_kind;
+    uint8_t *tile_event_divergent;
+    uint64_t *tile_effect_arguments;
+    uint32_t *tile_effect_operation;
+    uint16_t *tile_effect_next_site;
+    uint16_t *tile_effect_flags;
 };
 
 uint64_t srem_model_mix64(uint64_t value);
@@ -125,5 +153,15 @@ void srem_model_derive_event(const srem_model_batch_t *batch,
                              srem_model_event_t *event);
 const srem_model_workload_ops_t *
 srem_model_get_workload_ops(srem_model_workload_t workload);
+int srem_model_make_ticket(const srem_model_batch_t *batch,
+                           size_t index,
+                           srem_model_ticket_t *out_ticket);
+int srem_model_tile_admit_ticket(srem_model_batch_t *batch,
+                                 const srem_model_ticket_t *ticket,
+                                 srem_model_metrics_t *metrics);
+int srem_model_tile_drain(srem_model_batch_t *batch,
+                          srem_model_metrics_t *metrics);
+uint32_t *srem_model_tile_generation_at(srem_model_batch_t *batch,
+                                        size_t index);
 
 #endif
