@@ -138,7 +138,7 @@ static int test_create_validation(void) {
     EXPECT_INVALID(remote_producers, 3U);
 #undef EXPECT_INVALID
 
-    config.mode = LCCF_MODEL_FUSED_CAUSAL_CELL;
+    config.mode = LCCF_MODEL_REMOTE_WAKER_QUEUE;
     if (expect_create_error(config, ENOTSUP) != 0) {
         return 1;
     }
@@ -528,13 +528,246 @@ out:
     return rc;
 }
 
+static int run_fused_differential_case(
+    lccf_model_workload_t workload,
+    lccf_model_mode_t candidate_mode,
+    size_t frame_bytes,
+    size_t cell_bytes,
+    unsigned site_count,
+    size_t instance_count,
+    unsigned chain_length,
+    unsigned direct_budget,
+    uint64_t seed,
+    lccf_model_metrics_t *out_metrics,
+    lccf_model_batch_t **out_candidate) {
+    lccf_model_config_t baseline_config = base_config();
+    lccf_model_config_t candidate_config;
+    lccf_model_batch_t *baseline = NULL;
+    lccf_model_batch_t *candidate = NULL;
+    lccf_model_metrics_t baseline_metrics = {0};
+    lccf_model_metrics_t candidate_metrics = {0};
+    unsigned round;
+    int rc = 1;
+
+    if (out_candidate != NULL) {
+        *out_candidate = NULL;
+    }
+    baseline_config.workload = workload;
+    baseline_config.frame_bytes = frame_bytes;
+    baseline_config.cell_bytes = cell_bytes;
+    baseline_config.site_count = site_count;
+    baseline_config.instance_count = instance_count;
+    baseline_config.chain_length = chain_length;
+    baseline_config.direct_budget = direct_budget;
+    baseline_config.seed = seed;
+    candidate_config = baseline_config;
+    candidate_config.mode = candidate_mode;
+
+    if (lccf_model_batch_create(&baseline_config, &baseline) != 0 ||
+        lccf_model_batch_create(&candidate_config, &candidate) != 0) {
+        fail("fused differential create");
+        goto out;
+    }
+    for (round = 0U; round < 19U; ++round) {
+        if (lccf_model_run_round(baseline, &baseline_metrics) != 0 ||
+            lccf_model_run_round(candidate, &candidate_metrics) != 0 ||
+            !lccf_model_batch_equal(baseline, candidate) ||
+            lccf_model_checksum(baseline) !=
+                lccf_model_checksum(candidate)) {
+            fprintf(stderr,
+                    "[test_lccf_model] fused differential round=%u "
+                    "workload=%s mode=%s frame=%zu cell=%zu sites=%u "
+                    "instances=%zu chain=%u budget=%u\n",
+                    round,
+                    lccf_model_workload_name(workload),
+                    lccf_model_mode_name(candidate_mode),
+                    frame_bytes,
+                    cell_bytes,
+                    site_count,
+                    instance_count,
+                    chain_length,
+                    direct_budget);
+            goto out;
+        }
+    }
+    if (candidate_metrics.hot_allocations != 0U ||
+        candidate_metrics.resume_calls !=
+            (uint64_t)instance_count * chain_length *
+                UINT64_C(19)) {
+        fail("fused differential metric base");
+        goto out;
+    }
+    if (out_metrics != NULL) {
+        *out_metrics = candidate_metrics;
+    }
+    if (out_candidate != NULL) {
+        *out_candidate = candidate;
+        candidate = NULL;
+    }
+    rc = 0;
+
+out:
+    lccf_model_batch_destroy(candidate);
+    lccf_model_batch_destroy(baseline);
+    return rc;
+}
+
+static int test_fused_differential_matrix(void) {
+    static const lccf_model_workload_t workloads[] = {
+        LCCF_MODEL_COMPLETION_IO_PIPELINE,
+        LCCF_MODEL_COMPLETION_RPC_STATE,
+        LCCF_MODEL_COMPLETION_TIMER_CANCEL,
+    };
+    static const size_t frame_bytes[] = {64U, 128U, 256U};
+    static const size_t cell_bytes[] = {64U, 96U, 128U};
+    static const unsigned site_counts[] = {1U, 8U};
+    size_t wi;
+    size_t fi;
+    size_t ci;
+    size_t si;
+
+    for (wi = 0U; wi < sizeof(workloads) / sizeof(workloads[0]); ++wi) {
+        for (fi = 0U;
+             fi < sizeof(frame_bytes) / sizeof(frame_bytes[0]);
+             ++fi) {
+            for (ci = 0U;
+                 ci < sizeof(cell_bytes) / sizeof(cell_bytes[0]);
+                 ++ci) {
+                for (si = 0U;
+                     si < sizeof(site_counts) / sizeof(site_counts[0]);
+                     ++si) {
+                    lccf_model_metrics_t metrics;
+                    const size_t instance_count =
+                        (fi + ci + si) % 2U == 0U ? 37U : 257U;
+
+                    if (run_fused_differential_case(
+                            workloads[wi],
+                            LCCF_MODEL_FUSED_CAUSAL_CELL,
+                            frame_bytes[fi],
+                            cell_bytes[ci],
+                            site_counts[si],
+                            instance_count,
+                            1U,
+                            8U,
+                            UINT64_C(0xD1B54A32D192ED03) ^
+                                (uint64_t)(wi * 31U + fi * 7U +
+                                           ci * 3U + si),
+                            &metrics,
+                            NULL) != 0) {
+                        return 1;
+                    }
+                    if (metrics.queue_pushes != 0U ||
+                        metrics.queue_pops != 0U ||
+                        metrics.forced_escapes != 0U ||
+                        metrics.direct_calls !=
+                            metrics.resume_calls) {
+                        return fail("unbounded fused accounting");
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_exact_causal_budgets(void) {
+    static const struct {
+        unsigned chain_length;
+        unsigned direct_budget;
+        uint64_t escapes_per_instance;
+        uint64_t direct_per_instance;
+    } cases[] = {
+        {1U, 1U, UINT64_C(0), UINT64_C(1)},
+        {9U, 8U, UINT64_C(1), UINT64_C(8)},
+        {18U, 8U, UINT64_C(2), UINT64_C(16)},
+    };
+    size_t case_index;
+
+    for (case_index = 0U;
+         case_index < sizeof(cases) / sizeof(cases[0]);
+         ++case_index) {
+        lccf_model_metrics_t metrics;
+        lccf_model_batch_t *candidate = NULL;
+        const uint64_t instances = UINT64_C(37);
+        const uint64_t rounds = UINT64_C(19);
+
+        if (run_fused_differential_case(
+                LCCF_MODEL_COMPLETION_IO_PIPELINE,
+                LCCF_MODEL_BUDGETED_FUSED_CHAIN,
+                128U,
+                96U,
+                8U,
+                (size_t)instances,
+                cases[case_index].chain_length,
+                cases[case_index].direct_budget,
+                UINT64_C(0xA0761D6478BD642F) + case_index,
+                &metrics,
+                &candidate) != 0) {
+            return 1;
+        }
+        if (metrics.forced_escapes !=
+                instances * rounds *
+                    cases[case_index].escapes_per_instance ||
+            metrics.queue_pushes != metrics.forced_escapes ||
+            metrics.queue_pops != metrics.forced_escapes ||
+            metrics.direct_calls !=
+                instances * rounds *
+                    cases[case_index].direct_per_instance ||
+            candidate->maximum_callback_depth != 1U) {
+            lccf_model_batch_destroy(candidate);
+            return fail("exact causal budget accounting");
+        }
+        lccf_model_batch_destroy(candidate);
+    }
+    return 0;
+}
+
+static int test_mixed_fairness_accounting(void) {
+    lccf_model_metrics_t metrics;
+    lccf_model_batch_t *candidate = NULL;
+    const uint64_t expected_samples =
+        UINT64_C(257) * UINT64_C(18) * UINT64_C(19) /
+        UINT64_C(32);
+    int rc = 1;
+
+    if (run_fused_differential_case(
+            LCCF_MODEL_COMPLETION_MIXED_FAIRNESS,
+            LCCF_MODEL_BUDGETED_FUSED_CHAIN,
+            128U,
+            96U,
+            8U,
+            257U,
+            18U,
+            8U,
+            UINT64_C(0xE7037ED1A0B428DB),
+            &metrics,
+            &candidate) != 0) {
+        return 1;
+    }
+    if (metrics.fairness_samples != expected_samples ||
+        metrics.fairness_p99_ns == 0U ||
+        candidate->fairness_services != metrics.fairness_samples ||
+        candidate->fairness_due) {
+        fail("mixed fairness service accounting");
+        goto out;
+    }
+    rc = 0;
+
+out:
+    lccf_model_batch_destroy(candidate);
+    return rc;
+}
+
 int main(void) {
     if (test_names_and_parsers() != 0 ||
         test_create_validation() != 0 ||
         test_baseline_matrix() != 0 ||
         test_baseline_continue_requeues() != 0 ||
         test_causal_differential_matrix() != 0 ||
-        test_causal_layout_and_stale_generation() != 0) {
+        test_causal_layout_and_stale_generation() != 0 ||
+        test_fused_differential_matrix() != 0 ||
+        test_exact_causal_budgets() != 0 ||
+        test_mixed_fairness_accounting() != 0) {
         return 1;
     }
     printf("[test_lccf_model] all checks passed\n");

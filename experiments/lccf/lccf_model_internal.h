@@ -128,6 +128,13 @@ struct lccf_model_batch {
     lccf_model_ticket_t *tickets;
     lccf_model_local_queue_t local_queue;
     const lccf_model_workload_ops_t *ops;
+    unsigned callback_depth;
+    unsigned maximum_callback_depth;
+    uint64_t fairness_tick;
+    uint64_t fairness_due_tick;
+    uint64_t fairness_services;
+    uint64_t fairness_histogram[64];
+    bool fairness_due;
 };
 
 uint64_t lccf_model_mix64(uint64_t value);

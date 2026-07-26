@@ -44,7 +44,9 @@ static bool mode_uses_wakers(lccf_model_mode_t mode) {
 }
 
 static bool mode_uses_cells(lccf_model_mode_t mode) {
-    return mode == LCCF_MODEL_CAUSAL_CELL_QUEUE;
+    return mode == LCCF_MODEL_CAUSAL_CELL_QUEUE ||
+           mode == LCCF_MODEL_FUSED_CAUSAL_CELL ||
+           mode == LCCF_MODEL_BUDGETED_FUSED_CHAIN;
 }
 
 static bool frame_bytes_valid(size_t frame_bytes) {
@@ -486,6 +488,15 @@ int lccf_model_batch_reset(lccf_model_batch_t *batch) {
     batch->local_queue.head = 0U;
     batch->local_queue.tail = 0U;
     batch->round = 0U;
+    batch->callback_depth = 0U;
+    batch->maximum_callback_depth = 0U;
+    batch->fairness_tick = 0U;
+    batch->fairness_due_tick = 0U;
+    batch->fairness_services = 0U;
+    memset(batch->fairness_histogram,
+           0,
+           sizeof(batch->fairness_histogram));
+    batch->fairness_due = false;
     for (i = 0U; i < batch->config.instance_count; ++i) {
         if (initialize_instance(batch, i, false) != 0) {
             return EPROTO;
@@ -515,6 +526,11 @@ static int validate_metrics(const lccf_model_batch_t *batch,
         !metric_room(metrics->queue_pushes, callback_count) ||
         !metric_room(metrics->queue_pops, callback_count) ||
         !metric_room(metrics->resume_calls, callback_count) ||
+        !metric_room(metrics->direct_calls, callback_count) ||
+        !metric_room(metrics->forced_escapes, callback_count) ||
+        !metric_room(metrics->fairness_samples, callback_count) ||
+        !metric_room(batch->fairness_tick, callback_count) ||
+        !metric_room(batch->fairness_services, callback_count) ||
         (mode_uses_cells(batch->config.mode) &&
          batch->config.workload ==
              LCCF_MODEL_COMPLETION_TIMER_CANCEL &&
@@ -624,6 +640,103 @@ static bool command_valid(const lccf_model_batch_t *batch,
            command->kind <= LCCF_MODEL_COMMAND_FAIL;
 }
 
+static unsigned fairness_bucket(uint64_t latency) {
+    unsigned bucket = 0U;
+    uint64_t upper = UINT64_C(1);
+
+    while (upper < latency && bucket < 63U) {
+        upper <<= 1U;
+        bucket += 1U;
+    }
+    return bucket;
+}
+
+static void update_fairness_p99(lccf_model_batch_t *batch,
+                                lccf_model_metrics_t *metrics) {
+    const uint64_t rank =
+        batch->fairness_services -
+        batch->fairness_services / UINT64_C(100);
+    uint64_t cumulative = 0U;
+    unsigned bucket;
+
+    for (bucket = 0U; bucket < 64U; ++bucket) {
+        cumulative += batch->fairness_histogram[bucket];
+        if (cumulative >= rank) {
+            metrics->fairness_p99_ns =
+                bucket == 63U ?
+                    (UINT64_C(1) << 63U) :
+                    (UINT64_C(1) << bucket);
+            return;
+        }
+    }
+}
+
+static void fairness_note_callback(lccf_model_batch_t *batch) {
+    batch->fairness_tick += UINT64_C(1);
+    if (batch->config.workload ==
+            LCCF_MODEL_COMPLETION_MIXED_FAIRNESS &&
+        !batch->fairness_due &&
+        (batch->fairness_tick & UINT64_C(31)) == 0U) {
+        batch->fairness_due = true;
+        batch->fairness_due_tick = batch->fairness_tick;
+    }
+}
+
+static void fairness_service(lccf_model_batch_t *batch,
+                             lccf_model_metrics_t *metrics) {
+    uint64_t latency;
+    unsigned bucket;
+
+    if (!batch->fairness_due) {
+        return;
+    }
+    latency =
+        batch->fairness_tick - batch->fairness_due_tick +
+        UINT64_C(1);
+    bucket = fairness_bucket(latency);
+    batch->fairness_histogram[bucket] += UINT64_C(1);
+    batch->fairness_services += UINT64_C(1);
+    metrics->fairness_samples += UINT64_C(1);
+    batch->fairness_due = false;
+    update_fairness_p99(batch, metrics);
+}
+
+static int execute_resume_callback(
+    lccf_model_batch_t *batch,
+    lccf_model_instance_t *instance,
+    const lccf_model_event_t *event,
+    unsigned site,
+    bool direct,
+    lccf_model_metrics_t *metrics) {
+    lccf_model_resume_fn resume;
+
+    if (site >= batch->config.site_count ||
+        batch->callback_depth == UINT_MAX) {
+        return EPROTO;
+    }
+    resume = batch->ops->resume_sites[site];
+    if (resume == NULL) {
+        return EPROTO;
+    }
+    memset(&instance->command, 0, sizeof(instance->command));
+    batch->callback_depth += 1U;
+    if (batch->callback_depth > batch->maximum_callback_depth) {
+        batch->maximum_callback_depth = batch->callback_depth;
+    }
+    fairness_note_callback(batch);
+    resume(instance->frame,
+           event,
+           &instance->command,
+           &batch->config,
+           site);
+    batch->callback_depth -= 1U;
+    metrics->resume_calls += UINT64_C(1);
+    if (direct) {
+        metrics->direct_calls += UINT64_C(1);
+    }
+    return command_valid(batch, instance) ? 0 : EPROTO;
+}
+
 static int claim_and_publish_wakers(lccf_model_batch_t *batch,
                                     lccf_model_metrics_t *metrics) {
     size_t i;
@@ -672,7 +785,6 @@ static int resume_queued_wakers(lccf_model_batch_t *batch,
         lccf_model_frame_core_t *frame = instance->frame;
         const uint64_t generation = frame->generation;
         const unsigned site = waker->resume_site;
-        lccf_model_resume_fn resume;
 
         if (site >= batch->config.site_count) {
             return EPROTO;
@@ -682,21 +794,16 @@ static int resume_queued_wakers(lccf_model_batch_t *batch,
             lccf_model_pack_state(generation,
                                   LCCF_MODEL_STATE_RUNNING),
             memory_order_release);
-        memset(&instance->command, 0, sizeof(instance->command));
-        resume = batch->ops->resume_sites[site];
-        if (resume == NULL) {
+        if (execute_resume_callback(batch,
+                                    instance,
+                                    &instance->event,
+                                    site,
+                                    false,
+                                    metrics) != 0) {
             return EPROTO;
         }
-        resume(frame,
-               &instance->event,
-               &instance->command,
-               &batch->config,
-               site);
         metrics->queue_pops += UINT64_C(1);
-        metrics->resume_calls += UINT64_C(1);
-        if (!command_valid(batch, instance)) {
-            return EPROTO;
-        }
+        fairness_service(batch, metrics);
         frame->command_word =
             instance->command.output ^
             ((uint64_t)instance->command.next_site << 32U) ^
@@ -724,6 +831,48 @@ static int resume_queued_wakers(lccf_model_batch_t *batch,
                 memory_order_release);
         }
     }
+    return 0;
+}
+
+static void publish_cell_command(lccf_model_instance_t *instance) {
+    lccf_model_frame_core_t *frame = instance->frame;
+    lccf_model_cell_hot_t *cell = instance->cell;
+
+    frame->command_word =
+        instance->command.output ^
+        ((uint64_t)instance->command.next_site << 32U) ^
+        (uint64_t)instance->command.kind;
+    cell->command_word = frame->command_word;
+    frame->site = instance->command.next_site;
+    cell->next_site = frame->site;
+}
+
+static int rearm_cell_generation(lccf_model_batch_t *batch,
+                                 lccf_model_instance_t *instance) {
+    if (atomic_load_explicit(&instance->cell->backend_refs,
+                             memory_order_acquire) != 0U) {
+        return EBUSY;
+    }
+    instance->frame->generation += UINT64_C(1);
+    return prepare_causal_generation(batch, instance, true);
+}
+
+static int mark_cell_running(lccf_model_instance_t *instance,
+                             lccf_model_state_t expected_state) {
+    lccf_model_cell_hot_t *cell = instance->cell;
+    const uint64_t word = atomic_load_explicit(
+        &cell->state_generation, memory_order_acquire);
+
+    if (lccf_model_unpack_generation(word) !=
+            instance->frame->generation ||
+        lccf_model_unpack_state(word) != expected_state) {
+        return EPROTO;
+    }
+    atomic_store_explicit(
+        &cell->state_generation,
+        lccf_model_pack_state(instance->frame->generation,
+                              LCCF_MODEL_STATE_RUNNING),
+        memory_order_release);
     return 0;
 }
 
@@ -761,74 +910,107 @@ static int retire_backend_reference(lccf_model_cell_hot_t *cell) {
     return EPROTO;
 }
 
+static int claim_cell_tickets(lccf_model_batch_t *batch,
+                              lccf_model_instance_t *instance,
+                              lccf_model_metrics_t *metrics) {
+    lccf_model_cell_hot_t *cell = instance->cell;
+    const unsigned count = active_ticket_count(batch);
+    const unsigned first =
+        causal_winner_ticket(batch, instance);
+    unsigned offset;
+    bool won = false;
+
+    for (offset = 0U; offset < count; ++offset) {
+        const unsigned ticket_index =
+            count == 1U ? 0U : (first + offset) % count;
+        const lccf_model_ticket_t *ticket =
+            lccf_model_ticket_at(
+                batch, instance->index, ticket_index);
+        uint64_t expected;
+
+        if (ticket == NULL || ticket->target != cell) {
+            return EPROTO;
+        }
+        expected = lccf_model_pack_state(
+            ticket->generation, LCCF_MODEL_STATE_ARMED);
+        if (atomic_compare_exchange_strong_explicit(
+                &cell->state_generation,
+                &expected,
+                lccf_model_pack_state(
+                    ticket->generation,
+                    LCCF_MODEL_STATE_CLAIMED),
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            if (won) {
+                return EPROTO;
+            }
+            cell->event = ticket->event;
+            cell->next_site = instance->frame->site;
+            metrics->completions += UINT64_C(1);
+            metrics->claims += UINT64_C(1);
+            won = true;
+        } else {
+            metrics->stale_tickets += UINT64_C(1);
+        }
+        if (retire_backend_reference(cell) != 0) {
+            return EPROTO;
+        }
+    }
+    if (!won ||
+        atomic_load_explicit(&cell->backend_refs,
+                             memory_order_acquire) != 0U) {
+        return EPROTO;
+    }
+    return 0;
+}
+
+static int enqueue_claimed_cell(lccf_model_batch_t *batch,
+                                lccf_model_cell_hot_t *cell,
+                                lccf_model_metrics_t *metrics,
+                                bool forced_escape) {
+    const uint64_t word = atomic_load_explicit(
+        &cell->state_generation, memory_order_acquire);
+    const lccf_model_state_t state =
+        lccf_model_unpack_state(word);
+
+    if ((state != LCCF_MODEL_STATE_CLAIMED &&
+         state != LCCF_MODEL_STATE_RUNNING) ||
+        atomic_exchange_explicit(
+            &cell->queue_owned,
+            1U,
+            memory_order_acq_rel) != 0U) {
+        return EPROTO;
+    }
+    atomic_store_explicit(
+        &cell->state_generation,
+        lccf_model_pack_state(
+            lccf_model_unpack_generation(word),
+            LCCF_MODEL_STATE_QUEUED),
+        memory_order_release);
+    if (queue_push(&batch->local_queue, cell) != 0) {
+        return EOVERFLOW;
+    }
+    metrics->queue_pushes += UINT64_C(1);
+    if (forced_escape) {
+        metrics->forced_escapes += UINT64_C(1);
+    }
+    return 0;
+}
+
 static int claim_and_publish_cells(lccf_model_batch_t *batch,
                                    lccf_model_metrics_t *metrics) {
     size_t i;
 
     for (i = 0U; i < batch->config.instance_count; ++i) {
         lccf_model_instance_t *instance = &batch->instances[i];
-        lccf_model_cell_hot_t *cell = instance->cell;
-        const unsigned count = active_ticket_count(batch);
-        const unsigned first =
-            causal_winner_ticket(batch, instance);
-        unsigned offset;
-        bool won = false;
+        int rc = claim_cell_tickets(batch, instance, metrics);
 
-        for (offset = 0U; offset < count; ++offset) {
-            const unsigned ticket_index =
-                count == 1U ? 0U : (first + offset) % count;
-            const lccf_model_ticket_t *ticket =
-                lccf_model_ticket_at(batch, i, ticket_index);
-            uint64_t expected;
-
-            if (ticket == NULL || ticket->target != cell) {
-                return EPROTO;
-            }
-            expected = lccf_model_pack_state(
-                ticket->generation, LCCF_MODEL_STATE_ARMED);
-            if (atomic_compare_exchange_strong_explicit(
-                    &cell->state_generation,
-                    &expected,
-                    lccf_model_pack_state(
-                        ticket->generation,
-                        LCCF_MODEL_STATE_CLAIMED),
-                    memory_order_acq_rel,
-                    memory_order_acquire)) {
-                if (won) {
-                    return EPROTO;
-                }
-                cell->event = ticket->event;
-                cell->next_site = instance->frame->site;
-                if (atomic_exchange_explicit(
-                        &cell->queue_owned,
-                        1U,
-                        memory_order_acq_rel) != 0U) {
-                    return EPROTO;
-                }
-                atomic_store_explicit(
-                    &cell->state_generation,
-                    lccf_model_pack_state(
-                        ticket->generation,
-                        LCCF_MODEL_STATE_QUEUED),
-                    memory_order_release);
-                if (queue_push(&batch->local_queue, cell) != 0) {
-                    return EOVERFLOW;
-                }
-                metrics->completions += UINT64_C(1);
-                metrics->claims += UINT64_C(1);
-                metrics->queue_pushes += UINT64_C(1);
-                won = true;
-            } else {
-                metrics->stale_tickets += UINT64_C(1);
-            }
-            if (retire_backend_reference(cell) != 0) {
-                return EPROTO;
-            }
+        if (rc == 0) {
+            rc = enqueue_claimed_cell(
+                batch, instance->cell, metrics, false);
         }
-        if (!won ||
-            atomic_load_explicit(&cell->backend_refs,
-                                 memory_order_acquire) != 0U) {
-            return EPROTO;
+        if (rc != 0) {
+            return rc;
         }
     }
     return 0;
@@ -840,24 +1022,20 @@ static int resume_queued_cells(lccf_model_batch_t *batch,
 
     while ((cell = queue_pop(&batch->local_queue)) != NULL) {
         lccf_model_instance_t *instance = cell->instance;
-        lccf_model_frame_core_t *frame;
         uint64_t word;
-        uint64_t generation;
         unsigned site;
-        lccf_model_resume_fn resume;
 
         if (instance == NULL || instance->batch != batch ||
             instance->cell != cell) {
             return EPROTO;
         }
-        frame = instance->frame;
         word = atomic_load_explicit(
             &cell->state_generation, memory_order_acquire);
-        generation = lccf_model_unpack_generation(word);
         site = cell->next_site;
         if (lccf_model_unpack_state(word) !=
                 LCCF_MODEL_STATE_QUEUED ||
-            generation != frame->generation ||
+            lccf_model_unpack_generation(word) !=
+                instance->frame->generation ||
             site >= batch->config.site_count ||
             atomic_exchange_explicit(
                 &cell->queue_owned,
@@ -865,63 +1043,173 @@ static int resume_queued_cells(lccf_model_batch_t *batch,
                 memory_order_acq_rel) != 1U) {
             return EPROTO;
         }
-        atomic_store_explicit(
-            &cell->state_generation,
-            lccf_model_pack_state(generation,
-                                  LCCF_MODEL_STATE_RUNNING),
-            memory_order_release);
-        memset(&instance->command, 0, sizeof(instance->command));
-        resume = batch->ops->resume_sites[site];
-        if (resume == NULL) {
+        if (mark_cell_running(
+                instance, LCCF_MODEL_STATE_QUEUED) != 0 ||
+            execute_resume_callback(batch,
+                                    instance,
+                                    &cell->event,
+                                    site,
+                                    false,
+                                    metrics) != 0) {
             return EPROTO;
         }
-        resume(frame,
-               &cell->event,
-               &instance->command,
-               &batch->config,
-               site);
         metrics->queue_pops += UINT64_C(1);
-        metrics->resume_calls += UINT64_C(1);
-        if (!command_valid(batch, instance)) {
-            return EPROTO;
-        }
-        frame->command_word =
-            instance->command.output ^
-            ((uint64_t)instance->command.next_site << 32U) ^
-            (uint64_t)instance->command.kind;
-        cell->command_word = frame->command_word;
-        frame->site = instance->command.next_site;
-        cell->next_site = frame->site;
+        fairness_service(batch, metrics);
+        publish_cell_command(instance);
 
         if (instance->command.kind ==
             LCCF_MODEL_COMMAND_CONTINUE) {
-            if (atomic_exchange_explicit(
-                    &cell->queue_owned,
-                    1U,
-                    memory_order_acq_rel) != 0U) {
-                return EPROTO;
+            const int rc = enqueue_claimed_cell(
+                batch, cell, metrics, false);
+
+            if (rc != 0) {
+                return rc;
             }
-            atomic_store_explicit(
-                &cell->state_generation,
-                lccf_model_pack_state(
-                    generation, LCCF_MODEL_STATE_QUEUED),
-                memory_order_release);
-            if (queue_push(&batch->local_queue, cell) != 0) {
-                return EOVERFLOW;
-            }
-            metrics->queue_pushes += UINT64_C(1);
-        } else {
-            if (atomic_load_explicit(
-                    &cell->backend_refs,
-                    memory_order_acquire) != 0U) {
-                return EBUSY;
-            }
-            frame->generation += UINT64_C(1);
-            if (prepare_causal_generation(
-                    batch, instance, true) != 0) {
-                return EPROTO;
-            }
+        } else if (rearm_cell_generation(batch, instance) != 0) {
+            return EPROTO;
         }
+    }
+    return 0;
+}
+
+static int run_direct_cell_segment(
+    lccf_model_batch_t *batch,
+    lccf_model_cell_hot_t *cell,
+    lccf_model_metrics_t *metrics,
+    bool budgeted) {
+    lccf_model_instance_t *instance;
+    unsigned direct_count = 0U;
+    lccf_model_state_t expected_state;
+
+    if (cell == NULL || cell->instance == NULL ||
+        cell->instance->batch != batch ||
+        cell->instance->cell != cell) {
+        return EPROTO;
+    }
+    instance = cell->instance;
+    expected_state = lccf_model_unpack_state(
+        atomic_load_explicit(&cell->state_generation,
+                             memory_order_acquire));
+    if (expected_state != LCCF_MODEL_STATE_CLAIMED &&
+        expected_state != LCCF_MODEL_STATE_RUNNING) {
+        return EPROTO;
+    }
+
+    for (;;) {
+        int rc;
+
+        rc = mark_cell_running(instance, expected_state);
+        if (rc != 0) {
+            return rc;
+        }
+        rc = execute_resume_callback(batch,
+                                     instance,
+                                     &cell->event,
+                                     cell->next_site,
+                                     true,
+                                     metrics);
+        if (rc != 0) {
+            return rc;
+        }
+        direct_count += 1U;
+        publish_cell_command(instance);
+
+        if (instance->command.kind !=
+            LCCF_MODEL_COMMAND_CONTINUE) {
+            fairness_service(batch, metrics);
+            return rearm_cell_generation(batch, instance);
+        }
+        if (budgeted &&
+            (direct_count >= batch->config.direct_budget ||
+             batch->fairness_due)) {
+            rc = enqueue_claimed_cell(
+                batch, cell, metrics, true);
+            if (rc == 0) {
+                fairness_service(batch, metrics);
+            }
+            return rc;
+        }
+        expected_state = LCCF_MODEL_STATE_RUNNING;
+    }
+}
+
+static int resume_budgeted_escape_cells(
+    lccf_model_batch_t *batch,
+    lccf_model_metrics_t *metrics) {
+    lccf_model_cell_hot_t *cell;
+
+    while ((cell = queue_pop(&batch->local_queue)) != NULL) {
+        lccf_model_instance_t *instance = cell->instance;
+        uint64_t word;
+        int rc;
+
+        if (instance == NULL || instance->batch != batch ||
+            instance->cell != cell) {
+            return EPROTO;
+        }
+        word = atomic_load_explicit(
+            &cell->state_generation, memory_order_acquire);
+        if (lccf_model_unpack_state(word) !=
+                LCCF_MODEL_STATE_QUEUED ||
+            lccf_model_unpack_generation(word) !=
+                instance->frame->generation ||
+            cell->next_site >= batch->config.site_count ||
+            atomic_exchange_explicit(
+                &cell->queue_owned,
+                0U,
+                memory_order_acq_rel) != 1U) {
+            return EPROTO;
+        }
+        rc = mark_cell_running(
+            instance, LCCF_MODEL_STATE_QUEUED);
+        if (rc == 0) {
+            rc = execute_resume_callback(batch,
+                                         instance,
+                                         &cell->event,
+                                         cell->next_site,
+                                         false,
+                                         metrics);
+        }
+        if (rc != 0) {
+            return rc;
+        }
+        metrics->queue_pops += UINT64_C(1);
+        fairness_service(batch, metrics);
+        publish_cell_command(instance);
+
+        if (instance->command.kind ==
+            LCCF_MODEL_COMMAND_CONTINUE) {
+            rc = run_direct_cell_segment(
+                batch, cell, metrics, true);
+        } else {
+            rc = rearm_cell_generation(batch, instance);
+        }
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+static int run_fused_cells(lccf_model_batch_t *batch,
+                           lccf_model_metrics_t *metrics,
+                           bool budgeted) {
+    size_t i;
+
+    for (i = 0U; i < batch->config.instance_count; ++i) {
+        lccf_model_instance_t *instance = &batch->instances[i];
+        int rc = claim_cell_tickets(batch, instance, metrics);
+
+        if (rc == 0) {
+            rc = run_direct_cell_segment(
+                batch, instance->cell, metrics, budgeted);
+        }
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    if (budgeted) {
+        return resume_budgeted_escape_cells(batch, metrics);
     }
     return 0;
 }
@@ -946,16 +1234,29 @@ int lccf_model_run_round(lccf_model_batch_t *batch,
     }
     batch->local_queue.head = 0U;
     batch->local_queue.tail = 0U;
-    if (mode_uses_wakers(batch->config.mode)) {
-        rc = claim_and_publish_wakers(batch, metrics);
-        if (rc == 0) {
-            rc = resume_queued_wakers(batch, metrics);
-        }
-    } else {
-        rc = claim_and_publish_cells(batch, metrics);
-        if (rc == 0) {
-            rc = resume_queued_cells(batch, metrics);
-        }
+    switch (batch->config.mode) {
+        case LCCF_MODEL_WAKER_QUEUE:
+            rc = claim_and_publish_wakers(batch, metrics);
+            if (rc == 0) {
+                rc = resume_queued_wakers(batch, metrics);
+            }
+            break;
+        case LCCF_MODEL_CAUSAL_CELL_QUEUE:
+            rc = claim_and_publish_cells(batch, metrics);
+            if (rc == 0) {
+                rc = resume_queued_cells(batch, metrics);
+            }
+            break;
+        case LCCF_MODEL_FUSED_CAUSAL_CELL:
+            rc = run_fused_cells(batch, metrics, false);
+            break;
+        case LCCF_MODEL_BUDGETED_FUSED_CHAIN:
+            rc = run_fused_cells(batch, metrics, true);
+            break;
+        case LCCF_MODEL_REMOTE_WAKER_QUEUE:
+        case LCCF_MODEL_REMOTE_CAUSAL_CELL:
+        default:
+            return ENOTSUP;
     }
     if (rc != 0) {
         return rc;
