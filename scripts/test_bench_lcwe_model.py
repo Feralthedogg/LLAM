@@ -96,7 +96,7 @@ def test_binary_smoke() -> None:
         "--mode",
         "scalar",
         "--instances",
-        "64",
+        "4096",
         "--sites",
         "1",
         "--lanes",
@@ -113,8 +113,8 @@ def test_binary_smoke() -> None:
     row = parse_output(result.stdout)
     assert row.workload == "exec_io_pipeline"
     assert row.mode == "scalar"
-    assert row.instances == 64
-    assert row.ops == 256
+    assert row.instances == 4096
+    assert row.ops == 16384
 
     invalid = command.copy()
     invalid[invalid.index("--lanes") + 1] = "3"
