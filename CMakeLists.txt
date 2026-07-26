@@ -570,6 +570,46 @@ foreach(LLAM_LCCF_MODEL_TARGET test_lccf_model bench_lccf_model)
     endif()
 endforeach()
 
+set(LLAM_SREM_MODEL_SOURCES
+    experiments/srem/srem_platform.c
+    experiments/srem/srem_model.c
+    experiments/srem/srem_workloads.c
+)
+
+add_executable(test_srem_model
+    ${LLAM_SREM_MODEL_SOURCES}
+    experiments/srem/test_srem_model.c
+)
+add_executable(bench_srem_model
+    ${LLAM_SREM_MODEL_SOURCES}
+    experiments/srem/bench_srem_model.c
+)
+foreach(LLAM_SREM_MODEL_TARGET test_srem_model bench_srem_model)
+    target_include_directories(${LLAM_SREM_MODEL_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/experiments/srem
+    )
+    target_compile_definitions(${LLAM_SREM_MODEL_TARGET} PRIVATE _GNU_SOURCE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_compile_definitions(${LLAM_SREM_MODEL_TARGET} PRIVATE
+            _XOPEN_SOURCE=700
+            _DARWIN_C_SOURCE
+        )
+    elseif(LLAM_SYSTEM_IS_BSD)
+        target_compile_definitions(${LLAM_SREM_MODEL_TARGET} PRIVATE
+            ${LLAM_BSD_FEATURE_DEFINITIONS}
+        )
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_compile_definitions(${LLAM_SREM_MODEL_TARGET} PRIVATE
+            _WIN32_WINNT=0x0A00
+        )
+    endif()
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_link_libraries(${LLAM_SREM_MODEL_TARGET} PRIVATE
+            Threads::Threads
+        )
+    endif()
+endforeach()
+
 add_executable(test_abi_contract
     tests/test_abi_contract.c
 )
@@ -769,6 +809,7 @@ add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
 add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
 add_test(NAME test_lccf_model COMMAND test_lccf_model)
+add_test(NAME test_srem_model COMMAND test_srem_model)
 if(Python3_FOUND)
     add_test(
         NAME test_bench_lcwe_model
@@ -783,6 +824,20 @@ if(Python3_FOUND)
                 "LCCF_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lccf_model>"
                 ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lccf_model.py
+    )
+    add_test(
+        NAME test_bench_srem_native
+        COMMAND ${CMAKE_COMMAND} -E env
+                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_native.py
+    )
+    add_test(
+        NAME test_bench_srem_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_model.py
     )
 endif()
 add_test(NAME llam_broker_self_test COMMAND llam_broker --self-test)

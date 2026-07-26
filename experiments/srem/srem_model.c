@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
 #include <malloc.h>
 #endif
 
@@ -64,7 +64,7 @@ static void *aligned_zero_allocate(size_t count, size_t item_size) {
         return NULL;
     }
     rounded = (bytes + alignment - 1U) & ~(alignment - 1U);
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     memory = _aligned_malloc(rounded, alignment);
 #else
     memory = aligned_alloc(alignment, rounded);
@@ -76,7 +76,7 @@ static void *aligned_zero_allocate(size_t count, size_t item_size) {
 }
 
 static void aligned_deallocate(void *memory) {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     _aligned_free(memory);
 #else
     free(memory);
@@ -1258,6 +1258,8 @@ static int run_tile_scalar_mask(srem_model_batch_t *batch,
             &batch->config,
             resume_site);
         store_tile_frame(batch, index, &frame);
+        /* Resume callbacks initialize the complete effect descriptor. */
+        // cppcheck-suppress uninitvar
         store_tile_effect(batch, index, &effect);
         batch->tiles[tile_index].pending_mask &= ~bit;
         metrics->scalar_lanes += 1U;

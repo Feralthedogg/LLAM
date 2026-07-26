@@ -15,6 +15,7 @@ compile_commands.json
 /bench
 /bench_lccf_model
 /bench_lcwe_model
+/bench_srem_model
 /demo
 /llam_broker
 /stress
@@ -27,6 +28,7 @@ test_connect_io
 test_io_buffers
 /test_lccf_model
 test_lcwe_model
+/test_srem_model
 test_multi_runtime_core
 test_nm_compat_runtime
 test_runtime_api_edges

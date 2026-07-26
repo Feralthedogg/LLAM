@@ -382,7 +382,7 @@ static int measure_block(srem_model_batch_t *batch,
     }
     cpu_end = srem_platform_process_cpu_ns();
     wall_end = srem_platform_monotonic_ns();
-    if (cpu_end <= cpu_start || wall_end <= wall_start) {
+    if (cpu_end < cpu_start || wall_end <= wall_start) {
         return ERANGE;
     }
     out->cpu_ns = cpu_end - cpu_start;
@@ -496,7 +496,9 @@ static int calibrate_rounds(
             return error;
         }
         if (baseline_time.wall_ns >= minimum_block_ns &&
-            candidate_time.wall_ns >= minimum_block_ns) {
+            candidate_time.wall_ns >= minimum_block_ns &&
+            baseline_time.cpu_ns != 0U &&
+            candidate_time.cpu_ns != 0U) {
             *out_rounds = rounds;
             return 0;
         }
@@ -860,7 +862,9 @@ static int run_benchmark(const bench_options_t *options) {
         if (baseline_time.wall_ns >=
                 options->min_mode_ns &&
             candidate_time.wall_ns >=
-                options->min_mode_ns) {
+                options->min_mode_ns &&
+            baseline_time.cpu_ns != 0U &&
+            candidate_time.cpu_ns != 0U) {
             break;
         }
         if (rounds_per_block >
