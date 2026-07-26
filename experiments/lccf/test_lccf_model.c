@@ -1,9 +1,10 @@
 // Copyright 2026 Feralthedogg
 // SPDX-License-Identifier: Apache-2.0
 
-#include "lccf_model.h"
+#include "lccf_model_internal.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -137,7 +138,7 @@ static int test_create_validation(void) {
     EXPECT_INVALID(remote_producers, 3U);
 #undef EXPECT_INVALID
 
-    config.mode = LCCF_MODEL_CAUSAL_CELL_QUEUE;
+    config.mode = LCCF_MODEL_FUSED_CAUSAL_CELL;
     if (expect_create_error(config, ENOTSUP) != 0) {
         return 1;
     }
@@ -310,11 +311,230 @@ out:
     return rc;
 }
 
+static int run_causal_differential_case(
+    lccf_model_workload_t workload,
+    size_t frame_bytes,
+    size_t cell_bytes,
+    unsigned site_count,
+    size_t instance_count,
+    uint64_t seed) {
+    lccf_model_config_t baseline_config = base_config();
+    lccf_model_config_t causal_config = base_config();
+    lccf_model_batch_t *baseline = NULL;
+    lccf_model_batch_t *causal = NULL;
+    lccf_model_metrics_t baseline_metrics = {0};
+    lccf_model_metrics_t causal_metrics = {0};
+    unsigned round;
+    int rc = 1;
+
+    baseline_config.workload = workload;
+    baseline_config.frame_bytes = frame_bytes;
+    baseline_config.cell_bytes = cell_bytes;
+    baseline_config.site_count = site_count;
+    baseline_config.instance_count = instance_count;
+    baseline_config.seed = seed;
+    causal_config = baseline_config;
+    causal_config.mode = LCCF_MODEL_CAUSAL_CELL_QUEUE;
+
+    if (lccf_model_batch_create(&baseline_config, &baseline) != 0 ||
+        lccf_model_batch_create(&causal_config, &causal) != 0 ||
+        !lccf_model_batch_equal(baseline, causal) ||
+        lccf_model_checksum(baseline) !=
+            lccf_model_checksum(causal)) {
+        fail("causal differential create");
+        goto out;
+    }
+    for (round = 0U; round < 19U; ++round) {
+        size_t index;
+
+        if (lccf_model_run_round(baseline, &baseline_metrics) != 0 ||
+            lccf_model_run_round(causal, &causal_metrics) != 0 ||
+            !lccf_model_batch_equal(baseline, causal) ||
+            lccf_model_checksum(baseline) !=
+                lccf_model_checksum(causal)) {
+            fprintf(stderr,
+                    "[test_lccf_model] causal differential round=%u "
+                    "workload=%s frame=%zu cell=%zu sites=%u "
+                    "instances=%zu seed=%016llx\n",
+                    round,
+                    lccf_model_workload_name(workload),
+                    frame_bytes,
+                    cell_bytes,
+                    site_count,
+                    instance_count,
+                    (unsigned long long)seed);
+            goto out;
+        }
+        for (index = 0U; index < instance_count; ++index) {
+            const lccf_model_cell_hot_t *cell =
+                lccf_model_cell_at(causal, index);
+            const uint64_t word = atomic_load_explicit(
+                &cell->state_generation,
+                memory_order_acquire);
+            const unsigned expected_refs =
+                workload == LCCF_MODEL_COMPLETION_TIMER_CANCEL ?
+                    3U :
+                    1U;
+
+            if (lccf_model_unpack_state(word) !=
+                    LCCF_MODEL_STATE_ARMED ||
+                lccf_model_unpack_generation(word) !=
+                    causal->instances[index].frame->generation ||
+                atomic_load_explicit(&cell->backend_refs,
+                                     memory_order_acquire) !=
+                    expected_refs) {
+                fail("causal next generation arm");
+                goto out;
+            }
+        }
+    }
+    {
+        const uint64_t completions =
+            (uint64_t)instance_count * UINT64_C(19);
+        const uint64_t expected_stale =
+            workload == LCCF_MODEL_COMPLETION_TIMER_CANCEL ?
+                completions * UINT64_C(2) :
+                0U;
+
+        if (causal_metrics.completions != completions ||
+            causal_metrics.claims != completions ||
+            causal_metrics.stale_tickets != expected_stale ||
+            causal_metrics.queue_pushes != completions ||
+            causal_metrics.queue_pops != completions ||
+            causal_metrics.resume_calls != completions ||
+            causal_metrics.direct_calls != 0U ||
+            causal_metrics.hot_allocations != 0U) {
+            fail("causal queued metric invariants");
+            goto out;
+        }
+    }
+    rc = 0;
+
+out:
+    lccf_model_batch_destroy(causal);
+    lccf_model_batch_destroy(baseline);
+    return rc;
+}
+
+static int test_causal_differential_matrix(void) {
+    static const lccf_model_workload_t workloads[] = {
+        LCCF_MODEL_COMPLETION_IO_PIPELINE,
+        LCCF_MODEL_COMPLETION_RPC_STATE,
+        LCCF_MODEL_COMPLETION_TIMER_CANCEL,
+    };
+    static const size_t frame_bytes[] = {64U, 128U, 256U};
+    static const size_t cell_bytes[] = {64U, 96U, 128U};
+    static const unsigned site_counts[] = {1U, 8U};
+    static const size_t instance_counts[] = {37U, 257U};
+    static const uint64_t seeds[] = {
+        UINT64_C(1),
+        UINT64_C(0x0123456789ABCDEF),
+        UINT64_C(0xFEDCBA9876543210),
+    };
+    size_t wi;
+    size_t fi;
+    size_t ci;
+    size_t si;
+    size_t ii;
+    size_t seed_index;
+
+    for (wi = 0U; wi < sizeof(workloads) / sizeof(workloads[0]); ++wi) {
+        for (fi = 0U;
+             fi < sizeof(frame_bytes) / sizeof(frame_bytes[0]);
+             ++fi) {
+            for (ci = 0U;
+                 ci < sizeof(cell_bytes) / sizeof(cell_bytes[0]);
+                 ++ci) {
+                for (si = 0U;
+                     si < sizeof(site_counts) / sizeof(site_counts[0]);
+                     ++si) {
+                    for (ii = 0U;
+                         ii <
+                         sizeof(instance_counts) /
+                             sizeof(instance_counts[0]);
+                         ++ii) {
+                        for (seed_index = 0U;
+                             seed_index <
+                             sizeof(seeds) / sizeof(seeds[0]);
+                             ++seed_index) {
+                            if (run_causal_differential_case(
+                                    workloads[wi],
+                                    frame_bytes[fi],
+                                    cell_bytes[ci],
+                                    site_counts[si],
+                                    instance_counts[ii],
+                                    seeds[seed_index]) != 0) {
+                                return 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_causal_layout_and_stale_generation(void) {
+    lccf_model_config_t config = base_config();
+    lccf_model_batch_t *batch = NULL;
+    lccf_model_metrics_t metrics = {0};
+    lccf_model_ticket_t stale_ticket;
+    lccf_model_cell_hot_t *cell;
+    uint64_t expected;
+    int rc = 1;
+
+    config.mode = LCCF_MODEL_CAUSAL_CELL_QUEUE;
+    config.workload = LCCF_MODEL_COMPLETION_TIMER_CANCEL;
+    config.instance_count = 37U;
+    config.cell_bytes = 96U;
+    config.site_count = 8U;
+    if (lccf_model_batch_create(&config, &batch) != 0) {
+        return fail("causal layout create");
+    }
+    if ((unsigned char *)lccf_model_cell_at(batch, 1U) -
+            (unsigned char *)lccf_model_cell_at(batch, 0U) !=
+        (ptrdiff_t)config.cell_bytes) {
+        fail("causal cell stride");
+        goto out;
+    }
+    stale_ticket = *lccf_model_ticket_at(batch, 0U, 0U);
+    if (lccf_model_run_round(batch, &metrics) != 0) {
+        fail("causal stale setup round");
+        goto out;
+    }
+    cell = lccf_model_cell_at(batch, 0U);
+    expected = lccf_model_pack_state(
+        stale_ticket.generation,
+        LCCF_MODEL_STATE_ARMED);
+    if (atomic_compare_exchange_strong_explicit(
+            &cell->state_generation,
+            &expected,
+            lccf_model_pack_state(stale_ticket.generation,
+                                  LCCF_MODEL_STATE_CLAIMED),
+            memory_order_acq_rel,
+            memory_order_acquire) ||
+        lccf_model_unpack_generation(expected) !=
+            stale_ticket.generation + UINT64_C(1) ||
+        lccf_model_unpack_state(expected) !=
+            LCCF_MODEL_STATE_ARMED) {
+        fail("stale generation must not claim new cell");
+        goto out;
+    }
+    rc = 0;
+
+out:
+    lccf_model_batch_destroy(batch);
+    return rc;
+}
+
 int main(void) {
     if (test_names_and_parsers() != 0 ||
         test_create_validation() != 0 ||
         test_baseline_matrix() != 0 ||
-        test_baseline_continue_requeues() != 0) {
+        test_baseline_continue_requeues() != 0 ||
+        test_causal_differential_matrix() != 0 ||
+        test_causal_layout_and_stale_generation() != 0) {
         return 1;
     }
     printf("[test_lccf_model] all checks passed\n");

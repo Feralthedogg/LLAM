@@ -64,6 +64,30 @@ typedef struct lccf_model_waker {
     uint32_t reserved;
 } lccf_model_waker_t;
 
+typedef struct lccf_model_cell_hot {
+    _Atomic uint64_t state_generation;
+    lccf_model_instance_t *instance;
+    lccf_model_event_t event;
+    uint64_t command_word;
+    uint32_t home_shard;
+    uint32_t next_site;
+    _Atomic uint32_t queue_owned;
+    _Atomic uint32_t backend_refs;
+} lccf_model_cell_hot_t;
+
+_Static_assert(sizeof(lccf_model_cell_hot_t) == 64U,
+               "LCCF causal hot fields must occupy one cache line");
+
+typedef struct lccf_model_ticket {
+    lccf_model_cell_hot_t *target;
+    uint64_t generation;
+    lccf_model_event_t event;
+    uint32_t instance_index;
+    uint32_t ticket_index;
+} lccf_model_ticket_t;
+
+#define LCCF_MODEL_TICKETS_PER_INSTANCE 3U
+
 typedef void (*lccf_model_resume_fn)(
     lccf_model_frame_core_t *frame,
     const lccf_model_event_t *event,
@@ -79,6 +103,7 @@ struct lccf_model_instance {
     struct lccf_model_batch *batch;
     lccf_model_frame_core_t *frame;
     lccf_model_waker_t *waker;
+    lccf_model_cell_hot_t *cell;
     lccf_model_event_t event;
     lccf_model_command_t command;
     uint32_t index;
@@ -97,8 +122,10 @@ struct lccf_model_batch {
     lccf_model_config_t config;
     uint64_t round;
     unsigned char *frame_storage;
+    unsigned char *cell_storage;
     lccf_model_instance_t *instances;
     lccf_model_waker_t *wakers;
+    lccf_model_ticket_t *tickets;
     lccf_model_local_queue_t local_queue;
     const lccf_model_workload_ops_t *ops;
 };
@@ -113,5 +140,12 @@ void lccf_model_derive_event(const lccf_model_batch_t *batch,
                              lccf_model_event_t *event);
 const lccf_model_workload_ops_t *
 lccf_model_get_workload_ops(lccf_model_workload_t workload);
+lccf_model_cell_hot_t *lccf_model_cell_at(
+    const lccf_model_batch_t *batch,
+    size_t index);
+lccf_model_ticket_t *lccf_model_ticket_at(
+    const lccf_model_batch_t *batch,
+    size_t instance_index,
+    unsigned ticket_index);
 
 #endif
