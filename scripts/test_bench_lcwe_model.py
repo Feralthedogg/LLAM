@@ -5,8 +5,18 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from dataclasses import replace
+from pathlib import Path
 
-from bench_lcwe_model import ModelRow, parse_output
+from bench_lcwe_model import (
+    ModelRow,
+    SummaryRow,
+    classify,
+    parse_output,
+    select_median,
+    write_markdown,
+)
 from process_utils import run_capture
 
 
@@ -114,12 +124,214 @@ def test_binary_smoke() -> None:
     assert "--lanes" in result.stderr
 
 
+def summary_row(
+    workload: str,
+    mode: str,
+    wall: float,
+    cpu: float,
+    *,
+    spread: float = 1.01,
+    checksum: str = "0123456789abcdef",
+) -> SummaryRow:
+    return SummaryRow(
+        workload=workload,
+        mode=mode,
+        sites=1,
+        lanes=1 if mode in {"scalar", "cohort"} else 8,
+        sample_count=7,
+        wall_ns_per_op=wall,
+        cpu_ns_per_op=cpu,
+        p50_ns_per_op=wall,
+        p99_ns_per_op=wall * 1.05,
+        spread=spread,
+        checksum=checksum,
+    )
+
+
+def verdict_fixture(
+    *,
+    realistic_passes: int,
+    aosoa_passes: int,
+    cohort_speedup: float,
+) -> list[SummaryRow]:
+    workloads = [
+        "exec_io_pipeline",
+        "exec_rpc_state",
+        "exec_event_fanout",
+    ]
+    rows: list[SummaryRow] = []
+    for index, workload in enumerate(workloads):
+        rows.append(summary_row(workload, "scalar", 100.0, 100.0))
+        rows.append(
+            summary_row(
+                workload,
+                "cohort",
+                100.0 / cohort_speedup if index == 0 else 100.0,
+                100.0,
+            )
+        )
+        realistic_wall = 62.5 if index < realistic_passes else 100.0
+        realistic_cpu = 65.0 if index < realistic_passes else 100.0
+        rows.append(
+            summary_row(
+                workload,
+                "wave_pointers",
+                realistic_wall,
+                realistic_cpu,
+            )
+        )
+        rows.append(
+            summary_row(
+                workload,
+                "wave_capsule",
+                realistic_wall + 1.0,
+                realistic_cpu,
+            )
+        )
+        rows.append(
+            summary_row(
+                workload,
+                "wave_aosoa",
+                62.5 if index < aosoa_passes else 100.0,
+                65.0 if index < aosoa_passes else 100.0,
+            )
+        )
+    return rows
+
+
+def test_verdicts() -> None:
+    verdict, reasons = classify(
+        verdict_fixture(
+            realistic_passes=2,
+            aosoa_passes=2,
+            cohort_speedup=1.08,
+        )
+    )
+    assert verdict == "PROMISING"
+    assert reasons
+
+    verdict, _ = classify(
+        verdict_fixture(
+            realistic_passes=0,
+            aosoa_passes=2,
+            cohort_speedup=1.08,
+        )
+    )
+    assert verdict == "LAYOUT_BLOCKED"
+
+    verdict, _ = classify(
+        verdict_fixture(
+            realistic_passes=0,
+            aosoa_passes=0,
+            cohort_speedup=1.08,
+        )
+    )
+    assert verdict == "REJECT"
+
+    verdict, reasons = classify(
+        verdict_fixture(
+            realistic_passes=2,
+            aosoa_passes=2,
+            cohort_speedup=1.0,
+        )
+    )
+    assert verdict == "REJECT"
+    assert any("cohort" in reason.lower() for reason in reasons)
+
+
+def test_inconclusive_integrity_gates() -> None:
+    rows = verdict_fixture(
+        realistic_passes=2,
+        aosoa_passes=2,
+        cohort_speedup=1.08,
+    )
+    unstable = rows.copy()
+    unstable[0] = replace(unstable[0], spread=1.1501)
+    assert classify(unstable)[0] == "INCONCLUSIVE"
+
+    missing = [row for row in rows if not (
+        row.workload == "exec_io_pipeline" and row.mode == "scalar"
+    )]
+    assert classify(missing)[0] == "INCONCLUSIVE"
+
+    mismatch = rows.copy()
+    mismatch[3] = replace(mismatch[3], checksum="fedcba9876543210")
+    assert classify(mismatch)[0] == "INCONCLUSIVE"
+
+
+def test_median_keeps_one_process_row() -> None:
+    base = parse_output(SAMPLE_ROW)
+    fastest = replace(
+        base,
+        wall_ns_per_op=1.0,
+        cpu_ns_per_op=101.0,
+        p50_ns_per_op=1.0,
+        p99_ns_per_op=1.1,
+    )
+    median = replace(
+        base,
+        wall_ns_per_op=10.0,
+        cpu_ns_per_op=202.0,
+        p50_ns_per_op=9.0,
+        p99_ns_per_op=11.0,
+    )
+    slowest = replace(
+        base,
+        wall_ns_per_op=11.0,
+        cpu_ns_per_op=303.0,
+        p50_ns_per_op=10.0,
+        p99_ns_per_op=12.0,
+    )
+    selected = select_median([slowest, fastest, median])
+    assert selected.wall_ns_per_op == 10.0
+    assert selected.cpu_ns_per_op == 202.0
+    assert selected.p50_ns_per_op == 9.0
+    assert selected.p99_ns_per_op == 11.0
+    assert selected.spread == 11.0
+
+    checksum_mismatch = select_median(
+        [fastest, replace(median, checksum="fedcba9876543210"), slowest]
+    )
+    assert checksum_mismatch.checksum == "MISMATCH"
+
+
+def test_markdown_contract() -> None:
+    rows = verdict_fixture(
+        realistic_passes=2,
+        aosoa_passes=2,
+        cohort_speedup=1.08,
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "report.md"
+        write_markdown(
+            path,
+            rows,
+            "PROMISING",
+            ["two realistic workloads pass"],
+            {
+                "command": "python3 scripts/bench_lcwe_model.py --quick",
+                "host": "test-host",
+            },
+        )
+        text = path.read_text(encoding="utf-8")
+    assert "# LCWE Phase 1 Cost Model" in text
+    assert "PROMISING" in text
+    assert "realistic" in text
+    assert "upper-bound only" in text
+    assert "python3 scripts/bench_lcwe_model.py --quick" in text
+    assert "Phase 1 is not production validation" in text
+
+
 def main() -> int:
     test_exact_sample()
     test_missing_duplicate_and_extra_fields()
     test_invalid_numbers_and_checksum()
     test_result_row_cardinality()
     test_binary_smoke()
+    test_verdicts()
+    test_inconclusive_integrity_gates()
+    test_median_keeps_one_process_row()
+    test_markdown_contract()
     print("[test_bench_lcwe_model] all checks passed")
     return 0
 
