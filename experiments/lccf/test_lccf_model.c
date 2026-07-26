@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "lccf_model_internal.h"
+#include "lccf_platform.h"
 
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#define LCCF_RACE_GENERATIONS 10000U
+#define LCCF_RACE_WORKERS 3U
 
 static int fail(const char *message) {
     fprintf(stderr, "[test_lccf_model] %s\n", message);
@@ -139,9 +143,23 @@ static int test_create_validation(void) {
 #undef EXPECT_INVALID
 
     config.mode = LCCF_MODEL_REMOTE_WAKER_QUEUE;
-    if (expect_create_error(config, ENOTSUP) != 0) {
+    if (expect_create_error(config, EINVAL) != 0) {
         return 1;
     }
+    config.remote_producers = 2U;
+    if (lccf_model_batch_create(&config, &batch) != 0 ||
+        batch == NULL) {
+        return fail("remote create contract");
+    }
+    lccf_model_batch_destroy(batch);
+    config = base_config();
+    config.remote_producers = 2U;
+    if (lccf_model_batch_create(&config, &batch) != 0 ||
+        batch == NULL) {
+        return fail("local producer-count compatibility");
+    }
+    lccf_model_batch_destroy(batch);
+    batch = NULL;
     return 0;
 }
 
@@ -482,6 +500,7 @@ static int test_causal_layout_and_stale_generation(void) {
     lccf_model_ticket_t stale_ticket;
     lccf_model_cell_hot_t *cell;
     uint64_t expected;
+    bool stale_won = true;
     int rc = 1;
 
     config.mode = LCCF_MODEL_CAUSAL_CELL_QUEUE;
@@ -517,7 +536,13 @@ static int test_causal_layout_and_stale_generation(void) {
         lccf_model_unpack_generation(expected) !=
             stale_ticket.generation + UINT64_C(1) ||
         lccf_model_unpack_state(expected) !=
-            LCCF_MODEL_STATE_ARMED) {
+            LCCF_MODEL_STATE_ARMED ||
+        lccf_model_try_claim_ticket(
+            &stale_ticket, &stale_won) != 0 ||
+        stale_won ||
+        atomic_load_explicit(
+            &cell->backend_refs, memory_order_acquire) !=
+            LCCF_MODEL_TICKETS_PER_INSTANCE) {
         fail("stale generation must not claim new cell");
         goto out;
     }
@@ -758,6 +783,505 @@ out:
     return rc;
 }
 
+typedef struct platform_event_test_context {
+    lccf_platform_event_t *pulse;
+    lccf_platform_event_t *ready;
+    lccf_platform_event_t *ack;
+    _Atomic unsigned observed;
+    _Atomic bool stop;
+} platform_event_test_context_t;
+
+static int wait_for_counter(lccf_platform_event_t *event,
+                            const _Atomic unsigned *counter,
+                            unsigned target) {
+    while (atomic_load_explicit(counter, memory_order_acquire) <
+           target) {
+        const uint64_t epoch = lccf_platform_event_epoch(event);
+
+        if (epoch == UINT64_MAX) {
+            return EPROTO;
+        }
+        if (atomic_load_explicit(
+                counter, memory_order_acquire) >= target) {
+            break;
+        }
+        if (lccf_platform_event_wait(event, epoch) != 0) {
+            return EPROTO;
+        }
+    }
+    return 0;
+}
+
+static int platform_event_test_thread(void *opaque) {
+    platform_event_test_context_t *context = opaque;
+    uint64_t observed =
+        lccf_platform_event_epoch(context->pulse);
+    unsigned iteration;
+
+    if (observed == UINT64_MAX ||
+        lccf_platform_event_signal(context->ready) != 0) {
+        return EPROTO;
+    }
+    for (iteration = 1U; iteration <= 10U; ++iteration) {
+        uint64_t current;
+
+        if (lccf_platform_event_wait(
+                context->pulse, observed) != 0) {
+            return EPROTO;
+        }
+        if (atomic_load_explicit(
+                &context->stop, memory_order_acquire)) {
+            return ECANCELED;
+        }
+        current = lccf_platform_event_epoch(context->pulse);
+        if (current <= observed) {
+            return EPROTO;
+        }
+        observed = current;
+        atomic_store_explicit(
+            &context->observed, iteration, memory_order_release);
+        if (lccf_platform_event_signal(context->ack) != 0) {
+            return EPROTO;
+        }
+    }
+    return 0;
+}
+
+static int test_platform_contract(void) {
+    platform_event_test_context_t context;
+    lccf_platform_thread_t *thread = NULL;
+    uint64_t ready_epoch;
+    char description[256];
+    unsigned iteration;
+    int thread_result = EPROTO;
+    int rc = 1;
+
+    memset(&context, 0, sizeof(context));
+    atomic_init(&context.observed, 0U);
+    atomic_init(&context.stop, false);
+    if (lccf_platform_event_create(&context.pulse) != 0 ||
+        lccf_platform_event_create(&context.ready) != 0 ||
+        lccf_platform_event_create(&context.ack) != 0) {
+        fail("platform event create");
+        goto out;
+    }
+    ready_epoch = lccf_platform_event_epoch(context.ready);
+    if (ready_epoch == UINT64_MAX ||
+        lccf_platform_thread_start(
+            &thread, platform_event_test_thread, &context) != 0 ||
+        lccf_platform_event_wait(
+            context.ready, ready_epoch) != 0) {
+        fail("platform thread ready");
+        goto out;
+    }
+    for (iteration = 1U; iteration <= 10U; ++iteration) {
+        if (lccf_platform_event_signal(context.pulse) != 0 ||
+            wait_for_counter(
+                context.ack, &context.observed, iteration) != 0) {
+            fail("platform monotonic event epoch");
+            goto out;
+        }
+    }
+    if (lccf_platform_thread_join(thread, &thread_result) != 0 ||
+        thread_result != 0) {
+        thread = NULL;
+        fail("platform thread join");
+        goto out;
+    }
+    thread = NULL;
+    if (lccf_platform_monotonic_ns() == 0U ||
+        lccf_platform_process_cpu_ns() == 0U ||
+        lccf_platform_describe(
+            description, sizeof(description)) != 0 ||
+        description[0] == '\0') {
+        fail("platform clocks and description");
+        goto out;
+    }
+    rc = 0;
+
+out:
+    if (thread != NULL) {
+        atomic_store_explicit(
+            &context.stop, true, memory_order_release);
+        (void)lccf_platform_event_signal(context.pulse);
+        (void)lccf_platform_thread_join(thread, NULL);
+    }
+    lccf_platform_event_destroy(context.ack);
+    lccf_platform_event_destroy(context.ready);
+    lccf_platform_event_destroy(context.pulse);
+    return rc;
+}
+
+typedef struct ticket_race_context ticket_race_context_t;
+
+typedef struct ticket_race_worker {
+    ticket_race_context_t *race;
+    unsigned index;
+} ticket_race_worker_t;
+
+struct ticket_race_context {
+    lccf_model_batch_t *batch;
+    lccf_platform_event_t *start;
+    lccf_platform_event_t *ready;
+    lccf_platform_event_t *done;
+    _Atomic unsigned ready_workers;
+    _Atomic unsigned completed_workers;
+    _Atomic uint64_t wins;
+    _Atomic uint64_t stale;
+    _Atomic int error;
+    _Atomic bool stop;
+    ticket_race_worker_t workers[LCCF_RACE_WORKERS];
+};
+
+static void record_race_error(ticket_race_context_t *race, int error) {
+    int expected = 0;
+
+    (void)atomic_compare_exchange_strong_explicit(
+        &race->error,
+        &expected,
+        error == 0 ? EPROTO : error,
+        memory_order_acq_rel,
+        memory_order_acquire);
+}
+
+static int ticket_race_thread(void *opaque) {
+    ticket_race_worker_t *worker = opaque;
+    ticket_race_context_t *race = worker->race;
+    uint64_t observed =
+        lccf_platform_event_epoch(race->start);
+    unsigned generation;
+
+    if (observed == UINT64_MAX) {
+        return EPROTO;
+    }
+    atomic_fetch_add_explicit(
+        &race->ready_workers, 1U, memory_order_acq_rel);
+    if (lccf_platform_event_signal(race->ready) != 0) {
+        return EPROTO;
+    }
+    for (generation = 0U;
+         generation < LCCF_RACE_GENERATIONS;
+         ++generation) {
+        bool won = false;
+        int claim_rc;
+
+        if (lccf_platform_event_wait(
+                race->start, observed) != 0) {
+            record_race_error(race, EPROTO);
+        } else {
+            observed =
+                lccf_platform_event_epoch(race->start);
+            if (atomic_load_explicit(
+                    &race->stop, memory_order_acquire)) {
+                break;
+            }
+            claim_rc = lccf_model_try_claim_ticket(
+                lccf_model_ticket_at(
+                    race->batch, 0U, worker->index),
+                &won);
+            if (claim_rc != 0) {
+                record_race_error(race, claim_rc);
+            } else if (won) {
+                atomic_fetch_add_explicit(
+                    &race->wins, UINT64_C(1),
+                    memory_order_relaxed);
+            } else {
+                atomic_fetch_add_explicit(
+                    &race->stale, UINT64_C(1),
+                    memory_order_relaxed);
+            }
+        }
+        if (atomic_fetch_add_explicit(
+                &race->completed_workers,
+                1U,
+                memory_order_acq_rel) +
+                1U ==
+            LCCF_RACE_WORKERS) {
+            if (lccf_platform_event_signal(race->done) != 0) {
+                record_race_error(race, EPROTO);
+            }
+        }
+    }
+    return atomic_load_explicit(
+        &race->error, memory_order_acquire);
+}
+
+static int test_three_way_ticket_race(void) {
+    lccf_model_config_t config = base_config();
+    ticket_race_context_t race;
+    lccf_platform_thread_t *threads[LCCF_RACE_WORKERS] = {0};
+    lccf_model_metrics_t metrics = {0};
+    unsigned generation;
+    unsigned worker_index;
+    unsigned started_workers = 0U;
+    int rc = 1;
+
+    memset(&race, 0, sizeof(race));
+    atomic_init(&race.ready_workers, 0U);
+    atomic_init(&race.completed_workers, 0U);
+    atomic_init(&race.wins, UINT64_C(0));
+    atomic_init(&race.stale, UINT64_C(0));
+    atomic_init(&race.error, 0);
+    atomic_init(&race.stop, false);
+    config.mode = LCCF_MODEL_CAUSAL_CELL_QUEUE;
+    config.workload = LCCF_MODEL_COMPLETION_TIMER_CANCEL;
+    config.instance_count = 1U;
+    config.site_count = 8U;
+    if (lccf_model_batch_create(&config, &race.batch) != 0 ||
+        lccf_platform_event_create(&race.start) != 0 ||
+        lccf_platform_event_create(&race.ready) != 0 ||
+        lccf_platform_event_create(&race.done) != 0) {
+        fail("ticket race setup");
+        goto out;
+    }
+    for (worker_index = 0U;
+         worker_index < LCCF_RACE_WORKERS;
+         ++worker_index) {
+        race.workers[worker_index].race = &race;
+        race.workers[worker_index].index = worker_index;
+        if (lccf_platform_thread_start(
+                &threads[worker_index],
+                ticket_race_thread,
+                &race.workers[worker_index]) != 0) {
+            fail("ticket race thread start");
+            goto out;
+        }
+        started_workers += 1U;
+    }
+    if (wait_for_counter(
+            race.ready,
+            &race.ready_workers,
+            LCCF_RACE_WORKERS) != 0) {
+        fail("ticket race workers ready");
+        goto out;
+    }
+
+    for (generation = 0U;
+         generation < LCCF_RACE_GENERATIONS;
+         ++generation) {
+        lccf_model_cell_hot_t *cell;
+        uint64_t word;
+
+        atomic_store_explicit(
+            &race.completed_workers, 0U, memory_order_release);
+        if (lccf_platform_event_signal(race.start) != 0 ||
+            wait_for_counter(
+                race.done,
+                &race.completed_workers,
+                LCCF_RACE_WORKERS) != 0 ||
+            atomic_load_explicit(
+                &race.error, memory_order_acquire) != 0) {
+            fail("ticket race generation dispatch");
+            goto out;
+        }
+        cell = lccf_model_cell_at(race.batch, 0U);
+        word = atomic_load_explicit(
+            &cell->state_generation, memory_order_acquire);
+        if (lccf_model_unpack_state(word) !=
+                LCCF_MODEL_STATE_CLAIMED ||
+            atomic_load_explicit(
+                &cell->backend_refs,
+                memory_order_acquire) != 0U ||
+            lccf_model_resume_claimed_cell(
+                race.batch, 0U, &metrics) != 0) {
+            fail("ticket race claim or resume");
+            goto out;
+        }
+    }
+    for (worker_index = 0U;
+         worker_index < LCCF_RACE_WORKERS;
+         ++worker_index) {
+        int thread_result = EPROTO;
+
+        if (lccf_platform_thread_join(
+                threads[worker_index],
+                &thread_result) != 0 ||
+            thread_result != 0) {
+            threads[worker_index] = NULL;
+            fail("ticket race thread join");
+            goto out;
+        }
+        threads[worker_index] = NULL;
+    }
+    if (atomic_load_explicit(
+            &race.wins, memory_order_acquire) !=
+            LCCF_RACE_GENERATIONS ||
+        atomic_load_explicit(
+            &race.stale, memory_order_acquire) !=
+            UINT64_C(2) * LCCF_RACE_GENERATIONS ||
+        metrics.resume_calls != LCCF_RACE_GENERATIONS ||
+        metrics.direct_calls != LCCF_RACE_GENERATIONS ||
+        metrics.hot_allocations != 0U) {
+        fail("ticket race accounting");
+        goto out;
+    }
+    rc = 0;
+
+out:
+    atomic_store_explicit(&race.stop, true, memory_order_release);
+    if (race.start != NULL) {
+        (void)lccf_platform_event_signal(race.start);
+    }
+    for (worker_index = 0U;
+         worker_index < started_workers;
+         ++worker_index) {
+        if (threads[worker_index] != NULL) {
+            (void)lccf_platform_thread_join(
+                threads[worker_index], NULL);
+        }
+    }
+    lccf_platform_event_destroy(race.done);
+    lccf_platform_event_destroy(race.ready);
+    lccf_platform_event_destroy(race.start);
+    lccf_model_batch_destroy(race.batch);
+    return rc;
+}
+
+static int run_remote_differential_case(
+    lccf_model_workload_t workload,
+    size_t instance_count,
+    unsigned chain_length,
+    uint64_t seed) {
+    lccf_model_config_t waker_config = base_config();
+    lccf_model_config_t cell_config;
+    lccf_model_batch_t *waker = NULL;
+    lccf_model_batch_t *cell = NULL;
+    lccf_model_metrics_t waker_metrics = {0};
+    lccf_model_metrics_t cell_metrics = {0};
+    unsigned round;
+    int rc = 1;
+
+    waker_config.mode = LCCF_MODEL_REMOTE_WAKER_QUEUE;
+    waker_config.workload = workload;
+    waker_config.instance_count = instance_count;
+    waker_config.frame_bytes = 128U;
+    waker_config.cell_bytes = 96U;
+    waker_config.site_count = 8U;
+    waker_config.chain_length = chain_length;
+    waker_config.remote_producers = 2U;
+    waker_config.seed = seed;
+    cell_config = waker_config;
+    cell_config.mode = LCCF_MODEL_REMOTE_CAUSAL_CELL;
+
+    if (lccf_model_batch_create(&waker_config, &waker) != 0 ||
+        lccf_model_batch_create(&cell_config, &cell) != 0 ||
+        !lccf_model_batch_equal(waker, cell)) {
+        fail("remote differential create");
+        goto out;
+    }
+    for (round = 0U; round < 19U; ++round) {
+        if (lccf_model_run_round(waker, &waker_metrics) != 0 ||
+            lccf_model_run_round(cell, &cell_metrics) != 0 ||
+            !lccf_model_batch_equal(waker, cell) ||
+            lccf_model_checksum(waker) !=
+                lccf_model_checksum(cell)) {
+            fprintf(stderr,
+                    "[test_lccf_model] remote differential round=%u "
+                    "workload=%s instances=%zu seed=%016llx\n",
+                    round,
+                    lccf_model_workload_name(workload),
+                    instance_count,
+                    (unsigned long long)seed);
+            goto out;
+        }
+    }
+    {
+        const uint64_t completions =
+            (uint64_t)instance_count * UINT64_C(19);
+        const uint64_t callbacks =
+            completions * (uint64_t)chain_length;
+        const uint64_t expected_stale =
+            workload == LCCF_MODEL_COMPLETION_TIMER_CANCEL ?
+                completions * UINT64_C(2) :
+                0U;
+
+        if (waker_metrics.completions != completions ||
+            waker_metrics.claims != completions ||
+            waker_metrics.remote_pushes != completions ||
+            waker_metrics.queue_pushes != callbacks ||
+            waker_metrics.queue_pops != callbacks ||
+            waker_metrics.resume_calls != callbacks ||
+            waker_metrics.stale_tickets != 0U ||
+            waker_metrics.hot_allocations != 0U ||
+            cell_metrics.completions != completions ||
+            cell_metrics.claims != completions ||
+            cell_metrics.remote_pushes != completions ||
+            cell_metrics.queue_pushes != callbacks ||
+            cell_metrics.queue_pops != callbacks ||
+            cell_metrics.resume_calls != callbacks ||
+            cell_metrics.stale_tickets != expected_stale ||
+            cell_metrics.hot_allocations != 0U) {
+            fail("remote metric invariants");
+            goto out;
+        }
+    }
+    rc = 0;
+
+out:
+    lccf_model_batch_destroy(cell);
+    lccf_model_batch_destroy(waker);
+    return rc;
+}
+
+static int test_remote_differential(void) {
+    static const lccf_model_workload_t workloads[] = {
+        LCCF_MODEL_COMPLETION_IO_PIPELINE,
+        LCCF_MODEL_COMPLETION_RPC_STATE,
+        LCCF_MODEL_COMPLETION_TIMER_CANCEL,
+    };
+    static const size_t instance_counts[] = {37U, 257U};
+    static const uint64_t seeds[] = {
+        UINT64_C(1),
+        UINT64_C(0x0123456789ABCDEF),
+        UINT64_C(0xFEDCBA9876543210),
+    };
+    size_t workload_index;
+    size_t count_index;
+    size_t seed_index;
+
+    for (workload_index = 0U;
+         workload_index <
+         sizeof(workloads) / sizeof(workloads[0]);
+         ++workload_index) {
+        for (count_index = 0U;
+             count_index <
+             sizeof(instance_counts) / sizeof(instance_counts[0]);
+             ++count_index) {
+            for (seed_index = 0U;
+                 seed_index < sizeof(seeds) / sizeof(seeds[0]);
+                 ++seed_index) {
+                if (run_remote_differential_case(
+                        workloads[workload_index],
+                        instance_counts[count_index],
+                        seed_index == 2U ? 18U : 1U,
+                        seeds[seed_index]) != 0) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static int test_remote_destroy_after_error(void) {
+    lccf_model_config_t config = base_config();
+    lccf_model_batch_t *batch = NULL;
+    lccf_model_metrics_t metrics = {0};
+
+    config.mode = LCCF_MODEL_REMOTE_WAKER_QUEUE;
+    config.remote_producers = 2U;
+    if (lccf_model_batch_create(&config, &batch) != 0) {
+        return fail("remote error setup");
+    }
+    batch->instances[1U].batch = NULL;
+    if (lccf_model_run_round(batch, &metrics) != EPROTO) {
+        lccf_model_batch_destroy(batch);
+        return fail("remote injected error");
+    }
+    lccf_model_batch_destroy(batch);
+    return 0;
+}
+
 int main(void) {
     if (test_names_and_parsers() != 0 ||
         test_create_validation() != 0 ||
@@ -767,7 +1291,11 @@ int main(void) {
         test_causal_layout_and_stale_generation() != 0 ||
         test_fused_differential_matrix() != 0 ||
         test_exact_causal_budgets() != 0 ||
-        test_mixed_fairness_accounting() != 0) {
+        test_mixed_fairness_accounting() != 0 ||
+        test_platform_contract() != 0 ||
+        test_three_way_ticket_race() != 0 ||
+        test_remote_differential() != 0 ||
+        test_remote_destroy_after_error() != 0) {
         return 1;
     }
     printf("[test_lccf_model] all checks passed\n");

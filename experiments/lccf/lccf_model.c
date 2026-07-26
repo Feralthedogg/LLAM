@@ -29,6 +29,9 @@ static const char *const WORKLOAD_NAMES[] = {
     "completion_mixed_fairness",
 };
 
+static int remote_team_create(lccf_model_batch_t *batch);
+static void remote_team_destroy(lccf_model_batch_t *batch);
+
 static bool mode_valid(lccf_model_mode_t mode) {
     return mode >= LCCF_MODEL_WAKER_QUEUE &&
            mode <= LCCF_MODEL_REMOTE_CAUSAL_CELL;
@@ -40,13 +43,20 @@ static bool workload_valid(lccf_model_workload_t workload) {
 }
 
 static bool mode_uses_wakers(lccf_model_mode_t mode) {
-    return mode == LCCF_MODEL_WAKER_QUEUE;
+    return mode == LCCF_MODEL_WAKER_QUEUE ||
+           mode == LCCF_MODEL_REMOTE_WAKER_QUEUE;
 }
 
 static bool mode_uses_cells(lccf_model_mode_t mode) {
     return mode == LCCF_MODEL_CAUSAL_CELL_QUEUE ||
            mode == LCCF_MODEL_FUSED_CAUSAL_CELL ||
-           mode == LCCF_MODEL_BUDGETED_FUSED_CHAIN;
+           mode == LCCF_MODEL_BUDGETED_FUSED_CHAIN ||
+           mode == LCCF_MODEL_REMOTE_CAUSAL_CELL;
+}
+
+static bool mode_is_remote(lccf_model_mode_t mode) {
+    return mode == LCCF_MODEL_REMOTE_WAKER_QUEUE ||
+           mode == LCCF_MODEL_REMOTE_CAUSAL_CELL;
 }
 
 static bool frame_bytes_valid(size_t frame_bytes) {
@@ -367,7 +377,12 @@ static bool config_valid(const lccf_model_config_t *config) {
         config->direct_budget > LCCF_MODEL_MAX_DIRECT_BUDGET ||
         config->chain_length == 0U ||
         config->chain_length > LCCF_MODEL_MAX_CHAIN_LENGTH ||
-        config->remote_producers > 2U) {
+        config->remote_producers >
+            LCCF_MODEL_REMOTE_PRODUCER_COUNT ||
+        (mode_is_remote(config->mode) &&
+         config->remote_producers !=
+             LCCF_MODEL_REMOTE_PRODUCER_COUNT) ||
+        config->instance_count == SIZE_MAX) {
         return false;
     }
     if (!allocation_size_valid(config->instance_count,
@@ -407,9 +422,14 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
         return ENOTSUP;
     }
 
-    queue_capacity = next_power_of_two(config->instance_count);
+    queue_capacity =
+        next_power_of_two(config->instance_count + 1U);
     if (queue_capacity == 0U ||
-        !allocation_size_valid(queue_capacity, sizeof(void *))) {
+        !allocation_size_valid(queue_capacity, sizeof(void *)) ||
+        (mode_is_remote(config->mode) &&
+         !allocation_size_valid(
+             queue_capacity,
+             sizeof(lccf_model_remote_slot_t)))) {
         return EOVERFLOW;
     }
     batch = calloc(1U, sizeof(*batch));
@@ -435,8 +455,14 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
     }
     batch->local_queue.slots =
         calloc(queue_capacity, sizeof(*batch->local_queue.slots));
+    if (mode_is_remote(config->mode)) {
+        batch->remote_queue.slots = calloc(
+            queue_capacity, sizeof(*batch->remote_queue.slots));
+    }
     if (batch->frame_storage == NULL || batch->instances == NULL ||
         batch->local_queue.slots == NULL ||
+        (mode_is_remote(config->mode) &&
+         batch->remote_queue.slots == NULL) ||
         (mode_uses_wakers(config->mode) &&
          batch->wakers == NULL) ||
         (mode_uses_cells(config->mode) &&
@@ -446,6 +472,16 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
     }
     batch->local_queue.capacity = queue_capacity;
     batch->local_queue.mask = queue_capacity - 1U;
+    if (mode_is_remote(config->mode)) {
+        batch->remote_queue.capacity = queue_capacity;
+        batch->remote_queue.mask = queue_capacity - 1U;
+        atomic_init(
+            &batch->remote_queue.enqueue_position, 0U);
+        for (i = 0U; i < queue_capacity; ++i) {
+            atomic_init(
+                &batch->remote_queue.slots[i].sequence, i);
+        }
+    }
     batch->ops = lccf_model_get_workload_ops(config->workload);
     if (batch->ops == NULL) {
         lccf_model_batch_destroy(batch);
@@ -457,6 +493,14 @@ int lccf_model_batch_create(const lccf_model_config_t *config,
             return EPROTO;
         }
     }
+    if (mode_is_remote(config->mode)) {
+        const int remote_rc = remote_team_create(batch);
+
+        if (remote_rc != 0) {
+            lccf_model_batch_destroy(batch);
+            return remote_rc;
+        }
+    }
     *out_batch = batch;
     return 0;
 }
@@ -465,6 +509,8 @@ void lccf_model_batch_destroy(lccf_model_batch_t *batch) {
     if (batch == NULL) {
         return;
     }
+    remote_team_destroy(batch);
+    free(batch->remote_queue.slots);
     free(batch->local_queue.slots);
     free(batch->tickets);
     free(batch->wakers);
@@ -478,7 +524,13 @@ int lccf_model_batch_reset(lccf_model_batch_t *batch) {
     size_t i;
 
     if (batch == NULL || batch->local_queue.slots == NULL ||
-        batch->local_queue.head != batch->local_queue.tail) {
+        batch->local_queue.head != batch->local_queue.tail ||
+        (mode_is_remote(batch->config.mode) &&
+         (batch->remote_queue.slots == NULL ||
+          atomic_load_explicit(
+              &batch->remote_queue.enqueue_position,
+              memory_order_acquire) !=
+              batch->remote_queue.dequeue_position))) {
         return EINVAL;
     }
     memset(batch->local_queue.slots,
@@ -491,7 +543,7 @@ int lccf_model_batch_reset(lccf_model_batch_t *batch) {
     batch->callback_depth = 0U;
     batch->maximum_callback_depth = 0U;
     batch->fairness_tick = 0U;
-    batch->fairness_due_tick = 0U;
+    batch->fairness_due_ns = 0U;
     batch->fairness_services = 0U;
     memset(batch->fairness_histogram,
            0,
@@ -528,6 +580,7 @@ static int validate_metrics(const lccf_model_batch_t *batch,
         !metric_room(metrics->resume_calls, callback_count) ||
         !metric_room(metrics->direct_calls, callback_count) ||
         !metric_room(metrics->forced_escapes, callback_count) ||
+        !metric_room(metrics->remote_pushes, instances) ||
         !metric_room(metrics->fairness_samples, callback_count) ||
         !metric_room(batch->fairness_tick, callback_count) ||
         !metric_room(batch->fairness_services, callback_count) ||
@@ -671,34 +724,48 @@ static void update_fairness_p99(lccf_model_batch_t *batch,
     }
 }
 
-static void fairness_note_callback(lccf_model_batch_t *batch) {
+static int fairness_note_callback(lccf_model_batch_t *batch) {
     batch->fairness_tick += UINT64_C(1);
     if (batch->config.workload ==
             LCCF_MODEL_COMPLETION_MIXED_FAIRNESS &&
         !batch->fairness_due &&
         (batch->fairness_tick & UINT64_C(31)) == 0U) {
+        const uint64_t now =
+            lccf_platform_monotonic_ns();
+
+        if (now == 0U) {
+            return EIO;
+        }
         batch->fairness_due = true;
-        batch->fairness_due_tick = batch->fairness_tick;
+        batch->fairness_due_ns = now;
     }
+    return 0;
 }
 
-static void fairness_service(lccf_model_batch_t *batch,
-                             lccf_model_metrics_t *metrics) {
+static int fairness_service(lccf_model_batch_t *batch,
+                            lccf_model_metrics_t *metrics) {
+    uint64_t now;
     uint64_t latency;
     unsigned bucket;
 
     if (!batch->fairness_due) {
-        return;
+        return 0;
     }
-    latency =
-        batch->fairness_tick - batch->fairness_due_tick +
-        UINT64_C(1);
+    now = lccf_platform_monotonic_ns();
+    if (now == 0U || now < batch->fairness_due_ns) {
+        return EIO;
+    }
+    latency = now - batch->fairness_due_ns;
+    if (latency == 0U) {
+        latency = UINT64_C(1);
+    }
     bucket = fairness_bucket(latency);
     batch->fairness_histogram[bucket] += UINT64_C(1);
     batch->fairness_services += UINT64_C(1);
     metrics->fairness_samples += UINT64_C(1);
     batch->fairness_due = false;
     update_fairness_p99(batch, metrics);
+    return 0;
 }
 
 static int execute_resume_callback(
@@ -719,11 +786,13 @@ static int execute_resume_callback(
         return EPROTO;
     }
     memset(&instance->command, 0, sizeof(instance->command));
+    if (fairness_note_callback(batch) != 0) {
+        return EIO;
+    }
     batch->callback_depth += 1U;
     if (batch->callback_depth > batch->maximum_callback_depth) {
         batch->maximum_callback_depth = batch->callback_depth;
     }
-    fairness_note_callback(batch);
     resume(instance->frame,
            event,
            &instance->command,
@@ -776,59 +845,88 @@ static int claim_and_publish_wakers(lccf_model_batch_t *batch,
     return 0;
 }
 
+static int resume_one_waker(lccf_model_batch_t *batch,
+                            lccf_model_waker_t *waker,
+                            lccf_model_metrics_t *metrics) {
+    lccf_model_instance_t *instance;
+    lccf_model_frame_core_t *frame;
+    uint64_t word;
+    uint64_t generation;
+    unsigned site;
+
+    if (waker == NULL || waker->instance == NULL ||
+        waker->instance->batch != batch ||
+        waker->instance->waker != waker) {
+        return EPROTO;
+    }
+    instance = waker->instance;
+    frame = instance->frame;
+    word = atomic_load_explicit(
+        &waker->state_generation, memory_order_acquire);
+    generation = lccf_model_unpack_generation(word);
+    site = waker->resume_site;
+    if (lccf_model_unpack_state(word) !=
+            LCCF_MODEL_STATE_QUEUED ||
+        generation != frame->generation ||
+        site >= batch->config.site_count) {
+        return EPROTO;
+    }
+    atomic_store_explicit(
+        &waker->state_generation,
+        lccf_model_pack_state(generation,
+                              LCCF_MODEL_STATE_RUNNING),
+        memory_order_release);
+    if (execute_resume_callback(batch,
+                                instance,
+                                &instance->event,
+                                site,
+                                false,
+                                metrics) != 0) {
+        return EPROTO;
+    }
+    metrics->queue_pops += UINT64_C(1);
+    if (fairness_service(batch, metrics) != 0) {
+        return EIO;
+    }
+    frame->command_word =
+        instance->command.output ^
+        ((uint64_t)instance->command.next_site << 32U) ^
+        (uint64_t)instance->command.kind;
+    frame->site = instance->command.next_site;
+    waker->resume_site = frame->site;
+
+    if (instance->command.kind ==
+        LCCF_MODEL_COMMAND_CONTINUE) {
+        atomic_store_explicit(
+            &waker->state_generation,
+            lccf_model_pack_state(generation,
+                                  LCCF_MODEL_STATE_QUEUED),
+            memory_order_release);
+        if (queue_push(&batch->local_queue, waker) != 0) {
+            return EOVERFLOW;
+        }
+        metrics->queue_pushes += UINT64_C(1);
+    } else {
+        frame->generation += UINT64_C(1);
+        atomic_store_explicit(
+            &waker->state_generation,
+            lccf_model_pack_state(frame->generation,
+                                  LCCF_MODEL_STATE_ARMED),
+            memory_order_release);
+    }
+    return 0;
+}
+
 static int resume_queued_wakers(lccf_model_batch_t *batch,
                                 lccf_model_metrics_t *metrics) {
     lccf_model_waker_t *waker;
 
     while ((waker = queue_pop(&batch->local_queue)) != NULL) {
-        lccf_model_instance_t *instance = waker->instance;
-        lccf_model_frame_core_t *frame = instance->frame;
-        const uint64_t generation = frame->generation;
-        const unsigned site = waker->resume_site;
+        const int rc = resume_one_waker(
+            batch, waker, metrics);
 
-        if (site >= batch->config.site_count) {
-            return EPROTO;
-        }
-        atomic_store_explicit(
-            &waker->state_generation,
-            lccf_model_pack_state(generation,
-                                  LCCF_MODEL_STATE_RUNNING),
-            memory_order_release);
-        if (execute_resume_callback(batch,
-                                    instance,
-                                    &instance->event,
-                                    site,
-                                    false,
-                                    metrics) != 0) {
-            return EPROTO;
-        }
-        metrics->queue_pops += UINT64_C(1);
-        fairness_service(batch, metrics);
-        frame->command_word =
-            instance->command.output ^
-            ((uint64_t)instance->command.next_site << 32U) ^
-            (uint64_t)instance->command.kind;
-        frame->site = instance->command.next_site;
-        waker->resume_site = frame->site;
-
-        if (instance->command.kind ==
-            LCCF_MODEL_COMMAND_CONTINUE) {
-            atomic_store_explicit(
-                &waker->state_generation,
-                lccf_model_pack_state(generation,
-                                      LCCF_MODEL_STATE_QUEUED),
-                memory_order_release);
-            if (queue_push(&batch->local_queue, waker) != 0) {
-                return EOVERFLOW;
-            }
-            metrics->queue_pushes += UINT64_C(1);
-        } else {
-            frame->generation += UINT64_C(1);
-            atomic_store_explicit(
-                &waker->state_generation,
-                lccf_model_pack_state(frame->generation,
-                                      LCCF_MODEL_STATE_ARMED),
-                memory_order_release);
+        if (rc != 0) {
+            return rc;
         }
     }
     return 0;
@@ -910,6 +1008,46 @@ static int retire_backend_reference(lccf_model_cell_hot_t *cell) {
     return EPROTO;
 }
 
+int lccf_model_try_claim_ticket(
+    const lccf_model_ticket_t *ticket,
+    bool *out_won) {
+    lccf_model_cell_hot_t *cell;
+    uint64_t expected;
+    bool won;
+    int rc;
+
+    if (out_won == NULL) {
+        return EINVAL;
+    }
+    *out_won = false;
+    if (ticket == NULL || ticket->target == NULL ||
+        ticket->generation == 0U) {
+        return EINVAL;
+    }
+    cell = ticket->target;
+    expected = lccf_model_pack_state(
+        ticket->generation, LCCF_MODEL_STATE_ARMED);
+    won = atomic_compare_exchange_strong_explicit(
+        &cell->state_generation,
+        &expected,
+        lccf_model_pack_state(ticket->generation,
+                              LCCF_MODEL_STATE_CLAIMED),
+        memory_order_acq_rel,
+        memory_order_acquire);
+    if (won) {
+        cell->event = ticket->event;
+    } else if (lccf_model_unpack_generation(expected) !=
+               ticket->generation) {
+        return 0;
+    }
+    rc = retire_backend_reference(cell);
+    if (rc != 0) {
+        return rc;
+    }
+    *out_won = won;
+    return 0;
+}
+
 static int claim_cell_tickets(lccf_model_batch_t *batch,
                               lccf_model_instance_t *instance,
                               lccf_model_metrics_t *metrics) {
@@ -926,34 +1064,27 @@ static int claim_cell_tickets(lccf_model_batch_t *batch,
         const lccf_model_ticket_t *ticket =
             lccf_model_ticket_at(
                 batch, instance->index, ticket_index);
-        uint64_t expected;
+        bool ticket_won;
+        int rc;
 
         if (ticket == NULL || ticket->target != cell) {
             return EPROTO;
         }
-        expected = lccf_model_pack_state(
-            ticket->generation, LCCF_MODEL_STATE_ARMED);
-        if (atomic_compare_exchange_strong_explicit(
-                &cell->state_generation,
-                &expected,
-                lccf_model_pack_state(
-                    ticket->generation,
-                    LCCF_MODEL_STATE_CLAIMED),
-                memory_order_acq_rel,
-                memory_order_acquire)) {
+        rc = lccf_model_try_claim_ticket(
+            ticket, &ticket_won);
+        if (rc != 0) {
+            return rc;
+        }
+        if (ticket_won) {
             if (won) {
                 return EPROTO;
             }
-            cell->event = ticket->event;
             cell->next_site = instance->frame->site;
             metrics->completions += UINT64_C(1);
             metrics->claims += UINT64_C(1);
             won = true;
         } else {
             metrics->stale_tickets += UINT64_C(1);
-        }
-        if (retire_backend_reference(cell) != 0) {
-            return EPROTO;
         }
     }
     if (!won ||
@@ -1016,57 +1147,66 @@ static int claim_and_publish_cells(lccf_model_batch_t *batch,
     return 0;
 }
 
+static int resume_one_cell(lccf_model_batch_t *batch,
+                           lccf_model_cell_hot_t *cell,
+                           lccf_model_metrics_t *metrics) {
+    lccf_model_instance_t *instance;
+    uint64_t word;
+    unsigned site;
+
+    if (cell == NULL || cell->instance == NULL ||
+        cell->instance->batch != batch ||
+        cell->instance->cell != cell) {
+        return EPROTO;
+    }
+    instance = cell->instance;
+    word = atomic_load_explicit(
+        &cell->state_generation, memory_order_acquire);
+    site = cell->next_site;
+    if (lccf_model_unpack_state(word) !=
+            LCCF_MODEL_STATE_QUEUED ||
+        lccf_model_unpack_generation(word) !=
+            instance->frame->generation ||
+        site >= batch->config.site_count ||
+        atomic_exchange_explicit(
+            &cell->queue_owned,
+            0U,
+            memory_order_acq_rel) != 1U) {
+        return EPROTO;
+    }
+    if (mark_cell_running(
+            instance, LCCF_MODEL_STATE_QUEUED) != 0 ||
+        execute_resume_callback(batch,
+                                instance,
+                                &cell->event,
+                                site,
+                                false,
+                                metrics) != 0) {
+        return EPROTO;
+    }
+    metrics->queue_pops += UINT64_C(1);
+    if (fairness_service(batch, metrics) != 0) {
+        return EIO;
+    }
+    publish_cell_command(instance);
+
+    if (instance->command.kind ==
+        LCCF_MODEL_COMMAND_CONTINUE) {
+        return enqueue_claimed_cell(
+            batch, cell, metrics, false);
+    }
+    return rearm_cell_generation(batch, instance);
+}
+
 static int resume_queued_cells(lccf_model_batch_t *batch,
                                lccf_model_metrics_t *metrics) {
     lccf_model_cell_hot_t *cell;
 
     while ((cell = queue_pop(&batch->local_queue)) != NULL) {
-        lccf_model_instance_t *instance = cell->instance;
-        uint64_t word;
-        unsigned site;
+        const int rc = resume_one_cell(batch, cell, metrics);
 
-        if (instance == NULL || instance->batch != batch ||
-            instance->cell != cell) {
-            return EPROTO;
-        }
-        word = atomic_load_explicit(
-            &cell->state_generation, memory_order_acquire);
-        site = cell->next_site;
-        if (lccf_model_unpack_state(word) !=
-                LCCF_MODEL_STATE_QUEUED ||
-            lccf_model_unpack_generation(word) !=
-                instance->frame->generation ||
-            site >= batch->config.site_count ||
-            atomic_exchange_explicit(
-                &cell->queue_owned,
-                0U,
-                memory_order_acq_rel) != 1U) {
-            return EPROTO;
-        }
-        if (mark_cell_running(
-                instance, LCCF_MODEL_STATE_QUEUED) != 0 ||
-            execute_resume_callback(batch,
-                                    instance,
-                                    &cell->event,
-                                    site,
-                                    false,
-                                    metrics) != 0) {
-            return EPROTO;
-        }
-        metrics->queue_pops += UINT64_C(1);
-        fairness_service(batch, metrics);
-        publish_cell_command(instance);
-
-        if (instance->command.kind ==
-            LCCF_MODEL_COMMAND_CONTINUE) {
-            const int rc = enqueue_claimed_cell(
-                batch, cell, metrics, false);
-
-            if (rc != 0) {
-                return rc;
-            }
-        } else if (rearm_cell_generation(batch, instance) != 0) {
-            return EPROTO;
+        if (rc != 0) {
+            return rc;
         }
     }
     return 0;
@@ -1116,7 +1256,10 @@ static int run_direct_cell_segment(
 
         if (instance->command.kind !=
             LCCF_MODEL_COMMAND_CONTINUE) {
-            fairness_service(batch, metrics);
+            rc = fairness_service(batch, metrics);
+            if (rc != 0) {
+                return rc;
+            }
             return rearm_cell_generation(batch, instance);
         }
         if (budgeted &&
@@ -1125,12 +1268,29 @@ static int run_direct_cell_segment(
             rc = enqueue_claimed_cell(
                 batch, cell, metrics, true);
             if (rc == 0) {
-                fairness_service(batch, metrics);
+                rc = fairness_service(batch, metrics);
             }
             return rc;
         }
         expected_state = LCCF_MODEL_STATE_RUNNING;
     }
+}
+
+int lccf_model_resume_claimed_cell(
+    lccf_model_batch_t *batch,
+    size_t instance_index,
+    lccf_model_metrics_t *metrics) {
+    if (batch == NULL || metrics == NULL ||
+        !mode_uses_cells(batch->config.mode) ||
+        instance_index >= batch->config.instance_count ||
+        batch->local_queue.head != batch->local_queue.tail) {
+        return EINVAL;
+    }
+    return run_direct_cell_segment(
+        batch,
+        batch->instances[instance_index].cell,
+        metrics,
+        false);
 }
 
 static int resume_budgeted_escape_cells(
@@ -1174,7 +1334,10 @@ static int resume_budgeted_escape_cells(
             return rc;
         }
         metrics->queue_pops += UINT64_C(1);
-        fairness_service(batch, metrics);
+        rc = fairness_service(batch, metrics);
+        if (rc != 0) {
+            return rc;
+        }
         publish_cell_command(instance);
 
         if (instance->command.kind ==
@@ -1212,6 +1375,483 @@ static int run_fused_cells(lccf_model_batch_t *batch,
         return resume_budgeted_escape_cells(batch, metrics);
     }
     return 0;
+}
+
+static int remote_queue_push(lccf_model_batch_t *batch, void *item) {
+    lccf_model_remote_queue_t *queue = &batch->remote_queue;
+    lccf_model_remote_slot_t *slot;
+    size_t position;
+
+    if (item == NULL || queue->slots == NULL ||
+        queue->capacity == 0U) {
+        return EINVAL;
+    }
+    position = atomic_fetch_add_explicit(
+        &queue->enqueue_position, 1U, memory_order_relaxed);
+    slot = &queue->slots[position & queue->mask];
+    while (atomic_load_explicit(
+               &slot->sequence, memory_order_acquire) != position) {
+        if (atomic_load_explicit(
+                &batch->remote_team.stop,
+                memory_order_acquire)) {
+            return ECANCELED;
+        }
+        atomic_signal_fence(memory_order_seq_cst);
+    }
+    slot->item = item;
+    atomic_store_explicit(
+        &slot->sequence, position + 1U, memory_order_release);
+    return 0;
+}
+
+static int remote_queue_pop(lccf_model_remote_queue_t *queue,
+                            void **out_item) {
+    lccf_model_remote_slot_t *slot;
+    const size_t position =
+        queue == NULL ? 0U : queue->dequeue_position;
+    void *item;
+
+    if (queue == NULL || out_item == NULL ||
+        queue->slots == NULL || queue->capacity == 0U) {
+        return EINVAL;
+    }
+    *out_item = NULL;
+    slot = &queue->slots[position & queue->mask];
+    if (atomic_load_explicit(
+            &slot->sequence, memory_order_acquire) !=
+        position + 1U) {
+        return EAGAIN;
+    }
+    item = slot->item;
+    if (item == NULL) {
+        return EPROTO;
+    }
+    slot->item = NULL;
+    atomic_store_explicit(
+        &slot->sequence,
+        position + queue->capacity,
+        memory_order_release);
+    queue->dequeue_position = position + 1U;
+    *out_item = item;
+    return 0;
+}
+
+static int remote_publish_waker(
+    lccf_model_remote_worker_t *worker,
+    lccf_model_instance_t *instance) {
+    lccf_model_batch_t *batch = worker->batch;
+    lccf_model_waker_t *waker;
+    uint64_t generation;
+    uint64_t expected;
+
+    if (instance == NULL || instance->batch != batch ||
+        instance->waker == NULL || instance->cell != NULL) {
+        return EPROTO;
+    }
+    waker = instance->waker;
+    generation = instance->frame->generation;
+    expected = lccf_model_pack_state(
+        generation, LCCF_MODEL_STATE_ARMED);
+    lccf_model_derive_event(batch, instance, &instance->event);
+    if (!atomic_compare_exchange_strong_explicit(
+            &waker->state_generation,
+            &expected,
+            lccf_model_pack_state(
+                generation, LCCF_MODEL_STATE_CLAIMED),
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        return EPROTO;
+    }
+    atomic_store_explicit(
+        &waker->state_generation,
+        lccf_model_pack_state(
+            generation, LCCF_MODEL_STATE_QUEUED),
+        memory_order_release);
+    if (remote_queue_push(batch, waker) != 0) {
+        return EPROTO;
+    }
+    worker->metrics.completions += UINT64_C(1);
+    worker->metrics.claims += UINT64_C(1);
+    worker->metrics.queue_pushes += UINT64_C(1);
+    worker->metrics.remote_pushes += UINT64_C(1);
+    return 0;
+}
+
+static int remote_publish_cell(
+    lccf_model_remote_worker_t *worker,
+    lccf_model_instance_t *instance) {
+    lccf_model_batch_t *batch = worker->batch;
+    lccf_model_cell_hot_t *cell;
+    uint64_t word;
+    int rc;
+
+    if (instance == NULL || instance->batch != batch ||
+        instance->cell == NULL || instance->waker != NULL) {
+        return EPROTO;
+    }
+    cell = instance->cell;
+    rc = claim_cell_tickets(
+        batch, instance, &worker->metrics);
+    if (rc != 0) {
+        return rc;
+    }
+    word = atomic_load_explicit(
+        &cell->state_generation, memory_order_acquire);
+    if (lccf_model_unpack_state(word) !=
+            LCCF_MODEL_STATE_CLAIMED ||
+        atomic_exchange_explicit(
+            &cell->queue_owned,
+            1U,
+            memory_order_acq_rel) != 0U) {
+        return EPROTO;
+    }
+    atomic_store_explicit(
+        &cell->state_generation,
+        lccf_model_pack_state(
+            lccf_model_unpack_generation(word),
+            LCCF_MODEL_STATE_QUEUED),
+        memory_order_release);
+    rc = remote_queue_push(batch, cell);
+    if (rc != 0) {
+        return rc;
+    }
+    worker->metrics.queue_pushes += UINT64_C(1);
+    worker->metrics.remote_pushes += UINT64_C(1);
+    return 0;
+}
+
+static int remote_worker_main(void *opaque) {
+    lccf_model_remote_worker_t *worker = opaque;
+    lccf_model_batch_t *batch = worker->batch;
+    lccf_model_remote_team_t *team = &batch->remote_team;
+    uint64_t observed =
+        lccf_platform_event_epoch(team->start_event);
+
+    if (observed == UINT64_MAX) {
+        return EPROTO;
+    }
+    atomic_fetch_add_explicit(
+        &team->ready_workers, 1U, memory_order_acq_rel);
+    if (lccf_platform_event_signal(team->ready_event) != 0) {
+        return EPROTO;
+    }
+    for (;;) {
+        uint64_t current;
+        size_t index;
+        int rc;
+
+        rc = lccf_platform_event_wait(
+            team->start_event, observed);
+        if (rc != 0) {
+            return rc;
+        }
+        current =
+            lccf_platform_event_epoch(team->start_event);
+        if (current == UINT64_MAX || current <= observed) {
+            return EPROTO;
+        }
+        observed = current;
+        if (atomic_load_explicit(
+                &team->stop, memory_order_acquire)) {
+            return 0;
+        }
+
+        worker->error = 0;
+        for (index = worker->index;
+             index < batch->config.instance_count;
+             index += team->worker_count) {
+            if (batch->config.mode ==
+                LCCF_MODEL_REMOTE_WAKER_QUEUE) {
+                rc = remote_publish_waker(
+                    worker, &batch->instances[index]);
+            } else if (batch->config.mode ==
+                       LCCF_MODEL_REMOTE_CAUSAL_CELL) {
+                rc = remote_publish_cell(
+                    worker, &batch->instances[index]);
+            } else {
+                rc = ENOTSUP;
+            }
+            if (rc != 0) {
+                worker->error = rc;
+                break;
+            }
+        }
+        if (atomic_fetch_add_explicit(
+                &team->completed_workers,
+                1U,
+                memory_order_acq_rel) +
+                1U ==
+            team->worker_count) {
+            rc = lccf_platform_event_signal(team->done_event);
+            if (rc != 0) {
+                return rc;
+            }
+        }
+    }
+}
+
+static int wait_for_remote_workers(
+    lccf_platform_event_t *event,
+    const _Atomic unsigned *counter,
+    unsigned target) {
+    while (atomic_load_explicit(counter, memory_order_acquire) <
+           target) {
+        const uint64_t observed =
+            lccf_platform_event_epoch(event);
+        int rc;
+
+        if (observed == UINT64_MAX) {
+            return EPROTO;
+        }
+        if (atomic_load_explicit(
+                counter, memory_order_acquire) >= target) {
+            break;
+        }
+        rc = lccf_platform_event_wait(event, observed);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+static int remote_team_create(lccf_model_batch_t *batch) {
+    lccf_model_remote_team_t *team = &batch->remote_team;
+    unsigned index;
+    int rc;
+
+    atomic_init(&team->ready_workers, 0U);
+    atomic_init(&team->completed_workers, 0U);
+    atomic_init(&team->stop, false);
+    rc = lccf_platform_event_create(&team->start_event);
+    if (rc == 0) {
+        rc = lccf_platform_event_create(&team->ready_event);
+    }
+    if (rc == 0) {
+        rc = lccf_platform_event_create(&team->done_event);
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    for (index = 0U;
+         index < batch->config.remote_producers;
+         ++index) {
+        lccf_model_remote_worker_t *worker =
+            &team->workers[index];
+
+        worker->batch = batch;
+        worker->index = index;
+        rc = lccf_platform_thread_start(
+            &worker->thread, remote_worker_main, worker);
+        if (rc != 0) {
+            return rc;
+        }
+        team->worker_count += 1U;
+    }
+    return wait_for_remote_workers(
+        team->ready_event,
+        &team->ready_workers,
+        team->worker_count);
+}
+
+static void remote_team_destroy(lccf_model_batch_t *batch) {
+    lccf_model_remote_team_t *team;
+    unsigned index;
+
+    if (batch == NULL) {
+        return;
+    }
+    team = &batch->remote_team;
+    if (team->worker_count != 0U) {
+        atomic_store_explicit(
+            &team->stop, true, memory_order_release);
+        if (team->start_event != NULL) {
+            (void)lccf_platform_event_signal(
+                team->start_event);
+        }
+        for (index = 0U;
+             index < team->worker_count;
+             ++index) {
+            if (team->workers[index].thread != NULL) {
+                (void)lccf_platform_thread_join(
+                    team->workers[index].thread, NULL);
+                team->workers[index].thread = NULL;
+            }
+        }
+        team->worker_count = 0U;
+    }
+    lccf_platform_event_destroy(team->done_event);
+    lccf_platform_event_destroy(team->ready_event);
+    lccf_platform_event_destroy(team->start_event);
+    team->done_event = NULL;
+    team->ready_event = NULL;
+    team->start_event = NULL;
+}
+
+static void accumulate_metrics(
+    lccf_model_metrics_t *target,
+    const lccf_model_metrics_t *source) {
+    target->completions += source->completions;
+    target->claims += source->claims;
+    target->stale_tickets += source->stale_tickets;
+    target->queue_pushes += source->queue_pushes;
+    target->queue_pops += source->queue_pops;
+    target->resume_calls += source->resume_calls;
+    target->direct_calls += source->direct_calls;
+    target->forced_escapes += source->forced_escapes;
+    target->remote_pushes += source->remote_pushes;
+    target->fairness_samples += source->fairness_samples;
+    if (source->fairness_p99_ns > target->fairness_p99_ns) {
+        target->fairness_p99_ns =
+            source->fairness_p99_ns;
+    }
+    target->hot_allocations += source->hot_allocations;
+}
+
+static int discard_remote_items(lccf_model_batch_t *batch,
+                                uint64_t count) {
+    uint64_t index;
+
+    for (index = 0U; index < count; ++index) {
+        void *item;
+        const int rc = remote_queue_pop(
+            &batch->remote_queue, &item);
+
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return 0;
+}
+
+static int dispatch_remote_producers(
+    lccf_model_batch_t *batch,
+    lccf_model_metrics_t *metrics) {
+    lccf_model_remote_team_t *team = &batch->remote_team;
+    lccf_model_metrics_t produced = {0};
+    const size_t enqueue_position = atomic_load_explicit(
+        &batch->remote_queue.enqueue_position,
+        memory_order_acquire);
+    const size_t maximum_position_increment =
+        batch->remote_queue.capacity +
+        batch->config.instance_count - 1U;
+    unsigned index;
+    int first_error = 0;
+    int rc;
+
+    if (team->worker_count !=
+            batch->config.remote_producers ||
+        team->worker_count !=
+            LCCF_MODEL_REMOTE_PRODUCER_COUNT ||
+        enqueue_position !=
+            batch->remote_queue.dequeue_position ||
+        batch->remote_queue.capacity >
+            SIZE_MAX - (batch->config.instance_count - 1U) ||
+        enqueue_position >
+            SIZE_MAX - maximum_position_increment) {
+        return EOVERFLOW;
+    }
+    atomic_store_explicit(
+        &team->completed_workers, 0U, memory_order_release);
+    for (index = 0U; index < team->worker_count; ++index) {
+        memset(&team->workers[index].metrics,
+               0,
+               sizeof(team->workers[index].metrics));
+        team->workers[index].error = 0;
+    }
+    {
+        const uint64_t done_epoch =
+            lccf_platform_event_epoch(team->done_event);
+
+        if (done_epoch == UINT64_MAX) {
+            return EPROTO;
+        }
+        rc = lccf_platform_event_signal(team->start_event);
+        if (rc == 0) {
+            rc = lccf_platform_event_wait(
+                team->done_event, done_epoch);
+        }
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    for (index = 0U; index < team->worker_count; ++index) {
+        accumulate_metrics(
+            &produced, &team->workers[index].metrics);
+        if (first_error == 0 &&
+            team->workers[index].error != 0) {
+            first_error = team->workers[index].error;
+        }
+    }
+    if (first_error != 0 ||
+        produced.remote_pushes !=
+            batch->config.instance_count) {
+        rc = discard_remote_items(
+            batch, produced.remote_pushes);
+        return rc != 0 ?
+                   rc :
+                   (first_error != 0 ? first_error : EPROTO);
+    }
+    accumulate_metrics(metrics, &produced);
+    return 0;
+}
+
+static int run_remote_wakers(lccf_model_batch_t *batch,
+                             lccf_model_metrics_t *metrics) {
+    size_t index;
+    int rc = dispatch_remote_producers(batch, metrics);
+
+    if (rc != 0) {
+        return rc;
+    }
+    for (index = 0U;
+         index < batch->config.instance_count;
+         ++index) {
+        void *item;
+
+        rc = remote_queue_pop(&batch->remote_queue, &item);
+        if (rc != 0) {
+            return rc;
+        }
+        rc = resume_one_waker(batch, item, metrics);
+        if (rc != 0) {
+            (void)discard_remote_items(
+                batch,
+                (uint64_t)batch->config.instance_count -
+                    (uint64_t)index - UINT64_C(1));
+            return rc;
+        }
+    }
+    return resume_queued_wakers(batch, metrics);
+}
+
+static int run_remote_cells(lccf_model_batch_t *batch,
+                            lccf_model_metrics_t *metrics) {
+    size_t index;
+    int rc = dispatch_remote_producers(batch, metrics);
+
+    if (rc != 0) {
+        return rc;
+    }
+    for (index = 0U;
+         index < batch->config.instance_count;
+         ++index) {
+        void *item;
+
+        rc = remote_queue_pop(&batch->remote_queue, &item);
+        if (rc != 0) {
+            return rc;
+        }
+        rc = resume_one_cell(batch, item, metrics);
+        if (rc != 0) {
+            (void)discard_remote_items(
+                batch,
+                (uint64_t)batch->config.instance_count -
+                    (uint64_t)index - UINT64_C(1));
+            return rc;
+        }
+    }
+    return resume_queued_cells(batch, metrics);
 }
 
 int lccf_model_run_round(lccf_model_batch_t *batch,
@@ -1254,7 +1894,11 @@ int lccf_model_run_round(lccf_model_batch_t *batch,
             rc = run_fused_cells(batch, metrics, true);
             break;
         case LCCF_MODEL_REMOTE_WAKER_QUEUE:
+            rc = run_remote_wakers(batch, metrics);
+            break;
         case LCCF_MODEL_REMOTE_CAUSAL_CELL:
+            rc = run_remote_cells(batch, metrics);
+            break;
         default:
             return ENOTSUP;
     }
