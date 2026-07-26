@@ -4,6 +4,17 @@
 name: SREM Research
 
 on:
+  push:
+    branches:
+      - codex/srem-phase0
+    paths:
+      - .github/workflows/srem-research.yml
+      - experiments/srem/**
+      - scripts/bench_srem_model.py
+      - scripts/process_utils.py
+      - scripts/safe_output.py
+      - scripts/test_bench_srem_model.py
+      - scripts/test_bench_srem_native.py
   workflow_dispatch:
     inputs:
       phase:
@@ -32,11 +43,11 @@ concurrency:
 
 jobs:
   evidence:
-    name: linux-x86_64-${{ inputs.phase }}
+    name: linux-x86_64-${{ inputs.phase || 'screen' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      OUT_DIR: .artifacts/srem-phase0-${{ inputs.phase }}
+      OUT_DIR: .artifacts/srem-phase0-${{ inputs.phase || 'screen' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -84,7 +95,7 @@ jobs:
 
       - name: Run pinned SREM evidence matrix
         env:
-          PHASE: ${{ inputs.phase }}
+          PHASE: ${{ inputs.phase || 'screen' }}
           SELECTED_WIDTH: ${{ inputs.selected_width }}
           THRESHOLD: ${{ inputs.threshold }}
         run: |
@@ -133,6 +144,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: srem-phase0-${{ inputs.phase }}-linux-x86_64
-          path: .artifacts/srem-phase0-${{ inputs.phase }}
+          name: srem-phase0-${{ inputs.phase || 'screen' }}-linux-x86_64
+          path: .artifacts/srem-phase0-${{ inputs.phase || 'screen' }}
           if-no-files-found: error
