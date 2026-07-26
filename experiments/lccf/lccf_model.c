@@ -1262,6 +1262,12 @@ static int run_direct_cell_segment(
             }
             return rearm_cell_generation(batch, instance);
         }
+        if (!budgeted && batch->fairness_due) {
+            rc = fairness_service(batch, metrics);
+            if (rc != 0) {
+                return rc;
+            }
+        }
         if (budgeted &&
             (direct_count >= batch->config.direct_budget ||
              batch->fairness_due)) {
@@ -2102,4 +2108,27 @@ int lccf_model_parse_workload(const char *text,
     }
     *out = (lccf_model_workload_t)parsed;
     return 0;
+}
+
+int lccf_model_candidate_baseline(
+    lccf_model_mode_t candidate,
+    lccf_model_mode_t *out_baseline) {
+    if (out_baseline == NULL) {
+        return EINVAL;
+    }
+    switch (candidate) {
+        case LCCF_MODEL_CAUSAL_CELL_QUEUE:
+        case LCCF_MODEL_FUSED_CAUSAL_CELL:
+        case LCCF_MODEL_BUDGETED_FUSED_CHAIN:
+            *out_baseline = LCCF_MODEL_WAKER_QUEUE;
+            return 0;
+        case LCCF_MODEL_REMOTE_CAUSAL_CELL:
+            *out_baseline =
+                LCCF_MODEL_REMOTE_WAKER_QUEUE;
+            return 0;
+        case LCCF_MODEL_WAKER_QUEUE:
+        case LCCF_MODEL_REMOTE_WAKER_QUEUE:
+        default:
+            return EINVAL;
+    }
 }

@@ -85,5 +85,8 @@ const char *lccf_model_workload_name(lccf_model_workload_t workload);
 int lccf_model_parse_mode(const char *text, lccf_model_mode_t *out);
 int lccf_model_parse_workload(const char *text,
                               lccf_model_workload_t *out);
+int lccf_model_candidate_baseline(
+    lccf_model_mode_t candidate,
+    lccf_model_mode_t *out_baseline);
 
 #endif
