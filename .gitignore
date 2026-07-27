@@ -27,6 +27,7 @@ test_abi_compat
 test_connect_io
 test_io_buffers
 /test_lccf_model
+/test_leir_phase0
 test_lcwe_model
 /test_srem_model
 test_multi_runtime_core

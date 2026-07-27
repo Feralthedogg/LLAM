@@ -37,6 +37,7 @@ CLEAN_FILES = \
 	server \
 	server_lossless \
 	server_flood \
+	test_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
 	test_srem_model \
@@ -87,6 +88,7 @@ CLEAN_FILES = \
 	server.exe \
 	server_lossless.exe \
 	server_flood.exe \
+	test_leir_phase0.exe \
 	test_lccf_model.exe \
 	bench_lccf_model.exe \
 	test_srem_model.exe \
@@ -539,6 +541,8 @@ TEST_SECURITY_CAPABILITY_OBJS = \
 	$(OBJDIR)/tests/test_security_capability.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
+LEIR_PHASE0_TEST_OBJS = \
+	$(OBJDIR)/experiments/leir/test_leir_phase0.o
 LCWE_MODEL_CORE_OBJS = \
 	$(OBJDIR)/experiments/lcwe/lcwe_model.o \
 	$(OBJDIR)/experiments/lcwe/lcwe_workloads.o
@@ -594,6 +598,7 @@ BUILD_OBJS = \
 	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
 	$(TEST_SECURITY_CAPABILITY_OBJS) \
 	$(TEST_SHARED_LOAD_OBJS) \
+	$(LEIR_PHASE0_TEST_OBJS) \
 	$(LCWE_MODEL_CORE_OBJS) \
 	$(LCWE_MODEL_TEST_OBJS) \
 	$(LCWE_MODEL_BENCH_OBJS) \
@@ -611,6 +616,7 @@ LINK_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
+	test_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
 	test_srem_model \
@@ -642,7 +648,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-leir-phase0 test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -657,7 +663,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_leir_phase0|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -666,6 +672,7 @@ WINDOWS_CMAKE_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
+	test_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
 	test_srem_model \
@@ -719,6 +726,10 @@ test-lccf-model: windows-cmake-configure
 test-srem-model: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_srem_model bench_srem_model
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_srem_model|test_bench_srem_native|test_bench_srem_model" $(WINDOWS_CTEST_ARGS)
+
+test-leir-phase0: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0" $(WINDOWS_CTEST_ARGS)
 
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
@@ -869,7 +880,8 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: test_lcwe_model bench_lcwe_model test_lccf_model bench_lccf_model test_srem_model bench_srem_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: test_leir_phase0 test_lcwe_model bench_lcwe_model test_lccf_model bench_lccf_model test_srem_model bench_srem_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+	./test_leir_phase0
 	./test_lcwe_model
 	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
 	./test_lccf_model
@@ -2010,6 +2022,9 @@ test-srem-model: test_srem_model bench_srem_model
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_native.py
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_model.py
 
+test-leir-phase0: test_leir_phase0
+	./test_leir_phase0
+
 lcwe-model-report: test-lcwe-model
 	python3 scripts/bench_lcwe_model.py \
 		--binary ./bench_lcwe_model \
@@ -2146,6 +2161,9 @@ test_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_TEST_OBJS)
 bench_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
 
+test_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_TEST_OBJS) $(LDLIBS)
+
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
 
@@ -2258,6 +2276,10 @@ $(OBJDIR)/experiments/srem/%.o: experiments/srem/%.c \
 		experiments/srem/srem_platform.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/srem -c -o $@ $<
+
+$(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c $(RUNTIME_PRIV_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)

@@ -207,6 +207,15 @@ typedef struct llam_task_local_entry llam_task_local_entry_t;
 typedef struct llam_channel_select_state llam_channel_select_state_t;
 /** @brief Synchronization wait node shared by wait/wake handshakes. */
 typedef struct llam_wait_node llam_wait_node_t;
+/** @brief One recyclable logical I/O operation. */
+struct llam_io_req;
+/** @brief Trusted internal consumer for a normalized I/O completion. */
+typedef bool (*llam_io_completion_sink_fn)(
+    llam_node_t *node,
+    struct llam_io_req *req,
+    unsigned completion_owner,
+    llam_wait_reason_t *wake_reason,
+    void *context);
 
 /** @brief Simple FIFO task queue used for hot, inject, overflow, and blocking queues. */
 typedef struct llam_queue {
@@ -564,6 +573,8 @@ typedef struct llam_io_req {
     uint64_t deadline_ns;
     unsigned short provided_bid;
     void *platform_data;
+    llam_io_completion_sink_fn completion_sink;
+    void *completion_sink_context;
     atomic_uint wait_mode;
     atomic_uint abort_reason;
     /* Unique nonzero identity for this activation of recyclable request storage. */

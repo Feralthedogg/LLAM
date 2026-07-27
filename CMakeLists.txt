@@ -496,6 +496,17 @@ endif()
 
 enable_testing()
 
+add_executable(test_leir_phase0
+    experiments/leir/test_leir_phase0.c
+)
+target_include_directories(test_leir_phase0 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_phase0 PRIVATE llam_runtime)
+add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
+
 set(LLAM_LCWE_MODEL_SOURCES
     experiments/lcwe/lcwe_model.c
     experiments/lcwe/lcwe_workloads.c
@@ -758,6 +769,7 @@ target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS})
 add_dependencies(test_shared_load llam_runtime_shared)
 
 foreach(LLAM_TEST_TARGET
+        test_leir_phase0
         test_abi_contract
         test_abi_compat
         test_connect_io

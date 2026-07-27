@@ -191,6 +191,10 @@ void llam_io_complete_req(llam_node_t *node, llam_io_req_t *req, int res, unsign
         }
         pthread_mutex_unlock(&shard->lock);
     }
+    if (llam_io_dispatch_completion_sink(
+            node, req, completion_owner, &wake_reason)) {
+        return;
+    }
     llam_reinject_task_on_shard(rt,
                               req->task,
                               completion_owner,

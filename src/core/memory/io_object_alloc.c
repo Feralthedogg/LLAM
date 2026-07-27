@@ -107,6 +107,8 @@ void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsign
     req->deadline_ns = 0U;
     req->provided_bid = 0U;
     req->platform_data = NULL;
+    req->completion_sink = NULL;
+    req->completion_sink_context = NULL;
     atomic_init(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
     atomic_init(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_init(&req->operation_generation, 0U);

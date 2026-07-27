@@ -264,6 +264,24 @@ bool llam_io_completion_begin(llam_node_t *node, llam_io_req_t *req, bool decrem
     return true;
 }
 
+bool llam_io_dispatch_completion_sink(llam_node_t *node,
+                                      llam_io_req_t *req,
+                                      unsigned completion_owner,
+                                      llam_wait_reason_t *wake_reason) {
+    llam_io_completion_sink_fn sink;
+
+    if (req == NULL || wake_reason == NULL) {
+        return false;
+    }
+    sink = req->completion_sink;
+    return sink != NULL &&
+           sink(node,
+                req,
+                completion_owner,
+                wake_reason,
+                req->completion_sink_context);
+}
+
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard) {
     unsigned expected;
     llam_runtime_t *rt = req != NULL ? req->owner_runtime : NULL;

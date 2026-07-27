@@ -133,6 +133,10 @@ void llam_shard_note_inflight_io_waiter(llam_runtime_t *rt, unsigned owner_shard
 bool llam_node_note_pending_ops(llam_node_t *node, unsigned amount);
 bool llam_node_complete_pending_ops(llam_node_t *node, unsigned amount);
 bool llam_io_completion_begin(llam_node_t *node, llam_io_req_t *req, bool decrement_pending);
+bool llam_io_dispatch_completion_sink(llam_node_t *node,
+                                      llam_io_req_t *req,
+                                      unsigned completion_owner,
+                                      llam_wait_reason_t *wake_reason);
 bool llam_queue_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
 bool llam_node_submit_io_req(llam_node_t *node, llam_io_req_t *req);
 bool llam_remove_node_submit_locked(llam_node_t *node, llam_io_req_t *req);
