@@ -507,6 +507,7 @@ class WorkflowContractTests(unittest.TestCase):
         required_fragments = (
             "runs-on: ubuntu-24.04",
             "permissions:\n  contents: read",
+            "OUT_DIR: ${{ runner.temp }}/leir-native-screen",
             "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
             "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
             "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
@@ -535,6 +536,7 @@ class WorkflowContractTests(unittest.TestCase):
             "max_output_bytes=64 * 1024",
             "timeout=30",
             "if: always()",
+            "path: ${{ runner.temp }}/leir-native-screen",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
