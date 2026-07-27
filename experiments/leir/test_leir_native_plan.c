@@ -302,7 +302,7 @@ static int test_rejects_read_and_write_non_exact_opcodes(void) {
     return failed;
 }
 
-static int test_rejects_nonterminal_receive(void) {
+static int test_compile_receive_then_send(void) {
     const linear_fixture_options_t options = {
         2U,
         false,
@@ -311,13 +311,28 @@ static int test_rejects_nonterminal_receive(void) {
         true,
     };
     leir_phase0_program_t *program = NULL;
-    int failed;
+    leir_native_plan_t plan;
+    int failed = 0;
 
     if (create_linear_program(&options, &program) != 0) {
-        perror("create nonterminal-receive program");
+        perror("create receive-then-send program");
         return 1;
     }
-    failed = compile_must_fail(program);
+    if (leir_native_plan_compile(program, &plan) != 0) {
+        perror("compile receive-then-send program");
+        leir_phase0_program_destroy(program);
+        return 1;
+    }
+    if (plan.step_count != 2U ||
+        plan.steps[0].kind != LEIR_NATIVE_STEP_RECV ||
+        plan.steps[0].buffer_slot != TEST_MUT_BUFFER_SLOT ||
+        plan.steps[1].kind != LEIR_NATIVE_STEP_SEND ||
+        plan.steps[1].buffer_slot != TEST_CONST_BUFFER_SLOT ||
+        plan.return_node != 2U ||
+        plan.result_slot != TEST_FIRST_RESULT_SLOT + 1U) {
+        fprintf(stderr, "receive-then-send lowering mismatch\n");
+        failed = 1;
+    }
     leir_phase0_program_destroy(program);
     return failed;
 }
@@ -569,8 +584,8 @@ int main(void) {
          test_rejects_non_power_of_two_operation_count},
         {"reject non-exact operations",
          test_rejects_read_and_write_non_exact_opcodes},
-        {"reject nonterminal receive",
-         test_rejects_nonterminal_receive},
+        {"compile receive then send",
+         test_compile_receive_then_send},
         {"reject success cycle",
          test_rejects_success_cycle},
         {"reject success branch to fail",

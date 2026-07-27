@@ -23,14 +23,6 @@ static bool node_is_terminal_fail(
            program->nodes[index].opcode == LEIR_PHASE0_OP_FAIL;
 }
 
-static bool node_is_terminal_return(
-    const leir_phase0_program_t *program,
-    uint16_t index) {
-    return index < program->node_count &&
-           program->nodes[index].opcode ==
-               LEIR_PHASE0_OP_RETURN;
-}
-
 static bool slot_was_prior_result(
     const bool prior_results[LEIR_PHASE0_MAX_SLOTS],
     uint16_t slot) {
@@ -89,9 +81,6 @@ int leir_native_plan_compile(
         }
 
         if (plan.step_count >= LEIR_NATIVE_MAX_OPS ||
-            (kind == LEIR_NATIVE_STEP_RECV &&
-             !node_is_terminal_return(
-                 program, node->on_success)) ||
             !node_is_terminal_fail(program, node->on_eof) ||
             !node_is_terminal_fail(program, node->on_error) ||
             slot_was_prior_result(
