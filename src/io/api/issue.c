@@ -1135,20 +1135,10 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
 
 #if LLAM_RUNTIME_BACKEND_LINUX
 /**
- * @brief Submit one compiled Linux effect segment and park exactly once.
- *
- * This private research path deliberately excludes deadlines and cancellation.
- * The caller must join the activation before runtime shutdown.  Keeping that
- * envelope explicit prevents the generic per-operation abort protocol from
- * pretending it can safely cancel a linked kernel chain.
- *
- * @param segment Configured, idle native segment owned by the current runtime.
- * @param req     Active request storage owned by the current managed task.
- *
- * @return 0 after successful terminal completion, otherwise -1 with errno set.
+ * @brief Submit one bounded native batch and park its task exactly once.
  */
-int llam_issue_linux_native_segment(
-    llam_linux_native_segment_t *segment,
+int llam_issue_linux_native_batch(
+    llam_linux_native_batch_t *batch,
     llam_io_req_t *req) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
@@ -1158,14 +1148,14 @@ int llam_issue_linux_native_segment(
     unsigned i;
     int error = EINVAL;
 
-    if (segment == NULL || req == NULL ||
+    if (batch == NULL || req == NULL ||
         shard == NULL || task == NULL) {
         return llam_fail_io_setup_req(req, EINVAL);
     }
     rt = task->owner_runtime;
     if (rt == NULL ||
         shard->runtime != rt ||
-        segment->owner_runtime != rt ||
+        batch->owner_runtime != rt ||
         req->owner_runtime != rt) {
         return llam_fail_io_setup_req(req, EXDEV);
     }
@@ -1182,10 +1172,12 @@ int llam_issue_linux_native_segment(
             &req->wait_mode,
             memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE ||
         atomic_load_explicit(
-            &segment->state,
+            &batch->state,
             memory_order_acquire) !=
-            LLAM_LINUX_NATIVE_SEGMENT_IDLE ||
-        segment->generation == 0U) {
+            LLAM_LINUX_NATIVE_BATCH_IDLE ||
+        batch->segment_count == 0U ||
+        batch->segment_count >
+            LLAM_LINUX_NATIVE_BATCH_MAX_SEGMENTS) {
         return llam_fail_io_setup_req(req, EBUSY);
     }
     if (task->cancel_token != NULL) {
@@ -1200,37 +1192,54 @@ int llam_issue_linux_native_segment(
     if (!node->ring_ready || node->linux_submit_terminal) {
         return llam_fail_io_setup_req(req, EAGAIN);
     }
-    if (segment->op_count == 0U ||
-        segment->op_count > LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS) {
-        return llam_fail_io_setup_req(req, EINVAL);
-    }
-    if (segment->mode ==
-            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
-        (node->linux_ring_features & IORING_FEAT_CQE_SKIP) == 0U) {
-        return llam_fail_io_setup_req(req, ENOTSUP);
-    }
-    for (i = 0U; i < segment->op_count; i += 1U) {
-        if (segment->ops[i].kind ==
-            LLAM_LINUX_NATIVE_OP_RECV) {
-            if (node->supports_recv) {
-                continue;
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        llam_linux_native_segment_t *segment =
+            batch->segments[i];
+        unsigned operation_index;
+
+        if (segment == NULL ||
+            segment->owner_runtime != rt ||
+            segment->generation == 0U ||
+            segment->op_count == 0U ||
+            segment->op_count >
+                LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS ||
+            atomic_load_explicit(
+                &segment->state,
+                memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
+            return llam_fail_io_setup_req(req, EINVAL);
+        }
+        if (segment->mode ==
+                LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+            (node->linux_ring_features &
+             IORING_FEAT_CQE_SKIP) == 0U) {
+            return llam_fail_io_setup_req(req, ENOTSUP);
+        }
+        for (operation_index = 0U;
+             operation_index < segment->op_count;
+             operation_index += 1U) {
+            if (segment->ops[operation_index].kind ==
+                LLAM_LINUX_NATIVE_OP_RECV) {
+                if (node->supports_recv) {
+                    continue;
+                }
+                error = EAGAIN;
+                break;
             }
-            error = EAGAIN;
+            if (segment->ops[operation_index].kind ==
+                LLAM_LINUX_NATIVE_OP_SEND) {
+                if (node->supports_send) {
+                    continue;
+                }
+                error = EAGAIN;
+                break;
+            }
+            error = EINVAL;
             break;
         }
-        if (segment->ops[i].kind ==
-            LLAM_LINUX_NATIVE_OP_SEND) {
-            if (node->supports_send) {
-                continue;
-            }
-            error = EAGAIN;
-            break;
+        if (operation_index != segment->op_count) {
+            return llam_fail_io_setup_req(req, error);
         }
-        error = EINVAL;
-        break;
-    }
-    if (i != segment->op_count) {
-        return llam_fail_io_setup_req(req, error);
     }
 
     if (llam_prepare_io_wait(
@@ -1239,14 +1248,37 @@ int llam_issue_linux_native_segment(
             0U) != 0) {
         return -1;
     }
-    if (!llam_linux_native_segment_enqueue(
-            node, segment, req)) {
+    if (!llam_linux_native_batch_enqueue(
+            node, batch, req)) {
         int saved_errno = errno != 0 ? errno : EIO;
 
         llam_cleanup_io_wait_setup(task, req);
         return llam_fail_io_setup_req(req, saved_errno);
     }
-    segment->task_parks += 1U;
+    batch->segments[0]->task_parks += 1U;
     return llam_park_io_req(req, false, 0U, node);
+}
+
+/**
+ * @brief Preserve the width-one native API through a stack-owned batch ticket.
+ */
+int llam_issue_linux_native_segment(
+    llam_linux_native_segment_t *segment,
+    llam_io_req_t *req) {
+    llam_linux_native_batch_t batch;
+
+    if (segment == NULL) {
+        return llam_fail_io_setup_req(req, EINVAL);
+    }
+    memset(&batch, 0, sizeof(batch));
+    batch.owner_runtime = segment->owner_runtime;
+    batch.segments[0] = segment;
+    batch.segment_count = 1U;
+    atomic_init(&batch.state, LLAM_LINUX_NATIVE_BATCH_IDLE);
+    atomic_init(&batch.terminal_claimed, 0U);
+    atomic_init(
+        &batch.cancel_state,
+        LLAM_LINUX_NATIVE_CANCEL_NONE);
+    return llam_issue_linux_native_batch(&batch, req);
 }
 #endif

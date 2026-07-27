@@ -418,6 +418,10 @@ int llam_issue_multishot_recv(llam_io_req_t *req);
 int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns);
 #if LLAM_RUNTIME_BACKEND_LINUX
 struct llam_linux_native_segment;
+struct llam_linux_native_batch;
+LLAM_INTERNAL_API int llam_issue_linux_native_batch(
+    struct llam_linux_native_batch *batch,
+    llam_io_req_t *req);
 LLAM_INTERNAL_API int llam_issue_linux_native_segment(
     struct llam_linux_native_segment *segment,
     llam_io_req_t *req);

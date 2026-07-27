@@ -150,15 +150,15 @@ void llam_linux_track_backend_control(llam_node_t *node, llam_io_control_op_t *o
 bool llam_linux_untrack_backend_control(llam_node_t *node, llam_io_control_op_t *op);
 void llam_linux_retire_backend_controls(llam_node_t *node);
 void llam_linux_retire_backend_watch_refs(llam_node_t *node);
-bool llam_linux_native_segment_enqueue(
+bool llam_linux_native_batch_enqueue(
     llam_node_t *node,
-    struct llam_linux_native_segment *segment,
+    struct llam_linux_native_batch *batch,
     llam_io_req_t *req);
-struct llam_linux_native_segment *
-llam_linux_native_segment_take_all(llam_node_t *node);
-unsigned llam_linux_native_segment_submit_one(
+struct llam_linux_native_batch *
+llam_linux_native_batch_take_all(llam_node_t *node);
+unsigned llam_linux_native_batch_submit_one(
     llam_node_t *node,
-    struct llam_linux_native_segment *segment);
+    struct llam_linux_native_batch *batch);
 #endif
 
 /*

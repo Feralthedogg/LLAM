@@ -320,84 +320,92 @@ llam_linux_native_segment_apply_cqe(
     return action;
 }
 
-/**
- * @brief Publish one compiled effect segment to a Linux I/O node.
- *
- * The node submit mutex also owns the native-segment queue.  One segment owns
- * one pending-operation slot regardless of the number of SQEs it will prepare.
- */
-bool llam_linux_native_segment_enqueue(
+static bool llam_linux_native_batch_count_is_valid(
+    unsigned segment_count) {
+    return segment_count >= 1U &&
+           segment_count <=
+               LLAM_LINUX_NATIVE_BATCH_MAX_SEGMENTS;
+}
+
+static int llam_linux_native_batch_validate(
     llam_node_t *node,
-    llam_linux_native_segment_t *segment,
+    llam_linux_native_batch_t *batch,
     llam_io_req_t *req) {
     llam_runtime_t *runtime;
-    unsigned expected_state;
     unsigned i;
-    int error = 0;
+    unsigned j;
 
-    if (node == NULL || segment == NULL || req == NULL) {
-        errno = EINVAL;
-        return false;
+    if (node == NULL || batch == NULL || req == NULL) {
+        return EINVAL;
     }
     runtime = node->runtime;
     if (runtime == NULL ||
-        segment->owner_runtime == NULL ||
-        req->owner_runtime == NULL) {
-        errno = EINVAL;
-        return false;
+        batch->owner_runtime == NULL ||
+        req->owner_runtime == NULL ||
+        !llam_linux_native_batch_count_is_valid(
+            batch->segment_count)) {
+        return EINVAL;
     }
-    if (segment->owner_runtime != runtime ||
+    if (batch->owner_runtime != runtime ||
         req->owner_runtime != runtime) {
         llam_record_fatal_deferred(runtime, EXDEV);
-        errno = EXDEV;
-        return false;
+        return EXDEV;
     }
-    if (segment->generation == 0U) {
-        errno = EINVAL;
-        return false;
-    }
-
-    pthread_mutex_lock(&node->submit_lock);
     if (atomic_load_explicit(
-            &req->wait_mode,
-            memory_order_acquire) !=
-        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
-        error = EBUSY;
-        goto reject;
+            &batch->state, memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_BATCH_IDLE ||
+        atomic_load_explicit(
+            &batch->cancel_state, memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_CANCEL_NONE) {
+        return EBUSY;
     }
-    if (llam_io_req_abort_requested(req)) {
-        error = ECANCELED;
-        goto reject;
-    }
-    if (segment->mode ==
-            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
-        (node->linux_ring_features & IORING_FEAT_CQE_SKIP) == 0U) {
-        error = ENOTSUP;
-        goto reject;
-    }
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        llam_linux_native_segment_t *segment =
+            batch->segments[i];
 
-    expected_state = LLAM_LINUX_NATIVE_SEGMENT_IDLE;
-    if (!atomic_compare_exchange_strong_explicit(
-            &segment->state,
-            &expected_state,
-            LLAM_LINUX_NATIVE_SEGMENT_QUEUED,
-            memory_order_acq_rel,
-            memory_order_acquire)) {
-        error = EBUSY;
-        goto reject;
+        if (segment == NULL ||
+            segment->owner_runtime == NULL ||
+            segment->generation == 0U ||
+            segment->op_count == 0U ||
+            segment->op_count >
+                LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS) {
+            return EINVAL;
+        }
+        if (segment->owner_runtime != runtime) {
+            llam_record_fatal_deferred(runtime, EXDEV);
+            return EXDEV;
+        }
+        if (atomic_load_explicit(
+                &segment->state,
+                memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
+            return EBUSY;
+        }
+        if (segment->mode ==
+                LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+            (node->linux_ring_features &
+             IORING_FEAT_CQE_SKIP) == 0U) {
+            return ENOTSUP;
+        }
+        for (j = 0U; j < i; j += 1U) {
+            if (batch->segments[j] == segment) {
+                return EINVAL;
+            }
+        }
     }
-    if (!llam_node_note_pending_ops(node, 1U)) {
-        error = errno != 0 ? errno : EOVERFLOW;
-        atomic_store_explicit(
-            &segment->state,
-            LLAM_LINUX_NATIVE_SEGMENT_IDLE,
-            memory_order_release);
-        goto reject;
-    }
+    return 0;
+}
+
+static void llam_linux_native_segment_activate(
+    llam_node_t *node,
+    llam_linux_native_batch_t *batch,
+    llam_linux_native_segment_t *segment) {
+    unsigned i;
 
     segment->owner_node = node;
-    segment->req = req;
+    segment->req = batch->req;
     segment->next = NULL;
+    segment->batch = batch;
     segment->completed_cqes = 0U;
     segment->observed_operation_mask = 0U;
     segment->first_error = 0;
@@ -414,27 +422,113 @@ bool llam_linux_native_segment_enqueue(
         segment->tokens[i].generation = segment->generation;
         segment->tokens[i].operation_index = (uint16_t)i;
     }
+    segment->activations += 1U;
+    segment->logical_operations += segment->op_count;
+}
+
+/**
+ * @brief Publish one bounded native batch through one pending owner.
+ */
+bool llam_linux_native_batch_enqueue(
+    llam_node_t *node,
+    llam_linux_native_batch_t *batch,
+    llam_io_req_t *req) {
+    unsigned claimed_segments = 0U;
+    unsigned expected;
+    unsigned i;
+    int error;
+
+    error = llam_linux_native_batch_validate(
+        node, batch, req);
+    if (error != 0) {
+        errno = error;
+        return false;
+    }
+
+    pthread_mutex_lock(&node->submit_lock);
+    if (atomic_load_explicit(
+            &req->wait_mode,
+            memory_order_acquire) !=
+            LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+        error = EBUSY;
+        goto reject;
+    }
+    if (llam_io_req_abort_requested(req)) {
+        error = ECANCELED;
+        goto reject;
+    }
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        expected = LLAM_LINUX_NATIVE_SEGMENT_IDLE;
+        if (!atomic_compare_exchange_strong_explicit(
+                &batch->segments[i]->state,
+                &expected,
+                LLAM_LINUX_NATIVE_SEGMENT_QUEUED,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            error = EBUSY;
+            goto rollback_segments;
+        }
+        claimed_segments += 1U;
+    }
+    expected = LLAM_LINUX_NATIVE_BATCH_IDLE;
+    if (!atomic_compare_exchange_strong_explicit(
+            &batch->state,
+            &expected,
+            LLAM_LINUX_NATIVE_BATCH_QUEUED,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        error = EBUSY;
+        goto rollback_segments;
+    }
+    if (!llam_node_note_pending_ops(node, 1U)) {
+        error = errno != 0 ? errno : EOVERFLOW;
+        atomic_store_explicit(
+            &batch->state,
+            LLAM_LINUX_NATIVE_BATCH_IDLE,
+            memory_order_release);
+        goto rollback_segments;
+    }
+
+    batch->owner_node = node;
+    batch->req = req;
+    batch->next = NULL;
+    batch->cancel_next = NULL;
+    batch->retired_segments = 0U;
+    batch->terminal_result = 0;
+    batch->first_error_segment = UINT_MAX;
+    atomic_store_explicit(
+        &batch->terminal_claimed, 0U, memory_order_release);
+    atomic_store_explicit(
+        &batch->cancel_state,
+        LLAM_LINUX_NATIVE_CANCEL_NONE,
+        memory_order_release);
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        llam_linux_native_segment_activate(
+            node, batch, batch->segments[i]);
+    }
+    batch->segments[0]->queue_publications += 1U;
     atomic_store_explicit(
         &req->attached_node_index,
         node->index,
         memory_order_release);
-    if (node->native_segment_tail != NULL) {
-        node->native_segment_tail->next = segment;
+    if (node->native_batch_tail != NULL) {
+        node->native_batch_tail->next = batch;
     } else {
-        node->native_segment_head = segment;
+        node->native_batch_head = batch;
     }
-    node->native_segment_tail = segment;
-    segment->activations += 1U;
-    segment->logical_operations += segment->op_count;
-    segment->queue_publications += 1U;
-    atomic_store_explicit(
-        &segment->state,
-        LLAM_LINUX_NATIVE_SEGMENT_QUEUED,
-        memory_order_release);
+    node->native_batch_tail = batch;
     pthread_mutex_unlock(&node->submit_lock);
     llam_kick_node(node);
     return true;
 
+rollback_segments:
+    while (claimed_segments > 0U) {
+        claimed_segments -= 1U;
+        atomic_store_explicit(
+            &batch->segments[claimed_segments]->state,
+            LLAM_LINUX_NATIVE_SEGMENT_IDLE,
+            memory_order_release);
+    }
 reject:
     pthread_mutex_unlock(&node->submit_lock);
     errno = error;
@@ -442,35 +536,56 @@ reject:
 }
 
 /**
- * @brief Detach every queued native segment and publish backend ownership.
+ * @brief Detach every queued native batch and publish one waiter per ticket.
  */
-llam_linux_native_segment_t *
-llam_linux_native_segment_take_all(llam_node_t *node) {
-    llam_linux_native_segment_t *head;
-    llam_linux_native_segment_t *cursor;
+llam_linux_native_batch_t *
+llam_linux_native_batch_take_all(llam_node_t *node) {
+    llam_linux_native_batch_t *head;
+    llam_linux_native_batch_t *cursor;
 
     if (node == NULL) {
         return NULL;
     }
     pthread_mutex_lock(&node->submit_lock);
-    head = node->native_segment_head;
-    node->native_segment_head = NULL;
-    node->native_segment_tail = NULL;
+    head = node->native_batch_head;
+    node->native_batch_head = NULL;
+    node->native_batch_tail = NULL;
     cursor = head;
     while (cursor != NULL) {
         llam_io_req_t *req = cursor->req;
-
-        if (req == NULL ||
-            req->owner_runtime != node->runtime ||
+        bool valid =
+            req != NULL &&
+            cursor->owner_node == node &&
+            req->owner_runtime == node->runtime &&
             atomic_load_explicit(
                 &cursor->state,
-                memory_order_acquire) !=
-                LLAM_LINUX_NATIVE_SEGMENT_QUEUED ||
+                memory_order_acquire) ==
+                LLAM_LINUX_NATIVE_BATCH_QUEUED &&
             atomic_load_explicit(
                 &req->wait_mode,
-                memory_order_acquire) !=
-                LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
-            llam_record_fatal_deferred(node->runtime, EPROTO);
+                memory_order_acquire) ==
+                LLAM_IO_WAIT_MODE_SUBMIT_QUEUE;
+        unsigned i;
+
+        for (i = 0U;
+             valid && i < cursor->segment_count;
+             i += 1U) {
+            llam_linux_native_segment_t *segment =
+                cursor->segments[i];
+
+            valid =
+                segment != NULL &&
+                segment->batch == cursor &&
+                segment->req == req &&
+                segment->owner_node == node &&
+                atomic_load_explicit(
+                    &segment->state,
+                    memory_order_acquire) ==
+                    LLAM_LINUX_NATIVE_SEGMENT_QUEUED;
+        }
+        if (!valid) {
+            llam_record_fatal_deferred(
+                node->runtime, EPROTO);
         } else {
             unsigned owner_shard = atomic_load_explicit(
                 &req->owner_shard, memory_order_acquire);
@@ -492,23 +607,26 @@ llam_linux_native_segment_take_all(llam_node_t *node) {
     return head;
 }
 
-static void llam_linux_native_segment_complete_local(
+static void llam_linux_native_batch_complete_local(
     llam_node_t *node,
-    llam_linux_native_segment_t *segment,
+    llam_linux_native_batch_t *batch,
     int error) {
     unsigned expected = 0U;
+    unsigned i;
 
     if (node == NULL ||
-        segment == NULL ||
-        segment->req == NULL ||
+        batch == NULL ||
+        batch->req == NULL ||
+        batch->segment_count == 0U ||
         error <= 0) {
         if (node != NULL) {
-            llam_record_fatal_deferred(node->runtime, EINVAL);
+            llam_record_fatal_deferred(
+                node->runtime, EINVAL);
         }
         return;
     }
     if (!atomic_compare_exchange_strong_explicit(
-            &segment->terminal_claimed,
+            &batch->terminal_claimed,
             &expected,
             1U,
             memory_order_acq_rel,
@@ -516,113 +634,248 @@ static void llam_linux_native_segment_complete_local(
         llam_record_fatal_deferred(node->runtime, EPROTO);
         return;
     }
-    segment->first_error = error;
-    segment->first_error_index = UINT_MAX;
-    segment->semantic_result = -error;
-    segment->terminal_wakes += 1U;
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        llam_linux_native_segment_t *segment =
+            batch->segments[i];
+
+        segment->first_error = error;
+        segment->first_error_index = UINT_MAX;
+        segment->semantic_result = -error;
+        atomic_store_explicit(
+            &segment->semantic_claimed,
+            1U,
+            memory_order_release);
+        atomic_store_explicit(
+            &segment->target_retired,
+            1U,
+            memory_order_release);
+        atomic_store_explicit(
+            &segment->terminal_claimed,
+            1U,
+            memory_order_release);
+        atomic_store_explicit(
+            &segment->state,
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED,
+            memory_order_release);
+        segment->batch = NULL;
+    }
+    batch->retired_segments = batch->segment_count;
+    batch->first_error_segment = 0U;
+    batch->terminal_result = -error;
+    batch->segments[0]->terminal_wakes += 1U;
     atomic_store_explicit(
-        &segment->semantic_claimed, 1U, memory_order_release);
-    atomic_store_explicit(
-        &segment->target_retired, 1U, memory_order_release);
-    atomic_store_explicit(
-        &segment->state,
-        LLAM_LINUX_NATIVE_SEGMENT_RETIRED,
+        &batch->state,
+        LLAM_LINUX_NATIVE_BATCH_RETIRED,
         memory_order_release);
     llam_io_complete_req(
-        node, segment->req, -error, 0U, true);
+        node, batch->req, -error, 0U, true);
 }
 
 /**
- * @brief Encode one complete segment into the node SQ without partial chains.
+ * @brief Encode every complete segment in one ticket without partial publish.
  *
- * @return Number of prepared SQEs, or zero after local terminal completion.
+ * @return Number of prepared operation SQEs, or zero after local completion.
  */
-unsigned llam_linux_native_segment_submit_one(
+unsigned llam_linux_native_batch_submit_one(
     llam_node_t *node,
-    llam_linux_native_segment_t *segment) {
+    llam_linux_native_batch_t *batch) {
+    unsigned total_ops = 0U;
     unsigned start_tail;
     unsigned i;
+    unsigned j;
 
     if (node == NULL ||
-        segment == NULL ||
-        segment->req == NULL ||
-        segment->owner_node != node ||
-        segment->req->owner_runtime != node->runtime ||
+        batch == NULL ||
+        batch->req == NULL ||
+        batch->owner_node != node ||
+        batch->req->owner_runtime != node->runtime ||
+        !llam_linux_native_batch_count_is_valid(
+            batch->segment_count) ||
         atomic_load_explicit(
-            &segment->state,
+            &batch->state,
             memory_order_acquire) !=
-            LLAM_LINUX_NATIVE_SEGMENT_QUEUED) {
+            LLAM_LINUX_NATIVE_BATCH_QUEUED) {
         if (node != NULL) {
-            llam_record_fatal_deferred(node->runtime, EINVAL);
+            llam_record_fatal_deferred(
+                node->runtime, EINVAL);
         }
         return 0U;
     }
-    if (!node->ring_ready ||
-        node->linux_submit_terminal ||
-        (segment->mode ==
-             LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
-         (node->linux_ring_features & IORING_FEAT_CQE_SKIP) == 0U)) {
-        int error = atomic_load_explicit(
-            &node->runtime->fatal_errno, memory_order_acquire);
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        llam_linux_native_segment_t *segment =
+            batch->segments[i];
 
-        llam_linux_native_segment_complete_local(
-            node, segment, error != 0 ? error : EAGAIN);
+        if (segment == NULL ||
+            segment->batch != batch ||
+            segment->owner_node != node ||
+            segment->req != batch->req ||
+            atomic_load_explicit(
+                &segment->state,
+                memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_SEGMENT_QUEUED ||
+            UINT_MAX - total_ops < segment->op_count) {
+            llam_record_fatal_deferred(
+                node->runtime, EPROTO);
+            return 0U;
+        }
+        total_ops += segment->op_count;
+    }
+    if (!node->ring_ready ||
+        node->linux_submit_terminal) {
+        int error = atomic_load_explicit(
+            &node->runtime->fatal_errno,
+            memory_order_acquire);
+
+        llam_linux_native_batch_complete_local(
+            node, batch, error != 0 ? error : EAGAIN);
         return 0U;
     }
-
-    if (io_uring_sq_space_left(&node->ring) <
-        segment->op_count) {
+    if (io_uring_sq_space_left(&node->ring) < total_ops) {
         int rc = llam_node_submit_ring(node);
 
         if (rc < 0 ||
             io_uring_sq_space_left(&node->ring) <
-                segment->op_count) {
-            llam_linux_native_segment_complete_local(
-                node, segment, EAGAIN);
+                total_ops) {
+            llam_linux_native_batch_complete_local(
+                node, batch, EAGAIN);
             return 0U;
         }
     }
 
     start_tail = node->ring.sq.sqe_tail;
     atomic_store_explicit(
-        &segment->state,
-        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        &batch->state,
+        LLAM_LINUX_NATIVE_BATCH_INFLIGHT,
         memory_order_release);
-    for (i = 0U; i < segment->op_count; i += 1U) {
-        struct io_uring_sqe *sqe =
-            io_uring_get_sqe(&node->ring);
-
-        if (sqe == NULL) {
-            node->ring.sq.sqe_tail = start_tail;
-            atomic_store_explicit(
-                &segment->state,
-                LLAM_LINUX_NATIVE_SEGMENT_QUEUED,
-                memory_order_release);
-            llam_linux_native_segment_complete_local(
-                node, segment, EAGAIN);
-            return 0U;
-        }
-        llam_linux_native_segment_prepare_sqe(
-            segment, i, sqe);
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        atomic_store_explicit(
+            &batch->segments[i]->state,
+            LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+            memory_order_release);
     }
-    segment->prepared_sqes += segment->op_count;
-    return segment->op_count;
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        llam_linux_native_segment_t *segment =
+            batch->segments[i];
+
+        for (j = 0U; j < segment->op_count; j += 1U) {
+            struct io_uring_sqe *sqe =
+                io_uring_get_sqe(&node->ring);
+
+            if (sqe == NULL) {
+                node->ring.sq.sqe_tail = start_tail;
+                llam_linux_native_batch_complete_local(
+                    node, batch, EAGAIN);
+                return 0U;
+            }
+            llam_linux_native_segment_prepare_sqe(
+                segment, j, sqe);
+        }
+    }
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        batch->segments[i]->prepared_sqes +=
+            batch->segments[i]->op_count;
+    }
+    return total_ops;
+}
+
+static unsigned llam_linux_native_batch_segment_index(
+    const llam_linux_native_batch_t *batch,
+    const llam_linux_native_segment_t *segment) {
+    unsigned i;
+
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        if (batch->segments[i] == segment) {
+            return i;
+        }
+    }
+    return UINT_MAX;
+}
+
+static void llam_linux_native_batch_retire_segment(
+    llam_node_t *node,
+    llam_linux_native_batch_t *batch,
+    llam_linux_native_segment_t *segment,
+    int terminal_result) {
+    unsigned segment_index;
+    unsigned expected = 0U;
+    unsigned i;
+
+    segment_index = llam_linux_native_batch_segment_index(
+        batch, segment);
+    if (segment_index == UINT_MAX ||
+        batch->retired_segments >= batch->segment_count) {
+        llam_record_fatal_deferred(node->runtime, EPROTO);
+        return;
+    }
+    if (terminal_result < 0 &&
+        (batch->first_error_segment == UINT_MAX ||
+         segment_index < batch->first_error_segment)) {
+        batch->first_error_segment = segment_index;
+        batch->terminal_result = terminal_result;
+    }
+    batch->retired_segments += 1U;
+    if (batch->retired_segments < batch->segment_count) {
+        atomic_store_explicit(
+            &batch->state,
+            LLAM_LINUX_NATIVE_BATCH_RETIRING,
+            memory_order_release);
+        return;
+    }
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        if (atomic_load_explicit(
+                &batch->segments[i]->target_retired,
+                memory_order_acquire) == 0U ||
+            atomic_load_explicit(
+                &batch->segments[i]->state,
+                memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_SEGMENT_RETIRED) {
+            llam_record_fatal_deferred(
+                node->runtime, EPROTO);
+            return;
+        }
+    }
+    if (batch->first_error_segment == UINT_MAX) {
+        batch->terminal_result =
+            batch->segments[
+                batch->segment_count - 1U]->semantic_result;
+    }
+    if (!atomic_compare_exchange_strong_explicit(
+            &batch->terminal_claimed,
+            &expected,
+            1U,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        llam_record_fatal_deferred(node->runtime, EPROTO);
+        return;
+    }
+    atomic_store_explicit(
+        &batch->state,
+        LLAM_LINUX_NATIVE_BATCH_RETIRED,
+        memory_order_release);
+    for (i = 0U; i < batch->segment_count; i += 1U) {
+        batch->segments[i]->batch = NULL;
+    }
+    batch->segments[0]->terminal_wakes += 1U;
+    llam_io_complete_req(
+        node,
+        batch->req,
+        batch->terminal_result,
+        0U,
+        true);
 }
 
 /**
- * @brief Reduce one native-segment CQE and finish its task only at terminal.
- *
- * Intermediate link-only completions update segment state but retain all
- * request, pending-operation, and in-flight waiter ownership.  The first
- * terminal observation crosses the ordinary request completion bridge once.
+ * @brief Reduce one segment CQE and release its batch only after all tails.
  */
 void llam_linux_native_segment_handle_cqe(
     llam_node_t *node,
     llam_linux_native_token_t *token,
     int result) {
     llam_linux_native_segment_t *segment;
+    llam_linux_native_batch_t *batch;
     llam_linux_native_cqe_action_t action;
     int terminal_result = -EIO;
+    unsigned batch_state;
 
     if (node == NULL || node->runtime == NULL) {
         return;
@@ -632,24 +885,42 @@ void llam_linux_native_segment_handle_cqe(
         return;
     }
     segment = token->owner;
+    batch = segment->batch;
     if (segment->owner_runtime != node->runtime) {
         llam_record_fatal_deferred(node->runtime, EXDEV);
         return;
     }
-    if (segment->req == NULL ||
+    if (batch == NULL ||
+        segment->req == NULL ||
         segment->owner_node != node) {
         llam_record_fatal_deferred(node->runtime, EPROTO);
         return;
     }
-    if (segment->req->owner_runtime != node->runtime) {
+    if (batch->owner_runtime != node->runtime ||
+        batch->owner_node != node ||
+        batch->req != segment->req ||
+        segment->req->owner_runtime != node->runtime) {
         llam_record_fatal_deferred(node->runtime, EXDEV);
+        return;
+    }
+    batch_state = atomic_load_explicit(
+        &batch->state, memory_order_acquire);
+    if (batch_state != LLAM_LINUX_NATIVE_BATCH_INFLIGHT &&
+        batch_state != LLAM_LINUX_NATIVE_BATCH_RETIRING) {
+        llam_record_fatal_deferred(node->runtime, EPROTO);
         return;
     }
 
     action = llam_linux_native_segment_apply_cqe(
         segment, token, result, &terminal_result);
-    if (action == LLAM_LINUX_NATIVE_CQE_CONTINUE ||
-        action == LLAM_LINUX_NATIVE_CQE_SEMANTIC) {
+    if (action == LLAM_LINUX_NATIVE_CQE_CONTINUE) {
+        return;
+    }
+    if (action == LLAM_LINUX_NATIVE_CQE_SEMANTIC) {
+        atomic_store_explicit(
+            &batch->state,
+            LLAM_LINUX_NATIVE_BATCH_RETIRING,
+            memory_order_release);
         return;
     }
     if (action == LLAM_LINUX_NATIVE_CQE_FATAL) {
@@ -657,11 +928,6 @@ void llam_linux_native_segment_handle_cqe(
         return;
     }
 
-    segment->terminal_wakes += 1U;
-    llam_io_complete_req(
-        node,
-        segment->req,
-        terminal_result,
-        0U,
-        true);
+    llam_linux_native_batch_retire_segment(
+        node, batch, segment, terminal_result);
 }

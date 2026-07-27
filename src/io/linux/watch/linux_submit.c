@@ -194,14 +194,14 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
  */
 void llam_io_submit_batch(llam_node_t *node) {
     llam_io_control_op_t *controls;
-    llam_linux_native_segment_t *segments;
+    llam_linux_native_batch_t *batches;
     llam_io_req_t *reqs;
     unsigned submitted = 0U;
 
     /* Keep fd resolution at io_uring_enter inside the public close boundary. */
     llam_fd_watch_lifecycle_lock();
     controls = llam_take_node_controls(node);
-    segments = llam_linux_native_segment_take_all(node);
+    batches = llam_linux_native_batch_take_all(node);
     reqs = llam_take_node_submissions(node);
 
     while (controls != NULL) {
@@ -213,13 +213,13 @@ void llam_io_submit_batch(llam_node_t *node) {
         submitted += 1U;
     }
 
-    while (segments != NULL) {
-        llam_linux_native_segment_t *next = segments->next;
+    while (batches != NULL) {
+        llam_linux_native_batch_t *next = batches->next;
 
-        segments->next = NULL;
-        submitted += llam_linux_native_segment_submit_one(
-            node, segments);
-        segments = next;
+        batches->next = NULL;
+        submitted += llam_linux_native_batch_submit_one(
+            node, batches);
+        batches = next;
     }
 
     while (reqs != NULL) {

@@ -30,6 +30,7 @@
 #include "runtime_internal.h"
 
 #define LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS 8U
+#define LLAM_LINUX_NATIVE_BATCH_MAX_SEGMENTS 8U
 
 typedef enum llam_linux_native_op_kind {
     LLAM_LINUX_NATIVE_OP_RECV = 0,
@@ -57,6 +58,21 @@ enum {
     LLAM_LINUX_NATIVE_SEGMENT_RETIRED = 4U,
 };
 
+enum {
+    LLAM_LINUX_NATIVE_BATCH_IDLE = 0U,
+    LLAM_LINUX_NATIVE_BATCH_QUEUED = 1U,
+    LLAM_LINUX_NATIVE_BATCH_INFLIGHT = 2U,
+    LLAM_LINUX_NATIVE_BATCH_RETIRING = 3U,
+    LLAM_LINUX_NATIVE_BATCH_RETIRED = 4U,
+};
+
+enum {
+    LLAM_LINUX_NATIVE_CANCEL_NONE = 0U,
+    LLAM_LINUX_NATIVE_CANCEL_QUEUED = 1U,
+    LLAM_LINUX_NATIVE_CANCEL_SUBMITTED = 2U,
+    LLAM_LINUX_NATIVE_CANCEL_RETIRED = 3U,
+};
+
 typedef struct llam_linux_native_op {
     uint16_t kind;
     uint16_t result_slot;
@@ -67,6 +83,8 @@ typedef struct llam_linux_native_op {
 
 typedef struct llam_linux_native_segment
     llam_linux_native_segment_t;
+typedef struct llam_linux_native_batch
+    llam_linux_native_batch_t;
 
 typedef struct llam_linux_native_token {
     _Alignas(8) llam_linux_native_segment_t *owner;
@@ -85,6 +103,7 @@ struct llam_linux_native_segment {
     llam_linux_native_token_t
         tokens[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     llam_linux_native_segment_t *next;
+    llam_linux_native_batch_t *batch;
     uint64_t generation;
     uint64_t activations;
     uint64_t logical_operations;
@@ -108,6 +127,23 @@ struct llam_linux_native_segment {
     atomic_uint terminal_claimed;
 };
 
+struct llam_linux_native_batch {
+    llam_runtime_t *owner_runtime;
+    llam_node_t *owner_node;
+    llam_io_req_t *req;
+    llam_linux_native_segment_t
+        *segments[LLAM_LINUX_NATIVE_BATCH_MAX_SEGMENTS];
+    llam_linux_native_batch_t *next;
+    llam_linux_native_batch_t *cancel_next;
+    unsigned segment_count;
+    unsigned retired_segments;
+    int terminal_result;
+    unsigned first_error_segment;
+    atomic_uint state;
+    atomic_uint terminal_claimed;
+    atomic_uint cancel_state;
+};
+
 LLAM_INTERNAL_API int llam_linux_native_segment_configure(
     llam_linux_native_segment_t *segment,
     const llam_linux_native_op_t *ops,
@@ -123,15 +159,15 @@ llam_linux_native_segment_apply_cqe(
     const llam_linux_native_token_t *token,
     int result,
     int *terminal_result_out);
-LLAM_INTERNAL_API bool llam_linux_native_segment_enqueue(
+LLAM_INTERNAL_API bool llam_linux_native_batch_enqueue(
     llam_node_t *node,
-    llam_linux_native_segment_t *segment,
+    llam_linux_native_batch_t *batch,
     llam_io_req_t *req);
-LLAM_INTERNAL_API llam_linux_native_segment_t *
-llam_linux_native_segment_take_all(llam_node_t *node);
-LLAM_INTERNAL_API unsigned llam_linux_native_segment_submit_one(
+LLAM_INTERNAL_API llam_linux_native_batch_t *
+llam_linux_native_batch_take_all(llam_node_t *node);
+LLAM_INTERNAL_API unsigned llam_linux_native_batch_submit_one(
     llam_node_t *node,
-    llam_linux_native_segment_t *segment);
+    llam_linux_native_batch_t *batch);
 LLAM_INTERNAL_API void llam_linux_native_segment_handle_cqe(
     llam_node_t *node,
     llam_linux_native_token_t *token,

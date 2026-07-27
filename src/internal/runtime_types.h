@@ -212,6 +212,8 @@ struct llam_io_req;
 #if LLAM_RUNTIME_BACKEND_LINUX
 /** @brief One backend-native compiled Linux effect segment. */
 struct llam_linux_native_segment;
+/** @brief One owner ticket for a bounded native segment batch. */
+struct llam_linux_native_batch;
 #endif
 /** @brief Trusted internal consumer for a normalized I/O completion. */
 typedef bool (*llam_io_completion_sink_fn)(
@@ -1255,8 +1257,10 @@ struct llam_node {
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_io_control_op_t *linux_backend_control_head;
     llam_io_control_op_t *linux_backend_control_tail;
-    struct llam_linux_native_segment *native_segment_head;
-    struct llam_linux_native_segment *native_segment_tail;
+    struct llam_linux_native_batch *native_batch_head;
+    struct llam_linux_native_batch *native_batch_tail;
+    struct llam_linux_native_batch *native_cancel_head;
+    struct llam_linux_native_batch *native_cancel_tail;
 #endif
     llam_poll_watch_t *poll_watches;
     llam_accept_watch_t *accept_watches;
