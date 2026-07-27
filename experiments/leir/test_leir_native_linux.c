@@ -23,6 +23,21 @@ typedef struct test_case {
     test_fn run;
 } test_case_t;
 
+typedef struct queue_fixture {
+    llam_runtime_t runtime;
+    llam_runtime_t foreign_runtime;
+    llam_shard_t shard;
+    llam_node_t node;
+    llam_io_req_t req;
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned char
+        buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    bool shard_lock_ready;
+    bool submit_lock_ready;
+} queue_fixture_t;
+
 static void fill_operations(
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS],
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32],
@@ -77,6 +92,439 @@ static int configure_segment(
         &segment->state,
         LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
         memory_order_release);
+    return 0;
+}
+
+static bool consume_test_completion(
+    llam_node_t *node,
+    llam_io_req_t *req,
+    unsigned completion_owner,
+    llam_wait_reason_t *wake_reason,
+    void *context) {
+    unsigned *completion_count = context;
+
+    (void)node;
+    (void)req;
+    (void)completion_owner;
+    (void)wake_reason;
+    if (completion_count != NULL) {
+        *completion_count += 1U;
+    }
+    return true;
+}
+
+static int queue_fixture_init(
+    queue_fixture_t *fixture,
+    llam_linux_native_segment_mode_t mode,
+    unsigned op_count,
+    unsigned *completion_count) {
+    int rc;
+
+    memset(fixture, 0, sizeof(*fixture));
+    atomic_init(&fixture->runtime.fatal_errno, 0);
+    fixture->runtime.active_shards = 1U;
+    fixture->runtime.shards = &fixture->shard;
+    fixture->runtime.active_nodes = 1U;
+    fixture->runtime.nodes = &fixture->node;
+    fixture->shard.runtime = &fixture->runtime;
+    fixture->shard.id = 0U;
+    atomic_init(&fixture->shard.inflight_io_waiters, 0U);
+    rc = pthread_mutex_init(&fixture->shard.lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    fixture->shard_lock_ready = true;
+
+    fixture->node.runtime = &fixture->runtime;
+    fixture->node.index = 0U;
+    fixture->node.event_fd = -1;
+    fixture->node.linux_ring_features = IORING_FEAT_CQE_SKIP;
+    atomic_init(&fixture->node.event_pending, 0U);
+    atomic_init(&fixture->node.pending_ops, 0U);
+    rc = pthread_mutex_init(&fixture->node.submit_lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        pthread_mutex_destroy(&fixture->shard.lock);
+        fixture->shard_lock_ready = false;
+        return -1;
+    }
+    fixture->submit_lock_ready = true;
+
+    llam_io_req_reset(
+        &fixture->req, &fixture->runtime, 0U, UINT_MAX);
+    atomic_store_explicit(
+        &fixture->req.wait_mode,
+        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE,
+        memory_order_release);
+    fixture->req.completion_sink = consume_test_completion;
+    fixture->req.completion_sink_context = completion_count;
+
+    fill_operations(fixture->ops, fixture->buffers, op_count);
+    if (llam_linux_native_segment_configure(
+            &fixture->segment,
+            fixture->ops,
+            op_count,
+            mode) != 0) {
+        pthread_mutex_destroy(&fixture->node.submit_lock);
+        pthread_mutex_destroy(&fixture->shard.lock);
+        fixture->submit_lock_ready = false;
+        fixture->shard_lock_ready = false;
+        return -1;
+    }
+    fixture->segment.owner_runtime = &fixture->runtime;
+    fixture->segment.generation = UINT64_C(1);
+    return 0;
+}
+
+static void queue_fixture_destroy(queue_fixture_t *fixture) {
+    if (fixture->submit_lock_ready) {
+        pthread_mutex_destroy(&fixture->node.submit_lock);
+        fixture->submit_lock_ready = false;
+    }
+    if (fixture->shard_lock_ready) {
+        pthread_mutex_destroy(&fixture->shard.lock);
+        fixture->shard_lock_ready = false;
+    }
+}
+
+static int test_enqueue_publishes_once(void) {
+    queue_fixture_t fixture;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            4U,
+            &completions) != 0) {
+        perror("queue fixture init");
+        return 1;
+    }
+    if (!llam_linux_native_segment_enqueue(
+            &fixture.node,
+            &fixture.segment,
+            &fixture.req) ||
+        fixture.node.native_segment_head != &fixture.segment ||
+        fixture.node.native_segment_tail != &fixture.segment ||
+        fixture.segment.next != NULL ||
+        fixture.segment.owner_node != &fixture.node ||
+        fixture.segment.req != &fixture.req ||
+        fixture.segment.queue_publications != 1U ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_QUEUED ||
+        atomic_load_explicit(
+            &fixture.req.attached_node_index,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "native enqueue ownership mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_enqueue_rejects_foreign_runtime(void) {
+    queue_fixture_t fixture;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            2U,
+            &completions) != 0) {
+        perror("foreign queue fixture init");
+        return 1;
+    }
+    fixture.req.owner_runtime = &fixture.foreign_runtime;
+    errno = 0;
+    if (llam_linux_native_segment_enqueue(
+            &fixture.node,
+            &fixture.segment,
+            &fixture.req) ||
+        errno != EXDEV ||
+        fixture.node.native_segment_head != NULL ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
+        fprintf(stderr, "foreign runtime enqueue was not rejected\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_enqueue_rejects_non_idle_segment(void) {
+    queue_fixture_t fixture;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            2U,
+            &completions) != 0) {
+        perror("busy queue fixture init");
+        return 1;
+    }
+    atomic_store_explicit(
+        &fixture.segment.state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+    errno = 0;
+    if (llam_linux_native_segment_enqueue(
+            &fixture.node,
+            &fixture.segment,
+            &fixture.req) ||
+        errno != EBUSY ||
+        fixture.node.native_segment_head != NULL ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "non-idle native segment was enqueued\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_take_all_marks_request_inflight_once(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_segment_t *taken;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            4U,
+            &completions) != 0) {
+        perror("take queue fixture init");
+        return 1;
+    }
+    if (!llam_linux_native_segment_enqueue(
+            &fixture.node,
+            &fixture.segment,
+            &fixture.req)) {
+        perror("enqueue before take");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    taken = llam_linux_native_segment_take_all(&fixture.node);
+    if (taken != &fixture.segment ||
+        fixture.node.native_segment_head != NULL ||
+        fixture.node.native_segment_tail != NULL ||
+        atomic_load_explicit(
+            &fixture.req.wait_mode,
+            memory_order_acquire) !=
+            LLAM_IO_WAIT_MODE_INFLIGHT ||
+        atomic_load_explicit(
+            &fixture.req.inflight_owner_shard,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        llam_linux_native_segment_take_all(&fixture.node) != NULL ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 1U) {
+        fprintf(stderr, "native queue detach ownership mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int keep_linux_ring_full(
+    llam_node_t *node,
+    unsigned expected,
+    void *arg) {
+    unsigned *calls = arg;
+
+    (void)node;
+    (void)expected;
+    *calls += 1U;
+    return 0;
+}
+
+static void init_userspace_sq_fixture(
+    struct io_uring *ring,
+    struct io_uring_sqe *sqes,
+    unsigned *head,
+    unsigned entries) {
+    memset(ring, 0, sizeof(*ring));
+    memset(sqes, 0, entries * sizeof(sqes[0]));
+    *head = 0U;
+    ring->ring_fd = -1;
+    ring->sq.khead = head;
+    ring->sq.sqes = sqes;
+    ring->sq.ring_entries = entries;
+    ring->sq.ring_mask = entries - 1U;
+}
+
+static int test_chain_capacity_failure_consumes_no_sqe(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_segment_t *taken;
+    struct io_uring_sqe sqes[4];
+    unsigned completions = 0U;
+    unsigned submit_calls = 0U;
+    unsigned sq_head;
+    unsigned tail_before;
+    unsigned i;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            4U,
+            &completions) != 0) {
+        perror("capacity queue fixture init");
+        return 1;
+    }
+    init_userspace_sq_fixture(
+        &fixture.node.ring, sqes, &sq_head, 4U);
+    fixture.node.ring_ready = true;
+    for (i = 0U; i < 2U; i += 1U) {
+        struct io_uring_sqe *sqe =
+            io_uring_get_sqe(&fixture.node.ring);
+
+        if (sqe == NULL) {
+            fprintf(stderr, "failed to fill native capacity fixture\n");
+            queue_fixture_destroy(&fixture);
+            return 1;
+        }
+        io_uring_prep_nop(sqe);
+    }
+    tail_before = fixture.node.ring.sq.sqe_tail;
+    fixture.node.linux_submit_override = keep_linux_ring_full;
+    fixture.node.linux_submit_override_arg = &submit_calls;
+
+    if (!llam_linux_native_segment_enqueue(
+            &fixture.node,
+            &fixture.segment,
+            &fixture.req)) {
+        perror("enqueue before capacity failure");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    taken = llam_linux_native_segment_take_all(&fixture.node);
+    if (taken != &fixture.segment ||
+        llam_linux_native_segment_submit_one(
+            &fixture.node, taken) != 0U ||
+        fixture.node.ring.sq.sqe_tail != tail_before ||
+        fixture.segment.prepared_sqes != 0U ||
+        fixture.req.error_code != EAGAIN ||
+        completions != 1U ||
+        submit_calls != 1U ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_TERMINAL) {
+        fprintf(stderr, "native capacity failure was not atomic\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_chain_prepares_all_sqes(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_segment_t *taken;
+    struct io_uring_sqe sqes[8];
+    unsigned completions = 0U;
+    unsigned sq_head;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            4U,
+            &completions) != 0) {
+        perror("prepare queue fixture init");
+        return 1;
+    }
+    init_userspace_sq_fixture(
+        &fixture.node.ring, sqes, &sq_head, 8U);
+    fixture.node.ring_ready = true;
+    if (!llam_linux_native_segment_enqueue(
+            &fixture.node,
+            &fixture.segment,
+            &fixture.req)) {
+        perror("enqueue before chain preparation");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    taken = llam_linux_native_segment_take_all(&fixture.node);
+    if (taken != &fixture.segment ||
+        llam_linux_native_segment_submit_one(
+            &fixture.node, taken) != 4U ||
+        io_uring_sq_ready(&fixture.node.ring) != 4U ||
+        fixture.segment.prepared_sqes != 4U ||
+        completions != 0U ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT) {
+        fprintf(stderr, "native chain was not prepared atomically\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_skip_mode_rejects_missing_feature(void) {
+    queue_fixture_t fixture;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP,
+            4U,
+            &completions) != 0) {
+        perror("feature queue fixture init");
+        return 1;
+    }
+    fixture.node.linux_ring_features = 0U;
+    errno = 0;
+    if (llam_linux_native_segment_enqueue(
+            &fixture.node,
+            &fixture.segment,
+            &fixture.req) ||
+        errno != ENOTSUP ||
+        fixture.node.native_segment_head != NULL ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
+        fprintf(stderr, "missing CQE skip feature was not rejected\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
     return 0;
 }
 
@@ -590,7 +1038,7 @@ static int test_duplicate_terminal_is_fatal(void) {
 }
 
 int main(int argc, char **argv) {
-    static const test_case_t tests[] = {
+    static const test_case_t unit_tests[] = {
         {"validate configuration",
          test_validates_configuration},
         {"encode recv and send fields",
@@ -616,20 +1064,57 @@ int main(int argc, char **argv) {
         {"duplicate terminal is fatal",
          test_duplicate_terminal_is_fatal},
     };
+    static const test_case_t queue_tests[] = {
+        {"enqueue publishes once",
+         test_enqueue_publishes_once},
+        {"enqueue rejects foreign runtime",
+         test_enqueue_rejects_foreign_runtime},
+        {"enqueue rejects non-idle segment",
+         test_enqueue_rejects_non_idle_segment},
+        {"take all marks request inflight once",
+         test_take_all_marks_request_inflight_once},
+        {"chain capacity failure consumes no SQE",
+         test_chain_capacity_failure_consumes_no_sqe},
+        {"chain prepares all SQEs",
+         test_chain_prepares_all_sqes},
+        {"skip mode rejects missing feature",
+         test_skip_mode_rejects_missing_feature},
+    };
+    bool run_unit = true;
+    bool run_queue = true;
     size_t i;
 
-    if (argc != 1 &&
-        !(argc == 2 && strcmp(argv[1], "--unit-only") == 0)) {
-        fputs("usage: test_leir_native_linux [--unit-only]\n", stderr);
+    if (argc == 2 && strcmp(argv[1], "--unit-only") == 0) {
+        run_queue = false;
+    } else if (argc == 2 && strcmp(argv[1], "--queue") == 0) {
+        run_unit = false;
+    } else if (argc != 1) {
+        fputs(
+            "usage: test_leir_native_linux [--unit-only|--queue]\n",
+            stderr);
         return 2;
     }
-    for (i = 0U; i < sizeof(tests) / sizeof(tests[0]); i += 1U) {
-        if (tests[i].run() != 0) {
-            fprintf(stderr, "FAIL: %s\n", tests[i].name);
-            return 1;
+    if (run_unit) {
+        for (i = 0U;
+             i < sizeof(unit_tests) / sizeof(unit_tests[0]);
+             i += 1U) {
+            if (unit_tests[i].run() != 0) {
+                fprintf(stderr, "FAIL: %s\n", unit_tests[i].name);
+                return 1;
+            }
         }
     }
-    puts("LEIR native Linux unit tests passed");
+    if (run_queue) {
+        for (i = 0U;
+             i < sizeof(queue_tests) / sizeof(queue_tests[0]);
+             i += 1U) {
+            if (queue_tests[i].run() != 0) {
+                fprintf(stderr, "FAIL: %s\n", queue_tests[i].name);
+                return 1;
+            }
+        }
+    }
+    puts("LEIR native Linux tests passed");
     return 0;
 }
 

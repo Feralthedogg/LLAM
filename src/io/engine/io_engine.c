@@ -200,6 +200,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
         return -1;
     }
 
+    node->linux_ring_features = 0U;
     memset(&params, 0, sizeof(params));
     if (rt->experimental_sqpoll_requested != 0U && rt->experimental_shard_rings == 0U) {
         unsigned sqpoll_cpu = rt->sqpoll_cpu >= 0 ? (unsigned)rt->sqpoll_cpu : llam_node_default_sqpoll_cpu(rt, node->index);
@@ -215,6 +216,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
                 llam_node_disable_cq_eventfd(node);
             }
             node->ring_ready = true;
+            node->linux_ring_features = params.features;
             node->sqpoll_enabled = true;
             node->sqpoll_cpu = sqpoll_cpu;
             rt->experimental_sqpoll_active = 1U;
@@ -222,17 +224,22 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
         }
         llam_node_disable_sqpoll(node);
         if (!llam_io_sqpoll_setup_error(-rc)) {
+            node->linux_ring_features = 0U;
             errno = -rc;
             return -1;
         }
     }
 
-    rc = io_uring_queue_init(LLAM_IO_RING_DEPTH, &node->ring, 0);
+    memset(&params, 0, sizeof(params));
+    rc = io_uring_queue_init_params(
+        LLAM_IO_RING_DEPTH, &node->ring, &params);
     if (rc == 0) {
         llam_node_disable_cq_eventfd(node);
         node->ring_ready = true;
+        node->linux_ring_features = params.features;
         return 0;
     }
+    node->linux_ring_features = 0U;
     errno = -rc;
     return -1;
 }

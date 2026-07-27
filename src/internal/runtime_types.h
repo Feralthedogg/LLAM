@@ -209,6 +209,10 @@ typedef struct llam_channel_select_state llam_channel_select_state_t;
 typedef struct llam_wait_node llam_wait_node_t;
 /** @brief One recyclable logical I/O operation. */
 struct llam_io_req;
+#if LLAM_RUNTIME_BACKEND_LINUX
+/** @brief One backend-native compiled Linux effect segment. */
+struct llam_linux_native_segment;
+#endif
 /** @brief Trusted internal consumer for a normalized I/O completion. */
 typedef bool (*llam_io_completion_sink_fn)(
     llam_node_t *node,
@@ -1251,6 +1255,8 @@ struct llam_node {
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_io_control_op_t *linux_backend_control_head;
     llam_io_control_op_t *linux_backend_control_tail;
+    struct llam_linux_native_segment *native_segment_head;
+    struct llam_linux_native_segment *native_segment_tail;
 #endif
     llam_poll_watch_t *poll_watches;
     llam_accept_watch_t *accept_watches;
@@ -1267,6 +1273,7 @@ struct llam_node {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint pending_ops;
     bool sqpoll_enabled;
 #if LLAM_RUNTIME_BACKEND_LINUX
+    uint32_t linux_ring_features;
     bool linux_submit_retry;
     bool linux_submit_terminal;
     int (*linux_submit_override)(struct llam_node *node,

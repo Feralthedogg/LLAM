@@ -1122,6 +1122,9 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             } else {
                 io_uring_queue_exit(&rt->nodes[i].ring);
                 rt->nodes[i].ring_ready = false;
+#if LLAM_RUNTIME_BACKEND_LINUX
+                rt->nodes[i].linux_ring_features = 0U;
+#endif
             }
         }
     }

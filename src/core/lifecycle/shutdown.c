@@ -144,6 +144,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 llam_node_destroy_recv_buf_ring(&rt->nodes[i]);
                 io_uring_queue_exit(&rt->nodes[i].ring);
                 rt->nodes[i].ring_ready = false;
+                rt->nodes[i].linux_ring_features = 0U;
             }
             if (rt->nodes[i].watch_lock_initialized) {
                 llam_linux_retire_backend_controls(&rt->nodes[i]);
@@ -259,6 +260,9 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 llam_node_destroy_recv_buf_ring(&rt->nodes[i]);
                 io_uring_queue_exit(&rt->nodes[i].ring);
                 rt->nodes[i].ring_ready = false;
+#if LLAM_RUNTIME_BACKEND_LINUX
+                rt->nodes[i].linux_ring_features = 0U;
+#endif
             }
             if (rt->nodes[i].event_fd >= 0) {
                 llam_wake_handle_close(rt->nodes[i].event_fd);

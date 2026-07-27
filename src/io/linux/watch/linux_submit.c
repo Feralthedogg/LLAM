@@ -183,22 +183,25 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
 }
 
 /**
- * @brief Submit all pending node control operations and I/O requests.
+ * @brief Submit controls, native segments, and ordinary I/O requests.
  *
- * Controls are submitted before regular requests so watch deactivation and
- * migration state changes take effect promptly. Metrics record batch count,
- * total entries, and maximum observed batch size.
+ * Controls are submitted first so watch deactivation and migration state
+ * changes take effect promptly. Native segments are prepared next as complete
+ * linked chains, followed by ordinary requests. Metrics count actual prepared
+ * SQEs rather than queue objects.
  *
  * @param node Node whose pending queues should be flushed into the ring.
  */
 void llam_io_submit_batch(llam_node_t *node) {
     llam_io_control_op_t *controls;
+    llam_linux_native_segment_t *segments;
     llam_io_req_t *reqs;
     unsigned submitted = 0U;
 
     /* Keep fd resolution at io_uring_enter inside the public close boundary. */
     llam_fd_watch_lifecycle_lock();
     controls = llam_take_node_controls(node);
+    segments = llam_linux_native_segment_take_all(node);
     reqs = llam_take_node_submissions(node);
 
     while (controls != NULL) {
@@ -208,6 +211,15 @@ void llam_io_submit_batch(llam_node_t *node) {
         llam_io_submit_control_op(node, controls);
         controls = next;
         submitted += 1U;
+    }
+
+    while (segments != NULL) {
+        llam_linux_native_segment_t *next = segments->next;
+
+        segments->next = NULL;
+        submitted += llam_linux_native_segment_submit_one(
+            node, segments);
+        segments = next;
     }
 
     while (reqs != NULL) {

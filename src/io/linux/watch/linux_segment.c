@@ -23,7 +23,7 @@
  * limitations under the License.
  */
 
-#include "io/linux/runtime_io_segment_linux_internal.h"
+#include "io/linux/runtime_io_watch_linux_internal.h"
 
 _Static_assert(
     _Alignof(llam_linux_native_token_t) >= 8U,
@@ -229,7 +229,7 @@ llam_linux_native_segment_apply_cqe(
          * Successful non-final CQEs are suppressed in this mode.  The only
          * valid visible intermediate completion is therefore an error.
          */
-        if (segment->observed_cqes != 0U ||
+        if (segment->completed_cqes != 0U ||
             (index + 1U < segment->op_count &&
              result >= 0 &&
              (uint32_t)result == segment->ops[index].length)) {
@@ -240,11 +240,12 @@ llam_linux_native_segment_apply_cqe(
     error = llam_linux_native_result_error(
         &segment->ops[index], result);
     segment->observed_cqes += 1U;
+    segment->completed_cqes += 1U;
     llam_linux_native_record_error(segment, index, error);
 
     if (segment->mode ==
         LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) {
-        segment->suppressed_success_cqes = index;
+        segment->suppressed_success_cqes += index;
         if (index + 1U < segment->op_count && error == 0) {
             return LLAM_LINUX_NATIVE_CQE_FATAL;
         }
@@ -255,7 +256,6 @@ llam_linux_native_segment_apply_cqe(
             terminal_result_out);
     }
 
-    segment->completed_cqes += 1U;
     if (index + 1U < segment->op_count) {
         return LLAM_LINUX_NATIVE_CQE_CONTINUE;
     }
@@ -264,4 +264,282 @@ llam_linux_native_segment_apply_cqe(
         segment->first_error,
         result,
         terminal_result_out);
+}
+
+/**
+ * @brief Publish one compiled effect segment to a Linux I/O node.
+ *
+ * The node submit mutex also owns the native-segment queue.  One segment owns
+ * one pending-operation slot regardless of the number of SQEs it will prepare.
+ */
+bool llam_linux_native_segment_enqueue(
+    llam_node_t *node,
+    llam_linux_native_segment_t *segment,
+    llam_io_req_t *req) {
+    llam_runtime_t *runtime;
+    unsigned expected_state;
+    unsigned i;
+    int error = 0;
+
+    if (node == NULL || segment == NULL || req == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+    runtime = node->runtime;
+    if (runtime == NULL ||
+        segment->owner_runtime == NULL ||
+        req->owner_runtime == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+    if (segment->owner_runtime != runtime ||
+        req->owner_runtime != runtime) {
+        llam_record_fatal_deferred(runtime, EXDEV);
+        errno = EXDEV;
+        return false;
+    }
+    if (segment->generation == 0U) {
+        errno = EINVAL;
+        return false;
+    }
+
+    pthread_mutex_lock(&node->submit_lock);
+    if (atomic_load_explicit(
+            &req->wait_mode,
+            memory_order_acquire) !=
+        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+        error = EBUSY;
+        goto reject;
+    }
+    if (llam_io_req_abort_requested(req)) {
+        error = ECANCELED;
+        goto reject;
+    }
+    if (segment->mode ==
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+        (node->linux_ring_features & IORING_FEAT_CQE_SKIP) == 0U) {
+        error = ENOTSUP;
+        goto reject;
+    }
+
+    expected_state = LLAM_LINUX_NATIVE_SEGMENT_IDLE;
+    if (!atomic_compare_exchange_strong_explicit(
+            &segment->state,
+            &expected_state,
+            LLAM_LINUX_NATIVE_SEGMENT_QUEUED,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        error = EBUSY;
+        goto reject;
+    }
+    if (!llam_node_note_pending_ops(node, 1U)) {
+        error = errno != 0 ? errno : EOVERFLOW;
+        atomic_store_explicit(
+            &segment->state,
+            LLAM_LINUX_NATIVE_SEGMENT_IDLE,
+            memory_order_release);
+        goto reject;
+    }
+
+    segment->owner_node = node;
+    segment->req = req;
+    segment->next = NULL;
+    segment->completed_cqes = 0U;
+    segment->first_error = 0;
+    segment->first_error_index = UINT_MAX;
+    atomic_store_explicit(
+        &segment->terminal_claimed, 0U, memory_order_release);
+    for (i = 0U; i < segment->op_count; i += 1U) {
+        segment->tokens[i].owner = segment;
+        segment->tokens[i].generation = segment->generation;
+        segment->tokens[i].operation_index = (uint16_t)i;
+    }
+    atomic_store_explicit(
+        &req->attached_node_index,
+        node->index,
+        memory_order_release);
+    if (node->native_segment_tail != NULL) {
+        node->native_segment_tail->next = segment;
+    } else {
+        node->native_segment_head = segment;
+    }
+    node->native_segment_tail = segment;
+    segment->activations += 1U;
+    segment->logical_operations += segment->op_count;
+    segment->queue_publications += 1U;
+    atomic_store_explicit(
+        &segment->state,
+        LLAM_LINUX_NATIVE_SEGMENT_QUEUED,
+        memory_order_release);
+    pthread_mutex_unlock(&node->submit_lock);
+    llam_kick_node(node);
+    return true;
+
+reject:
+    pthread_mutex_unlock(&node->submit_lock);
+    errno = error;
+    return false;
+}
+
+/**
+ * @brief Detach every queued native segment and publish backend ownership.
+ */
+llam_linux_native_segment_t *
+llam_linux_native_segment_take_all(llam_node_t *node) {
+    llam_linux_native_segment_t *head;
+    llam_linux_native_segment_t *cursor;
+
+    if (node == NULL) {
+        return NULL;
+    }
+    pthread_mutex_lock(&node->submit_lock);
+    head = node->native_segment_head;
+    node->native_segment_head = NULL;
+    node->native_segment_tail = NULL;
+    cursor = head;
+    while (cursor != NULL) {
+        llam_io_req_t *req = cursor->req;
+
+        if (req == NULL ||
+            req->owner_runtime != node->runtime ||
+            atomic_load_explicit(
+                &cursor->state,
+                memory_order_acquire) !=
+                LLAM_LINUX_NATIVE_SEGMENT_QUEUED ||
+            atomic_load_explicit(
+                &req->wait_mode,
+                memory_order_acquire) !=
+                LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+            llam_record_fatal_deferred(node->runtime, EPROTO);
+        } else {
+            unsigned owner_shard = atomic_load_explicit(
+                &req->owner_shard, memory_order_acquire);
+
+            atomic_store_explicit(
+                &req->inflight_owner_shard,
+                owner_shard,
+                memory_order_release);
+            atomic_store_explicit(
+                &req->wait_mode,
+                LLAM_IO_WAIT_MODE_INFLIGHT,
+                memory_order_release);
+            llam_shard_note_inflight_io_waiter(
+                req->owner_runtime, owner_shard, 1);
+        }
+        cursor = cursor->next;
+    }
+    pthread_mutex_unlock(&node->submit_lock);
+    return head;
+}
+
+static void llam_linux_native_segment_complete_local(
+    llam_node_t *node,
+    llam_linux_native_segment_t *segment,
+    int error) {
+    unsigned expected = 0U;
+
+    if (node == NULL ||
+        segment == NULL ||
+        segment->req == NULL ||
+        error <= 0) {
+        if (node != NULL) {
+            llam_record_fatal_deferred(node->runtime, EINVAL);
+        }
+        return;
+    }
+    if (!atomic_compare_exchange_strong_explicit(
+            &segment->terminal_claimed,
+            &expected,
+            1U,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        llam_record_fatal_deferred(node->runtime, EPROTO);
+        return;
+    }
+    segment->first_error = error;
+    segment->first_error_index = UINT_MAX;
+    segment->terminal_wakes += 1U;
+    atomic_store_explicit(
+        &segment->state,
+        LLAM_LINUX_NATIVE_SEGMENT_TERMINAL,
+        memory_order_release);
+    llam_io_complete_req(
+        node, segment->req, -error, 0U, true);
+}
+
+/**
+ * @brief Encode one complete segment into the node SQ without partial chains.
+ *
+ * @return Number of prepared SQEs, or zero after local terminal completion.
+ */
+unsigned llam_linux_native_segment_submit_one(
+    llam_node_t *node,
+    llam_linux_native_segment_t *segment) {
+    unsigned start_tail;
+    unsigned i;
+
+    if (node == NULL ||
+        segment == NULL ||
+        segment->req == NULL ||
+        segment->owner_node != node ||
+        segment->req->owner_runtime != node->runtime ||
+        atomic_load_explicit(
+            &segment->state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_QUEUED) {
+        if (node != NULL) {
+            llam_record_fatal_deferred(node->runtime, EINVAL);
+        }
+        return 0U;
+    }
+    if (!node->ring_ready ||
+        node->linux_submit_terminal ||
+        (segment->mode ==
+             LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+         (node->linux_ring_features & IORING_FEAT_CQE_SKIP) == 0U)) {
+        int error = atomic_load_explicit(
+            &node->runtime->fatal_errno, memory_order_acquire);
+
+        llam_linux_native_segment_complete_local(
+            node, segment, error != 0 ? error : EAGAIN);
+        return 0U;
+    }
+
+    if (io_uring_sq_space_left(&node->ring) <
+        segment->op_count) {
+        int rc = llam_node_submit_ring(node);
+
+        if (rc < 0 ||
+            io_uring_sq_space_left(&node->ring) <
+                segment->op_count) {
+            llam_linux_native_segment_complete_local(
+                node, segment, EAGAIN);
+            return 0U;
+        }
+    }
+
+    start_tail = node->ring.sq.sqe_tail;
+    atomic_store_explicit(
+        &segment->state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+    for (i = 0U; i < segment->op_count; i += 1U) {
+        struct io_uring_sqe *sqe =
+            io_uring_get_sqe(&node->ring);
+
+        if (sqe == NULL) {
+            node->ring.sq.sqe_tail = start_tail;
+            atomic_store_explicit(
+                &segment->state,
+                LLAM_LINUX_NATIVE_SEGMENT_QUEUED,
+                memory_order_release);
+            llam_linux_native_segment_complete_local(
+                node, segment, EAGAIN);
+            return 0U;
+        }
+        llam_linux_native_segment_prepare_sqe(
+            segment, i, sqe);
+    }
+    segment->prepared_sqes += segment->op_count;
+    return segment->op_count;
 }
