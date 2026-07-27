@@ -11,7 +11,9 @@
 #include <unistd.h>
 #endif
 
-int leir_test_socketpair(llam_fd_t pair_out[2]) {
+int leir_test_socketpair_type(
+    int socket_type,
+    llam_fd_t pair_out[2]) {
     if (pair_out == NULL) {
         errno = EINVAL;
         return -1;
@@ -28,6 +30,10 @@ int leir_test_socketpair(llam_fd_t pair_out[2]) {
         int addr_len = (int)sizeof(addr);
         BOOL no_delay = TRUE;
 
+        if (socket_type != SOCK_STREAM) {
+            errno = EPROTONOSUPPORT;
+            return -1;
+        }
         listener = WSASocket(
             AF_INET,
             SOCK_STREAM,
@@ -99,7 +105,7 @@ int leir_test_socketpair(llam_fd_t pair_out[2]) {
     {
         int pair[2];
 
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
+        if (socketpair(AF_UNIX, socket_type, 0, pair) != 0) {
             return -1;
         }
         pair_out[0] = (llam_fd_t)pair[0];
@@ -107,6 +113,10 @@ int leir_test_socketpair(llam_fd_t pair_out[2]) {
         return 0;
     }
 #endif
+}
+
+int leir_test_socketpair(llam_fd_t pair_out[2]) {
+    return leir_test_socketpair_type(SOCK_STREAM, pair_out);
 }
 
 void leir_test_close(llam_fd_t *fd) {

@@ -1,0 +1,46 @@
+#ifndef LLAM_EXPERIMENTS_LEIR_NATIVE_SEGMENT_H
+#define LLAM_EXPERIMENTS_LEIR_NATIVE_SEGMENT_H
+
+#include "leir_native_plan.h"
+
+#include <stddef.h>
+#include <stdint.h>
+
+typedef enum leir_native_mode {
+    LEIR_NATIVE_MODE_LINK = 0,
+    LEIR_NATIVE_MODE_LINK_CQE_SKIP = 1,
+} leir_native_mode_t;
+
+typedef struct leir_native_instance leir_native_instance_t;
+
+typedef struct leir_native_metrics {
+    uint64_t activations;
+    uint64_t logical_operations;
+    uint64_t queue_publications;
+    uint64_t prepared_sqes;
+    uint64_t observed_cqes;
+    uint64_t suppressed_success_cqes;
+    uint64_t task_parks;
+    uint64_t terminal_wakes;
+    uint64_t hot_allocations;
+    uint16_t first_error_operation;
+} leir_native_metrics_t;
+
+size_t leir_native_instance_size(void);
+int leir_native_instance_init(
+    void *storage,
+    size_t storage_size,
+    const leir_phase0_program_t *program,
+    const leir_native_plan_t *plan,
+    leir_native_mode_t mode);
+int leir_native_instance_bind(
+    leir_native_instance_t *instance,
+    const leir_phase0_value_t *values,
+    size_t value_count);
+int leir_native_instance_run(
+    leir_native_instance_t *instance,
+    leir_phase0_value_t *values_out,
+    size_t value_count,
+    leir_native_metrics_t *metrics_out);
+
+#endif

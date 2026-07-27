@@ -7,6 +7,9 @@
 #include <stdint.h>
 
 int leir_test_socketpair(llam_fd_t pair_out[2]);
+int leir_test_socketpair_type(
+    int socket_type,
+    llam_fd_t pair_out[2]);
 void leir_test_close(llam_fd_t *fd);
 int leir_test_set_socket_buffers(llam_fd_t fd, int size);
 int leir_test_shutdown_write(llam_fd_t fd);

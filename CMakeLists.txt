@@ -516,6 +516,20 @@ target_include_directories(test_leir_native_plan PRIVATE
 )
 target_link_libraries(test_leir_native_plan PRIVATE llam_runtime)
 
+add_executable(test_leir_native_segment
+    experiments/leir/leir_program.c
+    experiments/leir/leir_native_plan.c
+    experiments/leir/leir_native_segment.c
+    experiments/leir/leir_test_support.c
+    experiments/leir/test_leir_native_segment.c
+)
+target_include_directories(test_leir_native_segment PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_native_segment PRIVATE llam_runtime)
+
 add_executable(test_leir_native_linux
     experiments/leir/test_leir_native_linux.c
 )
@@ -544,6 +558,9 @@ foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
 endforeach()
 add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
 add_test(NAME test_leir_native_plan COMMAND test_leir_native_plan)
+add_test(
+    NAME test_leir_native_segment
+    COMMAND test_leir_native_segment)
 add_test(NAME test_leir_native_linux COMMAND test_leir_native_linux --unit-only)
 add_test(
     NAME test_bench_leir_phase0_smoke
@@ -835,6 +852,7 @@ add_dependencies(test_shared_load llam_runtime_shared)
 foreach(LLAM_TEST_TARGET
         test_leir_phase0
         test_leir_native_plan
+        test_leir_native_segment
         test_leir_native_linux
         bench_leir_phase0
         test_abi_contract

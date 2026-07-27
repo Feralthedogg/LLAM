@@ -199,11 +199,13 @@ Link+skip mode follows the kernel contract for a normal soft-linked chain:
 
 - if every intermediate operation succeeds, those CQEs are omitted and the
   final operation produces the one observed CQE;
-- if an intermediate operation fails, that operation produces the one
-  observed CQE and later linked CQEs are omitted.
+- if an intermediate operation fails, that error CQE and the dependent
+  operations' `-ECANCELED` CQEs remain observable because skip-success does
+  not suppress failures.
 
-The token identifies the operation that produced the terminal observation.
-The owner validates the segment generation, claims terminal state once,
+The token identifies each visible operation. The owner retains the first
+non-cancel error, drains through the final linked token before releasing
+borrowed storage, validates the segment generation, claims terminal state once,
 decrements `pending_ops` once, and completes the segment's task request through
 the existing LLAM completion and wake path.
 

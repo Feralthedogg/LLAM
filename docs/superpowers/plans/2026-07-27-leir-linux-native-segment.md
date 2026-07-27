@@ -271,13 +271,25 @@ Cover:
 ```c
 static int test_link_waits_for_final_cqe_and_preserves_first_error(void);
 static int test_skip_success_completes_on_final_cqe(void);
-static int test_skip_intermediate_failure_is_terminal(void);
+static int test_skip_intermediate_failure_waits_for_tail(void);
 static int test_short_success_becomes_emsgsize_at_exact_boundary(void);
 static int test_stale_generation_is_fatal(void);
 static int test_duplicate_terminal_is_fatal(void);
 ```
 
-Link mode must observe all operation CQEs and return terminal only for the final token. Skip mode must return terminal on either an intermediate non-full result or the final token. A result different from the declared exact length becomes `-EMSGSIZE`. A stale generation, foreign owner, invalid index, or event after terminal claim returns `FATAL`.
+Link mode must observe all operation CQEs and return terminal only for the
+final token. Skip mode may skip successful intermediate tokens, but it must
+drain any visible intermediate failure and dependent cancellations through
+the final token. A result different from the declared exact length becomes
+`-EMSGSIZE` when it is observable. A stale generation, foreign owner, invalid
+index, or event after terminal claim returns `FATAL`.
+
+Correction from kernel-path validation: skip mode may observe an intermediate
+error followed by one `-ECANCELED` CQE for every dependent linked operation.
+It must retain the first non-cancel error and wait for the final token before
+claiming terminal state. Only a short result on the unsuppressed final
+operation can be checked directly in skip mode; exact intermediate message
+sizes remain part of the trusted `SOCK_SEQPACKET` protocol envelope.
 
 - [ ] **Step 3: Run the Linux test target and observe the red state**
 
@@ -483,7 +495,7 @@ Add:
 ```c
 static int test_link_dispatch_wakes_only_after_final_cqe(void);
 static int test_skip_dispatch_wakes_once_on_final_success(void);
-static int test_skip_dispatch_wakes_once_on_intermediate_error(void);
+static int test_skip_dispatch_drains_tail_before_error_wake(void);
 static int test_dispatch_balances_pending_and_inflight_once(void);
 static int test_dispatch_records_fatal_for_stale_token(void);
 ```
