@@ -25,6 +25,34 @@
  */
 
 #include "io/runtime_io_api_internal.h"
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static llam_io_park_snapshot_hook_fn
+    g_llam_io_park_snapshot_hook;
+
+void llam_io_test_set_park_snapshot_hook(
+    llam_io_park_snapshot_hook_fn hook) {
+    g_llam_io_park_snapshot_hook = hook;
+}
+
+static void llam_io_test_park_snapshot(
+    llam_io_req_t *req,
+    unsigned observed_wait_mode) {
+    if (g_llam_io_park_snapshot_hook != NULL) {
+        g_llam_io_park_snapshot_hook(
+            req,
+            observed_wait_mode);
+    }
+}
+#else
+static void llam_io_test_park_snapshot(
+    llam_io_req_t *req,
+    unsigned observed_wait_mode) {
+    (void)req;
+    (void)observed_wait_mode;
+}
+#endif
+
 /**
  * @brief Resolve the runtime that owns an I/O request.
  *
@@ -495,18 +523,24 @@ int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns
     }
 
     wait_mode = atomic_load_explicit(&req->wait_mode, memory_order_acquire);
+    llam_io_test_park_snapshot(req, wait_mode);
     /*
      * One-shot submit and shared-watch paths prepare the task before exposing
      * req to backend threads.  If an immediate backend completion wins before
      * this function runs, wait_mode is already NONE and the completion path has
-     * queued this task; do not reinitialize the result or wait ownership.
+     * queued this task; do not reinitialize the result or wait ownership. The
+     * initial snapshot can become stale while the completion clears task
+     * tracking, so the completed-state branch must reload wait_mode.
      */
     already_prepared = (req->task == task &&
                         ((llam_task_active_io_req_load(task) == req &&
                           task->state == LLAM_TASK_STATE_PARKED &&
                           (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) ==
                               LLAM_WAIT_IO) ||
-                         wait_mode == LLAM_IO_WAIT_MODE_NONE));
+                         atomic_load_explicit(
+                             &req->wait_mode,
+                             memory_order_acquire) ==
+                             LLAM_IO_WAIT_MODE_NONE));
     if (!already_prepared) {
         req->task = task;
         req->result = -1;

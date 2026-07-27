@@ -79,6 +79,141 @@ static int init_runtime(void) {
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef struct park_completion_race_state {
+    ssize_t result;
+    int park_rc;
+    int park_error;
+    int setup_error;
+    unsigned hook_calls;
+} park_completion_race_state_t;
+
+static void park_completion_snapshot_hook(
+    llam_io_req_t *req,
+    unsigned observed_wait_mode) {
+    park_completion_race_state_t *state;
+    unsigned owner_shard;
+
+    if (req == NULL ||
+        observed_wait_mode != LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+        return;
+    }
+    state = req->buf;
+    if (state == NULL) {
+        return;
+    }
+    state->hook_calls += 1U;
+    req->result = 37;
+    req->error_code = 0;
+    atomic_store_explicit(
+        &req->wait_mode,
+        LLAM_IO_WAIT_MODE_NONE,
+        memory_order_release);
+    owner_shard = atomic_load_explicit(
+        &req->owner_shard,
+        memory_order_acquire);
+    llam_reinject_task_on_shard(
+        req->owner_runtime,
+        req->task,
+        owner_shard,
+        true,
+        LLAM_TRACE_IO_COMPLETE,
+        LLAM_WAIT_IO);
+}
+
+static void park_completion_race_task(void *opaque) {
+    park_completion_race_state_t *state = opaque;
+    llam_io_req_t *req = llam_api_io_req_acquire(g_llam_tls_shard);
+
+    if (req == NULL) {
+        state->setup_error = errno != 0 ? errno : ENOMEM;
+        return;
+    }
+    req->task = g_llam_tls_task;
+    req->buf = state;
+    req->result = -1;
+    req->error_code = 0;
+    atomic_store_explicit(
+        &req->owner_shard,
+        g_llam_tls_shard->id,
+        memory_order_release);
+    atomic_store_explicit(
+        &req->wait_mode,
+        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE,
+        memory_order_release);
+    if (!llam_task_set_io_tracking(
+            g_llam_tls_task,
+            req,
+            g_llam_tls_shard->id)) {
+        state->setup_error = errno != 0 ? errno : EIO;
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        return;
+    }
+
+    llam_io_test_set_park_snapshot_hook(
+        park_completion_snapshot_hook);
+    errno = 0;
+    state->park_rc = llam_park_io_req(
+        req,
+        false,
+        0U,
+        NULL);
+    state->park_error = errno;
+    state->result = req->result;
+    llam_io_test_set_park_snapshot_hook(NULL);
+    llam_api_io_req_release(g_llam_tls_shard, req);
+}
+
+static int exercise_park_completion_preserves_result(void) {
+    park_completion_race_state_t state;
+    llam_task_t *task;
+    int run_rc;
+
+    memset(&state, 0, sizeof(state));
+    state.result = -1;
+    state.park_rc = -1;
+    if (init_runtime() != 0) {
+        return fail_errno(
+            "runtime init failed for park completion race");
+    }
+    task = llam_spawn(
+        park_completion_race_task,
+        &state,
+        NULL);
+    if (task == NULL) {
+        llam_runtime_shutdown();
+        return fail_errno(
+            "task spawn failed for park completion race");
+    }
+    run_rc = llam_run();
+    llam_io_test_set_park_snapshot_hook(NULL);
+    llam_runtime_shutdown();
+    if (run_rc != 0 ||
+        state.setup_error != 0 ||
+        state.hook_calls != 1U ||
+        state.park_rc != 0 ||
+        state.park_error != 0 ||
+        state.result != 37) {
+        fprintf(
+            stderr,
+            "park completion race failed: "
+            "run=%d setup=%d hooks=%u park=%d/%d result=%zd\n",
+            run_rc,
+            state.setup_error,
+            state.hook_calls,
+            state.park_rc,
+            state.park_error,
+            state.result);
+        return 1;
+    }
+    return 0;
+}
+#else
+static int exercise_park_completion_preserves_result(void) {
+    return 0;
+}
+#endif
+
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
 static void close_if_valid(int *fd) {
     if (fd != NULL && *fd >= 0) {
@@ -4861,6 +4996,9 @@ static int exercise_submit_cancel_rehome_regressions(void) {
 
 int main(void) {
     if (exercise_io_lifetime_invariants_are_lock_safe() != 0) {
+        return 1;
+    }
+    if (exercise_park_completion_preserves_result() != 0) {
         return 1;
     }
     if (exercise_submit_cancel_rehome_regressions() != 0) {

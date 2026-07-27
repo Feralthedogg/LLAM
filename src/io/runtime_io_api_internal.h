@@ -62,6 +62,11 @@ void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req);
 bool llam_io_test_abort_published_io_setup(llam_io_req_t *req,
                                            llam_io_abort_reason_t reason,
                                            bool *wait_for_completion);
+typedef void (*llam_io_park_snapshot_hook_fn)(
+    llam_io_req_t *req,
+    unsigned observed_wait_mode);
+void llam_io_test_set_park_snapshot_hook(
+    llam_io_park_snapshot_hook_fn hook);
 #endif
 
 /* Direct syscall and poll probes used before parking a task. */
