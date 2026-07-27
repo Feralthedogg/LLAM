@@ -226,32 +226,34 @@ llam_linux_native_segment_apply_cqe(
         }
     } else {
         /*
-         * Successful non-final CQEs are suppressed in this mode.  The only
-         * valid visible intermediate completion is therefore an error.
+         * completed_cqes is an operation cursor in skip mode. Gaps before a
+         * visible CQE are successful operations whose CQEs the kernel
+         * suppressed. A visible non-final CQE must be an error, and an error
+         * cannot release the request until every dependent cancellation has
+         * reached the tail of the linked chain.
          */
-        if (segment->completed_cqes != 0U ||
-            (index + 1U < segment->op_count &&
-             result >= 0 &&
-             (uint32_t)result == segment->ops[index].length)) {
+        if (index < segment->completed_cqes ||
+            (index + 1U < segment->op_count && result >= 0)) {
             return LLAM_LINUX_NATIVE_CQE_FATAL;
         }
+        segment->suppressed_success_cqes +=
+            index - segment->completed_cqes;
     }
 
     error = llam_linux_native_result_error(
         &segment->ops[index], result);
     segment->observed_cqes += 1U;
-    segment->completed_cqes += 1U;
+    segment->completed_cqes = index + 1U;
     llam_linux_native_record_error(segment, index, error);
 
     if (segment->mode ==
         LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) {
-        segment->suppressed_success_cqes += index;
-        if (index + 1U < segment->op_count && error == 0) {
-            return LLAM_LINUX_NATIVE_CQE_FATAL;
+        if (index + 1U < segment->op_count) {
+            return LLAM_LINUX_NATIVE_CQE_CONTINUE;
         }
         return llam_linux_native_claim_terminal(
             segment,
-            error,
+            segment->first_error,
             result,
             terminal_result_out);
     }

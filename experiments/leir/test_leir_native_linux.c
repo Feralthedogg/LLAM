@@ -627,7 +627,7 @@ static int test_skip_dispatch_wakes_once_on_final_success(void) {
     return 0;
 }
 
-static int test_skip_dispatch_wakes_once_on_intermediate_error(void) {
+static int test_skip_dispatch_drains_tail_before_error_wake(void) {
     queue_fixture_t fixture;
     struct io_uring_sqe sqes[8];
     unsigned completions = 0U;
@@ -648,9 +648,43 @@ static int test_skip_dispatch_wakes_once_on_intermediate_error(void) {
         &fixture.node,
         &fixture.segment.tokens[1],
         -ECONNRESET);
+    if (completions != 0U ||
+        fixture.segment.terminal_wakes != 0U ||
+        fixture.segment.first_error_index != 1U ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 1U) {
+        fprintf(stderr, "skip error dispatch woke before tail drain\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &fixture.segment.tokens[2],
+        -ECANCELED);
+    if (completions != 0U ||
+        fixture.segment.terminal_wakes != 0U ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 1U) {
+        fprintf(stderr, "skip cancellation woke before tail CQE\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &fixture.segment.tokens[3],
+        -ECANCELED);
     if (completions != 1U ||
         fixture.segment.terminal_wakes != 1U ||
-        fixture.segment.first_error_index != 1U ||
+        fixture.segment.observed_cqes != 3U ||
+        fixture.segment.suppressed_success_cqes != 1U ||
         fixture.req.result != -1 ||
         fixture.req.error_code != ECONNRESET ||
         atomic_load_explicit(
@@ -659,7 +693,7 @@ static int test_skip_dispatch_wakes_once_on_intermediate_error(void) {
         atomic_load_explicit(
             &fixture.shard.inflight_io_waiters,
             memory_order_acquire) != 0U) {
-        fprintf(stderr, "skip error dispatch ownership mismatch\n");
+        fprintf(stderr, "skip drained error ownership mismatch\n");
         queue_fixture_destroy(&fixture);
         return 1;
     }
@@ -1132,7 +1166,7 @@ static int test_skip_success_completes_on_final_cqe(void) {
     return 0;
 }
 
-static int test_skip_intermediate_failure_is_terminal(void) {
+static int test_skip_intermediate_failure_waits_for_tail(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
@@ -1152,18 +1186,36 @@ static int test_skip_intermediate_failure_is_terminal(void) {
             &segment.tokens[1],
             -ECONNRESET,
             &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_COMPLETE_ERROR ||
-        terminal_result != -ECONNRESET ||
+            LLAM_LINUX_NATIVE_CQE_CONTINUE ||
         segment.first_error_index != 1U ||
         segment.suppressed_success_cqes != 1U ||
         segment.observed_cqes != 1U) {
         fprintf(stderr, "skip intermediate failure mismatch\n");
         return 1;
     }
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[2],
+            -ECANCELED,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_CONTINUE ||
+        llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[3],
+            -ECANCELED,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_COMPLETE_ERROR ||
+        terminal_result != -ECONNRESET ||
+        segment.first_error_index != 1U ||
+        segment.suppressed_success_cqes != 1U ||
+        segment.observed_cqes != 3U) {
+        fprintf(stderr, "skip failure tail drain mismatch\n");
+        return 1;
+    }
     return 0;
 }
 
-static int test_short_success_becomes_emsgsize(void) {
+static int test_final_short_success_becomes_emsgsize(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
@@ -1180,14 +1232,14 @@ static int test_short_success_becomes_emsgsize(void) {
     }
     if (llam_linux_native_segment_apply_cqe(
             &segment,
-            &segment.tokens[2],
-            (int)ops[2].length - 1,
+            &segment.tokens[3],
+            (int)ops[3].length - 1,
             &terminal_result) !=
             LLAM_LINUX_NATIVE_CQE_COMPLETE_ERROR ||
         terminal_result != -EMSGSIZE ||
-        segment.first_error_index != 2U ||
+        segment.first_error_index != 3U ||
         segment.first_error != EMSGSIZE ||
-        segment.suppressed_success_cqes != 2U) {
+        segment.suppressed_success_cqes != 3U) {
         fprintf(stderr, "short exact result was not rejected\n");
         return 1;
     }
@@ -1314,10 +1366,10 @@ int main(int argc, char **argv) {
          test_link_preserves_first_non_cancel_error},
         {"skip success completes on final CQE",
          test_skip_success_completes_on_final_cqe},
-        {"skip intermediate failure is terminal",
-         test_skip_intermediate_failure_is_terminal},
-        {"short success becomes EMSGSIZE",
-         test_short_success_becomes_emsgsize},
+        {"skip intermediate failure drains tail",
+         test_skip_intermediate_failure_waits_for_tail},
+        {"final short success becomes EMSGSIZE",
+         test_final_short_success_becomes_emsgsize},
         {"stale generation is fatal",
          test_stale_generation_is_fatal},
         {"foreign owner is fatal",
@@ -1346,8 +1398,8 @@ int main(int argc, char **argv) {
          test_link_dispatch_wakes_only_after_final_cqe},
         {"skip dispatch wakes once on final success",
          test_skip_dispatch_wakes_once_on_final_success},
-        {"skip dispatch wakes once on intermediate error",
-         test_skip_dispatch_wakes_once_on_intermediate_error},
+        {"skip dispatch drains tail before error wake",
+         test_skip_dispatch_drains_tail_before_error_wake},
         {"dispatch rejects duplicate terminal wake",
          test_dispatch_rejects_duplicate_terminal_wake},
         {"dispatch records fatal for stale token",
