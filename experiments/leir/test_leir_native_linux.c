@@ -431,6 +431,67 @@ static int test_resource_attach_reports_capacity(void) {
     return 0;
 }
 
+static int test_resource_teardown_invalidates_live_leases(void) {
+    llam_node_t node;
+    resource_update_fixture_t updates;
+    llam_linux_native_resource_lease_t leases[2];
+    int fds[2] = {10, 11};
+    unsigned char storage[2][32];
+    struct iovec buffers[2] = {
+        {storage[0], sizeof(storage[0])},
+        {storage[1], sizeof(storage[1])},
+    };
+    unsigned i;
+
+    memset(leases, 0, sizeof(leases));
+    if (init_resource_node(&node, &updates) != 0) {
+        return 1;
+    }
+    for (i = 0U; i < 2U; i += 1U) {
+        if (llam_linux_native_resources_attach(
+                &node,
+                &fds[i],
+                1U,
+                &buffers[i],
+                1U,
+                &leases[i]) != 0) {
+            fprintf(stderr, "native teardown lease attach failed\n");
+            destroy_resource_node(&node);
+            return 1;
+        }
+    }
+    if (node.native_resource_leases != &leases[1] ||
+        leases[1].next != &leases[0]) {
+        fprintf(stderr, "native teardown lease list mismatch\n");
+        destroy_resource_node(&node);
+        return 1;
+    }
+
+    llam_linux_native_resources_before_ring_exit(&node);
+    if (leases[0].attached ||
+        leases[1].attached ||
+        leases[0].next != NULL ||
+        leases[1].next != NULL ||
+        node.native_resource_leases != NULL ||
+        node.native_fixed_file_bitmap != 0U ||
+        node.native_fixed_buffer_bitmap != 0U ||
+        node.supports_native_fixed_files ||
+        node.supports_native_fixed_buffers) {
+        fprintf(
+            stderr,
+            "native teardown left a live resource owner\n");
+        destroy_resource_node(&node);
+        return 1;
+    }
+    llam_linux_native_resources_after_ring_exit(&node);
+    if (node.native_resource_lock_initialized) {
+        fprintf(stderr, "native teardown left its lock initialized\n");
+        destroy_resource_node(&node);
+        return 1;
+    }
+    return 0;
+}
+
 static int test_enqueue_publishes_once(void) {
     queue_fixture_t fixture;
     unsigned completions = 0U;
@@ -1168,6 +1229,81 @@ static int test_cancel_and_target_orderings_retire_once(void) {
     return 0;
 }
 
+static uint64_t cancel_order_prng_next(uint64_t *state) {
+    uint64_t value = *state;
+
+    value ^= value >> 12U;
+    value ^= value << 25U;
+    value ^= value >> 27U;
+    *state = value;
+    return value * UINT64_C(2685821657736338717);
+}
+
+static int test_randomized_cancel_target_orderings(void) {
+    uint64_t seed;
+
+    for (seed = UINT64_C(1);
+         seed <= UINT64_C(10000);
+         seed += UINT64_C(1)) {
+        cancel_event_t events[] = {
+            {CANCEL_EVENT_TARGET, 0U, -ECONNRESET},
+            {CANCEL_EVENT_TARGET, 1U, -ECANCELED},
+            {CANCEL_EVENT_CONTROL, 0U, 0},
+            {CANCEL_EVENT_CONTROL, 1U, -ENOENT},
+        };
+        uint64_t prng = seed;
+        size_t i;
+
+        for (i = sizeof(events) / sizeof(events[0]);
+             i > 1U;
+             i -= 1U) {
+            size_t selected = (size_t)(
+                cancel_order_prng_next(&prng) % i);
+            cancel_event_t temporary = events[i - 1U];
+
+            events[i - 1U] = events[selected];
+            events[selected] = temporary;
+        }
+        {
+            unsigned next_target = 0U;
+
+            /*
+             * IOSQE_IO_LINK posts target CQEs in chain order.
+             * Cancellation CQEs may interleave arbitrarily, so retain
+             * only that kernel ordering constraint.
+             */
+            for (i = 0U;
+                 i < sizeof(events) / sizeof(events[0]);
+                 i += 1U) {
+                if (events[i].kind !=
+                    CANCEL_EVENT_TARGET) {
+                    continue;
+                }
+                events[i].operation_index =
+                    next_target;
+                events[i].result =
+                    next_target == 0U
+                        ? -ECONNRESET
+                        : -ECANCELED;
+                next_target += 1U;
+            }
+        }
+        if (run_cancel_order_case(
+                events,
+                sizeof(events) / sizeof(events[0]),
+                -1,
+                ECONNRESET) != 0) {
+            fprintf(
+                stderr,
+                "randomized native cancellation failed "
+                "at seed=%llu\n",
+                (unsigned long long)seed);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_cancel_sqes_target_operation_tokens(void) {
     queue_fixture_t fixture;
     struct io_uring_sqe sqes[8];
@@ -1644,7 +1780,7 @@ static int test_skip_dispatch_wakes_once_on_final_success(void) {
     return 0;
 }
 
-static int test_skip_dispatch_waits_for_target_retirement(void) {
+static int test_skip_dispatch_retires_omitted_tail(void) {
     queue_fixture_t fixture;
     struct io_uring_sqe sqes[8];
     unsigned completions = 0U;
@@ -1665,8 +1801,8 @@ static int test_skip_dispatch_waits_for_target_retirement(void) {
         &fixture.node,
         &fixture.segment.tokens[1],
         -ECONNRESET);
-    if (completions != 0U ||
-        fixture.segment.terminal_wakes != 0U ||
+    if (completions != 1U ||
+        fixture.segment.terminal_wakes != 1U ||
         fixture.segment.first_error_index != 1U ||
         fixture.segment.observed_cqes != 1U ||
         fixture.segment.suppressed_success_cqes != 1U ||
@@ -1675,54 +1811,20 @@ static int test_skip_dispatch_waits_for_target_retirement(void) {
             memory_order_acquire) != 1U ||
         atomic_load_explicit(
             &fixture.segment.target_retired,
-            memory_order_acquire) != 0U ||
-        atomic_load_explicit(
-            &fixture.segment.state,
-            memory_order_acquire) !=
-            LLAM_LINUX_NATIVE_SEGMENT_RETIRING ||
-        atomic_load_explicit(
-            &fixture.node.pending_ops,
-            memory_order_acquire) != 1U ||
-        atomic_load_explicit(
-            &fixture.shard.inflight_io_waiters,
-            memory_order_acquire) != 1U) {
-        fprintf(stderr, "skip first error released ownership early\n");
-        queue_fixture_destroy(&fixture);
-        return 1;
-    }
-    llam_linux_native_segment_handle_cqe(
-        &fixture.node,
-        &fixture.segment.tokens[2],
-        -ECANCELED);
-    if (completions != 0U ||
-        fixture.segment.terminal_wakes != 0U) {
-        fprintf(stderr, "skip cancellation released ownership early\n");
-        queue_fixture_destroy(&fixture);
-        return 1;
-    }
-    llam_linux_native_segment_handle_cqe(
-        &fixture.node,
-        &fixture.segment.tokens[3],
-        -ECANCELED);
-    if (completions != 1U ||
-        fixture.segment.terminal_wakes != 1U ||
-        fixture.segment.observed_cqes != 3U ||
-        fixture.req.result != -1 ||
-        fixture.req.error_code != ECONNRESET ||
-        atomic_load_explicit(
-            &fixture.segment.target_retired,
             memory_order_acquire) != 1U ||
         atomic_load_explicit(
             &fixture.segment.state,
             memory_order_acquire) !=
             LLAM_LINUX_NATIVE_SEGMENT_RETIRED ||
+        fixture.req.result != -1 ||
+        fixture.req.error_code != ECONNRESET ||
         atomic_load_explicit(
             &fixture.node.pending_ops,
             memory_order_acquire) != 0U ||
         atomic_load_explicit(
             &fixture.shard.inflight_io_waiters,
             memory_order_acquire) != 0U) {
-        fprintf(stderr, "skip target retirement ownership mismatch\n");
+        fprintf(stderr, "skip omitted-tail retirement mismatch\n");
         queue_fixture_destroy(&fixture);
         return 1;
     }
@@ -2383,7 +2485,7 @@ static int test_skip_success_completes_on_final_cqe(void) {
     return 0;
 }
 
-static int test_skip_intermediate_failure_waits_for_retirement(void) {
+static int test_skip_intermediate_failure_retires_omitted_tail(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
@@ -2403,7 +2505,7 @@ static int test_skip_intermediate_failure_waits_for_retirement(void) {
             &segment.tokens[1],
             -ECONNRESET,
             &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_SEMANTIC ||
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
         terminal_result != -ECONNRESET ||
         segment.first_error_index != 1U ||
         segment.suppressed_success_cqes != 1U ||
@@ -2411,46 +2513,17 @@ static int test_skip_intermediate_failure_waits_for_retirement(void) {
         atomic_load_explicit(
             &segment.state,
             memory_order_acquire) !=
-            LLAM_LINUX_NATIVE_SEGMENT_RETIRING ||
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED ||
         atomic_load_explicit(
             &segment.semantic_claimed,
             memory_order_acquire) != 1U ||
         atomic_load_explicit(
             &segment.target_retired,
-            memory_order_acquire) != 0U) {
-        fprintf(stderr, "skip intermediate failure mismatch\n");
-        return 1;
-    }
-    if (llam_linux_native_segment_apply_cqe(
-            &segment,
-            &segment.tokens[2],
-            -ECANCELED,
-            &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_CONTINUE ||
-        segment.first_error_index != 1U ||
-        segment.suppressed_success_cqes != 1U ||
-        segment.observed_cqes != 2U) {
-        fprintf(stderr, "late skip cancellation was not retained\n");
-        return 1;
-    }
-    if (llam_linux_native_segment_apply_cqe(
-            &segment,
-            &segment.tokens[3],
-            -ECANCELED,
-            &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
-        terminal_result != -ECONNRESET ||
-        segment.first_error_index != 1U ||
-        segment.observed_cqes != 3U ||
-        segment.observed_operation_mask != UINT64_C(0x0e) ||
-        atomic_load_explicit(
-            &segment.target_retired,
             memory_order_acquire) != 1U ||
         atomic_load_explicit(
-            &segment.state,
-            memory_order_acquire) !=
-            LLAM_LINUX_NATIVE_SEGMENT_RETIRED) {
-        fprintf(stderr, "skip target did not retire at tail\n");
+            &segment.terminal_claimed,
+            memory_order_acquire) != 1U) {
+        fprintf(stderr, "skip intermediate failure mismatch\n");
         return 1;
     }
     return 0;
@@ -2476,7 +2549,7 @@ static int test_skip_rejects_duplicate_operation_cqe(void) {
             &segment.tokens[1],
             -ECONNRESET,
             &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_SEMANTIC ||
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
         llam_linux_native_segment_apply_cqe(
             &segment,
             &segment.tokens[1],
@@ -2491,7 +2564,7 @@ static int test_skip_rejects_duplicate_operation_cqe(void) {
     return 0;
 }
 
-static int test_skip_out_of_order_errors_choose_lowest_index(void) {
+static int test_skip_failure_records_chain_index(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
@@ -2511,25 +2584,16 @@ static int test_skip_out_of_order_errors_choose_lowest_index(void) {
             &segment.tokens[2],
             -EPIPE,
             &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_SEMANTIC ||
-        llam_linux_native_segment_apply_cqe(
-            &segment,
-            &segment.tokens[1],
-            -ECONNRESET,
-            &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_CONTINUE ||
-        llam_linux_native_segment_apply_cqe(
-            &segment,
-            &segment.tokens[3],
-            -ECANCELED,
-            &terminal_result) !=
             LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
-        terminal_result != -ECONNRESET ||
-        segment.first_error_index != 1U ||
-        segment.first_error != ECONNRESET ||
-        segment.observed_cqes != 3U ||
-        segment.suppressed_success_cqes != 1U) {
-        fprintf(stderr, "out-of-order errors lost lowest index\n");
+        terminal_result != -EPIPE ||
+        segment.first_error_index != 2U ||
+        segment.first_error != EPIPE ||
+        segment.observed_cqes != 1U ||
+        segment.suppressed_success_cqes != 2U ||
+        atomic_load_explicit(
+            &segment.target_retired,
+            memory_order_acquire) != 1U) {
+        fprintf(stderr, "skip failure chain index mismatch\n");
         return 1;
     }
     return 0;
@@ -2678,6 +2742,8 @@ int main(int argc, char **argv) {
          test_resource_attach_rolls_back_updates},
         {"resource attach reports capacity",
          test_resource_attach_reports_capacity},
+        {"resource teardown invalidates live leases",
+         test_resource_teardown_invalidates_live_leases},
         {"validate configuration",
          test_validates_configuration},
         {"encode recv and send fields",
@@ -2694,12 +2760,12 @@ int main(int argc, char **argv) {
          test_link_preserves_first_non_cancel_error},
         {"skip success completes on final CQE",
          test_skip_success_completes_on_final_cqe},
-        {"skip intermediate failure waits for retirement",
-         test_skip_intermediate_failure_waits_for_retirement},
+        {"skip intermediate failure retires omitted tail",
+         test_skip_intermediate_failure_retires_omitted_tail},
         {"skip rejects duplicate operation CQE",
          test_skip_rejects_duplicate_operation_cqe},
-        {"skip out-of-order errors choose lowest index",
-         test_skip_out_of_order_errors_choose_lowest_index},
+        {"skip failure records chain index",
+         test_skip_failure_records_chain_index},
         {"final short success becomes EMSGSIZE",
          test_final_short_success_becomes_emsgsize},
         {"stale generation is fatal",
@@ -2736,12 +2802,14 @@ int main(int argc, char **argv) {
          test_link_dispatch_wakes_only_after_final_cqe},
         {"skip dispatch wakes once on final success",
          test_skip_dispatch_wakes_once_on_final_success},
-        {"skip dispatch waits for target retirement",
-         test_skip_dispatch_waits_for_target_retirement},
+        {"skip dispatch retires omitted tail",
+         test_skip_dispatch_retires_omitted_tail},
         {"batch dispatch wakes after all segment tails",
          test_batch_dispatch_wakes_after_all_segment_tails},
         {"cancel and target orderings retire once",
          test_cancel_and_target_orderings_retire_once},
+        {"randomized cancel and target orderings",
+         test_randomized_cancel_target_orderings},
         {"cancel SQEs target operation tokens",
          test_cancel_sqes_target_operation_tokens},
         {"cancel rejects stale and duplicate tokens",

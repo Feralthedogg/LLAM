@@ -237,28 +237,20 @@ enum {
 
 - [ ] **Step 1: Replace the early-skip-error test with a retirement test**
 
-Exercise CQEs for indices 1, 2, and 3:
+Exercise the first visible error CQE for index 1. Linux omits the rest of a
+soft-linked chain when a `CQE_SKIP_SUCCESS` request fails:
 
 ```c
 action = llam_linux_native_segment_apply_cqe(
     &segment, &segment.tokens[1], -ECONNRESET, &result);
-CHECK(action == LLAM_LINUX_NATIVE_CQE_SEMANTIC);
-CHECK(atomic_load(&segment.target_retired) == 0U);
-
-action = llam_linux_native_segment_apply_cqe(
-    &segment, &segment.tokens[2], -ECANCELED, &result);
-CHECK(action == LLAM_LINUX_NATIVE_CQE_CONTINUE);
-
-action = llam_linux_native_segment_apply_cqe(
-    &segment, &segment.tokens[3], -ECANCELED, &result);
 CHECK(action == LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR);
 CHECK(result == -ECONNRESET);
 CHECK(atomic_load(&segment.target_retired) == 1U);
 ```
 
-Add duplicate-bit and out-of-order non-final CQE cases. A duplicate token must
-return `FATAL`; unique out-of-order error tokens must preserve the lowest
-non-cancel error index.
+Add a duplicate-bit case. A duplicate token must return `FATAL`; target CQEs
+within one soft-linked chain remain ordered by the kernel, while cancel-control
+CQEs may interleave arbitrarily.
 
 - [ ] **Step 2: Run the Linux unit test and observe the old early terminal**
 

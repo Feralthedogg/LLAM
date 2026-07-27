@@ -321,6 +321,37 @@ llam_linux_native_segment_apply_cqe(
         }
     }
 
+    if (error != 0 &&
+        segment->mode ==
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+        index + 1U < segment->op_count) {
+        unsigned expected = 0U;
+
+        /*
+         * For a soft-linked chain, Linux omits every later CQE when
+         * a CQE_SKIP_SUCCESS request fails. The error CQE therefore
+         * proves that the remaining targets have been retired by the
+         * kernel; waiting for the tail would wait forever.
+         */
+        if (!atomic_compare_exchange_strong_explicit(
+                &segment->terminal_claimed,
+                &expected,
+                1U,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            return LLAM_LINUX_NATIVE_CQE_FATAL;
+        }
+        atomic_store_explicit(
+            &segment->target_retired,
+            1U,
+            memory_order_release);
+        atomic_store_explicit(
+            &segment->state,
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED,
+            memory_order_release);
+        return LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR;
+    }
+
     if (index + 1U == segment->op_count) {
         unsigned expected = 0U;
 

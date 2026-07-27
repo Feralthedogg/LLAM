@@ -1818,6 +1818,589 @@ static int test_fixed_recv_send_pipeline(void) {
     }
     return 0;
 }
+
+typedef struct native_cancel_batch_state
+    native_cancel_batch_state_t;
+
+typedef struct native_cancel_peer_context {
+    native_cancel_batch_state_t *state;
+    unsigned index;
+} native_cancel_peer_context_t;
+
+struct native_cancel_batch_state {
+    fixed_pipeline_state_t
+        lanes[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+    leir_native_instance_t
+        *instances[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+    leir_phase0_value_t
+        *values_out[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+    size_t value_counts[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+    leir_native_metrics_t
+        metrics[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+    native_cancel_peer_context_t
+        peer_contexts[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+    leir_native_batch_metrics_t batch_metrics;
+    llam_cancel_token_t *token;
+    unsigned width;
+    unsigned initialized_lanes;
+    bool completion_race;
+    bool runtime_stop;
+    atomic_uint runner_started;
+    atomic_uint release_peers;
+    atomic_uint runner_done;
+    atomic_uint failures;
+    int first_errno;
+    int run_result;
+    int run_errno;
+};
+
+static void native_cancel_batch_fail(
+    native_cancel_batch_state_t *state,
+    int error) {
+    unsigned i;
+
+    if (atomic_fetch_add_explicit(
+            &state->failures,
+            1U,
+            memory_order_relaxed) == 0U) {
+        state->first_errno = error;
+    }
+    atomic_store_explicit(
+        &state->release_peers, 1U, memory_order_release);
+    for (i = 0U; i < state->initialized_lanes; i += 1U) {
+        if (!LLAM_FD_IS_INVALID(state->lanes[i].pair[0])) {
+            (void)shutdown(
+                (int)state->lanes[i].pair[0],
+                SHUT_RDWR);
+        }
+        if (!LLAM_FD_IS_INVALID(state->lanes[i].pair[1])) {
+            (void)shutdown(
+                (int)state->lanes[i].pair[1],
+                SHUT_RDWR);
+        }
+    }
+}
+
+static int native_cancel_batch_state_init(
+    native_cancel_batch_state_t *state,
+    unsigned width,
+    leir_native_mode_t mode,
+    bool completion_race,
+    bool runtime_stop) {
+    unsigned i;
+
+    memset(state, 0, sizeof(*state));
+    state->width = width;
+    state->completion_race = completion_race;
+    state->runtime_stop = runtime_stop;
+    atomic_init(&state->runner_started, 0U);
+    atomic_init(&state->release_peers, 0U);
+    atomic_init(&state->runner_done, 0U);
+    atomic_init(&state->failures, 0U);
+    for (i = 0U; i < width; i += 1U) {
+        state->initialized_lanes = i + 1U;
+        if (fixed_pipeline_state_init(
+                &state->lanes[i], mode) != 0) {
+            return -1;
+        }
+        leir_test_fill_pattern(
+            state->lanes[i].payload,
+            sizeof(state->lanes[i].payload),
+            UINT64_C(0x43414e43454c0000) + i);
+        state->instances[i] = state->lanes[i].instance;
+        state->values_out[i] =
+            state->lanes[i].values_out;
+        state->value_counts[i] =
+            FIXED_PIPELINE_SLOT_COUNT;
+        state->peer_contexts[i].state = state;
+        state->peer_contexts[i].index = i;
+    }
+    state->token = llam_cancel_token_create();
+    return state->token != NULL ? 0 : -1;
+}
+
+static int native_cancel_batch_state_destroy(
+    native_cancel_batch_state_t *state) {
+    int result = 0;
+    unsigned i;
+
+    for (i = 0U; i < state->initialized_lanes; i += 1U) {
+        if (state->lanes[i].instance != NULL) {
+            if (leir_native_instance_destroy(
+                    state->lanes[i].instance) != 0) {
+                result = -1;
+            } else {
+                state->lanes[i].instance = NULL;
+            }
+        }
+        leir_test_close(&state->lanes[i].pair[0]);
+        leir_test_close(&state->lanes[i].pair[1]);
+        leir_phase0_program_destroy(
+            state->lanes[i].program);
+        state->lanes[i].program = NULL;
+    }
+    state->initialized_lanes = 0U;
+    if (state->token != NULL) {
+        if (llam_cancel_token_destroy(state->token) != 0) {
+            result = -1;
+        } else {
+            state->token = NULL;
+        }
+    }
+    return result;
+}
+
+static bool native_cancel_batch_is_inflight(void) {
+    llam_node_t *node;
+    bool queue_empty;
+
+    if (g_llam_runtime.nodes == NULL ||
+        g_llam_runtime.active_nodes == 0U) {
+        return false;
+    }
+    node = &g_llam_runtime.nodes[0];
+    pthread_mutex_lock(&node->submit_lock);
+    queue_empty = node->native_batch_head == NULL;
+    pthread_mutex_unlock(&node->submit_lock);
+    return queue_empty &&
+           atomic_load_explicit(
+               &node->pending_ops,
+               memory_order_acquire) != 0U &&
+           atomic_load_explicit(
+               &g_llam_runtime.active_io_waiters,
+               memory_order_acquire) != 0U;
+}
+
+static bool native_cancel_batch_queues_are_empty(void) {
+    llam_node_t *node;
+    bool empty;
+
+    if (g_llam_runtime.nodes == NULL ||
+        g_llam_runtime.active_nodes == 0U) {
+        return false;
+    }
+    node = &g_llam_runtime.nodes[0];
+    pthread_mutex_lock(&node->submit_lock);
+    empty = node->native_batch_head == NULL &&
+            node->native_batch_tail == NULL &&
+            node->native_cancel_head == NULL &&
+            node->native_cancel_tail == NULL;
+    pthread_mutex_unlock(&node->submit_lock);
+    return empty;
+}
+
+static void native_cancel_batch_runner_task(void *arg) {
+    native_cancel_batch_state_t *state = arg;
+
+    atomic_store_explicit(
+        &state->runner_started, 1U, memory_order_release);
+    errno = 0;
+    state->run_result = leir_native_batch_run(
+        state->instances,
+        state->values_out,
+        state->value_counts,
+        state->metrics,
+        state->width,
+        &state->batch_metrics);
+    state->run_errno = errno;
+    atomic_store_explicit(
+        &state->runner_done, 1U, memory_order_release);
+}
+
+static void native_cancel_batch_controller_task(void *arg) {
+    native_cancel_batch_state_t *state = arg;
+    unsigned spins;
+
+    for (spins = 0U; spins < 100000U; spins += 1U) {
+        if (atomic_load_explicit(
+                &state->runner_started,
+                memory_order_acquire) != 0U &&
+            native_cancel_batch_is_inflight()) {
+            break;
+        }
+        if (atomic_load_explicit(
+                &state->runner_done,
+                memory_order_acquire) != 0U) {
+            break;
+        }
+        llam_yield();
+    }
+    if (!native_cancel_batch_is_inflight()) {
+        native_cancel_batch_fail(state, ETIMEDOUT);
+    }
+    if (state->completion_race) {
+        atomic_store_explicit(
+            &state->release_peers,
+            1U,
+            memory_order_release);
+        llam_yield();
+    }
+    if (state->runtime_stop) {
+        if (llam_runtime_request_stop() != 0) {
+            native_cancel_batch_fail(
+                state, errno != 0 ? errno : EIO);
+        }
+    } else if (
+        llam_cancel_token_cancel(state->token) != 0) {
+        native_cancel_batch_fail(
+            state, errno != 0 ? errno : EIO);
+    }
+}
+
+static void native_cancel_batch_peer_task(void *arg) {
+    native_cancel_peer_context_t *context = arg;
+    native_cancel_batch_state_t *state = context->state;
+    fixed_pipeline_state_t *lane =
+        &state->lanes[context->index];
+    size_t offset = 0U;
+
+    while (atomic_load_explicit(
+               &state->release_peers,
+               memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    if (leir_test_write_all(
+            lane->pair[1],
+            lane->payload,
+            sizeof(lane->payload)) != 0) {
+        native_cancel_batch_fail(
+            state, errno != 0 ? errno : EIO);
+        return;
+    }
+
+    while (offset < sizeof(lane->echoed)) {
+        ssize_t received = recv(
+            (int)lane->pair[1],
+            lane->echoed + offset,
+            sizeof(lane->echoed) - offset,
+            MSG_DONTWAIT);
+
+        if (received > 0) {
+            offset += (size_t)received;
+            continue;
+        }
+        if (received == 0) {
+            native_cancel_batch_fail(state, ECONNRESET);
+            return;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK &&
+            errno != EINTR) {
+            native_cancel_batch_fail(state, errno);
+            return;
+        }
+        if (atomic_load_explicit(
+                &state->runner_done,
+                memory_order_acquire) != 0U &&
+            state->run_result != 0) {
+            return;
+        }
+        llam_yield();
+    }
+    if (memcmp(
+            lane->echoed,
+            lane->payload,
+            sizeof(lane->payload)) != 0) {
+        native_cancel_batch_fail(state, EPROTO);
+    }
+}
+
+static bool native_cancel_mode_is_available(
+    leir_native_mode_t mode) {
+    llam_node_t *node;
+    bool fixed =
+        mode == LEIR_NATIVE_MODE_FIXED_LINK ||
+        mode == LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP;
+    bool skip =
+        mode == LEIR_NATIVE_MODE_LINK_CQE_SKIP ||
+        mode == LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP;
+
+    if (g_llam_runtime.nodes == NULL ||
+        g_llam_runtime.active_nodes == 0U) {
+        return false;
+    }
+    node = &g_llam_runtime.nodes[0];
+    return node->ring_ready &&
+           node->supports_recv &&
+           node->supports_send &&
+           (!fixed ||
+            (node->supports_native_fixed_files &&
+             node->supports_native_fixed_buffers)) &&
+           (!skip ||
+            (node->linux_ring_features &
+             IORING_FEAT_CQE_SKIP) != 0U);
+}
+
+static int run_native_cancel_batch_case(
+    unsigned width,
+    leir_native_mode_t mode,
+    bool completion_race,
+    bool runtime_stop) {
+    native_cancel_batch_state_t state;
+    llam_runtime_opts_t runtime_opts;
+    llam_spawn_opts_t spawn_opts;
+    llam_task_t *runner = NULL;
+    llam_task_t *controller = NULL;
+    llam_task_t
+        *peers[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+    bool runtime_started = false;
+    bool unavailable = false;
+    bool fixed_mode =
+        mode == LEIR_NATIVE_MODE_FIXED_LINK ||
+        mode == LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP;
+    bool skip_mode =
+        mode == LEIR_NATIVE_MODE_LINK_CQE_SKIP ||
+        mode == LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP;
+    int failed = 1;
+    unsigned i;
+
+    memset(peers, 0, sizeof(peers));
+    if (native_cancel_batch_state_init(
+            &state,
+            width,
+            mode,
+            completion_race,
+            runtime_stop) != 0) {
+        perror("native cancel batch fixture init");
+        (void)native_cancel_batch_state_destroy(&state);
+        return 1;
+    }
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        perror("native cancel batch runtime init");
+        goto cleanup;
+    }
+    runtime_started = true;
+    if (!native_cancel_mode_is_available(mode)) {
+        unavailable = true;
+        failed = 0;
+        goto shutdown;
+    }
+    if (llam_spawn_opts_init(
+            &spawn_opts,
+            LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        perror("native cancel batch spawn opts");
+        goto shutdown;
+    }
+    spawn_opts.cancel_token = state.token;
+    runner = llam_spawn(
+        native_cancel_batch_runner_task,
+        &state,
+        &spawn_opts);
+    controller = llam_spawn(
+        native_cancel_batch_controller_task,
+        &state,
+        NULL);
+    if (completion_race) {
+        for (i = 0U; i < width; i += 1U) {
+            peers[i] = llam_spawn(
+                native_cancel_batch_peer_task,
+                &state.peer_contexts[i],
+                NULL);
+        }
+    }
+    if (runner == NULL || controller == NULL) {
+        native_cancel_batch_fail(
+            &state, errno != 0 ? errno : EIO);
+        goto shutdown;
+    }
+    for (i = 0U; i < width && completion_race; i += 1U) {
+        if (peers[i] == NULL) {
+            native_cancel_batch_fail(
+                &state, errno != 0 ? errno : EIO);
+            goto shutdown;
+        }
+    }
+    if (llam_run() != 0 ||
+        llam_join(runner) != 0 ||
+        llam_join(controller) != 0) {
+        perror("native cancel batch run");
+        goto shutdown;
+    }
+    runner = NULL;
+    controller = NULL;
+    for (i = 0U; i < width && completion_race; i += 1U) {
+        if (llam_join(peers[i]) != 0) {
+            perror("native cancel batch peer join");
+            goto shutdown;
+        }
+        peers[i] = NULL;
+    }
+    if (atomic_load_explicit(
+            &state.failures,
+            memory_order_acquire) != 0U ||
+        ((!completion_race || runtime_stop) &&
+         (state.run_result != -1 ||
+          state.run_errno != ECANCELED)) ||
+        (completion_race && !runtime_stop &&
+         state.run_result != 0 &&
+         (state.run_result != -1 ||
+          state.run_errno != ECANCELED)) ||
+        state.batch_metrics.activations != 1U ||
+        state.batch_metrics.segments != width ||
+        state.batch_metrics.queue_publications != 1U ||
+        state.batch_metrics.task_parks != 1U ||
+        state.batch_metrics.terminal_wakes != 1U ||
+        state.batch_metrics.operation_sqes !=
+            (uint64_t)width * 2U ||
+        state.batch_metrics.operation_cqes !=
+            (skip_mode
+                 ? (uint64_t)width
+                 : (uint64_t)width * 2U) ||
+        state.batch_metrics.hot_allocations != 0U ||
+        atomic_load_explicit(
+            &g_llam_runtime.nodes[0].pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &g_llam_runtime.active_io_waiters,
+            memory_order_acquire) != 0U ||
+        !native_cancel_batch_queues_are_empty()) {
+        fprintf(
+            stderr,
+            "native cancel batch mismatch width=%u "
+            "mode=%u race=%u result=%d errno=%d "
+            "failure=%d\n",
+            width,
+            (unsigned)mode,
+            completion_race ? 1U : 0U,
+            state.run_result,
+            state.run_errno,
+            state.first_errno);
+        goto shutdown;
+    }
+    if ((fixed_mode &&
+         (__builtin_popcountll(
+              g_llam_runtime.nodes[0].
+                  native_fixed_file_bitmap) !=
+              (int)width ||
+          __builtin_popcountll(
+              g_llam_runtime.nodes[0].
+                  native_fixed_buffer_bitmap) !=
+              (int)width)) ||
+        (!fixed_mode &&
+         (g_llam_runtime.nodes[0].
+              native_fixed_file_bitmap != 0U ||
+          g_llam_runtime.nodes[0].
+              native_fixed_buffer_bitmap != 0U))) {
+        fprintf(
+            stderr,
+            "native cancel fixed attachment mismatch "
+            "width=%u mode=%u\n",
+            width,
+            (unsigned)mode);
+        goto shutdown;
+    }
+    if (state.run_result == 0) {
+        for (i = 0U; i < width; i += 1U) {
+            if (state.lanes[i].values_out[
+                    FIXED_PIPELINE_RECV_RESULT_SLOT].i64 !=
+                    FIXED_PIPELINE_BYTES ||
+                state.lanes[i].values_out[
+                    FIXED_PIPELINE_SEND_RESULT_SLOT].i64 !=
+                    FIXED_PIPELINE_BYTES ||
+                memcmp(
+                    state.lanes[i].external_buffer,
+                    state.lanes[i].payload,
+                    FIXED_PIPELINE_BYTES) != 0) {
+                fprintf(
+                    stderr,
+                    "native cancel race success bytes "
+                    "mismatch lane=%u\n",
+                    i);
+                goto shutdown;
+            }
+        }
+    } else if (
+        state.batch_metrics.cancel_sqes !=
+            (uint64_t)width * 2U ||
+        state.batch_metrics.cancel_cqes !=
+            state.batch_metrics.cancel_sqes) {
+        fprintf(
+            stderr,
+            "native cancel control retirement mismatch "
+            "width=%u sqes=%llu cqes=%llu\n",
+            width,
+            (unsigned long long)
+                state.batch_metrics.cancel_sqes,
+            (unsigned long long)
+                state.batch_metrics.cancel_cqes);
+        goto shutdown;
+    }
+    failed = 0;
+
+shutdown:
+    atomic_store_explicit(
+        &state.release_peers, 1U, memory_order_release);
+    if (state.token != NULL &&
+        atomic_load_explicit(
+            &state.runner_done,
+            memory_order_acquire) == 0U) {
+        (void)llam_cancel_token_cancel(state.token);
+    }
+    if (runtime_started && failed == 0) {
+        if (native_cancel_batch_state_destroy(&state) != 0) {
+            perror("native cancel batch destroy");
+            failed = 1;
+        }
+        if (g_llam_runtime.nodes[0].
+                native_fixed_file_bitmap != 0U ||
+            g_llam_runtime.nodes[0].
+                native_fixed_buffer_bitmap != 0U) {
+            fprintf(
+                stderr,
+                "native cancel batch leaked fixed slots\n");
+            failed = 1;
+        }
+    }
+    if (runtime_started) {
+        llam_runtime_shutdown();
+        runtime_started = false;
+    }
+cleanup:
+    if (state.token != NULL ||
+        state.initialized_lanes != 0U) {
+        if (native_cancel_batch_state_destroy(
+                &state) != 0) {
+            failed = 1;
+        }
+    }
+    if (unavailable) {
+        puts(
+            "SKIP: native cancel batch mode unavailable");
+    }
+    return failed;
+}
+
+static int test_native_cancel_batch_ownership(void) {
+    static const struct {
+        unsigned width;
+        leir_native_mode_t mode;
+        bool completion_race;
+        bool runtime_stop;
+    } cases[] = {
+        {2U, LEIR_NATIVE_MODE_LINK, false, false},
+        {2U, LEIR_NATIVE_MODE_LINK_CQE_SKIP, false, false},
+        {8U, LEIR_NATIVE_MODE_LINK_CQE_SKIP, false, false},
+        {2U, LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP, true, false},
+        {8U, LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP, true, false},
+        {8U, LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP, false, true},
+    };
+    size_t i;
+
+    for (i = 0U;
+         i < sizeof(cases) / sizeof(cases[0]);
+         i += 1U) {
+        if (run_native_cancel_batch_case(
+                cases[i].width,
+                cases[i].mode,
+                cases[i].completion_race,
+                cases[i].runtime_stop) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 #endif
 
 int main(void) {
@@ -1843,7 +2426,8 @@ int main(void) {
         test_native_runtime_link_and_skip() != 0 ||
         test_native_runtime_pins_bound_fd() != 0 ||
         test_native_runtime_batches_width_two() != 0 ||
-        test_fixed_recv_send_pipeline() != 0) {
+        test_fixed_recv_send_pipeline() != 0 ||
+        test_native_cancel_batch_ownership() != 0) {
         return 1;
     }
 #endif

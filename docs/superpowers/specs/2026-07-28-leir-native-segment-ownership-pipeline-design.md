@@ -135,8 +135,9 @@ direct path from compiler batching decisions to runtime cost amortization.
 Each segment tracks:
 
 - **semantic terminal:** the logical LEIR result is known;
-- **target retired:** the final, deliberately non-skipped operation token has
-  produced a CQE;
+- **target retired:** either the final, deliberately non-skipped operation
+  token has produced a CQE, or an intermediate soft-link error CQE proves
+  that Linux omitted and retired the rest of a `CQE_SKIP_SUCCESS` chain;
 - **cancel retired:** every submitted async-cancel token has produced a CQE;
 - **reusable:** target retired and cancel retired.
 
@@ -163,8 +164,12 @@ IDLE -> QUEUED -> INFLIGHT -> RETIRING -> RETIRED -> IDLE
 - The worker always prepares operation SQEs before cancellation SQEs for the
   same ticket.
 - The final operation never sets `IOSQE_CQE_SKIP_SUCCESS`; its CQE is the
-  per-segment target-retirement fence on success, error, linked cancellation,
-  and short/partial ring submission retry.
+  per-segment target-retirement fence on success and final-operation error.
+- Linux explicitly omits CQEs for all later soft-linked requests when a
+  `IOSQE_CQE_SKIP_SUCCESS` request fails. In that case the visible
+  intermediate error CQE is the retirement fence for the omitted tail.
+  Waiting for a final `-ECANCELED` CQE would deadlock. This follows the
+  [`io_uring_enter(2)` CQE-skip contract](https://man7.org/linux/man-pages/man2/io_uring_enter2.2.html).
 
 ### 5.3 Cancellation tokens
 
@@ -182,7 +187,9 @@ duplicated CQEs.
 
 A ticket records cancel SQEs prepared and cancel CQEs observed. `0`,
 `-ENOENT`, and `-EALREADY` are control outcomes, not target-retirement evidence.
-Only the final operation token retires target ownership.
+Target ownership is retired only by an operation CQE: either the explicit
+tail CQE or the intermediate error CQE whose soft-link semantics guarantee
+that the kernel omitted the remaining targets.
 
 ### 5.4 Request integration
 
@@ -300,12 +307,14 @@ One worker pass performs:
 
 Preparing operations before their cancels prevents a cancel from returning
 `ENOENT` and then allowing a not-yet-visible target to be submitted afterward.
-Short ring submits preserve the existing retry obligation; a ticket cannot
-retire until its final target CQEs arrive.
+Short ring submits preserve the existing retry obligation. A ticket cannot
+retire until each segment has either observed its final target CQE or observed
+an intermediate skip-mode error that contractually retires the omitted tail.
 
 Completion handling is allocation-free:
 
-- operation CQE -> reduce semantic result, note final-target retirement;
+- operation CQE -> reduce semantic result and note either explicit-tail or
+  omitted-tail target retirement;
 - cancel CQE -> validate generation and note cancel retirement;
 - reusable segment -> increment ticket retired count;
 - final reusable segment -> claim ticket once and complete its one request.
@@ -420,4 +429,3 @@ notes must separate:
 - multishot receive or provided-buffer-ring integration;
 - cross-node migration of an attached fixed instance;
 - claiming a general LLAM speedup from Linux-only evidence.
-
