@@ -1402,6 +1402,198 @@ cleanup:
     return failed;
 }
 
+typedef struct embedded_reuse_state {
+    llam_fd_t pair[2];
+    leir_phase0_program_t *program;
+    llam_io_req_t *held_request;
+    unsigned char expected[LEIR_PENDING_TEST_BYTES];
+    unsigned char received[LEIR_PENDING_TEST_BYTES];
+    leir_phase0_metrics_t metrics;
+    atomic_uint request_held;
+    atomic_uint request_released;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[96];
+} embedded_reuse_state_t;
+
+static void embedded_reuse_fail(
+    embedded_reuse_state_t *state,
+    const char *where,
+    int error_code) {
+    if (atomic_fetch_add_explicit(
+            &state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = error_code;
+        (void)snprintf(
+            state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static void embedded_reuse_release_task(void *arg) {
+    embedded_reuse_state_t *state = arg;
+
+    while (atomic_load_explicit(
+               &state->request_held, memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    atomic_store_explicit(
+        &state->held_request->backend_event_refs,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &state->request_released, 1U, memory_order_release);
+}
+
+static void embedded_reuse_peer_task(void *arg) {
+    embedded_reuse_state_t *state = arg;
+
+    if (llam_sleep_ns(UINT64_C(2) * 1000U * 1000U) != 0 ||
+        leir_test_write_all(
+            state->pair[1],
+            state->expected,
+            sizeof(state->expected)) != 0) {
+        embedded_reuse_fail(state, "embedded reuse peer", errno);
+    }
+}
+
+static void embedded_reuse_instance_task(void *arg) {
+    embedded_reuse_state_t *state = arg;
+    leir_phase0_run_opts_t opts = {
+        .inline_budget = 8U,
+        .force_backend = true,
+    };
+    leir_phase0_value_t values[4] = {0};
+    leir_phase0_value_t values_out[4] = {0};
+    leir_phase0_instance_t instance;
+
+    if (leir_phase0_instance_init(
+            &instance, sizeof(instance), state->program) != 0) {
+        embedded_reuse_fail(state, "embedded reuse init", errno);
+        return;
+    }
+    values[0].fd = state->pair[0];
+    values[1].buffer.data = state->received;
+    values[1].buffer.size = sizeof(state->received);
+    values[2].u64 = sizeof(state->received);
+    values[3].i64 = -1;
+    if (leir_phase0_instance_bind(
+            &instance, values, 4U, &opts) != 0) {
+        embedded_reuse_fail(state, "embedded reuse bind", errno);
+        return;
+    }
+
+    /*
+     * Model the real terminal-completion race: the task is runnable while
+     * the backend worker still owns its event-batch pin. A LEIR activation
+     * must wait for the embedded request instead of entering the allocator.
+     */
+    state->held_request = &g_llam_tls_task->embedded_io_req;
+    atomic_store_explicit(
+        &state->held_request->backend_event_refs,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &state->request_held, 1U, memory_order_release);
+
+    memset(&state->metrics, 0, sizeof(state->metrics));
+    if (leir_phase0_instance_run(
+            &instance, values_out, 4U, &state->metrics) != 0) {
+        embedded_reuse_fail(state, "embedded reuse run", errno);
+        return;
+    }
+    if (atomic_load_explicit(
+            &state->request_released, memory_order_acquire) == 0U ||
+        values_out[3].i64 != (int64_t)sizeof(state->received) ||
+        memcmp(
+            state->received,
+            state->expected,
+            sizeof(state->received)) != 0 ||
+        state->metrics.heap_requests != 0U ||
+        state->metrics.hot_allocations != 0U) {
+        embedded_reuse_fail(
+            state, "embedded reuse result or allocation", EPROTO);
+    }
+}
+
+static int test_embedded_request_reuse_avoids_heap_fallback(void) {
+    embedded_reuse_state_t state;
+    leir_phase0_program_desc_t desc = valid_program_desc();
+    llam_runtime_opts_t opts;
+    llam_task_t *instance_task = NULL;
+    llam_task_t *release_task = NULL;
+    llam_task_t *peer_task = NULL;
+    bool runtime_started = false;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.pair[0] = LLAM_INVALID_FD;
+    state.pair[1] = LLAM_INVALID_FD;
+    atomic_init(&state.request_held, 0U);
+    atomic_init(&state.request_released, 0U);
+    atomic_init(&state.failures, 0U);
+    leir_test_fill_pattern(
+        state.expected,
+        sizeof(state.expected),
+        UINT64_C(0x4c45495252455553));
+    if (leir_phase0_program_create(&desc, &state.program) != 0 ||
+        leir_test_socketpair(state.pair) != 0) {
+        goto cleanup;
+    }
+
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&opts) != 0) {
+        goto cleanup;
+    }
+    runtime_started = true;
+    instance_task =
+        llam_spawn(embedded_reuse_instance_task, &state, NULL);
+    release_task =
+        llam_spawn(embedded_reuse_release_task, &state, NULL);
+    peer_task =
+        llam_spawn(embedded_reuse_peer_task, &state, NULL);
+    if (instance_task == NULL || release_task == NULL ||
+        peer_task == NULL || llam_run() != 0 ||
+        llam_join(instance_task) != 0 ||
+        llam_join(release_task) != 0 ||
+        llam_join(peer_task) != 0) {
+        goto cleanup;
+    }
+    instance_task = NULL;
+    release_task = NULL;
+    peer_task = NULL;
+    if (atomic_load_explicit(
+            &state.failures, memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "embedded reuse failed at %s: errno=%d heap=%llu hot=%llu\n",
+            state.first_case,
+            state.first_errno,
+            (unsigned long long)state.metrics.heap_requests,
+            (unsigned long long)state.metrics.hot_allocations);
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    if (state.held_request != NULL &&
+        atomic_load_explicit(
+            &state.request_released, memory_order_acquire) == 0U) {
+        atomic_store_explicit(
+            &state.held_request->backend_event_refs,
+            0U,
+            memory_order_release);
+    }
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
+    leir_test_close(&state.pair[0]);
+    leir_test_close(&state.pair[1]);
+    leir_phase0_program_destroy(state.program);
+    return failed;
+}
+
 #define LEIR_DIFF_BYTES 64U
 #define LEIR_DIFF_MAX_ROUNDS 4U
 #define LEIR_DIFF_MODES 2U
@@ -2687,6 +2879,12 @@ int main(void) {
     }
     if (test_pending_read_terminal_uses_one_park() != 0) {
         fputs("test_pending_read_terminal_uses_one_park failed\n", stderr);
+        return 1;
+    }
+    if (test_embedded_request_reuse_avoids_heap_fallback() != 0) {
+        fputs(
+            "test_embedded_request_reuse_avoids_heap_fallback failed\n",
+            stderr);
         return 1;
     }
     if (test_multi_node_differential_advancement() != 0) {

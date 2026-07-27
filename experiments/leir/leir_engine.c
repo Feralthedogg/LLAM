@@ -961,6 +961,44 @@ static void copy_outputs(
     *metrics_out = instance->metrics;
 }
 
+static bool embedded_request_is_reusable(const llam_task_t *task) {
+    const llam_io_req_t *req;
+
+    if (task == NULL ||
+        llam_task_active_io_req_load(task) != NULL) {
+        return false;
+    }
+    req = &task->embedded_io_req;
+    return atomic_load_explicit(
+               &req->lifetime_refs, memory_order_acquire) == 0U &&
+           atomic_load_explicit(
+               &req->cancel_queued, memory_order_acquire) == 0U &&
+           atomic_load_explicit(
+               &req->cancel_submitted, memory_order_acquire) == 0U &&
+           atomic_load_explicit(
+               &req->free_after_cancel, memory_order_acquire) == 0U &&
+           atomic_load_explicit(
+               &req->backend_event_refs, memory_order_acquire) == 0U &&
+           atomic_load_explicit(
+               &req->release_after_event, memory_order_acquire) == 0U;
+}
+
+static llam_io_req_t *acquire_embedded_request(
+    llam_shard_t *shard,
+    llam_task_t *task) {
+    /*
+     * A backend may make the task runnable before dropping its event-batch
+     * lifetime pin. Generic task I/O may use an allocator-backed request in
+     * that narrow window, but LEIR's Phase 0A contract forbids hot-path
+     * request allocation. Cooperatively wait for the task-owned slot instead;
+     * the measured scheduling cost remains visible in the paired benchmark.
+     */
+    while (!embedded_request_is_reusable(task)) {
+        llam_yield();
+    }
+    return llam_api_io_req_acquire(shard);
+}
+
 int leir_phase0_instance_run(
     leir_phase0_instance_t *instance,
     leir_phase0_value_t *values_out,
@@ -1001,7 +1039,7 @@ int leir_phase0_instance_run(
         return -1;
     }
 
-    req = llam_api_io_req_acquire(g_llam_tls_shard);
+    req = acquire_embedded_request(g_llam_tls_shard, task);
     if (req == NULL) {
         atomic_store_explicit(
             &instance->running, 0U, memory_order_release);
