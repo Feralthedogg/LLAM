@@ -354,6 +354,7 @@ class RunnerContractTests(unittest.TestCase):
                 kwargs.get("max_output_bytes"),
                 MAX_OUTPUT_BYTES,
             )
+            self.assertEqual(kwargs.get("timeout"), 120.0)
             return result
 
         return run_one(

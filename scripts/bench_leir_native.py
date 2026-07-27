@@ -570,7 +570,7 @@ def run_one(
         order=order,
     )
     effective_timeout = (
-        max(30.0, min_mode_ms / 1000.0 * 24.0)
+        max(120.0, min_mode_ms / 1000.0 * 24.0)
         if timeout is None
         else timeout
     )
