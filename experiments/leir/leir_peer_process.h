@@ -49,6 +49,7 @@ typedef struct leir_peer_config {
     size_t payload;
     uint64_t activations;
     unsigned transactions_per_activation;
+    unsigned warmup_transactions_per_connection;
     leir_peer_socket_kind_t socket_kind;
     unsigned operations_per_activation;
 } leir_peer_config_t;

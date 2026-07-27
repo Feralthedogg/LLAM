@@ -315,7 +315,8 @@ static int validate_peer_config(
         config->payload < 8U ||
         config->payload > 16384U ||
         config->activations == 0U ||
-        config->transactions_per_activation == 0U) {
+        config->transactions_per_activation == 0U ||
+        config->warmup_transactions_per_connection > 16U) {
         return EINVAL;
     }
     native_shape =
@@ -332,15 +333,17 @@ static int validate_peer_config(
             LEIR_PEER_SOCKET_SEQPACKET) {
         unsigned transactions;
 
-        if (!native_shape ||
-            config->workload !=
-                LEIR_BENCH_WORKLOAD_SOCKET_RELAY) {
+        if (config->workload !=
+            LEIR_BENCH_WORKLOAD_SOCKET_RELAY) {
             return EINVAL;
         }
-        transactions =
-            config->operations_per_activation;
-        if (config->transactions_per_activation !=
-            transactions) {
+        transactions = config->operations_per_activation;
+        if ((transactions == 0U &&
+             config->transactions_per_activation != 1U) ||
+            (transactions != 0U &&
+             (!native_shape ||
+              config->transactions_per_activation !=
+                  transactions))) {
             return EINVAL;
         }
     } else {
@@ -352,7 +355,8 @@ static int validate_peer_config(
 static bool peer_is_one_way(
     const leir_peer_config_t *config) {
     return config->socket_kind ==
-           LEIR_PEER_SOCKET_SEQPACKET;
+               LEIR_PEER_SOCKET_SEQPACKET &&
+           config->operations_per_activation != 0U;
 }
 
 static uint64_t transactions_for_connection(
@@ -369,7 +373,14 @@ static uint64_t transactions_for_connection(
         UINT64_MAX / config->transactions_per_activation) {
         return UINT64_MAX;
     }
-    return activations * config->transactions_per_activation;
+    activations *= config->transactions_per_activation;
+    if (activations >
+        UINT64_MAX -
+            config->warmup_transactions_per_connection) {
+        return UINT64_MAX;
+    }
+    return activations +
+           config->warmup_transactions_per_connection;
 }
 
 #if LLAM_PLATFORM_WINDOWS
@@ -640,14 +651,20 @@ static int service_peer_connections(
                 status = EPROTO;
                 goto cleanup;
             }
-            checksum ^= rotate_checksum(
-                leir_test_payload_checksum(
-                    connection->response,
-                    config->payload,
-                    i,
-                    connection->sequence),
-                (unsigned)((i + connection->sequence) & 63U));
-            completed += 1U;
+            if (connection->sequence >=
+                config->
+                    warmup_transactions_per_connection) {
+                checksum ^= rotate_checksum(
+                    leir_test_payload_checksum(
+                        connection->response,
+                        config->payload,
+                        i,
+                        connection->sequence),
+                    (unsigned)(
+                        (i + connection->sequence) &
+                        63U));
+                completed += 1U;
+            }
             connection->sequence += 1U;
             if (connection->sequence ==
                 connection->transaction_count) {
