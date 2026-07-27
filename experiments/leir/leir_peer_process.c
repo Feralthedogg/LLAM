@@ -305,6 +305,8 @@ static void close_fd_array(llam_fd_t *fds, unsigned count) {
 
 static int validate_peer_config(
     const leir_peer_config_t *config) {
+    bool native_shape;
+
     if (config == NULL ||
         config->workload < LEIR_BENCH_WORKLOAD_SOCKET_RELAY ||
         config->workload > LEIR_BENCH_WORKLOAD_GRAPH_BREAK ||
@@ -316,7 +318,44 @@ static int validate_peer_config(
         config->transactions_per_activation == 0U) {
         return EINVAL;
     }
+    native_shape =
+        config->operations_per_activation == 1U ||
+        config->operations_per_activation == 2U ||
+        config->operations_per_activation == 4U ||
+        config->operations_per_activation == 8U;
+    if (config->socket_kind == LEIR_PEER_SOCKET_STREAM) {
+        if (config->operations_per_activation != 0U) {
+            return EINVAL;
+        }
+    } else if (
+        config->socket_kind ==
+            LEIR_PEER_SOCKET_SEQPACKET) {
+        unsigned transactions;
+
+        if (!native_shape ||
+            config->workload !=
+                LEIR_BENCH_WORKLOAD_SOCKET_RELAY) {
+            return EINVAL;
+        }
+        transactions =
+            config->operations_per_activation == 1U
+                ? 1U
+                : config->operations_per_activation / 2U;
+        if (config->transactions_per_activation !=
+            transactions) {
+            return EINVAL;
+        }
+    } else {
+        return EINVAL;
+    }
     return 0;
+}
+
+static bool peer_is_one_way(
+    const leir_peer_config_t *config) {
+    return config->socket_kind ==
+               LEIR_PEER_SOCKET_SEQPACKET &&
+           config->operations_per_activation == 1U;
 }
 
 static uint64_t transactions_for_connection(
@@ -584,6 +623,35 @@ static int service_peer_connections(
             }
             connection->offset = 0U;
             if (connection->stage == LEIR_PEER_STAGE_SEND) {
+                if (peer_is_one_way(config)) {
+                    checksum ^= rotate_checksum(
+                        leir_test_payload_checksum(
+                            connection->request,
+                            config->payload,
+                            i,
+                            connection->sequence),
+                        (unsigned)(
+                            (i + connection->sequence) &
+                            63U));
+                    completed += 1U;
+                    connection->sequence += 1U;
+                    if (connection->sequence ==
+                        connection->transaction_count) {
+                        connection->stage =
+                            LEIR_PEER_STAGE_DONE;
+                        leir_test_close(&peer_fds[i]);
+                        active -= 1U;
+                    } else {
+                        connection->stage =
+                            LEIR_PEER_STAGE_SEND;
+                        leir_test_prepare_payload(
+                            connection->request,
+                            config->payload,
+                            i,
+                            connection->sequence);
+                    }
+                    continue;
+                }
                 connection->stage =
                     LEIR_PEER_STAGE_RECEIVE;
                 continue;
@@ -786,7 +854,12 @@ int leir_peer_process_start(
             LLAM_INVALID_FD,
         };
 
-        if (leir_test_socketpair(pair) != 0) {
+        if (leir_test_socketpair_type(
+                config->socket_kind ==
+                        LEIR_PEER_SOCKET_SEQPACKET
+                    ? SOCK_SEQPACKET
+                    : SOCK_STREAM,
+                pair) != 0) {
             destroy_peer_storage(peer);
             return -1;
         }

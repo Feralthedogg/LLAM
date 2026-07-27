@@ -530,6 +530,21 @@ target_include_directories(test_leir_native_segment PRIVATE
 )
 target_link_libraries(test_leir_native_segment PRIVATE llam_runtime)
 
+add_executable(bench_leir_native_segment
+    experiments/leir/leir_program.c
+    experiments/leir/leir_native_plan.c
+    experiments/leir/leir_native_segment.c
+    experiments/leir/leir_peer_process.c
+    experiments/leir/leir_test_support.c
+    experiments/leir/bench_leir_native_segment.c
+)
+target_include_directories(bench_leir_native_segment PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(bench_leir_native_segment PRIVATE llam_runtime)
+
 add_executable(test_leir_native_linux
     experiments/leir/test_leir_native_linux.c
 )
@@ -561,6 +576,19 @@ add_test(NAME test_leir_native_plan COMMAND test_leir_native_plan)
 add_test(
     NAME test_leir_native_segment
     COMMAND test_leir_native_segment)
+add_test(
+    NAME test_bench_leir_native_segment_smoke
+    COMMAND bench_leir_native_segment
+        --candidate link
+        --ops 2
+        --concurrency 4
+        --payload 64
+        --activations 8
+        --min-mode-ms 1
+        --order ABBA)
+set_tests_properties(
+    test_bench_leir_native_segment_smoke
+    PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME test_leir_native_linux COMMAND test_leir_native_linux --unit-only)
 add_test(
     NAME test_bench_leir_phase0_smoke
@@ -853,6 +881,7 @@ foreach(LLAM_TEST_TARGET
         test_leir_phase0
         test_leir_native_plan
         test_leir_native_segment
+        bench_leir_native_segment
         test_leir_native_linux
         bench_leir_phase0
         test_abi_contract

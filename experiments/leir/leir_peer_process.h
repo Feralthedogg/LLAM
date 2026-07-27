@@ -17,6 +17,11 @@ typedef enum leir_bench_order {
     LEIR_BENCH_ORDER_BAAB = 1,
 } leir_bench_order_t;
 
+typedef enum leir_peer_socket_kind {
+    LEIR_PEER_SOCKET_STREAM = 0,
+    LEIR_PEER_SOCKET_SEQPACKET = 1,
+} leir_peer_socket_kind_t;
+
 typedef struct leir_bench_options {
     leir_bench_workload_t workload;
     unsigned nodes;
@@ -44,6 +49,8 @@ typedef struct leir_peer_config {
     size_t payload;
     uint64_t activations;
     unsigned transactions_per_activation;
+    leir_peer_socket_kind_t socket_kind;
+    unsigned operations_per_activation;
 } leir_peer_config_t;
 
 typedef struct leir_peer_result {

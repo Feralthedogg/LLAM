@@ -41,6 +41,7 @@ CLEAN_FILES = \
 	test_leir_native_plan \
 	test_leir_native_segment \
 	test_leir_native_linux \
+	bench_leir_native_segment \
 	bench_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
@@ -96,6 +97,7 @@ CLEAN_FILES = \
 	test_leir_native_plan.exe \
 	test_leir_native_segment.exe \
 	test_leir_native_linux.exe \
+	bench_leir_native_segment.exe \
 	bench_leir_phase0.exe \
 	test_lccf_model.exe \
 	bench_lccf_model.exe \
@@ -571,6 +573,13 @@ LEIR_NATIVE_SEGMENT_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_native_segment.o
 LEIR_NATIVE_LINUX_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_native_linux.o
+LEIR_NATIVE_BENCH_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_native_plan.o \
+	$(OBJDIR)/experiments/leir/leir_native_segment.o \
+	$(OBJDIR)/experiments/leir/leir_peer_process.o \
+	$(OBJDIR)/experiments/leir/leir_test_support.o \
+	$(OBJDIR)/experiments/leir/bench_leir_native_segment.o
 LCWE_MODEL_CORE_OBJS = \
 	$(OBJDIR)/experiments/lcwe/lcwe_model.o \
 	$(OBJDIR)/experiments/lcwe/lcwe_workloads.o
@@ -632,6 +641,7 @@ BUILD_OBJS = \
 	$(LEIR_NATIVE_PLAN_TEST_OBJS) \
 	$(LEIR_NATIVE_SEGMENT_TEST_OBJS) \
 	$(LEIR_NATIVE_LINUX_TEST_OBJS) \
+	$(LEIR_NATIVE_BENCH_OBJS) \
 	$(LCWE_MODEL_CORE_OBJS) \
 	$(LCWE_MODEL_TEST_OBJS) \
 	$(LCWE_MODEL_BENCH_OBJS) \
@@ -653,6 +663,7 @@ LINK_TARGETS = \
 	test_leir_native_plan \
 	test_leir_native_segment \
 	test_leir_native_linux \
+	bench_leir_native_segment \
 	bench_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
@@ -2249,6 +2260,9 @@ test_leir_native_segment: $(RUNTIME_OBJS) $(LEIR_NATIVE_SEGMENT_TEST_OBJS)
 
 test_leir_native_linux: $(RUNTIME_OBJS) $(LEIR_NATIVE_LINUX_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_LINUX_TEST_OBJS) $(LDLIBS)
+
+bench_leir_native_segment: $(RUNTIME_OBJS) $(LEIR_NATIVE_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_BENCH_OBJS) $(LDLIBS)
 
 bench_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_BENCH_OBJS) $(LDLIBS)
