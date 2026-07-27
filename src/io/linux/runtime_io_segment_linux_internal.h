@@ -94,6 +94,14 @@ typedef struct llam_linux_native_token {
     uint32_t reserved32;
 } llam_linux_native_token_t;
 
+typedef struct llam_linux_native_cancel_token {
+    _Alignas(8) llam_linux_native_segment_t *owner;
+    uint64_t generation;
+    uint16_t operation_index;
+    uint16_t reserved16;
+    uint32_t reserved32;
+} llam_linux_native_cancel_token_t;
+
 struct llam_linux_native_segment {
     llam_runtime_t *owner_runtime;
     llam_node_t *owner_node;
@@ -102,6 +110,8 @@ struct llam_linux_native_segment {
         ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     llam_linux_native_token_t
         tokens[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    llam_linux_native_cancel_token_t
+        cancel_tokens[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     llam_linux_native_segment_t *next;
     llam_linux_native_batch_t *batch;
     uint64_t generation;
@@ -115,6 +125,7 @@ struct llam_linux_native_segment {
     uint64_t terminal_wakes;
     uint64_t hot_allocations;
     uint64_t observed_operation_mask;
+    uint64_t observed_cancel_mask;
     unsigned op_count;
     unsigned completed_cqes;
     unsigned first_error_index;
@@ -137,11 +148,14 @@ struct llam_linux_native_batch {
     llam_linux_native_batch_t *cancel_next;
     unsigned segment_count;
     unsigned retired_segments;
+    unsigned cancel_sqes_prepared;
+    unsigned cancel_cqes_observed;
     int terminal_result;
     unsigned first_error_segment;
     atomic_uint state;
     atomic_uint terminal_claimed;
     atomic_uint cancel_state;
+    atomic_uint cancel_requested;
 };
 
 LLAM_INTERNAL_API int llam_linux_native_segment_configure(
@@ -168,9 +182,29 @@ llam_linux_native_batch_take_all(llam_node_t *node);
 LLAM_INTERNAL_API unsigned llam_linux_native_batch_submit_one(
     llam_node_t *node,
     llam_linux_native_batch_t *batch);
+LLAM_INTERNAL_API bool llam_linux_native_batch_abort_queued(
+    llam_node_t *node,
+    llam_linux_native_batch_t *batch,
+    llam_io_req_t *req);
+LLAM_INTERNAL_API bool llam_linux_native_batch_request_cancel(
+    llam_node_t *node,
+    llam_linux_native_batch_t *batch,
+    llam_io_req_t *req);
+LLAM_INTERNAL_API llam_linux_native_batch_t *
+llam_linux_native_cancel_take_all(llam_node_t *node);
+LLAM_INTERNAL_API unsigned llam_linux_native_batch_submit_cancel(
+    llam_node_t *node,
+    llam_linux_native_batch_t *batch);
+LLAM_INTERNAL_API void llam_linux_native_batch_maybe_complete(
+    llam_node_t *node,
+    llam_linux_native_batch_t *batch);
 LLAM_INTERNAL_API void llam_linux_native_segment_handle_cqe(
     llam_node_t *node,
     llam_linux_native_token_t *token,
+    int result);
+LLAM_INTERNAL_API void llam_linux_native_cancel_handle_cqe(
+    llam_node_t *node,
+    llam_linux_native_cancel_token_t *token,
     int result);
 
 #endif

@@ -159,6 +159,19 @@ llam_linux_native_batch_take_all(llam_node_t *node);
 unsigned llam_linux_native_batch_submit_one(
     llam_node_t *node,
     struct llam_linux_native_batch *batch);
+bool llam_linux_native_batch_abort_queued(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch,
+    llam_io_req_t *req);
+bool llam_linux_native_batch_request_cancel(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch,
+    llam_io_req_t *req);
+struct llam_linux_native_batch *
+llam_linux_native_cancel_take_all(llam_node_t *node);
+unsigned llam_linux_native_batch_submit_cancel(
+    llam_node_t *node,
+    struct llam_linux_native_batch *batch);
 #endif
 
 /*

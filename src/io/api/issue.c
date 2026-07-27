@@ -1180,9 +1180,6 @@ int llam_issue_linux_native_batch(
             LLAM_LINUX_NATIVE_BATCH_MAX_SEGMENTS) {
         return llam_fail_io_setup_req(req, EBUSY);
     }
-    if (task->cancel_token != NULL) {
-        return llam_fail_io_setup_req(req, ENOTSUP);
-    }
     if (atomic_load_explicit(
             &rt->stop_requested, memory_order_acquire) ||
         atomic_load_explicit(
@@ -1279,6 +1276,7 @@ int llam_issue_linux_native_segment(
     atomic_init(
         &batch.cancel_state,
         LLAM_LINUX_NATIVE_CANCEL_NONE);
+    atomic_init(&batch.cancel_requested, 0U);
     return llam_issue_linux_native_batch(&batch, req);
 }
 #endif

@@ -142,6 +142,14 @@ void llam_io_handle_cqe(llam_node_t *node, struct io_uring_cqe *cqe) {
                 node, token, res);
             break;
         }
+        case LLAM_IO_UDATA_NATIVE_CANCEL: {
+            llam_linux_native_cancel_token_t *token =
+                llam_io_udata_ptr(user_data);
+
+            llam_linux_native_cancel_handle_cqe(
+                node, token, res);
+            break;
+        }
         case LLAM_IO_UDATA_POLL_WATCH: {
             llam_poll_watch_t *watch = llam_io_udata_ptr(user_data);
             llam_poll_watch_t *backend_watch = watch;

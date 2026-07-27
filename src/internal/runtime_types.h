@@ -579,6 +579,9 @@ typedef struct llam_io_req {
     uint64_t deadline_ns;
     unsigned short provided_bid;
     void *platform_data;
+#if LLAM_RUNTIME_BACKEND_LINUX
+    _Atomic(struct llam_linux_native_batch *) linux_native_batch;
+#endif
     llam_io_completion_sink_fn completion_sink;
     void *completion_sink_context;
     atomic_uint wait_mode;

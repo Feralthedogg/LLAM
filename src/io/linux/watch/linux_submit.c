@@ -195,6 +195,7 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
 void llam_io_submit_batch(llam_node_t *node) {
     llam_io_control_op_t *controls;
     llam_linux_native_batch_t *batches;
+    llam_linux_native_batch_t *cancellations;
     llam_io_req_t *reqs;
     unsigned submitted = 0U;
 
@@ -202,6 +203,7 @@ void llam_io_submit_batch(llam_node_t *node) {
     llam_fd_watch_lifecycle_lock();
     controls = llam_take_node_controls(node);
     batches = llam_linux_native_batch_take_all(node);
+    cancellations = llam_linux_native_cancel_take_all(node);
     reqs = llam_take_node_submissions(node);
 
     while (controls != NULL) {
@@ -220,6 +222,17 @@ void llam_io_submit_batch(llam_node_t *node) {
         submitted += llam_linux_native_batch_submit_one(
             node, batches);
         batches = next;
+    }
+
+    while (cancellations != NULL) {
+        llam_linux_native_batch_t *next =
+            cancellations->cancel_next;
+
+        cancellations->cancel_next = NULL;
+        submitted +=
+            llam_linux_native_batch_submit_cancel(
+                node, cancellations);
+        cancellations = next;
     }
 
     while (reqs != NULL) {

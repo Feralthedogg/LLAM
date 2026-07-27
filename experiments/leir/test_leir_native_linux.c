@@ -175,6 +175,7 @@ static int queue_fixture_init(
     atomic_init(
         &fixture->batch.cancel_state,
         LLAM_LINUX_NATIVE_CANCEL_NONE);
+    atomic_init(&fixture->batch.cancel_requested, 0U);
     return 0;
 }
 
@@ -381,6 +382,7 @@ static void initialize_batch(
     atomic_init(
         &batch->cancel_state,
         LLAM_LINUX_NATIVE_CANCEL_NONE);
+    atomic_init(&batch->cancel_requested, 0U);
 }
 
 static int test_batch_enqueue_publishes_width_two_once(void) {
@@ -567,6 +569,132 @@ static int test_batch_enqueue_rejects_invalid_groups(void) {
     return 0;
 }
 
+static int test_batch_abort_queued_detaches_exact_ticket(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_segment_t middle_first;
+    llam_linux_native_segment_t middle_second;
+    llam_linux_native_segment_t last;
+    llam_linux_native_op_t
+        middle_first_ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    llam_linux_native_op_t
+        middle_second_ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    llam_linux_native_op_t
+        last_ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned char
+        middle_first_buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    unsigned char
+        middle_second_buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    unsigned char
+        last_buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    llam_linux_native_batch_t middle_batch;
+    llam_linux_native_batch_t last_batch;
+    llam_io_req_t middle_req;
+    llam_io_req_t last_req;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            2U,
+            &completions) != 0 ||
+        configure_batch_peer(
+            &fixture,
+            &middle_first,
+            middle_first_ops,
+            middle_first_buffers,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK) != 0 ||
+        configure_batch_peer(
+            &fixture,
+            &middle_second,
+            middle_second_ops,
+            middle_second_buffers,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK) != 0 ||
+        configure_batch_peer(
+            &fixture,
+            &last,
+            last_ops,
+            last_buffers,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK) != 0) {
+        perror("queued abort fixture init");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    middle_first.generation = UINT64_C(2);
+    middle_second.generation = UINT64_C(3);
+    last.generation = UINT64_C(4);
+    llam_io_req_reset(
+        &middle_req, &fixture.runtime, 0U, UINT_MAX);
+    llam_io_req_reset(
+        &last_req, &fixture.runtime, 0U, UINT_MAX);
+    atomic_store_explicit(
+        &middle_req.wait_mode,
+        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE,
+        memory_order_release);
+    atomic_store_explicit(
+        &last_req.wait_mode,
+        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE,
+        memory_order_release);
+    initialize_batch(
+        &middle_batch,
+        &fixture.runtime,
+        &middle_first,
+        &middle_second,
+        2U);
+    initialize_batch(
+        &last_batch,
+        &fixture.runtime,
+        &last,
+        NULL,
+        1U);
+    if (!llam_linux_native_batch_enqueue(
+            &fixture.node,
+            &fixture.batch,
+            &fixture.req) ||
+        !llam_linux_native_batch_enqueue(
+            &fixture.node,
+            &middle_batch,
+            &middle_req) ||
+        !llam_linux_native_batch_enqueue(
+            &fixture.node,
+            &last_batch,
+            &last_req) ||
+        !llam_linux_native_batch_abort_queued(
+            &fixture.node,
+            &middle_batch,
+            &middle_req) ||
+        fixture.node.native_batch_head != &fixture.batch ||
+        fixture.batch.next != &last_batch ||
+        fixture.node.native_batch_tail != &last_batch ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 2U ||
+        atomic_load_explicit(
+            &middle_req.wait_mode,
+            memory_order_acquire) !=
+            LLAM_IO_WAIT_MODE_NONE ||
+        atomic_load_explicit(
+            &middle_req.linux_native_batch,
+            memory_order_acquire) != NULL ||
+        atomic_load_explicit(
+            &middle_batch.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_BATCH_RETIRED ||
+        atomic_load_explicit(
+            &middle_first.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED ||
+        atomic_load_explicit(
+            &middle_second.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED) {
+        fprintf(stderr, "queued native batch detach mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
 static int keep_linux_ring_full(
     llam_node_t *node,
     unsigned expected,
@@ -577,6 +705,18 @@ static int keep_linux_ring_full(
     (void)expected;
     *calls += 1U;
     return 0;
+}
+
+static int fail_linux_ring_permanently(
+    llam_node_t *node,
+    unsigned expected,
+    void *arg) {
+    unsigned *calls = arg;
+
+    (void)node;
+    (void)expected;
+    *calls += 1U;
+    return -EIO;
 }
 
 static void init_userspace_sq_fixture(
@@ -626,6 +766,419 @@ static int prepare_dispatch_fixture(
         errno = EIO;
         return -1;
     }
+    return 0;
+}
+
+typedef enum cancel_event_kind {
+    CANCEL_EVENT_TARGET = 0,
+    CANCEL_EVENT_CONTROL = 1,
+} cancel_event_kind_t;
+
+typedef struct cancel_event {
+    cancel_event_kind_t kind;
+    unsigned operation_index;
+    int result;
+} cancel_event_t;
+
+static int prepare_cancel_fixture(
+    queue_fixture_t *fixture,
+    unsigned *completions,
+    struct io_uring_sqe *sqes,
+    unsigned *sq_head) {
+    llam_linux_native_batch_t *cancelled;
+
+    if (prepare_dispatch_fixture(
+            fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            2U,
+            completions,
+            sqes,
+            8U,
+            sq_head) != 0) {
+        return -1;
+    }
+    atomic_store_explicit(
+        &fixture->req.abort_reason,
+        LLAM_IO_ABORT_CANCEL,
+        memory_order_release);
+    if (!llam_linux_native_batch_request_cancel(
+            &fixture->node,
+            &fixture->batch,
+            &fixture->req)) {
+        queue_fixture_destroy(fixture);
+        return -1;
+    }
+    cancelled = llam_linux_native_cancel_take_all(
+        &fixture->node);
+    if (cancelled != &fixture->batch ||
+        llam_linux_native_batch_submit_cancel(
+            &fixture->node, cancelled) != 2U) {
+        queue_fixture_destroy(fixture);
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
+static int run_cancel_order_case(
+    const cancel_event_t *events,
+    size_t event_count,
+    ssize_t expected_result,
+    int expected_error) {
+    queue_fixture_t fixture;
+    struct io_uring_sqe sqes[8];
+    unsigned completions = 0U;
+    unsigned sq_head;
+    size_t i;
+
+    if (prepare_cancel_fixture(
+            &fixture,
+            &completions,
+            sqes,
+            &sq_head) != 0) {
+        perror("cancel order fixture init");
+        return 1;
+    }
+    for (i = 0U; i < event_count; i += 1U) {
+        const cancel_event_t *event = &events[i];
+
+        if (event->kind == CANCEL_EVENT_CONTROL) {
+            llam_linux_native_cancel_handle_cqe(
+                &fixture.node,
+                &fixture.segment.cancel_tokens[
+                    event->operation_index],
+                event->result);
+        } else {
+            llam_linux_native_segment_handle_cqe(
+                &fixture.node,
+                &fixture.segment.tokens[
+                    event->operation_index],
+                event->result);
+        }
+        if (i + 1U < event_count &&
+            (completions != 0U ||
+             atomic_load_explicit(
+                 &fixture.node.pending_ops,
+                 memory_order_acquire) != 1U ||
+             atomic_load_explicit(
+                 &fixture.shard.inflight_io_waiters,
+                 memory_order_acquire) != 1U)) {
+            fprintf(stderr, "native cancel completed on prefix %zu\n", i);
+            queue_fixture_destroy(&fixture);
+            return 1;
+        }
+    }
+    if (completions != 1U ||
+        fixture.req.result != expected_result ||
+        fixture.req.error_code != expected_error ||
+        fixture.batch.cancel_sqes_prepared != 2U ||
+        fixture.batch.cancel_cqes_observed != 2U ||
+        fixture.segment.observed_cancel_mask != UINT64_C(0x03) ||
+        atomic_load_explicit(
+            &fixture.batch.cancel_state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_CANCEL_RETIRED ||
+        atomic_load_explicit(
+            &fixture.batch.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_BATCH_RETIRED ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "native cancel retirement mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_cancel_and_target_orderings_retire_once(void) {
+    static const cancel_event_t cancel_before_target[] = {
+        {CANCEL_EVENT_CONTROL, 0U, 0},
+        {CANCEL_EVENT_TARGET, 0U, -ECANCELED},
+        {CANCEL_EVENT_CONTROL, 1U, -ENOENT},
+        {CANCEL_EVENT_TARGET, 1U, -ECANCELED},
+    };
+    static const cancel_event_t target_before_cancel[] = {
+        {CANCEL_EVENT_TARGET, 0U, 16},
+        {CANCEL_EVENT_TARGET, 1U, 17},
+        {CANCEL_EVENT_CONTROL, 0U, -ENOENT},
+        {CANCEL_EVENT_CONTROL, 1U, -EALREADY},
+    };
+
+    if (run_cancel_order_case(
+            cancel_before_target,
+            sizeof(cancel_before_target) /
+                sizeof(cancel_before_target[0]),
+            -1,
+            ECANCELED) != 0 ||
+        run_cancel_order_case(
+            target_before_cancel,
+            sizeof(target_before_cancel) /
+                sizeof(target_before_cancel[0]),
+            17,
+            0) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static int test_cancel_sqes_target_operation_tokens(void) {
+    queue_fixture_t fixture;
+    struct io_uring_sqe sqes[8];
+    unsigned completions = 0U;
+    unsigned sq_head;
+    unsigned i;
+
+    if (prepare_cancel_fixture(
+            &fixture,
+            &completions,
+            sqes,
+            &sq_head) != 0) {
+        perror("cancel SQE fixture init");
+        return 1;
+    }
+    for (i = 0U; i < 2U; i += 1U) {
+        struct io_uring_sqe *sqe = &sqes[2U + i];
+
+        if (sqe->opcode != IORING_OP_ASYNC_CANCEL ||
+            sqe->addr != llam_io_udata_encode(
+                &fixture.segment.tokens[i],
+                LLAM_IO_UDATA_NATIVE_SEGMENT) ||
+            llam_io_udata_tag(sqe->user_data) !=
+                LLAM_IO_UDATA_NATIVE_CANCEL ||
+            llam_io_udata_ptr(sqe->user_data) !=
+                &fixture.segment.cancel_tokens[i]) {
+            fprintf(stderr, "native cancel SQE token mismatch\n");
+            queue_fixture_destroy(&fixture);
+            return 1;
+        }
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_cancel_rejects_stale_and_duplicate_tokens(void) {
+    queue_fixture_t stale_fixture;
+    queue_fixture_t duplicate_fixture;
+    struct io_uring_sqe stale_sqes[8];
+    struct io_uring_sqe duplicate_sqes[8];
+    llam_linux_native_cancel_token_t stale;
+    unsigned stale_completions = 0U;
+    unsigned duplicate_completions = 0U;
+    unsigned stale_sq_head;
+    unsigned duplicate_sq_head;
+
+    if (prepare_cancel_fixture(
+            &stale_fixture,
+            &stale_completions,
+            stale_sqes,
+            &stale_sq_head) != 0) {
+        perror("stale cancel fixture init");
+        return 1;
+    }
+    stale = stale_fixture.segment.cancel_tokens[0];
+    stale.generation += 1U;
+    llam_linux_native_cancel_handle_cqe(
+        &stale_fixture.node, &stale, 0);
+    if (stale_completions != 0U ||
+        stale_fixture.batch.cancel_cqes_observed != 0U ||
+        stale_fixture.segment.observed_cancel_mask != 0U ||
+        atomic_load_explicit(
+            &stale_fixture.runtime.fatal_errno,
+            memory_order_acquire) != EPROTO) {
+        fprintf(stderr, "stale cancel token was not rejected\n");
+        queue_fixture_destroy(&stale_fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&stale_fixture);
+
+    if (prepare_cancel_fixture(
+            &duplicate_fixture,
+            &duplicate_completions,
+            duplicate_sqes,
+            &duplicate_sq_head) != 0) {
+        perror("duplicate cancel fixture init");
+        return 1;
+    }
+    llam_linux_native_cancel_handle_cqe(
+        &duplicate_fixture.node,
+        &duplicate_fixture.segment.cancel_tokens[0],
+        -ENOENT);
+    llam_linux_native_cancel_handle_cqe(
+        &duplicate_fixture.node,
+        &duplicate_fixture.segment.cancel_tokens[0],
+        -ENOENT);
+    if (duplicate_completions != 0U ||
+        duplicate_fixture.batch.cancel_cqes_observed != 1U ||
+        duplicate_fixture.segment.observed_cancel_mask !=
+            UINT64_C(0x01) ||
+        atomic_load_explicit(
+            &duplicate_fixture.runtime.fatal_errno,
+            memory_order_acquire) != EPROTO) {
+        fprintf(stderr, "duplicate cancel token was not rejected\n");
+        queue_fixture_destroy(&duplicate_fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&duplicate_fixture);
+    return 0;
+}
+
+static int test_cancel_local_retirement_ignores_prior_statistics(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_batch_t *taken;
+    llam_linux_native_batch_t *cancelled;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            2U,
+            &completions) != 0) {
+        perror("local cancel fixture init");
+        return 1;
+    }
+    fixture.segment.prepared_sqes = 17U;
+    if (!llam_linux_native_batch_enqueue(
+            &fixture.node,
+            &fixture.batch,
+            &fixture.req)) {
+        perror("local cancel enqueue");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    taken = llam_linux_native_batch_take_all(&fixture.node);
+    atomic_store_explicit(
+        &fixture.req.abort_reason,
+        LLAM_IO_ABORT_CANCEL,
+        memory_order_release);
+    if (taken != &fixture.batch ||
+        !llam_linux_native_batch_request_cancel(
+            &fixture.node,
+            &fixture.batch,
+            &fixture.req) ||
+        llam_linux_native_batch_submit_one(
+            &fixture.node, taken) != 0U ||
+        completions != 0U) {
+        fprintf(stderr, "local cancel setup mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    cancelled = llam_linux_native_cancel_take_all(
+        &fixture.node);
+    if (cancelled != &fixture.batch ||
+        llam_linux_native_batch_submit_cancel(
+            &fixture.node, cancelled) != 0U ||
+        completions != 1U ||
+        fixture.req.error_code != EAGAIN ||
+        fixture.batch.cancel_sqes_prepared != 0U ||
+        fixture.batch.cancel_cqes_observed != 0U ||
+        atomic_load_explicit(
+            &fixture.batch.cancel_state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_CANCEL_RETIRED ||
+        atomic_load_explicit(
+            &fixture.batch.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_BATCH_RETIRED ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != 0 ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "local cancel retirement mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_terminal_cancel_submit_is_not_requeued(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_batch_t *cancelled;
+    struct io_uring_sqe sqes[2];
+    unsigned completions = 0U;
+    unsigned submit_calls = 0U;
+    unsigned sq_head;
+    unsigned i;
+
+    if (prepare_dispatch_fixture(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            2U,
+            &completions,
+            sqes,
+            2U,
+            &sq_head) != 0) {
+        perror("terminal cancel fixture init");
+        return 1;
+    }
+    fixture.node.linux_submit_override =
+        fail_linux_ring_permanently;
+    fixture.node.linux_submit_override_arg = &submit_calls;
+    atomic_store_explicit(
+        &fixture.req.abort_reason,
+        LLAM_IO_ABORT_CANCEL,
+        memory_order_release);
+    if (!llam_linux_native_batch_request_cancel(
+            &fixture.node,
+            &fixture.batch,
+            &fixture.req)) {
+        fprintf(stderr, "terminal cancel request mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    cancelled = llam_linux_native_cancel_take_all(
+        &fixture.node);
+    if (cancelled != &fixture.batch ||
+        llam_linux_native_batch_submit_cancel(
+            &fixture.node, cancelled) != 0U ||
+        submit_calls != 1U ||
+        !fixture.node.linux_submit_terminal ||
+        fixture.node.native_cancel_head != NULL ||
+        fixture.node.native_cancel_tail != NULL ||
+        atomic_load_explicit(
+            &fixture.batch.cancel_state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_CANCEL_RETIRED ||
+        fixture.batch.cancel_sqes_prepared != 0U ||
+        fixture.batch.cancel_cqes_observed != 0U ||
+        completions != 0U) {
+        fprintf(stderr, "terminal cancel was requeued\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    for (i = 0U; i < fixture.segment.op_count; i += 1U) {
+        llam_linux_native_segment_handle_cqe(
+            &fixture.node,
+            &fixture.segment.tokens[i],
+            (int)fixture.ops[i].length);
+    }
+    if (completions != 1U ||
+        atomic_load_explicit(
+            &fixture.batch.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_BATCH_RETIRED ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "terminal cancel retirement mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
     return 0;
 }
 
@@ -1861,6 +2414,8 @@ int main(int argc, char **argv) {
          test_batch_enqueue_publishes_width_two_once},
         {"batch enqueue rejects invalid groups",
          test_batch_enqueue_rejects_invalid_groups},
+        {"batch abort queued detaches exact ticket",
+         test_batch_abort_queued_detaches_exact_ticket},
         {"chain capacity failure consumes no SQE",
          test_chain_capacity_failure_consumes_no_sqe},
         {"chain prepares all SQEs",
@@ -1877,6 +2432,16 @@ int main(int argc, char **argv) {
          test_skip_dispatch_waits_for_target_retirement},
         {"batch dispatch wakes after all segment tails",
          test_batch_dispatch_wakes_after_all_segment_tails},
+        {"cancel and target orderings retire once",
+         test_cancel_and_target_orderings_retire_once},
+        {"cancel SQEs target operation tokens",
+         test_cancel_sqes_target_operation_tokens},
+        {"cancel rejects stale and duplicate tokens",
+         test_cancel_rejects_stale_and_duplicate_tokens},
+        {"local cancel retirement ignores prior statistics",
+         test_cancel_local_retirement_ignores_prior_statistics},
+        {"terminal cancel submit is not requeued",
+         test_terminal_cancel_submit_is_not_requeued},
         {"dispatch rejects duplicate terminal wake",
          test_dispatch_rejects_duplicate_terminal_wake},
         {"dispatch records fatal for stale token",

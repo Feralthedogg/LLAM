@@ -203,6 +203,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/io/linux/watch/linux_control.c
         src/io/linux/watch/linux_submit.c
         src/io/linux/watch/linux_segment.c
+        src/io/linux/watch/linux_segment_cancel.c
         src/io/linux/watch/cqe.c
         src/io/linux/watch/linux_worker.c
     )

@@ -1068,6 +1068,37 @@ static bool llam_abort_io_wait_impl(llam_task_t *task,
         node = &rt->nodes[(unsigned)node_index];
 
         if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+            struct llam_linux_native_batch *native_batch =
+                atomic_load_explicit(
+                    &req->linux_native_batch,
+                    memory_order_acquire);
+
+            if (native_batch != NULL) {
+                removed =
+                    llam_linux_native_batch_abort_queued(
+                        node, native_batch, req);
+                if (removed) {
+                    break;
+                }
+                if (atomic_load_explicit(
+                        &req->linux_native_batch,
+                        memory_order_acquire) ==
+                        native_batch &&
+                    atomic_load_explicit(
+                        &req->wait_mode,
+                        memory_order_acquire) ==
+                        LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
+                    atomic_store_explicit(
+                        &req->abort_reason,
+                        (unsigned)reason,
+                        memory_order_release);
+                    llam_record_fatal_deferred(rt, EPROTO);
+                    goto release_req;
+                }
+                continue;
+            }
+#endif
             unsigned detached_node_index = UINT_MAX;
             llam_io_submit_detach_result_t submit_result;
 
@@ -1131,6 +1162,13 @@ static bool llam_abort_io_wait_impl(llam_task_t *task,
             goto release_req;
         }
         if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
+#if LLAM_RUNTIME_BACKEND_LINUX
+            struct llam_linux_native_batch *native_batch =
+                atomic_load_explicit(
+                    &req->linux_native_batch,
+                    memory_order_acquire);
+#endif
+
             if (!llam_io_abort_owner_matches(task,
                                              req,
                                              rt,
@@ -1144,6 +1182,17 @@ static bool llam_abort_io_wait_impl(llam_task_t *task,
                     attached_node_index) {
                 continue;
             }
+#if LLAM_RUNTIME_BACKEND_LINUX
+            if (native_batch != NULL) {
+                atomic_store_explicit(
+                    &req->abort_reason,
+                    (unsigned)reason,
+                    memory_order_release);
+                (void)llam_linux_native_batch_request_cancel(
+                    node, native_batch, req);
+                goto release_req;
+            }
+#endif
             /*
              * Backend ownership is stable after the submit-lock transition.
              * Queue cancellation on that current node; the control owns its
