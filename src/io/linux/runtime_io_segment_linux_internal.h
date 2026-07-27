@@ -126,5 +126,9 @@ llam_linux_native_segment_take_all(llam_node_t *node);
 LLAM_INTERNAL_API unsigned llam_linux_native_segment_submit_one(
     llam_node_t *node,
     llam_linux_native_segment_t *segment);
+LLAM_INTERNAL_API void llam_linux_native_segment_handle_cqe(
+    llam_node_t *node,
+    llam_linux_native_token_t *token,
+    int result);
 
 #endif

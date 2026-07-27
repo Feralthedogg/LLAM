@@ -407,11 +407,21 @@ int llam_positional_call_blocking_io(llam_blocking_fn fn, llam_io_req_t *req);
 
 /* Cooperative I/O parking and backend issue paths. */
 void llam_cleanup_io_wait_setup(llam_task_t *task, llam_io_req_t *req);
+LLAM_INTERNAL_API int llam_prepare_io_wait(
+    llam_io_req_t *req,
+    llam_io_wait_mode_t wait_mode,
+    uint64_t deadline_ns);
 int llam_park_io_req(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns, llam_node_t *wake_node);
 int llam_issue_multishot_poll(llam_io_req_t *req);
 int llam_issue_multishot_accept(llam_io_req_t *req);
 int llam_issue_multishot_recv(llam_io_req_t *req);
 int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns);
+#if LLAM_RUNTIME_BACKEND_LINUX
+struct llam_linux_native_segment;
+LLAM_INTERNAL_API int llam_issue_linux_native_segment(
+    struct llam_linux_native_segment *segment,
+    llam_io_req_t *req);
+#endif
 bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kind, const void *target);
 
 #endif

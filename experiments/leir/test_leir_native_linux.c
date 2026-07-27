@@ -371,6 +371,41 @@ static void init_userspace_sq_fixture(
     ring->sq.ring_mask = entries - 1U;
 }
 
+static int prepare_dispatch_fixture(
+    queue_fixture_t *fixture,
+    llam_linux_native_segment_mode_t mode,
+    unsigned op_count,
+    unsigned *completion_count,
+    struct io_uring_sqe *sqes,
+    unsigned sqe_count,
+    unsigned *sq_head) {
+    llam_linux_native_segment_t *taken;
+
+    if (queue_fixture_init(
+            fixture, mode, op_count, completion_count) != 0) {
+        return -1;
+    }
+    init_userspace_sq_fixture(
+        &fixture->node.ring, sqes, sq_head, sqe_count);
+    fixture->node.ring_ready = true;
+    if (!llam_linux_native_segment_enqueue(
+            &fixture->node,
+            &fixture->segment,
+            &fixture->req)) {
+        queue_fixture_destroy(fixture);
+        return -1;
+    }
+    taken = llam_linux_native_segment_take_all(&fixture->node);
+    if (taken != &fixture->segment ||
+        llam_linux_native_segment_submit_one(
+            &fixture->node, taken) != op_count) {
+        queue_fixture_destroy(fixture);
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
 static int test_chain_capacity_failure_consumes_no_sqe(void) {
     queue_fixture_t fixture;
     llam_linux_native_segment_t *taken;
@@ -486,6 +521,232 @@ static int test_chain_prepares_all_sqes(void) {
             memory_order_acquire) !=
             LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT) {
         fprintf(stderr, "native chain was not prepared atomically\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_link_dispatch_wakes_only_after_final_cqe(void) {
+    queue_fixture_t fixture;
+    struct io_uring_sqe sqes[8];
+    unsigned completions = 0U;
+    unsigned sq_head;
+    unsigned i;
+
+    if (prepare_dispatch_fixture(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            4U,
+            &completions,
+            sqes,
+            8U,
+            &sq_head) != 0) {
+        perror("link dispatch fixture init");
+        return 1;
+    }
+    for (i = 0U; i < 3U; i += 1U) {
+        llam_linux_native_segment_handle_cqe(
+            &fixture.node,
+            &fixture.segment.tokens[i],
+            (int)fixture.ops[i].length);
+        if (completions != 0U ||
+            fixture.segment.terminal_wakes != 0U ||
+            atomic_load_explicit(
+                &fixture.node.pending_ops,
+                memory_order_acquire) != 1U ||
+            atomic_load_explicit(
+                &fixture.shard.inflight_io_waiters,
+                memory_order_acquire) != 1U) {
+            fprintf(stderr, "link dispatch woke before final CQE\n");
+            queue_fixture_destroy(&fixture);
+            return 1;
+        }
+    }
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &fixture.segment.tokens[3],
+        (int)fixture.ops[3].length);
+    if (completions != 1U ||
+        fixture.segment.terminal_wakes != 1U ||
+        fixture.req.result != (int)fixture.ops[3].length ||
+        fixture.req.error_code != 0 ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "link final dispatch ownership mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_skip_dispatch_wakes_once_on_final_success(void) {
+    queue_fixture_t fixture;
+    struct io_uring_sqe sqes[8];
+    unsigned completions = 0U;
+    unsigned sq_head;
+
+    if (prepare_dispatch_fixture(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP,
+            4U,
+            &completions,
+            sqes,
+            8U,
+            &sq_head) != 0) {
+        perror("skip success dispatch fixture init");
+        return 1;
+    }
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &fixture.segment.tokens[3],
+        (int)fixture.ops[3].length);
+    if (completions != 1U ||
+        fixture.segment.terminal_wakes != 1U ||
+        fixture.segment.observed_cqes != 1U ||
+        fixture.segment.suppressed_success_cqes != 3U ||
+        fixture.req.result != (int)fixture.ops[3].length ||
+        fixture.req.error_code != 0 ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "skip final dispatch ownership mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_skip_dispatch_wakes_once_on_intermediate_error(void) {
+    queue_fixture_t fixture;
+    struct io_uring_sqe sqes[8];
+    unsigned completions = 0U;
+    unsigned sq_head;
+
+    if (prepare_dispatch_fixture(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP,
+            4U,
+            &completions,
+            sqes,
+            8U,
+            &sq_head) != 0) {
+        perror("skip error dispatch fixture init");
+        return 1;
+    }
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &fixture.segment.tokens[1],
+        -ECONNRESET);
+    if (completions != 1U ||
+        fixture.segment.terminal_wakes != 1U ||
+        fixture.segment.first_error_index != 1U ||
+        fixture.req.result != -1 ||
+        fixture.req.error_code != ECONNRESET ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "skip error dispatch ownership mismatch\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_dispatch_rejects_duplicate_terminal_wake(void) {
+    queue_fixture_t fixture;
+    struct io_uring_sqe sqes[2];
+    unsigned completions = 0U;
+    unsigned sq_head;
+
+    if (prepare_dispatch_fixture(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            1U,
+            &completions,
+            sqes,
+            2U,
+            &sq_head) != 0) {
+        perror("duplicate dispatch fixture init");
+        return 1;
+    }
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &fixture.segment.tokens[0],
+        (int)fixture.ops[0].length);
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &fixture.segment.tokens[0],
+        (int)fixture.ops[0].length);
+    if (completions != 1U ||
+        fixture.segment.terminal_wakes != 1U ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != EPROTO ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        fprintf(stderr, "duplicate terminal dispatch was not failed closed\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
+static int test_dispatch_records_fatal_for_stale_token(void) {
+    queue_fixture_t fixture;
+    llam_linux_native_token_t stale;
+    struct io_uring_sqe sqes[2];
+    unsigned completions = 0U;
+    unsigned sq_head;
+
+    if (prepare_dispatch_fixture(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK,
+            1U,
+            &completions,
+            sqes,
+            2U,
+            &sq_head) != 0) {
+        perror("stale dispatch fixture init");
+        return 1;
+    }
+    stale = fixture.segment.tokens[0];
+    stale.generation += 1U;
+    llam_linux_native_segment_handle_cqe(
+        &fixture.node,
+        &stale,
+        (int)fixture.ops[0].length);
+    if (completions != 0U ||
+        fixture.segment.terminal_wakes != 0U ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != EPROTO ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shard.inflight_io_waiters,
+            memory_order_acquire) != 1U) {
+        fprintf(stderr, "stale dispatch token was not failed closed\n");
         queue_fixture_destroy(&fixture);
         return 1;
     }
@@ -1080,17 +1341,36 @@ int main(int argc, char **argv) {
         {"skip mode rejects missing feature",
          test_skip_mode_rejects_missing_feature},
     };
+    static const test_case_t dispatch_tests[] = {
+        {"link dispatch wakes only after final CQE",
+         test_link_dispatch_wakes_only_after_final_cqe},
+        {"skip dispatch wakes once on final success",
+         test_skip_dispatch_wakes_once_on_final_success},
+        {"skip dispatch wakes once on intermediate error",
+         test_skip_dispatch_wakes_once_on_intermediate_error},
+        {"dispatch rejects duplicate terminal wake",
+         test_dispatch_rejects_duplicate_terminal_wake},
+        {"dispatch records fatal for stale token",
+         test_dispatch_records_fatal_for_stale_token},
+    };
     bool run_unit = true;
     bool run_queue = true;
+    bool run_dispatch = true;
     size_t i;
 
     if (argc == 2 && strcmp(argv[1], "--unit-only") == 0) {
         run_queue = false;
+        run_dispatch = false;
     } else if (argc == 2 && strcmp(argv[1], "--queue") == 0) {
         run_unit = false;
+        run_dispatch = false;
+    } else if (argc == 2 && strcmp(argv[1], "--dispatch") == 0) {
+        run_unit = false;
+        run_queue = false;
     } else if (argc != 1) {
         fputs(
-            "usage: test_leir_native_linux [--unit-only|--queue]\n",
+            "usage: test_leir_native_linux "
+            "[--unit-only|--queue|--dispatch]\n",
             stderr);
         return 2;
     }
@@ -1110,6 +1390,19 @@ int main(int argc, char **argv) {
              i += 1U) {
             if (queue_tests[i].run() != 0) {
                 fprintf(stderr, "FAIL: %s\n", queue_tests[i].name);
+                return 1;
+            }
+        }
+    }
+    if (run_dispatch) {
+        for (i = 0U;
+             i < sizeof(dispatch_tests) / sizeof(dispatch_tests[0]);
+             i += 1U) {
+            if (dispatch_tests[i].run() != 0) {
+                fprintf(
+                    stderr,
+                    "FAIL: %s\n",
+                    dispatch_tests[i].name);
                 return 1;
             }
         }

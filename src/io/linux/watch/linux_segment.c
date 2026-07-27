@@ -543,3 +543,59 @@ unsigned llam_linux_native_segment_submit_one(
     segment->prepared_sqes += segment->op_count;
     return segment->op_count;
 }
+
+/**
+ * @brief Reduce one native-segment CQE and finish its task only at terminal.
+ *
+ * Intermediate link-only completions update segment state but retain all
+ * request, pending-operation, and in-flight waiter ownership.  The first
+ * terminal observation crosses the ordinary request completion bridge once.
+ */
+void llam_linux_native_segment_handle_cqe(
+    llam_node_t *node,
+    llam_linux_native_token_t *token,
+    int result) {
+    llam_linux_native_segment_t *segment;
+    llam_linux_native_cqe_action_t action;
+    int terminal_result = -EIO;
+
+    if (node == NULL || node->runtime == NULL) {
+        return;
+    }
+    if (token == NULL || token->owner == NULL) {
+        llam_record_fatal_deferred(node->runtime, EPROTO);
+        return;
+    }
+    segment = token->owner;
+    if (segment->owner_runtime != node->runtime) {
+        llam_record_fatal_deferred(node->runtime, EXDEV);
+        return;
+    }
+    if (segment->req == NULL ||
+        segment->owner_node != node) {
+        llam_record_fatal_deferred(node->runtime, EPROTO);
+        return;
+    }
+    if (segment->req->owner_runtime != node->runtime) {
+        llam_record_fatal_deferred(node->runtime, EXDEV);
+        return;
+    }
+
+    action = llam_linux_native_segment_apply_cqe(
+        segment, token, result, &terminal_result);
+    if (action == LLAM_LINUX_NATIVE_CQE_CONTINUE) {
+        return;
+    }
+    if (action == LLAM_LINUX_NATIVE_CQE_FATAL) {
+        llam_record_fatal_deferred(node->runtime, EPROTO);
+        return;
+    }
+
+    segment->terminal_wakes += 1U;
+    llam_io_complete_req(
+        node,
+        segment->req,
+        terminal_result,
+        0U,
+        true);
+}

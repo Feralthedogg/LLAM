@@ -26,6 +26,10 @@
 
 #include "io/runtime_io_api_internal.h"
 
+#if LLAM_RUNTIME_BACKEND_LINUX
+#include "io/linux/runtime_io_segment_linux_internal.h"
+#endif
+
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static llam_io_park_snapshot_hook_fn
     g_llam_io_park_snapshot_hook;
@@ -458,7 +462,10 @@ bool llam_io_test_abort_published_io_setup(llam_io_req_t *req,
  *
  * @return 0 on success, -1 with errno set for invalid context.
  */
-static int llam_prepare_io_wait(llam_io_req_t *req, llam_io_wait_mode_t wait_mode, uint64_t deadline_ns) {
+int llam_prepare_io_wait(
+    llam_io_req_t *req,
+    llam_io_wait_mode_t wait_mode,
+    uint64_t deadline_ns) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
 
@@ -1125,3 +1132,121 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     }
     return 0;
 }
+
+#if LLAM_RUNTIME_BACKEND_LINUX
+/**
+ * @brief Submit one compiled Linux effect segment and park exactly once.
+ *
+ * This private research path deliberately excludes deadlines and cancellation.
+ * The caller must join the activation before runtime shutdown.  Keeping that
+ * envelope explicit prevents the generic per-operation abort protocol from
+ * pretending it can safely cancel a linked kernel chain.
+ *
+ * @param segment Configured, idle native segment owned by the current runtime.
+ * @param req     Active request storage owned by the current managed task.
+ *
+ * @return 0 after successful terminal completion, otherwise -1 with errno set.
+ */
+int llam_issue_linux_native_segment(
+    llam_linux_native_segment_t *segment,
+    llam_io_req_t *req) {
+    llam_shard_t *shard = g_llam_tls_shard;
+    llam_task_t *task = g_llam_tls_task;
+    llam_runtime_t *rt;
+    llam_node_t *node;
+    unsigned request_refs;
+    unsigned i;
+    int error = EINVAL;
+
+    if (segment == NULL || req == NULL ||
+        shard == NULL || task == NULL) {
+        return llam_fail_io_setup_req(req, EINVAL);
+    }
+    rt = task->owner_runtime;
+    if (rt == NULL ||
+        shard->runtime != rt ||
+        segment->owner_runtime != rt ||
+        req->owner_runtime != rt) {
+        return llam_fail_io_setup_req(req, EXDEV);
+    }
+    if (shard->id >= rt->active_shards ||
+        shard->io_node_index >= rt->active_nodes ||
+        rt->nodes == NULL) {
+        return llam_fail_io_setup_req(req, EINVAL);
+    }
+    node = &rt->nodes[shard->io_node_index];
+    request_refs = atomic_load_explicit(
+        &req->lifetime_refs, memory_order_acquire);
+    if (request_refs == 0U || request_refs == UINT_MAX ||
+        atomic_load_explicit(
+            &req->wait_mode,
+            memory_order_acquire) != LLAM_IO_WAIT_MODE_NONE ||
+        atomic_load_explicit(
+            &segment->state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_IDLE ||
+        segment->generation == 0U) {
+        return llam_fail_io_setup_req(req, EBUSY);
+    }
+    if (task->cancel_token != NULL) {
+        return llam_fail_io_setup_req(req, ENOTSUP);
+    }
+    if (atomic_load_explicit(
+            &rt->stop_requested, memory_order_acquire) ||
+        atomic_load_explicit(
+            &rt->shutdown_requested, memory_order_acquire)) {
+        return llam_fail_io_setup_req(req, ESHUTDOWN);
+    }
+    if (!node->ring_ready || node->linux_submit_terminal) {
+        return llam_fail_io_setup_req(req, EAGAIN);
+    }
+    if (segment->op_count == 0U ||
+        segment->op_count > LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS) {
+        return llam_fail_io_setup_req(req, EINVAL);
+    }
+    if (segment->mode ==
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+        (node->linux_ring_features & IORING_FEAT_CQE_SKIP) == 0U) {
+        return llam_fail_io_setup_req(req, ENOTSUP);
+    }
+    for (i = 0U; i < segment->op_count; i += 1U) {
+        if (segment->ops[i].kind ==
+            LLAM_LINUX_NATIVE_OP_RECV) {
+            if (node->supports_recv) {
+                continue;
+            }
+            error = EAGAIN;
+            break;
+        }
+        if (segment->ops[i].kind ==
+            LLAM_LINUX_NATIVE_OP_SEND) {
+            if (node->supports_send) {
+                continue;
+            }
+            error = EAGAIN;
+            break;
+        }
+        error = EINVAL;
+        break;
+    }
+    if (i != segment->op_count) {
+        return llam_fail_io_setup_req(req, error);
+    }
+
+    if (llam_prepare_io_wait(
+            req,
+            LLAM_IO_WAIT_MODE_SUBMIT_QUEUE,
+            0U) != 0) {
+        return -1;
+    }
+    if (!llam_linux_native_segment_enqueue(
+            node, segment, req)) {
+        int saved_errno = errno != 0 ? errno : EIO;
+
+        llam_cleanup_io_wait_setup(task, req);
+        return llam_fail_io_setup_req(req, saved_errno);
+    }
+    segment->task_parks += 1U;
+    return llam_park_io_req(req, false, 0U, node);
+}
+#endif
