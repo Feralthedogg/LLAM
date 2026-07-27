@@ -472,7 +472,7 @@ class EvidenceAndCliTests(unittest.TestCase):
         binary = os.environ.get("LEIR_NATIVE_TEST_BINARY")
         if not binary:
             self.skipTest("LEIR_NATIVE_TEST_BINARY is not set")
-        cell = MatrixCell("link_skip", 4, 4, 64)
+        cell = MatrixCell("link_skip", 8, 4, 64)
         result = run_capture(
             benchmark_command(
                 Path(binary),
@@ -521,6 +521,7 @@ class WorkflowContractTests(unittest.TestCase):
             "bench_leir_native_segment",
             "-fsanitize=address,undefined",
             "-fsanitize=thread",
+            "asan-native-bench.log",
             "make -j2 test",
             "audit-shared-exports",
             "audit-production-test-hooks",

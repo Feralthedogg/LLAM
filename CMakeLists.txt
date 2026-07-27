@@ -580,7 +580,7 @@ add_test(
     NAME test_bench_leir_native_segment_smoke
     COMMAND bench_leir_native_segment
         --candidate link
-        --ops 2
+        --ops 8
         --concurrency 4
         --payload 64
         --activations 8

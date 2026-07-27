@@ -514,7 +514,8 @@ static int create_program(
     unsigned i;
 
     if (program_out == NULL ||
-        !operation_count_is_supported(operations)) {
+        !operation_count_is_supported(operations) ||
+        first_result_slot >= LEIR_PHASE0_MAX_SLOTS) {
         return fail_with_errno(EINVAL);
     }
     *program_out = NULL;
@@ -522,25 +523,22 @@ static int create_program(
     memset(slots, 0, sizeof(slots));
     slots[0] = LEIR_PHASE0_SLOT_FD;
     slots[1] = LEIR_PHASE0_SLOT_U64;
+    slots[first_result_slot] = LEIR_PHASE0_SLOT_I64;
     for (i = 0U; i < operations; i += 1U) {
         slots[first_buffer_slot + i] =
             LEIR_PHASE0_SLOT_CONST_BUFFER;
-        slots[first_result_slot + i] =
-            LEIR_PHASE0_SLOT_I64;
         nodes[i].opcode = LEIR_PHASE0_OP_WRITE_ALL;
         nodes[i].fd_slot = 0U;
         nodes[i].buffer_slot =
             (uint16_t)(first_buffer_slot + i);
         nodes[i].length_slot = 1U;
-        nodes[i].result_slot =
-            (uint16_t)(first_result_slot + i);
+        nodes[i].result_slot = (uint16_t)first_result_slot;
         nodes[i].on_success = (uint16_t)(i + 1U);
         nodes[i].on_eof = (uint16_t)(operations + 1U);
         nodes[i].on_error = (uint16_t)(operations + 1U);
     }
     nodes[operations] = terminal_node(
-        LEIR_PHASE0_OP_RETURN,
-        (uint16_t)(first_result_slot + operations - 1U));
+        LEIR_PHASE0_OP_RETURN, (uint16_t)first_result_slot);
     nodes[operations + 1U] = terminal_node(
         LEIR_PHASE0_OP_FAIL,
         (uint16_t)first_result_slot);
@@ -548,7 +546,7 @@ static int create_program(
     desc.nodes = nodes;
     desc.slot_kinds = slots;
     desc.node_count = operations + 2U;
-    desc.slot_count = first_result_slot + operations;
+    desc.slot_count = first_result_slot + 1U;
     desc.entry_node = 0U;
     return leir_phase0_program_create(
         &desc, program_out);
@@ -917,10 +915,8 @@ static int initialize_candidate_instances(
                 operation_buffer(state, i, operation);
             values[2U + operation].buffer.size =
                 options->payload;
-            values[
-                2U + options->operations +
-                operation].i64 = -1;
         }
+        values[2U + options->operations].i64 = -1;
         if (leir_native_instance_init(
                 instance,
                 state->instance_stride,

@@ -193,7 +193,10 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
             2>&1 | tee "$OUT_DIR/asan-configure.log"
           cmake --build object/leir-native-ci-asan \
-            --target test_leir_native_segment test_leir_native_linux \
+            --target \
+              test_leir_native_segment \
+              test_leir_native_linux \
+              bench_leir_native_segment \
             -j2 2>&1 | tee "$OUT_DIR/asan-build.log"
           ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
             UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
@@ -203,6 +206,17 @@ jobs:
             UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
             ./object/leir-native-ci-asan/test_leir_native_linux \
             2>&1 | tee "$OUT_DIR/asan-linux-test.log"
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+            ./object/leir-native-ci-asan/bench_leir_native_segment \
+              --candidate link \
+              --ops 8 \
+              --concurrency 1 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA \
+            2>&1 | tee "$OUT_DIR/asan-native-bench.log"
 
       - name: TSan native integration gate
         shell: bash
