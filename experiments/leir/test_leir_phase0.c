@@ -2134,12 +2134,27 @@ cleanup:
 
 static int test_inline_budget_fairness_and_companion_service(void) {
     const unsigned budgets[] = {1U, 8U, 32U};
+    enum { latency_repetitions = 5 };
     fairness_result_t results[
         sizeof(budgets) / sizeof(budgets[0])];
+    uint64_t latency_ratios[latency_repetitions];
     bool latency_gating = true;
     size_t i;
 
-    for (i = 0U; i < sizeof(budgets) / sizeof(budgets[0]); i += 1U) {
+    for (i = 0U; i < latency_repetitions; i += 1U) {
+        if (run_fairness_case(budgets[0], &results[0]) != 0 ||
+            results[0].baseline_p99_ns == 0U ||
+            results[0].candidate_p99_ns >
+                UINT64_MAX / UINT64_C(1000000)) {
+            return 1;
+        }
+        latency_gating =
+            latency_gating && results[0].ready_path_valid;
+        latency_ratios[i] =
+            results[0].candidate_p99_ns * UINT64_C(1000000) /
+            results[0].baseline_p99_ns;
+    }
+    for (i = 1U; i < sizeof(budgets) / sizeof(budgets[0]); i += 1U) {
         if (run_fairness_case(budgets[i], &results[i]) != 0) {
             return 1;
         }
@@ -2150,15 +2165,20 @@ static int test_inline_budget_fairness_and_companion_service(void) {
         results[0].companion_runs == 0U) {
         return 1;
     }
+    qsort(
+        latency_ratios,
+        latency_repetitions,
+        sizeof(latency_ratios[0]),
+        compare_u64);
     if (!LEIR_TEST_THREAD_SANITIZER &&
         latency_gating &&
-        results[0].candidate_p99_ns >
-            results[0].baseline_p99_ns * 110U / 100U) {
+        latency_ratios[latency_repetitions / 2U] >
+            UINT64_C(1100000)) {
         fprintf(
             stderr,
-            "fairness p99 regression: baseline=%llu candidate=%llu\n",
-            (unsigned long long)results[0].baseline_p99_ns,
-            (unsigned long long)results[0].candidate_p99_ns);
+            "fairness median p99 ratio regression: ratio_ppm=%llu\n",
+            (unsigned long long)
+                latency_ratios[latency_repetitions / 2U]);
         return 1;
     }
     return 0;
