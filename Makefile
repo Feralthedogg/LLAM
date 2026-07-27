@@ -2125,6 +2125,9 @@ test-leir-native: test_leir_native_plan test_leir_native_segment bench_leir_nati
 	./test_leir_native_segment
 	LEIR_NATIVE_TEST_BINARY=./bench_leir_native_segment \
 		python3 -m unittest scripts/test_bench_leir_native.py -v
+	LEIR_NATIVE_PIPELINE_TEST_BINARY=./bench_leir_native_pipeline \
+		python3 -m unittest \
+			scripts/test_bench_leir_native_pipeline.py -v
 
 leir-phase0a-screen: test-leir-phase0
 	python3 scripts/bench_leir_phase0.py \

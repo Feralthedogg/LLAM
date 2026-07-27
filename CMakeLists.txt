@@ -638,6 +638,18 @@ if(Python3_Interpreter_FOUND)
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     add_test(
+        NAME test_bench_leir_native_pipeline_contract
+        COMMAND ${CMAKE_COMMAND} -E env
+            "LEIR_NATIVE_PIPELINE_TEST_BINARY=$<TARGET_FILE:bench_leir_native_pipeline>"
+            ${Python3_EXECUTABLE}
+            -m unittest
+            scripts/test_bench_leir_native_pipeline.py -v
+    )
+    set_tests_properties(
+        test_bench_leir_native_pipeline_contract
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
         NAME test_bench_leir_phase0_contract
         COMMAND ${CMAKE_COMMAND} -E env
             "LEIR_PHASE0_TEST_BINARY=$<TARGET_FILE:bench_leir_phase0>"
