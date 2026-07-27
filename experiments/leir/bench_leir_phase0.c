@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -49,6 +50,10 @@ typedef struct leir_bench_block_state {
     atomic_uint failures;
     atomic_uint_fast64_t remaining_activations;
     int first_error;
+    int first_raw_error;
+    unsigned first_connection;
+    uint64_t first_activation;
+    unsigned first_transaction;
     char first_stage[96];
 } leir_bench_block_state_t;
 
@@ -199,10 +204,13 @@ static void leir_bench_stats_add(
     total->io_completions += sample->io_completions;
 }
 
-static void leir_bench_fail(
+static void leir_bench_fail_at(
     leir_bench_block_state_t *state,
     const char *stage,
-    int error_code) {
+    int error_code,
+    unsigned connection,
+    uint64_t activation,
+    unsigned transaction) {
     unsigned expected = 0U;
 
     if (atomic_compare_exchange_strong_explicit(
@@ -211,13 +219,30 @@ static void leir_bench_fail(
             1U,
             memory_order_acq_rel,
             memory_order_acquire)) {
+        state->first_raw_error = error_code;
         state->first_error = error_code != 0 ? error_code : EIO;
+        state->first_connection = connection;
+        state->first_activation = activation;
+        state->first_transaction = transaction;
         (void)snprintf(
             state->first_stage,
             sizeof(state->first_stage),
             "%s",
             stage);
     }
+}
+
+static void leir_bench_fail(
+    leir_bench_block_state_t *state,
+    const char *stage,
+    int error_code) {
+    leir_bench_fail_at(
+        state,
+        stage,
+        error_code,
+        UINT_MAX,
+        UINT64_MAX,
+        UINT_MAX);
 }
 
 static void leir_bench_activation_complete(
@@ -385,7 +410,13 @@ static void leir_bench_baseline_task(void *opaque) {
              transaction += 1U) {
             if (leir_test_read_exact(
                     fd, buffer, options->payload) != 0) {
-                leir_bench_fail(state, "baseline read", errno);
+                leir_bench_fail_at(
+                    state,
+                    "baseline read",
+                    errno,
+                    arg->connection,
+                    local_activation,
+                    transaction);
                 return;
             }
             state->task_results[
@@ -407,7 +438,13 @@ static void leir_bench_baseline_task(void *opaque) {
             }
             if (leir_test_write_all(
                     fd, buffer, options->payload) != 0) {
-                leir_bench_fail(state, "baseline write", errno);
+                leir_bench_fail_at(
+                    state,
+                    "baseline write",
+                    errno,
+                    arg->connection,
+                    local_activation,
+                    transaction);
                 return;
             }
             state->task_results[
@@ -918,14 +955,43 @@ cleanup:
     if (status != 0 &&
         atomic_load_explicit(
             &state.failures, memory_order_acquire) != 0U) {
+        unsigned pending_ops = 0U;
+        unsigned active_io_waiters = 0U;
+        int fatal_errno = 0;
+
+        if (runtime_started) {
+            fatal_errno = atomic_load_explicit(
+                &g_llam_runtime.fatal_errno,
+                memory_order_acquire);
+            active_io_waiters = atomic_load_explicit(
+                &g_llam_runtime.active_io_waiters,
+                memory_order_acquire);
+            for (i = 0U;
+                 i < g_llam_runtime.active_nodes;
+                 i += 1U) {
+                pending_ops += atomic_load_explicit(
+                    &g_llam_runtime.nodes[i].pending_ops,
+                    memory_order_acquire);
+            }
+        }
         fprintf(
             stderr,
-            "LEIR benchmark block failed mode=%s stage=%s errno=%d\n",
+            "LEIR benchmark block failed mode=%s stage=%s "
+            "errno=%d raw_errno=%d connection=%u "
+            "activation=%" PRIu64 " transaction=%u "
+            "fatal_errno=%d active_io_waiters=%u pending_ops=%u\n",
             mode == LEIR_BENCH_MODE_BASELINE
                 ? "baseline"
                 : "candidate",
             state.first_stage,
-            state.first_error);
+            state.first_error,
+            state.first_raw_error,
+            state.first_connection,
+            state.first_activation,
+            state.first_transaction,
+            fatal_errno,
+            active_io_waiters,
+            pending_ops);
     }
     if (state.peer != NULL) {
         leir_peer_process_abort(state.peer);
