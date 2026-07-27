@@ -52,7 +52,12 @@ static bool validate_io_node(const leir_phase0_program_t *program,
 
     return slot_is(program, node->fd_slot, LEIR_PHASE0_SLOT_FD) &&
            buffer_is_valid &&
-           slot_is(program, node->length_slot, LEIR_PHASE0_SLOT_U64) &&
+           (slot_is(program,
+                    node->length_slot,
+                    LEIR_PHASE0_SLOT_U64) ||
+            slot_is(program,
+                    node->length_slot,
+                    LEIR_PHASE0_SLOT_I64)) &&
            slot_is(program, node->result_slot, LEIR_PHASE0_SLOT_I64) &&
            edge_is_valid(program, node->on_success) &&
            edge_is_valid(program, node->on_eof) &&

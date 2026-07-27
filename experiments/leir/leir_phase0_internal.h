@@ -7,6 +7,12 @@
 
 typedef void *(*leir_phase0_calloc_fn)(size_t count, size_t size);
 
+typedef enum leir_phase0_advance_result {
+    LEIR_PHASE0_ADVANCE_TERMINAL = 0,
+    LEIR_PHASE0_ADVANCE_NEEDS_BACKEND = 1,
+    LEIR_PHASE0_ADVANCE_ERROR = 2,
+} leir_phase0_advance_result_t;
+
 struct leir_phase0_program {
     leir_phase0_node_desc_t nodes[LEIR_PHASE0_MAX_NODES];
     leir_phase0_slot_kind_t slot_kinds[LEIR_PHASE0_MAX_SLOTS];

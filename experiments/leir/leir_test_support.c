@@ -121,6 +121,90 @@ void leir_test_close(llam_fd_t *fd) {
     *fd = LLAM_INVALID_FD;
 }
 
+int leir_test_set_socket_buffers(llam_fd_t fd, int size) {
+    if (LLAM_FD_IS_INVALID(fd) || size <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+#if LLAM_PLATFORM_WINDOWS
+    if (setsockopt(
+            (SOCKET)fd,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            (const char *)&size,
+            (int)sizeof(size)) == SOCKET_ERROR ||
+        setsockopt(
+            (SOCKET)fd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            (const char *)&size,
+            (int)sizeof(size)) == SOCKET_ERROR) {
+        errno = EIO;
+        return -1;
+    }
+#else
+    if (setsockopt(
+            (int)fd,
+            SOL_SOCKET,
+            SO_SNDBUF,
+            &size,
+            (socklen_t)sizeof(size)) != 0 ||
+        setsockopt(
+            (int)fd,
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &size,
+            (socklen_t)sizeof(size)) != 0) {
+        return -1;
+    }
+#endif
+    return 0;
+}
+
+int leir_test_shutdown_write(llam_fd_t fd) {
+    if (LLAM_FD_IS_INVALID(fd)) {
+        errno = EINVAL;
+        return -1;
+    }
+#if LLAM_PLATFORM_WINDOWS
+    if (shutdown((SOCKET)fd, SD_SEND) == SOCKET_ERROR) {
+        errno = EIO;
+        return -1;
+    }
+#else
+    if (shutdown((int)fd, SHUT_WR) != 0) {
+        return -1;
+    }
+#endif
+    return 0;
+}
+
+int leir_test_read_exact(llam_fd_t fd, void *data, size_t size) {
+    unsigned char *bytes = data;
+    size_t offset = 0U;
+
+    if ((data == NULL && size != 0U) || LLAM_FD_IS_INVALID(fd)) {
+        errno = EINVAL;
+        return -1;
+    }
+    while (offset < size) {
+        ssize_t result = llam_read(fd, bytes + offset, size - offset);
+
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (result == 0) {
+            errno = ECONNRESET;
+            return -1;
+        }
+        offset += (size_t)result;
+    }
+    return 0;
+}
+
 int leir_test_write_all(llam_fd_t fd, const void *data, size_t size) {
     const unsigned char *bytes = data;
     size_t offset = 0U;
