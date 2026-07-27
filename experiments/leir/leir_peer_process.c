@@ -13,6 +13,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -362,6 +363,25 @@ static int peer_poll(
 #endif
 }
 
+static int peer_socket_set_nonblocking(llam_fd_t fd) {
+#if LLAM_PLATFORM_WINDOWS
+    u_long enabled = 1UL;
+
+    if (ioctlsocket((SOCKET)fd, FIONBIO, &enabled) == SOCKET_ERROR) {
+        errno = EIO;
+        return -1;
+    }
+#else
+    int flags = fcntl((int)fd, F_GETFL, 0);
+
+    if (flags < 0 ||
+        fcntl((int)fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        return -1;
+    }
+#endif
+    return 0;
+}
+
 static ssize_t peer_socket_send(
     llam_fd_t fd,
     const void *data,
@@ -371,7 +391,9 @@ static ssize_t peer_socket_send(
     int result = send((SOCKET)fd, data, chunk, 0);
 
     if (result == SOCKET_ERROR) {
-        errno = EIO;
+        errno = WSAGetLastError() == WSAEWOULDBLOCK
+            ? EAGAIN
+            : EIO;
         return -1;
     }
     return (ssize_t)result;
@@ -394,7 +416,9 @@ static ssize_t peer_socket_receive(
     int result = recv((SOCKET)fd, data, chunk, 0);
 
     if (result == SOCKET_ERROR) {
-        errno = EIO;
+        errno = WSAGetLastError() == WSAEWOULDBLOCK
+            ? EAGAIN
+            : EIO;
         return -1;
     }
     return (ssize_t)result;
@@ -450,6 +474,10 @@ static int service_peer_connections(
         leir_peer_connection_t *connection =
             &connections[i];
 
+        if (peer_socket_set_nonblocking(peer_fds[i]) != 0) {
+            status = errno != 0 ? errno : EIO;
+            goto cleanup;
+        }
         connection->transaction_count =
             transactions_for_connection(config, i);
         if (connection->transaction_count == UINT64_MAX) {
@@ -537,7 +565,8 @@ static int service_peer_connections(
                     config->payload - connection->offset);
             }
             if (io_result < 0) {
-                if (errno == EINTR) {
+                if (errno == EINTR || errno == EAGAIN ||
+                    errno == EWOULDBLOCK) {
                     continue;
                 }
                 status = errno != 0 ? errno : EIO;

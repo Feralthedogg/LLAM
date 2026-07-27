@@ -535,6 +535,27 @@ class EvidenceAndCliTests(unittest.TestCase):
         )
         self.assertEqual(_cell_key(row.cell), _cell_key(cell))
 
+    def test_optional_native_high_fanout_peer_progress(self) -> None:
+        binary = os.environ.get("LEIR_PHASE0_TEST_BINARY")
+        if not binary:
+            self.skipTest("LEIR_PHASE0_TEST_BINARY is not set")
+        cell = MatrixCell("socket_relay", 1, 64, 16384, 1)
+        command = benchmark_command(
+            Path(binary),
+            cell,
+            activations=64,
+            min_mode_ms=1,
+            order="ABBA",
+        )
+        result = run_capture(command, timeout=10.0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        row = parse_output(
+            result.stdout,
+            allow_combined_cpu=(os.name == "nt"),
+        )
+        self.assertEqual(_cell_key(row.cell), _cell_key(cell))
+
 
 if __name__ == "__main__":
     unittest.main()
