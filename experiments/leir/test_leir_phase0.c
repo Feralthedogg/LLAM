@@ -248,10 +248,10 @@ static int test_benchmark_calibration_retains_duration_margin(void) {
     uint64_t largest =
         leir_bench_calibration_target_block_ns(UINT64_MAX);
 
-    if (target != UINT64_C(25000000) || tiny != 1U ||
-        largest != UINT64_MAX / 4U + 1U ||
+    if (target != UINT64_C(50000000) || tiny != 1U ||
+        largest != UINT64_MAX / 2U + 1U ||
         target > UINT64_MAX / 8U ||
-        target * 8U < UINT64_C(200000000)) {
+        target * 8U < UINT64_C(400000000)) {
         return 1;
     }
     return 0;
