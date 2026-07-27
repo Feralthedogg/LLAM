@@ -58,6 +58,64 @@ python3 scripts/bench_runtime_compare.py \
 The scheduled `Runtime Benchmarks` workflow uploads CSV and PNG artifacts for
 Linux, macOS, and Windows lanes.
 
+## Connected LEIR Native Pipeline
+
+The connected-pipeline gate measures compiled LEIR `RECV`→`SEND` effect
+segments against the public LLAM I/O path on Linux:
+
+```sh
+make bench_leir_native_pipeline
+python3 scripts/bench_leir_native_pipeline.py \
+  --binary ./bench_leir_native_pipeline \
+  --samples 9 \
+  --activations 32 \
+  --min-mode-ms 20 \
+  --output-dir object/leir-native-pipeline \
+  --tracked-report \
+    object/leir_native_pipeline_tracked_report.md
+python3 scripts/bench_leir_native_pipeline.py \
+  --audit-existing object/leir-native-pipeline
+```
+
+This is explicitly a **Linux/io_uring specialized evidence** run. It covers
+`link_skip` and `fixed_link_skip`, widths 1/2/4/8, concurrency 1/4/16, and
+payloads 64/512/4096. Each cell has one discarded fresh-process warmup and
+nine measured fresh-process pairs with alternating ABBA/BAAB order.
+
+The output directory contains:
+
+- `raw.csv`: every accepted process result and structural counter.
+- `summary.csv`: deterministic paired-log bootstrap estimates and 95%
+  confidence intervals.
+- `leir_native_pipeline_report.md`: human-readable gates and cell results.
+- `leir_native_pipeline_metadata.json`: invocation, source, environment,
+  verdict, and unavailable-cell metadata.
+
+The separate tracked report must byte-match
+`leir_native_pipeline_report.md`. The audit command recomputes the summaries
+and verdict from `raw.csv` and fails if the CSV, report, or metadata was
+altered.
+
+Verdicts have narrow meanings:
+
+- `SPECIALIZED` means the precommitted Linux-only wall, CPU, p99,
+  fixed-resource, batching, and structural gates all passed.
+- `INCONCLUSIVE` means coverage or sample evidence was incomplete, a required
+  comparative win was absent, or the confidence bounds were insufficient.
+- `REJECT` means a structural/correctness gate failed, a wall regression was
+  statistically supported, or the matrix CPU/p99 regression limit was
+  exceeded.
+
+If the kernel, liburing, memlock/resource limits, registered files/buffers, or
+CQE-skip support cannot run `fixed_link_skip`, the benchmark exits with the
+native skip code and the matrix records unavailable fixed cells. It never
+substitutes non-fixed measurements. Such missing coverage cannot produce
+`SPECIALIZED`.
+
+These results isolate one Linux backend mechanism. Even a `SPECIALIZED`
+verdict does not establish a portable LLAM speedup, a general language-runtime
+advantage, or a release by itself.
+
 ## Guardrails
 
 `scripts/bench_guard.py` is a catastrophic-regression gate. Keep it

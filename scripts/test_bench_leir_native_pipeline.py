@@ -508,5 +508,61 @@ class EvidenceTests(unittest.TestCase):
                 audit_existing(output)
 
 
+class LinuxIntegrationContractTests(unittest.TestCase):
+    def test_workflow_verify_script_and_docs_cover_pipeline(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (
+            root / ".github/workflows/leir-native-research.yml"
+        ).read_text(encoding="utf-8")
+        verify_linux = (
+            root / "scripts/verify_linux.sh"
+        ).read_text(encoding="utf-8")
+        benchmarks = (
+            root / "docs/operations/benchmarks.md"
+        ).read_text(encoding="utf-8")
+
+        workflow_fragments = (
+            '"scripts/bench_leir_native_pipeline.py"',
+            '"scripts/test_bench_leir_native_pipeline.py"',
+            "ulimit -l",
+            "/proc/sys/kernel/io_uring_disabled",
+            "bench_leir_native_pipeline",
+            "for iteration in 1 2 3 4 5",
+            "asan-linux-test-$iteration.log",
+            "asan-pipeline-bench.log",
+            "tsan-pipeline-bench.log",
+            "--output-dir \"$OUT_DIR/pipeline\"",
+            "--audit-existing \"$OUT_DIR/pipeline\"",
+            "leir_native_pipeline_tracked_report.md",
+        )
+        for fragment in workflow_fragments:
+            with self.subTest(workflow=fragment):
+                self.assertIn(fragment, workflow)
+
+        verify_fragments = (
+            "bench_leir_native_pipeline",
+            "test_bench_leir_native_pipeline.py",
+            "./test_leir_native_linux",
+            '"--batch-width", "4"',
+        )
+        for fragment in verify_fragments:
+            with self.subTest(verify_linux=fragment):
+                self.assertIn(fragment, verify_linux)
+
+        doc_fragments = (
+            "Linux/io_uring specialized evidence",
+            "SPECIALIZED",
+            "INCONCLUSIVE",
+            "REJECT",
+            "fixed_link_skip",
+            "portable LLAM speedup",
+            "leir_native_pipeline_report.md",
+            "leir_native_pipeline_metadata.json",
+        )
+        for fragment in doc_fragments:
+            with self.subTest(benchmarks=fragment):
+                self.assertIn(fragment, benchmarks)
+
+
 if __name__ == "__main__":
     unittest.main()

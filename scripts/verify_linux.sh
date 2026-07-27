@@ -11,62 +11,84 @@ fi
 
 JOBS="${JOBS:-4}"
 make clean
-make -j"$JOBS" all test bench_leir_native_segment
+make -j"$JOBS" all test \
+    bench_leir_native_segment bench_leir_native_pipeline
+./test_leir_native_linux
+python3 -m unittest \
+    scripts/test_bench_leir_native.py \
+    scripts/test_bench_leir_native_pipeline.py -v
 
 python3 - <<'PY'
 import sys
 
 sys.path.insert(0, "scripts")
 
-from process_utils import ProcessTimeoutError, print_captured_output, run_capture
+from process_utils import (
+    ProcessTimeoutError,
+    print_captured_output,
+    run_capture,
+)
 
-command = [
-    "./bench_leir_native_segment",
-    "--candidate", "link_skip",
-    "--ops", "4",
-    "--concurrency", "4",
-    "--payload", "64",
-    "--activations", "8",
-    "--min-mode-ms", "1",
-    "--order", "ABBA",
-]
-try:
-    probe = run_capture(
-        command,
-        timeout=30,
-        max_output_bytes=64 * 1024,
-    )
-except ProcessTimeoutError as exc:
-    print_captured_output(exc.stdout, exc.stderr)
-    print(
-        "verify_linux.sh: Linux io_uring native segment "
-        "probe timed out after 30s",
-        file=sys.stderr,
-    )
-    sys.exit(124)
 
-if probe.stdout_truncated or probe.stderr_truncated:
-    print(
-        "verify_linux.sh: Linux io_uring native segment "
-        "probe exceeded the output cap",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-if probe.returncode == 0:
-    print(
-        "verify_linux.sh: Linux io_uring native segment "
-        "available"
-    )
-    print_captured_output(probe.stdout, probe.stderr)
-elif probe.returncode == 77:
-    print(
-        "verify_linux.sh: SKIP Linux io_uring native "
-        "segment unavailable"
-    )
-    print_captured_output(probe.stdout, probe.stderr)
-else:
-    print_captured_output(probe.stdout, probe.stderr)
-    sys.exit(probe.returncode)
+def probe_native(label, command):
+    try:
+        probe = run_capture(
+            command,
+            timeout=30,
+            max_output_bytes=64 * 1024,
+        )
+    except ProcessTimeoutError as exc:
+        print_captured_output(exc.stdout, exc.stderr)
+        print(
+            f"verify_linux.sh: {label} probe timed out after 30s",
+            file=sys.stderr,
+        )
+        sys.exit(124)
+
+    if probe.stdout_truncated or probe.stderr_truncated:
+        print(
+            f"verify_linux.sh: {label} probe exceeded "
+            "the output cap",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if probe.returncode == 0:
+        print(f"verify_linux.sh: {label} available")
+        print_captured_output(probe.stdout, probe.stderr)
+    elif probe.returncode == 77:
+        print(f"verify_linux.sh: SKIP {label} unavailable")
+        print_captured_output(probe.stdout, probe.stderr)
+    else:
+        print_captured_output(probe.stdout, probe.stderr)
+        sys.exit(probe.returncode)
+
+
+probe_native(
+    "Linux io_uring native segment",
+    [
+        "./bench_leir_native_segment",
+        "--candidate", "link_skip",
+        "--ops", "4",
+        "--concurrency", "4",
+        "--payload", "64",
+        "--activations", "8",
+        "--min-mode-ms", "1",
+        "--order", "ABBA",
+    ],
+)
+probe_native(
+    "Linux io_uring connected native pipeline",
+    [
+        "./bench_leir_native_pipeline",
+        "--candidate", "link_skip",
+        "--batch-width", "4",
+        "--concurrency", "4",
+        "--payload", "64",
+        "--activations", "8",
+        "--min-mode-ms", "1",
+        "--order", "ABBA",
+    ],
+)
 PY
 
 python3 - <<'PY'

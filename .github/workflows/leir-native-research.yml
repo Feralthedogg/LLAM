@@ -8,13 +8,18 @@ on:
     paths:
       - ".github/workflows/leir-native-research.yml"
       - "experiments/leir/**"
-      - "src/io/linux/watch/**"
-      - "src/internal/io/**"
+      - "include/llam/experimental/**"
+      - "src/io/linux/**"
+      - "src/core/wait/**"
+      - "src/internal/**"
       - "scripts/bench_leir_native.py"
       - "scripts/test_bench_leir_native.py"
+      - "scripts/bench_leir_native_pipeline.py"
+      - "scripts/test_bench_leir_native_pipeline.py"
       - "scripts/process_utils.py"
       - "scripts/test_process_utils.py"
       - "scripts/verify_linux.sh"
+      - "docs/operations/benchmarks.md"
       - "CMakeLists.txt"
       - "Makefile"
   workflow_dispatch:
@@ -71,30 +76,43 @@ jobs:
           } | tee "$OUT_DIR/source.txt"
           {
             uname -a
+            ulimit -l
             lscpu
             gcc --version
             clang --version
             cmake --version
             python3 --version
             pkg-config --modversion liburing
+            cat /proc/sys/kernel/io_uring_disabled
             taskset --version
             taskset -pc $$
             git rev-parse HEAD
           } > "$OUT_DIR/environment.txt"
 
-      - name: Make native segment gate
+      - name: Make native pipeline correctness gate
         shell: bash
         run: |
           set -o pipefail
           make clean
-          make -j2 test-leir-native \
+          make -j2 \
+            test_leir_native_plan \
+            test_leir_native_segment \
+            test_leir_native_linux \
+            bench_leir_native_segment \
+            bench_leir_native_pipeline \
             CC=gcc \
             CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O3 -g -fno-omit-frame-pointer" \
             2>&1 | tee "$OUT_DIR/make-test-leir-native.log"
-          make -j2 test_leir_native_linux CC=gcc \
-            2>&1 | tee "$OUT_DIR/make-native-linux-build.log"
+          ./test_leir_native_plan \
+            2>&1 | tee "$OUT_DIR/make-native-plan-test.log"
+          ./test_leir_native_segment \
+            2>&1 | tee "$OUT_DIR/make-native-segment-test.log"
           ./test_leir_native_linux \
             2>&1 | tee "$OUT_DIR/make-native-linux-test.log"
+          python3 -m unittest \
+            scripts/test_bench_leir_native.py \
+            scripts/test_bench_leir_native_pipeline.py -v \
+            2>&1 | tee "$OUT_DIR/make-native-python-test.log"
 
       - name: Probe kernel native feature status
         shell: bash
@@ -172,6 +190,7 @@ jobs:
               test_leir_native_segment \
               test_leir_native_linux \
               bench_leir_native_segment \
+              bench_leir_native_pipeline \
             -j2 2>&1 | tee "$OUT_DIR/cmake-build.log"
           ctest --test-dir object/leir-native-ci-cmake \
             --output-on-failure \
@@ -194,20 +213,55 @@ jobs:
             2>&1 | tee "$OUT_DIR/asan-configure.log"
           cmake --build object/leir-native-ci-asan \
             --target \
+              test_leir_native_plan \
               test_leir_native_segment \
               test_leir_native_linux \
               bench_leir_native_segment \
+              bench_leir_native_pipeline \
             -j2 2>&1 | tee "$OUT_DIR/asan-build.log"
-          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
-            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-            ./object/leir-native-ci-asan/test_leir_native_segment \
-            2>&1 | tee "$OUT_DIR/asan-segment-test.log"
-          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
-            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
-            ./object/leir-native-ci-asan/test_leir_native_linux \
-            2>&1 | tee "$OUT_DIR/asan-linux-test.log"
-          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
-            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+
+          status=0
+          run_logged() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              status=1
+            fi
+          }
+          run_logged_allow_skip() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 77 ]; then
+              status=1
+            fi
+          }
+          sanitizer_env=(
+            env
+            ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
+            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+          )
+          run_logged "$OUT_DIR/asan-plan-test.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/test_leir_native_plan
+          run_logged "$OUT_DIR/asan-segment-test.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/test_leir_native_segment
+          for iteration in 1 2 3 4 5; do
+            run_logged \
+              "$OUT_DIR/asan-linux-test-$iteration.log" \
+              "${sanitizer_env[@]}" \
+              ./object/leir-native-ci-asan/test_leir_native_linux
+          done
+          run_logged_allow_skip "$OUT_DIR/asan-native-bench.log" \
+            "${sanitizer_env[@]}" \
             ./object/leir-native-ci-asan/bench_leir_native_segment \
               --candidate link \
               --ops 8 \
@@ -215,8 +269,29 @@ jobs:
               --payload 64 \
               --activations 8 \
               --min-mode-ms 1 \
-              --order ABBA \
-            2>&1 | tee "$OUT_DIR/asan-native-bench.log"
+              --order ABBA
+          run_logged_allow_skip "$OUT_DIR/asan-pipeline-bench.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/bench_leir_native_pipeline \
+              --candidate link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          run_logged_allow_skip \
+            "$OUT_DIR/asan-pipeline-fixed-bench.log" \
+            "${sanitizer_env[@]}" \
+            ./object/leir-native-ci-asan/bench_leir_native_pipeline \
+              --candidate fixed_link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          exit "$status"
 
       - name: TSan native integration gate
         shell: bash
@@ -230,14 +305,67 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
             2>&1 | tee "$OUT_DIR/tsan-configure.log"
           cmake --build object/leir-native-ci-tsan \
-            --target test_leir_native_segment test_leir_native_linux \
+            --target \
+              test_leir_native_plan \
+              test_leir_native_segment \
+              test_leir_native_linux \
+              bench_leir_native_pipeline \
             -j2 2>&1 | tee "$OUT_DIR/tsan-build.log"
-          TSAN_OPTIONS=halt_on_error=1 \
-            ./object/leir-native-ci-tsan/test_leir_native_segment \
-            2>&1 | tee "$OUT_DIR/tsan-segment-test.log"
-          TSAN_OPTIONS=halt_on_error=1 \
-            ./object/leir-native-ci-tsan/test_leir_native_linux \
-            2>&1 | tee "$OUT_DIR/tsan-linux-test.log"
+
+          status=0
+          run_logged() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              status=1
+            fi
+          }
+          run_logged_allow_skip() {
+            log="$1"
+            shift
+            set +e
+            "$@" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 77 ]; then
+              status=1
+            fi
+          }
+          run_logged "$OUT_DIR/tsan-plan-test.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/test_leir_native_plan
+          run_logged "$OUT_DIR/tsan-segment-test.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/test_leir_native_segment
+          run_logged "$OUT_DIR/tsan-linux-test.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/test_leir_native_linux
+          run_logged_allow_skip "$OUT_DIR/tsan-pipeline-bench.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/bench_leir_native_pipeline \
+              --candidate link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          run_logged_allow_skip \
+            "$OUT_DIR/tsan-pipeline-fixed-bench.log" \
+            env TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-native-ci-tsan/bench_leir_native_pipeline \
+              --candidate fixed_link_skip \
+              --batch-width 4 \
+              --concurrency 4 \
+              --payload 64 \
+              --activations 8 \
+              --min-mode-ms 1 \
+              --order ABBA
+          exit "$status"
 
       - name: Full runtime regression and export gates
         shell: bash
@@ -252,7 +380,7 @@ jobs:
           JOBS=2 scripts/verify_linux.sh \
             2>&1 | tee "$OUT_DIR/verify-linux.log"
 
-      - name: Run pinned native screen
+      - name: Run pinned native and connected pipeline evidence
         shell: bash
         run: |
           set -o pipefail
@@ -280,6 +408,23 @@ jobs:
           cmp \
             "$OUT_DIR/leir_native_report.md" \
             "$OUT_DIR/leir_native_tracked_report.md"
+          taskset -c "$server_cpu" \
+            python3 scripts/bench_leir_native_pipeline.py \
+              --binary ./bench_leir_native_pipeline \
+              --samples 9 \
+              --activations 32 \
+              --min-mode-ms 20 \
+              --output-dir "$OUT_DIR/pipeline" \
+              --tracked-report \
+                "$OUT_DIR/leir_native_pipeline_tracked_report.md" \
+            2> >(tee "$OUT_DIR/pipeline-runner-stderr.log" >&2) |
+            tee "$OUT_DIR/pipeline-runner-stdout.log"
+          cmp \
+            "$OUT_DIR/pipeline/leir_native_pipeline_report.md" \
+            "$OUT_DIR/leir_native_pipeline_tracked_report.md"
+          python3 scripts/bench_leir_native_pipeline.py \
+            --audit-existing "$OUT_DIR/pipeline" \
+            2>&1 | tee "$OUT_DIR/pipeline-audit.log"
 
       - name: Upload LEIR native evidence
         if: always()
