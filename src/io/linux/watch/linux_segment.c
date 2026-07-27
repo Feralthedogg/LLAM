@@ -89,6 +89,8 @@ int llam_linux_native_segment_configure(
         segment->tokens[i].operation_index = (uint16_t)i;
     }
     atomic_init(&segment->state, LLAM_LINUX_NATIVE_SEGMENT_IDLE);
+    atomic_init(&segment->semantic_claimed, 0U);
+    atomic_init(&segment->target_retired, 0U);
     atomic_init(&segment->terminal_claimed, 0U);
     return 0;
 }
@@ -156,42 +158,43 @@ static void llam_linux_native_record_error(
     llam_linux_native_segment_t *segment,
     unsigned index,
     int error) {
+    bool current_is_cancel;
+    bool error_is_cancel;
+
     if (error == 0) {
         return;
     }
+    current_is_cancel = segment->first_error == ECANCELED;
+    error_is_cancel = error == ECANCELED;
     if (segment->first_error == 0 ||
-        (segment->first_error == ECANCELED &&
-         error != ECANCELED)) {
+        (current_is_cancel && !error_is_cancel) ||
+        (current_is_cancel == error_is_cancel &&
+         index < segment->first_error_index)) {
         segment->first_error = error;
         segment->first_error_index = index;
     }
 }
 
-static llam_linux_native_cqe_action_t
-llam_linux_native_claim_terminal(
-    llam_linux_native_segment_t *segment,
-    int error,
-    int success_result,
-    int *terminal_result_out) {
-    unsigned expected = 0U;
+static unsigned llam_linux_native_missing_cqes(
+    uint64_t observed_mask) {
+    unsigned highest = 0U;
+    unsigned missing = 0U;
+    unsigned i;
 
-    if (!atomic_compare_exchange_strong_explicit(
-            &segment->terminal_claimed,
-            &expected,
-            1U,
-            memory_order_acq_rel,
-            memory_order_acquire)) {
-        return LLAM_LINUX_NATIVE_CQE_FATAL;
+    if (observed_mask == 0U) {
+        return 0U;
     }
-    atomic_store_explicit(
-        &segment->state,
-        LLAM_LINUX_NATIVE_SEGMENT_TERMINAL,
-        memory_order_release);
-    *terminal_result_out =
-        error != 0 ? -error : success_result;
-    return error != 0
-        ? LLAM_LINUX_NATIVE_CQE_COMPLETE_ERROR
-        : LLAM_LINUX_NATIVE_CQE_COMPLETE_OK;
+    for (i = 0U; i < LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS; i += 1U) {
+        if ((observed_mask & (UINT64_C(1) << i)) != 0U) {
+            highest = i;
+        }
+    }
+    for (i = 0U; i < highest; i += 1U) {
+        if ((observed_mask & (UINT64_C(1) << i)) == 0U) {
+            missing += 1U;
+        }
+    }
+    return missing;
 }
 
 llam_linux_native_cqe_action_t
@@ -200,6 +203,13 @@ llam_linux_native_segment_apply_cqe(
     const llam_linux_native_token_t *token,
     int result,
     int *terminal_result_out) {
+    llam_linux_native_cqe_action_t action =
+        LLAM_LINUX_NATIVE_CQE_CONTINUE;
+    uint64_t bit;
+    uint64_t old_mask;
+    unsigned old_missing = 0U;
+    unsigned new_missing = 0U;
+    unsigned state;
     unsigned index;
     int error;
 
@@ -209,61 +219,105 @@ llam_linux_native_segment_apply_cqe(
         token->owner != segment ||
         token->generation == 0U ||
         token->generation != segment->generation ||
-        token->operation_index >= segment->op_count ||
-        atomic_load_explicit(
-            &segment->state,
-            memory_order_acquire) !=
-            LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT ||
-        atomic_load_explicit(
-            &segment->terminal_claimed,
-            memory_order_acquire) != 0U) {
+        token->operation_index >= segment->op_count) {
         return LLAM_LINUX_NATIVE_CQE_FATAL;
     }
 
+    state = atomic_load_explicit(
+        &segment->state, memory_order_acquire);
+    if (state != LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT &&
+        state != LLAM_LINUX_NATIVE_SEGMENT_RETIRING) {
+        return LLAM_LINUX_NATIVE_CQE_FATAL;
+    }
     index = token->operation_index;
-    if (segment->mode == LLAM_LINUX_NATIVE_SEGMENT_LINK) {
-        if (index != segment->completed_cqes) {
-            return LLAM_LINUX_NATIVE_CQE_FATAL;
+    bit = UINT64_C(1) << index;
+    old_mask = segment->observed_operation_mask;
+    if ((old_mask & bit) != 0U ||
+        (segment->mode ==
+             LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+         index + 1U < segment->op_count &&
+         result >= 0)) {
+        return LLAM_LINUX_NATIVE_CQE_FATAL;
+    }
+    if (segment->mode ==
+        LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) {
+        old_missing =
+            llam_linux_native_missing_cqes(old_mask);
+    }
+    segment->observed_operation_mask = old_mask | bit;
+    if (segment->mode ==
+        LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) {
+        new_missing = llam_linux_native_missing_cqes(
+            segment->observed_operation_mask);
+        if (new_missing >= old_missing) {
+            segment->suppressed_success_cqes +=
+                new_missing - old_missing;
+        } else {
+            segment->suppressed_success_cqes -=
+                old_missing - new_missing;
         }
-    } else {
-        /*
-         * completed_cqes is an operation cursor in skip mode. Gaps before a
-         * visible CQE are successful operations whose CQEs the kernel
-         * suppressed. A visible non-final CQE must be an error. For a soft
-         * link, that error cancels the remaining dependent requests and their
-         * CQEs are omitted, so the error CQE is terminal for this segment.
-         */
-        if (index < segment->completed_cqes ||
-            (index + 1U < segment->op_count && result >= 0)) {
-            return LLAM_LINUX_NATIVE_CQE_FATAL;
-        }
-        segment->suppressed_success_cqes +=
-            index - segment->completed_cqes;
     }
 
     error = llam_linux_native_result_error(
         &segment->ops[index], result);
     segment->observed_cqes += 1U;
-    segment->completed_cqes = index + 1U;
+    segment->completed_cqes += 1U;
     llam_linux_native_record_error(segment, index, error);
 
-    if (segment->mode ==
-        LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) {
-        return llam_linux_native_claim_terminal(
-            segment,
-            segment->first_error,
-            result,
-            terminal_result_out);
+    if (error != 0) {
+        unsigned was_claimed = atomic_exchange_explicit(
+            &segment->semantic_claimed,
+            1U,
+            memory_order_acq_rel);
+
+        segment->semantic_result = -segment->first_error;
+        *terminal_result_out = segment->semantic_result;
+        if (was_claimed == 0U) {
+            atomic_store_explicit(
+                &segment->state,
+                LLAM_LINUX_NATIVE_SEGMENT_RETIRING,
+                memory_order_release);
+            action = LLAM_LINUX_NATIVE_CQE_SEMANTIC;
+        }
     }
 
-    if (index + 1U < segment->op_count) {
-        return LLAM_LINUX_NATIVE_CQE_CONTINUE;
+    if (index + 1U == segment->op_count) {
+        unsigned expected = 0U;
+
+        if (!atomic_compare_exchange_strong_explicit(
+                &segment->terminal_claimed,
+                &expected,
+                1U,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            return LLAM_LINUX_NATIVE_CQE_FATAL;
+        }
+        atomic_store_explicit(
+            &segment->target_retired,
+            1U,
+            memory_order_release);
+        if (atomic_exchange_explicit(
+                &segment->semantic_claimed,
+                1U,
+                memory_order_acq_rel) == 0U) {
+            segment->semantic_result =
+                segment->first_error != 0
+                    ? -segment->first_error
+                    : result;
+        } else if (segment->first_error != 0) {
+            segment->semantic_result =
+                -segment->first_error;
+        }
+        *terminal_result_out = segment->semantic_result;
+        atomic_store_explicit(
+            &segment->state,
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED,
+            memory_order_release);
+        return segment->first_error != 0
+            ? LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR
+            : LLAM_LINUX_NATIVE_CQE_RETIRED_OK;
     }
-    return llam_linux_native_claim_terminal(
-        segment,
-        segment->first_error,
-        result,
-        terminal_result_out);
+    return action;
 }
 
 /**
@@ -345,8 +399,14 @@ bool llam_linux_native_segment_enqueue(
     segment->req = req;
     segment->next = NULL;
     segment->completed_cqes = 0U;
+    segment->observed_operation_mask = 0U;
     segment->first_error = 0;
     segment->first_error_index = UINT_MAX;
+    segment->semantic_result = 0;
+    atomic_store_explicit(
+        &segment->semantic_claimed, 0U, memory_order_release);
+    atomic_store_explicit(
+        &segment->target_retired, 0U, memory_order_release);
     atomic_store_explicit(
         &segment->terminal_claimed, 0U, memory_order_release);
     for (i = 0U; i < segment->op_count; i += 1U) {
@@ -458,10 +518,15 @@ static void llam_linux_native_segment_complete_local(
     }
     segment->first_error = error;
     segment->first_error_index = UINT_MAX;
+    segment->semantic_result = -error;
     segment->terminal_wakes += 1U;
     atomic_store_explicit(
+        &segment->semantic_claimed, 1U, memory_order_release);
+    atomic_store_explicit(
+        &segment->target_retired, 1U, memory_order_release);
+    atomic_store_explicit(
         &segment->state,
-        LLAM_LINUX_NATIVE_SEGMENT_TERMINAL,
+        LLAM_LINUX_NATIVE_SEGMENT_RETIRED,
         memory_order_release);
     llam_io_complete_req(
         node, segment->req, -error, 0U, true);
@@ -583,7 +648,8 @@ void llam_linux_native_segment_handle_cqe(
 
     action = llam_linux_native_segment_apply_cqe(
         segment, token, result, &terminal_result);
-    if (action == LLAM_LINUX_NATIVE_CQE_CONTINUE) {
+    if (action == LLAM_LINUX_NATIVE_CQE_CONTINUE ||
+        action == LLAM_LINUX_NATIVE_CQE_SEMANTIC) {
         return;
     }
     if (action == LLAM_LINUX_NATIVE_CQE_FATAL) {

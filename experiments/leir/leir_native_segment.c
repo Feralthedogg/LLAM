@@ -661,7 +661,7 @@ int leir_native_instance_run(
             &instance->segment.state,
             memory_order_acquire);
         if (segment_state !=
-                LLAM_LINUX_NATIVE_SEGMENT_TERMINAL &&
+                LLAM_LINUX_NATIVE_SEGMENT_RETIRED &&
             segment_state !=
                 LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
             /*

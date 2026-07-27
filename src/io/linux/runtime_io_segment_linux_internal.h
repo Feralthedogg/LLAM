@@ -43,16 +43,18 @@ typedef enum llam_linux_native_segment_mode {
 
 typedef enum llam_linux_native_cqe_action {
     LLAM_LINUX_NATIVE_CQE_CONTINUE = 0,
-    LLAM_LINUX_NATIVE_CQE_COMPLETE_OK = 1,
-    LLAM_LINUX_NATIVE_CQE_COMPLETE_ERROR = 2,
-    LLAM_LINUX_NATIVE_CQE_FATAL = 3,
+    LLAM_LINUX_NATIVE_CQE_SEMANTIC = 1,
+    LLAM_LINUX_NATIVE_CQE_RETIRED_OK = 2,
+    LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR = 3,
+    LLAM_LINUX_NATIVE_CQE_FATAL = 4,
 } llam_linux_native_cqe_action_t;
 
 enum {
     LLAM_LINUX_NATIVE_SEGMENT_IDLE = 0U,
     LLAM_LINUX_NATIVE_SEGMENT_QUEUED = 1U,
     LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT = 2U,
-    LLAM_LINUX_NATIVE_SEGMENT_TERMINAL = 3U,
+    LLAM_LINUX_NATIVE_SEGMENT_RETIRING = 3U,
+    LLAM_LINUX_NATIVE_SEGMENT_RETIRED = 4U,
 };
 
 typedef struct llam_linux_native_op {
@@ -93,12 +95,16 @@ struct llam_linux_native_segment {
     uint64_t task_parks;
     uint64_t terminal_wakes;
     uint64_t hot_allocations;
+    uint64_t observed_operation_mask;
     unsigned op_count;
     unsigned completed_cqes;
     unsigned first_error_index;
     int first_error;
+    int semantic_result;
     llam_linux_native_segment_mode_t mode;
     atomic_uint state;
+    atomic_uint semantic_claimed;
+    atomic_uint target_retired;
     atomic_uint terminal_claimed;
 };
 
