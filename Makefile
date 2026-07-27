@@ -541,6 +541,8 @@ TEST_SECURITY_CAPABILITY_OBJS = \
 	$(OBJDIR)/tests/test_security_capability.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
+LEIR_PHASE0_CORE_OBJS = \
+	$(OBJDIR)/experiments/leir/leir_program.o
 LEIR_PHASE0_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_phase0.o
 LCWE_MODEL_CORE_OBJS = \
@@ -598,6 +600,7 @@ BUILD_OBJS = \
 	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
 	$(TEST_SECURITY_CAPABILITY_OBJS) \
 	$(TEST_SHARED_LOAD_OBJS) \
+	$(LEIR_PHASE0_CORE_OBJS) \
 	$(LEIR_PHASE0_TEST_OBJS) \
 	$(LCWE_MODEL_CORE_OBJS) \
 	$(LCWE_MODEL_TEST_OBJS) \
@@ -2161,8 +2164,8 @@ test_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_TEST_OBJS)
 bench_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS) $(SERVER_FLOOD_LDLIBS)
 
-test_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_TEST_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_TEST_OBJS) $(LDLIBS)
+test_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS) $(LDLIBS)
 
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)
@@ -2277,7 +2280,10 @@ $(OBJDIR)/experiments/srem/%.o: experiments/srem/%.c \
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/srem -c -o $@ $<
 
-$(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c $(RUNTIME_PRIV_HDRS)
+$(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c \
+		$(RUNTIME_PRIV_HDRS) \
+		experiments/leir/leir_phase0.h \
+		experiments/leir/leir_phase0_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir -c -o $@ $<
 

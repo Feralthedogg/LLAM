@@ -496,7 +496,12 @@ endif()
 
 enable_testing()
 
+set(LLAM_LEIR_PHASE0_SOURCES
+    experiments/leir/leir_program.c
+)
+
 add_executable(test_leir_phase0
+    ${LLAM_LEIR_PHASE0_SOURCES}
     experiments/leir/test_leir_phase0.c
 )
 target_include_directories(test_leir_phase0 PRIVATE
