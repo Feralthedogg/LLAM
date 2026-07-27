@@ -31,6 +31,8 @@
 
 #define LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS 8U
 #define LLAM_LINUX_NATIVE_BATCH_MAX_SEGMENTS 8U
+#define LLAM_LINUX_NATIVE_FIXED_FILE_SLOTS 64U
+#define LLAM_LINUX_NATIVE_FIXED_BUFFER_SLOTS 64U
 
 typedef enum llam_linux_native_op_kind {
     LLAM_LINUX_NATIVE_OP_RECV = 0,
@@ -85,6 +87,17 @@ typedef struct llam_linux_native_segment
     llam_linux_native_segment_t;
 typedef struct llam_linux_native_batch
     llam_linux_native_batch_t;
+
+typedef struct llam_linux_native_resource_lease {
+    unsigned
+        file_slots[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned
+        buffer_slots[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned file_count;
+    unsigned buffer_count;
+    unsigned node_index;
+    bool attached;
+} llam_linux_native_resource_lease_t;
 
 typedef struct llam_linux_native_token {
     _Alignas(8) llam_linux_native_segment_t *owner;
@@ -206,5 +219,23 @@ LLAM_INTERNAL_API void llam_linux_native_cancel_handle_cqe(
     llam_node_t *node,
     llam_linux_native_cancel_token_t *token,
     int result);
+LLAM_INTERNAL_API int llam_linux_native_resources_setup(
+    llam_node_t *node);
+LLAM_INTERNAL_API void
+llam_linux_native_resources_before_ring_exit(
+    llam_node_t *node);
+LLAM_INTERNAL_API void
+llam_linux_native_resources_after_ring_exit(
+    llam_node_t *node);
+LLAM_INTERNAL_API int llam_linux_native_resources_attach(
+    llam_node_t *node,
+    const int *fds,
+    unsigned fd_count,
+    const struct iovec *buffers,
+    unsigned buffer_count,
+    llam_linux_native_resource_lease_t *lease);
+LLAM_INTERNAL_API int llam_linux_native_resources_detach(
+    llam_node_t *node,
+    llam_linux_native_resource_lease_t *lease);
 
 #endif

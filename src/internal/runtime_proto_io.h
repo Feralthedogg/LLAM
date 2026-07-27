@@ -237,6 +237,13 @@ bool llam_node_supports_kind(const llam_node_t *node, llam_io_kind_t kind);
 void llam_io_queue_shutdown_controls_common(llam_node_t *node);
 void llam_probe_ring_support(llam_node_t *node);
 void llam_io_buffer_public_detach_runtime_storage(llam_runtime_t *rt);
+#if LLAM_RUNTIME_BACKEND_LINUX
+int llam_linux_native_resources_setup(llam_node_t *node);
+void llam_linux_native_resources_before_ring_exit(
+    llam_node_t *node);
+void llam_linux_native_resources_after_ring_exit(
+    llam_node_t *node);
+#endif
 
 /*
  * io_uring/kqueue user-data tagging. Pointers are encoded with small type tags

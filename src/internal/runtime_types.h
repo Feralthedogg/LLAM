@@ -1264,6 +1264,27 @@ struct llam_node {
     struct llam_linux_native_batch *native_batch_tail;
     struct llam_linux_native_batch *native_cancel_head;
     struct llam_linux_native_batch *native_cancel_tail;
+    pthread_mutex_t native_resource_lock;
+    bool native_resource_lock_initialized;
+    bool supports_native_fixed_files;
+    bool supports_native_fixed_buffers;
+    bool native_fixed_files_registered;
+    bool native_fixed_buffers_registered;
+    uint64_t native_fixed_file_bitmap;
+    uint64_t native_fixed_buffer_bitmap;
+    int (*native_files_update_override)(
+        struct llam_node *node,
+        unsigned offset,
+        const int *files,
+        unsigned count,
+        void *arg);
+    int (*native_buffers_update_override)(
+        struct llam_node *node,
+        unsigned offset,
+        const struct iovec *buffers,
+        unsigned count,
+        void *arg);
+    void *native_resource_update_override_arg;
 #endif
     llam_poll_watch_t *poll_watches;
     llam_accept_watch_t *accept_watches;

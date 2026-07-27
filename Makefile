@@ -372,6 +372,7 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/linux/watch/linux_submit.o \
 	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
 	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o \
 	$(OBJDIR)/src/io/linux/watch/cqe.o \
 	$(OBJDIR)/src/io/linux/watch/linux_worker.o
 ifeq ($(UNAME_M),x86_64)

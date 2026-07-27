@@ -190,6 +190,247 @@ static void queue_fixture_destroy(queue_fixture_t *fixture) {
     }
 }
 
+typedef struct resource_update_fixture {
+    unsigned file_calls;
+    unsigned buffer_calls;
+    unsigned fail_file_call;
+    unsigned fail_buffer_call;
+    uint64_t live_files;
+    uint64_t live_buffers;
+} resource_update_fixture_t;
+
+static int resource_files_update(
+    llam_node_t *node,
+    unsigned offset,
+    const int *files,
+    unsigned count,
+    void *arg) {
+    resource_update_fixture_t *fixture = arg;
+    uint64_t bit;
+
+    (void)node;
+    if (files == NULL || count != 1U || offset >= 64U) {
+        return -EINVAL;
+    }
+    fixture->file_calls += 1U;
+    if (fixture->fail_file_call != 0U &&
+        fixture->file_calls == fixture->fail_file_call) {
+        return -EIO;
+    }
+    bit = UINT64_C(1) << offset;
+    if (files[0] < 0) {
+        fixture->live_files &= ~bit;
+    } else {
+        fixture->live_files |= bit;
+    }
+    return 1;
+}
+
+static int resource_buffers_update(
+    llam_node_t *node,
+    unsigned offset,
+    const struct iovec *buffers,
+    unsigned count,
+    void *arg) {
+    resource_update_fixture_t *fixture = arg;
+    uint64_t bit;
+
+    (void)node;
+    if (buffers == NULL ||
+        count != 1U ||
+        offset >= 64U) {
+        return -EINVAL;
+    }
+    fixture->buffer_calls += 1U;
+    if (fixture->fail_buffer_call != 0U &&
+        fixture->buffer_calls ==
+            fixture->fail_buffer_call) {
+        return -EIO;
+    }
+    bit = UINT64_C(1) << offset;
+    if (buffers[0].iov_base == NULL &&
+        buffers[0].iov_len == 0U) {
+        fixture->live_buffers &= ~bit;
+    } else {
+        fixture->live_buffers |= bit;
+    }
+    return 1;
+}
+
+static int init_resource_node(
+    llam_node_t *node,
+    resource_update_fixture_t *updates) {
+    int rc;
+
+    memset(node, 0, sizeof(*node));
+    memset(updates, 0, sizeof(*updates));
+    node->supports_native_fixed_files = true;
+    node->supports_native_fixed_buffers = true;
+    node->native_files_update_override =
+        resource_files_update;
+    node->native_buffers_update_override =
+        resource_buffers_update;
+    node->native_resource_update_override_arg =
+        updates;
+    rc = pthread_mutex_init(
+        &node->native_resource_lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    node->native_resource_lock_initialized = true;
+    return 0;
+}
+
+static void destroy_resource_node(llam_node_t *node) {
+    if (node->native_resource_lock_initialized) {
+        pthread_mutex_destroy(
+            &node->native_resource_lock);
+        node->native_resource_lock_initialized = false;
+    }
+}
+
+static int test_resource_slots_attach_and_detach(void) {
+    llam_node_t node;
+    resource_update_fixture_t updates;
+    llam_linux_native_resource_lease_t lease;
+    int fds[2] = {10, 11};
+    unsigned char storage[2][32];
+    struct iovec buffers[2] = {
+        {storage[0], sizeof(storage[0])},
+        {storage[1], sizeof(storage[1])},
+    };
+
+    memset(&lease, 0, sizeof(lease));
+    if (init_resource_node(&node, &updates) != 0) {
+        perror("resource node init");
+        return 1;
+    }
+    node.index = 3U;
+    if (llam_linux_native_resources_attach(
+            &node,
+            fds,
+            2U,
+            buffers,
+            2U,
+            &lease) != 0 ||
+        !lease.attached ||
+        lease.node_index != 3U ||
+        lease.file_count != 2U ||
+        lease.buffer_count != 2U ||
+        __builtin_popcountll(
+            node.native_fixed_file_bitmap) != 2 ||
+        __builtin_popcountll(
+            node.native_fixed_buffer_bitmap) != 2 ||
+        __builtin_popcountll(updates.live_files) != 2 ||
+        __builtin_popcountll(updates.live_buffers) != 2 ||
+        llam_linux_native_resources_detach(
+            &node, &lease) != 0 ||
+        lease.attached ||
+        lease.file_count != 0U ||
+        lease.buffer_count != 0U ||
+        node.native_fixed_file_bitmap != 0U ||
+        node.native_fixed_buffer_bitmap != 0U ||
+        updates.live_files != 0U ||
+        updates.live_buffers != 0U) {
+        fprintf(stderr, "native resource lease mismatch\n");
+        destroy_resource_node(&node);
+        return 1;
+    }
+    destroy_resource_node(&node);
+    return 0;
+}
+
+static int run_resource_rollback_case(
+    unsigned fail_file_call,
+    unsigned fail_buffer_call) {
+    llam_node_t node;
+    resource_update_fixture_t updates;
+    llam_linux_native_resource_lease_t lease;
+    int fds[2] = {10, 11};
+    unsigned char storage[2][32];
+    struct iovec buffers[2] = {
+        {storage[0], sizeof(storage[0])},
+        {storage[1], sizeof(storage[1])},
+    };
+
+    memset(&lease, 0, sizeof(lease));
+    if (init_resource_node(&node, &updates) != 0) {
+        return 1;
+    }
+    updates.fail_file_call = fail_file_call;
+    updates.fail_buffer_call = fail_buffer_call;
+    errno = 0;
+    if (llam_linux_native_resources_attach(
+            &node,
+            fds,
+            2U,
+            buffers,
+            2U,
+            &lease) == 0 ||
+        errno != EIO ||
+        lease.attached ||
+        lease.file_count != 0U ||
+        lease.buffer_count != 0U ||
+        node.native_fixed_file_bitmap != 0U ||
+        node.native_fixed_buffer_bitmap != 0U ||
+        updates.live_files != 0U ||
+        updates.live_buffers != 0U) {
+        fprintf(
+            stderr,
+            "native resource rollback mismatch files=%u "
+            "buffers=%u\n",
+            fail_file_call,
+            fail_buffer_call);
+        destroy_resource_node(&node);
+        return 1;
+    }
+    destroy_resource_node(&node);
+    return 0;
+}
+
+static int test_resource_attach_rolls_back_updates(void) {
+    return run_resource_rollback_case(2U, 0U) != 0 ||
+           run_resource_rollback_case(0U, 2U) != 0;
+}
+
+static int test_resource_attach_reports_capacity(void) {
+    llam_node_t node;
+    resource_update_fixture_t updates;
+    llam_linux_native_resource_lease_t lease;
+    int fd = 10;
+    unsigned char storage[32];
+    struct iovec buffer = {
+        storage,
+        sizeof(storage),
+    };
+
+    memset(&lease, 0, sizeof(lease));
+    if (init_resource_node(&node, &updates) != 0) {
+        return 1;
+    }
+    node.native_fixed_file_bitmap = UINT64_MAX;
+    node.native_fixed_buffer_bitmap = UINT64_MAX;
+    errno = 0;
+    if (llam_linux_native_resources_attach(
+            &node,
+            &fd,
+            1U,
+            &buffer,
+            1U,
+            &lease) == 0 ||
+        errno != ENOSPC ||
+        updates.file_calls != 0U ||
+        updates.buffer_calls != 0U ||
+        lease.attached) {
+        fprintf(stderr, "native resource capacity mismatch\n");
+        destroy_resource_node(&node);
+        return 1;
+    }
+    destroy_resource_node(&node);
+    return 0;
+}
+
 static int test_enqueue_publishes_once(void) {
     queue_fixture_t fixture;
     unsigned completions = 0U;
@@ -2372,6 +2613,12 @@ static int test_duplicate_terminal_is_fatal(void) {
 
 int main(int argc, char **argv) {
     static const test_case_t unit_tests[] = {
+        {"resource slots attach and detach",
+         test_resource_slots_attach_and_detach},
+        {"resource attach rolls back updates",
+         test_resource_attach_rolls_back_updates},
+        {"resource attach reports capacity",
+         test_resource_attach_reports_capacity},
         {"validate configuration",
          test_validates_configuration},
         {"encode recv and send fields",

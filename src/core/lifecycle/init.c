@@ -1108,10 +1108,24 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             return -1;
         }
         rt->nodes[i].recv_buf_lock_initialized = true;
+#if LLAM_RUNTIME_BACKEND_LINUX
+        rc = pthread_mutex_init(
+            &rt->nodes[i].native_resource_lock, NULL);
+        if (rc != 0) {
+            errno = rc;
+            llam_runtime_shutdown_rt(rt);
+            return -1;
+        }
+        rt->nodes[i].native_resource_lock_initialized = true;
+#endif
         if (llam_node_init_ring(rt, &rt->nodes[i]) == 0) {
             rt->nodes[i].ring_ready = true;
             llam_probe_ring_support(&rt->nodes[i]);
             (void)llam_node_setup_recv_buf_ring(&rt->nodes[i]);
+#if LLAM_RUNTIME_BACKEND_LINUX
+            (void)llam_linux_native_resources_setup(
+                &rt->nodes[i]);
+#endif
             if (rt->experimental_shard_rings != 0U && rt->experimental_shard_rings_multishot == 0U) {
                 rt->nodes[i].supports_multishot_recv = false;
                 rt->nodes[i].supports_multishot_accept = false;
@@ -1120,10 +1134,16 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             if (pthread_create(&rt->nodes[i].thread, NULL, llam_io_worker_main, &rt->nodes[i]) == 0) {
                 rt->nodes[i].thread_started = true;
             } else {
+#if LLAM_RUNTIME_BACKEND_LINUX
+                llam_linux_native_resources_before_ring_exit(
+                    &rt->nodes[i]);
+#endif
                 io_uring_queue_exit(&rt->nodes[i].ring);
                 rt->nodes[i].ring_ready = false;
 #if LLAM_RUNTIME_BACKEND_LINUX
                 rt->nodes[i].linux_ring_features = 0U;
+                llam_linux_native_resources_after_ring_exit(
+                    &rt->nodes[i]);
 #endif
             }
         }
