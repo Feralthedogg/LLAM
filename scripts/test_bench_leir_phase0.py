@@ -18,8 +18,10 @@ from scripts.bench_leir_phase0 import (
     _build_parser,
     benchmark_command,
     classify,
+    classify_focused,
     gate_matrix,
     parse_output,
+    parse_focus_cell,
     run_one,
     screen_matrix,
     summarize,
@@ -394,6 +396,42 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(verdict, "INCONCLUSIVE")
         self.assertTrue(any("server-only CPU" in reason for reason in reasons))
 
+    def test_focused_diagnostic_ignores_performance_verdicts(self) -> None:
+        cell = MatrixCell("socket_relay", 1, 512, 64, 8)
+        samples = [
+            SampleRow(
+                process_sample=index,
+                row=_pair_for_cell(
+                    cell,
+                    wall_speedup=0.25,
+                    cpu_ratio=3.0,
+                    min_mode_ns=100_000_000,
+                    order="ABBA" if index % 2 else "BAAB",
+                ),
+            )
+            for index in range(1, 4)
+        ]
+        summaries = summarize(samples)
+        verdict, reasons = classify_focused(
+            summaries,
+            expected_cell=cell,
+            expected_samples=3,
+            min_mode_ns=100_000_000,
+        )
+        self.assertEqual(verdict, "DIAGNOSTIC_PASS")
+        self.assertIn("completed", reasons[0])
+
+        invalid = [replace(summaries[0], mechanism_valid=False)]
+        self.assertEqual(
+            classify_focused(
+                invalid,
+                expected_cell=cell,
+                expected_samples=3,
+                min_mode_ns=100_000_000,
+            )[0],
+            "DIAGNOSTIC_INCONCLUSIVE",
+        )
+
 
 class RunnerFailureTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -513,6 +551,38 @@ class EvidenceAndCliTests(unittest.TestCase):
         self.assertEqual(
             command[command.index("--activations") + 1], "128"
         )
+
+    def test_focused_cell_cli_contract(self) -> None:
+        args = _build_parser().parse_args(
+            [
+                "--binary",
+                "/tmp/bench_leir_phase0",
+                "--focus-cell",
+                "socket_relay,1,512,64,8",
+                "--samples",
+                "101",
+                "--output-dir",
+                "/tmp/evidence",
+            ]
+        )
+        self.assertEqual(
+            parse_focus_cell(args.focus_cell),
+            MatrixCell("socket_relay", 1, 512, 64, 8),
+        )
+        invalid = (
+            "",
+            "socket_relay,1,512,64",
+            "unknown,1,512,64,8",
+            "graph_break,2,512,64,8",
+            "socket_relay,3,512,64,8",
+            "socket_relay,1,0,64,8",
+            "socket_relay,1,512,63,8",
+            "socket_relay,1,512,64,0",
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_focus_cell(value)
 
     def test_optional_native_binary_smoke(self) -> None:
         binary = os.environ.get("LEIR_PHASE0_TEST_BINARY")

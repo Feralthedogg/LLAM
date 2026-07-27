@@ -52,6 +52,7 @@ GATE_PAYLOADS = (64, 1024)
 GATE_INLINE_BUDGET = 8
 SCREEN_SAMPLES = 5
 GATE_SAMPLES = 9
+FOCUS_SAMPLES = 101
 SCREEN_MIN_MODE_NS = 100_000_000
 GATE_MIN_MODE_NS = 250_000_000
 BLOCK_COUNT = 16
@@ -516,6 +517,45 @@ def gate_matrix() -> list[MatrixCell]:
     return cells
 
 
+def parse_focus_cell(text: str) -> MatrixCell:
+    fields = [field.strip() for field in text.split(",")]
+    if len(fields) != 5 or any(not field for field in fields):
+        raise ValueError(
+            "focus cell must be workload,nodes,concurrency,payload,budget"
+        )
+    workload = fields[0]
+    try:
+        nodes, concurrency, payload, inline_budget = (
+            int(field, 10) for field in fields[1:]
+        )
+    except ValueError as exc:
+        raise ValueError("focus cell numeric fields must be integers") from exc
+    cell = MatrixCell(
+        workload,
+        nodes,
+        concurrency,
+        payload,
+        inline_budget,
+    )
+    if workload not in WORKLOADS:
+        raise ValueError("unknown focus-cell workload")
+    if nodes not in NODES:
+        raise ValueError("unsupported focus-cell node count")
+    if concurrency not in CONCURRENCY:
+        raise ValueError("unsupported focus-cell concurrency")
+    if payload not in PAYLOADS:
+        raise ValueError("unsupported focus-cell payload")
+    if inline_budget not in INLINE_BUDGETS:
+        raise ValueError("unsupported focus-cell inline budget")
+    if workload == "graph_break" and (
+        nodes != 1 or inline_budget != GATE_INLINE_BUDGET
+    ):
+        raise ValueError(
+            "graph_break focus cells require nodes=1 and budget=8"
+        )
+    return cell
+
+
 def benchmark_command(
     binary: Path,
     cell: MatrixCell,
@@ -810,6 +850,53 @@ def _is_short_control(row: SummaryRow) -> bool:
             and row.payload in GATE_PAYLOADS
             and row.inline_budget == GATE_INLINE_BUDGET
         )
+    )
+
+
+def classify_focused(
+    summaries: Sequence[SummaryRow],
+    *,
+    expected_cell: MatrixCell,
+    expected_samples: int,
+    min_mode_ns: int,
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    if len(summaries) != 1:
+        reasons.append(
+            f"focused summary count {len(summaries)}/1"
+        )
+    elif _cell_key(summaries[0].cell) != _cell_key(expected_cell):
+        reasons.append(
+            "focused summary cell disagrees with the requested cell"
+        )
+    else:
+        row = summaries[0]
+        if row.sample_count != expected_samples:
+            reasons.append(
+                f"focused sample count "
+                f"{row.sample_count}/{expected_samples}"
+            )
+        if row.min_mode_ns < min_mode_ns:
+            reasons.append(
+                f"focused minimum duration below {min_mode_ns} ns"
+            )
+        if not (
+            row.path_valid
+            and row.checksum_valid
+            and row.allocation_valid
+            and row.mechanism_valid
+        ):
+            reasons.append(
+                "focused mechanism/correctness control failed"
+            )
+    if reasons:
+        return "DIAGNOSTIC_INCONCLUSIVE", reasons
+    return (
+        "DIAGNOSTIC_PASS",
+        [
+            f"{expected_samples} focused native samples completed "
+            "with valid mechanism and correctness controls"
+        ],
     )
 
 
@@ -1125,6 +1212,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--activations", type=_positive_int, default=128
     )
     parser.add_argument("--min-mode-ms", type=_positive_int)
+    parser.add_argument(
+        "--focus-cell",
+        help=(
+            "diagnostic matrix cell as "
+            "workload,nodes,concurrency,payload,budget"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--tracked-report", type=Path)
     return parser
@@ -1152,18 +1246,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    try:
+        focus_cell = (
+            parse_focus_cell(args.focus_cell)
+            if args.focus_cell is not None
+            else None
+        )
+    except ValueError as exc:
+        print(f"[bench_leir_phase0.py] {exc}", file=sys.stderr)
+        return 2
     if args.phase == "screen":
         cells = screen_matrix()
-        samples = args.samples or SCREEN_SAMPLES
+        samples = args.samples or (
+            FOCUS_SAMPLES
+            if focus_cell is not None
+            else SCREEN_SAMPLES
+        )
         min_mode_ms = args.min_mode_ms or (
             SCREEN_MIN_MODE_NS // 1_000_000
         )
     else:
         cells = gate_matrix()
-        samples = args.samples or GATE_SAMPLES
+        samples = args.samples or (
+            FOCUS_SAMPLES
+            if focus_cell is not None
+            else GATE_SAMPLES
+        )
         min_mode_ms = args.min_mode_ms or (
             GATE_MIN_MODE_NS // 1_000_000
         )
+    if focus_cell is not None:
+        cells = [focus_cell]
     if samples % 2 == 0:
         print(
             "[bench_leir_phase0.py] samples must be odd",
@@ -1180,13 +1293,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_mode_ms=min_mode_ms,
         )
         summaries = summarize(raw)
-        verdict, reasons = classify(
-            summaries,
-            phase=args.phase,
-            expected_samples=samples,
-            min_mode_ns=min_mode_ms * 1_000_000,
-            expected_cells=cells,
-        )
+        if focus_cell is not None:
+            verdict, reasons = classify_focused(
+                summaries,
+                expected_cell=focus_cell,
+                expected_samples=samples,
+                min_mode_ns=min_mode_ms * 1_000_000,
+            )
+        else:
+            verdict, reasons = classify(
+                summaries,
+                phase=args.phase,
+                expected_samples=samples,
+                min_mode_ns=min_mode_ms * 1_000_000,
+                expected_cells=cells,
+            )
     except (ValueError, MatrixRunError) as exc:
         print(f"[bench_leir_phase0.py] {exc}", file=sys.stderr)
         return 2
@@ -1207,6 +1328,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "binary": str(args.binary),
             "source_commit": _source_commit(),
             "matrix_cells": len(cells),
+            "focus_cell": (
+                asdict(focus_cell)
+                if focus_cell is not None
+                else None
+            ),
             "samples": samples,
             "activations": args.activations,
             "min_mode_ms": min_mode_ms,

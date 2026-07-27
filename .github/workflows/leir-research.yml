@@ -22,6 +22,18 @@ on:
         options:
           - screen
           - gate
+      focus_cell:
+        description: >-
+          Optional diagnostic cell:
+          workload,nodes,concurrency,payload,budget
+        required: false
+        default: ""
+        type: string
+      focus_samples:
+        description: Odd sample count for a focused diagnostic cell
+        required: true
+        default: 101
+        type: number
 
 permissions:
   contents: read
@@ -151,6 +163,8 @@ jobs:
         shell: bash
         env:
           PHASE: ${{ inputs.phase || 'screen' }}
+          FOCUS_CELL: ${{ inputs.focus_cell || '' }}
+          FOCUS_SAMPLES: ${{ inputs.focus_samples || 101 }}
         run: |
           set -o pipefail
           server_cpu="$(
@@ -171,7 +185,13 @@ jobs:
             --output-dir "$OUT_DIR"
             --tracked-report "$OUT_DIR/leir_phase0a_tracked_report.md"
           )
-          if [ "$PHASE" = "screen" ]; then
+          if [ -n "$FOCUS_CELL" ]; then
+            command+=(
+              --focus-cell "$FOCUS_CELL"
+              --samples "$FOCUS_SAMPLES"
+              --min-mode-ms 100
+            )
+          elif [ "$PHASE" = "screen" ]; then
             command+=(--samples 5 --min-mode-ms 100)
           else
             command+=(--samples 9 --min-mode-ms 250)
