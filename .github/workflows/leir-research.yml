@@ -4,6 +4,14 @@
 name: LEIR Phase 0A Research
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/leir-research.yml"
+      - "experiments/leir/**"
+      - "scripts/bench_leir_phase0.py"
+      - "scripts/test_bench_leir_phase0.py"
+      - "CMakeLists.txt"
+      - "Makefile"
   workflow_dispatch:
     inputs:
       phase:
@@ -25,6 +33,9 @@ concurrency:
 jobs:
   evidence:
     name: linux-x86_64-${{ inputs.phase || 'screen' }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
