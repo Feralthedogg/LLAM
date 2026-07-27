@@ -532,6 +532,19 @@ add_test(
         --min-mode-ms 1
         --order ABBA
 )
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME test_bench_leir_phase0_contract
+        COMMAND ${CMAKE_COMMAND} -E env
+            "LEIR_PHASE0_TEST_BINARY=$<TARGET_FILE:bench_leir_phase0>"
+            ${Python3_EXECUTABLE}
+            -m unittest scripts/test_bench_leir_phase0.py -v
+    )
+    set_tests_properties(
+        test_bench_leir_phase0_contract
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+endif()
 
 set(LLAM_LCWE_MODEL_SOURCES
     experiments/lcwe/lcwe_model.c

@@ -20,6 +20,8 @@
 
 #define LEIR_BENCH_BLOCK_COUNT 16U
 #define LEIR_BENCH_MODE_COUNT 2U
+#define LEIR_BENCH_SERVICE_GAP_CAPACITY 65536U
+#define LEIR_BENCH_SERVICE_PERIOD_NS UINT64_C(100000)
 
 typedef enum leir_bench_mode {
     LEIR_BENCH_MODE_BASELINE = 0,
@@ -41,9 +43,11 @@ typedef struct leir_bench_block_state {
     leir_phase0_instance_t *instances;
     unsigned char *buffers;
     uint64_t *terminal_latencies;
-    uint64_t *completion_times;
+    uint64_t *service_gaps;
+    size_t service_gap_count;
     leir_bench_task_result_t *task_results;
     atomic_uint failures;
+    atomic_uint_fast64_t remaining_activations;
     int first_error;
     char first_stage[96];
 } leir_bench_block_state_t;
@@ -213,6 +217,19 @@ static void leir_bench_fail(
             sizeof(state->first_stage),
             "%s",
             stage);
+    }
+}
+
+static void leir_bench_activation_complete(
+    leir_bench_block_state_t *state) {
+    uint64_t previous = atomic_fetch_sub_explicit(
+        &state->remaining_activations,
+        1U,
+        memory_order_acq_rel);
+
+    if (previous == 0U) {
+        leir_bench_fail(
+            state, "activation accounting underflow", EPROTO);
     }
 }
 
@@ -403,9 +420,7 @@ static void leir_bench_baseline_task(void *opaque) {
         state->terminal_latencies[
             arg->activation_begin + local_activation] =
             llam_now_ns() - started_ns;
-        state->completion_times[
-            arg->activation_begin + local_activation] =
-            llam_now_ns();
+        leir_bench_activation_complete(state);
     }
 }
 
@@ -521,9 +536,33 @@ static void leir_bench_candidate_task(void *opaque) {
         state->terminal_latencies[
             arg->activation_begin + local_activation] =
             llam_now_ns() - started_ns;
-        state->completion_times[
-            arg->activation_begin + local_activation] =
-            llam_now_ns();
+        leir_bench_activation_complete(state);
+    }
+}
+
+static void leir_bench_service_task(void *opaque) {
+    leir_bench_block_state_t *state = opaque;
+    uint64_t previous_ns = llam_now_ns();
+
+    while (atomic_load_explicit(
+               &state->remaining_activations,
+               memory_order_acquire) != 0U &&
+           atomic_load_explicit(
+               &state->failures,
+               memory_order_acquire) == 0U) {
+        uint64_t now_ns;
+
+        if (llam_sleep_ns(LEIR_BENCH_SERVICE_PERIOD_NS) != 0) {
+            leir_bench_fail(state, "service task sleep", errno);
+            return;
+        }
+        now_ns = llam_now_ns();
+        if (state->service_gap_count <
+            LEIR_BENCH_SERVICE_GAP_CAPACITY) {
+            state->service_gaps[state->service_gap_count++] =
+                now_ns - previous_ns;
+        }
+        previous_ns = now_ns;
     }
 }
 
@@ -570,26 +609,6 @@ static uint64_t leir_bench_p99(
         index = count;
     }
     return samples[index - 1U];
-}
-
-static uint64_t leir_bench_service_gap_p99(
-    uint64_t *completion_times,
-    size_t count) {
-    size_t i;
-
-    if (completion_times == NULL || count < 2U) {
-        return 0U;
-    }
-    qsort(
-        completion_times,
-        count,
-        sizeof(completion_times[0]),
-        leir_bench_compare_u64);
-    for (i = 0U; i + 1U < count; i += 1U) {
-        completion_times[i] =
-            completion_times[i + 1U] - completion_times[i];
-    }
-    return leir_bench_p99(completion_times, count - 1U);
 }
 
 static bool leir_bench_block_integrity(
@@ -689,6 +708,7 @@ static int leir_bench_run_block(
     leir_bench_task_arg_t *task_args = NULL;
     llam_task_t **tasks = NULL;
     llam_task_t *peer_starter = NULL;
+    llam_task_t *service_task = NULL;
     llam_runtime_opts_t runtime_options;
     bool runtime_started = false;
     uint64_t wall_started;
@@ -713,6 +733,7 @@ static int leir_bench_run_block(
     memset(result_out, 0, sizeof(*result_out));
     memset(&state, 0, sizeof(state));
     atomic_init(&state.failures, 0U);
+    atomic_init(&state.remaining_activations, activations);
     state.options = options;
     state.mode = mode;
 
@@ -721,13 +742,14 @@ static int leir_bench_run_block(
         options->concurrency, sizeof(state.task_results[0]));
     state.terminal_latencies = calloc(
         activation_count, sizeof(state.terminal_latencies[0]));
-    state.completion_times = calloc(
-        activation_count, sizeof(state.completion_times[0]));
+    state.service_gaps = calloc(
+        LEIR_BENCH_SERVICE_GAP_CAPACITY,
+        sizeof(state.service_gaps[0]));
     task_args = calloc(options->concurrency, sizeof(task_args[0]));
     tasks = calloc(options->concurrency, sizeof(tasks[0]));
     if (state.buffers == NULL || state.task_results == NULL ||
         state.terminal_latencies == NULL ||
-        state.completion_times == NULL ||
+        state.service_gaps == NULL ||
         task_args == NULL || tasks == NULL) {
         errno = ENOMEM;
         goto cleanup;
@@ -793,6 +815,13 @@ static int leir_bench_run_block(
             goto cleanup;
         }
     }
+    service_task = llam_spawn(
+        leir_bench_service_task, &state, NULL);
+    if (service_task == NULL) {
+        leir_bench_fail(&state, "service task spawn", errno);
+        (void)llam_runtime_request_stop();
+        goto cleanup;
+    }
     peer_starter = llam_spawn(
         leir_bench_peer_start_task, &state, NULL);
     if (peer_starter == NULL) {
@@ -832,6 +861,16 @@ static int leir_bench_run_block(
         leir_bench_fail(&state, "peer starter join", errno);
     }
     peer_starter = NULL;
+    if (service_task != NULL && llam_join(service_task) != 0) {
+        leir_bench_fail(&state, "service task join", errno);
+    }
+    service_task = NULL;
+    if (atomic_load_explicit(
+            &state.remaining_activations,
+            memory_order_acquire) != 0U) {
+        leir_bench_fail(
+            &state, "activation accounting incomplete", EPROTO);
+    }
     if (atomic_load_explicit(
             &state.failures, memory_order_acquire) != 0U) {
         errno = state.first_error;
@@ -847,9 +886,8 @@ static int leir_bench_run_block(
         peer_result.completed_transactions;
     result_out->terminal_p99_ns = leir_bench_p99(
         state.terminal_latencies, activation_count);
-    result_out->service_gap_p99_ns =
-        leir_bench_service_gap_p99(
-            state.completion_times, activation_count);
+    result_out->service_gap_p99_ns = leir_bench_p99(
+        state.service_gaps, state.service_gap_count);
     if (peer_result.status != 0 ||
         peer_result.checksum != result_out->checksum) {
         leir_bench_fail(&state, "peer checksum", EPROTO);
@@ -888,7 +926,7 @@ cleanup:
     free(state.instances);
     free(tasks);
     free(task_args);
-    free(state.completion_times);
+    free(state.service_gaps);
     free(state.terminal_latencies);
     free(state.task_results);
     free(state.buffers);
@@ -1071,8 +1109,10 @@ static int leir_bench_run(
         " baseline_checksum=%016" PRIx64
         " candidate_checksum=%016" PRIx64
         " pending_path_valid=1"
-        " service_gap_p99_ns=%" PRIu64
-        " terminal_p99_ns=%" PRIu64
+        " baseline_service_gap_p99_ns=%" PRIu64
+        " candidate_service_gap_p99_ns=%" PRIu64
+        " baseline_terminal_p99_ns=%" PRIu64
+        " candidate_terminal_p99_ns=%" PRIu64
         " peer=%s"
         " cpu_scope=%s"
         " order=%s\n",
@@ -1106,7 +1146,9 @@ static int leir_bench_run(
         totals[1].metrics.hot_allocations,
         totals[0].checksum,
         totals[1].checksum,
+        totals[0].service_gap_p99_ns,
         totals[1].service_gap_p99_ns,
+        totals[0].terminal_p99_ns,
         totals[1].terminal_p99_ns,
         leir_peer_kind_name(),
         leir_peer_cpu_scope_name(),

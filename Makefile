@@ -660,7 +660,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-leir-phase0 test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-leir-phase0 leir-phase0a-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -675,7 +675,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_leir_phase0|test_bench_leir_phase0_smoke|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_leir_phase0|test_bench_leir_phase0|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -742,7 +742,7 @@ test-srem-model: windows-cmake-configure
 
 test-leir-phase0: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0 bench_leir_phase0
-	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0|test_bench_leir_phase0_smoke" $(WINDOWS_CTEST_ARGS)
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0|test_bench_leir_phase0" $(WINDOWS_CTEST_ARGS)
 
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
@@ -2046,6 +2046,18 @@ test-leir-phase0: test_leir_phase0 bench_leir_phase0
 		--activations 8 \
 		--min-mode-ms 1 \
 		--order ABBA
+	LEIR_PHASE0_TEST_BINARY=./bench_leir_phase0 \
+		python3 -m unittest scripts/test_bench_leir_phase0.py -v
+
+leir-phase0a-screen: test-leir-phase0
+	python3 scripts/bench_leir_phase0.py \
+		--binary ./bench_leir_phase0 \
+		--phase screen \
+		--samples 5 \
+		--min-mode-ms 100 \
+		--output-dir object/leir-phase0a-screen \
+		--tracked-report \
+			docs/superpowers/reports/2026-07-27-leir-phase0a-results.md
 
 lcwe-model-report: test-lcwe-model
 	python3 scripts/bench_lcwe_model.py \
