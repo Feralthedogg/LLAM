@@ -1,0 +1,181 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: Apache-2.0
+
+name: LEIR Phase 0A Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: LEIR Phase 0A evidence phase
+        required: true
+        default: screen
+        type: choice
+        options:
+          - screen
+          - gate
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leir-research-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evidence:
+    name: linux-x86_64-${{ inputs.phase || 'screen' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      OUT_DIR: .artifacts/leir-phase0a-${{ inputs.phase || 'screen' }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Verify exact source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Install research toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            cmake \
+            liburing-dev \
+            util-linux
+
+      - name: Initialize evidence and record runner environment
+        run: |
+          make clean
+          mkdir -p "$OUT_DIR"
+          {
+            echo "event_sha=$GITHUB_SHA"
+            echo "source_sha=$(git rev-parse HEAD)"
+          } | tee "$OUT_DIR/source.txt"
+          {
+            uname -a
+            lscpu
+            gcc --version
+            clang --version
+            cmake --version
+            python3 --version
+            taskset --version
+            git rev-parse HEAD
+          } > "$OUT_DIR/environment.txt"
+
+      - name: Build and verify LEIR harness
+        shell: bash
+        run: |
+          set -o pipefail
+          make -j2 test-leir-phase0 \
+            CC=gcc \
+            CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O3 -g -fno-omit-frame-pointer" \
+            2>&1 | tee "$OUT_DIR/make-test-leir-phase0.log"
+
+      - name: CMake portability gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B object/leir-ci-cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_ASM_COMPILER=clang \
+            2>&1 | tee "$OUT_DIR/cmake-configure.log"
+          cmake --build object/leir-ci-cmake \
+            --target test_leir_phase0 bench_leir_phase0 \
+            -j2 2>&1 | tee "$OUT_DIR/cmake-build.log"
+          ctest --test-dir object/leir-ci-cmake \
+            --output-on-failure \
+            --timeout 180 \
+            -R "test_leir_phase0|test_bench_leir_phase0" \
+            2>&1 | tee "$OUT_DIR/ctest.log"
+
+      - name: ASan and UBSan gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B object/leir-ci-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_ASM_COMPILER=gcc \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+            2>&1 | tee "$OUT_DIR/asan-configure.log"
+          cmake --build object/leir-ci-asan \
+            --target test_leir_phase0 \
+            -j2 2>&1 | tee "$OUT_DIR/asan-build.log"
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+            ./object/leir-ci-asan/test_leir_phase0 \
+            2>&1 | tee "$OUT_DIR/asan-test.log"
+
+      - name: TSan gate
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake -S . -B object/leir-ci-tsan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_ASM_COMPILER=gcc \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+            2>&1 | tee "$OUT_DIR/tsan-configure.log"
+          cmake --build object/leir-ci-tsan \
+            --target test_leir_phase0 \
+            -j2 2>&1 | tee "$OUT_DIR/tsan-build.log"
+          env \
+            LLAM_LEIR_RACE_ITERS=1000 \
+            TSAN_OPTIONS=halt_on_error=1 \
+            ./object/leir-ci-tsan/test_leir_phase0 \
+            2>&1 | tee "$OUT_DIR/tsan-test.log"
+
+      - name: Run pinned LEIR evidence matrix
+        shell: bash
+        env:
+          PHASE: ${{ inputs.phase || 'screen' }}
+        run: |
+          set -o pipefail
+          server_cpu="$(
+            python3 - <<'PY'
+          import os
+          print(min(os.sched_getaffinity(0)))
+          PY
+          )"
+          {
+            echo "phase=$PHASE"
+            echo "server_cpu=$server_cpu"
+            echo "allowed_cpus=$(taskset -pc $$)"
+          } | tee "$OUT_DIR/affinity.txt"
+          command=(
+            python3 scripts/bench_leir_phase0.py
+            --binary ./bench_leir_phase0
+            --phase "$PHASE"
+            --output-dir "$OUT_DIR"
+            --tracked-report "$OUT_DIR/leir_phase0a_tracked_report.md"
+          )
+          if [ "$PHASE" = "screen" ]; then
+            command+=(--samples 5 --min-mode-ms 100)
+          else
+            command+=(--samples 9 --min-mode-ms 250)
+          fi
+          taskset -c "$server_cpu" "${command[@]}" \
+            2> >(tee "$OUT_DIR/runner-stderr.log" >&2) |
+            tee "$OUT_DIR/runner-stdout.log"
+          cmp \
+            "$OUT_DIR/leir_phase0a_report.md" \
+            "$OUT_DIR/leir_phase0a_tracked_report.md"
+
+      - name: Upload LEIR evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: leir-phase0a-${{ inputs.phase || 'screen' }}-linux-x86_64
+          path: .artifacts/leir-phase0a-${{ inputs.phase || 'screen' }}
+          if-no-files-found: error
