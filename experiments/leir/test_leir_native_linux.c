@@ -1996,13 +1996,15 @@ static int test_validates_configuration(void) {
         fprintf(stderr, "invalid operation count was accepted\n");
         return 1;
     }
+    fill_operations(ops, buffers, 2U);
     ops[0].kind = LLAM_LINUX_NATIVE_OP_RECV;
+    ops[1].kind = LLAM_LINUX_NATIVE_OP_SEND;
     if (llam_linux_native_segment_configure(
             &segment,
             ops,
-            4U,
-            LLAM_LINUX_NATIVE_SEGMENT_LINK) == 0) {
-        fprintf(stderr, "nonterminal receive was accepted\n");
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK) != 0) {
+        fprintf(stderr, "receive-send pipeline was rejected\n");
         return 1;
     }
     fill_operations(ops, buffers, 4U);
@@ -2082,6 +2084,63 @@ static int test_encodes_recv_and_send_fields(void) {
         recv_sqe.len != ops[1].length ||
         recv_sqe.msg_flags != 0U) {
         fprintf(stderr, "native SQE operation fields mismatch\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_encodes_fixed_recv_and_send_fields(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned char
+        buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    struct io_uring_sqe recv_sqe;
+    struct io_uring_sqe send_sqe;
+
+    fill_operations(ops, buffers, 2U);
+    ops[0].kind = LLAM_LINUX_NATIVE_OP_RECV;
+    ops[0].flags =
+        LLAM_LINUX_NATIVE_OP_FIXED_FILE |
+        LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER;
+    ops[0].fixed_file_slot = 7U;
+    ops[0].fixed_buffer_slot = 9U;
+    ops[1].kind = LLAM_LINUX_NATIVE_OP_SEND;
+    ops[1].flags = LLAM_LINUX_NATIVE_OP_FIXED_FILE;
+    ops[1].fixed_file_slot = 7U;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("configure fixed encoding segment");
+        return 1;
+    }
+    memset(&recv_sqe, 0, sizeof(recv_sqe));
+    memset(&send_sqe, 0, sizeof(send_sqe));
+    llam_linux_native_segment_prepare_sqe(
+        &segment, 0U, &recv_sqe);
+    llam_linux_native_segment_prepare_sqe(
+        &segment, 1U, &send_sqe);
+
+    if (recv_sqe.opcode != IORING_OP_READ_FIXED ||
+        recv_sqe.fd != 7 ||
+        recv_sqe.addr !=
+            (uint64_t)(uintptr_t)ops[0].buffer ||
+        recv_sqe.len != ops[0].length ||
+        recv_sqe.buf_index != 9U ||
+        recv_sqe.off != UINT64_MAX ||
+        (recv_sqe.flags & IOSQE_FIXED_FILE) == 0U ||
+        (recv_sqe.flags & IOSQE_IO_LINK) == 0U ||
+        (recv_sqe.flags & IOSQE_CQE_SKIP_SUCCESS) == 0U ||
+        send_sqe.opcode != IORING_OP_SEND ||
+        send_sqe.fd != 7 ||
+        send_sqe.addr !=
+            (uint64_t)(uintptr_t)ops[1].buffer ||
+        send_sqe.len != ops[1].length ||
+        send_sqe.msg_flags != (uint32_t)MSG_NOSIGNAL ||
+        (send_sqe.flags & IOSQE_FIXED_FILE) == 0U) {
+        fprintf(stderr, "fixed native SQE fields mismatch\n");
         return 1;
     }
     return 0;
@@ -2623,6 +2682,8 @@ int main(int argc, char **argv) {
          test_validates_configuration},
         {"encode recv and send fields",
          test_encodes_recv_and_send_fields},
+        {"encode fixed recv and send fields",
+         test_encodes_fixed_recv_and_send_fields},
         {"encode link and skip flags",
          test_encodes_link_and_skip_flags},
         {"encode aligned generation token",

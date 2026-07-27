@@ -112,6 +112,7 @@ int llam_linux_native_resources_setup(llam_node_t *node) {
     node->native_fixed_buffers_registered = false;
     node->native_fixed_file_bitmap = 0U;
     node->native_fixed_buffer_bitmap = 0U;
+    node->native_resource_leases = NULL;
     if (!node->ring_ready) {
         return 0;
     }
@@ -253,6 +254,8 @@ int llam_linux_native_resources_attach(
     lease->buffer_count = buffer_count;
     lease->node_index = node->index;
     lease->attached = true;
+    lease->next = node->native_resource_leases;
+    node->native_resource_leases = lease;
     pthread_mutex_unlock(&node->native_resource_lock);
     errno = 0;
     return 0;
@@ -303,6 +306,8 @@ int llam_linux_native_resources_detach(
     llam_linux_native_resource_lease_t *lease) {
     unsigned i;
     int error = 0;
+    llam_linux_native_resource_lease_t *previous = NULL;
+    llam_linux_native_resource_lease_t *cursor;
 
     if (node == NULL ||
         lease == NULL ||
@@ -333,6 +338,15 @@ int llam_linux_native_resources_detach(
         }
     }
     pthread_mutex_lock(&node->native_resource_lock);
+    cursor = node->native_resource_leases;
+    while (cursor != NULL && cursor != lease) {
+        previous = cursor;
+        cursor = cursor->next;
+    }
+    if (cursor != lease) {
+        error = EINVAL;
+        goto fail;
+    }
     for (i = 0U; i < lease->file_count; i += 1U) {
         if ((node->native_fixed_file_bitmap &
              (UINT64_C(1) << lease->file_slots[i])) ==
@@ -383,6 +397,11 @@ int llam_linux_native_resources_detach(
         node->native_fixed_buffer_bitmap &=
             ~(UINT64_C(1) << lease->buffer_slots[i]);
     }
+    if (previous != NULL) {
+        previous->next = lease->next;
+    } else {
+        node->native_resource_leases = lease->next;
+    }
     memset(lease, 0, sizeof(*lease));
     pthread_mutex_unlock(&node->native_resource_lock);
     errno = 0;
@@ -398,12 +417,24 @@ void llam_linux_native_resources_before_ring_exit(
     llam_node_t *node) {
     int buffers_result = 0;
     int files_result = 0;
+    llam_linux_native_resource_lease_t *lease;
 
     if (node == NULL ||
         !node->native_resource_lock_initialized) {
         return;
     }
     pthread_mutex_lock(&node->native_resource_lock);
+    lease = node->native_resource_leases;
+    while (lease != NULL) {
+        llam_linux_native_resource_lease_t *next =
+            lease->next;
+
+        memset(lease, 0, sizeof(*lease));
+        lease = next;
+    }
+    node->native_resource_leases = NULL;
+    node->native_fixed_file_bitmap = 0U;
+    node->native_fixed_buffer_bitmap = 0U;
     if (node->native_fixed_buffers_registered) {
         buffers_result =
             io_uring_unregister_buffers(&node->ring);
@@ -455,6 +486,7 @@ void llam_linux_native_resources_after_ring_exit(
     node->native_fixed_files_registered = false;
     node->native_fixed_file_bitmap = 0U;
     node->native_fixed_buffer_bitmap = 0U;
+    node->native_resource_leases = NULL;
     pthread_mutex_unlock(&node->native_resource_lock);
     pthread_mutex_destroy(&node->native_resource_lock);
     node->native_resource_lock_initialized = false;

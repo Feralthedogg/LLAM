@@ -39,6 +39,11 @@ typedef enum llam_linux_native_op_kind {
     LLAM_LINUX_NATIVE_OP_SEND = 1,
 } llam_linux_native_op_kind_t;
 
+enum {
+    LLAM_LINUX_NATIVE_OP_FIXED_FILE = 1U << 0,
+    LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER = 1U << 1,
+};
+
 typedef enum llam_linux_native_segment_mode {
     LLAM_LINUX_NATIVE_SEGMENT_LINK = 0,
     LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP = 1,
@@ -78,6 +83,10 @@ enum {
 typedef struct llam_linux_native_op {
     uint16_t kind;
     uint16_t result_slot;
+    uint16_t flags;
+    uint16_t fixed_file_slot;
+    uint16_t fixed_buffer_slot;
+    uint16_t reserved16;
     llam_fd_t fd;
     void *buffer;
     uint32_t length;
@@ -89,6 +98,7 @@ typedef struct llam_linux_native_batch
     llam_linux_native_batch_t;
 
 typedef struct llam_linux_native_resource_lease {
+    struct llam_linux_native_resource_lease *next;
     unsigned
         file_slots[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned

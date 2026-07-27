@@ -1272,6 +1272,8 @@ struct llam_node {
     bool native_fixed_buffers_registered;
     uint64_t native_fixed_file_bitmap;
     uint64_t native_fixed_buffer_bitmap;
+    struct llam_linux_native_resource_lease
+        *native_resource_leases;
     int (*native_files_update_override)(
         struct llam_node *node,
         unsigned offset,

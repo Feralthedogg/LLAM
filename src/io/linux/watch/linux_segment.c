@@ -67,12 +67,30 @@ int llam_linux_native_segment_configure(
         return -1;
     }
     for (i = 0U; i < op_count; i += 1U) {
+        unsigned flags = ops[i].flags;
+
         if (!llam_linux_native_kind_is_valid(ops[i].kind) ||
-            ops[i].fd < 0 ||
+            (flags &
+             ~(LLAM_LINUX_NATIVE_OP_FIXED_FILE |
+               LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER)) !=
+                0U ||
+            ((flags & LLAM_LINUX_NATIVE_OP_FIXED_FILE) ==
+                 0U &&
+             ops[i].fd < 0) ||
+            ((flags & LLAM_LINUX_NATIVE_OP_FIXED_FILE) !=
+                 0U &&
+             ops[i].fixed_file_slot >=
+                 LLAM_LINUX_NATIVE_FIXED_FILE_SLOTS) ||
+            ((flags &
+              LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER) !=
+                 0U &&
+             (ops[i].kind != LLAM_LINUX_NATIVE_OP_RECV ||
+              (flags & LLAM_LINUX_NATIVE_OP_FIXED_FILE) ==
+                  0U ||
+              ops[i].fixed_buffer_slot >=
+                  LLAM_LINUX_NATIVE_FIXED_BUFFER_SLOTS)) ||
             ops[i].buffer == NULL ||
-            ops[i].length == 0U ||
-            (ops[i].kind == LLAM_LINUX_NATIVE_OP_RECV &&
-             i + 1U < op_count)) {
+            ops[i].length == 0U) {
             errno = EINVAL;
             return -1;
         }
@@ -111,24 +129,43 @@ void llam_linux_native_segment_prepare_sqe(
         return;
     }
     op = &segment->ops[index];
-    if (op->kind == LLAM_LINUX_NATIVE_OP_RECV) {
+    if ((op->flags &
+         LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER) != 0U) {
+        io_uring_prep_read_fixed(
+            sqe,
+            (int)op->fixed_file_slot,
+            op->buffer,
+            op->length,
+            UINT64_MAX,
+            (int)op->fixed_buffer_slot);
+    } else if (op->kind == LLAM_LINUX_NATIVE_OP_RECV) {
         io_uring_prep_recv(
             sqe,
-            op->fd,
+            (op->flags &
+             LLAM_LINUX_NATIVE_OP_FIXED_FILE) != 0U
+                ? (int)op->fixed_file_slot
+                : op->fd,
             op->buffer,
             op->length,
             0);
     } else {
         io_uring_prep_send(
             sqe,
-            op->fd,
+            (op->flags &
+             LLAM_LINUX_NATIVE_OP_FIXED_FILE) != 0U
+                ? (int)op->fixed_file_slot
+                : op->fd,
             op->buffer,
             op->length,
             MSG_NOSIGNAL);
     }
 
+    if ((op->flags &
+         LLAM_LINUX_NATIVE_OP_FIXED_FILE) != 0U) {
+        flags |= IOSQE_FIXED_FILE;
+    }
     if (index + 1U < segment->op_count) {
-        flags = IOSQE_IO_LINK;
+        flags |= IOSQE_IO_LINK;
         if (segment->mode ==
             LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) {
             flags |= IOSQE_CQE_SKIP_SUCCESS;

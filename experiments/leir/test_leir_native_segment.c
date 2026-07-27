@@ -1477,6 +1477,347 @@ cleanup:
     }
     return result == NATIVE_INTEGRATION_PASS ? 0 : 1;
 }
+
+enum {
+    FIXED_PIPELINE_FD_SLOT = 0U,
+    FIXED_PIPELINE_LENGTH_SLOT = 1U,
+    FIXED_PIPELINE_BUFFER_SLOT = 2U,
+    FIXED_PIPELINE_RECV_RESULT_SLOT = 3U,
+    FIXED_PIPELINE_SEND_RESULT_SLOT = 4U,
+    FIXED_PIPELINE_SLOT_COUNT = 5U,
+    FIXED_PIPELINE_BYTES = 64U,
+};
+
+typedef struct fixed_pipeline_state {
+    leir_phase0_program_t *program;
+    leir_native_plan_t plan;
+    leir_native_mode_t mode;
+    test_instance_storage_t storage;
+    leir_native_instance_t *instance;
+    leir_phase0_value_t values[LEIR_PHASE0_MAX_SLOTS];
+    leir_phase0_value_t values_out[LEIR_PHASE0_MAX_SLOTS];
+    unsigned char external_buffer[FIXED_PIPELINE_BYTES];
+    unsigned char payload[FIXED_PIPELINE_BYTES];
+    unsigned char echoed[FIXED_PIPELINE_BYTES];
+    llam_fd_t pair[2];
+    atomic_uint failures;
+    int first_errno;
+} fixed_pipeline_state_t;
+
+static int create_fixed_pipeline_program(
+    leir_phase0_program_t **out) {
+    leir_phase0_node_desc_t nodes[4];
+    leir_phase0_slot_kind_t
+        slots[FIXED_PIPELINE_SLOT_COUNT];
+    leir_phase0_program_desc_t desc;
+
+    memset(nodes, 0, sizeof(nodes));
+    memset(slots, 0, sizeof(slots));
+    slots[FIXED_PIPELINE_FD_SLOT] = LEIR_PHASE0_SLOT_FD;
+    slots[FIXED_PIPELINE_LENGTH_SLOT] =
+        LEIR_PHASE0_SLOT_U64;
+    slots[FIXED_PIPELINE_BUFFER_SLOT] =
+        LEIR_PHASE0_SLOT_MUT_BUFFER;
+    slots[FIXED_PIPELINE_RECV_RESULT_SLOT] =
+        LEIR_PHASE0_SLOT_I64;
+    slots[FIXED_PIPELINE_SEND_RESULT_SLOT] =
+        LEIR_PHASE0_SLOT_I64;
+
+    nodes[0].opcode = LEIR_PHASE0_OP_READ_EXACT;
+    nodes[0].fd_slot = FIXED_PIPELINE_FD_SLOT;
+    nodes[0].buffer_slot = FIXED_PIPELINE_BUFFER_SLOT;
+    nodes[0].length_slot = FIXED_PIPELINE_LENGTH_SLOT;
+    nodes[0].result_slot =
+        FIXED_PIPELINE_RECV_RESULT_SLOT;
+    nodes[0].on_success = 1U;
+    nodes[0].on_eof = 3U;
+    nodes[0].on_error = 3U;
+
+    nodes[1].opcode = LEIR_PHASE0_OP_WRITE_ALL;
+    nodes[1].fd_slot = FIXED_PIPELINE_FD_SLOT;
+    nodes[1].buffer_slot = FIXED_PIPELINE_BUFFER_SLOT;
+    nodes[1].length_slot = FIXED_PIPELINE_LENGTH_SLOT;
+    nodes[1].result_slot =
+        FIXED_PIPELINE_SEND_RESULT_SLOT;
+    nodes[1].on_success = 2U;
+    nodes[1].on_eof = 3U;
+    nodes[1].on_error = 3U;
+    nodes[2] = terminal_node(
+        LEIR_PHASE0_OP_RETURN,
+        FIXED_PIPELINE_SEND_RESULT_SLOT);
+    nodes[3] = terminal_node(
+        LEIR_PHASE0_OP_FAIL,
+        FIXED_PIPELINE_RECV_RESULT_SLOT);
+
+    memset(&desc, 0, sizeof(desc));
+    desc.nodes = nodes;
+    desc.slot_kinds = slots;
+    desc.node_count = 4U;
+    desc.slot_count = FIXED_PIPELINE_SLOT_COUNT;
+    desc.entry_node = 0U;
+    return leir_phase0_program_create(&desc, out);
+}
+
+static int fixed_pipeline_state_init(
+    fixed_pipeline_state_t *state,
+    leir_native_mode_t mode) {
+    memset(state, 0, sizeof(*state));
+    state->mode = mode;
+    state->pair[0] = LLAM_INVALID_FD;
+    state->pair[1] = LLAM_INVALID_FD;
+    atomic_init(&state->failures, 0U);
+    if (create_fixed_pipeline_program(
+            &state->program) != 0 ||
+        leir_native_plan_compile(
+            state->program, &state->plan) != 0 ||
+        leir_native_instance_init(
+            state->storage.bytes,
+            sizeof(state->storage.bytes),
+            state->program,
+            &state->plan,
+            mode) != 0 ||
+        leir_test_socketpair_type(
+            SOCK_SEQPACKET, state->pair) != 0) {
+        return -1;
+    }
+    state->instance =
+        (leir_native_instance_t *)state->storage.bytes;
+    state->values[FIXED_PIPELINE_FD_SLOT].fd =
+        state->pair[0];
+    state->values[FIXED_PIPELINE_LENGTH_SLOT].u64 =
+        FIXED_PIPELINE_BYTES;
+    state->values[
+        FIXED_PIPELINE_BUFFER_SLOT].buffer.data =
+        state->external_buffer;
+    state->values[
+        FIXED_PIPELINE_BUFFER_SLOT].buffer.size =
+        sizeof(state->external_buffer);
+    leir_test_fill_pattern(
+        state->payload,
+        sizeof(state->payload),
+        UINT64_C(0x46495845444c4549));
+    return leir_native_instance_bind(
+        state->instance,
+        state->values,
+        FIXED_PIPELINE_SLOT_COUNT);
+}
+
+static void fixed_pipeline_fail(
+    fixed_pipeline_state_t *state,
+    int error) {
+    if (atomic_fetch_add_explicit(
+            &state->failures,
+            1U,
+            memory_order_relaxed) == 0U) {
+        state->first_errno = error;
+    }
+    if (!LLAM_FD_IS_INVALID(state->pair[0])) {
+        (void)shutdown((int)state->pair[0], SHUT_RDWR);
+    }
+    if (!LLAM_FD_IS_INVALID(state->pair[1])) {
+        (void)shutdown((int)state->pair[1], SHUT_RDWR);
+    }
+}
+
+static void fixed_pipeline_peer_task(void *arg) {
+    fixed_pipeline_state_t *state = arg;
+
+    if (leir_test_write_all(
+            state->pair[1],
+            state->payload,
+            sizeof(state->payload)) != 0 ||
+        leir_test_read_exact(
+            state->pair[1],
+            state->echoed,
+            sizeof(state->echoed)) != 0 ||
+        memcmp(
+            state->echoed,
+            state->payload,
+            sizeof(state->payload)) != 0) {
+        fixed_pipeline_fail(
+            state, errno != 0 ? errno : EPROTO);
+    }
+}
+
+static void fixed_pipeline_instance_task(void *arg) {
+    fixed_pipeline_state_t *state = arg;
+    leir_native_metrics_t metrics;
+    uint64_t expected_cqes =
+        state->mode ==
+                LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP
+            ? 1U
+            : 2U;
+    uint64_t expected_suppressed =
+        state->mode ==
+                LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP
+            ? 1U
+            : 0U;
+
+    memset(&metrics, 0, sizeof(metrics));
+    if (leir_native_instance_run(
+            state->instance,
+            state->values_out,
+            FIXED_PIPELINE_SLOT_COUNT,
+            &metrics) != 0 ||
+        state->values_out[
+            FIXED_PIPELINE_RECV_RESULT_SLOT].i64 !=
+            FIXED_PIPELINE_BYTES ||
+        state->values_out[
+            FIXED_PIPELINE_SEND_RESULT_SLOT].i64 !=
+            FIXED_PIPELINE_BYTES ||
+        memcmp(
+            state->external_buffer,
+            state->payload,
+            sizeof(state->payload)) != 0 ||
+        metrics.activations != 1U ||
+        metrics.logical_operations != 2U ||
+        metrics.prepared_sqes != 2U ||
+        metrics.observed_cqes != expected_cqes ||
+        metrics.suppressed_success_cqes !=
+            expected_suppressed ||
+        metrics.task_parks != 1U ||
+        metrics.terminal_wakes != 1U ||
+        metrics.hot_allocations != 0U) {
+        fixed_pipeline_fail(
+            state, errno != 0 ? errno : EPROTO);
+    }
+}
+
+static int run_fixed_recv_send_pipeline(
+    leir_native_mode_t mode,
+    bool destroy_after_shutdown) {
+    fixed_pipeline_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *peer = NULL;
+    llam_task_t *instance_task = NULL;
+    bool runtime_started = false;
+    bool fixed_available = false;
+    int failed = 1;
+
+    if (fixed_pipeline_state_init(&state, mode) != 0) {
+        perror("fixed pipeline fixture init");
+        return 1;
+    }
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        perror("fixed pipeline runtime init");
+        goto cleanup;
+    }
+    runtime_started = true;
+    fixed_available =
+        g_llam_runtime.active_nodes != 0U &&
+        g_llam_runtime.nodes != NULL &&
+        g_llam_runtime.nodes[0].ring_ready &&
+        g_llam_runtime.nodes[0]
+            .supports_native_fixed_files &&
+        g_llam_runtime.nodes[0]
+            .supports_native_fixed_buffers &&
+        (mode != LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP ||
+         (g_llam_runtime.nodes[0].linux_ring_features &
+          IORING_FEAT_CQE_SKIP) != 0U);
+    if (!fixed_available) {
+        failed = 0;
+        goto destroy_instance;
+    }
+
+    peer = llam_spawn(
+        fixed_pipeline_peer_task, &state, NULL);
+    instance_task = llam_spawn(
+        fixed_pipeline_instance_task, &state, NULL);
+    if (peer == NULL ||
+        instance_task == NULL ||
+        llam_run() != 0 ||
+        llam_join(peer) != 0 ||
+        llam_join(instance_task) != 0 ||
+        atomic_load_explicit(
+            &state.failures,
+            memory_order_acquire) != 0U ||
+        __builtin_popcountll(
+            g_llam_runtime.nodes[0].
+                native_fixed_file_bitmap) != 1 ||
+        __builtin_popcountll(
+            g_llam_runtime.nodes[0].
+                native_fixed_buffer_bitmap) != 1) {
+        fprintf(
+            stderr,
+            "fixed pipeline failed errno=%d\n",
+            state.first_errno);
+        goto destroy_instance;
+    }
+    failed = 0;
+
+destroy_instance:
+    if (!destroy_after_shutdown &&
+        state.instance != NULL) {
+        if (leir_native_instance_destroy(
+                state.instance) != 0) {
+            perror("destroy fixed pipeline instance");
+            failed = 1;
+        } else {
+            state.instance = NULL;
+        }
+    }
+    if (fixed_available &&
+        !destroy_after_shutdown &&
+        (g_llam_runtime.nodes[0].
+             native_fixed_file_bitmap != 0U ||
+         g_llam_runtime.nodes[0].
+             native_fixed_buffer_bitmap != 0U)) {
+        fprintf(stderr, "fixed pipeline lease was not detached\n");
+        failed = 1;
+    }
+    if (!fixed_available) {
+        puts(
+            "SKIP: Linux fixed-file/buffer "
+            "registration unavailable");
+    }
+
+cleanup:
+    if (runtime_started) {
+        llam_runtime_shutdown();
+        runtime_started = false;
+    }
+    if (state.instance != NULL) {
+        if (leir_native_instance_destroy(
+                state.instance) != 0) {
+            perror(
+                "destroy fixed pipeline instance "
+                "after runtime shutdown");
+            failed = 1;
+        } else {
+            state.instance = NULL;
+        }
+    }
+    leir_test_close(&state.pair[0]);
+    leir_test_close(&state.pair[1]);
+    leir_phase0_program_destroy(state.program);
+    return failed;
+}
+
+static int test_fixed_recv_send_pipeline(void) {
+    static const struct {
+        leir_native_mode_t mode;
+        bool destroy_after_shutdown;
+    } cases[] = {
+        {LEIR_NATIVE_MODE_FIXED_LINK, false},
+        {LEIR_NATIVE_MODE_FIXED_LINK, true},
+        {LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP, true},
+    };
+    size_t i;
+
+    for (i = 0U;
+         i < sizeof(cases) / sizeof(cases[0]);
+         i += 1U) {
+        if (run_fixed_recv_send_pipeline(
+                cases[i].mode,
+                cases[i].destroy_after_shutdown) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 #endif
 
 int main(void) {
@@ -1501,7 +1842,8 @@ int main(void) {
         test_destroy_releases_pinned_fd() != 0 ||
         test_native_runtime_link_and_skip() != 0 ||
         test_native_runtime_pins_bound_fd() != 0 ||
-        test_native_runtime_batches_width_two() != 0) {
+        test_native_runtime_batches_width_two() != 0 ||
+        test_fixed_recv_send_pipeline() != 0) {
         return 1;
     }
 #endif

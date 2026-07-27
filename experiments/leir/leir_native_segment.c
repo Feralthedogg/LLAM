@@ -33,6 +33,20 @@ enum {
     LEIR_NATIVE_INSTANCE_BINDING = 2U,
 };
 
+#if LLAM_RUNTIME_BACKEND_LINUX
+typedef struct leir_native_fixed_buffer {
+    void *external;
+    void *scratch;
+    size_t logical_size;
+    size_t registered_size;
+    size_t recv_copy_size;
+    unsigned first_recv_operation;
+    uint16_t slot;
+    bool first_use_send;
+    bool recv_written;
+} leir_native_fixed_buffer_t;
+#endif
+
 struct leir_native_instance {
     const leir_phase0_program_t *program;
     leir_native_plan_t plan;
@@ -45,6 +59,16 @@ struct leir_native_instance {
     llam_fd_t
         pinned_fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned pinned_fd_count;
+    leir_native_fixed_buffer_t
+        fixed_buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned fixed_buffer_count;
+    uint8_t
+        op_fd_indices[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    uint8_t
+        op_buffer_indices[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    llam_linux_native_resource_lease_t fixed_lease;
+    llam_runtime_t *fixed_owner_runtime;
+    uint64_t fixed_owner_runtime_id;
 #endif
 };
 
@@ -60,8 +84,17 @@ static bool operation_count_is_supported(unsigned count) {
 
 static bool mode_is_supported(leir_native_mode_t mode) {
     return mode == LEIR_NATIVE_MODE_LINK ||
-           mode == LEIR_NATIVE_MODE_LINK_CQE_SKIP;
+           mode == LEIR_NATIVE_MODE_LINK_CQE_SKIP ||
+           mode == LEIR_NATIVE_MODE_FIXED_LINK ||
+           mode == LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP;
 }
+
+#if LLAM_RUNTIME_BACKEND_LINUX
+static bool mode_is_fixed(leir_native_mode_t mode) {
+    return mode == LEIR_NATIVE_MODE_FIXED_LINK ||
+           mode == LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP;
+}
+#endif
 
 static bool plans_are_equal(
     const leir_native_plan_t *left,
@@ -230,9 +263,127 @@ static int validate_linux_socket(llam_fd_t fd) {
 
 static llam_linux_native_segment_mode_t linux_mode(
     leir_native_mode_t mode) {
-    return mode == LEIR_NATIVE_MODE_LINK_CQE_SKIP
+    return mode == LEIR_NATIVE_MODE_LINK_CQE_SKIP ||
+           mode == LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP
         ? LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP
         : LLAM_LINUX_NATIVE_SEGMENT_LINK;
+}
+
+static void free_linux_fixed_buffer_array(
+    leir_native_fixed_buffer_t *buffers,
+    unsigned count) {
+    int saved_errno = errno;
+    unsigned i;
+
+    for (i = 0U; i < count; i += 1U) {
+        free(buffers[i].scratch);
+        buffers[i].scratch = NULL;
+    }
+    errno = saved_errno;
+}
+
+static void free_linux_fixed_buffers(
+    leir_native_instance_t *instance) {
+    free_linux_fixed_buffer_array(
+        instance->fixed_buffers,
+        instance->fixed_buffer_count);
+    memset(
+        instance->fixed_buffers,
+        0,
+        sizeof(instance->fixed_buffers));
+    instance->fixed_buffer_count = 0U;
+}
+
+static int detach_linux_fixed_lease(
+    leir_native_instance_t *instance) {
+    llam_runtime_t *runtime;
+    llam_node_t *node;
+    unsigned state;
+
+    if (!instance->fixed_lease.attached) {
+        instance->fixed_owner_runtime = NULL;
+        instance->fixed_owner_runtime_id = 0U;
+        return 0;
+    }
+    state = atomic_load_explicit(
+        &instance->segment.state, memory_order_acquire);
+    if (state != LLAM_LINUX_NATIVE_SEGMENT_IDLE &&
+        state != LLAM_LINUX_NATIVE_SEGMENT_RETIRED) {
+        return fail_with_errno(EBUSY);
+    }
+    runtime = instance->fixed_owner_runtime;
+    if (runtime == NULL ||
+        runtime->runtime_id !=
+            instance->fixed_owner_runtime_id ||
+        runtime->nodes == NULL ||
+        instance->fixed_lease.node_index >=
+            runtime->active_nodes) {
+        memset(
+            &instance->fixed_lease,
+            0,
+            sizeof(instance->fixed_lease));
+        instance->fixed_owner_runtime = NULL;
+        instance->fixed_owner_runtime_id = 0U;
+        return 0;
+    }
+    node = &runtime->nodes[
+        instance->fixed_lease.node_index];
+    if (!node->native_resource_lock_initialized ||
+        !node->ring_ready ||
+        (!node->native_fixed_files_registered &&
+         !node->native_fixed_buffers_registered)) {
+        memset(
+            &instance->fixed_lease,
+            0,
+            sizeof(instance->fixed_lease));
+        instance->fixed_owner_runtime = NULL;
+        instance->fixed_owner_runtime_id = 0U;
+        return 0;
+    }
+    if (llam_linux_native_resources_detach(
+            node, &instance->fixed_lease) != 0) {
+        return -1;
+    }
+    instance->fixed_owner_runtime = NULL;
+    instance->fixed_owner_runtime_id = 0U;
+    return 0;
+}
+
+static int allocate_linux_fixed_buffer(
+    leir_native_fixed_buffer_t *buffer,
+    uint16_t slot,
+    void *external,
+    size_t logical_size,
+    bool first_use_send) {
+    long page_value = sysconf(_SC_PAGESIZE);
+    size_t page_size =
+        page_value > 0 ? (size_t)page_value : 4096U;
+    size_t rounded_size;
+    void *scratch = NULL;
+    int result;
+
+    if (logical_size == 0U ||
+        logical_size > SIZE_MAX - (page_size - 1U)) {
+        return fail_with_errno(EOVERFLOW);
+    }
+    rounded_size =
+        ((logical_size + page_size - 1U) / page_size) *
+        page_size;
+    result = posix_memalign(
+        &scratch, page_size, rounded_size);
+    if (result != 0) {
+        return fail_with_errno(result);
+    }
+    memset(scratch, 0, rounded_size);
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->external = external;
+    buffer->scratch = scratch;
+    buffer->logical_size = logical_size;
+    buffer->registered_size = rounded_size;
+    buffer->first_recv_operation = UINT_MAX;
+    buffer->slot = slot;
+    buffer->first_use_send = first_use_send;
+    return 0;
 }
 
 static int configure_linux_segment(
@@ -244,10 +395,21 @@ static int configure_linux_segment(
         source_fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     llam_fd_t
         pinned_fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    leir_native_fixed_buffer_t
+        fixed_buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    uint8_t
+        op_fd_indices[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    uint8_t
+        op_buffer_indices[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned pinned_count = 0U;
+    unsigned fixed_buffer_count = 0U;
+    bool fixed = mode_is_fixed(instance->mode);
     unsigned i;
 
     memset(ops, 0, sizeof(ops));
+    memset(fixed_buffers, 0, sizeof(fixed_buffers));
+    memset(op_fd_indices, 0, sizeof(op_fd_indices));
+    memset(op_buffer_indices, 0, sizeof(op_buffer_indices));
     for (i = 0U;
          i < LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS;
          i += 1U) {
@@ -260,6 +422,7 @@ static int configure_linux_segment(
         llam_fd_t fd = values[step->fd_slot].fd;
         uint32_t length;
         unsigned pinned;
+        unsigned buffer_index = 0U;
 
         if (step_length(
                 instance->program,
@@ -293,15 +456,61 @@ static int configure_linux_segment(
             }
         }
 
+        if (fixed) {
+            for (buffer_index = 0U;
+                 buffer_index < fixed_buffer_count;
+                 buffer_index += 1U) {
+                if (fixed_buffers[buffer_index].slot ==
+                    step->buffer_slot) {
+                    break;
+                }
+            }
+            if (buffer_index == fixed_buffer_count) {
+                if (allocate_linux_fixed_buffer(
+                        &fixed_buffers[
+                            fixed_buffer_count],
+                        step->buffer_slot,
+                        values[step->buffer_slot]
+                            .buffer.data,
+                        values[step->buffer_slot]
+                            .buffer.size,
+                        step->kind ==
+                            LEIR_NATIVE_STEP_SEND) != 0) {
+                    goto fail;
+                }
+                buffer_index = fixed_buffer_count;
+                fixed_buffer_count += 1U;
+            }
+            if (step->kind == LEIR_NATIVE_STEP_RECV) {
+                leir_native_fixed_buffer_t *buffer =
+                    &fixed_buffers[buffer_index];
+
+                buffer->recv_written = true;
+                if (buffer->first_recv_operation == UINT_MAX) {
+                    buffer->first_recv_operation = i;
+                }
+                if (length > buffer->recv_copy_size) {
+                    buffer->recv_copy_size = length;
+                }
+            }
+        }
+
         ops[i].kind =
             step->kind == LEIR_NATIVE_STEP_RECV
                 ? LLAM_LINUX_NATIVE_OP_RECV
                 : LLAM_LINUX_NATIVE_OP_SEND;
         ops[i].result_slot = step->result_slot;
         ops[i].fd = pinned_fds[pinned];
-        ops[i].buffer =
-            values[step->buffer_slot].buffer.data;
+        ops[i].buffer = fixed
+            ? fixed_buffers[buffer_index].scratch
+            : values[step->buffer_slot].buffer.data;
         ops[i].length = length;
+        op_fd_indices[i] = (uint8_t)pinned;
+        op_buffer_indices[i] =
+            (uint8_t)buffer_index;
+    }
+    if (detach_linux_fixed_lease(instance) != 0) {
+        goto fail;
     }
     if (llam_linux_native_segment_configure(
             &instance->segment,
@@ -311,16 +520,170 @@ static int configure_linux_segment(
         goto fail;
     }
     close_linux_pinned_fds(instance);
+    free_linux_fixed_buffers(instance);
     memcpy(
         instance->pinned_fds,
         pinned_fds,
         pinned_count * sizeof(pinned_fds[0]));
+    memcpy(
+        instance->fixed_buffers,
+        fixed_buffers,
+        fixed_buffer_count * sizeof(fixed_buffers[0]));
+    memcpy(
+        instance->op_fd_indices,
+        op_fd_indices,
+        sizeof(op_fd_indices));
+    memcpy(
+        instance->op_buffer_indices,
+        op_buffer_indices,
+        sizeof(op_buffer_indices));
     instance->pinned_fd_count = pinned_count;
+    instance->fixed_buffer_count = fixed_buffer_count;
     return 0;
 
 fail:
     close_linux_fd_array(pinned_fds, pinned_count);
+    free_linux_fixed_buffer_array(
+        fixed_buffers, fixed_buffer_count);
     return -1;
+}
+
+static int attach_linux_fixed_instance(
+    leir_native_instance_t *instance,
+    llam_runtime_t *runtime,
+    llam_node_t *node) {
+    struct iovec
+        buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    int fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned i;
+
+    if (!mode_is_fixed(instance->mode)) {
+        return 0;
+    }
+    if (instance->fixed_lease.attached) {
+        if (instance->fixed_owner_runtime != runtime ||
+            instance->fixed_owner_runtime_id !=
+                runtime->runtime_id ||
+            instance->fixed_lease.node_index !=
+                node->index) {
+            return fail_with_errno(EXDEV);
+        }
+    } else {
+        if (!node->supports_native_fixed_files ||
+            !node->supports_native_fixed_buffers ||
+            instance->pinned_fd_count == 0U ||
+            instance->fixed_buffer_count == 0U) {
+            return fail_with_errno(ENOTSUP);
+        }
+        for (i = 0U;
+             i < instance->pinned_fd_count;
+             i += 1U) {
+            fds[i] = (int)instance->pinned_fds[i];
+        }
+        for (i = 0U;
+             i < instance->fixed_buffer_count;
+             i += 1U) {
+            buffers[i].iov_base =
+                instance->fixed_buffers[i].scratch;
+            buffers[i].iov_len =
+                instance->fixed_buffers[i]
+                    .registered_size;
+        }
+        if (llam_linux_native_resources_attach(
+                node,
+                fds,
+                instance->pinned_fd_count,
+                buffers,
+                instance->fixed_buffer_count,
+                &instance->fixed_lease) != 0) {
+            return -1;
+        }
+        instance->fixed_owner_runtime = runtime;
+        instance->fixed_owner_runtime_id =
+            runtime->runtime_id;
+    }
+
+    for (i = 0U; i < instance->segment.op_count; i += 1U) {
+        llam_linux_native_op_t *op =
+            &instance->segment.ops[i];
+        unsigned file_index =
+            instance->op_fd_indices[i];
+        unsigned buffer_index =
+            instance->op_buffer_indices[i];
+
+        if (file_index >=
+                instance->fixed_lease.file_count ||
+            buffer_index >=
+                instance->fixed_lease.buffer_count) {
+            return fail_with_errno(EPROTO);
+        }
+        op->flags = LLAM_LINUX_NATIVE_OP_FIXED_FILE;
+        op->fixed_file_slot = (uint16_t)
+            instance->fixed_lease.file_slots[file_index];
+        op->buffer =
+            instance->fixed_buffers[
+                buffer_index].scratch;
+        if (op->kind == LLAM_LINUX_NATIVE_OP_RECV) {
+            op->flags |=
+                LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER;
+            op->fixed_buffer_slot = (uint16_t)
+                instance->fixed_lease
+                    .buffer_slots[buffer_index];
+        }
+    }
+    return 0;
+}
+
+static void copy_linux_fixed_inputs(
+    leir_native_instance_t *instance) {
+    unsigned i;
+
+    if (!mode_is_fixed(instance->mode)) {
+        return;
+    }
+    for (i = 0U;
+         i < instance->fixed_buffer_count;
+         i += 1U) {
+        leir_native_fixed_buffer_t *buffer =
+            &instance->fixed_buffers[i];
+
+        if (buffer->first_use_send) {
+            memcpy(
+                buffer->scratch,
+                buffer->external,
+                buffer->logical_size);
+        }
+    }
+}
+
+static void copy_linux_fixed_outputs(
+    leir_native_instance_t *instance,
+    bool activated) {
+    unsigned successful_operations;
+    unsigned i;
+
+    if (!activated || !mode_is_fixed(instance->mode)) {
+        return;
+    }
+    successful_operations =
+        instance->segment.first_error == 0
+            ? instance->segment.op_count
+            : instance->segment.first_error_index;
+    for (i = 0U;
+         i < instance->fixed_buffer_count;
+         i += 1U) {
+        leir_native_fixed_buffer_t *buffer =
+            &instance->fixed_buffers[i];
+
+        if (buffer->recv_written &&
+            buffer->first_recv_operation <
+                successful_operations) {
+            memcpy(
+                buffer->external,
+                buffer->scratch,
+                buffer->recv_copy_size);
+        }
+    }
 }
 
 static bool embedded_request_is_reusable(
@@ -501,11 +864,6 @@ int leir_native_instance_bind(
             memory_order_acquire)) {
         return fail_with_errno(EBUSY);
     }
-    atomic_store_explicit(
-        &instance->bound, 0U, memory_order_release);
-#if LLAM_RUNTIME_BACKEND_LINUX
-    close_linux_pinned_fds(instance);
-#endif
 
     if (validate_slot_values(
             instance->program, values) != 0) {
@@ -567,7 +925,19 @@ int leir_native_instance_destroy(
     atomic_store_explicit(
         &instance->bound, 0U, memory_order_release);
 #if LLAM_RUNTIME_BACKEND_LINUX
+    if (detach_linux_fixed_lease(instance) != 0) {
+        int saved_errno = errno;
+
+        atomic_store_explicit(
+            &instance->bound, 1U, memory_order_release);
+        atomic_store_explicit(
+            &instance->activity,
+            LEIR_NATIVE_INSTANCE_IDLE,
+            memory_order_release);
+        return fail_with_errno(saved_errno);
+    }
     close_linux_pinned_fds(instance);
+    free_linux_fixed_buffers(instance);
 #endif
     memset(&instance->plan, 0, sizeof(instance->plan));
     memset(instance->slots, 0, sizeof(instance->slots));
@@ -698,6 +1068,8 @@ int leir_native_batch_run(
 #if LLAM_RUNTIME_BACKEND_LINUX
     {
         llam_task_t *task = g_llam_tls_task;
+        llam_runtime_t *runtime;
+        llam_node_t *node;
         llam_linux_native_batch_t batch;
         llam_io_req_t *req;
         leir_native_metrics_t
@@ -715,9 +1087,30 @@ int leir_native_batch_run(
                 instances, instance_count);
             return fail_with_errno(EINVAL);
         }
+        runtime = task->owner_runtime;
+        if (g_llam_tls_shard->io_node_index >=
+                runtime->active_nodes ||
+            runtime->nodes == NULL) {
+            release_running_instances(
+                instances, instance_count);
+            return fail_with_errno(EINVAL);
+        }
+        node = &runtime->nodes[
+            g_llam_tls_shard->io_node_index];
+        for (i = 0U; i < instance_count; i += 1U) {
+            if (attach_linux_fixed_instance(
+                    instances[i], runtime, node) != 0) {
+                saved_errno =
+                    errno != 0 ? errno : ENOTSUP;
+                release_running_instances(
+                    instances, instance_count);
+                return fail_with_errno(saved_errno);
+            }
+            copy_linux_fixed_inputs(instances[i]);
+        }
 
         memset(&batch, 0, sizeof(batch));
-        batch.owner_runtime = task->owner_runtime;
+        batch.owner_runtime = runtime;
         batch.segment_count = (unsigned)instance_count;
         atomic_init(
             &batch.state,
@@ -797,6 +1190,8 @@ int leir_native_batch_run(
             activated =
                 after->activations >
                 before[i].activations;
+            copy_linux_fixed_outputs(
+                instances[i], activated);
             publish_results(
                 instances[i],
                 activated &&

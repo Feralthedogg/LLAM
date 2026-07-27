@@ -13,6 +13,8 @@ enum {
 typedef enum leir_native_mode {
     LEIR_NATIVE_MODE_LINK = 0,
     LEIR_NATIVE_MODE_LINK_CQE_SKIP = 1,
+    LEIR_NATIVE_MODE_FIXED_LINK = 2,
+    LEIR_NATIVE_MODE_FIXED_LINK_CQE_SKIP = 3,
 } leir_native_mode_t;
 
 typedef struct leir_native_instance leir_native_instance_t;
