@@ -202,6 +202,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/io/linux/watch/linux_migration_rehome.c
         src/io/linux/watch/linux_control.c
         src/io/linux/watch/linux_submit.c
+        src/io/linux/watch/linux_segment.c
         src/io/linux/watch/cqe.c
         src/io/linux/watch/linux_worker.c
     )
@@ -515,6 +516,16 @@ target_include_directories(test_leir_native_plan PRIVATE
 )
 target_link_libraries(test_leir_native_plan PRIVATE llam_runtime)
 
+add_executable(test_leir_native_linux
+    experiments/leir/test_leir_native_linux.c
+)
+target_include_directories(test_leir_native_linux PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+)
+target_link_libraries(test_leir_native_linux PRIVATE llam_runtime)
+
 add_executable(test_leir_phase0
     ${LLAM_LEIR_PHASE0_SOURCES}
     experiments/leir/test_leir_phase0.c
@@ -533,6 +544,7 @@ foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
 endforeach()
 add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
 add_test(NAME test_leir_native_plan COMMAND test_leir_native_plan)
+add_test(NAME test_leir_native_linux COMMAND test_leir_native_linux --unit-only)
 add_test(
     NAME test_bench_leir_phase0_smoke
     COMMAND bench_leir_phase0
@@ -823,6 +835,7 @@ add_dependencies(test_shared_load llam_runtime_shared)
 foreach(LLAM_TEST_TARGET
         test_leir_phase0
         test_leir_native_plan
+        test_leir_native_linux
         bench_leir_phase0
         test_abi_contract
         test_abi_compat
