@@ -1,9 +1,12 @@
 #include "runtime_internal.h"
 #include "leir_phase0.h"
 #include "leir_phase0_internal.h"
+#include "leir_test_support.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const leir_phase0_slot_kind_t valid_slots[] = {
@@ -277,6 +280,271 @@ static int test_program_allocation_failure_clears_output(void) {
     return 0;
 }
 
+static int test_instance_rejects_invalid_storage_and_bindings(void) {
+    leir_phase0_program_desc_t desc = valid_program_desc();
+    leir_phase0_program_t *program = NULL;
+    leir_phase0_instance_t *instance;
+    leir_phase0_run_opts_t opts = {
+        .inline_budget = 8U,
+        .force_backend = true,
+    };
+    leir_phase0_value_t values[4] = {0};
+    unsigned char buffer[64];
+    void *storage;
+    size_t storage_size;
+    int failed = 1;
+
+    if (leir_phase0_program_create(&desc, &program) != 0) {
+        return 1;
+    }
+    storage_size = leir_phase0_instance_size();
+    if (storage_size == 0U) {
+        goto cleanup_program;
+    }
+    storage = malloc(storage_size);
+    if (storage == NULL) {
+        goto cleanup_program;
+    }
+
+    errno = 0;
+    if (leir_phase0_instance_init(NULL, storage_size, program) != -1 ||
+        errno != EINVAL) {
+        goto cleanup_storage;
+    }
+    errno = 0;
+    if (leir_phase0_instance_init(
+            storage, storage_size - 1U, program) != -1 ||
+        errno != EINVAL) {
+        goto cleanup_storage;
+    }
+    errno = 0;
+    if (leir_phase0_instance_init(storage, storage_size, NULL) != -1 ||
+        errno != EINVAL ||
+        leir_phase0_instance_init(storage, storage_size, program) != 0) {
+        goto cleanup_storage;
+    }
+
+    instance = storage;
+    values[0].fd = (llam_fd_t)0;
+    values[1].buffer.data = buffer;
+    values[1].buffer.size = sizeof(buffer);
+    values[2].u64 = sizeof(buffer);
+    values[3].i64 = 0;
+
+    errno = 0;
+    if (leir_phase0_instance_bind(
+            NULL, values, 4U, &opts) != -1 ||
+        errno != EINVAL ||
+        leir_phase0_instance_bind(
+            instance, NULL, 4U, &opts) != -1 ||
+        errno != EINVAL ||
+        leir_phase0_instance_bind(
+            instance, values, 3U, &opts) != -1 ||
+        errno != EINVAL ||
+        leir_phase0_instance_bind(
+            instance, values, 4U, NULL) != -1 ||
+        errno != EINVAL) {
+        goto cleanup_storage;
+    }
+
+    values[0].fd = LLAM_INVALID_FD;
+    if (leir_phase0_instance_bind(
+            instance, values, 4U, &opts) != -1 ||
+        errno != EINVAL) {
+        goto cleanup_storage;
+    }
+    values[0].fd = (llam_fd_t)0;
+    values[1].buffer.data = NULL;
+    if (leir_phase0_instance_bind(
+            instance, values, 4U, &opts) != -1 ||
+        errno != EINVAL) {
+        goto cleanup_storage;
+    }
+    values[1].buffer.data = buffer;
+    values[1].buffer.size = sizeof(buffer) - 1U;
+    if (leir_phase0_instance_bind(
+            instance, values, 4U, &opts) != -1 ||
+        errno != EINVAL) {
+        goto cleanup_storage;
+    }
+    values[1].buffer.size = sizeof(buffer);
+    values[2].u64 = sizeof(buffer) + 1U;
+    if (leir_phase0_instance_bind(
+            instance, values, 4U, &opts) != -1 ||
+        errno != EINVAL) {
+        goto cleanup_storage;
+    }
+    values[2].u64 = sizeof(buffer);
+    if (leir_phase0_instance_bind(
+            instance, values, 4U, &opts) != 0) {
+        goto cleanup_storage;
+    }
+    failed = 0;
+
+cleanup_storage:
+    free(storage);
+cleanup_program:
+    leir_phase0_program_destroy(program);
+    return failed;
+}
+
+#define LEIR_PENDING_TEST_BYTES 64U
+
+typedef struct pending_read_state {
+    llam_fd_t pair[2];
+    leir_phase0_program_t *program;
+    unsigned char expected[LEIR_PENDING_TEST_BYTES];
+    unsigned char received[LEIR_PENDING_TEST_BYTES];
+    leir_phase0_metrics_t metrics;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[96];
+} pending_read_state_t;
+
+static void pending_read_fail(
+    pending_read_state_t *state,
+    const char *where,
+    int error_code) {
+    if (atomic_fetch_add_explicit(
+            &state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = error_code;
+        (void)snprintf(
+            state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static void pending_read_peer_task(void *arg) {
+    pending_read_state_t *state = arg;
+
+    if (llam_sleep_ns(UINT64_C(2) * 1000U * 1000U) != 0) {
+        pending_read_fail(state, "peer sleep", errno);
+        return;
+    }
+    if (leir_test_write_all(
+            state->pair[1],
+            state->expected,
+            sizeof(state->expected)) != 0) {
+        pending_read_fail(state, "peer write", errno);
+    }
+}
+
+static void pending_read_instance_task(void *arg) {
+    pending_read_state_t *state = arg;
+    leir_phase0_run_opts_t opts = {
+        .inline_budget = 8U,
+        .force_backend = true,
+    };
+    leir_phase0_value_t values[4] = {0};
+    leir_phase0_value_t values_out[4] = {0};
+    leir_phase0_metrics_t metrics;
+    leir_phase0_instance_t storage;
+    leir_phase0_instance_t *instance = &storage;
+
+    if (leir_phase0_instance_init(
+            &storage, sizeof(storage), state->program) != 0) {
+        pending_read_fail(state, "instance init", errno);
+        return;
+    }
+
+    values[0].fd = state->pair[0];
+    values[1].buffer.data = state->received;
+    values[1].buffer.size = sizeof(state->received);
+    values[2].u64 = sizeof(state->received);
+    values[3].i64 = -1;
+    if (leir_phase0_instance_bind(
+            instance, values, 4U, &opts) != 0) {
+        pending_read_fail(state, "instance bind", errno);
+        return;
+    }
+    memset(&metrics, 0, sizeof(metrics));
+    if (leir_phase0_instance_run(
+            instance, values_out, 4U, &metrics) != 0) {
+        pending_read_fail(state, "instance run", errno);
+        return;
+    }
+
+    state->metrics = metrics;
+    if (values_out[3].i64 != (int64_t)sizeof(state->received) ||
+        memcmp(
+            state->received,
+            state->expected,
+            sizeof(state->received)) != 0 ||
+        metrics.activations != 1U ||
+        metrics.effect_completions != 1U ||
+        metrics.backend_submits != 1U ||
+        metrics.direct_completions != 0U ||
+        metrics.task_parks != 1U ||
+        metrics.terminal_publications != 1U ||
+        metrics.task_resumes_avoided != 0U ||
+        metrics.heap_requests != 0U ||
+        metrics.hot_allocations != 0U) {
+        pending_read_fail(state, "instance result or metrics", EPROTO);
+    }
+}
+
+static int test_pending_read_terminal_uses_one_park(void) {
+    pending_read_state_t state;
+    leir_phase0_program_desc_t desc = valid_program_desc();
+    llam_runtime_opts_t opts;
+    llam_task_t *peer = NULL;
+    llam_task_t *instance_task = NULL;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.pair[0] = LLAM_INVALID_FD;
+    state.pair[1] = LLAM_INVALID_FD;
+    atomic_init(&state.failures, 0U);
+    leir_test_fill_pattern(
+        state.expected, sizeof(state.expected), UINT64_C(0x4c454952));
+    if (leir_phase0_program_create(&desc, &state.program) != 0 ||
+        leir_test_socketpair(state.pair) != 0) {
+        goto cleanup;
+    }
+
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    opts.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&opts) != 0) {
+        goto cleanup;
+    }
+    peer = llam_spawn(pending_read_peer_task, &state, NULL);
+    if (peer != NULL) {
+        instance_task =
+            llam_spawn(pending_read_instance_task, &state, NULL);
+    }
+    if (peer == NULL || instance_task == NULL ||
+        llam_run() != 0) {
+        goto shutdown;
+    }
+    if (llam_join(peer) != 0 || llam_join(instance_task) != 0) {
+        peer = NULL;
+        instance_task = NULL;
+        goto shutdown;
+    }
+    peer = NULL;
+    instance_task = NULL;
+    if (atomic_load_explicit(
+            &state.failures, memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "pending read failed at %s: errno=%d\n",
+            state.first_case,
+            state.first_errno);
+        goto shutdown;
+    }
+    failed = 0;
+
+shutdown:
+    llam_runtime_shutdown();
+cleanup:
+    leir_test_close(&state.pair[0]);
+    leir_test_close(&state.pair[1]);
+    leir_phase0_program_destroy(state.program);
+    return failed;
+}
+
 static bool test_sink(llam_node_t *node,
                       llam_io_req_t *req,
                       unsigned completion_owner,
@@ -351,6 +619,15 @@ int main(void) {
     if (test_program_allocation_failure_clears_output() != 0) {
         fputs("test_program_allocation_failure_clears_output failed\n",
               stderr);
+        return 1;
+    }
+    if (test_instance_rejects_invalid_storage_and_bindings() != 0) {
+        fputs("test_instance_rejects_invalid_storage_and_bindings failed\n",
+              stderr);
+        return 1;
+    }
+    if (test_pending_read_terminal_uses_one_park() != 0) {
+        fputs("test_pending_read_terminal_uses_one_park failed\n", stderr);
         return 1;
     }
     puts("LEIR Phase 0 tests passed");

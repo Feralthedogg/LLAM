@@ -1015,6 +1015,7 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     llam_shard_t *shard = g_llam_tls_shard;
     llam_task_t *task = g_llam_tls_task;
     llam_node_t *node;
+    bool kind_supported;
 
     if (task == NULL || shard == NULL) {
         return 0;
@@ -1026,6 +1027,23 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     }
 
     node = &rt->nodes[shard->io_node_index];
+    kind_supported =
+        req->kind == LLAM_IO_KIND_READ && req->use_recv_op
+            ? node->supports_recv
+            : llam_node_supports_kind(node, req->kind);
+#if LLAM_RUNTIME_BACKEND_KQUEUE
+    /*
+     * Generic public read/write keeps using its conservative blocking fallback
+     * on kqueue. A trusted internal completion sink, however, can use the
+     * existing one-shot request backend so it can retain ownership across a
+     * composed runtime-effect region.
+     */
+    if (!kind_supported && req->completion_sink != NULL &&
+        (req->kind == LLAM_IO_KIND_READ ||
+         req->kind == LLAM_IO_KIND_WRITE)) {
+        kind_supported = true;
+    }
+#endif
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     if (req->kind == LLAM_IO_KIND_POLL && !llam_windows_iocp_poll_supported(req->fd, req->poll_events)) {
         atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
@@ -1034,8 +1052,7 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
         return -1;
     }
 #endif
-    if (!node->ring_ready ||
-        (req->kind == LLAM_IO_KIND_READ && req->use_recv_op ? !node->supports_recv : !llam_node_supports_kind(node, req->kind))) {
+    if (!node->ring_ready || !kind_supported) {
         atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
         shard->metrics.io_fallbacks += 1U;
         errno = EAGAIN;

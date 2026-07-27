@@ -497,7 +497,9 @@ endif()
 enable_testing()
 
 set(LLAM_LEIR_PHASE0_SOURCES
+    experiments/leir/leir_engine.c
     experiments/leir/leir_program.c
+    experiments/leir/leir_test_support.c
 )
 
 add_executable(test_leir_phase0

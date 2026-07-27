@@ -542,7 +542,9 @@ TEST_SECURITY_CAPABILITY_OBJS = \
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 LEIR_PHASE0_CORE_OBJS = \
-	$(OBJDIR)/experiments/leir/leir_program.o
+	$(OBJDIR)/experiments/leir/leir_engine.o \
+	$(OBJDIR)/experiments/leir/leir_program.o \
+	$(OBJDIR)/experiments/leir/leir_test_support.o
 LEIR_PHASE0_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_phase0.o
 LCWE_MODEL_CORE_OBJS = \
@@ -2283,7 +2285,8 @@ $(OBJDIR)/experiments/srem/%.o: experiments/srem/%.c \
 $(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c \
 		$(RUNTIME_PRIV_HDRS) \
 		experiments/leir/leir_phase0.h \
-		experiments/leir/leir_phase0_internal.h
+		experiments/leir/leir_phase0_internal.h \
+		experiments/leir/leir_test_support.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir -c -o $@ $<
 
