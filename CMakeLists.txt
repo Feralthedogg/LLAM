@@ -604,6 +604,17 @@ add_test(
 )
 if(Python3_Interpreter_FOUND)
     add_test(
+        NAME test_bench_leir_native_contract
+        COMMAND ${CMAKE_COMMAND} -E env
+            "LEIR_NATIVE_TEST_BINARY=$<TARGET_FILE:bench_leir_native_segment>"
+            ${Python3_EXECUTABLE}
+            -m unittest scripts/test_bench_leir_native.py -v
+    )
+    set_tests_properties(
+        test_bench_leir_native_contract
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
         NAME test_bench_leir_phase0_contract
         COMMAND ${CMAKE_COMMAND} -E env
             "LEIR_PHASE0_TEST_BINARY=$<TARGET_FILE:bench_leir_phase0>"
