@@ -479,5 +479,53 @@ class EvidenceAndCliTests(unittest.TestCase):
         self.assertEqual(_cell_key(row.cell), _cell_key(cell))
 
 
+class WorkflowContractTests(unittest.TestCase):
+    def test_linux_native_research_workflow_is_source_pinned_and_complete(
+        self,
+    ) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow_path = (
+            root
+            / ".github"
+            / "workflows"
+            / "leir-native-research.yml"
+        )
+        self.assertTrue(workflow_path.is_file())
+        workflow = workflow_path.read_text(encoding="utf-8")
+        required_fragments = (
+            "runs-on: ubuntu-24.04",
+            "permissions:\n  contents: read",
+            "actions/checkout@v6",
+            "actions/setup-python@v6",
+            "actions/upload-artifact@v6",
+            'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
+            "liburing-dev",
+            "make -j2 test-leir-native",
+            "test_leir_native_plan",
+            "test_leir_native_segment",
+            "test_leir_native_linux",
+            "bench_leir_native_segment",
+            "-fsanitize=address,undefined",
+            "-fsanitize=thread",
+            "make -j2 test",
+            "audit-shared-exports",
+            "audit-production-test-hooks",
+            "scripts/verify_linux.sh",
+            "taskset -c",
+            "--samples 5",
+            "--min-mode-ms 100",
+            "uname -a",
+            "lscpu",
+            "gcc --version",
+            "clang --version",
+            "pkg-config --modversion liburing",
+            "feature-status.txt",
+            "if: always()",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

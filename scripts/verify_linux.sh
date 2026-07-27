@@ -11,7 +11,34 @@ fi
 
 JOBS="${JOBS:-4}"
 make clean
-make -j"$JOBS" all test
+make -j"$JOBS" all test bench_leir_native_segment
+
+native_probe_stdout="${TMPDIR:-/tmp}/llam-leir-native-probe-$$.stdout"
+native_probe_stderr="${TMPDIR:-/tmp}/llam-leir-native-probe-$$.stderr"
+trap 'rm -f "$native_probe_stdout" "$native_probe_stderr"' EXIT
+if ./bench_leir_native_segment \
+    --candidate link_skip \
+    --ops 4 \
+    --concurrency 4 \
+    --payload 64 \
+    --activations 8 \
+    --min-mode-ms 1 \
+    --order ABBA \
+    >"$native_probe_stdout" \
+    2>"$native_probe_stderr"; then
+    echo "verify_linux.sh: Linux io_uring native segment available"
+    cat "$native_probe_stdout"
+else
+    native_probe_status=$?
+    if [ "$native_probe_status" -eq 77 ]; then
+        echo "verify_linux.sh: SKIP Linux io_uring native segment unavailable"
+        cat "$native_probe_stderr"
+    else
+        cat "$native_probe_stdout"
+        cat "$native_probe_stderr" >&2
+        exit "$native_probe_status"
+    fi
+fi
 
 python3 - <<'PY'
 import os
