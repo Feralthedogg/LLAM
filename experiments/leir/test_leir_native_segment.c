@@ -119,9 +119,10 @@ static int create_two_step_program(
     return leir_phase0_program_create(&desc, out);
 }
 
-static int bind_fixture_init(
+static int bind_fixture_init_mode(
     bind_fixture_t *fixture,
-    bool signed_length) {
+    bool signed_length,
+    leir_native_mode_t mode) {
     int socket_type = SOCK_STREAM;
 
     memset(fixture, 0, sizeof(*fixture));
@@ -141,7 +142,7 @@ static int bind_fixture_init(
             sizeof(fixture->storage.bytes),
             fixture->program,
             &fixture->plan,
-            LEIR_NATIVE_MODE_LINK) != 0 ||
+            mode) != 0 ||
         leir_test_socketpair_type(
             socket_type, fixture->pair) != 0) {
         return -1;
@@ -166,6 +167,15 @@ static int bind_fixture_init(
         fixture->values[TEST_LENGTH_SLOT].u64 = 16U;
     }
     return 0;
+}
+
+static int bind_fixture_init(
+    bind_fixture_t *fixture,
+    bool signed_length) {
+    return bind_fixture_init_mode(
+        fixture,
+        signed_length,
+        LEIR_NATIVE_MODE_LINK);
 }
 
 static void bind_fixture_destroy(bind_fixture_t *fixture) {
@@ -380,6 +390,236 @@ static int test_bind_accepts_repeated_fd(void) {
         failed = 1;
     }
     bind_fixture_destroy(&fixture);
+    return failed;
+}
+
+static int bind_fixture_bind(bind_fixture_t *fixture) {
+    return leir_native_instance_bind(
+        fixture->instance,
+        fixture->values,
+        fixture->value_count);
+}
+
+static int expect_batch_failure(
+    leir_native_instance_t *const *instances,
+    leir_phase0_value_t *const *values_out,
+    const size_t *value_counts,
+    leir_native_metrics_t *metrics_out,
+    size_t instance_count,
+    int expected_errno) {
+    leir_native_batch_metrics_t batch_metrics;
+
+    memset(&batch_metrics, 0xa5, sizeof(batch_metrics));
+    errno = 0;
+    if (leir_native_batch_run(
+            instances,
+            values_out,
+            value_counts,
+            metrics_out,
+            instance_count,
+            &batch_metrics) == 0 ||
+        errno != expected_errno) {
+        fprintf(
+            stderr,
+            "batch failure mismatch expected=%d actual=%d\n",
+            expected_errno,
+            errno);
+        return 1;
+    }
+    return 0;
+}
+
+static int test_batch_validates_width_and_members(void) {
+    bind_fixture_t first;
+    bind_fixture_t second;
+    leir_native_instance_t *instances[9];
+    leir_phase0_value_t first_out[LEIR_PHASE0_MAX_SLOTS];
+    leir_phase0_value_t second_out[LEIR_PHASE0_MAX_SLOTS];
+    leir_phase0_value_t *values_out[9];
+    size_t value_counts[9];
+    leir_native_metrics_t metrics[9];
+    size_t i;
+    int failed = 0;
+
+    if (bind_fixture_init(&first, false) != 0 ||
+        bind_fixture_init_mode(
+            &second,
+            false,
+            LEIR_NATIVE_MODE_LINK_CQE_SKIP) != 0 ||
+        bind_fixture_bind(&first) != 0 ||
+        bind_fixture_bind(&second) != 0) {
+        perror("batch validation fixture init");
+        bind_fixture_destroy(&first);
+        bind_fixture_destroy(&second);
+        return 1;
+    }
+    memset(first_out, 0, sizeof(first_out));
+    memset(second_out, 0, sizeof(second_out));
+    memset(metrics, 0, sizeof(metrics));
+    for (i = 0U; i < 9U; i += 1U) {
+        instances[i] = first.instance;
+        values_out[i] = first_out;
+        value_counts[i] = first.value_count;
+    }
+
+    if (expect_batch_failure(
+            instances,
+            values_out,
+            value_counts,
+            metrics,
+            0U,
+            EINVAL) != 0 ||
+        expect_batch_failure(
+            instances,
+            values_out,
+            value_counts,
+            metrics,
+            9U,
+            EINVAL) != 0 ||
+        expect_batch_failure(
+            instances,
+            values_out,
+            value_counts,
+            metrics,
+            2U,
+            EINVAL) != 0) {
+        failed = 1;
+        goto done;
+    }
+
+    instances[1] = second.instance;
+    values_out[1] = second_out;
+    value_counts[1] = second.value_count;
+    if (expect_batch_failure(
+            instances,
+            values_out,
+            value_counts,
+            metrics,
+            2U,
+            EINVAL) != 0) {
+        failed = 1;
+        goto done;
+    }
+
+    if (leir_native_instance_bind(
+            second.instance,
+            second.values,
+            second.value_count) != 0) {
+        perror("batch rejection left second instance busy");
+        failed = 1;
+    }
+
+done:
+    bind_fixture_destroy(&first);
+    bind_fixture_destroy(&second);
+    return failed;
+}
+
+static int test_batch_rejects_unbound_member_and_rolls_back(void) {
+    bind_fixture_t first;
+    bind_fixture_t second;
+    leir_native_instance_t *instances[2];
+    leir_phase0_value_t outputs[2][LEIR_PHASE0_MAX_SLOTS];
+    leir_phase0_value_t *values_out[2] = {
+        outputs[0],
+        outputs[1],
+    };
+    size_t value_counts[2];
+    leir_native_metrics_t metrics[2];
+    int failed = 0;
+
+    if (bind_fixture_init(&first, false) != 0 ||
+        bind_fixture_init(&second, false) != 0 ||
+        bind_fixture_bind(&first) != 0) {
+        perror("unbound batch fixture init");
+        bind_fixture_destroy(&first);
+        bind_fixture_destroy(&second);
+        return 1;
+    }
+    instances[0] = first.instance;
+    instances[1] = second.instance;
+    value_counts[0] = first.value_count;
+    value_counts[1] = second.value_count;
+    memset(outputs, 0, sizeof(outputs));
+    memset(metrics, 0, sizeof(metrics));
+
+    if (expect_batch_failure(
+            instances,
+            values_out,
+            value_counts,
+            metrics,
+            2U,
+            EINVAL) != 0 ||
+        leir_native_instance_bind(
+            first.instance,
+            first.values,
+            first.value_count) != 0) {
+        fprintf(
+            stderr,
+            "unbound batch rejection did not restore instances\n");
+        failed = 1;
+    }
+    bind_fixture_destroy(&first);
+    bind_fixture_destroy(&second);
+    return failed;
+}
+
+static int test_valid_batch_without_runtime_releases_instances(void) {
+    bind_fixture_t first;
+    bind_fixture_t second;
+    leir_native_instance_t *instances[2];
+    leir_phase0_value_t outputs[2][LEIR_PHASE0_MAX_SLOTS];
+    leir_phase0_value_t *values_out[2] = {
+        outputs[0],
+        outputs[1],
+    };
+    size_t value_counts[2];
+    leir_native_metrics_t metrics[2];
+    int expected_errno;
+    int failed = 0;
+
+    if (bind_fixture_init(&first, false) != 0 ||
+        bind_fixture_init(&second, false) != 0 ||
+        bind_fixture_bind(&first) != 0 ||
+        bind_fixture_bind(&second) != 0) {
+        perror("valid batch fixture init");
+        bind_fixture_destroy(&first);
+        bind_fixture_destroy(&second);
+        return 1;
+    }
+    instances[0] = first.instance;
+    instances[1] = second.instance;
+    value_counts[0] = first.value_count;
+    value_counts[1] = second.value_count;
+    memset(outputs, 0, sizeof(outputs));
+    memset(metrics, 0, sizeof(metrics));
+#if defined(__linux__)
+    expected_errno = EINVAL;
+#else
+    expected_errno = ENOTSUP;
+#endif
+    if (expect_batch_failure(
+            instances,
+            values_out,
+            value_counts,
+            metrics,
+            2U,
+            expected_errno) != 0 ||
+        leir_native_instance_bind(
+            first.instance,
+            first.values,
+            first.value_count) != 0 ||
+        leir_native_instance_bind(
+            second.instance,
+            second.values,
+            second.value_count) != 0) {
+        fprintf(
+            stderr,
+            "valid batch failure did not release instances\n");
+        failed = 1;
+    }
+    bind_fixture_destroy(&first);
+    bind_fixture_destroy(&second);
     return failed;
 }
 
@@ -1012,6 +1252,231 @@ static int test_native_runtime_pins_bound_fd(void) {
     }
     return result == NATIVE_INTEGRATION_PASS ? 0 : 1;
 }
+
+typedef struct native_batch_integration_state {
+    native_integration_state_t lanes[2];
+    atomic_uint batch_done;
+} native_batch_integration_state_t;
+
+static bool native_batch_lane_metrics_are_expected(
+    const native_integration_state_t *lane,
+    const leir_native_metrics_t *metrics,
+    unsigned activation,
+    bool ticket_owner) {
+    uint64_t activations = (uint64_t)activation + 1U;
+    uint64_t ticket_events =
+        ticket_owner ? activations : 0U;
+
+    return metrics->activations == activations &&
+           metrics->logical_operations ==
+               activations * lane->op_count &&
+           metrics->queue_publications == ticket_events &&
+           metrics->prepared_sqes ==
+               activations * lane->op_count &&
+           metrics->observed_cqes ==
+               activations * lane->op_count &&
+           metrics->suppressed_success_cqes == 0U &&
+           metrics->task_parks == ticket_events &&
+           metrics->terminal_wakes == ticket_events &&
+           metrics->hot_allocations == 0U &&
+           metrics->first_error_operation == UINT16_MAX;
+}
+
+static void native_batch_integration_task(void *arg) {
+    native_batch_integration_state_t *state = arg;
+    leir_native_instance_t *instances[2] = {
+        state->lanes[0].instance,
+        state->lanes[1].instance,
+    };
+    leir_phase0_value_t *values_out[2] = {
+        state->lanes[0].values_out,
+        state->lanes[1].values_out,
+    };
+    size_t value_counts[2] = {
+        INTEGRATION_SLOT_COUNT,
+        INTEGRATION_SLOT_COUNT,
+    };
+    unsigned activation;
+
+    for (activation = 0U;
+         activation < INTEGRATION_ACTIVATIONS;
+         activation += 1U) {
+        leir_native_metrics_t metrics[2];
+        leir_native_batch_metrics_t batch_metrics;
+        unsigned i;
+
+        memset(metrics, 0, sizeof(metrics));
+        memset(&batch_metrics, 0, sizeof(batch_metrics));
+        for (i = 0U; i < 2U; i += 1U) {
+            memset(
+                state->lanes[i].values_out,
+                0,
+                sizeof(state->lanes[i].values_out));
+        }
+        if (leir_native_batch_run(
+                instances,
+                values_out,
+                value_counts,
+                metrics,
+                2U,
+                &batch_metrics) != 0) {
+            native_integration_fail(
+                &state->lanes[0],
+                "native batch run",
+                errno);
+            goto done;
+        }
+        if (batch_metrics.activations != 1U ||
+            batch_metrics.segments != 2U ||
+            batch_metrics.queue_publications != 1U ||
+            batch_metrics.task_parks != 1U ||
+            batch_metrics.terminal_wakes != 1U ||
+            batch_metrics.operation_sqes != 4U ||
+            batch_metrics.operation_cqes != 4U ||
+            batch_metrics.cancel_sqes != 0U ||
+            batch_metrics.cancel_cqes != 0U ||
+            batch_metrics.hot_allocations != 0U) {
+            native_integration_fail(
+                &state->lanes[0],
+                "native batch metrics",
+                EPROTO);
+            goto done;
+        }
+        for (i = 0U; i < 2U; i += 1U) {
+            if (state->lanes[i].values_out[
+                    INTEGRATION_RESULT_SLOT].i64 !=
+                    INTEGRATION_BYTES ||
+                !native_batch_lane_metrics_are_expected(
+                    &state->lanes[i],
+                    &metrics[i],
+                    activation,
+                    i == 0U)) {
+                native_integration_fail(
+                    &state->lanes[i],
+                    "native batch lane result",
+                    EPROTO);
+                goto done;
+            }
+        }
+    }
+
+done:
+    atomic_store_explicit(
+        &state->batch_done, 1U, memory_order_release);
+    atomic_store_explicit(
+        &state->lanes[0].instance_done,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &state->lanes[1].instance_done,
+        1U,
+        memory_order_release);
+}
+
+static int test_native_runtime_batches_width_two(void) {
+    native_batch_integration_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *peers[2] = {NULL, NULL};
+    llam_task_t *batch_task = NULL;
+    bool runtime_started = false;
+    int result = NATIVE_INTEGRATION_FAIL;
+    unsigned i;
+
+    memset(&state, 0, sizeof(state));
+    for (i = 0U; i < 2U; i += 1U) {
+        state.lanes[i].pair[0] = LLAM_INVALID_FD;
+        state.lanes[i].pair[1] = LLAM_INVALID_FD;
+        state.lanes[i].replacement_pair[0] =
+            LLAM_INVALID_FD;
+        state.lanes[i].replacement_pair[1] =
+            LLAM_INVALID_FD;
+    }
+    atomic_init(&state.batch_done, 0U);
+    if (native_integration_state_init(
+            &state.lanes[0],
+            2U,
+            LEIR_NATIVE_MODE_LINK) != 0 ||
+        native_integration_state_init(
+            &state.lanes[1],
+            2U,
+            LEIR_NATIVE_MODE_LINK) != 0) {
+        perror("native batch integration fixture init");
+        goto cleanup;
+    }
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    opts.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&opts) != 0) {
+        perror("native batch integration runtime init");
+        goto cleanup;
+    }
+    runtime_started = true;
+    if (g_llam_runtime.active_nodes == 0U ||
+        g_llam_runtime.nodes == NULL ||
+        !g_llam_runtime.nodes[0].ring_ready ||
+        !g_llam_runtime.nodes[0].supports_send) {
+        result = NATIVE_INTEGRATION_UNAVAILABLE;
+        goto shutdown;
+    }
+    for (i = 0U; i < 2U; i += 1U) {
+        peers[i] = llam_spawn(
+            native_integration_peer_task,
+            &state.lanes[i],
+            NULL);
+    }
+    batch_task = llam_spawn(
+        native_batch_integration_task,
+        &state,
+        NULL);
+    if (peers[0] == NULL ||
+        peers[1] == NULL ||
+        batch_task == NULL ||
+        llam_run() != 0) {
+        goto shutdown;
+    }
+    for (i = 0U; i < 2U; i += 1U) {
+        if (llam_join(peers[i]) != 0) {
+            goto shutdown;
+        }
+        peers[i] = NULL;
+    }
+    if (llam_join(batch_task) != 0) {
+        goto shutdown;
+    }
+    batch_task = NULL;
+    if (atomic_load_explicit(
+            &state.lanes[0].failures,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &state.lanes[1].failures,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &state.batch_done,
+            memory_order_acquire) == 0U) {
+        fprintf(
+            stderr,
+            "native width-two batch integration failed\n");
+        goto shutdown;
+    }
+    result = NATIVE_INTEGRATION_PASS;
+
+shutdown:
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
+cleanup:
+    native_integration_state_destroy(&state.lanes[0]);
+    native_integration_state_destroy(&state.lanes[1]);
+    if (result == NATIVE_INTEGRATION_UNAVAILABLE) {
+        puts(
+            "SKIP: Linux io_uring native batch "
+            "integration unavailable");
+        return 0;
+    }
+    return result == NATIVE_INTEGRATION_PASS ? 0 : 1;
+}
 #endif
 
 int main(void) {
@@ -1023,7 +1488,10 @@ int main(void) {
         test_bind_rejects_length_above_uint() != 0 ||
         test_bind_rejects_null_nonempty_buffer() != 0 ||
         test_bind_rejects_invalid_fd() != 0 ||
-        test_bind_accepts_repeated_fd() != 0) {
+        test_bind_accepts_repeated_fd() != 0 ||
+        test_batch_validates_width_and_members() != 0 ||
+        test_batch_rejects_unbound_member_and_rolls_back() != 0 ||
+        test_valid_batch_without_runtime_releases_instances() != 0) {
         return 1;
     }
 #if defined(__linux__)
@@ -1032,7 +1500,8 @@ int main(void) {
         test_bind_rejects_unconnected_seqpacket() != 0 ||
         test_destroy_releases_pinned_fd() != 0 ||
         test_native_runtime_link_and_skip() != 0 ||
-        test_native_runtime_pins_bound_fd() != 0) {
+        test_native_runtime_pins_bound_fd() != 0 ||
+        test_native_runtime_batches_width_two() != 0) {
         return 1;
     }
 #endif

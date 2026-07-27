@@ -6,6 +6,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum {
+    LEIR_NATIVE_MAX_BATCH_SEGMENTS = 8U,
+};
+
 typedef enum leir_native_mode {
     LEIR_NATIVE_MODE_LINK = 0,
     LEIR_NATIVE_MODE_LINK_CQE_SKIP = 1,
@@ -26,6 +30,19 @@ typedef struct leir_native_metrics {
     uint16_t first_error_operation;
 } leir_native_metrics_t;
 
+typedef struct leir_native_batch_metrics {
+    uint64_t activations;
+    uint64_t segments;
+    uint64_t queue_publications;
+    uint64_t task_parks;
+    uint64_t terminal_wakes;
+    uint64_t operation_sqes;
+    uint64_t operation_cqes;
+    uint64_t cancel_sqes;
+    uint64_t cancel_cqes;
+    uint64_t hot_allocations;
+} leir_native_batch_metrics_t;
+
 size_t leir_native_instance_size(void);
 int leir_native_instance_init(
     void *storage,
@@ -44,5 +61,12 @@ int leir_native_instance_run(
     leir_phase0_value_t *values_out,
     size_t value_count,
     leir_native_metrics_t *metrics_out);
+int leir_native_batch_run(
+    leir_native_instance_t *const *instances,
+    leir_phase0_value_t *const *values_out,
+    const size_t *value_counts,
+    leir_native_metrics_t *metrics_out,
+    size_t instance_count,
+    leir_native_batch_metrics_t *batch_metrics_out);
 
 #endif

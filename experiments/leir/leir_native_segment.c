@@ -5,6 +5,11 @@
 
 #if LLAM_RUNTIME_BACKEND_LINUX
 #include "io/linux/runtime_io_segment_linux_internal.h"
+
+_Static_assert(
+    LEIR_NATIVE_MAX_BATCH_SEGMENTS ==
+        LLAM_LINUX_NATIVE_BATCH_MAX_SEGMENTS,
+    "public and Linux native batch limits must match");
 #endif
 
 #include <errno.h>
@@ -575,38 +580,129 @@ int leir_native_instance_destroy(
     return 0;
 }
 
-int leir_native_instance_run(
-    leir_native_instance_t *instance,
-    leir_phase0_value_t *values_out,
-    size_t value_count,
-    leir_native_metrics_t *metrics_out) {
-    unsigned expected = LEIR_NATIVE_INSTANCE_IDLE;
-
-    if (instance == NULL ||
-        instance->program == NULL ||
-        values_out == NULL ||
-        metrics_out == NULL ||
-        value_count != instance->program->slot_count ||
-        atomic_load_explicit(
-            &instance->bound,
-            memory_order_acquire) == 0U) {
-        return fail_with_errno(EINVAL);
+static void release_running_instances(
+    leir_native_instance_t *const *instances,
+    size_t count) {
+    while (count > 0U) {
+        count -= 1U;
+        atomic_store_explicit(
+            &instances[count]->activity,
+            LEIR_NATIVE_INSTANCE_IDLE,
+            memory_order_release);
     }
-    if (!atomic_compare_exchange_strong_explicit(
-            &instance->activity,
-            &expected,
-            LEIR_NATIVE_INSTANCE_RUNNING,
-            memory_order_acq_rel,
-            memory_order_acquire)) {
-        return fail_with_errno(EBUSY);
+}
+
+static int validate_batch_arguments(
+    leir_native_instance_t *const *instances,
+    leir_phase0_value_t *const *values_out,
+    const size_t *value_counts,
+    leir_native_metrics_t *metrics_out,
+    size_t instance_count,
+    leir_native_batch_metrics_t *batch_metrics_out) {
+    size_t i;
+    size_t j;
+
+    if (instances == NULL ||
+        values_out == NULL ||
+        value_counts == NULL ||
+        metrics_out == NULL ||
+        batch_metrics_out == NULL ||
+        instance_count == 0U ||
+        instance_count >
+            LEIR_NATIVE_MAX_BATCH_SEGMENTS) {
+        return EINVAL;
+    }
+    for (i = 0U; i < instance_count; i += 1U) {
+        leir_native_instance_t *instance = instances[i];
+
+        if (instance == NULL ||
+            instance->program == NULL ||
+            values_out[i] == NULL ||
+            value_counts[i] !=
+                instance->program->slot_count ||
+            atomic_load_explicit(
+                &instance->bound,
+                memory_order_acquire) == 0U ||
+            (i != 0U &&
+             instance->mode != instances[0]->mode)) {
+            return EINVAL;
+        }
+        for (j = 0U; j < i; j += 1U) {
+            if (instances[j] == instance) {
+                return EINVAL;
+            }
+        }
+    }
+    return 0;
+}
+
+static int acquire_running_instances(
+    leir_native_instance_t *const *instances,
+    size_t instance_count) {
+    size_t acquired = 0U;
+
+    while (acquired < instance_count) {
+        unsigned expected = LEIR_NATIVE_INSTANCE_IDLE;
+
+        if (!atomic_compare_exchange_strong_explicit(
+                &instances[acquired]->activity,
+                &expected,
+                LEIR_NATIVE_INSTANCE_RUNNING,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            release_running_instances(
+                instances, acquired);
+            return EBUSY;
+        }
+        if (atomic_load_explicit(
+                &instances[acquired]->bound,
+                memory_order_acquire) == 0U) {
+            acquired += 1U;
+            release_running_instances(
+                instances, acquired);
+            return EINVAL;
+        }
+        acquired += 1U;
+    }
+    return 0;
+}
+
+int leir_native_batch_run(
+    leir_native_instance_t *const *instances,
+    leir_phase0_value_t *const *values_out,
+    const size_t *value_counts,
+    leir_native_metrics_t *metrics_out,
+    size_t instance_count,
+    leir_native_batch_metrics_t *batch_metrics_out) {
+    int error = validate_batch_arguments(
+        instances,
+        values_out,
+        value_counts,
+        metrics_out,
+        instance_count,
+        batch_metrics_out);
+
+    if (error != 0) {
+        return fail_with_errno(error);
+    }
+    memset(
+        batch_metrics_out,
+        0,
+        sizeof(*batch_metrics_out));
+    error = acquire_running_instances(
+        instances, instance_count);
+    if (error != 0) {
+        return fail_with_errno(error);
     }
 
 #if LLAM_RUNTIME_BACKEND_LINUX
     {
         llam_task_t *task = g_llam_tls_task;
+        llam_linux_native_batch_t batch;
         llam_io_req_t *req;
-        unsigned segment_state;
-        uint64_t generation;
+        leir_native_metrics_t
+            before[LEIR_NATIVE_MAX_BATCH_SEGMENTS];
+        size_t i;
         int issue_result;
         int saved_errno;
 
@@ -615,98 +711,191 @@ int leir_native_instance_run(
             task->owner_runtime == NULL ||
             g_llam_tls_shard->runtime !=
                 task->owner_runtime) {
-            atomic_store_explicit(
-                &instance->activity,
-                LEIR_NATIVE_INSTANCE_IDLE,
-                memory_order_release);
+            release_running_instances(
+                instances, instance_count);
             return fail_with_errno(EINVAL);
         }
 
+        memset(&batch, 0, sizeof(batch));
+        batch.owner_runtime = task->owner_runtime;
+        batch.segment_count = (unsigned)instance_count;
+        atomic_init(
+            &batch.state,
+            LLAM_LINUX_NATIVE_BATCH_IDLE);
+        atomic_init(&batch.terminal_claimed, 0U);
+        atomic_init(
+            &batch.cancel_state,
+            LLAM_LINUX_NATIVE_CANCEL_NONE);
+        atomic_init(&batch.cancel_requested, 0U);
+        for (i = 0U; i < instance_count; i += 1U) {
+            uint64_t generation;
+
+            copy_linux_metrics(
+                &instances[i]->segment, &before[i]);
+            generation =
+                instances[i]->segment.generation;
+            generation =
+                generation == UINT64_MAX
+                    ? UINT64_C(1)
+                    : generation + UINT64_C(1);
+            instances[i]->segment.generation =
+                generation;
+            instances[i]->segment.owner_runtime =
+                task->owner_runtime;
+            batch.segments[i] =
+                &instances[i]->segment;
+        }
         req = acquire_embedded_request(task);
         if (req == NULL) {
             saved_errno = errno != 0 ? errno : ENOMEM;
-            atomic_store_explicit(
-                &instance->activity,
-                LEIR_NATIVE_INSTANCE_IDLE,
-                memory_order_release);
+            release_running_instances(
+                instances, instance_count);
             return fail_with_errno(saved_errno);
         }
         if (req != &task->embedded_io_req) {
-            instance->segment.hot_allocations += 1U;
+            instances[0]->segment.hot_allocations += 1U;
+            batch_metrics_out->hot_allocations = 1U;
             llam_api_io_req_release(g_llam_tls_shard, req);
-            atomic_store_explicit(
-                &instance->activity,
-                LEIR_NATIVE_INSTANCE_IDLE,
-                memory_order_release);
+            release_running_instances(
+                instances, instance_count);
             return fail_with_errno(EAGAIN);
         }
 
         prepare_request(
             req,
-            &instance->segment.ops[
-                instance->segment.op_count - 1U]);
-        generation = instance->segment.generation;
-        generation =
-            generation == UINT64_MAX
-                ? UINT64_C(1)
-                : generation + UINT64_C(1);
-        instance->segment.generation = generation;
-        instance->segment.owner_runtime =
-            task->owner_runtime;
-
-        issue_result = llam_issue_linux_native_segment(
-            &instance->segment, req);
+            &instances[instance_count - 1U]
+                 ->segment.ops[
+                     instances[instance_count - 1U]
+                         ->segment.op_count -
+                     1U]);
+        issue_result = llam_issue_linux_native_batch(
+            &batch, req);
         saved_errno = errno;
-        segment_state = atomic_load_explicit(
-            &instance->segment.state,
-            memory_order_acquire);
-        if (segment_state !=
-                LLAM_LINUX_NATIVE_SEGMENT_RETIRED &&
-            segment_state !=
-                LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
-            /*
-             * A returned call cannot leave kernel or queue ownership live.
-             * Releasing either the request or this instance would otherwise
-             * permit a backend use-after-free, so fail closed.
-             */
-            abort();
-        }
-        publish_results(
-            instance,
-            issue_result == 0);
-        copy_linux_metrics(
-            &instance->segment, metrics_out);
-        memcpy(
-            values_out,
-            instance->slots,
-            value_count * sizeof(values_out[0]));
+        for (i = 0U; i < instance_count; i += 1U) {
+            llam_linux_native_segment_t *segment =
+                &instances[i]->segment;
+            leir_native_metrics_t *after =
+                &metrics_out[i];
+            unsigned segment_state =
+                atomic_load_explicit(
+                    &segment->state,
+                    memory_order_acquire);
+            bool activated;
 
-        instance->segment.req = NULL;
-        instance->segment.owner_node = NULL;
-        instance->segment.next = NULL;
-        atomic_store_explicit(
-            &instance->segment.state,
-            LLAM_LINUX_NATIVE_SEGMENT_IDLE,
-            memory_order_release);
+            if (segment_state !=
+                    LLAM_LINUX_NATIVE_SEGMENT_RETIRED &&
+                segment_state !=
+                    LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
+                /*
+                 * A returned call cannot leave kernel or queue ownership
+                 * live. Releasing either the request or an instance would
+                 * otherwise permit a backend use-after-free.
+                 */
+                abort();
+            }
+            copy_linux_metrics(segment, after);
+            activated =
+                after->activations >
+                before[i].activations;
+            publish_results(
+                instances[i],
+                activated &&
+                    segment->first_error == 0 &&
+                    segment->semantic_result >= 0);
+            memcpy(
+                values_out[i],
+                instances[i]->slots,
+                value_counts[i] *
+                    sizeof(values_out[i][0]));
+
+            batch_metrics_out->segments +=
+                after->activations -
+                before[i].activations;
+            batch_metrics_out->operation_sqes +=
+                after->prepared_sqes -
+                before[i].prepared_sqes;
+            batch_metrics_out->operation_cqes +=
+                after->observed_cqes -
+                before[i].observed_cqes;
+            batch_metrics_out->hot_allocations +=
+                after->hot_allocations -
+                before[i].hot_allocations;
+        }
+        batch_metrics_out->activations =
+            metrics_out[0].activations -
+            before[0].activations;
+        batch_metrics_out->queue_publications =
+            metrics_out[0].queue_publications -
+            before[0].queue_publications;
+        batch_metrics_out->task_parks =
+            metrics_out[0].task_parks -
+            before[0].task_parks;
+        batch_metrics_out->terminal_wakes =
+            metrics_out[0].terminal_wakes -
+            before[0].terminal_wakes;
+        batch_metrics_out->cancel_sqes =
+            batch.cancel_sqes_prepared;
+        batch_metrics_out->cancel_cqes =
+            batch.cancel_cqes_observed;
+
+        for (i = 0U; i < instance_count; i += 1U) {
+            llam_linux_native_segment_t *segment =
+                &instances[i]->segment;
+
+            segment->req = NULL;
+            segment->owner_node = NULL;
+            segment->next = NULL;
+            segment->batch = NULL;
+            atomic_store_explicit(
+                &segment->state,
+                LLAM_LINUX_NATIVE_SEGMENT_IDLE,
+                memory_order_release);
+        }
         llam_api_io_req_release(g_llam_tls_shard, req);
-        atomic_store_explicit(
-            &instance->activity,
-            LEIR_NATIVE_INSTANCE_IDLE,
-            memory_order_release);
+        release_running_instances(
+            instances, instance_count);
         errno = saved_errno;
         return issue_result;
     }
 #else
-    memset(metrics_out, 0, sizeof(*metrics_out));
-    metrics_out->first_error_operation = UINT16_MAX;
-    memcpy(
-        values_out,
-        instance->slots,
-        value_count * sizeof(values_out[0]));
-    atomic_store_explicit(
-        &instance->activity,
-        LEIR_NATIVE_INSTANCE_IDLE,
-        memory_order_release);
+    {
+        size_t i;
+
+        for (i = 0U; i < instance_count; i += 1U) {
+            memset(
+                &metrics_out[i],
+                0,
+                sizeof(metrics_out[i]));
+            metrics_out[i].first_error_operation =
+                UINT16_MAX;
+            memcpy(
+                values_out[i],
+                instances[i]->slots,
+                value_counts[i] *
+                    sizeof(values_out[i][0]));
+        }
+    }
+    release_running_instances(
+        instances, instance_count);
     return fail_with_errno(ENOTSUP);
 #endif
+}
+
+int leir_native_instance_run(
+    leir_native_instance_t *instance,
+    leir_phase0_value_t *values_out,
+    size_t value_count,
+    leir_native_metrics_t *metrics_out) {
+    leir_native_instance_t *instances[1] = {instance};
+    leir_phase0_value_t *outputs[1] = {values_out};
+    size_t value_counts[1] = {value_count};
+    leir_native_batch_metrics_t ignored_batch_metrics;
+
+    return leir_native_batch_run(
+        instances,
+        outputs,
+        value_counts,
+        metrics_out,
+        1U,
+        &ignored_batch_metrics);
 }
