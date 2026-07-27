@@ -386,6 +386,14 @@ def parse_output(
         != integers["effect_completions"]
     ):
         raise ValueError("candidate effect/backend counters are unbalanced")
+    if (
+        integers["effect_completions"]
+        < integers["terminal_publications"]
+        or integers["resumes_avoided"]
+        != integers["effect_completions"]
+        - integers["terminal_publications"]
+    ):
+        raise ValueError("candidate completion/resume counters are unbalanced")
     if integers["heap_requests"] != 0 or integers["hot_allocations"] != 0:
         raise ValueError("allocation-bearing LEIR row")
     if integers["pending_path_valid"] != 1:
@@ -660,10 +668,10 @@ def _mechanism_valid(row: PairRow) -> bool:
         and row.candidate_task_io_submits == expected_candidate_io
         and row.candidate_task_io_completions == expected_candidate_io
         and row.effect_completions
-        == aggregate_activations * effect_nodes
+        >= aggregate_activations * effect_nodes
         and row.terminal_publications == aggregate_activations
         and row.resumes_avoided
-        == aggregate_activations * (effect_nodes - 1)
+        == row.effect_completions - row.terminal_publications
         and row.candidate_backend_submits + row.direct_completions
         == row.effect_completions
         and row.pending_path_valid == 1

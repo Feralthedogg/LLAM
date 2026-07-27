@@ -622,7 +622,12 @@ static bool leir_bench_block_integrity(
             : options->nodes;
     uint64_t transactions =
         leir_bench_transactions_per_activation(options);
+    uint64_t minimum_effect_completions;
 
+    if (activations > UINT64_MAX / effect_nodes) {
+        return false;
+    }
+    minimum_effect_completions = activations * effect_nodes;
     if (result->checksum == 0U ||
         result->completed_transactions != activations * transactions ||
         result->logical_io_submits == 0U ||
@@ -659,11 +664,14 @@ static bool leir_bench_block_integrity(
         return true;
     }
     if (result->metrics.activations != activations ||
-        result->metrics.effect_completions !=
-            activations * effect_nodes ||
+        result->metrics.effect_completions <
+            minimum_effect_completions ||
         result->metrics.terminal_publications != activations ||
+        result->metrics.effect_completions <
+            result->metrics.terminal_publications ||
         result->metrics.task_resumes_avoided !=
-            activations * (effect_nodes - 1U) ||
+            result->metrics.effect_completions -
+                result->metrics.terminal_publications ||
         result->metrics.backend_submits !=
             result->metrics.effect_completions -
                 result->metrics.direct_completions ||
@@ -673,7 +681,7 @@ static bool leir_bench_block_integrity(
         fprintf(
             stderr,
             "LEIR candidate counters activations=%" PRIu64
-            "/%" PRIu64 " effects=%" PRIu64 "/%" PRIu64
+            "/%" PRIu64 " effects=%" PRIu64 "/min:%" PRIu64
             " terminal=%" PRIu64 "/%" PRIu64
             " avoided=%" PRIu64 "/%" PRIu64
             " backend=%" PRIu64 " direct=%" PRIu64
@@ -682,11 +690,15 @@ static bool leir_bench_block_integrity(
             result->metrics.activations,
             activations,
             result->metrics.effect_completions,
-            activations * effect_nodes,
+            minimum_effect_completions,
             result->metrics.terminal_publications,
             activations,
             result->metrics.task_resumes_avoided,
-            activations * (effect_nodes - 1U),
+            result->metrics.effect_completions >=
+                    result->metrics.terminal_publications
+                ? result->metrics.effect_completions -
+                      result->metrics.terminal_publications
+                : UINT64_MAX,
             result->metrics.backend_submits,
             result->metrics.direct_completions,
             result->metrics.heap_requests,

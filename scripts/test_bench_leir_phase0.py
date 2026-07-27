@@ -207,6 +207,9 @@ class ParserContractTests(unittest.TestCase):
             VALID_ROW.replace("pending_path_valid=1", "pending_path_valid=0"),
             VALID_ROW.replace("heap_requests=0", "heap_requests=1"),
             VALID_ROW.replace("hot_allocations=0", "hot_allocations=1"),
+            VALID_ROW.replace(
+                "resumes_avoided=98304", "resumes_avoided=98303"
+            ),
             VALID_ROW.replace("order=ABBA", "order=AABB"),
             VALID_ROW + " unknown=1",
             VALID_ROW.replace(" nodes=4", ""),
@@ -270,6 +273,33 @@ class MatrixAndSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(summary.cpu_ratio, 0.72, places=6)
         self.assertGreater(summary.wall_ratio_spread, 1.39)
         self.assertTrue(summary.mechanism_valid)
+
+    def test_partial_completions_preserve_mechanism_balance(self) -> None:
+        cell = MatrixCell("socket_relay", 1, 64, 16384, 8)
+        row = _pair_for_cell(
+            cell,
+            wall_speedup=1.0,
+            cpu_ratio=1.0,
+        )
+        partial = replace(
+            row,
+            candidate_backend_submits=row.effect_completions * 2,
+            effect_completions=row.effect_completions * 2,
+            resumes_avoided=row.effect_completions,
+        )
+        summary = summarize(
+            [SampleRow(process_sample=1, row=partial)]
+        )[0]
+        self.assertTrue(summary.mechanism_valid)
+
+        unbalanced = replace(
+            partial,
+            resumes_avoided=partial.resumes_avoided - 1,
+        )
+        bad_summary = summarize(
+            [SampleRow(process_sample=1, row=unbalanced)]
+        )[0]
+        self.assertFalse(bad_summary.mechanism_valid)
 
 
 class ClassifierTests(unittest.TestCase):
