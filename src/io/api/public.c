@@ -283,13 +283,15 @@ static llam_fd_t llam_accept_req_result(const llam_io_req_t *req) {
  * @brief Submit one managed read without re-entering the direct/readiness loop.
  *
  * Generic POSIX descriptors have no portable per-call nonblocking read flag.
- * Once the direct helper classifies a descriptor as non-socket, this is the
- * only scheduler-safe continuation: a capable backend owns the read and its
+ * Once the direct helper classifies a descriptor, retain that classification
+ * across the async boundary: sockets use the backend's receive operation,
+ * while non-sockets use generic read. A capable backend owns the read and its
  * absolute deadline, or the bounded blocking-worker pool owns the syscall.
  */
 static ssize_t llam_submit_managed_read(llam_fd_t fd,
                                         void *buf,
                                         size_t count,
+                                        bool socket_read,
                                         bool has_deadline,
                                         uint64_t deadline_ns) {
     llam_io_req_t *req;
@@ -313,6 +315,8 @@ static ssize_t llam_submit_managed_read(llam_fd_t fd,
     req->fd = fd;
     req->buf = buf;
     req->count = count;
+    req->use_recv_op = socket_read;
+    req->recv_flags = 0;
     req->recv_watch = NULL;
     if (llam_issue_io(req, has_deadline, has_deadline ? deadline_ns : 0U) != 0) {
         if (!llam_io_capability_error(errno)) {
@@ -331,6 +335,8 @@ static ssize_t llam_submit_managed_read(llam_fd_t fd,
         req->fd = fd;
         req->buf = buf;
         req->count = count;
+        req->use_recv_op = socket_read;
+        req->recv_flags = 0;
         req->task = g_llam_tls_task;
         if (llam_call_blocking_io(llam_blocking_read_impl, req) != 0) {
             int saved_errno = errno;
@@ -386,7 +392,7 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
         }
         llam_task_safepoint();
         if (!direct_socket) {
-            return llam_submit_managed_read(fd, buf, count, false, 0U);
+            return llam_submit_managed_read(fd, buf, count, false, false, 0U);
         }
         if (llam_io_coop_yield_enabled() && llam_io_shard_has_local_work()) {
             llam_yield();
@@ -406,7 +412,7 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
                 return -1;
             }
             if (!direct_socket) {
-                return llam_submit_managed_read(fd, buf, count, false, 0U);
+                return llam_submit_managed_read(fd, buf, count, false, false, 0U);
             }
         }
         direct_rc = llam_try_direct_blocking_rw(fd, buf, count, false, false, 0, &direct_result);
@@ -417,7 +423,7 @@ ssize_t llam_read(llam_fd_t fd, void *buf, size_t count) {
             return -1;
         }
     }
-    return llam_submit_managed_read(fd, buf, count, false, 0U);
+    return llam_submit_managed_read(fd, buf, count, true, false, 0U);
 }
 
 /**
@@ -576,11 +582,12 @@ ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_
                     errno = EIO;
                     return -1;
                 }
-                return llam_submit_managed_read(fd, buf, count, false, 0U);
+                return llam_submit_managed_read(fd, buf, count, false, false, 0U);
             }
             return llam_submit_managed_read(fd,
                                             buf,
                                             count,
+                                            false,
                                             timeout_ms >= 0,
                                             deadline_ns);
         }

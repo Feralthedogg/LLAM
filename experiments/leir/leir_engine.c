@@ -427,6 +427,7 @@ static int prepare_request(
     void *buffer;
     size_t count;
     bool write_op;
+    bool socket_io;
     int saved_errno;
 
     if (req == NULL ||
@@ -439,11 +440,12 @@ static int prepare_request(
     req->fd = fd;
     req->buf = buffer;
     req->count = count;
-    req->use_recv_op = false;
     saved_errno = errno;
-    req->use_send_op =
-        write_op && llam_fd_get_socket_type(fd, NULL);
+    socket_io = llam_fd_get_socket_type(fd, NULL);
     errno = saved_errno;
+    req->use_recv_op = !write_op && socket_io;
+    req->recv_flags = 0;
+    req->use_send_op = write_op && socket_io;
     req->completion_sink = leir_phase0_completion_sink;
     req->completion_sink_context = instance;
     return 0;
