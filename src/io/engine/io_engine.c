@@ -401,6 +401,7 @@ void llam_probe_ring_support(llam_node_t *node) {
         node->supports_read = true;
         node->supports_recv = true;
         node->supports_write = true;
+        node->supports_send = true;
         node->supports_accept = true;
         node->supports_connect = true;
         node->supports_poll = true;
@@ -413,6 +414,7 @@ void llam_probe_ring_support(llam_node_t *node) {
     node->supports_read = io_uring_opcode_supported(probe, IORING_OP_READ) != 0;
     node->supports_recv = io_uring_opcode_supported(probe, IORING_OP_RECV) != 0;
     node->supports_write = io_uring_opcode_supported(probe, IORING_OP_WRITE) != 0;
+    node->supports_send = io_uring_opcode_supported(probe, IORING_OP_SEND) != 0;
     node->supports_accept = io_uring_opcode_supported(probe, IORING_OP_ACCEPT) != 0;
     node->supports_connect = io_uring_opcode_supported(probe, IORING_OP_CONNECT) != 0;
     node->supports_poll = io_uring_opcode_supported(probe, IORING_OP_POLL_ADD) != 0;
@@ -530,6 +532,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->supports_read = false;
     node->supports_recv = false;
     node->supports_write = false;
+    node->supports_send = false;
     node->supports_accept = false;
     node->supports_connect = false;
     node->supports_poll = false;
@@ -592,6 +595,7 @@ void llam_probe_ring_support(llam_node_t *node) {
     node->supports_read = false;
     node->supports_recv = false;
     node->supports_write = false;
+    node->supports_send = false;
     node->supports_accept = false;
     node->supports_connect = false;
     node->supports_poll = false;
@@ -626,6 +630,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->supports_read = true;
     node->supports_recv = true;
     node->supports_write = true;
+    node->supports_send = true;
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;
@@ -673,6 +678,7 @@ void llam_probe_ring_support(llam_node_t *node) {
     node->supports_read = true;
     node->supports_recv = true;
     node->supports_write = true;
+    node->supports_send = true;
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;
@@ -699,6 +705,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->supports_read = true;
     node->supports_recv = true;
     node->supports_write = true;
+    node->supports_send = true;
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;
@@ -726,6 +733,7 @@ void llam_probe_ring_support(llam_node_t *node) {
     node->supports_read = true;
     node->supports_recv = true;
     node->supports_write = true;
+    node->supports_send = true;
     node->supports_accept = true;
     node->supports_connect = true;
     node->supports_poll = true;

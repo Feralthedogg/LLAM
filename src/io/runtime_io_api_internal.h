@@ -35,6 +35,10 @@
 
 #include <limits.h>
 
+bool llam_fd_get_socket_type(
+    llam_fd_t fd,
+    int *so_type_out);
+
 #if LLAM_PLATFORM_POSIX
 ssize_t llam_posix_write_socket_safe(
     llam_fd_t fd,

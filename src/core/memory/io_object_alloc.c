@@ -118,6 +118,7 @@ void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsign
     atomic_init(&req->backend_event_refs, 0U);
     atomic_init(&req->release_after_event, 0U);
     req->use_recv_op = false;
+    req->use_send_op = false;
     req->use_provided_buffer = false;
     /* Publish an idle slot only after every reusable field is initialized. */
     atomic_init(&req->lifetime_refs, 0U);

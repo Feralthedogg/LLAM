@@ -30,6 +30,42 @@
 
 #include "io/runtime_io_api_internal.h"
 
+/**
+ * @brief Query whether a descriptor is a socket.
+ *
+ * Async Linux writes need this distinction before choosing between
+ * IORING_OP_WRITE and IORING_OP_SEND with MSG_NOSIGNAL. Keep the probe at the
+ * shared platform boundary so every internal caller gets the same Windows
+ * error normalization.
+ */
+bool llam_fd_get_socket_type(
+    llam_fd_t fd,
+    int *so_type_out) {
+    int so_type = 0;
+    socklen_t so_type_len = sizeof(so_type);
+
+    if (LLAM_FD_IS_INVALID(fd)) {
+        errno = EBADF;
+        return false;
+    }
+    if (getsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_TYPE,
+            &so_type,
+            &so_type_len) != 0) {
+#if LLAM_RUNTIME_BACKEND_WINDOWS
+        errno = llam_windows_wsa_error_to_errno(
+            WSAGetLastError());
+#endif
+        return false;
+    }
+    if (so_type_out != NULL) {
+        *so_type_out = so_type;
+    }
+    return true;
+}
+
 #if LLAM_PLATFORM_POSIX
 #include <signal.h>
 #include <sys/uio.h>

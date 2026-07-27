@@ -132,7 +132,21 @@ void llam_io_submit_one(llam_node_t *node, llam_io_req_t *req) {
         }
         break;
     case LLAM_IO_KIND_WRITE:
-        io_uring_prep_write(sqe, req->fd, req->buf, (unsigned)req->count, (unsigned long long)-1);
+        if (req->use_send_op) {
+            io_uring_prep_send(
+                sqe,
+                req->fd,
+                req->buf,
+                (unsigned)req->count,
+                MSG_NOSIGNAL);
+        } else {
+            io_uring_prep_write(
+                sqe,
+                req->fd,
+                req->buf,
+                (unsigned)req->count,
+                (unsigned long long)-1);
+        }
         break;
     case LLAM_IO_KIND_PREAD:
         io_uring_prep_read(sqe, req->fd, req->buf, (unsigned)req->count, req->offset);

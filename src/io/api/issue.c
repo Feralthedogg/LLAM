@@ -1030,6 +1030,8 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     kind_supported =
         req->kind == LLAM_IO_KIND_READ && req->use_recv_op
             ? node->supports_recv
+            : req->kind == LLAM_IO_KIND_WRITE && req->use_send_op
+                ? node->supports_send
             : llam_node_supports_kind(node, req->kind);
 #if LLAM_RUNTIME_BACKEND_KQUEUE
     /*

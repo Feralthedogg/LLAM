@@ -587,6 +587,11 @@ typedef struct llam_io_req {
     atomic_uint backend_event_refs;
     atomic_uint release_after_event;
     bool use_recv_op;
+    /*
+     * Socket-backed writes use send semantics in asynchronous backends so the
+     * operation can carry MSG_NOSIGNAL without changing process-wide state.
+     */
+    bool use_send_op;
     bool use_provided_buffer;
 } llam_io_req_t;
 
@@ -1197,6 +1202,7 @@ struct llam_node {
     bool supports_read;
     bool supports_recv;
     bool supports_write;
+    bool supports_send;
     bool supports_accept;
     bool supports_connect;
     bool supports_poll;

@@ -224,40 +224,6 @@ static void *llam_blocking_recv_impl(void *arg) {
 }
 
 /**
- * @brief Query whether a descriptor is a socket and optionally return its type.
- *
- * @param fd          Descriptor to inspect.
- * @param so_type_out Optional output for @c SO_TYPE.
- *
- * @return @c true when @p fd is a socket.
- */
-static bool llam_fd_get_socket_type(llam_fd_t fd, int *so_type_out) {
-    int so_type = 0;
-    socklen_t so_type_len = sizeof(so_type);
-
-    if (LLAM_FD_IS_INVALID(fd)) {
-        errno = EBADF;
-        return false;
-    }
-    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &so_type, &so_type_len) != 0) {
-#if LLAM_RUNTIME_BACKEND_WINDOWS
-        /*
-         * Winsock reports errors through WSAGetLastError(), not errno.  The
-         * owned-buffer path relies on errno to decide whether it can safely
-         * allocate before issuing the read, so normalize the probe failure at
-         * the platform boundary.
-         */
-        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
-#endif
-        return false;
-    }
-    if (so_type_out != NULL) {
-        *so_type_out = so_type;
-    }
-    return true;
-}
-
-/**
  * @brief Shared implementation for owned read and owned recv APIs.
  *
  * The function selects between plain buffers, provided buffers, multishot recv,

@@ -397,6 +397,9 @@ static bool llam_node_supports_submit_req(const llam_node_t *node, const llam_io
     if (req->kind == LLAM_IO_KIND_READ && req->use_recv_op) {
         return node->supports_recv;
     }
+    if (req->kind == LLAM_IO_KIND_WRITE && req->use_send_op) {
+        return node->supports_send;
+    }
     return llam_node_supports_kind(node, req->kind);
 }
 

@@ -1933,13 +1933,22 @@ static int test_multi_node_differential_advancement(void) {
 
 #define LEIR_FAIR_IO_NODES (LEIR_PHASE0_MAX_NODES - 1U)
 #define LEIR_FAIR_ACTIVATIONS 256U
+#define LEIR_FAIR_SEGMENT_ACTIVATIONS \
+    (LEIR_FAIR_ACTIVATIONS / 2U)
+#define LEIR_FAIR_SEGMENT_BYTES \
+    (LEIR_FAIR_IO_NODES * LEIR_FAIR_SEGMENT_ACTIVATIONS)
 #define LEIR_FAIR_GAP_CAPACITY 8192U
 #define LEIR_FAIR_SAMPLE_WINDOW 32U
+
+_Static_assert(
+    LEIR_FAIR_ACTIVATIONS % 2U == 0U,
+    "fairness ABBA sampling requires an even activation count");
 
 typedef enum fairness_phase {
     LEIR_FAIR_PHASE_BASELINE = 0,
     LEIR_FAIR_PHASE_CANDIDATE = 1,
-    LEIR_FAIR_PHASE_DONE = 2,
+    LEIR_FAIR_PHASE_PAUSE = 2,
+    LEIR_FAIR_PHASE_DONE = 3,
 } fairness_phase_t;
 
 typedef struct fairness_state {
@@ -2011,6 +2020,13 @@ static void fairness_companion_task(void *arg) {
         if (phase == LEIR_FAIR_PHASE_DONE) {
             return;
         }
+        if (phase == LEIR_FAIR_PHASE_PAUSE) {
+            previous_phase = phase;
+            previous_ns = 0U;
+            window_runs = 0U;
+            llam_yield();
+            continue;
+        }
         if (phase != previous_phase) {
             previous_phase = phase;
             previous_ns = llam_now_ns();
@@ -2077,45 +2093,24 @@ static bool fairness_baseline_completion_sink(
     return false;
 }
 
-static void fairness_candidate_task(void *arg) {
-    fairness_state_t *state = arg;
-    leir_phase0_instance_t instance;
-    leir_phase0_value_t values[4] = {0};
-    leir_phase0_value_t values_out[4] = {0};
-    leir_phase0_run_opts_t opts = {
-        .force_backend = false,
-    };
-    unsigned char byte = 0U;
+static int fairness_run_baseline_segment(
+    fairness_state_t *state,
+    unsigned char *byte) {
     unsigned i;
 
-    if (leir_phase0_instance_init(
-            &instance, sizeof(instance), state->program) != 0) {
-        fairness_fail(state, "fairness instance init", errno);
-        atomic_store_explicit(
-            &state->phase,
-            LEIR_FAIR_PHASE_DONE,
-            memory_order_release);
-        return;
-    }
-    for (i = 0U;
-         i < LEIR_FAIR_IO_NODES * LEIR_FAIR_ACTIVATIONS;
-         i += 1U) {
+    for (i = 0U; i < LEIR_FAIR_SEGMENT_BYTES; i += 1U) {
         llam_io_req_t *req =
             llam_api_io_req_acquire(g_llam_tls_shard);
 
         if (req == NULL) {
             fairness_fail(
                 state, "fairness baseline acquire", errno);
-            atomic_store_explicit(
-                &state->phase,
-                LEIR_FAIR_PHASE_DONE,
-                memory_order_release);
-            return;
+            return -1;
         }
         req->kind = LLAM_IO_KIND_READ;
         req->fd = state->pair[0];
-        req->buf = &byte;
-        req->count = sizeof(byte);
+        req->buf = byte;
+        req->count = sizeof(*byte);
         req->completion_sink =
             fairness_baseline_completion_sink;
         req->completion_sink_context = NULL;
@@ -2128,22 +2123,72 @@ static void fairness_candidate_task(void *arg) {
                 state,
                 "fairness baseline await",
                 saved_errno);
-            atomic_store_explicit(
-                &state->phase,
-                LEIR_FAIR_PHASE_DONE,
-                memory_order_release);
-            return;
+            return -1;
         }
         req->completion_sink = NULL;
         req->completion_sink_context = NULL;
         llam_api_io_req_release(g_llam_tls_shard, req);
     }
+    return 0;
+}
+
+static int fairness_run_candidate_segment(
+    fairness_state_t *state,
+    leir_phase0_instance_t *instance,
+    leir_phase0_value_t values[4],
+    leir_phase0_value_t values_out[4],
+    const leir_phase0_run_opts_t *opts) {
+    unsigned i;
+
+    for (i = 0U; i < LEIR_FAIR_SEGMENT_ACTIVATIONS; i += 1U) {
+        leir_phase0_metrics_t metrics;
+
+        values[3].i64 = -1;
+        if (leir_phase0_instance_bind(
+                instance, values, 4U, opts) != 0 ||
+            leir_phase0_instance_run(
+                instance, values_out, 4U, &metrics) != 0 ||
+            values_out[3].i64 != 1) {
+            fairness_fail(state, "fairness activation", errno);
+            return -1;
+        }
+        fairness_metrics_add(&state->metrics, &metrics);
+    }
+    return 0;
+}
+
+static int fairness_preload_segment(fairness_state_t *state) {
     if (leir_test_write_all(
             state->pair[1],
             state->preload,
-            sizeof(state->preload)) != 0) {
+            LEIR_FAIR_SEGMENT_BYTES) != 0) {
         fairness_fail(
             state, "fairness candidate preload", errno);
+        return -1;
+    }
+    return 0;
+}
+
+static void fairness_candidate_task(void *arg) {
+    static const fairness_phase_t phase_order[] = {
+        LEIR_FAIR_PHASE_BASELINE,
+        LEIR_FAIR_PHASE_CANDIDATE,
+        LEIR_FAIR_PHASE_CANDIDATE,
+        LEIR_FAIR_PHASE_BASELINE,
+    };
+    fairness_state_t *state = arg;
+    leir_phase0_instance_t instance;
+    leir_phase0_value_t values[4] = {0};
+    leir_phase0_value_t values_out[4] = {0};
+    leir_phase0_run_opts_t opts = {
+        .force_backend = false,
+    };
+    unsigned char byte = 0U;
+    size_t segment;
+
+    if (leir_phase0_instance_init(
+            &instance, sizeof(instance), state->program) != 0) {
+        fairness_fail(state, "fairness instance init", errno);
         atomic_store_explicit(
             &state->phase,
             LEIR_FAIR_PHASE_DONE,
@@ -2156,23 +2201,42 @@ static void fairness_candidate_task(void *arg) {
     values[1].buffer.data = &byte;
     values[1].buffer.size = sizeof(byte);
     values[2].u64 = sizeof(byte);
-    atomic_store_explicit(
-        &state->phase,
-        LEIR_FAIR_PHASE_CANDIDATE,
-        memory_order_release);
-    for (i = 0U; i < LEIR_FAIR_ACTIVATIONS; i += 1U) {
-        leir_phase0_metrics_t metrics;
-
-        values[3].i64 = -1;
-        if (leir_phase0_instance_bind(
-                &instance, values, 4U, &opts) != 0 ||
-            leir_phase0_instance_run(
-                &instance, values_out, 4U, &metrics) != 0 ||
-            values_out[3].i64 != 1) {
-            fairness_fail(state, "fairness activation", errno);
+    for (segment = 0U;
+         segment < sizeof(phase_order) / sizeof(phase_order[0]);
+         segment += 1U) {
+        if (segment != 0U) {
+            /*
+             * Exclude refill work from both latency populations. The
+             * yield guarantees the continuously-ready companion observes
+             * the pause even when the peer socket accepts the refill
+             * synchronously.
+             */
+            atomic_store_explicit(
+                &state->phase,
+                LEIR_FAIR_PHASE_PAUSE,
+                memory_order_release);
+            llam_yield();
+            if (fairness_preload_segment(state) != 0) {
+                break;
+            }
+        }
+        atomic_store_explicit(
+            &state->phase,
+            phase_order[segment],
+            memory_order_release);
+        if (phase_order[segment] == LEIR_FAIR_PHASE_BASELINE) {
+            if (fairness_run_baseline_segment(
+                    state, &byte) != 0) {
+                break;
+            }
+        } else if (fairness_run_candidate_segment(
+                       state,
+                       &instance,
+                       values,
+                       values_out,
+                       &opts) != 0) {
             break;
         }
-        fairness_metrics_add(&state->metrics, &metrics);
     }
     atomic_store_explicit(
         &state->phase,
@@ -2271,7 +2335,7 @@ static int run_fairness_case(
     state.pair[0] = LLAM_INVALID_FD;
     state.pair[1] = LLAM_INVALID_FD;
     state.inline_budget = inline_budget;
-    atomic_init(&state.phase, LEIR_FAIR_PHASE_BASELINE);
+    atomic_init(&state.phase, LEIR_FAIR_PHASE_PAUSE);
     atomic_init(&state.failures, 0U);
     memset(result_out, 0, sizeof(*result_out));
     leir_test_fill_pattern(
@@ -2283,7 +2347,7 @@ static int run_fairness_case(
         leir_test_write_all(
             state.pair[1],
             state.preload,
-            sizeof(state.preload)) != 0) {
+            LEIR_FAIR_SEGMENT_BYTES) != 0) {
         goto cleanup;
     }
 
@@ -2613,7 +2677,14 @@ static void partial_io_instance_task(void *arg) {
     leir_phase0_metrics_t metrics;
     leir_phase0_run_opts_t opts = {
         .inline_budget = 8U,
-        .force_backend = false,
+        /*
+         * The error case must cross the asynchronous backend boundary. A
+         * direct send already suppresses SIGPIPE, so allowing it here would
+         * leave Linux IORING_OP_WRITE regressions dependent on a readiness
+         * race.
+         */
+        .force_backend =
+            state->test_case == PARTIAL_IO_ERROR,
     };
     bool write_op =
         state->test_case == PARTIAL_IO_WRITE_ALL ||

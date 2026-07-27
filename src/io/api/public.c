@@ -633,6 +633,7 @@ ssize_t llam_read_when_ready(llam_fd_t fd, void *buf, size_t count, int timeout_
 ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
     llam_io_req_t *req;
     ssize_t result;
+    bool socket_write = false;
 
     if (g_llam_tls_shard == NULL || g_llam_tls_task == NULL) {
         return llam_platform_write_fd(fd, buf, count);
@@ -659,6 +660,7 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
             if (direct_rc < 0) {
                 return -1;
             }
+            socket_write = true;
         }
     }
     if (llam_validate_async_rw_count(count) != 0) {
@@ -675,6 +677,7 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
     req->fd = fd;
     req->buf = (void *)buf;
     req->count = count;
+    req->use_send_op = socket_write;
     if (llam_issue_io(req, false, 0U) != 0) {
         if (!llam_io_capability_error(errno)) {
             llam_api_io_req_release(g_llam_tls_shard, req);
@@ -684,6 +687,7 @@ ssize_t llam_write(llam_fd_t fd, const void *buf, size_t count) {
         req->fd = fd;
         req->buf = (void *)buf;
         req->count = count;
+        req->use_send_op = socket_write;
         req->task = g_llam_tls_task;
         if (llam_call_blocking_io(llam_blocking_write_impl, req) != 0) {
             int saved_errno = errno;
