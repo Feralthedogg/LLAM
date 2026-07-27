@@ -35,6 +35,22 @@
 
 #include <limits.h>
 
+#if LLAM_PLATFORM_POSIX
+ssize_t llam_posix_write_socket_safe(
+    llam_fd_t fd,
+    const void *buf,
+    size_t count);
+ssize_t llam_posix_send_no_sigpipe(
+    llam_fd_t fd,
+    const void *buf,
+    size_t count,
+    int flags);
+ssize_t llam_posix_sendmsg_no_sigpipe(
+    llam_fd_t fd,
+    const struct msghdr *message,
+    int flags);
+#endif
+
 /* Request ownership helpers used by public I/O entry points. */
 llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard);
 void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req);
@@ -57,7 +73,7 @@ static inline ssize_t llam_platform_write_fd(llam_fd_t fd, const void *buf, size
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     return llam_windows_socket_send(fd, buf, count, 0);
 #else
-    return write(fd, buf, count);
+    return llam_posix_write_socket_safe(fd, buf, count);
 #endif
 }
 
@@ -257,7 +273,7 @@ static inline ssize_t llam_platform_send_fd(llam_fd_t fd, const void *buf, size_
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     return llam_windows_socket_send(fd, buf, count, flags);
 #else
-    return send(fd, buf, count, flags);
+    return llam_posix_send_no_sigpipe(fd, buf, count, flags);
 #endif
 }
 

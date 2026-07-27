@@ -25,6 +25,7 @@
  */
 
 #include "io/darwin/runtime_io_watch_darwin_internal.h"
+#include "io/runtime_io_api_internal.h"
 
 /** @brief Convert a kevent filter/flags pair into poll-style revents. */
 short llam_darwin_poll_revents(const struct kevent *event) {
@@ -285,7 +286,8 @@ int llam_darwin_try_req_syscall(llam_io_req_t *req, int *result_out) {
                                     (int)read(req->fd, req->buf, req->count);
             break;
         case LLAM_IO_KIND_WRITE:
-            rc = (int)write(req->fd, req->buf, req->count);
+            rc = (int)llam_platform_write_fd(
+                req->fd, req->buf, req->count);
             break;
         case LLAM_IO_KIND_ACCEPT:
             rc = accept(req->fd, req->addr, req->addrlen);

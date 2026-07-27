@@ -31,7 +31,141 @@
 #include "io/runtime_io_api_internal.h"
 
 #if LLAM_PLATFORM_POSIX
+#include <signal.h>
 #include <sys/uio.h>
+
+#if !defined(MSG_NOSIGNAL)
+typedef enum llam_posix_sigpipe_operation {
+    LLAM_POSIX_SIGPIPE_SEND = 0,
+    LLAM_POSIX_SIGPIPE_SENDMSG = 1,
+} llam_posix_sigpipe_operation_t;
+
+typedef struct llam_posix_sigpipe_call {
+    llam_posix_sigpipe_operation_t operation;
+    llam_fd_t fd;
+    const void *buffer;
+    size_t count;
+    const struct msghdr *message;
+    int flags;
+} llam_posix_sigpipe_call_t;
+
+static ssize_t llam_posix_perform_sigpipe_call(
+    const llam_posix_sigpipe_call_t *call) {
+    switch (call->operation) {
+        case LLAM_POSIX_SIGPIPE_SEND:
+            return send(
+                call->fd, call->buffer, call->count, call->flags);
+        case LLAM_POSIX_SIGPIPE_SENDMSG:
+            return sendmsg(call->fd, call->message, call->flags);
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+static ssize_t llam_posix_call_without_sigpipe(
+    const llam_posix_sigpipe_call_t *call) {
+    sigset_t blocked;
+    sigset_t old_mask;
+    sigset_t pending;
+    ssize_t result;
+    int saved_errno;
+    int mask_error;
+    int pending_member;
+    bool pending_before;
+
+    if (sigemptyset(&blocked) != 0 ||
+        sigaddset(&blocked, SIGPIPE) != 0) {
+        return -1;
+    }
+    mask_error = pthread_sigmask(SIG_BLOCK, &blocked, &old_mask);
+    if (mask_error != 0) {
+        errno = mask_error;
+        return -1;
+    }
+    if (sigpending(&pending) != 0) {
+        saved_errno = errno;
+        (void)pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+        errno = saved_errno;
+        return -1;
+    }
+    pending_member = sigismember(&pending, SIGPIPE);
+    if (pending_member < 0) {
+        saved_errno = errno;
+        (void)pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+        errno = saved_errno;
+        return -1;
+    }
+    pending_before = pending_member == 1;
+
+    result = llam_posix_perform_sigpipe_call(call);
+    saved_errno = errno;
+    if (!pending_before && result < 0 && saved_errno == EPIPE &&
+        sigpending(&pending) == 0 &&
+        sigismember(&pending, SIGPIPE) == 1) {
+        int received_signal;
+
+        (void)sigwait(&blocked, &received_signal);
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+    errno = saved_errno;
+    return result;
+}
+#endif
+
+ssize_t llam_posix_write_socket_safe(
+    llam_fd_t fd,
+    const void *buf,
+    size_t count) {
+    ssize_t socket_result;
+    int socket_error;
+
+    socket_result =
+        llam_posix_send_no_sigpipe(fd, buf, count, 0);
+    socket_error = errno;
+    if (socket_result >= 0 ||
+        socket_error != ENOTSOCK) {
+        return socket_result;
+    }
+    return write(fd, buf, count);
+}
+
+ssize_t llam_posix_send_no_sigpipe(
+    llam_fd_t fd,
+    const void *buf,
+    size_t count,
+    int flags) {
+#if defined(MSG_NOSIGNAL)
+    return send(fd, buf, count, flags | MSG_NOSIGNAL);
+#else
+    const llam_posix_sigpipe_call_t call = {
+        .operation = LLAM_POSIX_SIGPIPE_SEND,
+        .fd = fd,
+        .buffer = buf,
+        .count = count,
+        .flags = flags,
+    };
+
+    return llam_posix_call_without_sigpipe(&call);
+#endif
+}
+
+ssize_t llam_posix_sendmsg_no_sigpipe(
+    llam_fd_t fd,
+    const struct msghdr *message,
+    int flags) {
+#if defined(MSG_NOSIGNAL)
+    return sendmsg(fd, message, flags | MSG_NOSIGNAL);
+#else
+    const llam_posix_sigpipe_call_t call = {
+        .operation = LLAM_POSIX_SIGPIPE_SENDMSG,
+        .fd = fd,
+        .message = message,
+        .flags = flags,
+    };
+
+    return llam_posix_call_without_sigpipe(&call);
+#endif
+}
 #endif
 
 /**
@@ -558,7 +692,8 @@ int llam_try_direct_writev(llam_fd_t fd,
         msg.msg_iov = native_iov;
         msg.msg_iovlen = (size_t)iovcnt;
         for (;;) {
-            rc = sendmsg(fd, &msg, MSG_DONTWAIT);
+            rc = llam_posix_sendmsg_no_sigpipe(
+                fd, &msg, MSG_DONTWAIT);
             if (rc >= 0) {
                 if (result_out != NULL) {
                     *result_out = rc;

@@ -2410,6 +2410,55 @@ static void *unmanaged_external_run_thread(void *arg) {
     return NULL;
 }
 
+#if !LLAM_PLATFORM_WINDOWS
+static int test_unmanaged_closed_socket_write_suppresses_sigpipe(void) {
+    pid_t child = fork();
+    int status;
+
+    if (child < 0) {
+        return fail_errno("closed socket SIGPIPE fork failed");
+    }
+    if (child == 0) {
+        struct sigaction default_action;
+        sigset_t sigpipe_set;
+        int pair[2] = {-1, -1};
+        unsigned char byte = 0x4cU;
+        ssize_t result;
+        int error_code;
+
+        memset(&default_action, 0, sizeof(default_action));
+        default_action.sa_handler = SIG_DFL;
+        if (sigemptyset(&default_action.sa_mask) != 0 ||
+            sigaction(SIGPIPE, &default_action, NULL) != 0 ||
+            sigemptyset(&sigpipe_set) != 0 ||
+            sigaddset(&sigpipe_set, SIGPIPE) != 0 ||
+            pthread_sigmask(SIG_UNBLOCK, &sigpipe_set, NULL) != 0 ||
+            socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) {
+            _exit(2);
+        }
+        (void)close(pair[1]);
+        errno = 0;
+        result = llam_write(pair[0], &byte, sizeof(byte));
+        error_code = errno;
+        (void)close(pair[0]);
+        _exit(result == -1 && error_code == EPIPE ? 0 : 3);
+    }
+    if (waitpid(child, &status, 0) != child) {
+        return fail_errno("closed socket SIGPIPE wait failed");
+    }
+    if (WIFSIGNALED(status)) {
+        fprintf(
+            stderr,
+            "closed socket write killed child with signal %d\n",
+            WTERMSIG(status));
+        return 1;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0
+               ? 0
+               : fail_msg("closed socket write did not return EPIPE");
+}
+#endif
+
 static int test_unmanaged_boundary_contracts(void) {
     edge_state_t state;
     llam_channel_t *channel;
@@ -6063,6 +6112,11 @@ int main(void) {
     }
     if (setenv("LLAM_ACCEPT_DIRECT_BLOCKING", "1", 1) != 0) {
         return fail_errno("enable blocking accept edge mode failed");
+    }
+    if (run_edge_case(
+            "unmanaged_closed_socket_write_suppresses_sigpipe",
+            test_unmanaged_closed_socket_write_suppresses_sigpipe) != 0) {
+        return 1;
     }
 #endif
     if (run_edge_case("public_slot_generation_wrap_guard",
