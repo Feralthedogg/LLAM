@@ -976,7 +976,8 @@ static int leir_bench_calibrate(
         uint64_t slow_ns;
         uint64_t fast_ns;
         uint64_t target_block_ns =
-            (options->min_mode_ns + 7U) / 8U;
+            leir_bench_calibration_target_block_ns(
+                options->min_mode_ns);
         uint64_t scale;
 
         if (leir_bench_run_block(
@@ -1072,7 +1073,23 @@ static int leir_bench_run(
         totals[1].wall_ns == 0U ||
         totals[0].cpu_ns == 0U ||
         totals[1].cpu_ns == 0U) {
-        fputs("LEIR benchmark aggregate integrity failed\n", stderr);
+        fprintf(
+            stderr,
+            "LEIR benchmark aggregate integrity failed: "
+            "blocks=%u/%u checksum=%016" PRIx64 "/%016" PRIx64
+            " wall=%" PRIu64 "/%" PRIu64 " min=%" PRIu64
+            " cpu=%" PRIu64 "/%" PRIu64 " pending=%u/%u\n",
+            totals[0].blocks,
+            totals[1].blocks,
+            totals[0].checksum,
+            totals[1].checksum,
+            totals[0].wall_ns,
+            totals[1].wall_ns,
+            options->min_mode_ns,
+            totals[0].cpu_ns,
+            totals[1].cpu_ns,
+            totals[0].pending_path_valid ? 1U : 0U,
+            totals[1].pending_path_valid ? 1U : 0U);
         return 3;
     }
 

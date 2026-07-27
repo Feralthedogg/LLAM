@@ -32,6 +32,8 @@ int leir_bench_parse_options(
     int argc,
     char *const argv[],
     leir_bench_options_t *out);
+uint64_t leir_bench_calibration_target_block_ns(
+    uint64_t min_mode_ns);
 const char *leir_bench_workload_name(
     leir_bench_workload_t workload);
 const char *leir_bench_order_name(leir_bench_order_t order);

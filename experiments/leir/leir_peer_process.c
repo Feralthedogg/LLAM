@@ -213,6 +213,17 @@ int leir_bench_parse_options(
     return 0;
 }
 
+uint64_t leir_bench_calibration_target_block_ns(
+    uint64_t min_mode_ns) {
+    /*
+     * Each mode owns eight measured blocks. Calibrate each block for one
+     * quarter of the requested mode duration, retaining a 2x margin when the
+     * final frozen run is faster than the calibration probe.
+     */
+    return min_mode_ns / 4U +
+           (min_mode_ns % 4U != 0U ? 1U : 0U);
+}
+
 const char *leir_bench_workload_name(
     leir_bench_workload_t workload) {
     switch (workload) {

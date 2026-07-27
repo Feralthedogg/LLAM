@@ -240,6 +240,23 @@ static int test_benchmark_option_parser(void) {
     return 0;
 }
 
+static int test_benchmark_calibration_retains_duration_margin(void) {
+    uint64_t target =
+        leir_bench_calibration_target_block_ns(UINT64_C(100000000));
+    uint64_t tiny =
+        leir_bench_calibration_target_block_ns(UINT64_C(1));
+    uint64_t largest =
+        leir_bench_calibration_target_block_ns(UINT64_MAX);
+
+    if (target != UINT64_C(25000000) || tiny != 1U ||
+        largest != UINT64_MAX / 4U + 1U ||
+        target > UINT64_MAX / 8U ||
+        target * 8U < UINT64_C(200000000)) {
+        return 1;
+    }
+    return 0;
+}
+
 static int expect_program_error(const leir_phase0_program_desc_t *desc,
                                 int expected_error) {
     leir_phase0_program_t *program =
@@ -2811,6 +2828,12 @@ static int test_completion_sink_dispatch(void) {
 int main(void) {
     if (test_benchmark_option_parser() != 0) {
         fputs("test_benchmark_option_parser failed\n", stderr);
+        return 1;
+    }
+    if (test_benchmark_calibration_retains_duration_margin() != 0) {
+        fputs(
+            "test_benchmark_calibration_retains_duration_margin failed\n",
+            stderr);
         return 1;
     }
     if (test_completion_sink_dispatch() != 0) {
