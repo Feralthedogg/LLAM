@@ -16,8 +16,10 @@
 #include <string.h>
 
 #if LLAM_RUNTIME_BACKEND_LINUX
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <unistd.h>
 #endif
 
 enum {
@@ -35,6 +37,9 @@ struct leir_native_instance {
     atomic_uint bound;
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_linux_native_segment_t segment;
+    llam_fd_t
+        pinned_fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned pinned_fd_count;
 #endif
 };
 
@@ -150,6 +155,34 @@ static int step_length(
 }
 
 #if LLAM_RUNTIME_BACKEND_LINUX
+static void close_linux_pinned_fds(
+    leir_native_instance_t *instance) {
+    unsigned i;
+
+    for (i = 0U; i < instance->pinned_fd_count; i += 1U) {
+        if (instance->pinned_fds[i] >= 0) {
+            (void)close((int)instance->pinned_fds[i]);
+            instance->pinned_fds[i] = LLAM_INVALID_FD;
+        }
+    }
+    instance->pinned_fd_count = 0U;
+}
+
+static void close_linux_fd_array(
+    llam_fd_t *fds,
+    unsigned count) {
+    int saved_errno = errno;
+    unsigned i;
+
+    for (i = 0U; i < count; i += 1U) {
+        if (fds[i] >= 0) {
+            (void)close((int)fds[i]);
+            fds[i] = LLAM_INVALID_FD;
+        }
+    }
+    errno = saved_errno;
+}
+
 static int validate_linux_socket(llam_fd_t fd) {
     struct sockaddr_storage address;
     socklen_t address_length;
@@ -202,37 +235,57 @@ static int configure_linux_segment(
     const leir_phase0_value_t *values) {
     llam_linux_native_op_t
         ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
-    llam_fd_t checked_fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
-    unsigned checked_count = 0U;
+    llam_fd_t
+        source_fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    llam_fd_t
+        pinned_fds[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned pinned_count = 0U;
     unsigned i;
 
     memset(ops, 0, sizeof(ops));
+    for (i = 0U;
+         i < LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS;
+         i += 1U) {
+        source_fds[i] = LLAM_INVALID_FD;
+        pinned_fds[i] = LLAM_INVALID_FD;
+    }
     for (i = 0U; i < instance->plan.step_count; i += 1U) {
         const leir_native_step_t *step =
             &instance->plan.steps[i];
         llam_fd_t fd = values[step->fd_slot].fd;
         uint32_t length;
-        unsigned checked;
+        unsigned pinned;
 
         if (step_length(
                 instance->program,
                 step,
                 values,
                 &length) != 0) {
-            return -1;
+            goto fail;
         }
-        for (checked = 0U;
-             checked < checked_count;
-             checked += 1U) {
-            if (checked_fds[checked] == fd) {
+        for (pinned = 0U;
+             pinned < pinned_count;
+             pinned += 1U) {
+            if (source_fds[pinned] == fd) {
                 break;
             }
         }
-        if (checked == checked_count) {
-            if (validate_linux_socket(fd) != 0) {
-                return -1;
+        if (pinned == pinned_count) {
+            int duplicate = fcntl(
+                (int)fd, F_DUPFD_CLOEXEC, 0);
+
+            if (duplicate < 0) {
+                goto fail;
             }
-            checked_fds[checked_count++] = fd;
+            pinned_fds[pinned_count] =
+                (llam_fd_t)duplicate;
+            source_fds[pinned_count] = fd;
+            pinned = pinned_count;
+            pinned_count += 1U;
+            if (validate_linux_socket(
+                    pinned_fds[pinned]) != 0) {
+                goto fail;
+            }
         }
 
         ops[i].kind =
@@ -240,16 +293,29 @@ static int configure_linux_segment(
                 ? LLAM_LINUX_NATIVE_OP_RECV
                 : LLAM_LINUX_NATIVE_OP_SEND;
         ops[i].result_slot = step->result_slot;
-        ops[i].fd = fd;
+        ops[i].fd = pinned_fds[pinned];
         ops[i].buffer =
             values[step->buffer_slot].buffer.data;
         ops[i].length = length;
     }
-    return llam_linux_native_segment_configure(
-        &instance->segment,
-        ops,
-        instance->plan.step_count,
-        linux_mode(instance->mode));
+    if (llam_linux_native_segment_configure(
+            &instance->segment,
+            ops,
+            instance->plan.step_count,
+            linux_mode(instance->mode)) != 0) {
+        goto fail;
+    }
+    close_linux_pinned_fds(instance);
+    memcpy(
+        instance->pinned_fds,
+        pinned_fds,
+        pinned_count * sizeof(pinned_fds[0]));
+    instance->pinned_fd_count = pinned_count;
+    return 0;
+
+fail:
+    close_linux_fd_array(pinned_fds, pinned_count);
+    return -1;
 }
 
 static bool embedded_request_is_reusable(
@@ -393,6 +459,17 @@ int leir_native_instance_init(
         &instance->activity,
         LEIR_NATIVE_INSTANCE_IDLE);
     atomic_init(&instance->bound, 0U);
+#if LLAM_RUNTIME_BACKEND_LINUX
+    {
+        unsigned i;
+
+        for (i = 0U;
+             i < LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS;
+             i += 1U) {
+            instance->pinned_fds[i] = LLAM_INVALID_FD;
+        }
+    }
+#endif
     return 0;
 }
 
@@ -421,6 +498,9 @@ int leir_native_instance_bind(
     }
     atomic_store_explicit(
         &instance->bound, 0U, memory_order_release);
+#if LLAM_RUNTIME_BACKEND_LINUX
+    close_linux_pinned_fds(instance);
+#endif
 
     if (validate_slot_values(
             instance->program, values) != 0) {
@@ -461,6 +541,38 @@ done:
         memory_order_release);
     errno = saved_errno;
     return result;
+}
+
+int leir_native_instance_destroy(
+    leir_native_instance_t *instance) {
+    unsigned expected = LEIR_NATIVE_INSTANCE_IDLE;
+
+    if (instance == NULL || instance->program == NULL) {
+        return fail_with_errno(EINVAL);
+    }
+    if (!atomic_compare_exchange_strong_explicit(
+            &instance->activity,
+            &expected,
+            LEIR_NATIVE_INSTANCE_BINDING,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        return fail_with_errno(EBUSY);
+    }
+
+    atomic_store_explicit(
+        &instance->bound, 0U, memory_order_release);
+#if LLAM_RUNTIME_BACKEND_LINUX
+    close_linux_pinned_fds(instance);
+#endif
+    memset(&instance->plan, 0, sizeof(instance->plan));
+    memset(instance->slots, 0, sizeof(instance->slots));
+    instance->program = NULL;
+    atomic_store_explicit(
+        &instance->activity,
+        LEIR_NATIVE_INSTANCE_IDLE,
+        memory_order_release);
+    errno = 0;
+    return 0;
 }
 
 int leir_native_instance_run(

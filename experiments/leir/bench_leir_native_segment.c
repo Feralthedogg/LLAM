@@ -55,6 +55,7 @@ typedef struct native_block_state {
     leir_native_plan_t plan;
     unsigned char *instance_storage;
     size_t instance_stride;
+    unsigned initialized_instances;
     unsigned char *buffers;
     uint64_t *terminal_latencies;
     uint64_t *service_gaps;
@@ -324,9 +325,7 @@ static leir_native_mode_t candidate_mode(
 
 static unsigned transactions_per_activation(
     const native_bench_options_t *options) {
-    return options->operations == 1U
-        ? 1U
-        : options->operations / 2U;
+    return options->operations;
 }
 
 static uint64_t process_cpu_ns(void) {
@@ -505,15 +504,13 @@ static leir_phase0_node_desc_t terminal_node(
 static int create_program(
     unsigned operations,
     leir_phase0_program_t **program_out) {
-    static const leir_phase0_slot_kind_t slots[4] = {
-        LEIR_PHASE0_SLOT_FD,
-        LEIR_PHASE0_SLOT_MUT_BUFFER,
-        LEIR_PHASE0_SLOT_U64,
-        LEIR_PHASE0_SLOT_I64,
-    };
+    leir_phase0_slot_kind_t slots[LEIR_PHASE0_MAX_SLOTS];
     leir_phase0_node_desc_t
         nodes[LEIR_NATIVE_MAX_OPS + 2U];
     leir_phase0_program_desc_t desc;
+    unsigned first_buffer_slot = 2U;
+    unsigned first_result_slot =
+        first_buffer_slot + operations;
     unsigned i;
 
     if (program_out == NULL ||
@@ -522,28 +519,36 @@ static int create_program(
     }
     *program_out = NULL;
     memset(nodes, 0, sizeof(nodes));
+    memset(slots, 0, sizeof(slots));
+    slots[0] = LEIR_PHASE0_SLOT_FD;
+    slots[1] = LEIR_PHASE0_SLOT_U64;
     for (i = 0U; i < operations; i += 1U) {
-        nodes[i].opcode = (uint16_t)(
-            i % 2U == 0U
-                ? LEIR_PHASE0_OP_READ_EXACT
-                : LEIR_PHASE0_OP_WRITE_ALL);
+        slots[first_buffer_slot + i] =
+            LEIR_PHASE0_SLOT_CONST_BUFFER;
+        slots[first_result_slot + i] =
+            LEIR_PHASE0_SLOT_I64;
+        nodes[i].opcode = LEIR_PHASE0_OP_WRITE_ALL;
         nodes[i].fd_slot = 0U;
-        nodes[i].buffer_slot = 1U;
-        nodes[i].length_slot = 2U;
-        nodes[i].result_slot = 3U;
+        nodes[i].buffer_slot =
+            (uint16_t)(first_buffer_slot + i);
+        nodes[i].length_slot = 1U;
+        nodes[i].result_slot =
+            (uint16_t)(first_result_slot + i);
         nodes[i].on_success = (uint16_t)(i + 1U);
         nodes[i].on_eof = (uint16_t)(operations + 1U);
         nodes[i].on_error = (uint16_t)(operations + 1U);
     }
     nodes[operations] = terminal_node(
-        LEIR_PHASE0_OP_RETURN, 3U);
+        LEIR_PHASE0_OP_RETURN,
+        (uint16_t)(first_result_slot + operations - 1U));
     nodes[operations + 1U] = terminal_node(
-        LEIR_PHASE0_OP_FAIL, 3U);
+        LEIR_PHASE0_OP_FAIL,
+        (uint16_t)first_result_slot);
     memset(&desc, 0, sizeof(desc));
     desc.nodes = nodes;
     desc.slot_kinds = slots;
     desc.node_count = operations + 2U;
-    desc.slot_count = 4U;
+    desc.slot_count = first_result_slot + operations;
     desc.entry_node = 0U;
     return leir_phase0_program_create(
         &desc, program_out);
@@ -576,15 +581,16 @@ static void record_checksum(
                 63U));
 }
 
-static bool request_is_valid(
-    const native_task_arg_t *arg,
-    uint64_t sequence,
-    const unsigned char *buffer) {
-    return leir_test_payload_is_valid(
-        buffer,
-        arg->state->options->payload,
-        arg->connection,
-        sequence);
+static unsigned char *operation_buffer(
+    native_block_state_t *state,
+    unsigned connection,
+    unsigned operation) {
+    size_t index =
+        (size_t)connection * state->options->operations +
+        operation;
+
+    return state->buffers +
+           index * state->options->payload;
 }
 
 static void baseline_task(void *opaque) {
@@ -592,53 +598,30 @@ static void baseline_task(void *opaque) {
     native_block_state_t *state = arg->state;
     const native_bench_options_t *options =
         state->options;
-    unsigned char *buffer =
-        state->buffers +
-        (size_t)arg->connection * options->payload;
     llam_fd_t fd = leir_peer_process_server_fd(
         state->peer, arg->connection);
-    unsigned transactions =
-        transactions_per_activation(options);
     uint64_t activation;
 
     for (activation = 0U;
          activation < arg->activation_count;
          activation += 1U) {
         uint64_t started_ns = llam_now_ns();
-        unsigned transaction;
+        unsigned operation;
 
-        for (transaction = 0U;
-             transaction < transactions;
-             transaction += 1U) {
+        for (operation = 0U;
+             operation < options->operations;
+             operation += 1U) {
             uint64_t sequence =
-                activation * transactions + transaction;
+                activation * options->operations +
+                operation;
+            unsigned char *buffer = operation_buffer(
+                state, arg->connection, operation);
 
-            if (leir_test_read_exact(
-                    fd, buffer, options->payload) != 0) {
-                block_fail_at(
-                    state,
-                    "baseline read",
-                    errno,
-                    arg->connection,
-                    activation);
-                return;
-            }
-            state->task_results[
-                arg->connection].logical_operations += 1U;
-            if (!request_is_valid(
-                    arg, sequence, buffer)) {
-                block_fail_at(
-                    state,
-                    "baseline request sequence",
-                    EPROTO,
-                    arg->connection,
-                    activation);
-                return;
-            }
-            if (options->operations == 1U) {
-                record_checksum(arg, sequence, buffer);
-                continue;
-            }
+            leir_test_prepare_payload(
+                buffer,
+                options->payload,
+                arg->connection,
+                sequence);
             if (leir_test_write_all(
                     fd, buffer, options->payload) != 0) {
                 block_fail_at(
@@ -669,27 +652,39 @@ static void candidate_task(void *opaque) {
         &state->task_results[arg->connection];
     leir_native_instance_t *instance =
         instance_at(state, arg->connection);
-    unsigned char *buffer =
-        state->buffers +
-        (size_t)arg->connection * options->payload;
-    unsigned transactions =
-        transactions_per_activation(options);
     uint64_t activation;
 
     for (activation = 0U;
          activation < arg->activation_count;
          activation += 1U) {
-        leir_phase0_value_t values_out[4];
+        leir_phase0_value_t
+            values_out[LEIR_PHASE0_MAX_SLOTS];
         leir_native_metrics_t metrics;
         uint64_t started_ns = llam_now_ns();
-        unsigned transaction;
+        unsigned operation;
 
         memset(values_out, 0, sizeof(values_out));
         native_metrics_init(&metrics);
+        for (operation = 0U;
+             operation < options->operations;
+             operation += 1U) {
+            uint64_t sequence =
+                activation * options->operations +
+                operation;
+            unsigned char *buffer = operation_buffer(
+                state, arg->connection, operation);
+
+            leir_test_prepare_payload(
+                buffer,
+                options->payload,
+                arg->connection,
+                sequence);
+            record_checksum(arg, sequence, buffer);
+        }
         if (leir_native_instance_run(
                 instance,
                 values_out,
-                4U,
+                state->program->slot_count,
                 &metrics) != 0) {
             block_fail_at(
                 state,
@@ -699,7 +694,8 @@ static void candidate_task(void *opaque) {
                 activation);
             return;
         }
-        if (values_out[3].i64 !=
+        if (values_out[
+                state->plan.result_slot].i64 !=
             (int64_t)options->payload) {
             block_fail_at(
                 state,
@@ -710,51 +706,6 @@ static void candidate_task(void *opaque) {
             return;
         }
 
-        if (options->operations == 1U) {
-            uint64_t sequence = activation;
-
-            if (!request_is_valid(
-                    arg, sequence, buffer)) {
-                block_fail_at(
-                    state,
-                    "candidate request sequence",
-                    EPROTO,
-                    arg->connection,
-                    activation);
-                return;
-            }
-            record_checksum(arg, sequence, buffer);
-        } else {
-            uint64_t final_sequence =
-                activation * transactions +
-                (transactions - 1U);
-
-            if (!request_is_valid(
-                    arg, final_sequence, buffer)) {
-                block_fail_at(
-                    state,
-                    "candidate terminal sequence",
-                    EPROTO,
-                    arg->connection,
-                    activation);
-                return;
-            }
-            for (transaction = 0U;
-                 transaction < transactions;
-                 transaction += 1U) {
-                uint64_t sequence =
-                    activation * transactions +
-                    transaction;
-
-                leir_test_prepare_payload(
-                    buffer,
-                    options->payload,
-                    arg->connection,
-                    sequence);
-                record_checksum(
-                    arg, sequence, buffer);
-            }
-        }
         task_result->metrics = metrics;
         task_result->logical_operations +=
             options->operations;
@@ -949,32 +900,64 @@ static int initialize_candidate_instances(
     }
 
     for (i = 0U; i < options->concurrency; i += 1U) {
-        leir_phase0_value_t values[4];
+        leir_phase0_value_t
+            values[LEIR_PHASE0_MAX_SLOTS];
         leir_native_instance_t *instance =
             instance_at(state, i);
+        unsigned operation;
 
         memset(values, 0, sizeof(values));
         values[0].fd = leir_peer_process_server_fd(
             state->peer, i);
-        values[1].buffer.data =
-            state->buffers +
-            (size_t)i * options->payload;
-        values[1].buffer.size = options->payload;
-        values[2].u64 = options->payload;
-        values[3].i64 = -1;
+        values[1].u64 = options->payload;
+        for (operation = 0U;
+             operation < options->operations;
+             operation += 1U) {
+            values[2U + operation].buffer.data =
+                operation_buffer(state, i, operation);
+            values[2U + operation].buffer.size =
+                options->payload;
+            values[
+                2U + options->operations +
+                operation].i64 = -1;
+        }
         if (leir_native_instance_init(
                 instance,
                 state->instance_stride,
                 state->program,
                 &state->plan,
                 candidate_mode(
-                    options->candidate)) != 0 ||
-            leir_native_instance_bind(
-                instance,
-                values,
-                4U) != 0) {
+                    options->candidate)) != 0) {
             return -1;
         }
+        state->initialized_instances += 1U;
+        if (leir_native_instance_bind(
+                instance,
+                values,
+                state->program->slot_count) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int destroy_candidate_instances(
+    native_block_state_t *state) {
+    int first_error = 0;
+    unsigned i;
+
+    for (i = 0U;
+         i < state->initialized_instances;
+         i += 1U) {
+        if (leir_native_instance_destroy(
+                instance_at(state, i)) != 0 &&
+            first_error == 0) {
+            first_error = errno != 0 ? errno : EIO;
+        }
+    }
+    state->initialized_instances = 0U;
+    if (first_error != 0) {
+        return fail_with_errno(first_error);
     }
     return 0;
 }
@@ -1011,8 +994,11 @@ static int run_block(
         activations > SIZE_MAX ||
         activations >
             UINT64_MAX / options->operations ||
+        options->operations >
+            SIZE_MAX / options->payload ||
         options->concurrency >
-            SIZE_MAX / options->payload) {
+            SIZE_MAX /
+                (options->operations * options->payload)) {
         return fail_with_errno(EOVERFLOW);
     }
     activation_count = (size_t)activations;
@@ -1027,7 +1013,9 @@ static int run_block(
         activations);
 
     state.buffers = calloc(
-        options->concurrency, options->payload);
+        (size_t)options->concurrency *
+            options->operations,
+        options->payload);
     state.task_results = calloc(
         options->concurrency,
         sizeof(state.task_results[0]));
@@ -1235,6 +1223,10 @@ cleanup:
     }
     if (runtime_started) {
         llam_runtime_shutdown();
+    }
+    if (destroy_candidate_instances(&state) != 0 &&
+        status == NATIVE_BLOCK_OK) {
+        status = NATIVE_BLOCK_ERROR;
     }
     leir_phase0_program_destroy(state.program);
     free(state.instance_storage);

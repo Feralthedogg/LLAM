@@ -338,9 +338,7 @@ static int validate_peer_config(
             return EINVAL;
         }
         transactions =
-            config->operations_per_activation == 1U
-                ? 1U
-                : config->operations_per_activation / 2U;
+            config->operations_per_activation;
         if (config->transactions_per_activation !=
             transactions) {
             return EINVAL;
@@ -354,8 +352,7 @@ static int validate_peer_config(
 static bool peer_is_one_way(
     const leir_peer_config_t *config) {
     return config->socket_kind ==
-               LEIR_PEER_SOCKET_SEQPACKET &&
-           config->operations_per_activation == 1U;
+           LEIR_PEER_SOCKET_SEQPACKET;
 }
 
 static uint64_t transactions_for_connection(
@@ -533,7 +530,10 @@ static int service_peer_connections(
             connection->stage = LEIR_PEER_STAGE_DONE;
             leir_test_close(&peer_fds[i]);
         } else {
-            connection->stage = LEIR_PEER_STAGE_SEND;
+            connection->stage =
+                peer_is_one_way(config)
+                    ? LEIR_PEER_STAGE_RECEIVE
+                    : LEIR_PEER_STAGE_SEND;
             leir_test_prepare_payload(
                 connection->request,
                 config->payload,
@@ -623,35 +623,6 @@ static int service_peer_connections(
             }
             connection->offset = 0U;
             if (connection->stage == LEIR_PEER_STAGE_SEND) {
-                if (peer_is_one_way(config)) {
-                    checksum ^= rotate_checksum(
-                        leir_test_payload_checksum(
-                            connection->request,
-                            config->payload,
-                            i,
-                            connection->sequence),
-                        (unsigned)(
-                            (i + connection->sequence) &
-                            63U));
-                    completed += 1U;
-                    connection->sequence += 1U;
-                    if (connection->sequence ==
-                        connection->transaction_count) {
-                        connection->stage =
-                            LEIR_PEER_STAGE_DONE;
-                        leir_test_close(&peer_fds[i]);
-                        active -= 1U;
-                    } else {
-                        connection->stage =
-                            LEIR_PEER_STAGE_SEND;
-                        leir_test_prepare_payload(
-                            connection->request,
-                            config->payload,
-                            i,
-                            connection->sequence);
-                    }
-                    continue;
-                }
                 connection->stage =
                     LEIR_PEER_STAGE_RECEIVE;
                 continue;
@@ -684,7 +655,10 @@ static int service_peer_connections(
                 leir_test_close(&peer_fds[i]);
                 active -= 1U;
             } else {
-                connection->stage = LEIR_PEER_STAGE_SEND;
+                connection->stage =
+                    peer_is_one_way(config)
+                        ? LEIR_PEER_STAGE_RECEIVE
+                        : LEIR_PEER_STAGE_SEND;
                 leir_test_prepare_payload(
                     connection->request,
                     config->payload,

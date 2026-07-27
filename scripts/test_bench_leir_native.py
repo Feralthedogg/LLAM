@@ -349,7 +349,11 @@ class RunnerContractTests(unittest.TestCase):
 
     def _run_with(self, result: CapturedProcess) -> SampleRow:
         def runner(*args: object, **kwargs: object) -> CapturedProcess:
-            del args, kwargs
+            self.assertTrue(args)
+            self.assertEqual(
+                kwargs.get("max_output_bytes"),
+                MAX_OUTPUT_BYTES,
+            )
             return result
 
         return run_one(
@@ -387,6 +391,13 @@ class RunnerContractTests(unittest.TestCase):
             CapturedProcess(["bench"], 0, VALID_ROW + "\n" + VALID_ROW, ""),
             CapturedProcess(["bench"], 0, "x" * (MAX_OUTPUT_BYTES + 1), ""),
             CapturedProcess(["bench"], 0, VALID_ROW, "x" * (MAX_OUTPUT_BYTES + 1)),
+            CapturedProcess(
+                ["bench"],
+                0,
+                VALID_ROW,
+                "",
+                stdout_truncated=True,
+            ),
         )
         for result in cases:
             with self.subTest(returncode=result.returncode):
@@ -470,6 +481,7 @@ class EvidenceAndCliTests(unittest.TestCase):
                 order="ABBA",
             ),
             timeout=30.0,
+            max_output_bytes=MAX_OUTPUT_BYTES,
         )
         if result.returncode == 77:
             self.skipTest("Linux io_uring native backend is unavailable")
@@ -495,9 +507,9 @@ class WorkflowContractTests(unittest.TestCase):
         required_fragments = (
             "runs-on: ubuntu-24.04",
             "permissions:\n  contents: read",
-            "actions/checkout@v6",
-            "actions/setup-python@v6",
-            "actions/upload-artifact@v6",
+            "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
             'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"',
             "liburing-dev",
             "make -j2 test-leir-native",
@@ -520,11 +532,16 @@ class WorkflowContractTests(unittest.TestCase):
             "clang --version",
             "pkg-config --modversion liburing",
             "feature-status.txt",
+            "max_output_bytes=64 * 1024",
+            "timeout=30",
             "if: always()",
         )
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, workflow)
+        self.assertNotIn("uses: actions/checkout@v", workflow)
+        self.assertNotIn("uses: actions/setup-python@v", workflow)
+        self.assertNotIn("uses: actions/upload-artifact@v", workflow)
 
 
 if __name__ == "__main__":

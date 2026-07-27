@@ -139,13 +139,13 @@ static int compile_must_fail(leir_phase0_program_t *program) {
 static int test_compile_exact_linear_lengths(void) {
     static const unsigned counts[] = {1U, 2U, 4U, 8U};
     static const uint16_t expected_kinds[8] = {
-        LEIR_NATIVE_STEP_RECV,
         LEIR_NATIVE_STEP_SEND,
-        LEIR_NATIVE_STEP_RECV,
         LEIR_NATIVE_STEP_SEND,
-        LEIR_NATIVE_STEP_RECV,
         LEIR_NATIVE_STEP_SEND,
-        LEIR_NATIVE_STEP_RECV,
+        LEIR_NATIVE_STEP_SEND,
+        LEIR_NATIVE_STEP_SEND,
+        LEIR_NATIVE_STEP_SEND,
+        LEIR_NATIVE_STEP_SEND,
         LEIR_NATIVE_STEP_SEND,
     };
     unsigned case_index;
@@ -155,9 +155,9 @@ static int test_compile_exact_linear_lengths(void) {
          case_index += 1U) {
         linear_fixture_options_t options = {
             counts[case_index],
+            true,
+            true,
             false,
-            true,
-            true,
             true,
         };
         leir_phase0_program_t *program = NULL;
@@ -187,10 +187,7 @@ static int test_compile_exact_linear_lengths(void) {
 
             if (step->kind != expected_kinds[i] ||
                 step->fd_slot != TEST_FD_SLOT ||
-                step->buffer_slot !=
-                    ((i & 1U) != 0U
-                         ? TEST_CONST_BUFFER_SLOT
-                         : TEST_MUT_BUFFER_SLOT) ||
+                step->buffer_slot != TEST_CONST_BUFFER_SLOT ||
                 step->length_slot != TEST_LENGTH_SLOT ||
                 step->result_slot != TEST_FIRST_RESULT_SLOT + i) {
                 fprintf(
@@ -268,9 +265,9 @@ static int test_compile_copies_exact_slot_indices(void) {
 static int test_rejects_non_power_of_two_operation_count(void) {
     const linear_fixture_options_t options = {
         3U,
+        true,
+        true,
         false,
-        true,
-        true,
         true,
     };
     leir_phase0_program_t *program = NULL;
@@ -288,9 +285,9 @@ static int test_rejects_non_power_of_two_operation_count(void) {
 static int test_rejects_read_and_write_non_exact_opcodes(void) {
     const linear_fixture_options_t options = {
         2U,
-        false,
-        false,
         true,
+        false,
+        false,
         true,
     };
     leir_phase0_program_t *program = NULL;
@@ -305,19 +302,19 @@ static int test_rejects_read_and_write_non_exact_opcodes(void) {
     return failed;
 }
 
-static int test_rejects_non_alternating_steps(void) {
+static int test_rejects_nonterminal_receive(void) {
     const linear_fixture_options_t options = {
         2U,
         false,
         true,
-        false,
+        true,
         true,
     };
     leir_phase0_program_t *program = NULL;
     int failed;
 
     if (create_linear_program(&options, &program) != 0) {
-        perror("create non-alternating program");
+        perror("create nonterminal-receive program");
         return 1;
     }
     failed = compile_must_fail(program);
@@ -338,9 +335,9 @@ static int create_cycle_program(leir_phase0_program_t **out) {
     leir_phase0_program_desc_t desc;
 
     memset(nodes, 0, sizeof(nodes));
-    nodes[0].opcode = LEIR_PHASE0_OP_READ_EXACT;
+    nodes[0].opcode = LEIR_PHASE0_OP_WRITE_ALL;
     nodes[0].fd_slot = 0U;
-    nodes[0].buffer_slot = 1U;
+    nodes[0].buffer_slot = 2U;
     nodes[0].length_slot = 3U;
     nodes[0].result_slot = 4U;
     nodes[0].on_success = 1U;
@@ -391,9 +388,9 @@ static int create_success_to_fail_program(
     leir_phase0_program_desc_t desc;
 
     memset(nodes, 0, sizeof(nodes));
-    nodes[0].opcode = LEIR_PHASE0_OP_READ_EXACT;
+    nodes[0].opcode = LEIR_PHASE0_OP_WRITE_ALL;
     nodes[0].fd_slot = 0U;
-    nodes[0].buffer_slot = 1U;
+    nodes[0].buffer_slot = 2U;
     nodes[0].length_slot = 3U;
     nodes[0].result_slot = 4U;
     nodes[0].on_success = 1U;
@@ -437,9 +434,9 @@ static int create_nonterminal_failure_edge_program(
     leir_phase0_program_desc_t desc;
 
     memset(nodes, 0, sizeof(nodes));
-    nodes[0].opcode = LEIR_PHASE0_OP_READ_EXACT;
+    nodes[0].opcode = LEIR_PHASE0_OP_WRITE_ALL;
     nodes[0].fd_slot = 0U;
-    nodes[0].buffer_slot = 1U;
+    nodes[0].buffer_slot = 2U;
     nodes[0].length_slot = 3U;
     nodes[0].result_slot = 4U;
     nodes[0].on_success = 2U;
@@ -492,9 +489,9 @@ static int create_result_dependent_length_program(
     leir_phase0_program_desc_t desc;
 
     memset(nodes, 0, sizeof(nodes));
-    nodes[0].opcode = LEIR_PHASE0_OP_READ_EXACT;
+    nodes[0].opcode = LEIR_PHASE0_OP_WRITE_ALL;
     nodes[0].fd_slot = 0U;
-    nodes[0].buffer_slot = 1U;
+    nodes[0].buffer_slot = 2U;
     nodes[0].length_slot = 3U;
     nodes[0].result_slot = 4U;
     nodes[0].on_success = 1U;
@@ -536,9 +533,9 @@ static int test_rejects_prior_result_as_later_length(void) {
 static int test_rejects_nonfinal_return_result(void) {
     const linear_fixture_options_t options = {
         2U,
+        true,
+        true,
         false,
-        true,
-        true,
         false,
     };
     leir_phase0_program_t *program = NULL;
@@ -572,8 +569,8 @@ int main(void) {
          test_rejects_non_power_of_two_operation_count},
         {"reject non-exact operations",
          test_rejects_read_and_write_non_exact_opcodes},
-        {"reject non-alternating steps",
-         test_rejects_non_alternating_steps},
+        {"reject nonterminal receive",
+         test_rejects_nonterminal_receive},
         {"reject success cycle",
          test_rejects_success_cycle},
         {"reject success branch to fail",

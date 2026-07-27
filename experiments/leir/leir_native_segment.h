@@ -37,6 +37,8 @@ int leir_native_instance_bind(
     leir_native_instance_t *instance,
     const leir_phase0_value_t *values,
     size_t value_count);
+int leir_native_instance_destroy(
+    leir_native_instance_t *instance);
 int leir_native_instance_run(
     leir_native_instance_t *instance,
     leir_phase0_value_t *values_out,

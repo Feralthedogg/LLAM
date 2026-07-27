@@ -66,7 +66,9 @@ experiment private and removable.
 The first compiler accepts exactly one linear success path:
 
 - one, two, four, or eight I/O nodes;
-- alternating fixed-length `READ_EXACT` and `WRITE_ALL` effects;
+- one or more fixed-length `WRITE_ALL` effects, with an optional
+  `READ_EXACT` only as the final effect;
+- no receive whose success edge names another I/O effect;
 - every success edge names the next node or the final `RETURN`;
 - every EOF and error edge names a final `FAIL`;
 - all fd, buffer, and length slots are known at bind time;
@@ -75,10 +77,17 @@ The first compiler accepts exactly one linear success path:
 - one final result is published to the waiting task.
 
 At bind time every descriptor must be a connected `SOCK_SEQPACKET` socket.
-Every peer message has exactly the declared length. Message-oriented send and
-receive semantics are required because successful intermediate CQEs are not
-observable in the skip mode. Stream sockets, datagram truncation, and any
-operation class that permits an unobservable short success are rejected.
+The instance atomically duplicates each distinct descriptor with
+`F_DUPFD_CLOEXEC`, validates the duplicate, and owns it until explicit
+instance destruction. Closing or reusing the caller's descriptor therefore
+cannot retarget an already-bound segment.
+
+Every message has exactly the declared length. Message-oriented send semantics
+are required because successful intermediate CQEs are not observable in skip
+mode. A receive is permitted only as the terminal operation, whose CQE remains
+visible and can therefore be length-checked. Stream sockets, datagram
+truncation, nonterminal receives, and any other operation class that permits
+an unobservable short success are rejected.
 
 The backend maps semantic reads to `IORING_OP_RECV` and writes to
 `IORING_OP_SEND`. Writes retain `MSG_NOSIGNAL`.
@@ -199,15 +208,15 @@ Link+skip mode follows the kernel contract for a normal soft-linked chain:
 
 - if every intermediate operation succeeds, those CQEs are omitted and the
   final operation produces the one observed CQE;
-- if an intermediate operation fails, that error CQE and the dependent
-  operations' `-ECANCELED` CQEs remain observable because skip-success does
-  not suppress failures.
+- if an intermediate operation fails, that error CQE is visible, the remaining
+  soft-linked requests are not executed, and their CQEs are omitted.
 
-The token identifies each visible operation. The owner retains the first
-non-cancel error, drains through the final linked token before releasing
-borrowed storage, validates the segment generation, claims terminal state once,
-decrements `pending_ops` once, and completes the segment's task request through
-the existing LLAM completion and wake path.
+The token identifies each visible operation. A visible intermediate failure is
+therefore terminal immediately; waiting for a synthetic cancellation tail
+would deadlock. The owner retains the first non-cancel error, validates the
+segment generation, claims terminal state once, decrements `pending_ops` once,
+and completes the segment's task request through the existing LLAM completion
+and wake path.
 
 No completion executes LEIR node dispatch. There is no userspace resubmission
 between effects.
@@ -241,21 +250,23 @@ from a foreign runtime fails closed and records a runtime fatal error.
 
 Cancellation is not implemented in this falsification screen. The private
 submit API rejects a pre-canceled request, and the benchmark joins every
-segment before runtime shutdown. A performance win is required before adding
-whole-chain async cancellation and teardown races.
+segment before runtime shutdown. Public stop/cancel does not yet own the native
+queue and operation tokens; that is an explicit promotion blocker even if the
+performance screen passes.
 
 ## Benchmark
 
 The Linux benchmark uses an external process and connected Unix
-`SOCK_SEQPACKET` pairs. The peer sends a fixed request record, receives and
-validates the fixed response, then advances to the next transaction. This
-forces every receive through a real pending kernel path while retaining
-message-atomic semantics.
+`SOCK_SEQPACKET` pairs. For each activation the server prepares one distinct
+record per operation and sends all records to the peer. The peer receives,
+validates, and checksums each record. This isolates linked submission and CQE
+traffic without mixing a platform-specific result with request/response
+protocol effects.
 
 Three modes use identical payloads and peer behavior:
 
-1. `task` — an ordinary LLAM task calls the existing read/write path for every
-   operation and resumes after every pending receive;
+1. `task` — an ordinary LLAM task calls the existing write path once per
+   operation;
 2. `link` — one private compiled segment submits the entire chain with
    `IOSQE_IO_LINK`, retaining all CQEs;
 3. `link_skip` — the same segment suppresses successful intermediate CQEs.
@@ -311,6 +322,7 @@ or unstable paired evidence. Thresholds are not relaxed after observation.
 Portable unit tests prove:
 
 - eligible linear programs compile into the exact step sequence;
+- adjacent sends are accepted and nonterminal receives are rejected;
 - branching, cycles, result-dependent paths, unsupported terminals, and
   excessive lengths are rejected;
 - binding rejects incorrect slot kinds and lengths before backend submission.
@@ -329,6 +341,9 @@ Linux integration tests use real `SOCK_SEQPACKET` pairs and prove:
 - link+skip success observes exactly one CQE and wakes once;
 - an injected peer close identifies the first failed operation;
 - invalid socket type and missing feature support fail before queue ownership;
+- closing and numerically reusing a bound caller descriptor cannot retarget
+  native traffic;
+- explicit instance destruction releases every pinned descriptor;
 - repeated instance reuse advances generation and rejects stale tokens;
 - runtime pending-operation accounting returns to zero.
 
@@ -343,9 +358,11 @@ class, lengths, and ownership are validated before native state is published.
 User-controlled values never become SQE flags, opcodes, pointers, or
 `user_data` tags without validation.
 
-Borrowed buffers and descriptors remain owned by the waiting task until the
-one terminal completion. The experiment does not expose raw kernel pointers,
-does not add a public handle family, and does not weaken close serialization.
+Buffers remain borrowed and owned by the caller for the instance lifetime.
+Descriptors are private `CLOEXEC` duplicates owned by the instance and released
+by `leir_native_instance_destroy`. The experiment does not expose raw kernel
+pointers, does not add a public handle family, and does not weaken close
+serialization.
 
 Non-Linux backends receive no behavioral change. They compile private stubs or
 omit the Linux-only target. A Linux-only positive result does not imply that
@@ -357,8 +374,9 @@ The design relies on the documented normal soft-link and CQE-skip contract:
 
 - linked requests execute sequentially and must be submitted together:
   <https://man7.org/linux/man-pages/man7/io_uring_linked_requests.7.html>
-- `IOSQE_CQE_SKIP_SUCCESS` omits successful CQEs, and all but the final
-  request of a normal link can yield one CQE per link:
+- `IOSQE_CQE_SKIP_SUCCESS` omits successful CQEs; on a soft-link failure the
+  error CQE is posted while dependent requests are not executed and their CQEs
+  are omitted:
   <https://man7.org/linux/man-pages/man2/io_uring_enter.2.html>
 - support is advertised by `IORING_FEAT_CQE_SKIP`:
   <https://github.com/axboe/liburing/blob/master/man/io_uring_setup.2>

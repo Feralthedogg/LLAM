@@ -89,13 +89,13 @@ static int create_two_step_program(
     for (i = 0U; i < 2U; i += 1U) {
         nodes[i].opcode = (uint16_t)(
             i == 0U
-                ? LEIR_PHASE0_OP_READ_EXACT
-                : LEIR_PHASE0_OP_WRITE_ALL);
+                ? LEIR_PHASE0_OP_WRITE_ALL
+                : LEIR_PHASE0_OP_READ_EXACT);
         nodes[i].fd_slot = TEST_FD_SLOT;
         nodes[i].buffer_slot = (uint16_t)(
             i == 0U
-                ? TEST_MUT_BUFFER_SLOT
-                : TEST_CONST_BUFFER_SLOT);
+                ? TEST_CONST_BUFFER_SLOT
+                : TEST_MUT_BUFFER_SLOT);
         nodes[i].length_slot = TEST_LENGTH_SLOT;
         nodes[i].result_slot =
             (uint16_t)(TEST_FIRST_RESULT_SLOT + i);
@@ -169,6 +169,10 @@ static int bind_fixture_init(
 }
 
 static void bind_fixture_destroy(bind_fixture_t *fixture) {
+    if (fixture->instance != NULL) {
+        (void)leir_native_instance_destroy(fixture->instance);
+        fixture->instance = NULL;
+    }
     leir_test_close(&fixture->pair[0]);
     leir_test_close(&fixture->pair[1]);
     leir_phase0_program_destroy(fixture->program);
@@ -437,6 +441,59 @@ static int test_bind_rejects_unconnected_seqpacket(void) {
     return failed;
 }
 
+static int test_destroy_releases_pinned_fd(void) {
+    bind_fixture_t fixture;
+    unsigned char byte;
+    ssize_t result;
+    int failed = 0;
+
+    if (bind_fixture_init(&fixture, false) != 0) {
+        perror("pinned-fd fixture init");
+        return 1;
+    }
+    if (leir_native_instance_bind(
+            fixture.instance,
+            fixture.values,
+            fixture.value_count) != 0) {
+        perror("pinned-fd bind");
+        bind_fixture_destroy(&fixture);
+        return 1;
+    }
+
+    leir_test_close(&fixture.pair[0]);
+    errno = 0;
+    result = recv(
+        (int)fixture.pair[1],
+        &byte,
+        sizeof(byte),
+        MSG_DONTWAIT);
+    if (result != -1 ||
+        (errno != EAGAIN && errno != EWOULDBLOCK)) {
+        fprintf(stderr, "bound duplicate did not pin socket\n");
+        failed = 1;
+    }
+    if (leir_native_instance_destroy(
+            fixture.instance) != 0) {
+        perror("destroy pinned-fd instance");
+        failed = 1;
+    } else {
+        fixture.instance = NULL;
+        result = recv(
+            (int)fixture.pair[1],
+            &byte,
+            sizeof(byte),
+            MSG_DONTWAIT);
+        if (result != 0) {
+            fprintf(
+                stderr,
+                "destroy did not release pinned socket\n");
+            failed = 1;
+        }
+    }
+    bind_fixture_destroy(&fixture);
+    return failed;
+}
+
 typedef struct native_integration_state {
     leir_phase0_program_t *program;
     leir_native_plan_t plan;
@@ -445,11 +502,13 @@ typedef struct native_integration_state {
     leir_phase0_value_t values[LEIR_PHASE0_MAX_SLOTS];
     leir_phase0_value_t values_out[LEIR_PHASE0_MAX_SLOTS];
     unsigned char buffers[LEIR_NATIVE_MAX_OPS][INTEGRATION_BYTES];
-    unsigned char peer_payloads[LEIR_NATIVE_MAX_OPS][INTEGRATION_BYTES];
     llam_fd_t pair[2];
+    llam_fd_t replacement_pair[2];
     leir_native_mode_t mode;
     unsigned op_count;
+    bool fd_reused;
     atomic_uint failures;
+    atomic_uint instance_done;
     int first_errno;
     char first_case[96];
 } native_integration_state_t;
@@ -469,17 +528,12 @@ static int create_integration_program(
     slots[INTEGRATION_LENGTH_SLOT] = LEIR_PHASE0_SLOT_U64;
     for (i = 0U; i < LEIR_NATIVE_MAX_OPS; i += 1U) {
         slots[INTEGRATION_FIRST_BUFFER_SLOT + i] =
-            i % 2U == 0U
-                ? LEIR_PHASE0_SLOT_MUT_BUFFER
-                : LEIR_PHASE0_SLOT_CONST_BUFFER;
+            LEIR_PHASE0_SLOT_CONST_BUFFER;
     }
     slots[INTEGRATION_RESULT_SLOT] = LEIR_PHASE0_SLOT_I64;
 
     for (i = 0U; i < op_count; i += 1U) {
-        nodes[i].opcode = (uint16_t)(
-            i % 2U == 0U
-                ? LEIR_PHASE0_OP_READ_EXACT
-                : LEIR_PHASE0_OP_WRITE_ALL);
+        nodes[i].opcode = LEIR_PHASE0_OP_WRITE_ALL;
         nodes[i].fd_slot = INTEGRATION_FD_SLOT;
         nodes[i].buffer_slot =
             (uint16_t)(INTEGRATION_FIRST_BUFFER_SLOT + i);
@@ -526,6 +580,14 @@ static void native_integration_fail(
     if (!LLAM_FD_IS_INVALID(state->pair[1])) {
         (void)shutdown((int)state->pair[1], SHUT_RDWR);
     }
+    if (!LLAM_FD_IS_INVALID(state->replacement_pair[0])) {
+        (void)shutdown(
+            (int)state->replacement_pair[0], SHUT_RDWR);
+    }
+    if (!LLAM_FD_IS_INVALID(state->replacement_pair[1])) {
+        (void)shutdown(
+            (int)state->replacement_pair[1], SHUT_RDWR);
+    }
 }
 
 static int native_integration_state_init(
@@ -537,9 +599,12 @@ static int native_integration_state_init(
     memset(state, 0, sizeof(*state));
     state->pair[0] = LLAM_INVALID_FD;
     state->pair[1] = LLAM_INVALID_FD;
+    state->replacement_pair[0] = LLAM_INVALID_FD;
+    state->replacement_pair[1] = LLAM_INVALID_FD;
     state->op_count = op_count;
     state->mode = mode;
     atomic_init(&state->failures, 0U);
+    atomic_init(&state->instance_done, 0U);
 
     if (create_integration_program(
             op_count, &state->program) != 0 ||
@@ -575,10 +640,6 @@ static int native_integration_state_init(
             state->buffers[i],
             sizeof(state->buffers[i]),
             UINT64_C(0x4c4549520000) + i);
-        leir_test_fill_pattern(
-            state->peer_payloads[i],
-            sizeof(state->peer_payloads[i]),
-            UINT64_C(0x4e4154490000) + i);
     }
     return leir_native_instance_bind(
         state->instance,
@@ -586,12 +647,101 @@ static int native_integration_state_init(
         INTEGRATION_SLOT_COUNT);
 }
 
+static int native_integration_reuse_bound_fd(
+    native_integration_state_t *state) {
+    int bound_fd;
+    int flags;
+
+    if (state == NULL ||
+        LLAM_FD_IS_INVALID(state->pair[0])) {
+        errno = EINVAL;
+        return -1;
+    }
+    bound_fd = (int)state->pair[0];
+    leir_test_close(&state->pair[0]);
+    if (leir_test_socketpair_type(
+            SOCK_SEQPACKET,
+            state->replacement_pair) != 0) {
+        return -1;
+    }
+    if ((int)state->replacement_pair[1] == bound_fd) {
+        llam_fd_t other = state->replacement_pair[0];
+
+        state->replacement_pair[0] =
+            state->replacement_pair[1];
+        state->replacement_pair[1] = other;
+    } else if (
+        (int)state->replacement_pair[0] != bound_fd) {
+        if (dup2(
+                (int)state->replacement_pair[0],
+                bound_fd) < 0) {
+            return -1;
+        }
+        leir_test_close(&state->replacement_pair[0]);
+        state->replacement_pair[0] = (llam_fd_t)bound_fd;
+    }
+    flags = fcntl((int)state->pair[1], F_GETFL, 0);
+    if (flags < 0 ||
+        fcntl(
+            (int)state->pair[1],
+            F_SETFL,
+            flags | O_NONBLOCK) != 0) {
+        return -1;
+    }
+    state->fd_reused = true;
+    return 0;
+}
+
 static void native_integration_state_destroy(
     native_integration_state_t *state) {
+    if (state->instance != NULL) {
+        (void)leir_native_instance_destroy(state->instance);
+        state->instance = NULL;
+    }
     leir_test_close(&state->pair[0]);
     leir_test_close(&state->pair[1]);
+    leir_test_close(&state->replacement_pair[0]);
+    leir_test_close(&state->replacement_pair[1]);
     leir_phase0_program_destroy(state->program);
     state->program = NULL;
+}
+
+static int native_integration_receive(
+    native_integration_state_t *state,
+    unsigned char received[INTEGRATION_BYTES]) {
+    if (!state->fd_reused) {
+        return leir_test_read_exact(
+            state->pair[1],
+            received,
+            INTEGRATION_BYTES);
+    }
+
+    for (;;) {
+        ssize_t result = recv(
+            (int)state->pair[1],
+            received,
+            INTEGRATION_BYTES,
+            MSG_DONTWAIT);
+
+        if (result == (ssize_t)INTEGRATION_BYTES) {
+            return 0;
+        }
+        if (result < 0 &&
+            (errno == EINTR ||
+             errno == EAGAIN ||
+             errno == EWOULDBLOCK)) {
+            if (atomic_load_explicit(
+                    &state->instance_done,
+                    memory_order_acquire) != 0U) {
+                errno = EPIPE;
+                return -1;
+            }
+            llam_yield();
+            continue;
+        }
+        errno = result == 0 ? EPIPE : EPROTO;
+        return -1;
+    }
 }
 
 static void native_integration_peer_task(void *arg) {
@@ -601,35 +751,22 @@ static void native_integration_peer_task(void *arg) {
 
     for (activation = 0U;
          activation < INTEGRATION_ACTIVATIONS;
-         activation += 1U) {
+        activation += 1U) {
         for (i = 0U; i < state->op_count; i += 1U) {
-            if (i % 2U == 0U) {
-                if (leir_test_write_all(
-                        state->pair[1],
-                        state->peer_payloads[i],
-                        INTEGRATION_BYTES) != 0) {
-                    native_integration_fail(
-                        state, "peer send", errno);
-                    return;
-                }
-            } else {
-                unsigned char received[INTEGRATION_BYTES];
+            unsigned char received[INTEGRATION_BYTES];
 
-                memset(received, 0, sizeof(received));
-                if (leir_test_read_exact(
-                        state->pair[1],
-                        received,
-                        sizeof(received)) != 0 ||
-                    memcmp(
-                        received,
-                        state->buffers[i],
-                        sizeof(received)) != 0) {
-                    native_integration_fail(
-                        state,
-                        "peer receive",
-                        errno != 0 ? errno : EPROTO);
-                    return;
-                }
+            memset(received, 0, sizeof(received));
+            if (native_integration_receive(
+                    state, received) != 0 ||
+                memcmp(
+                    received,
+                    state->buffers[i],
+                    sizeof(received)) != 0) {
+                native_integration_fail(
+                    state,
+                    "peer receive",
+                    errno != 0 ? errno : EPROTO);
+                return;
             }
         }
     }
@@ -667,7 +804,6 @@ static int native_metrics_are_expected(
 static void native_integration_instance_task(void *arg) {
     native_integration_state_t *state = arg;
     unsigned activation;
-    unsigned i;
 
     for (activation = 0U;
          activation < INTEGRATION_ACTIVATIONS;
@@ -686,7 +822,7 @@ static void native_integration_instance_task(void *arg) {
                 &metrics) != 0) {
             native_integration_fail(
                 state, "native run", errno);
-            return;
+            goto done;
         }
         if (state->values_out[
                 INTEGRATION_RESULT_SLOT].i64 !=
@@ -697,21 +833,13 @@ static void native_integration_instance_task(void *arg) {
                 state,
                 "native result or metrics",
                 EPROTO);
-            return;
-        }
-        for (i = 0U; i < state->op_count; i += 2U) {
-            if (memcmp(
-                    state->buffers[i],
-                    state->peer_payloads[i],
-                    INTEGRATION_BYTES) != 0) {
-                native_integration_fail(
-                    state,
-                    "native receive payload",
-                    EPROTO);
-                return;
-            }
+            goto done;
         }
     }
+
+done:
+    atomic_store_explicit(
+        &state->instance_done, 1U, memory_order_release);
 }
 
 enum {
@@ -722,7 +850,8 @@ enum {
 
 static int run_native_integration_case(
     unsigned op_count,
-    leir_native_mode_t mode) {
+    leir_native_mode_t mode,
+    bool reuse_bound_fd) {
     native_integration_state_t state;
     llam_runtime_opts_t opts;
     llam_task_t *peer = NULL;
@@ -733,6 +862,12 @@ static int run_native_integration_case(
     if (native_integration_state_init(
             &state, op_count, mode) != 0) {
         perror("native integration fixture init");
+        native_integration_state_destroy(&state);
+        return NATIVE_INTEGRATION_FAIL;
+    }
+    if (reuse_bound_fd &&
+        native_integration_reuse_bound_fd(&state) != 0) {
+        perror("reuse bound native descriptor");
         native_integration_state_destroy(&state);
         return NATIVE_INTEGRATION_FAIL;
     }
@@ -790,6 +925,24 @@ static int run_native_integration_case(
             (unsigned)mode);
         goto shutdown;
     }
+    if (reuse_bound_fd) {
+        unsigned char unexpected;
+        ssize_t received;
+
+        errno = 0;
+        received = recv(
+            (int)state.replacement_pair[1],
+            &unexpected,
+            sizeof(unexpected),
+            MSG_DONTWAIT);
+        if (received != -1 ||
+            (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            fprintf(
+                stderr,
+                "reused descriptor received native traffic\n");
+            goto shutdown;
+        }
+    }
     result = NATIVE_INTEGRATION_PASS;
 
 shutdown:
@@ -813,7 +966,8 @@ static int test_native_runtime_link_and_skip(void) {
          i += 1U) {
         int result = run_native_integration_case(
             operation_counts[i],
-            LEIR_NATIVE_MODE_LINK);
+            LEIR_NATIVE_MODE_LINK,
+            false);
 
         if (result == NATIVE_INTEGRATION_UNAVAILABLE) {
             puts(
@@ -828,7 +982,8 @@ static int test_native_runtime_link_and_skip(void) {
     {
         int result = run_native_integration_case(
             4U,
-            LEIR_NATIVE_MODE_LINK_CQE_SKIP);
+            LEIR_NATIVE_MODE_LINK_CQE_SKIP,
+            false);
 
         if (result == NATIVE_INTEGRATION_UNAVAILABLE) {
             puts(
@@ -841,6 +996,21 @@ static int test_native_runtime_link_and_skip(void) {
         }
     }
     return 0;
+}
+
+static int test_native_runtime_pins_bound_fd(void) {
+    int result = run_native_integration_case(
+        1U,
+        LEIR_NATIVE_MODE_LINK,
+        true);
+
+    if (result == NATIVE_INTEGRATION_UNAVAILABLE) {
+        puts(
+            "SKIP: Linux io_uring native fd pin "
+            "integration unavailable");
+        return 0;
+    }
+    return result == NATIVE_INTEGRATION_PASS ? 0 : 1;
 }
 #endif
 
@@ -860,7 +1030,9 @@ int main(void) {
     if (test_bind_rejects_regular_file_with_enotsock() != 0 ||
         test_bind_rejects_stream_socket_with_eprototype() != 0 ||
         test_bind_rejects_unconnected_seqpacket() != 0 ||
-        test_native_runtime_link_and_skip() != 0) {
+        test_destroy_releases_pinned_fd() != 0 ||
+        test_native_runtime_link_and_skip() != 0 ||
+        test_native_runtime_pins_bound_fd() != 0) {
         return 1;
     }
 #endif

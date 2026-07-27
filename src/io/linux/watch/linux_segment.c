@@ -71,7 +71,8 @@ int llam_linux_native_segment_configure(
             ops[i].fd < 0 ||
             ops[i].buffer == NULL ||
             ops[i].length == 0U ||
-            (i > 0U && ops[i].kind == ops[i - 1U].kind)) {
+            (ops[i].kind == LLAM_LINUX_NATIVE_OP_RECV &&
+             i + 1U < op_count)) {
             errno = EINVAL;
             return -1;
         }
@@ -228,9 +229,9 @@ llam_linux_native_segment_apply_cqe(
         /*
          * completed_cqes is an operation cursor in skip mode. Gaps before a
          * visible CQE are successful operations whose CQEs the kernel
-         * suppressed. A visible non-final CQE must be an error, and an error
-         * cannot release the request until every dependent cancellation has
-         * reached the tail of the linked chain.
+         * suppressed. A visible non-final CQE must be an error. For a soft
+         * link, that error cancels the remaining dependent requests and their
+         * CQEs are omitted, so the error CQE is terminal for this segment.
          */
         if (index < segment->completed_cqes ||
             (index + 1U < segment->op_count && result >= 0)) {
@@ -248,9 +249,6 @@ llam_linux_native_segment_apply_cqe(
 
     if (segment->mode ==
         LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) {
-        if (index + 1U < segment->op_count) {
-            return LLAM_LINUX_NATIVE_CQE_CONTINUE;
-        }
         return llam_linux_native_claim_terminal(
             segment,
             segment->first_error,

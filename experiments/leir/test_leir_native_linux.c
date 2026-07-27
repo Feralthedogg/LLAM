@@ -42,16 +42,6 @@ static void fill_operations(
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS],
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32],
     unsigned count) {
-    static const uint16_t expected_kinds[8] = {
-        LLAM_LINUX_NATIVE_OP_RECV,
-        LLAM_LINUX_NATIVE_OP_SEND,
-        LLAM_LINUX_NATIVE_OP_RECV,
-        LLAM_LINUX_NATIVE_OP_SEND,
-        LLAM_LINUX_NATIVE_OP_RECV,
-        LLAM_LINUX_NATIVE_OP_SEND,
-        LLAM_LINUX_NATIVE_OP_RECV,
-        LLAM_LINUX_NATIVE_OP_SEND,
-    };
     unsigned i;
 
     memset(
@@ -63,7 +53,7 @@ static void fill_operations(
         0,
         LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS * sizeof(buffers[0]));
     for (i = 0U; i < count; i += 1U) {
-        ops[i].kind = expected_kinds[i];
+        ops[i].kind = LLAM_LINUX_NATIVE_OP_SEND;
         ops[i].result_slot = (uint16_t)(4U + i);
         ops[i].fd = (llam_fd_t)(10 + (int)i);
         ops[i].buffer = buffers[i];
@@ -627,7 +617,7 @@ static int test_skip_dispatch_wakes_once_on_final_success(void) {
     return 0;
 }
 
-static int test_skip_dispatch_drains_tail_before_error_wake(void) {
+static int test_skip_dispatch_wakes_on_first_error(void) {
     queue_fixture_t fixture;
     struct io_uring_sqe sqes[8];
     unsigned completions = 0U;
@@ -648,42 +638,10 @@ static int test_skip_dispatch_drains_tail_before_error_wake(void) {
         &fixture.node,
         &fixture.segment.tokens[1],
         -ECONNRESET);
-    if (completions != 0U ||
-        fixture.segment.terminal_wakes != 0U ||
-        fixture.segment.first_error_index != 1U ||
-        atomic_load_explicit(
-            &fixture.node.pending_ops,
-            memory_order_acquire) != 1U ||
-        atomic_load_explicit(
-            &fixture.shard.inflight_io_waiters,
-            memory_order_acquire) != 1U) {
-        fprintf(stderr, "skip error dispatch woke before tail drain\n");
-        queue_fixture_destroy(&fixture);
-        return 1;
-    }
-    llam_linux_native_segment_handle_cqe(
-        &fixture.node,
-        &fixture.segment.tokens[2],
-        -ECANCELED);
-    if (completions != 0U ||
-        fixture.segment.terminal_wakes != 0U ||
-        atomic_load_explicit(
-            &fixture.node.pending_ops,
-            memory_order_acquire) != 1U ||
-        atomic_load_explicit(
-            &fixture.shard.inflight_io_waiters,
-            memory_order_acquire) != 1U) {
-        fprintf(stderr, "skip cancellation woke before tail CQE\n");
-        queue_fixture_destroy(&fixture);
-        return 1;
-    }
-    llam_linux_native_segment_handle_cqe(
-        &fixture.node,
-        &fixture.segment.tokens[3],
-        -ECANCELED);
     if (completions != 1U ||
         fixture.segment.terminal_wakes != 1U ||
-        fixture.segment.observed_cqes != 3U ||
+        fixture.segment.first_error_index != 1U ||
+        fixture.segment.observed_cqes != 1U ||
         fixture.segment.suppressed_success_cqes != 1U ||
         fixture.req.result != -1 ||
         fixture.req.error_code != ECONNRESET ||
@@ -693,7 +651,7 @@ static int test_skip_dispatch_drains_tail_before_error_wake(void) {
         atomic_load_explicit(
             &fixture.shard.inflight_io_waiters,
             memory_order_acquire) != 0U) {
-        fprintf(stderr, "skip drained error ownership mismatch\n");
+        fprintf(stderr, "skip first-error ownership mismatch\n");
         queue_fixture_destroy(&fixture);
         return 1;
     }
@@ -858,13 +816,13 @@ static int test_validates_configuration(void) {
         fprintf(stderr, "invalid operation count was accepted\n");
         return 1;
     }
-    ops[1].kind = ops[0].kind;
+    ops[0].kind = LLAM_LINUX_NATIVE_OP_RECV;
     if (llam_linux_native_segment_configure(
             &segment,
             ops,
             4U,
             LLAM_LINUX_NATIVE_SEGMENT_LINK) == 0) {
-        fprintf(stderr, "non-alternating operations were accepted\n");
+        fprintf(stderr, "nonterminal receive was accepted\n");
         return 1;
     }
     fill_operations(ops, buffers, 4U);
@@ -913,35 +871,36 @@ static int test_encodes_recv_and_send_fields(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
-    struct io_uring_sqe recv_sqe;
     struct io_uring_sqe send_sqe;
+    struct io_uring_sqe recv_sqe;
 
-    if (configure_segment(
+    fill_operations(ops, buffers, 2U);
+    ops[1].kind = LLAM_LINUX_NATIVE_OP_RECV;
+    if (llam_linux_native_segment_configure(
             &segment,
-            LLAM_LINUX_NATIVE_SEGMENT_LINK,
-            2U,
             ops,
-            buffers) != 0) {
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK) != 0) {
         perror("configure encoding segment");
         return 1;
     }
-    memset(&recv_sqe, 0, sizeof(recv_sqe));
     memset(&send_sqe, 0, sizeof(send_sqe));
+    memset(&recv_sqe, 0, sizeof(recv_sqe));
     llam_linux_native_segment_prepare_sqe(
-        &segment, 0U, &recv_sqe);
+        &segment, 0U, &send_sqe);
     llam_linux_native_segment_prepare_sqe(
-        &segment, 1U, &send_sqe);
+        &segment, 1U, &recv_sqe);
 
-    if (recv_sqe.opcode != IORING_OP_RECV ||
-        recv_sqe.fd != ops[0].fd ||
-        recv_sqe.addr != (uint64_t)(uintptr_t)ops[0].buffer ||
-        recv_sqe.len != ops[0].length ||
-        recv_sqe.msg_flags != 0U ||
-        send_sqe.opcode != IORING_OP_SEND ||
-        send_sqe.fd != ops[1].fd ||
-        send_sqe.addr != (uint64_t)(uintptr_t)ops[1].buffer ||
-        send_sqe.len != ops[1].length ||
-        send_sqe.msg_flags != (uint32_t)MSG_NOSIGNAL) {
+    if (send_sqe.opcode != IORING_OP_SEND ||
+        send_sqe.fd != ops[0].fd ||
+        send_sqe.addr != (uint64_t)(uintptr_t)ops[0].buffer ||
+        send_sqe.len != ops[0].length ||
+        send_sqe.msg_flags != (uint32_t)MSG_NOSIGNAL ||
+        recv_sqe.opcode != IORING_OP_RECV ||
+        recv_sqe.fd != ops[1].fd ||
+        recv_sqe.addr != (uint64_t)(uintptr_t)ops[1].buffer ||
+        recv_sqe.len != ops[1].length ||
+        recv_sqe.msg_flags != 0U) {
         fprintf(stderr, "native SQE operation fields mismatch\n");
         return 1;
     }
@@ -1166,7 +1125,7 @@ static int test_skip_success_completes_on_final_cqe(void) {
     return 0;
 }
 
-static int test_skip_intermediate_failure_waits_for_tail(void) {
+static int test_skip_intermediate_failure_is_terminal(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
     unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
@@ -1186,10 +1145,15 @@ static int test_skip_intermediate_failure_waits_for_tail(void) {
             &segment.tokens[1],
             -ECONNRESET,
             &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_CONTINUE ||
+            LLAM_LINUX_NATIVE_CQE_COMPLETE_ERROR ||
+        terminal_result != -ECONNRESET ||
         segment.first_error_index != 1U ||
         segment.suppressed_success_cqes != 1U ||
-        segment.observed_cqes != 1U) {
+        segment.observed_cqes != 1U ||
+        atomic_load_explicit(
+            &segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_TERMINAL) {
         fprintf(stderr, "skip intermediate failure mismatch\n");
         return 1;
     }
@@ -1198,18 +1162,11 @@ static int test_skip_intermediate_failure_waits_for_tail(void) {
             &segment.tokens[2],
             -ECANCELED,
             &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_CONTINUE ||
-        llam_linux_native_segment_apply_cqe(
-            &segment,
-            &segment.tokens[3],
-            -ECANCELED,
-            &terminal_result) !=
-            LLAM_LINUX_NATIVE_CQE_COMPLETE_ERROR ||
-        terminal_result != -ECONNRESET ||
+            LLAM_LINUX_NATIVE_CQE_FATAL ||
         segment.first_error_index != 1U ||
         segment.suppressed_success_cqes != 1U ||
-        segment.observed_cqes != 3U) {
-        fprintf(stderr, "skip failure tail drain mismatch\n");
+        segment.observed_cqes != 1U) {
+        fprintf(stderr, "late skip failure CQE was not rejected\n");
         return 1;
     }
     return 0;
@@ -1366,8 +1323,8 @@ int main(int argc, char **argv) {
          test_link_preserves_first_non_cancel_error},
         {"skip success completes on final CQE",
          test_skip_success_completes_on_final_cqe},
-        {"skip intermediate failure drains tail",
-         test_skip_intermediate_failure_waits_for_tail},
+        {"skip intermediate failure is terminal",
+         test_skip_intermediate_failure_is_terminal},
         {"final short success becomes EMSGSIZE",
          test_final_short_success_becomes_emsgsize},
         {"stale generation is fatal",
@@ -1398,8 +1355,8 @@ int main(int argc, char **argv) {
          test_link_dispatch_wakes_only_after_final_cqe},
         {"skip dispatch wakes once on final success",
          test_skip_dispatch_wakes_once_on_final_success},
-        {"skip dispatch drains tail before error wake",
-         test_skip_dispatch_drains_tail_before_error_wake},
+        {"skip dispatch wakes on first error",
+         test_skip_dispatch_wakes_on_first_error},
         {"dispatch rejects duplicate terminal wake",
          test_dispatch_rejects_duplicate_terminal_wake},
         {"dispatch records fatal for stale token",

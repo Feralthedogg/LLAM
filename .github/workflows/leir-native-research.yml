@@ -12,6 +12,8 @@ on:
       - "src/internal/io/**"
       - "scripts/bench_leir_native.py"
       - "scripts/test_bench_leir_native.py"
+      - "scripts/process_utils.py"
+      - "scripts/test_process_utils.py"
       - "scripts/verify_linux.sh"
       - "CMakeLists.txt"
       - "Makefile"
@@ -36,9 +38,9 @@ jobs:
       OUT_DIR: .artifacts/leir-native-screen
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
 
@@ -94,35 +96,63 @@ jobs:
       - name: Probe kernel native feature status
         shell: bash
         run: |
-          set +e
-          ./bench_leir_native_segment \
-            --candidate link_skip \
-            --ops 4 \
-            --concurrency 4 \
-            --payload 64 \
-            --activations 8 \
-            --min-mode-ms 1 \
-            --order ABBA \
-            > "$OUT_DIR/feature-probe.stdout" \
-            2> "$OUT_DIR/feature-probe.stderr"
-          probe_status=$?
-          set -e
-          case "$probe_status" in
-            0)
-              echo "linux_io_uring_native=available" |
-                tee "$OUT_DIR/feature-status.txt"
-              ;;
-            77)
-              echo "linux_io_uring_native=unavailable" |
-                tee "$OUT_DIR/feature-status.txt"
-              cat "$OUT_DIR/feature-probe.stderr"
-              ;;
-            *)
-              cat "$OUT_DIR/feature-probe.stdout"
-              cat "$OUT_DIR/feature-probe.stderr" >&2
-              exit "$probe_status"
-              ;;
-          esac
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, "scripts")
+          from process_utils import ProcessTimeoutError, run_capture
+
+          out_dir = Path(os.environ["OUT_DIR"])
+          command = [
+              "./bench_leir_native_segment",
+              "--candidate", "link_skip",
+              "--ops", "4",
+              "--concurrency", "4",
+              "--payload", "64",
+              "--activations", "8",
+              "--min-mode-ms", "1",
+              "--order", "ABBA",
+          ]
+          try:
+              probe = run_capture(
+                  command,
+                  timeout=30,
+                  max_output_bytes=64 * 1024,
+              )
+          except ProcessTimeoutError as exc:
+              (out_dir / "feature-probe.stdout").write_text(
+                  exc.stdout, encoding="utf-8"
+              )
+              (out_dir / "feature-probe.stderr").write_text(
+                  exc.stderr, encoding="utf-8"
+              )
+              raise SystemExit(124)
+
+          (out_dir / "feature-probe.stdout").write_text(
+              probe.stdout, encoding="utf-8"
+          )
+          (out_dir / "feature-probe.stderr").write_text(
+              probe.stderr, encoding="utf-8"
+          )
+          if probe.stdout_truncated or probe.stderr_truncated:
+              raise SystemExit("feature probe exceeded output cap")
+          if probe.returncode == 0:
+              status = "available"
+          elif probe.returncode == 77:
+              status = "unavailable"
+              print(probe.stderr, end="")
+          else:
+              print(probe.stdout, end="")
+              print(probe.stderr, end="", file=sys.stderr)
+              raise SystemExit(probe.returncode)
+          text = f"linux_io_uring_native={status}\n"
+          (out_dir / "feature-status.txt").write_text(
+              text, encoding="utf-8"
+          )
+          print(text, end="")
+          PY
 
       - name: Clang CMake native gate
         shell: bash
@@ -236,7 +266,7 @@ jobs:
 
       - name: Upload LEIR native evidence
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: leir-native-screen-linux-x86_64
           path: .artifacts/leir-native-screen

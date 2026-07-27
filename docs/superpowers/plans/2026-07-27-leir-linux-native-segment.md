@@ -4,16 +4,24 @@
 
 **Goal:** Compile the approved static LEIR subset into one Linux `io_uring` linked segment, optionally suppress successful intermediate CQEs, and measure it against ordinary LLAM task I/O without changing the public ABI.
 
-**Architecture:** A portable planner reduces an already validated Phase 0 program to at most eight immutable RECV/SEND steps. A Linux-private segment object binds concrete `SOCK_SEQPACKET` resources, enters the existing node worker through a dedicated intrusive queue, prepares the complete linked chain in one ring batch, and completes one existing task request only at the terminal observation. A paired process-isolated benchmark reports link-only mechanics separately from link-plus-skip performance.
+**Architecture:** A portable planner reduces an already validated Phase 0 program to at most eight immutable SEND steps plus an optional terminal RECV. A Linux-private segment object pins concrete `SOCK_SEQPACKET` resources, enters the existing node worker through a dedicated intrusive queue, prepares the complete linked chain in one ring batch, and completes one existing task request only at the terminal observation. A paired process-isolated benchmark reports link-only mechanics separately from link-plus-skip performance.
 
 **Tech Stack:** C11, LLAM internal task/I/O ownership protocol, liburing/io_uring, Unix `SOCK_SEQPACKET`, GNU Make, CMake/CTest, Python 3 `unittest`, GitHub Actions on Ubuntu 24.04.
+
+**Validated amendment:** Kernel-path and security validation supersede any
+older alternating-relay or cancellation-tail wording below. The accepted
+shape is a SEND batch with an optional terminal RECV. In skip mode, a visible
+intermediate error is terminal because dependent soft-linked requests and
+their CQEs are omitted. Bind owns `CLOEXEC` descriptor duplicates until
+explicit instance destruction. Public stop/cancel integration remains a
+promotion blocker.
 
 ## Global Constraints
 
 - Keep LEIR as the compiler/planner semantic contract; never dispatch another LEIR node from a CQE.
-- Accept exactly 1, 2, 4, or 8 alternating `READ_EXACT`/`WRITE_ALL` steps.
+- Accept exactly 1, 2, 4, or 8 `WRITE_ALL` steps, optionally ending in one `READ_EXACT`; reject every nonterminal receive.
 - Reject branches, cycles, dynamic result dependencies, timeout, cancellation, fork/join, callbacks, parsers, and native escapes.
-- Bind only connected Unix `SOCK_SEQPACKET` descriptors and lengths in `[1, UINT_MAX]`.
+- Bind only connected Unix `SOCK_SEQPACKET` descriptors and lengths in `[1, UINT_MAX]`; pin each distinct descriptor with `F_DUPFD_CLOEXEC`.
 - Map reads to `IORING_OP_RECV`, writes to `IORING_OP_SEND`, and writes to `MSG_NOSIGNAL`.
 - Link every non-final SQE with `IOSQE_IO_LINK`; add `IOSQE_CQE_SKIP_SUCCESS` only to non-final SQEs in skip mode.
 - Require `IORING_FEAT_CQE_SKIP` for skip mode and retain link-only mode when it is absent.
@@ -21,6 +29,7 @@
 - Allocate no memory between timed activation start and terminal return.
 - Keep all new runtime entry points hidden and all installed headers unchanged.
 - Make non-Linux behavior an explicit `ENOTSUP` stub with no runtime behavior change.
+- Treat whole-segment stop/cancel/token ownership as required before promotion.
 - Classify positive evidence as `SPECIALIZED`, never `CATEGORY`.
 - Do not change version `2.2.0`, create a release, or merge the research branch.
 
@@ -77,7 +86,7 @@ static int test_compile_can_start_with_send(void);
 static int test_compile_copies_exact_slot_indices(void);
 ```
 
-For operation counts `1, 2, 4, 8`, construct Phase 0 programs whose success path alternates exact read/all-write nodes and ends in `RETURN`; both failure edges of every effect end in a terminal `FAIL`. Assert `step_count`, `return_node`, `result_slot`, every step kind, and all four slot indices.
+For operation counts `1, 2, 4, 8`, construct Phase 0 programs whose success path contains only all-write nodes and ends in `RETURN`; separately prove a terminal exact read is accepted. Both failure edges of every effect end in a terminal `FAIL`. Assert `step_count`, `return_node`, `result_slot`, every step kind, and all four slot indices.
 
 - [ ] **Step 2: Write planner rejection tests**
 
@@ -86,7 +95,7 @@ Create one descriptor fixture per rejection and assert `-1` with `errno == EINVA
 ```c
 static int test_rejects_non_power_of_two_operation_count(void);
 static int test_rejects_read_and_write_non_exact_opcodes(void);
-static int test_rejects_non_alternating_steps(void);
+static int test_rejects_nonterminal_receive(void);
 static int test_rejects_success_cycle(void);
 static int test_rejects_success_branch_to_fail(void);
 static int test_rejects_nonterminal_eof_or_error_edge(void);
@@ -123,7 +132,7 @@ default:
 }
 ```
 
-Require the operation count to be one of `1, 2, 4, 8`, require alternating kinds, require `on_eof` and `on_error` to name terminal `FAIL` nodes, reject a repeated success node, and reject every later fd/buffer/length slot that aliases a prior effect result slot. Copy only the five static fields into `leir_native_plan_t`; do not retain a generic node table.
+Require the operation count to be one of `1, 2, 4, 8`, permit adjacent sends, require any receive to name the final `RETURN` on success, require `on_eof` and `on_error` to name terminal `FAIL` nodes, reject a repeated success node, and reject every later fd/buffer/length slot that aliases a prior effect result slot. Copy only the five static fields into `leir_native_plan_t`; do not retain a generic node table.
 
 - [ ] **Step 5: Add portable build targets and run them**
 
@@ -271,23 +280,22 @@ Cover:
 ```c
 static int test_link_waits_for_final_cqe_and_preserves_first_error(void);
 static int test_skip_success_completes_on_final_cqe(void);
-static int test_skip_intermediate_failure_waits_for_tail(void);
+static int test_skip_intermediate_failure_is_terminal(void);
 static int test_short_success_becomes_emsgsize_at_exact_boundary(void);
 static int test_stale_generation_is_fatal(void);
 static int test_duplicate_terminal_is_fatal(void);
 ```
 
 Link mode must observe all operation CQEs and return terminal only for the
-final token. Skip mode may skip successful intermediate tokens, but it must
-drain any visible intermediate failure and dependent cancellations through
-the final token. A result different from the declared exact length becomes
+final token. Skip mode may skip successful intermediate tokens; a visible
+intermediate failure is terminal immediately because the dependent soft-linked
+requests and their CQEs are omitted. A result different from the declared exact length becomes
 `-EMSGSIZE` when it is observable. A stale generation, foreign owner, invalid
 index, or event after terminal claim returns `FATAL`.
 
-Correction from kernel-path validation: skip mode may observe an intermediate
-error followed by one `-ECANCELED` CQE for every dependent linked operation.
-It must retain the first non-cancel error and wait for the final token before
-claiming terminal state. Only a short result on the unsuppressed final
+Correction from kernel-path validation: skip mode observes the intermediate
+error without a synthetic dependent cancellation tail. It must retain the
+first non-cancel error and claim terminal state on that CQE. Only a short result on the unsuppressed final
 operation can be checked directly in skip mode; exact intermediate message
 sizes remain part of the trusted `SOCK_SEQPACKET` protocol envelope.
 
@@ -495,7 +503,7 @@ Add:
 ```c
 static int test_link_dispatch_wakes_only_after_final_cqe(void);
 static int test_skip_dispatch_wakes_once_on_final_success(void);
-static int test_skip_dispatch_drains_tail_before_error_wake(void);
+static int test_skip_dispatch_wakes_on_first_error(void);
 static int test_dispatch_balances_pending_and_inflight_once(void);
 static int test_dispatch_records_fatal_for_stale_token(void);
 ```
@@ -625,6 +633,8 @@ int leir_native_instance_bind(
     leir_native_instance_t *instance,
     const leir_phase0_value_t *values,
     size_t value_count);
+int leir_native_instance_destroy(
+    leir_native_instance_t *instance);
 int leir_native_instance_run(
     leir_native_instance_t *instance,
     leir_phase0_value_t *values_out,
@@ -634,7 +644,7 @@ int leir_native_instance_run(
 
 - [ ] **Step 1: Write portable bind validation tests**
 
-Assert rejection for null/undersized/misaligned storage, wrong value count, negative signed length, zero length, length beyond buffer capacity, length above `UINT_MAX`, null nonempty buffer, invalid fd, and rebind while active. Assert repeated use of the same valid fd across alternating steps is accepted.
+Assert rejection for null/undersized/misaligned storage, wrong value count, negative signed length, zero length, length beyond buffer capacity, length above `UINT_MAX`, null nonempty buffer, invalid fd, and rebind while active. Assert repeated use of the same valid fd across adjacent sends is accepted.
 
 - [ ] **Step 2: Write Linux socket-boundary tests**
 
@@ -662,7 +672,7 @@ Expected: build failure because the instance API does not exist.
 
 - [ ] **Step 4: Implement fixed storage, binding, and the non-Linux stub**
 
-Store a copy of values and a Linux segment inside the instance; never allocate. Validate every concrete value before configuring the backend. On Linux use `getsockopt(SOL_SOCKET, SO_TYPE)` and `getpeername`; on non-Linux let initialization/binding validate portable data but return `ENOTSUP` from `run`.
+Store a copy of values and a Linux segment inside the instance; never allocate. Atomically duplicate each distinct bound fd with `F_DUPFD_CLOEXEC`, validate and configure using only those duplicates, and release them from `leir_native_instance_destroy`. On Linux use `getsockopt(SOL_SOCKET, SO_TYPE)` and `getpeername`; on non-Linux let initialization/binding validate portable data but return `ENOTSUP` from `run`.
 
 - [ ] **Step 5: Implement one-activation run**
 
@@ -677,6 +687,9 @@ Run a managed task over connected Unix sequence-packet pairs and assert:
 - link-only observed CQEs equal logical operations;
 - skip observed CQEs equal activations and suppressed CQEs equal `(ops - 1) * activations`;
 - peer-close failure reports the exact first operation;
+- closing and numerically reusing the caller fd after bind leaves traffic on
+  the pinned original socket;
+- destroy releases every pinned duplicate;
 - 1,000 instance reuses advance generation and leave `pending_ops` zero.
 
 If ring setup returns `EPERM`, `ENOSYS`, or skip support is absent, print an explicit `SKIP` record for only the affected integration case; pure tests must still run.
@@ -733,7 +746,7 @@ typedef enum leir_peer_socket_kind {
 } leir_peer_socket_kind_t;
 ```
 
-and fields `socket_kind` and `operations_per_activation` to `leir_peer_config_t`. Zero/default retains stream request-response behavior. Native mode sets sequence-packet and `1,2,4,8` operations. For one operation, the peer sends and records the request checksum without waiting for a response; even counts retain one send/receive transaction per operation pair.
+and fields `socket_kind` and `operations_per_activation` to `leir_peer_config_t`. Zero/default retains stream request-response behavior. Native mode sets sequence-packet and `1,2,4,8` operations. For every native operation the server sends one distinct record and the peer receives, validates, and checksums it.
 
 - [ ] **Step 3: Run a smoke build and observe failure**
 
@@ -748,7 +761,7 @@ Expected before implementation: target or CLI failure.
 
 - [ ] **Step 4: Implement identical baseline and candidate workloads**
 
-Build one LEIR program per operation count. Baseline tasks execute alternating `llam_read`/`llam_write` and require every result to equal payload length. Candidate tasks reuse one bound native instance. Each measured block starts a fresh peer and runtime, signals the peer only after all tasks are ready, and measures server process CPU with `CLOCK_PROCESS_CPUTIME_ID`.
+Build one all-`WRITE_ALL` LEIR program per operation count with one immutable buffer slot per operation. Baseline tasks execute the same number of ordinary writes and require every result to equal payload length. Candidate tasks reuse one bound native instance. Each measured block starts a fresh peer and runtime, signals the peer only after all tasks are ready, and measures server process CPU with `CLOCK_PROCESS_CPUTIME_ID`.
 
 - [ ] **Step 5: Implement balanced sampling and correctness counters**
 
@@ -953,7 +966,7 @@ Expected: shared export set is unchanged; new symbols are hidden/internal; timed
 
 - [ ] **Step 3: Run a normal Codex Security diff scan**
 
-Review pointer-tag alignment, user-controlled lengths/pointers, fd type and connectedness checks, generation/stale-CQE handling, queue ownership, counter underflow/overflow, task/request lifetime, shell-free subprocess use, bounded output, and workflow permissions. Fix every validated high/medium finding with a failing regression test before proceeding.
+Review pointer-tag alignment, user-controlled lengths/pointers, fd type and connectedness checks, generation/stale-CQE handling, queue ownership, counter underflow/overflow, task/request lifetime, shell-free subprocess use, bounded output, and workflow permissions. Fix every validated correctness or security finding in scope with a failing regression test before proceeding; keep stop/cancel ownership explicit if it remains deferred.
 
 - [ ] **Step 4: Push and open a draft PR**
 
@@ -983,7 +996,7 @@ REJECT
 INCONCLUSIVE
 ```
 
-A `SPECIALIZED` result authorizes the next private design for cancellation/timeouts/teardown/source maps/generated C. It does not authorize `CATEGORY`, a version bump, or a release.
+A `SPECIALIZED` result authorizes the next private design for cancellation/timeouts/teardown/source maps/generated C. Whole-segment stop/cancel ownership remains mandatory before promotion. It does not authorize `CATEGORY`, a version bump, or a release.
 
 - [ ] **Step 7: Commit the exact-SHA report and re-run CI**
 

@@ -575,11 +575,19 @@ def run_one(
         else timeout
     )
     try:
-        result = runner(command, timeout=effective_timeout)
+        result = runner(
+            command,
+            timeout=effective_timeout,
+            max_output_bytes=MAX_OUTPUT_BYTES,
+        )
     except (OSError, ProcessTimeoutError) as exc:
         raise MatrixRunError(
             f"sample {process_sample} process failure: {exc}"
         ) from exc
+    if result.stdout_truncated or result.stderr_truncated:
+        raise MatrixRunError(
+            f"sample {process_sample} exceeded the output cap"
+        )
     if _output_too_large(result.stdout) or _output_too_large(
         result.stderr
     ):
@@ -1136,6 +1144,7 @@ def _source_commit() -> str:
         result = run_capture(
             ["git", "rev-parse", "HEAD"],
             timeout=5.0,
+            max_output_bytes=4096,
         )
     except (OSError, ProcessTimeoutError):
         return "unavailable"
