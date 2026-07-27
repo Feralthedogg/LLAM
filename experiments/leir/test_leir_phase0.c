@@ -1,5 +1,6 @@
 #include "runtime_internal.h"
 #include "io/runtime_io_api_internal.h"
+#include "leir_peer_process.h"
 #include "leir_phase0.h"
 #include "leir_phase0_internal.h"
 #include "leir_test_support.h"
@@ -72,6 +73,171 @@ static leir_phase0_program_desc_t valid_program_desc(void) {
     };
 
     return desc;
+}
+
+static int test_benchmark_option_parser(void) {
+    char *argv[] = {
+        "bench_leir_phase0",
+        "--workload",
+        "socket_relay",
+        "--nodes",
+        "4",
+        "--concurrency",
+        "64",
+        "--payload",
+        "1024",
+        "--inline-budget",
+        "8",
+        "--activations",
+        "128",
+        "--min-mode-ms",
+        "20",
+        "--order",
+        "ABBA",
+    };
+    static const char *const workloads[] = {
+        "socket_relay",
+        "framed_rpc",
+        "graph_break",
+    };
+    static const char *const nodes[] = {
+        "1", "2", "4", "8",
+    };
+    static const char *const orders[] = {
+        "ABBA", "BAAB",
+    };
+    leir_bench_options_t options;
+    size_t i;
+
+    for (i = 0U;
+         i < sizeof(workloads) / sizeof(workloads[0]);
+         i += 1U) {
+        argv[2] = (char *)workloads[i];
+        if (leir_bench_parse_options(
+                (int)(sizeof(argv) / sizeof(argv[0])),
+                argv,
+                &options) != 0 ||
+            strcmp(
+                leir_bench_workload_name(options.workload),
+                workloads[i]) != 0) {
+            return 1;
+        }
+    }
+    argv[2] = "socket_relay";
+    for (i = 0U; i < sizeof(nodes) / sizeof(nodes[0]); i += 1U) {
+        argv[4] = (char *)nodes[i];
+        if (leir_bench_parse_options(
+                (int)(sizeof(argv) / sizeof(argv[0])),
+                argv,
+                &options) != 0 ||
+            options.nodes != (unsigned)(1U << i)) {
+            return 1;
+        }
+    }
+    argv[4] = "4";
+    for (i = 0U; i < sizeof(orders) / sizeof(orders[0]); i += 1U) {
+        argv[16] = (char *)orders[i];
+        if (leir_bench_parse_options(
+                (int)(sizeof(argv) / sizeof(argv[0])),
+                argv,
+                &options) != 0 ||
+            strcmp(
+                leir_bench_order_name(options.order),
+                orders[i]) != 0) {
+            return 1;
+        }
+    }
+    argv[16] = "ABBA";
+    argv[6] = "1";
+    argv[8] = "64";
+    argv[10] = "1";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != 0 ||
+        options.concurrency != 1U ||
+        options.payload != 64U ||
+        options.inline_budget != 1U ||
+        options.activations != 128U ||
+        options.min_mode_ns != UINT64_C(20000000)) {
+        return 1;
+    }
+    argv[6] = "512";
+    argv[8] = "16384";
+    argv[10] = "32";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != 0 ||
+        options.concurrency != 512U ||
+        options.payload != 16384U ||
+        options.inline_budget != 32U) {
+        return 1;
+    }
+
+    if (leir_bench_parse_options(15, argv, &options) != EINVAL) {
+        return 1;
+    }
+    argv[15] = "--nodes";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != EINVAL) {
+        return 1;
+    }
+    argv[15] = "--order";
+    argv[4] = "3";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != EINVAL) {
+        return 1;
+    }
+    argv[4] = "4";
+    argv[6] = "0";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != EINVAL) {
+        return 1;
+    }
+    argv[6] = "64";
+    argv[8] = "0";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != EINVAL) {
+        return 1;
+    }
+    argv[8] = "64";
+    argv[10] = "0";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != EINVAL) {
+        return 1;
+    }
+    argv[10] = "8";
+    argv[12] = "0";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != EINVAL) {
+        return 1;
+    }
+    argv[12] = "128";
+    argv[14] = "0";
+    if (leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            &options) != EINVAL ||
+        leir_bench_parse_options(
+            (int)(sizeof(argv) / sizeof(argv[0])),
+            argv,
+            NULL) != EINVAL) {
+        return 1;
+    }
+    return 0;
 }
 
 static int expect_program_error(const leir_phase0_program_desc_t *desc,
@@ -2370,6 +2536,10 @@ static int test_completion_sink_dispatch(void) {
 }
 
 int main(void) {
+    if (test_benchmark_option_parser() != 0) {
+        fputs("test_benchmark_option_parser failed\n", stderr);
+        return 1;
+    }
     if (test_completion_sink_dispatch() != 0) {
         fputs("test_completion_sink_dispatch failed\n", stderr);
         return 1;

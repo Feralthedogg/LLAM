@@ -38,6 +38,7 @@ CLEAN_FILES = \
 	server_lossless \
 	server_flood \
 	test_leir_phase0 \
+	bench_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
 	test_srem_model \
@@ -89,6 +90,7 @@ CLEAN_FILES = \
 	server_lossless.exe \
 	server_flood.exe \
 	test_leir_phase0.exe \
+	bench_leir_phase0.exe \
 	test_lccf_model.exe \
 	bench_lccf_model.exe \
 	test_srem_model.exe \
@@ -543,10 +545,13 @@ TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 LEIR_PHASE0_CORE_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_engine.o \
+	$(OBJDIR)/experiments/leir/leir_peer_process.o \
 	$(OBJDIR)/experiments/leir/leir_program.o \
 	$(OBJDIR)/experiments/leir/leir_test_support.o
 LEIR_PHASE0_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_phase0.o
+LEIR_PHASE0_BENCH_OBJS = \
+	$(OBJDIR)/experiments/leir/bench_leir_phase0.o
 LCWE_MODEL_CORE_OBJS = \
 	$(OBJDIR)/experiments/lcwe/lcwe_model.o \
 	$(OBJDIR)/experiments/lcwe/lcwe_workloads.o
@@ -604,6 +609,7 @@ BUILD_OBJS = \
 	$(TEST_SHARED_LOAD_OBJS) \
 	$(LEIR_PHASE0_CORE_OBJS) \
 	$(LEIR_PHASE0_TEST_OBJS) \
+	$(LEIR_PHASE0_BENCH_OBJS) \
 	$(LCWE_MODEL_CORE_OBJS) \
 	$(LCWE_MODEL_TEST_OBJS) \
 	$(LCWE_MODEL_BENCH_OBJS) \
@@ -622,6 +628,7 @@ LINK_TARGETS = \
 	server_lossless \
 	server_flood \
 	test_leir_phase0 \
+	bench_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
 	test_srem_model \
@@ -668,7 +675,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_leir_phase0|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_leir_phase0|test_bench_leir_phase0_smoke|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -678,6 +685,7 @@ WINDOWS_CMAKE_TARGETS = \
 	server_lossless \
 	server_flood \
 	test_leir_phase0 \
+	bench_leir_phase0 \
 	test_lccf_model \
 	bench_lccf_model \
 	test_srem_model \
@@ -733,8 +741,8 @@ test-srem-model: windows-cmake-configure
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_srem_model|test_bench_srem_native|test_bench_srem_model" $(WINDOWS_CTEST_ARGS)
 
 test-leir-phase0: windows-cmake-configure
-	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0
-	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0" $(WINDOWS_CTEST_ARGS)
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_phase0 bench_leir_phase0
+	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_phase0|test_bench_leir_phase0_smoke" $(WINDOWS_CTEST_ARGS)
 
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
@@ -2027,8 +2035,17 @@ test-srem-model: test_srem_model bench_srem_model
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_native.py
 	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_model.py
 
-test-leir-phase0: test_leir_phase0
+test-leir-phase0: test_leir_phase0 bench_leir_phase0
 	./test_leir_phase0
+	./bench_leir_phase0 \
+		--workload socket_relay \
+		--nodes 4 \
+		--concurrency 4 \
+		--payload 64 \
+		--inline-budget 8 \
+		--activations 8 \
+		--min-mode-ms 1 \
+		--order ABBA
 
 lcwe-model-report: test-lcwe-model
 	python3 scripts/bench_lcwe_model.py \
@@ -2168,6 +2185,9 @@ bench_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS)
 
 test_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS) $(LDLIBS)
+
+bench_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_BENCH_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_BENCH_OBJS) $(LDLIBS)
 
 test_abi_contract: $(RUNTIME_OBJS) $(TEST_ABI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ABI_OBJS) $(LDLIBS)

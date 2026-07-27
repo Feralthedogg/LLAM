@@ -498,6 +498,7 @@ enable_testing()
 
 set(LLAM_LEIR_PHASE0_SOURCES
     experiments/leir/leir_engine.c
+    experiments/leir/leir_peer_process.c
     experiments/leir/leir_program.c
     experiments/leir/leir_test_support.c
 )
@@ -506,13 +507,31 @@ add_executable(test_leir_phase0
     ${LLAM_LEIR_PHASE0_SOURCES}
     experiments/leir/test_leir_phase0.c
 )
-target_include_directories(test_leir_phase0 PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
-    ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+add_executable(bench_leir_phase0
+    ${LLAM_LEIR_PHASE0_SOURCES}
+    experiments/leir/bench_leir_phase0.c
 )
-target_link_libraries(test_leir_phase0 PRIVATE llam_runtime)
+foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
+    target_include_directories(${LLAM_LEIR_PHASE0_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+        ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+    )
+    target_link_libraries(${LLAM_LEIR_PHASE0_TARGET} PRIVATE llam_runtime)
+endforeach()
 add_test(NAME test_leir_phase0 COMMAND test_leir_phase0)
+add_test(
+    NAME test_bench_leir_phase0_smoke
+    COMMAND bench_leir_phase0
+        --workload socket_relay
+        --nodes 4
+        --concurrency 4
+        --payload 64
+        --inline-budget 8
+        --activations 8
+        --min-mode-ms 1
+        --order ABBA
+)
 
 set(LLAM_LCWE_MODEL_SOURCES
     experiments/lcwe/lcwe_model.c
@@ -777,6 +796,7 @@ add_dependencies(test_shared_load llam_runtime_shared)
 
 foreach(LLAM_TEST_TARGET
         test_leir_phase0
+        bench_leir_phase0
         test_abi_contract
         test_abi_compat
         test_connect_io

@@ -16,6 +16,7 @@ compile_commands.json
 /bench_lccf_model
 /bench_lcwe_model
 /bench_srem_model
+/bench_leir_phase0
 /demo
 /llam_broker
 /stress

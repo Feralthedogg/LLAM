@@ -249,3 +249,115 @@ void leir_test_fill_pattern(
         data[i] = (unsigned char)mixed;
     }
 }
+
+static uint64_t leir_test_payload_token(
+    uint64_t connection,
+    uint64_t sequence) {
+    uint64_t value =
+        sequence ^
+        (connection + UINT64_C(1)) *
+            UINT64_C(0x9e3779b97f4a7c15);
+
+    value ^= value >> 30U;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27U;
+    value *= UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31U);
+}
+
+static unsigned char leir_test_payload_byte(
+    uint64_t token,
+    size_t index) {
+    uint64_t value =
+        token +
+        ((uint64_t)index + UINT64_C(1)) *
+            UINT64_C(0xd6e8feb86659fd93);
+
+    value ^= value >> 32U;
+    value *= UINT64_C(0xa5a3564e27f8862f);
+    value ^= value >> 29U;
+    return (unsigned char)(value >> 56U);
+}
+
+void leir_test_prepare_payload(
+    unsigned char *data,
+    size_t size,
+    uint64_t connection,
+    uint64_t sequence) {
+    uint64_t token;
+    size_t i;
+
+    if (data == NULL) {
+        return;
+    }
+    token = leir_test_payload_token(connection, sequence);
+    for (i = 0U; i < size; i += 1U) {
+        data[i] = i < sizeof(token)
+            ? (unsigned char)(token >> (i * 8U))
+            : leir_test_payload_byte(token, i);
+    }
+}
+
+bool leir_test_payload_is_valid(
+    const unsigned char *data,
+    size_t size,
+    uint64_t connection,
+    uint64_t sequence) {
+    uint64_t token;
+    size_t i;
+
+    if (data == NULL) {
+        return size == 0U;
+    }
+    token = leir_test_payload_token(connection, sequence);
+    for (i = 0U; i < size; i += 1U) {
+        unsigned char expected = i < sizeof(token)
+            ? (unsigned char)(token >> (i * 8U))
+            : leir_test_payload_byte(token, i);
+
+        if (data[i] != expected) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void leir_test_transform_payload(
+    unsigned char *data,
+    size_t size) {
+    static const unsigned char mask[8] = {
+        0x4cU, 0x45U, 0x49U, 0x52U,
+        0xa5U, 0x5aU, 0xc3U, 0x3cU,
+    };
+    size_t i;
+    size_t limit = size < sizeof(mask) ? size : sizeof(mask);
+
+    if (data == NULL) {
+        return;
+    }
+    for (i = 0U; i < limit; i += 1U) {
+        data[i] ^= mask[i];
+    }
+}
+
+uint64_t leir_test_payload_checksum(
+    const unsigned char *data,
+    size_t size,
+    uint64_t connection,
+    uint64_t sequence) {
+    uint64_t hash =
+        UINT64_C(1469598103934665603) ^
+        leir_test_payload_token(connection, sequence);
+    size_t i;
+
+    if (data == NULL && size != 0U) {
+        return 0U;
+    }
+    for (i = 0U; i < size; i += 1U) {
+        hash ^= data[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    hash ^= (uint64_t)size;
+    hash *= UINT64_C(1099511628211);
+    return hash != 0U ? hash : UINT64_C(1);
+}

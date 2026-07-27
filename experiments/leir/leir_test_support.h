@@ -16,5 +16,23 @@ void leir_test_fill_pattern(
     unsigned char *data,
     size_t size,
     uint64_t seed);
+void leir_test_prepare_payload(
+    unsigned char *data,
+    size_t size,
+    uint64_t connection,
+    uint64_t sequence);
+bool leir_test_payload_is_valid(
+    const unsigned char *data,
+    size_t size,
+    uint64_t connection,
+    uint64_t sequence);
+void leir_test_transform_payload(
+    unsigned char *data,
+    size_t size);
+uint64_t leir_test_payload_checksum(
+    const unsigned char *data,
+    size_t size,
+    uint64_t connection,
+    uint64_t sequence);
 
 #endif
