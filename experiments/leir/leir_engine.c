@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int fail_with_errno(int error_code) {
     errno = error_code;
@@ -126,8 +127,14 @@ int leir_phase0_instance_init(
     atomic_init(&instance->req, NULL);
     atomic_init(&instance->task, NULL);
     atomic_init(&instance->cancel_requested, 0U);
+    atomic_init(&instance->cancel_readers, 0U);
+    atomic_init(
+        &instance->cancel_phase, LEIR_PHASE0_CANCEL_PHASE_IDLE);
     atomic_init(&instance->running, 0U);
+    atomic_init(&instance->terminal_claimed, 0U);
     atomic_init(&instance->terminal, 0U);
+    atomic_init(&instance->initial_submit_observed, 0U);
+    atomic_init(&instance->test_completion_claimed, 0U);
     atomic_init(&instance->activation_generation, 0U);
     atomic_init(&instance->request_generation, 0U);
     instance->current_node = program->entry_node;
@@ -151,7 +158,12 @@ int leir_phase0_instance_bind(
     if (atomic_load_explicit(
             &instance->running, memory_order_acquire) != 0U ||
         atomic_load_explicit(&instance->req, memory_order_acquire) != NULL ||
-        atomic_load_explicit(&instance->task, memory_order_acquire) != NULL) {
+        atomic_load_explicit(&instance->task, memory_order_acquire) != NULL ||
+        atomic_load_explicit(
+            &instance->cancel_readers, memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &instance->cancel_phase, memory_order_acquire) !=
+            LEIR_PHASE0_CANCEL_PHASE_IDLE) {
         return fail_with_errno(EBUSY);
     }
     if (!bindings_are_valid(program, values)) {
@@ -172,10 +184,136 @@ int leir_phase0_instance_bind(
     atomic_store_explicit(
         &instance->cancel_requested, 0U, memory_order_release);
     atomic_store_explicit(
+        &instance->cancel_phase,
+        LEIR_PHASE0_CANCEL_PHASE_IDLE,
+        memory_order_release);
+    atomic_store_explicit(
+        &instance->terminal_claimed, 0U, memory_order_release);
+    atomic_store_explicit(
         &instance->terminal, 0U, memory_order_release);
+    atomic_store_explicit(
+        &instance->initial_submit_observed, 0U, memory_order_release);
+    atomic_store_explicit(
+        &instance->test_completion_claimed, 0U, memory_order_release);
     atomic_store_explicit(
         &instance->request_generation, 0U, memory_order_release);
     (void)advance_activation_generation(instance);
+    return 0;
+}
+
+static bool cancel_reader_acquire(
+    leir_phase0_instance_t *instance) {
+    unsigned readers = atomic_load_explicit(
+        &instance->cancel_readers, memory_order_acquire);
+
+    for (;;) {
+        if (readers == UINT_MAX) {
+            errno = EOVERFLOW;
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &instance->cancel_readers,
+                &readers,
+                readers + 1U,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+static void cancel_reader_release(
+    leir_phase0_instance_t *instance) {
+    unsigned previous = atomic_fetch_sub_explicit(
+        &instance->cancel_readers, 1U, memory_order_acq_rel);
+
+    if (previous == 0U) {
+        abort();
+    }
+}
+
+static void unpublish_cancel_target(
+    leir_phase0_instance_t *instance) {
+    atomic_store_explicit(
+        &instance->task, NULL, memory_order_release);
+    while (atomic_load_explicit(
+               &instance->cancel_readers,
+               memory_order_acquire) != 0U) {
+        llam_yield();
+    }
+}
+
+static void cancel_wait_yield(void) {
+    if (g_llam_tls_task != NULL && g_llam_tls_shard != NULL) {
+        llam_yield();
+    } else {
+        struct timespec delay = {
+            .tv_sec = 0,
+            .tv_nsec = 100000L,
+        };
+
+        (void)nanosleep(&delay, NULL);
+    }
+}
+
+int leir_phase0_instance_cancel(
+    leir_phase0_instance_t *instance) {
+    llam_task_t *task;
+
+    if (instance == NULL || instance->program == NULL) {
+        return fail_with_errno(EINVAL);
+    }
+    atomic_store_explicit(
+        &instance->cancel_requested, 1U, memory_order_release);
+    if (!cancel_reader_acquire(instance)) {
+        return -1;
+    }
+
+    task = atomic_load_explicit(
+        &instance->task, memory_order_acquire);
+    while (task != NULL &&
+           atomic_load_explicit(
+               &instance->cancel_phase, memory_order_acquire) ==
+               LEIR_PHASE0_CANCEL_PHASE_SUBMITTING &&
+           atomic_load_explicit(
+               &instance->running, memory_order_acquire) != 0U &&
+           atomic_load_explicit(
+               &instance->terminal, memory_order_acquire) == 0U &&
+           atomic_load_explicit(
+               &instance->task, memory_order_acquire) == task) {
+        llam_io_req_t *req = atomic_load_explicit(
+            &instance->req, memory_order_acquire);
+
+        if (req != NULL &&
+            atomic_load_explicit(
+                &req->wait_mode, memory_order_acquire) !=
+                LLAM_IO_WAIT_MODE_NONE) {
+            uint64_t wait_generation =
+                (uint64_t)atomic_load_explicit(
+                    &task->wait_generation, memory_order_acquire);
+
+            if (wait_generation != 0U &&
+                wait_generation != UINT64_MAX) {
+                atomic_store_explicit(
+                    &instance->initial_submit_observed,
+                    1U,
+                    memory_order_release);
+                bool detached = llam_abort_io_wait(
+                    task,
+                    LLAM_IO_ABORT_CANCEL,
+                    wait_generation);
+                unsigned abort_reason = atomic_load_explicit(
+                    &req->abort_reason, memory_order_acquire);
+
+                if (detached ||
+                    abort_reason == LLAM_IO_ABORT_CANCEL) {
+                    break;
+                }
+            }
+        }
+        cancel_wait_yield();
+    }
+    cancel_reader_release(instance);
     return 0;
 }
 
@@ -320,14 +458,66 @@ static int completion_error(
     return EIO;
 }
 
-static bool publish_engine_error(
-    leir_phase0_instance_t *instance,
-    int error_code) {
-    instance->terminal_error =
-        error_code != 0 ? error_code : EIO;
+static bool cancellation_is_requested(
+    const leir_phase0_instance_t *instance) {
+    return atomic_load_explicit(
+               &instance->cancel_requested,
+               memory_order_acquire) != 0U;
+}
+
+static void mark_current_io_cancelled(
+    leir_phase0_instance_t *instance) {
+    const leir_phase0_node_desc_t *node =
+        &instance->program->nodes[instance->current_node];
+
+    if (node_is_read(node) || node_is_write(node)) {
+        instance->slots[node->result_slot].i64 = -1;
+    }
+    instance->terminal_error = ECANCELED;
+}
+
+static bool claim_terminal(
+    leir_phase0_instance_t *instance) {
+    unsigned expected = 0U;
+
+    return atomic_compare_exchange_strong_explicit(
+        &instance->terminal_claimed,
+        &expected,
+        1U,
+        memory_order_acq_rel,
+        memory_order_acquire);
+}
+
+static void finish_terminal_publication(
+    leir_phase0_instance_t *instance) {
     instance->metrics.terminal_publications += 1U;
     atomic_store_explicit(
         &instance->terminal, 1U, memory_order_release);
+    atomic_store_explicit(
+        &instance->cancel_phase,
+        LEIR_PHASE0_CANCEL_PHASE_IDLE,
+        memory_order_release);
+}
+
+static bool publish_engine_error(
+    leir_phase0_instance_t *instance,
+    int error_code) {
+    if (!claim_terminal(instance)) {
+        return false;
+    }
+    instance->terminal_error =
+        error_code != 0 ? error_code : EIO;
+    finish_terminal_publication(instance);
+    return false;
+}
+
+static bool publish_cancellation(
+    leir_phase0_instance_t *instance) {
+    if (!claim_terminal(instance)) {
+        return false;
+    }
+    mark_current_io_cancelled(instance);
+    finish_terminal_publication(instance);
     return false;
 }
 
@@ -336,6 +526,9 @@ static bool publish_current_terminal(
     const leir_phase0_node_desc_t *terminal_node =
         &instance->program->nodes[instance->current_node];
 
+    if (!claim_terminal(instance)) {
+        return false;
+    }
     if (terminal_node->opcode == LEIR_PHASE0_OP_RETURN) {
         instance->terminal_error = 0;
     } else if (terminal_node->opcode == LEIR_PHASE0_OP_FAIL) {
@@ -343,11 +536,9 @@ static bool publish_current_terminal(
             instance->terminal_error = EIO;
         }
     } else {
-        return publish_engine_error(instance, EPROTO);
+        instance->terminal_error = EPROTO;
     }
-    instance->metrics.terminal_publications += 1U;
-    atomic_store_explicit(
-        &instance->terminal, 1U, memory_order_release);
+    finish_terminal_publication(instance);
     return false;
 }
 
@@ -423,6 +614,93 @@ static int leir_phase0_apply_result(
     return 0;
 }
 
+static bool request_completion_identity_is_live(
+    leir_phase0_instance_t *instance,
+    llam_io_req_t *req) {
+    uint64_t expected_generation = (uint64_t)atomic_load_explicit(
+        &instance->request_generation, memory_order_acquire);
+    uint64_t observed_generation = req != NULL
+        ? (uint64_t)atomic_load_explicit(
+              &req->operation_generation, memory_order_acquire)
+        : 0U;
+    bool live =
+        atomic_load_explicit(
+            &instance->running, memory_order_acquire) == 1U &&
+        atomic_load_explicit(
+            &instance->terminal_claimed, memory_order_acquire) == 0U &&
+        atomic_load_explicit(
+            &instance->terminal, memory_order_acquire) == 0U;
+
+    if (live &&
+        atomic_load_explicit(
+            &instance->req, memory_order_acquire) == req &&
+        expected_generation != 0U &&
+        observed_generation == expected_generation) {
+        return true;
+    }
+
+    instance->metrics.stale_completions += 1U;
+    if (live) {
+        (void)publish_engine_error(instance, EPROTO);
+    }
+    return false;
+}
+
+bool leir_phase0_test_inject_completion(
+    leir_phase0_instance_t *instance,
+    uint64_t activation_generation,
+    ssize_t result,
+    int error_code) {
+    uint64_t current_generation;
+    bool live;
+
+    if (instance == NULL || instance->program == NULL ||
+        activation_generation == 0U ||
+        activation_generation == UINT64_MAX) {
+        errno = EINVAL;
+        return false;
+    }
+
+    current_generation = (uint64_t)atomic_load_explicit(
+        &instance->activation_generation, memory_order_acquire);
+    live =
+        atomic_load_explicit(
+            &instance->running, memory_order_acquire) == 1U &&
+        atomic_load_explicit(
+            &instance->terminal_claimed, memory_order_acquire) == 0U &&
+        atomic_load_explicit(
+            &instance->terminal, memory_order_acquire) == 0U;
+    if (!live || current_generation != activation_generation) {
+        instance->metrics.stale_completions += 1U;
+        if (live) {
+            (void)publish_engine_error(instance, EPROTO);
+        }
+        return false;
+    }
+    if (atomic_exchange_explicit(
+            &instance->test_completion_claimed,
+            1U,
+            memory_order_acq_rel) != 0U) {
+        instance->metrics.stale_completions += 1U;
+        return false;
+    }
+
+    instance->metrics.effect_completions += 1U;
+    if (leir_phase0_apply_result(
+            instance, result, error_code) != 0) {
+        (void)publish_engine_error(
+            instance,
+            instance->terminal_error != 0
+                ? instance->terminal_error
+                : EPROTO);
+        return true;
+    }
+    if (current_node_is_terminal(instance)) {
+        (void)publish_current_terminal(instance);
+    }
+    return true;
+}
+
 static leir_phase0_advance_result_t leir_phase0_advance_direct(
     leir_phase0_instance_t *instance) {
     for (;;) {
@@ -434,6 +712,10 @@ static leir_phase0_advance_result_t leir_phase0_advance_direct(
         int direct_rc;
         int direct_error;
 
+        if (cancellation_is_requested(instance)) {
+            mark_current_io_cancelled(instance);
+            return LEIR_PHASE0_ADVANCE_ERROR;
+        }
         if (current_node_is_terminal(instance)) {
             (void)publish_current_terminal(instance);
             return LEIR_PHASE0_ADVANCE_TERMINAL;
@@ -467,6 +749,10 @@ static leir_phase0_advance_result_t leir_phase0_advance_direct(
             &direct_result,
             NULL);
         direct_error = errno;
+        if (cancellation_is_requested(instance)) {
+            mark_current_io_cancelled(instance);
+            return LEIR_PHASE0_ADVANCE_ERROR;
+        }
         if (direct_rc == 0) {
             return LEIR_PHASE0_ADVANCE_NEEDS_BACKEND;
         }
@@ -507,6 +793,11 @@ static bool leir_phase0_resubmit(
         errno = EPROTO;
         return false;
     }
+    if (cancellation_is_requested(instance)) {
+        mark_current_io_cancelled(instance);
+        errno = ECANCELED;
+        return false;
+    }
     if (prepare_request(instance, req) != 0) {
         instance->terminal_error =
             errno != 0 ? errno : EPROTO;
@@ -522,6 +813,21 @@ static bool leir_phase0_resubmit(
         node->index,
         memory_order_release);
     atomic_store_explicit(
+        &instance->cancel_phase,
+        LEIR_PHASE0_CANCEL_PHASE_SUBMITTING,
+        memory_order_release);
+    if (cancellation_is_requested(instance)) {
+        atomic_store_explicit(
+            &instance->cancel_phase,
+            LEIR_PHASE0_CANCEL_PHASE_CALLBACK,
+            memory_order_release);
+        req->result = -1;
+        req->error_code = ECANCELED;
+        mark_current_io_cancelled(instance);
+        errno = ECANCELED;
+        return false;
+    }
+    atomic_store_explicit(
         &req->wait_mode,
         LLAM_IO_WAIT_MODE_SUBMIT_QUEUE,
         memory_order_release);
@@ -536,6 +842,10 @@ static bool leir_phase0_resubmit(
         req->result = -1;
         req->error_code = saved_errno;
         instance->terminal_error = saved_errno;
+        atomic_store_explicit(
+            &instance->cancel_phase,
+            LEIR_PHASE0_CANCEL_PHASE_CALLBACK,
+            memory_order_release);
         errno = saved_errno;
         return false;
     }
@@ -553,23 +863,31 @@ static bool leir_phase0_completion_sink(
     void *context) {
     leir_phase0_instance_t *instance = context;
     leir_phase0_advance_result_t advance_result;
-    uint64_t expected_generation;
-    uint64_t observed_generation;
 
     if (instance == NULL || req == NULL || wake_reason == NULL) {
         return false;
     }
-    expected_generation = (uint64_t)atomic_load_explicit(
-        &instance->request_generation, memory_order_acquire);
-    observed_generation = (uint64_t)atomic_load_explicit(
-        &req->operation_generation, memory_order_acquire);
-    if (atomic_load_explicit(&instance->req, memory_order_acquire) != req ||
-        expected_generation == 0U ||
-        observed_generation != expected_generation) {
-        instance->metrics.stale_completions += 1U;
+    if (!request_completion_identity_is_live(instance, req)) {
         return false;
     }
+    atomic_store_explicit(
+        &instance->initial_submit_observed,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &instance->cancel_phase,
+        LEIR_PHASE0_CANCEL_PHASE_CALLBACK,
+        memory_order_release);
+    if (cancellation_is_requested(instance)) {
+        req->result = -1;
+        req->error_code = ECANCELED;
+        *wake_reason = LLAM_WAIT_CANCEL;
+        return publish_cancellation(instance);
+    }
     if (*wake_reason != LLAM_WAIT_IO) {
+        if (*wake_reason == LLAM_WAIT_CANCEL) {
+            return publish_cancellation(instance);
+        }
         return publish_engine_error(
             instance, completion_error(req, *wake_reason));
     }
@@ -587,6 +905,12 @@ static bool leir_phase0_completion_sink(
                 ? instance->terminal_error
                 : EPROTO);
     }
+    if (cancellation_is_requested(instance)) {
+        req->result = -1;
+        req->error_code = ECANCELED;
+        *wake_reason = LLAM_WAIT_CANCEL;
+        return publish_cancellation(instance);
+    }
     if (current_node_is_terminal(instance)) {
         return publish_current_terminal(instance);
     }
@@ -597,6 +921,12 @@ static bool leir_phase0_completion_sink(
         return false;
     }
     if (advance_result == LEIR_PHASE0_ADVANCE_ERROR) {
+        if (instance->terminal_error == ECANCELED) {
+            req->result = -1;
+            req->error_code = ECANCELED;
+            *wake_reason = LLAM_WAIT_CANCEL;
+            return publish_cancellation(instance);
+        }
         return publish_engine_error(
             instance,
             instance->terminal_error != 0
@@ -608,7 +938,10 @@ static bool leir_phase0_completion_sink(
         return true;
     }
     if (instance->terminal_error == ECANCELED) {
+        req->result = -1;
+        req->error_code = ECANCELED;
         *wake_reason = LLAM_WAIT_CANCEL;
+        return publish_cancellation(instance);
     }
     return publish_engine_error(
         instance,
@@ -658,6 +991,15 @@ int leir_phase0_instance_run(
             memory_order_acquire)) {
         return fail_with_errno(EBUSY);
     }
+    if (atomic_load_explicit(
+            &instance->cancel_requested, memory_order_acquire) != 0U) {
+        (void)publish_cancellation(instance);
+        copy_outputs(instance, values_out, metrics_out);
+        atomic_store_explicit(
+            &instance->running, 0U, memory_order_release);
+        errno = ECANCELED;
+        return -1;
+    }
 
     req = llam_api_io_req_acquire(g_llam_tls_shard);
     if (req == NULL) {
@@ -685,7 +1027,27 @@ int leir_phase0_instance_run(
         request_generation,
         memory_order_release);
     atomic_store_explicit(&instance->req, req, memory_order_release);
+    atomic_store_explicit(
+        &instance->cancel_phase,
+        LEIR_PHASE0_CANCEL_PHASE_SUBMITTING,
+        memory_order_release);
     atomic_store_explicit(&instance->task, task, memory_order_release);
+    if (atomic_load_explicit(
+            &instance->cancel_requested, memory_order_acquire) != 0U) {
+        saved_errno = ECANCELED;
+        req->result = -1;
+        req->error_code = ECANCELED;
+        (void)publish_cancellation(instance);
+        unpublish_cancel_target(instance);
+        atomic_store_explicit(
+            &instance->req, NULL, memory_order_release);
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        copy_outputs(instance, values_out, metrics_out);
+        atomic_store_explicit(
+            &instance->running, 0U, memory_order_release);
+        errno = saved_errno;
+        return -1;
+    }
     instance->metrics.backend_submits += 1U;
     instance->metrics.task_parks += 1U;
 
@@ -696,15 +1058,40 @@ int leir_phase0_instance_run(
             ? instance->opts.deadline_ns
             : 0U);
     saved_errno = errno;
-    if (instance->metrics.effect_completions == 0U) {
+    if (issue_result == 0) {
+        atomic_store_explicit(
+            &instance->initial_submit_observed,
+            1U,
+            memory_order_release);
+    }
+    atomic_store_explicit(
+        &instance->cancel_phase,
+        LEIR_PHASE0_CANCEL_PHASE_IDLE,
+        memory_order_release);
+    if (atomic_load_explicit(
+            &instance->initial_submit_observed,
+            memory_order_acquire) == 0U) {
         instance->metrics.backend_submits -= 1U;
         instance->metrics.task_parks -= 1U;
+    }
+    if (atomic_load_explicit(
+            &instance->terminal, memory_order_acquire) == 0U) {
+        int terminal_error = issue_result != 0
+            ? (saved_errno != 0 ? saved_errno : EIO)
+            : EPROTO;
+
+        if (terminal_error == ECANCELED ||
+            cancellation_is_requested(instance)) {
+            (void)publish_cancellation(instance);
+        } else {
+            (void)publish_engine_error(instance, terminal_error);
+        }
     }
 
     req->completion_sink = NULL;
     req->completion_sink_context = NULL;
     atomic_store_explicit(&instance->req, NULL, memory_order_release);
-    atomic_store_explicit(&instance->task, NULL, memory_order_release);
+    unpublish_cancel_target(instance);
     llam_api_io_req_release(g_llam_tls_shard, req);
 
     if (atomic_load_explicit(

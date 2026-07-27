@@ -98,6 +98,7 @@ int leir_phase0_instance_bind(
     const leir_phase0_value_t *values,
     size_t value_count,
     const leir_phase0_run_opts_t *opts);
+int leir_phase0_instance_cancel(leir_phase0_instance_t *instance);
 int leir_phase0_instance_run(
     leir_phase0_instance_t *instance,
     leir_phase0_value_t *values_out,

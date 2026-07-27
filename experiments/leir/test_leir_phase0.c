@@ -1,4 +1,5 @@
 #include "runtime_internal.h"
+#include "io/runtime_io_api_internal.h"
 #include "leir_phase0.h"
 #include "leir_phase0_internal.h"
 #include "leir_test_support.h"
@@ -8,6 +9,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define LEIR_TEST_THREAD_SANITIZER 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+#define LEIR_TEST_THREAD_SANITIZER 1
+#endif
+#ifndef LEIR_TEST_THREAD_SANITIZER
+#define LEIR_TEST_THREAD_SANITIZER 0
+#endif
 
 static const leir_phase0_slot_kind_t valid_slots[] = {
     LEIR_PHASE0_SLOT_FD,
@@ -431,6 +444,637 @@ static int test_instance_rejects_invalid_storage_and_bindings(void) {
 cleanup_storage:
     free(storage);
 cleanup_program:
+    leir_phase0_program_destroy(program);
+    return failed;
+}
+
+static int test_instance_cancel_before_run_publishes_request(void) {
+    leir_phase0_program_desc_t desc = valid_program_desc();
+    leir_phase0_program_t *program = NULL;
+    leir_phase0_instance_t instance;
+    leir_phase0_run_opts_t opts = {
+        .inline_budget = 8U,
+    };
+    leir_phase0_value_t values[4] = {0};
+    unsigned char buffer[64];
+    int failed = 1;
+
+    if (leir_phase0_program_create(&desc, &program) != 0 ||
+        leir_phase0_instance_init(
+            &instance, sizeof(instance), program) != 0) {
+        goto cleanup;
+    }
+    values[0].fd = (llam_fd_t)0;
+    values[1].buffer.data = buffer;
+    values[1].buffer.size = sizeof(buffer);
+    values[2].u64 = sizeof(buffer);
+    values[3].i64 = -1;
+    if (leir_phase0_instance_bind(
+            &instance, values, 4U, &opts) != 0 ||
+        leir_phase0_instance_cancel(&instance) != 0 ||
+        atomic_load_explicit(
+            &instance.cancel_requested, memory_order_acquire) == 0U) {
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    leir_phase0_program_destroy(program);
+    return failed;
+}
+
+static int bind_injection_instance(
+    leir_phase0_instance_t *instance,
+    unsigned char *buffer,
+    size_t buffer_size,
+    int64_t initial_result) {
+    leir_phase0_run_opts_t opts = {
+        .inline_budget = 8U,
+    };
+    leir_phase0_value_t values[4] = {0};
+
+    values[0].fd = (llam_fd_t)0;
+    values[1].buffer.data = buffer;
+    values[1].buffer.size = buffer_size;
+    values[2].u64 = buffer_size;
+    values[3].i64 = initial_result;
+    return leir_phase0_instance_bind(
+        instance, values, 4U, &opts);
+}
+
+static int test_stale_and_duplicate_completion_injection(void) {
+    static const leir_phase0_node_desc_t intermediate_nodes[] = {
+        {
+            .opcode = LEIR_PHASE0_OP_READ_EXACT,
+            .fd_slot = 0U,
+            .buffer_slot = 1U,
+            .length_slot = 2U,
+            .result_slot = 3U,
+            .on_success = 1U,
+            .on_eof = 3U,
+            .on_error = 3U,
+        },
+        {
+            .opcode = LEIR_PHASE0_OP_READ_EXACT,
+            .fd_slot = 0U,
+            .buffer_slot = 1U,
+            .length_slot = 2U,
+            .result_slot = 3U,
+            .on_success = 2U,
+            .on_eof = 3U,
+            .on_error = 3U,
+        },
+        {
+            .opcode = LEIR_PHASE0_OP_RETURN,
+            .fd_slot = LEIR_PHASE0_NODE_NONE,
+            .buffer_slot = LEIR_PHASE0_NODE_NONE,
+            .length_slot = LEIR_PHASE0_NODE_NONE,
+            .result_slot = 3U,
+            .on_success = LEIR_PHASE0_NODE_NONE,
+            .on_eof = LEIR_PHASE0_NODE_NONE,
+            .on_error = LEIR_PHASE0_NODE_NONE,
+        },
+        {
+            .opcode = LEIR_PHASE0_OP_FAIL,
+            .fd_slot = LEIR_PHASE0_NODE_NONE,
+            .buffer_slot = LEIR_PHASE0_NODE_NONE,
+            .length_slot = LEIR_PHASE0_NODE_NONE,
+            .result_slot = 3U,
+            .on_success = LEIR_PHASE0_NODE_NONE,
+            .on_eof = LEIR_PHASE0_NODE_NONE,
+            .on_error = LEIR_PHASE0_NODE_NONE,
+        },
+    };
+    leir_phase0_program_desc_t terminal_desc = valid_program_desc();
+    leir_phase0_program_desc_t intermediate_desc = {
+        .nodes = intermediate_nodes,
+        .slot_kinds = valid_slots,
+        .node_count =
+            sizeof(intermediate_nodes) / sizeof(intermediate_nodes[0]),
+        .slot_count = sizeof(valid_slots) / sizeof(valid_slots[0]),
+        .entry_node = 0U,
+    };
+    leir_phase0_program_t *terminal_program = NULL;
+    leir_phase0_program_t *intermediate_program = NULL;
+    leir_phase0_instance_t terminal_instance;
+    leir_phase0_instance_t intermediate_instance;
+    unsigned char buffer[8] = {0};
+    uint64_t old_activation;
+    uint64_t current_activation;
+    bool terminal_initialized = false;
+    bool intermediate_initialized = false;
+    int failed = 1;
+
+    if (leir_phase0_program_create(
+            &terminal_desc, &terminal_program) != 0 ||
+        leir_phase0_program_create(
+            &intermediate_desc, &intermediate_program) != 0) {
+        goto cleanup;
+    }
+    if (leir_phase0_instance_init(
+            &terminal_instance,
+            sizeof(terminal_instance),
+            terminal_program) != 0) {
+        goto cleanup;
+    }
+    terminal_initialized = true;
+    if (leir_phase0_instance_init(
+            &intermediate_instance,
+            sizeof(intermediate_instance),
+            intermediate_program) != 0) {
+        goto cleanup;
+    }
+    intermediate_initialized = true;
+    if (bind_injection_instance(
+            &terminal_instance, buffer, sizeof(buffer), -71) != 0) {
+        goto cleanup;
+    }
+
+    atomic_store_explicit(
+        &terminal_instance.running, 1U, memory_order_release);
+    old_activation = (uint64_t)atomic_load_explicit(
+        &terminal_instance.activation_generation,
+        memory_order_acquire);
+    if (!leir_phase0_test_inject_completion(
+            &terminal_instance,
+            old_activation,
+            (ssize_t)sizeof(buffer),
+            0) ||
+        atomic_load_explicit(
+            &terminal_instance.terminal, memory_order_acquire) == 0U ||
+        terminal_instance.metrics.terminal_publications != 1U ||
+        terminal_instance.slots[3].i64 != (int64_t)sizeof(buffer) ||
+        leir_phase0_test_inject_completion(
+            &terminal_instance,
+            old_activation,
+            (ssize_t)sizeof(buffer),
+            0) ||
+        terminal_instance.metrics.terminal_publications != 1U) {
+        goto cleanup;
+    }
+    atomic_store_explicit(
+        &terminal_instance.running, 0U, memory_order_release);
+
+    if (bind_injection_instance(
+            &terminal_instance, buffer, sizeof(buffer), -73) != 0) {
+        goto cleanup;
+    }
+    current_activation = (uint64_t)atomic_load_explicit(
+        &terminal_instance.activation_generation,
+        memory_order_acquire);
+    atomic_store_explicit(
+        &terminal_instance.running, 1U, memory_order_release);
+    if (current_activation == old_activation ||
+        leir_phase0_test_inject_completion(
+            &terminal_instance,
+            old_activation,
+            (ssize_t)sizeof(buffer),
+            0) ||
+        terminal_instance.slots[3].i64 != -73 ||
+        terminal_instance.metrics.stale_completions != 1U ||
+        terminal_instance.metrics.terminal_publications != 1U ||
+        terminal_instance.terminal_error != EPROTO) {
+        goto cleanup;
+    }
+    atomic_store_explicit(
+        &terminal_instance.running, 0U, memory_order_release);
+
+    if (bind_injection_instance(
+            &intermediate_instance, buffer, sizeof(buffer), -79) != 0) {
+        goto cleanup;
+    }
+    current_activation = (uint64_t)atomic_load_explicit(
+        &intermediate_instance.activation_generation,
+        memory_order_acquire);
+    atomic_store_explicit(
+        &intermediate_instance.running, 1U, memory_order_release);
+    if (!leir_phase0_test_inject_completion(
+            &intermediate_instance,
+            current_activation,
+            (ssize_t)sizeof(buffer),
+            0) ||
+        intermediate_instance.current_node != 1U ||
+        intermediate_instance.metrics.terminal_publications != 0U ||
+        leir_phase0_test_inject_completion(
+            &intermediate_instance,
+            current_activation,
+            (ssize_t)sizeof(buffer),
+            0) ||
+        intermediate_instance.current_node != 1U ||
+        intermediate_instance.metrics.backend_submits != 0U ||
+        intermediate_instance.metrics.stale_completions != 1U) {
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    if (terminal_initialized) {
+        atomic_store_explicit(
+            &terminal_instance.running, 0U, memory_order_release);
+    }
+    if (intermediate_initialized) {
+        atomic_store_explicit(
+            &intermediate_instance.running, 0U, memory_order_release);
+    }
+    leir_phase0_program_destroy(intermediate_program);
+    leir_phase0_program_destroy(terminal_program);
+    return failed;
+}
+
+#define LEIR_CANCEL_BYTES 64U
+
+typedef struct cancellation_state {
+    leir_phase0_instance_t instance;
+    leir_phase0_value_t values_out[4];
+    leir_phase0_metrics_t metrics;
+    unsigned char expected[LEIR_CANCEL_BYTES];
+    unsigned char received[LEIR_CANCEL_BYTES];
+    atomic_uint runner_done;
+    atomic_uint canceller_ready;
+    atomic_uint observed_mode;
+    atomic_uint cancel_called;
+    bool wait_for_mode;
+    bool wait_for_inflight;
+    unsigned delay_spins;
+    int run_result;
+    int run_errno;
+    int cancel_result;
+    int cancel_errno;
+} cancellation_state_t;
+
+static void cancellation_instance_task(void *arg) {
+    cancellation_state_t *state = arg;
+
+    errno = 0;
+    state->run_result = leir_phase0_instance_run(
+        &state->instance,
+        state->values_out,
+        4U,
+        &state->metrics);
+    state->run_errno = errno;
+    atomic_store_explicit(
+        &state->runner_done, 1U, memory_order_release);
+}
+
+static unsigned cancellation_observe_wait_mode(
+    cancellation_state_t *state,
+    bool *request_published_out) {
+    llam_io_req_t *req;
+    llam_task_t *task;
+    unsigned mode = LLAM_IO_WAIT_MODE_NONE;
+
+    (void)atomic_fetch_add_explicit(
+        &state->instance.cancel_readers,
+        1U,
+        memory_order_acq_rel);
+    task = atomic_load_explicit(
+        &state->instance.task, memory_order_acquire);
+    req = task != NULL
+        ? atomic_load_explicit(
+              &state->instance.req, memory_order_acquire)
+        : NULL;
+    if (task != NULL && req != NULL) {
+        mode = atomic_load_explicit(
+            &req->wait_mode, memory_order_acquire);
+    }
+    (void)atomic_fetch_sub_explicit(
+        &state->instance.cancel_readers,
+        1U,
+        memory_order_acq_rel);
+    *request_published_out = req != NULL;
+    return mode;
+}
+
+static void *cancellation_thread(void *arg) {
+    cancellation_state_t *state = arg;
+    unsigned mode = LLAM_IO_WAIT_MODE_NONE;
+    unsigned i;
+
+    atomic_store_explicit(
+        &state->canceller_ready, 1U, memory_order_release);
+    for (;;) {
+        bool request_published = false;
+
+        mode = cancellation_observe_wait_mode(
+            state, &request_published);
+        if (request_published) {
+            if (!state->wait_for_mode ||
+                (state->wait_for_inflight
+                     ? mode == LLAM_IO_WAIT_MODE_INFLIGHT
+                     : mode != LLAM_IO_WAIT_MODE_NONE)) {
+                break;
+            }
+        }
+        if (atomic_load_explicit(
+                &state->runner_done, memory_order_acquire) != 0U) {
+            break;
+        }
+    }
+    atomic_store_explicit(
+        &state->observed_mode, mode, memory_order_release);
+    for (i = 0U; i < state->delay_spins; i += 1U) {
+        atomic_signal_fence(memory_order_seq_cst);
+    }
+    errno = 0;
+    state->cancel_result =
+        leir_phase0_instance_cancel(&state->instance);
+    state->cancel_errno = errno;
+    atomic_store_explicit(
+        &state->cancel_called, 1U, memory_order_release);
+    return NULL;
+}
+
+static bool runtime_pending_ops_are_zero(void) {
+    unsigned i;
+
+    for (i = 0U; i < g_llam_runtime.active_nodes; i += 1U) {
+        if (atomic_load_explicit(
+                &g_llam_runtime.nodes[i].pending_ops,
+                memory_order_acquire) != 0U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int bind_cancellation_instance(
+    cancellation_state_t *state,
+    llam_fd_t fd) {
+    leir_phase0_run_opts_t opts = {
+        .inline_budget = 8U,
+        .force_backend = true,
+    };
+    leir_phase0_value_t values[4] = {0};
+
+    memset(state->received, 0, sizeof(state->received));
+    memset(state->values_out, 0, sizeof(state->values_out));
+    memset(&state->metrics, 0, sizeof(state->metrics));
+    state->run_result = -2;
+    state->run_errno = 0;
+    state->cancel_result = -2;
+    state->cancel_errno = 0;
+    atomic_store_explicit(
+        &state->runner_done, 0U, memory_order_release);
+    atomic_store_explicit(
+        &state->canceller_ready, 0U, memory_order_release);
+    atomic_store_explicit(
+        &state->observed_mode,
+        LLAM_IO_WAIT_MODE_NONE,
+        memory_order_release);
+    atomic_store_explicit(
+        &state->cancel_called, 0U, memory_order_release);
+
+    values[0].fd = fd;
+    values[1].buffer.data = state->received;
+    values[1].buffer.size = sizeof(state->received);
+    values[2].u64 = sizeof(state->received);
+    values[3].i64 = 17;
+    return leir_phase0_instance_bind(
+        &state->instance, values, 4U, &opts);
+}
+
+static int run_cancellation_activation(
+    cancellation_state_t *state,
+    llam_fd_t pair[2],
+    bool preload_success,
+    bool use_canceller,
+    bool wait_for_mode,
+    bool wait_for_inflight,
+    unsigned delay_spins) {
+    pthread_t canceller;
+    llam_task_t *runner = NULL;
+    bool canceller_started = false;
+    int failed = 1;
+
+    state->wait_for_mode = wait_for_mode;
+    state->wait_for_inflight = wait_for_inflight;
+    state->delay_spins = delay_spins;
+    if (bind_cancellation_instance(state, pair[0]) != 0) {
+        return 1;
+    }
+    if (preload_success &&
+        leir_test_write_all(
+            pair[1], state->expected, sizeof(state->expected)) != 0) {
+        return 1;
+    }
+    if (use_canceller) {
+        if (pthread_create(
+                &canceller, NULL, cancellation_thread, state) != 0) {
+            return 1;
+        }
+        canceller_started = true;
+        while (atomic_load_explicit(
+                   &state->canceller_ready,
+                   memory_order_acquire) == 0U) {
+            atomic_signal_fence(memory_order_seq_cst);
+        }
+    }
+
+    runner = llam_spawn(cancellation_instance_task, state, NULL);
+    if (runner == NULL || llam_run() != 0 ||
+        llam_join(runner) != 0) {
+        runner = NULL;
+        goto cleanup;
+    }
+    runner = NULL;
+    if (canceller_started) {
+        if (pthread_join(canceller, NULL) != 0) {
+            canceller_started = false;
+            goto cleanup;
+        }
+        canceller_started = false;
+    }
+    if (atomic_load_explicit(
+            &state->instance.running, memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &state->instance.cancel_readers, memory_order_acquire) != 0U ||
+        state->metrics.terminal_publications != 1U ||
+        !runtime_pending_ops_are_zero()) {
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    if (runner != NULL) {
+        (void)llam_runtime_request_stop();
+        (void)llam_run();
+        (void)llam_join(runner);
+    }
+    if (canceller_started) {
+        (void)leir_phase0_instance_cancel(&state->instance);
+        (void)pthread_join(canceller, NULL);
+    }
+    return failed;
+}
+
+static size_t cancellation_race_iterations(void) {
+    const char *value = getenv("LLAM_LEIR_RACE_ITERS");
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (value == NULL || *value == '\0') {
+        return 100U;
+    }
+    errno = 0;
+    parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        parsed == 0UL || parsed > 10000UL) {
+        return 100U;
+    }
+    return (size_t)parsed;
+}
+
+static int test_pre_submit_inflight_and_racing_cancellation(void) {
+    cancellation_state_t state;
+    leir_phase0_program_desc_t desc = valid_program_desc();
+    leir_phase0_program_t *program = NULL;
+    llam_runtime_opts_t runtime_opts;
+    llam_fd_t pair[2] = {
+        LLAM_INVALID_FD,
+        LLAM_INVALID_FD,
+    };
+    bool runtime_started = false;
+    bool saw_submit_queue = false;
+    bool saw_inflight = false;
+    size_t race_iterations;
+    size_t i;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.runner_done, 0U);
+    atomic_init(&state.canceller_ready, 0U);
+    atomic_init(
+        &state.observed_mode, LLAM_IO_WAIT_MODE_NONE);
+    atomic_init(&state.cancel_called, 0U);
+    leir_test_fill_pattern(
+        state.expected,
+        sizeof(state.expected),
+        UINT64_C(0x4c45495243414e43));
+    if (leir_phase0_program_create(&desc, &program) != 0 ||
+        leir_phase0_instance_init(
+            &state.instance,
+            sizeof(state.instance),
+            program) != 0) {
+        goto cleanup;
+    }
+
+    memset(&runtime_opts, 0, sizeof(runtime_opts));
+    runtime_opts.deterministic = 1U;
+    runtime_opts.forced_yield_every = 1U;
+    runtime_opts.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&runtime_opts) != 0) {
+        goto cleanup;
+    }
+    runtime_started = true;
+
+    if (leir_test_socketpair(pair) != 0 ||
+        bind_cancellation_instance(&state, pair[0]) != 0 ||
+        leir_phase0_instance_cancel(&state.instance) != 0) {
+        goto cleanup;
+    }
+    {
+        llam_task_t *runner =
+            llam_spawn(cancellation_instance_task, &state, NULL);
+
+        if (runner == NULL || llam_run() != 0 ||
+            llam_join(runner) != 0 ||
+            state.run_result != -1 ||
+            state.run_errno != ECANCELED ||
+            state.values_out[3].i64 != -1 ||
+            state.metrics.backend_submits != 0U ||
+            state.metrics.task_parks != 0U ||
+            state.metrics.effect_completions != 0U ||
+            state.metrics.terminal_publications != 1U ||
+            !runtime_pending_ops_are_zero()) {
+            goto cleanup;
+        }
+    }
+    leir_test_close(&pair[0]);
+    leir_test_close(&pair[1]);
+
+    for (i = 0U; i < 64U &&
+                 (!saw_submit_queue || !saw_inflight);
+         i += 1U) {
+        unsigned observed;
+
+        if (leir_test_socketpair(pair) != 0 ||
+            run_cancellation_activation(
+                &state,
+                pair,
+                false,
+                true,
+                true,
+                saw_submit_queue,
+                0U) != 0 ||
+            state.run_result != -1 ||
+            state.run_errno != ECANCELED ||
+            state.values_out[3].i64 != -1 ||
+            state.metrics.backend_submits != 1U ||
+            state.metrics.task_parks != 1U ||
+            state.cancel_result != 0 ||
+            atomic_load_explicit(
+                &state.cancel_called, memory_order_acquire) == 0U) {
+            goto cleanup;
+        }
+        observed = atomic_load_explicit(
+            &state.observed_mode, memory_order_acquire);
+        saw_submit_queue =
+            saw_submit_queue ||
+            observed == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE;
+        saw_inflight =
+            saw_inflight ||
+            observed == LLAM_IO_WAIT_MODE_INFLIGHT;
+        leir_test_close(&pair[0]);
+        leir_test_close(&pair[1]);
+    }
+    if (!saw_submit_queue || !saw_inflight) {
+        fprintf(
+            stderr,
+            "cancellation modes missing: submit=%u inflight=%u\n",
+            saw_submit_queue ? 1U : 0U,
+            saw_inflight ? 1U : 0U);
+        goto cleanup;
+    }
+
+    race_iterations = cancellation_race_iterations();
+    for (i = 0U; i < race_iterations; i += 1U) {
+        if (leir_test_socketpair(pair) != 0 ||
+            run_cancellation_activation(
+                &state,
+                pair,
+                true,
+                true,
+                (i & 1U) != 0U,
+                false,
+                (unsigned)(i & 31U) * 32U) != 0) {
+            goto cleanup;
+        }
+        if (state.run_result == 0) {
+            if (state.run_errno != 0 ||
+                state.values_out[3].i64 !=
+                    (int64_t)sizeof(state.received) ||
+                memcmp(
+                    state.received,
+                    state.expected,
+                    sizeof(state.received)) != 0) {
+                goto cleanup;
+            }
+        } else if (state.run_result != -1 ||
+                   state.run_errno != ECANCELED) {
+            goto cleanup;
+        }
+        leir_test_close(&pair[0]);
+        leir_test_close(&pair[1]);
+    }
+    failed = 0;
+
+cleanup:
+    leir_test_close(&pair[0]);
+    leir_test_close(&pair[1]);
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
     leir_phase0_program_destroy(program);
     return failed;
 }
@@ -912,6 +1556,448 @@ static int test_multi_node_differential_advancement(void) {
                : 0;
 }
 
+#define LEIR_FAIR_IO_NODES (LEIR_PHASE0_MAX_NODES - 1U)
+#define LEIR_FAIR_ACTIVATIONS 256U
+#define LEIR_FAIR_GAP_CAPACITY 8192U
+
+typedef enum fairness_phase {
+    LEIR_FAIR_PHASE_BASELINE = 0,
+    LEIR_FAIR_PHASE_CANDIDATE = 1,
+    LEIR_FAIR_PHASE_DONE = 2,
+} fairness_phase_t;
+
+typedef struct fairness_state {
+    llam_fd_t pair[2];
+    leir_phase0_program_t *program;
+    leir_phase0_metrics_t metrics;
+    unsigned char preload[
+        LEIR_FAIR_IO_NODES * LEIR_FAIR_ACTIVATIONS];
+    uint64_t baseline_gaps[LEIR_FAIR_GAP_CAPACITY];
+    uint64_t candidate_gaps[LEIR_FAIR_GAP_CAPACITY];
+    size_t baseline_gap_count;
+    size_t candidate_gap_count;
+    uint64_t baseline_runs;
+    uint64_t candidate_runs;
+    unsigned inline_budget;
+    atomic_uint phase;
+    atomic_uint failures;
+    int first_errno;
+    char first_case[96];
+} fairness_state_t;
+
+typedef struct fairness_result {
+    leir_phase0_metrics_t metrics;
+    uint64_t baseline_p99_ns;
+    uint64_t candidate_p99_ns;
+    uint64_t companion_runs;
+    bool ready_path_valid;
+} fairness_result_t;
+
+static void fairness_fail(
+    fairness_state_t *state,
+    const char *where,
+    int error_code) {
+    if (atomic_fetch_add_explicit(
+            &state->failures, 1U, memory_order_relaxed) == 0U) {
+        state->first_errno = error_code;
+        (void)snprintf(
+            state->first_case, sizeof(state->first_case), "%s", where);
+    }
+}
+
+static void fairness_metrics_add(
+    leir_phase0_metrics_t *total,
+    const leir_phase0_metrics_t *sample) {
+    total->activations += sample->activations;
+    total->effect_completions += sample->effect_completions;
+    total->backend_submits += sample->backend_submits;
+    total->direct_completions += sample->direct_completions;
+    total->task_parks += sample->task_parks;
+    total->terminal_publications += sample->terminal_publications;
+    total->task_resumes_avoided += sample->task_resumes_avoided;
+    total->fairness_resubmits += sample->fairness_resubmits;
+    total->stale_completions += sample->stale_completions;
+    total->heap_requests += sample->heap_requests;
+    total->hot_allocations += sample->hot_allocations;
+}
+
+static void fairness_companion_task(void *arg) {
+    fairness_state_t *state = arg;
+    unsigned previous_phase = LEIR_FAIR_PHASE_DONE;
+    uint64_t previous_ns = 0U;
+
+    for (;;) {
+        unsigned phase = atomic_load_explicit(
+            &state->phase, memory_order_acquire);
+        uint64_t now_ns;
+
+        if (phase == LEIR_FAIR_PHASE_DONE) {
+            return;
+        }
+        now_ns = llam_now_ns();
+        if (phase != previous_phase) {
+            previous_phase = phase;
+            previous_ns = now_ns;
+        } else {
+            uint64_t gap =
+                now_ns >= previous_ns ? now_ns - previous_ns : 0U;
+
+            if (phase == LEIR_FAIR_PHASE_BASELINE) {
+                state->baseline_runs += 1U;
+                if (state->baseline_gap_count <
+                    LEIR_FAIR_GAP_CAPACITY) {
+                    state->baseline_gaps[
+                        state->baseline_gap_count++] = gap;
+                }
+            } else {
+                state->candidate_runs += 1U;
+                if (state->candidate_gap_count <
+                    LEIR_FAIR_GAP_CAPACITY) {
+                    state->candidate_gaps[
+                        state->candidate_gap_count++] = gap;
+                }
+            }
+            previous_ns = now_ns;
+        }
+        llam_yield();
+    }
+}
+
+static bool fairness_baseline_completion_sink(
+    llam_node_t *node,
+    llam_io_req_t *req,
+    unsigned completion_owner,
+    llam_wait_reason_t *wake_reason,
+    void *context) {
+    (void)node;
+    (void)req;
+    (void)completion_owner;
+    (void)wake_reason;
+    (void)context;
+    return false;
+}
+
+static void fairness_candidate_task(void *arg) {
+    fairness_state_t *state = arg;
+    leir_phase0_instance_t instance;
+    leir_phase0_value_t values[4] = {0};
+    leir_phase0_value_t values_out[4] = {0};
+    leir_phase0_run_opts_t opts = {
+        .force_backend = false,
+    };
+    unsigned char byte = 0U;
+    unsigned i;
+
+    if (leir_phase0_instance_init(
+            &instance, sizeof(instance), state->program) != 0) {
+        fairness_fail(state, "fairness instance init", errno);
+        atomic_store_explicit(
+            &state->phase,
+            LEIR_FAIR_PHASE_DONE,
+            memory_order_release);
+        return;
+    }
+    for (i = 0U;
+         i < LEIR_FAIR_IO_NODES * LEIR_FAIR_ACTIVATIONS;
+         i += 1U) {
+        llam_io_req_t *req =
+            llam_api_io_req_acquire(g_llam_tls_shard);
+
+        if (req == NULL) {
+            fairness_fail(
+                state, "fairness baseline acquire", errno);
+            atomic_store_explicit(
+                &state->phase,
+                LEIR_FAIR_PHASE_DONE,
+                memory_order_release);
+            return;
+        }
+        req->kind = LLAM_IO_KIND_READ;
+        req->fd = state->pair[0];
+        req->buf = &byte;
+        req->count = sizeof(byte);
+        req->completion_sink =
+            fairness_baseline_completion_sink;
+        req->completion_sink_context = NULL;
+        if (llam_issue_io(req, false, 0U) != 0) {
+            int saved_errno = errno;
+
+            req->completion_sink = NULL;
+            llam_api_io_req_release(g_llam_tls_shard, req);
+            fairness_fail(
+                state,
+                "fairness baseline await",
+                saved_errno);
+            atomic_store_explicit(
+                &state->phase,
+                LEIR_FAIR_PHASE_DONE,
+                memory_order_release);
+            return;
+        }
+        req->completion_sink = NULL;
+        req->completion_sink_context = NULL;
+        llam_api_io_req_release(g_llam_tls_shard, req);
+    }
+    if (leir_test_write_all(
+            state->pair[1],
+            state->preload,
+            sizeof(state->preload)) != 0) {
+        fairness_fail(
+            state, "fairness candidate preload", errno);
+        atomic_store_explicit(
+            &state->phase,
+            LEIR_FAIR_PHASE_DONE,
+            memory_order_release);
+        return;
+    }
+
+    opts.inline_budget = state->inline_budget;
+    values[0].fd = state->pair[0];
+    values[1].buffer.data = &byte;
+    values[1].buffer.size = sizeof(byte);
+    values[2].u64 = sizeof(byte);
+    atomic_store_explicit(
+        &state->phase,
+        LEIR_FAIR_PHASE_CANDIDATE,
+        memory_order_release);
+    for (i = 0U; i < LEIR_FAIR_ACTIVATIONS; i += 1U) {
+        leir_phase0_metrics_t metrics;
+
+        values[3].i64 = -1;
+        if (leir_phase0_instance_bind(
+                &instance, values, 4U, &opts) != 0 ||
+            leir_phase0_instance_run(
+                &instance, values_out, 4U, &metrics) != 0 ||
+            values_out[3].i64 != 1) {
+            fairness_fail(state, "fairness activation", errno);
+            break;
+        }
+        fairness_metrics_add(&state->metrics, &metrics);
+    }
+    atomic_store_explicit(
+        &state->phase,
+        LEIR_FAIR_PHASE_DONE,
+        memory_order_release);
+}
+
+static int compare_u64(const void *left, const void *right) {
+    uint64_t lhs = *(const uint64_t *)left;
+    uint64_t rhs = *(const uint64_t *)right;
+
+    return lhs < rhs ? -1 : (lhs > rhs ? 1 : 0);
+}
+
+static uint64_t fairness_p99(
+    uint64_t *samples,
+    size_t sample_count) {
+    size_t index;
+
+    if (sample_count == 0U) {
+        return 0U;
+    }
+    qsort(
+        samples,
+        sample_count,
+        sizeof(samples[0]),
+        compare_u64);
+    index = (sample_count * 99U + 99U) / 100U;
+    return samples[index == 0U ? 0U : index - 1U];
+}
+
+static int create_fairness_program(
+    leir_phase0_program_t **program_out) {
+    leir_phase0_node_desc_t nodes[LEIR_PHASE0_MAX_NODES];
+    leir_phase0_program_desc_t desc;
+    uint16_t terminal_node = (uint16_t)LEIR_FAIR_IO_NODES;
+    unsigned i;
+
+    if (program_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (i = 0U; i < LEIR_FAIR_IO_NODES; i += 1U) {
+        nodes[i] = (leir_phase0_node_desc_t){
+            .opcode = LEIR_PHASE0_OP_READ,
+            .fd_slot = 0U,
+            .buffer_slot = 1U,
+            .length_slot = 2U,
+            .result_slot = 3U,
+            .on_success =
+                i + 1U == LEIR_FAIR_IO_NODES
+                    ? terminal_node
+                    : (uint16_t)(i + 1U),
+            .on_eof = terminal_node,
+            .on_error = terminal_node,
+        };
+    }
+    nodes[terminal_node] = (leir_phase0_node_desc_t){
+        .opcode = LEIR_PHASE0_OP_RETURN,
+        .fd_slot = LEIR_PHASE0_NODE_NONE,
+        .buffer_slot = LEIR_PHASE0_NODE_NONE,
+        .length_slot = LEIR_PHASE0_NODE_NONE,
+        .result_slot = 3U,
+        .on_success = LEIR_PHASE0_NODE_NONE,
+        .on_eof = LEIR_PHASE0_NODE_NONE,
+        .on_error = LEIR_PHASE0_NODE_NONE,
+    };
+    desc = (leir_phase0_program_desc_t){
+        .nodes = nodes,
+        .slot_kinds = valid_slots,
+        .node_count = LEIR_PHASE0_MAX_NODES,
+        .slot_count = sizeof(valid_slots) / sizeof(valid_slots[0]),
+        .entry_node = 0U,
+    };
+    return leir_phase0_program_create(&desc, program_out);
+}
+
+static int run_fairness_case(
+    unsigned inline_budget,
+    fairness_result_t *result_out) {
+    fairness_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *companion = NULL;
+    llam_task_t *candidate = NULL;
+    uint64_t expected_effects =
+        LEIR_FAIR_IO_NODES * LEIR_FAIR_ACTIVATIONS;
+    uint64_t expected_backend_per_activation =
+        (LEIR_FAIR_IO_NODES + inline_budget - 1U) /
+        inline_budget;
+    uint64_t expected_fairness_per_activation =
+        (LEIR_FAIR_IO_NODES - 1U) / inline_budget;
+    bool runtime_started = false;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.pair[0] = LLAM_INVALID_FD;
+    state.pair[1] = LLAM_INVALID_FD;
+    state.inline_budget = inline_budget;
+    atomic_init(&state.phase, LEIR_FAIR_PHASE_BASELINE);
+    atomic_init(&state.failures, 0U);
+    memset(result_out, 0, sizeof(*result_out));
+    leir_test_fill_pattern(
+        state.preload,
+        sizeof(state.preload),
+        UINT64_C(0x4c45495246414952) + inline_budget);
+    if (create_fairness_program(&state.program) != 0 ||
+        leir_test_socketpair(state.pair) != 0 ||
+        leir_test_write_all(
+            state.pair[1],
+            state.preload,
+            sizeof(state.preload)) != 0) {
+        goto cleanup;
+    }
+
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    opts.experimental_flags =
+        LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ;
+    if (llam_runtime_init(&opts) != 0) {
+        goto cleanup;
+    }
+    runtime_started = true;
+    companion = llam_spawn(fairness_companion_task, &state, NULL);
+    candidate = llam_spawn(fairness_candidate_task, &state, NULL);
+    if (companion == NULL || candidate == NULL ||
+        llam_run() != 0) {
+        goto cleanup;
+    }
+    if (llam_join(companion) != 0 ||
+        llam_join(candidate) != 0) {
+        companion = NULL;
+        candidate = NULL;
+        goto cleanup;
+    }
+    companion = NULL;
+    candidate = NULL;
+    if (atomic_load_explicit(
+            &state.failures, memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "fairness budget %u failed at %s: errno=%d\n",
+            inline_budget,
+            state.first_case,
+            state.first_errno);
+        goto cleanup;
+    }
+
+    result_out->metrics = state.metrics;
+    result_out->baseline_p99_ns = fairness_p99(
+        state.baseline_gaps, state.baseline_gap_count);
+    result_out->candidate_p99_ns = fairness_p99(
+        state.candidate_gaps, state.candidate_gap_count);
+    result_out->companion_runs = state.candidate_runs;
+    result_out->ready_path_valid =
+        state.metrics.effect_completions == expected_effects &&
+        state.metrics.backend_submits ==
+            expected_backend_per_activation *
+                LEIR_FAIR_ACTIVATIONS &&
+        state.metrics.direct_completions ==
+            expected_effects -
+                state.metrics.backend_submits &&
+        state.metrics.fairness_resubmits ==
+            expected_fairness_per_activation *
+                LEIR_FAIR_ACTIVATIONS;
+    if (state.baseline_runs == 0U ||
+        state.candidate_runs == 0U ||
+        state.baseline_gap_count < 100U ||
+        state.candidate_gap_count < 100U ||
+        state.metrics.activations != LEIR_FAIR_ACTIVATIONS ||
+        state.metrics.task_parks != LEIR_FAIR_ACTIVATIONS ||
+        state.metrics.terminal_publications !=
+            LEIR_FAIR_ACTIVATIONS ||
+        state.metrics.task_resumes_avoided !=
+            (LEIR_FAIR_IO_NODES - 1U) *
+                LEIR_FAIR_ACTIVATIONS ||
+        state.metrics.heap_requests != 0U ||
+        state.metrics.hot_allocations != 0U ||
+        !runtime_pending_ops_are_zero()) {
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
+    leir_test_close(&state.pair[0]);
+    leir_test_close(&state.pair[1]);
+    leir_phase0_program_destroy(state.program);
+    return failed;
+}
+
+static int test_inline_budget_fairness_and_companion_service(void) {
+    const unsigned budgets[] = {1U, 8U, 32U};
+    fairness_result_t results[
+        sizeof(budgets) / sizeof(budgets[0])];
+    bool latency_gating = true;
+    size_t i;
+
+    for (i = 0U; i < sizeof(budgets) / sizeof(budgets[0]); i += 1U) {
+        if (run_fairness_case(budgets[i], &results[i]) != 0) {
+            return 1;
+        }
+        latency_gating =
+            latency_gating && results[i].ready_path_valid;
+    }
+    if (results[0].metrics.fairness_resubmits == 0U ||
+        results[0].companion_runs == 0U) {
+        return 1;
+    }
+    if (!LEIR_TEST_THREAD_SANITIZER &&
+        latency_gating &&
+        results[0].candidate_p99_ns >
+            results[0].baseline_p99_ns * 110U / 100U) {
+        fprintf(
+            stderr,
+            "fairness p99 regression: baseline=%llu candidate=%llu\n",
+            (unsigned long long)results[0].baseline_p99_ns,
+            (unsigned long long)results[0].candidate_p99_ns);
+        return 1;
+    }
+    return 0;
+}
+
 #define LEIR_PARTIAL_BYTES (16U * 1024U)
 #define LEIR_PARTIAL_SLICE 257U
 #define LEIR_PARTIAL_EOF_BYTES 777U
@@ -1333,12 +2419,32 @@ int main(void) {
               stderr);
         return 1;
     }
+    if (test_instance_cancel_before_run_publishes_request() != 0) {
+        fputs("test_instance_cancel_before_run_publishes_request failed\n",
+              stderr);
+        return 1;
+    }
+    if (test_stale_and_duplicate_completion_injection() != 0) {
+        fputs("test_stale_and_duplicate_completion_injection failed\n",
+              stderr);
+        return 1;
+    }
+    if (test_pre_submit_inflight_and_racing_cancellation() != 0) {
+        fputs("test_pre_submit_inflight_and_racing_cancellation failed\n",
+              stderr);
+        return 1;
+    }
     if (test_pending_read_terminal_uses_one_park() != 0) {
         fputs("test_pending_read_terminal_uses_one_park failed\n", stderr);
         return 1;
     }
     if (test_multi_node_differential_advancement() != 0) {
         fputs("test_multi_node_differential_advancement failed\n", stderr);
+        return 1;
+    }
+    if (test_inline_budget_fairness_and_companion_service() != 0) {
+        fputs("test_inline_budget_fairness_and_companion_service failed\n",
+              stderr);
         return 1;
     }
     if (test_partial_exact_eof_and_error_paths() != 0) {

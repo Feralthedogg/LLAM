@@ -13,6 +13,12 @@ typedef enum leir_phase0_advance_result {
     LEIR_PHASE0_ADVANCE_ERROR = 2,
 } leir_phase0_advance_result_t;
 
+typedef enum leir_phase0_cancel_phase {
+    LEIR_PHASE0_CANCEL_PHASE_IDLE = 0,
+    LEIR_PHASE0_CANCEL_PHASE_SUBMITTING = 1,
+    LEIR_PHASE0_CANCEL_PHASE_CALLBACK = 2,
+} leir_phase0_cancel_phase_t;
+
 struct leir_phase0_program {
     leir_phase0_node_desc_t nodes[LEIR_PHASE0_MAX_NODES];
     leir_phase0_slot_kind_t slot_kinds[LEIR_PHASE0_MAX_SLOTS];
@@ -30,8 +36,13 @@ struct leir_phase0_instance {
     _Atomic(llam_io_req_t *) req;
     _Atomic(llam_task_t *) task;
     atomic_uint cancel_requested;
+    atomic_uint cancel_readers;
+    atomic_uint cancel_phase;
     atomic_uint running;
+    atomic_uint terminal_claimed;
     atomic_uint terminal;
+    atomic_uint initial_submit_observed;
+    atomic_uint test_completion_claimed;
     atomic_uint_fast64_t activation_generation;
     atomic_uint_fast64_t request_generation;
     uint16_t current_node;
@@ -44,5 +55,11 @@ int leir_phase0_program_create_with_allocator(
     const leir_phase0_program_desc_t *desc,
     leir_phase0_program_t **out,
     leir_phase0_calloc_fn calloc_fn);
+
+bool leir_phase0_test_inject_completion(
+    leir_phase0_instance_t *instance,
+    uint64_t activation_generation,
+    ssize_t result,
+    int error_code);
 
 #endif
