@@ -47,26 +47,26 @@ ThreadSanitizer where supported.
 - Modify: `src/internal/runtime_types.h`
 - Modify: `experiments/leir/test_leir_native_linux.c`
 
-- [ ] Add reducer tests where a non-tail `READ_FIXED` returns `0` and a
+- [x] Add reducer tests where a non-tail `READ_FIXED` returns `0` and a
   positive value smaller than the requested length. Assert semantic EOF/error
   selection, target retirement, no fatal runtime state, and reusable batch.
-- [ ] Add an injected `io_uring_enter` short-submit test for a linked batch.
+- [x] Add an injected `io_uring_enter` short-submit test for a linked batch.
   Assert only the submitted prefix is considered in flight, the unsubmitted
   suffix remains owned by the caller, and token storage is not released.
-- [ ] Run `make -j4 test_leir_native_linux && ./test_leir_native_linux` and
+- [x] Run `make -j4 test_leir_native_linux && ./test_leir_native_linux` and
   record both intended failures.
-- [ ] Replace the sign-only non-tail CQE guard with opcode-aware expected-result
+- [x] Replace the sign-only non-tail CQE guard with opcode-aware expected-result
   classification. A successful non-tail CQE is impossible only when the
   operation's semantic contract says it should have been skipped; EOF/short
   reads transition to a real semantic failure and wait for kernel-proven
   retirement.
-- [ ] Request `IORING_SETUP_SUBMIT_ALL` and record whether the kernel accepted
+- [x] Request `IORING_SETUP_SUBMIT_ALL` and record whether the kernel accepted
   it. Reject multi-operation native chains when that setup guarantee is absent.
   Guard omitted-tail retirement with the same recorded guarantee so even an
   injected fragmented submit cannot release caller-owned token storage.
-- [ ] Run the focused test natively and in the privileged Linux 6.x io_uring
+- [x] Run the focused test natively and in the privileged Linux 6.x io_uring
   container.
-- [ ] Commit as `fix: make native segment retirement submission-aware`.
+- [x] Commit as `fix: make native segment retirement submission-aware`.
 
 ### Task 2: Close native adapter copy and lifecycle races
 
@@ -91,7 +91,7 @@ ThreadSanitizer where supported.
   successful prefix. A short receive can preserve caller bytes but cannot
   disclose scratch bytes from an earlier activation.
 - [x] Run native segment tests, ASan/UBSan, and the deterministic race loops.
-- [ ] Commit as `fix: seal native instance ownership transitions`.
+- [x] Commit as `fix: seal native instance ownership transitions`.
 
 ### Task 3: Dispose blocking results suppressed by cancellation
 
@@ -116,28 +116,29 @@ ThreadSanitizer where supported.
 - [x] Keep ordinary worker failure and no-result cancellation unchanged.
 - [x] Run API edge, core, shutdown, Linux ASan/UBSan, and Windows cross-build
   tests.
-- [ ] Commit as `fix: discard canceled blocking results`.
+- [x] Commit as `fix: discard canceled blocking results`.
 
 ### Task 4: Unpublish watch waiters before reclaiming watches
 
 **Files:**
+- Modify: `Makefile`
+- Modify: `src/internal/runtime_proto_io.h`
 - Modify: `src/io/watch/close.c`
-- Modify: `src/io/watch/waiter.c`
-- Modify: `src/io/watch/watch_lookup.c`
 - Modify: `tests/test_runtime_shutdown_internal.c`
 
-- [ ] Add deterministic poll-watch and accept-watch tests that pause close
-  after detaching a waiter and race request cancellation. Run under ASan and
-  observe the stale watch dereference.
-- [ ] While holding `watch_lock`, transfer each detached waiter away from the
+- [x] Add deterministic poll-, accept-, and recv-watch tests that pause close
+  after detaching a waiter and before completion. Assert cancellation cannot
+  re-enter through an old wait mode or raw watch pointer.
+- [x] While holding `watch_lock`, transfer each detached waiter away from the
   watch: clear the request's watch pointer/owner metadata and publish
   `LLAM_IO_WAIT_MODE_NONE` before any path can free the watch.
-- [ ] If the completion queue itself needs the object, take one explicit
-  lifetime reference per queued completion and release it after completion.
-- [ ] Make cancellation treat an already-unpublished waiter as a completed
+- [x] Prove the detached completion list carries requests rather than watch
+  objects, so no additional watch lifetime reference is required.
+- [x] Make cancellation treat an already-unpublished waiter as a completed
   race, without dereferencing the old watch.
-- [ ] Run the two race loops under ASan/TSan and all watch/API tests.
-- [ ] Commit as `fix: retire watch waiters before reclamation`.
+- [x] Run the race contract under ASan/UBSan and TSan, run host/Linux
+  watch/API regressions, and cross-build production/test-hook Windows targets.
+- [x] Commit as `fix: retire watch waiters before reclamation`.
 
 ### Task 5: Bind broker I/O to stable descriptor identities
 

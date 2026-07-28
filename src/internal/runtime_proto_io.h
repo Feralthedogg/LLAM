@@ -50,6 +50,12 @@ typedef void (*llam_io_submit_detach_snapshot_hook_fn)(llam_io_req_t *req,
                                                         unsigned node_index);
 void llam_io_test_set_submit_detach_snapshot_hook(
     llam_io_submit_detach_snapshot_hook_fn hook);
+typedef void (*llam_io_close_watch_unlocked_hook_fn)(
+    llam_node_t *node,
+    void *context);
+void llam_io_test_set_close_watch_unlocked_hook(
+    llam_io_close_watch_unlocked_hook_fn hook,
+    void *context);
 #endif
 
 static inline bool llam_io_req_abort_requested(const llam_io_req_t *req) {

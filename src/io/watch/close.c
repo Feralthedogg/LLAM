@@ -35,16 +35,102 @@
 
 #if !LLAM_PLATFORM_WINDOWS
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static llam_io_close_watch_unlocked_hook_fn
+    g_llam_io_close_watch_unlocked_hook;
+static void *g_llam_io_close_watch_unlocked_context;
+
+void llam_io_test_set_close_watch_unlocked_hook(
+    llam_io_close_watch_unlocked_hook_fn hook,
+    void *context) {
+    g_llam_io_close_watch_unlocked_context = context;
+    g_llam_io_close_watch_unlocked_hook = hook;
+}
+
+static void llam_io_test_close_watch_unlocked(
+    llam_node_t *node) {
+    llam_io_close_watch_unlocked_hook_fn hook =
+        g_llam_io_close_watch_unlocked_hook;
+
+    if (hook != NULL) {
+        hook(
+            node,
+            g_llam_io_close_watch_unlocked_context);
+    }
+}
+#endif
+
 typedef struct llam_closed_watch_waiters {
     llam_io_req_t *head;
     llam_io_req_t *tail;
 } llam_closed_watch_waiters_t;
 
-static void llam_closed_watch_waiters_append(llam_closed_watch_waiters_t *detached,
+static bool llam_closed_watch_waiter_matches(const llam_io_req_t *req,
+                                              unsigned mode,
+                                              const void *watch) {
+    if (req == NULL || watch == NULL) {
+        return false;
+    }
+    if (mode == LLAM_IO_WAIT_MODE_POLL_WATCH) {
+        return req->poll_watch == watch;
+    }
+    if (mode == LLAM_IO_WAIT_MODE_ACCEPT_WATCH) {
+        return req->accept_watch == watch;
+    }
+    if (mode == LLAM_IO_WAIT_MODE_RECV_WATCH) {
+        return req->recv_watch == watch;
+    }
+    return false;
+}
+
+static void llam_closed_watch_waiter_unpublish(llam_node_t *node,
+                                               llam_io_req_t *req,
+                                               unsigned mode,
+                                               const void *watch) {
+    if (req == NULL) {
+        return;
+    }
+    if (atomic_load_explicit(&req->wait_mode, memory_order_acquire) != mode ||
+        !llam_closed_watch_waiter_matches(req, mode, watch)) {
+        /*
+         * List membership is the authoritative ownership proof while
+         * watch_lock is held. Metadata disagreement is corruption, but the
+         * detached request must still stop publishing storage that close can
+         * reclaim before its EBADF completion is delivered.
+         */
+        llam_record_fatal_deferred(
+            node != NULL ? node->runtime : NULL,
+            EPROTO);
+    }
+
+    /*
+     * Cancellation first rechecks wait_mode under watch_lock and only then
+     * follows a raw watch pointer. Clear every raw pointer before publishing
+     * NONE so a canceller that observed the old mode either wins the lock
+     * first or sees this completed ownership handoff.
+     */
+    req->poll_watch = NULL;
+    req->accept_watch = NULL;
+    req->recv_watch = NULL;
+    atomic_store_explicit(
+        &req->inflight_owner_shard,
+        UINT_MAX,
+        memory_order_release);
+    atomic_store_explicit(
+        &req->wait_mode,
+        LLAM_IO_WAIT_MODE_NONE,
+        memory_order_release);
+}
+
+static void llam_closed_watch_waiters_append(llam_node_t *node,
+                                              llam_closed_watch_waiters_t *detached,
                                               llam_io_req_t **head,
-                                              llam_io_req_t **tail) {
+                                              llam_io_req_t **tail,
+                                              unsigned mode,
+                                              const void *watch) {
     llam_io_req_t *list_head;
     llam_io_req_t *list_tail;
+    llam_io_req_t *req;
 
     if (detached == NULL || head == NULL || tail == NULL || *head == NULL) {
         return;
@@ -53,6 +139,11 @@ static void llam_closed_watch_waiters_append(llam_closed_watch_waiters_t *detach
     list_tail = *tail;
     *head = NULL;
     *tail = NULL;
+    req = list_head;
+    while (req != NULL) {
+        llam_closed_watch_waiter_unpublish(node, req, mode, watch);
+        req = req->next;
+    }
     if (list_tail == NULL) {
         list_tail = list_head;
         while (list_tail->next != NULL) {
@@ -110,7 +201,12 @@ static void llam_close_poll_watch_locked(llam_node_t *node,
     watch->migrate_target_node_index = UINT_MAX;
     watch->live_transferred = false;
     watch->sticky_revents = 0;
-    llam_closed_watch_waiters_append(detached, &watch->wait_head, &watch->wait_tail);
+    llam_closed_watch_waiters_append(node,
+                                      detached,
+                                      &watch->wait_head,
+                                      &watch->wait_tail,
+                                      LLAM_IO_WAIT_MODE_POLL_WATCH,
+                                      watch);
 
     if (watch->activating &&
         llam_drop_node_control_locked(node, LLAM_IO_CONTROL_POLL_ACTIVATE, watch)) {
@@ -135,7 +231,12 @@ static void llam_close_accept_watch_locked(llam_node_t *node,
     watch->accepts_waiters = false;
     watch->migrate_target_node_index = UINT_MAX;
     watch->live_transferred = false;
-    llam_closed_watch_waiters_append(detached, &watch->wait_head, &watch->wait_tail);
+    llam_closed_watch_waiters_append(node,
+                                      detached,
+                                      &watch->wait_head,
+                                      &watch->wait_tail,
+                                      LLAM_IO_WAIT_MODE_ACCEPT_WATCH,
+                                      watch);
 
     if (watch->activating &&
         llam_drop_node_control_locked(node, LLAM_IO_CONTROL_ACCEPT_ACTIVATE, watch)) {
@@ -160,7 +261,12 @@ static void llam_close_recv_watch_locked(llam_node_t *node,
     watch->accepts_waiters = false;
     watch->migrate_target_node_index = UINT_MAX;
     watch->live_transferred = false;
-    llam_closed_watch_waiters_append(detached, &watch->wait_head, &watch->wait_tail);
+    llam_closed_watch_waiters_append(node,
+                                      detached,
+                                      &watch->wait_head,
+                                      &watch->wait_tail,
+                                      LLAM_IO_WAIT_MODE_RECV_WATCH,
+                                      watch);
 
     if (watch->activating &&
         llam_drop_node_control_locked(node, LLAM_IO_CONTROL_RECV_ACTIVATE, watch)) {
@@ -263,6 +369,9 @@ int llam_forget_closed_fd_watch_state(llam_runtime_t *rt, llam_fd_t fd) {
                                             &kick_node,
                                             &first_error);
         pthread_mutex_unlock(&node->watch_lock);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        llam_io_test_close_watch_unlocked(node);
+#endif
 
         if (kick_node) {
             llam_kick_node(node);

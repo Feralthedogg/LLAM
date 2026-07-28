@@ -465,6 +465,7 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/io/api/blocking_wrappers.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/public.o \
+	$(TESTHOOK_OBJDIR)/src/io/watch/close.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
@@ -478,6 +479,7 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/io/api/blocking_wrappers.o \
 		$(OBJDIR)/src/io/api/issue.o \
 		$(OBJDIR)/src/io/api/public.o \
+		$(OBJDIR)/src/io/watch/close.o \
 		$(OBJDIR)/src/io/watch/watch_queue.o, \
 		$(RUNTIME_OBJS)) \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS)

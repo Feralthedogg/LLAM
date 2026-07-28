@@ -440,6 +440,301 @@ static int exercise_canceled_blocking_results_are_disposed(void) {
 }
 #endif
 
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+typedef enum close_watch_unpublish_kind {
+    CLOSE_WATCH_UNPUBLISH_POLL = 0,
+    CLOSE_WATCH_UNPUBLISH_ACCEPT = 1,
+    CLOSE_WATCH_UNPUBLISH_RECV = 2,
+} close_watch_unpublish_kind_t;
+
+typedef struct close_watch_unpublish_state {
+    llam_runtime_t runtime;
+    llam_node_t node;
+    llam_io_req_t req;
+    void *watch;
+    close_watch_unpublish_kind_t kind;
+    atomic_uint hook_reached;
+    atomic_uint hook_release;
+    int close_result;
+} close_watch_unpublish_state_t;
+
+static bool close_watch_unpublish_completion_sink(
+    llam_node_t *node,
+    llam_io_req_t *req,
+    unsigned completion_owner,
+    llam_wait_reason_t *wake_reason,
+    void *context) {
+    (void)node;
+    (void)req;
+    (void)completion_owner;
+    (void)wake_reason;
+    (void)context;
+    return true;
+}
+
+static void close_watch_unpublish_hook(
+    llam_node_t *node,
+    void *context) {
+    close_watch_unpublish_state_t *state = context;
+
+    if (state == NULL || node != &state->node) {
+        return;
+    }
+    atomic_store_explicit(
+        &state->hook_reached, 1U, memory_order_release);
+    while (atomic_load_explicit(
+               &state->hook_release,
+               memory_order_acquire) == 0U) {
+        sched_yield();
+    }
+}
+
+static void *close_watch_unpublish_thread(void *context) {
+    close_watch_unpublish_state_t *state = context;
+
+    state->close_result =
+        llam_forget_closed_fd_watch_state(
+            &state->runtime,
+            state->req.fd);
+    return NULL;
+}
+
+static int run_close_watch_unpublish_case(
+    close_watch_unpublish_kind_t kind) {
+    close_watch_unpublish_state_t state;
+    pthread_t closer;
+    unsigned mode;
+    bool unpublished;
+    bool removed = true;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.kind = kind;
+    state.close_result = -2;
+    atomic_init(&state.hook_reached, 0U);
+    atomic_init(&state.hook_release, 0U);
+    state.runtime.nodes = &state.node;
+    state.runtime.active_nodes = 1U;
+    state.node.runtime = &state.runtime;
+    state.node.index = 0U;
+    state.node.watch_lock_initialized = true;
+    if (pthread_mutex_init(
+            &state.node.watch_lock, NULL) != 0) {
+        return 1;
+    }
+    llam_io_req_reset(
+        &state.req,
+        &state.runtime,
+        UINT_MAX,
+        UINT_MAX);
+    state.req.fd = (llam_fd_t)(41 + (int)kind);
+    state.req.completion_sink =
+        close_watch_unpublish_completion_sink;
+    atomic_store_explicit(
+        &state.req.attached_node_index,
+        0U,
+        memory_order_release);
+
+    pthread_mutex_lock(&state.node.watch_lock);
+    if (kind == CLOSE_WATCH_UNPUBLISH_POLL) {
+        llam_poll_watch_t *watch =
+            calloc(1U, sizeof(*watch));
+
+        if (watch == NULL) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+        state.watch = watch;
+        watch->fd = state.req.fd;
+        watch->migrate_target_node_index = UINT_MAX;
+        watch->accepts_waiters = true;
+        watch->activating = true;
+        watch->wait_head = &state.req;
+        watch->wait_tail = &state.req;
+        state.node.poll_watches = watch;
+        state.req.kind = LLAM_IO_KIND_POLL;
+        state.req.poll_watch = watch;
+        atomic_store_explicit(
+            &state.req.wait_mode,
+            LLAM_IO_WAIT_MODE_POLL_WATCH,
+            memory_order_release);
+        if (llam_node_queue_control_locked(
+                &state.node,
+                LLAM_IO_CONTROL_POLL_ACTIVATE,
+                watch) != 0) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            free(watch);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+    } else if (kind == CLOSE_WATCH_UNPUBLISH_ACCEPT) {
+        llam_accept_watch_t *watch =
+            calloc(1U, sizeof(*watch));
+
+        if (watch == NULL) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+        state.watch = watch;
+        watch->fd = state.req.fd;
+        watch->migrate_target_node_index = UINT_MAX;
+        watch->accepts_waiters = true;
+        watch->activating = true;
+        watch->wait_head = &state.req;
+        watch->wait_tail = &state.req;
+        state.node.accept_watches = watch;
+        state.req.kind = LLAM_IO_KIND_ACCEPT;
+        state.req.accept_watch = watch;
+        atomic_store_explicit(
+            &state.req.wait_mode,
+            LLAM_IO_WAIT_MODE_ACCEPT_WATCH,
+            memory_order_release);
+        if (llam_node_queue_control_locked(
+                &state.node,
+                LLAM_IO_CONTROL_ACCEPT_ACTIVATE,
+                watch) != 0) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            free(watch);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+    } else {
+        llam_recv_watch_t *watch =
+            calloc(1U, sizeof(*watch));
+
+        if (watch == NULL) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+        state.watch = watch;
+        watch->fd = state.req.fd;
+        watch->migrate_target_node_index = UINT_MAX;
+        watch->accepts_waiters = true;
+        watch->activating = true;
+        watch->wait_head = &state.req;
+        watch->wait_tail = &state.req;
+        state.node.recv_watches = watch;
+        state.req.kind = LLAM_IO_KIND_READ;
+        state.req.recv_watch = watch;
+        atomic_store_explicit(
+            &state.req.wait_mode,
+            LLAM_IO_WAIT_MODE_RECV_WATCH,
+            memory_order_release);
+        if (llam_node_queue_control_locked(
+                &state.node,
+                LLAM_IO_CONTROL_RECV_ACTIVATE,
+                watch) != 0) {
+            pthread_mutex_unlock(&state.node.watch_lock);
+            free(watch);
+            pthread_mutex_destroy(&state.node.watch_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&state.node.watch_lock);
+
+    llam_io_test_set_close_watch_unlocked_hook(
+        close_watch_unpublish_hook, &state);
+    if (pthread_create(
+            &closer,
+            NULL,
+            close_watch_unpublish_thread,
+            &state) != 0) {
+        llam_io_test_set_close_watch_unlocked_hook(
+            NULL, NULL);
+        return 1;
+    }
+    for (unsigned attempt = 0U;
+         attempt < 1000000U &&
+         atomic_load_explicit(
+             &state.hook_reached,
+             memory_order_acquire) == 0U;
+         attempt += 1U) {
+        sched_yield();
+    }
+
+    mode = atomic_load_explicit(
+        &state.req.wait_mode, memory_order_acquire);
+    unpublished =
+        mode == LLAM_IO_WAIT_MODE_NONE &&
+        state.req.poll_watch == NULL &&
+        state.req.accept_watch == NULL &&
+        state.req.recv_watch == NULL;
+    if (unpublished) {
+        removed = llam_remove_watch_waiter_after_abort(
+            &state.node,
+            &state.req,
+            kind == CLOSE_WATCH_UNPUBLISH_POLL
+                ? LLAM_IO_WAIT_MODE_POLL_WATCH
+                : kind == CLOSE_WATCH_UNPUBLISH_ACCEPT
+                      ? LLAM_IO_WAIT_MODE_ACCEPT_WATCH
+                      : LLAM_IO_WAIT_MODE_RECV_WATCH,
+            true);
+    }
+    atomic_store_explicit(
+        &state.hook_release, 1U, memory_order_release);
+    (void)pthread_join(closer, NULL);
+    llam_io_test_set_close_watch_unlocked_hook(NULL, NULL);
+
+    if (atomic_load_explicit(
+            &state.hook_reached,
+            memory_order_acquire) != 0U &&
+        unpublished &&
+        !removed &&
+        state.close_result == 0 &&
+        state.node.poll_watches == NULL &&
+        state.node.accept_watches == NULL &&
+        state.node.recv_watches == NULL &&
+        state.node.control_head == NULL &&
+        state.node.control_tail == NULL) {
+        failed = 0;
+    } else {
+        fprintf(
+            stderr,
+            "close watch remained published kind=%u "
+            "hook=%u mode=%u raw=%p removed=%u close=%d\n",
+            (unsigned)kind,
+            atomic_load_explicit(
+                &state.hook_reached,
+                memory_order_acquire),
+            mode,
+            kind == CLOSE_WATCH_UNPUBLISH_POLL
+                ? (void *)state.req.poll_watch
+                : kind == CLOSE_WATCH_UNPUBLISH_ACCEPT
+                      ? (void *)state.req.accept_watch
+                      : (void *)state.req.recv_watch,
+            removed ? 1U : 0U,
+            state.close_result);
+    }
+    pthread_mutex_destroy(&state.node.watch_lock);
+    return failed;
+}
+
+static int exercise_close_unpublishes_detached_watch_waiters(void) {
+    int failed = 0;
+
+    if (run_close_watch_unpublish_case(
+            CLOSE_WATCH_UNPUBLISH_POLL) != 0) {
+        failed = 1;
+    }
+    if (run_close_watch_unpublish_case(
+            CLOSE_WATCH_UNPUBLISH_ACCEPT) != 0) {
+        failed = 1;
+    }
+    if (run_close_watch_unpublish_case(
+            CLOSE_WATCH_UNPUBLISH_RECV) != 0) {
+        failed = 1;
+    }
+    return failed;
+}
+#else
+static int exercise_close_unpublishes_detached_watch_waiters(void) {
+    return 0;
+}
+#endif
+
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 typedef struct park_completion_race_state {
     ssize_t result;
@@ -5500,6 +5795,9 @@ int main(void) {
         return 1;
     }
     if (exercise_canceled_blocking_results_are_disposed() != 0) {
+        return 1;
+    }
+    if (exercise_close_unpublishes_detached_watch_waiters() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");
