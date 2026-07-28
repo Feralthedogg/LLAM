@@ -67,6 +67,32 @@ typedef void (*llam_io_park_snapshot_hook_fn)(
     unsigned observed_wait_mode);
 void llam_io_test_set_park_snapshot_hook(
     llam_io_park_snapshot_hook_fn hook);
+
+typedef enum llam_blocking_result_test_kind {
+    LLAM_BLOCKING_RESULT_TEST_GETADDRINFO = 1,
+    LLAM_BLOCKING_RESULT_TEST_OPEN = 2,
+    LLAM_BLOCKING_RESULT_TEST_ACCEPT = 3,
+} llam_blocking_result_test_kind_t;
+
+typedef enum llam_blocking_result_test_event {
+    LLAM_BLOCKING_RESULT_TEST_BEFORE_CREATE = 1,
+    LLAM_BLOCKING_RESULT_TEST_CREATED = 2,
+    LLAM_BLOCKING_RESULT_TEST_DISCARDED = 3,
+} llam_blocking_result_test_event_t;
+
+typedef void (*llam_blocking_result_test_hook_fn)(
+    llam_blocking_result_test_kind_t kind,
+    llam_blocking_result_test_event_t event,
+    uintptr_t value,
+    void *context);
+
+void llam_io_test_set_blocking_result_hook(
+    llam_blocking_result_test_hook_fn hook,
+    void *context);
+void llam_io_test_notify_blocking_result(
+    llam_blocking_result_test_kind_t kind,
+    llam_blocking_result_test_event_t event,
+    uintptr_t value);
 #endif
 
 /* Direct syscall and poll probes used before parking a task. */

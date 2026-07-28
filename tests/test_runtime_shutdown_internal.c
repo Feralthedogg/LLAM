@@ -40,6 +40,8 @@
 #include <limits.h>
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sched.h>
 #include <sys/socket.h>
@@ -78,6 +80,365 @@ static int init_runtime(void) {
     opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
     return llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
 }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_RUNTIME_BACKEND_WINDOWS
+typedef struct blocking_result_disposal_state {
+    llam_cancel_token_t *token;
+    llam_blocking_result_test_kind_t kind;
+    atomic_uint gate_reached;
+    atomic_uint release_gate;
+    atomic_uint created;
+    atomic_uint discarded;
+    uintptr_t created_value;
+    uintptr_t discarded_value;
+    struct addrinfo *addrinfo_result;
+    llam_handle_t handle_result;
+    llam_fd_t accept_result;
+    int caller_result;
+    int caller_errno;
+    int gai_error;
+    int cancel_result;
+    int cancel_errno;
+    int listener;
+    int client;
+    int connect_result;
+    int connect_errno;
+    struct sockaddr_in listener_address;
+} blocking_result_disposal_state_t;
+
+static void blocking_result_disposal_hook(
+    llam_blocking_result_test_kind_t kind,
+    llam_blocking_result_test_event_t event,
+    uintptr_t value,
+    void *context) {
+    blocking_result_disposal_state_t *state = context;
+
+    if (state == NULL || kind != state->kind) {
+        return;
+    }
+    if (event == LLAM_BLOCKING_RESULT_TEST_DISCARDED) {
+        state->discarded_value = value;
+        atomic_store_explicit(
+            &state->discarded, 1U, memory_order_release);
+        return;
+    }
+    if (event == LLAM_BLOCKING_RESULT_TEST_CREATED) {
+        state->created_value = value;
+        atomic_store_explicit(
+            &state->created, 1U, memory_order_release);
+        if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+            return;
+        }
+    } else if (
+        event != LLAM_BLOCKING_RESULT_TEST_BEFORE_CREATE ||
+        kind != LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+        return;
+    }
+
+    if (atomic_exchange_explicit(
+            &state->gate_reached,
+            1U,
+            memory_order_acq_rel) != 0U) {
+        return;
+    }
+    while (atomic_load_explicit(
+               &state->release_gate,
+               memory_order_acquire) == 0U) {
+        sched_yield();
+    }
+}
+
+static void blocking_result_disposal_caller(void *context) {
+    blocking_result_disposal_state_t *state = context;
+
+    errno = 0;
+    switch (state->kind) {
+        case LLAM_BLOCKING_RESULT_TEST_GETADDRINFO:
+            state->caller_result = llam_getaddrinfo_result(
+                "localhost",
+                "80",
+                NULL,
+                &state->addrinfo_result,
+                &state->gai_error);
+            break;
+        case LLAM_BLOCKING_RESULT_TEST_OPEN:
+            state->caller_result = llam_open_async(
+                "/dev/null",
+                O_RDONLY,
+                0U,
+                &state->handle_result);
+            break;
+        case LLAM_BLOCKING_RESULT_TEST_ACCEPT: {
+            struct sockaddr_storage peer;
+            socklen_t peer_size = sizeof(peer);
+
+            state->accept_result = llam_accept(
+                (llam_fd_t)state->listener,
+                (struct sockaddr *)&peer,
+                &peer_size);
+            state->caller_result =
+                LLAM_FD_IS_INVALID(state->accept_result)
+                    ? -1
+                    : 0;
+            break;
+        }
+    }
+    state->caller_errno = errno;
+}
+
+static void blocking_result_disposal_canceller(void *context) {
+    blocking_result_disposal_state_t *state = context;
+
+    while (atomic_load_explicit(
+               &state->gate_reached,
+               memory_order_acquire) == 0U) {
+        llam_yield();
+    }
+    errno = 0;
+    state->cancel_result =
+        llam_cancel_token_cancel(state->token);
+    state->cancel_errno = errno;
+    if (state->kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+        state->client = socket(AF_INET, SOCK_STREAM, 0);
+        if (state->client >= 0) {
+            errno = 0;
+            state->connect_result = connect(
+                state->client,
+                (const struct sockaddr *)
+                    &state->listener_address,
+                sizeof(state->listener_address));
+            state->connect_errno = errno;
+        } else {
+            state->connect_result = -1;
+            state->connect_errno = errno;
+        }
+    }
+    atomic_store_explicit(
+        &state->release_gate, 1U, memory_order_release);
+}
+
+static int blocking_result_disposal_listener_init(
+    blocking_result_disposal_state_t *state) {
+    socklen_t address_size =
+        sizeof(state->listener_address);
+    int one = 1;
+
+    if (setenv(
+            "LLAM_ACCEPT_DIRECT_BLOCKING", "1", 1) != 0) {
+        return -1;
+    }
+    state->listener = socket(AF_INET, SOCK_STREAM, 0);
+    if (state->listener < 0) {
+        return -1;
+    }
+    (void)setsockopt(
+        state->listener,
+        SOL_SOCKET,
+        SO_REUSEADDR,
+        &one,
+        sizeof(one));
+    memset(
+        &state->listener_address,
+        0,
+        sizeof(state->listener_address));
+    state->listener_address.sin_family = AF_INET;
+    state->listener_address.sin_addr.s_addr =
+        htonl(INADDR_LOOPBACK);
+    if (bind(
+            state->listener,
+            (const struct sockaddr *)
+                &state->listener_address,
+            sizeof(state->listener_address)) != 0 ||
+        listen(state->listener, 8) != 0 ||
+        getsockname(
+            state->listener,
+            (struct sockaddr *)
+                &state->listener_address,
+            &address_size) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static int run_blocking_result_disposal_case(
+    llam_blocking_result_test_kind_t kind) {
+    blocking_result_disposal_state_t state;
+    llam_runtime_opts_t runtime_options;
+    llam_spawn_opts_t spawn_options;
+    llam_task_t *caller = NULL;
+    llam_task_t *canceller = NULL;
+    bool runtime_started = false;
+    bool resource_still_live = false;
+    int failed = 1;
+
+    memset(&state, 0, sizeof(state));
+    state.kind = kind;
+    state.handle_result = LLAM_INVALID_HANDLE;
+    state.accept_result = LLAM_INVALID_FD;
+    state.caller_result = -2;
+    state.cancel_result = -2;
+    state.listener = -1;
+    state.client = -1;
+    state.connect_result = -2;
+    atomic_init(&state.gate_reached, 0U);
+    atomic_init(&state.release_gate, 0U);
+    atomic_init(&state.created, 0U);
+    atomic_init(&state.discarded, 0U);
+    if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT &&
+        blocking_result_disposal_listener_init(&state) != 0) {
+        goto cleanup;
+    }
+    state.token = llam_cancel_token_create();
+    if (state.token == NULL ||
+        llam_runtime_opts_init(
+            &runtime_options,
+            LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0 ||
+        llam_spawn_opts_init(
+            &spawn_options,
+            LLAM_SPAWN_OPTS_CURRENT_SIZE) != 0) {
+        goto cleanup;
+    }
+    runtime_options.deterministic = 1U;
+    runtime_options.forced_yield_every = 1U;
+    spawn_options.cancel_token = state.token;
+    if (llam_runtime_init(&runtime_options) != 0) {
+        goto cleanup;
+    }
+    runtime_started = true;
+    llam_io_test_set_blocking_result_hook(
+        blocking_result_disposal_hook, &state);
+    caller = llam_spawn(
+        blocking_result_disposal_caller,
+        &state,
+        &spawn_options);
+    canceller = llam_spawn(
+        blocking_result_disposal_canceller,
+        &state,
+        NULL);
+    if (caller == NULL ||
+        canceller == NULL ||
+        llam_run() != 0 ||
+        llam_join(caller) != 0 ||
+        llam_join(canceller) != 0) {
+        goto cleanup;
+    }
+    llam_io_test_set_blocking_result_hook(NULL, NULL);
+
+    if (kind == LLAM_BLOCKING_RESULT_TEST_OPEN ||
+        kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+        int descriptor = (int)state.created_value;
+
+        errno = 0;
+        resource_still_live =
+            descriptor >= 0 &&
+            fcntl(descriptor, F_GETFD) != -1;
+    }
+    if (state.caller_result == -1 &&
+        state.caller_errno == ECANCELED &&
+        state.cancel_result == 0 &&
+        atomic_load_explicit(
+            &state.gate_reached,
+            memory_order_acquire) != 0U &&
+        atomic_load_explicit(
+            &state.created,
+            memory_order_acquire) != 0U &&
+        atomic_load_explicit(
+            &state.discarded,
+            memory_order_acquire) != 0U &&
+        state.discarded_value == state.created_value &&
+        !resource_still_live &&
+        (kind != LLAM_BLOCKING_RESULT_TEST_ACCEPT ||
+         state.connect_result == 0)) {
+        failed = 0;
+    } else {
+        fprintf(
+            stderr,
+            "blocking result disposal kind=%u "
+            "caller=%d/%d cancel=%d/%d connect=%d/%d "
+            "gate=%u created=%u discarded=%u live=%u\n",
+            (unsigned)kind,
+            state.caller_result,
+            state.caller_errno,
+            state.cancel_result,
+            state.cancel_errno,
+            state.connect_result,
+            state.connect_errno,
+            atomic_load_explicit(
+                &state.gate_reached,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &state.created,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &state.discarded,
+                memory_order_acquire),
+            resource_still_live ? 1U : 0U);
+    }
+
+cleanup:
+    llam_io_test_set_blocking_result_hook(NULL, NULL);
+    if (state.addrinfo_result != NULL) {
+        freeaddrinfo(state.addrinfo_result);
+        state.addrinfo_result = NULL;
+    } else if (
+        kind == LLAM_BLOCKING_RESULT_TEST_GETADDRINFO &&
+        state.created_value != 0U &&
+        atomic_load_explicit(
+            &state.discarded,
+            memory_order_acquire) == 0U) {
+        freeaddrinfo(
+            (struct addrinfo *)state.created_value);
+    }
+    if ((kind == LLAM_BLOCKING_RESULT_TEST_OPEN ||
+         kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) &&
+        atomic_load_explicit(
+            &state.created,
+            memory_order_acquire) != 0U) {
+        int descriptor = (int)state.created_value;
+
+        errno = 0;
+        if (fcntl(descriptor, F_GETFD) != -1) {
+            (void)close(descriptor);
+        }
+    }
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
+    if (state.token != NULL &&
+        llam_cancel_token_destroy(state.token) != 0) {
+        failed = 1;
+    }
+    if (state.client >= 0) {
+        (void)close(state.client);
+    }
+    if (state.listener >= 0) {
+        (void)close(state.listener);
+    }
+    return failed;
+}
+
+static int exercise_canceled_blocking_results_are_disposed(void) {
+    int failed = 0;
+
+    if (run_blocking_result_disposal_case(
+            LLAM_BLOCKING_RESULT_TEST_GETADDRINFO) != 0) {
+        failed = 1;
+    }
+    if (run_blocking_result_disposal_case(
+            LLAM_BLOCKING_RESULT_TEST_OPEN) != 0) {
+        failed = 1;
+    }
+    if (run_blocking_result_disposal_case(
+            LLAM_BLOCKING_RESULT_TEST_ACCEPT) != 0) {
+        failed = 1;
+    }
+    return failed;
+}
+#else
+static int exercise_canceled_blocking_results_are_disposed(void) {
+    return 0;
+}
+#endif
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 typedef struct park_completion_race_state {
@@ -5136,6 +5497,9 @@ int main(void) {
         return 1;
     }
     if (exercise_dynamic_scaler_live_saturation_fails_closed() != 0) {
+        return 1;
+    }
+    if (exercise_canceled_blocking_results_are_disposed() != 0) {
         return 1;
     }
     printf("test_runtime_shutdown_internal ok\n");

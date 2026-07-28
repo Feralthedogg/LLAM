@@ -96,23 +96,26 @@ ThreadSanitizer where supported.
 ### Task 3: Dispose blocking results suppressed by cancellation
 
 **Files:**
+- Modify: `Makefile`
+- Modify: `src/io/runtime_io_api_internal.h`
+- Modify: `src/io/api/blocking_ops.c`
 - Modify: `src/io/api/blocking_wrappers.c`
 - Modify: `src/io/api/public.c`
-- Modify: `tests/test_runtime_api_edges.c`
 - Modify: `tests/test_runtime_shutdown_internal.c`
 
-- [ ] Add deterministic cancellation tests in which `getaddrinfo`, managed
+- [x] Add deterministic cancellation tests in which `getaddrinfo`, managed
   `open`, and blocking `accept` first produce a valid result and cancellation
   wins before delivery. Count resolver frees and verify descriptor/handle
   closure through reuse-safe probes.
-- [ ] Run only the new tests and observe the leaked resolver allocation and
+- [x] Run only the new tests and observe the leaked resolver allocation and
   live descriptors.
-- [ ] On every error return from `llam_call_blocking_result` or
+- [x] On every error return from `llam_call_blocking_result` or
   `llam_call_blocking_io`, inspect the typed output. Call `freeaddrinfo`, close
   a produced managed-open handle, or close a produced accepted socket before
   recycling request storage.
-- [ ] Keep ordinary worker failure and no-result cancellation unchanged.
-- [ ] Run API edge, shutdown, and sanitizer tests.
+- [x] Keep ordinary worker failure and no-result cancellation unchanged.
+- [x] Run API edge, core, shutdown, Linux ASan/UBSan, and Windows cross-build
+  tests.
 - [ ] Commit as `fix: discard canceled blocking results`.
 
 ### Task 4: Unpublish watch waiters before reclaiming watches

@@ -280,6 +280,37 @@ static llam_fd_t llam_accept_req_result(const llam_io_req_t *req) {
 }
 
 /**
+ * @brief Close a blocking-accept result that cancellation made unpublishable.
+ */
+static void llam_discard_blocking_accept_result(
+    llam_io_req_t *req) {
+    llam_fd_t accepted;
+    int saved_errno;
+    int close_result;
+
+    if (req == NULL ||
+        LLAM_FD_IS_INVALID(req->fd_result)) {
+        return;
+    }
+    accepted = req->fd_result;
+    req->fd_result = LLAM_INVALID_FD;
+    req->result = -1;
+    saved_errno = errno;
+    close_result = llam_close(accepted);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (close_result == 0) {
+        llam_io_test_notify_blocking_result(
+            LLAM_BLOCKING_RESULT_TEST_ACCEPT,
+            LLAM_BLOCKING_RESULT_TEST_DISCARDED,
+            (uintptr_t)accepted);
+    }
+#else
+    (void)close_result;
+#endif
+    errno = saved_errno;
+}
+
+/**
  * @brief Submit one managed read without re-entering the direct/readiness loop.
  *
  * Generic POSIX descriptors have no portable per-call nonblocking read flag.
@@ -993,6 +1024,7 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
         if (llam_call_blocking_io(llam_blocking_accept_impl, req) != 0) {
             int saved_errno = errno;
 
+            llam_discard_blocking_accept_result(req);
             llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
             return LLAM_INVALID_FD;
@@ -1027,6 +1059,7 @@ llam_fd_t llam_accept(llam_fd_t fd, struct sockaddr *addr, socklen_t *addrlen) {
         if (llam_call_blocking_io(llam_blocking_accept_impl, req) != 0) {
             int saved_errno = errno;
 
+            llam_discard_blocking_accept_result(req);
             llam_api_io_req_release(g_llam_tls_shard, req);
             errno = saved_errno;
             return LLAM_INVALID_FD;
