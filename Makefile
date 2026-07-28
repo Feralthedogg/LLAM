@@ -16,14 +16,18 @@ ifneq ($(strip $(filter package,$(MAKECMDGOALS))),)
 $(error research-enabled builds cannot be packaged)
 endif
 endif
-RESEARCH_CPPFLAGS = -DLLAM_BUILD_RESEARCH=$(LLAM_BUILD_RESEARCH)
-CPPFLAGS := $(CPPFLAGS) $(RESEARCH_CPPFLAGS)
+override LLAM_INTERNAL_CPPFLAGS := -DLLAM_BUILD_RESEARCH=$(LLAM_BUILD_RESEARCH)
+override CPPFLAGS := $(CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)
 LDLIBS ?= -pthread -luring
 SERVER_FLOOD_LDLIBS ?= -pthread
 OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 TESTHOOK_OBJDIR ?= $(OBJDIR)-testhooks
-SHARED_CPPFLAGS ?= $(CPPFLAGS) -DLLAM_BUILD_SHARED
+ifeq ($(origin SHARED_CPPFLAGS),undefined)
+SHARED_CPPFLAGS = $(CPPFLAGS) -DLLAM_BUILD_SHARED
+else
+override SHARED_CPPFLAGS := $(SHARED_CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)
+endif
 PICFLAGS ?= -fPIC -fvisibility=hidden
 LLAM_ABI_MAJOR ?= 2
 LLAM_VERSION ?= 2.2.0
@@ -148,6 +152,7 @@ CLEAN_FILES = \
 	libllam_runtime.so \
 	libllam_runtime.so.$(LLAM_ABI_MAJOR) \
 	libllam_runtime.so.$(LLAM_VERSION) \
+	*.llam-build-provenance \
 	CMakeCache.txt \
 	cmake_install.cmake \
 	compile_commands.json \
@@ -691,6 +696,9 @@ ifeq ($(LLAM_BUILD_RESEARCH),0)
 ifneq ($(strip $(filter $(RESEARCH_ENTRY_TARGETS),$(MAKECMDGOALS))),)
 $(error research targets require LLAM_BUILD_RESEARCH=1)
 endif
+ifneq ($(findstring /experiments/,$(MAKECMDGOALS)),)
+$(error research targets require LLAM_BUILD_RESEARCH=1)
+endif
 endif
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
@@ -721,7 +729,9 @@ BUILD_OBJS = \
 	$(TEST_IO_BUFFERS_OBJS) \
 	$(TEST_WINDOWS_POLICY_OBJS) \
 	$(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) \
+	$(TEST_WINDOWS_IOCP_IO_OBJS) \
 	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
+	$(TEST_WINDOWS_HANDLE_IO_OBJS) \
 	$(TEST_SECURITY_CAPABILITY_OBJS) \
 	$(TEST_SHARED_LOAD_OBJS)
 LINK_TARGETS = \
@@ -987,6 +997,12 @@ $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 		mv "$$tmp" "$@"; \
 	fi
 
+define WRITE_BUILD_PROVENANCE
+	@tmp="$@.llam-build-provenance.$$$$.tmp"; \
+	printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)' > "$$tmp"; \
+	mv "$$tmp" "$@.llam-build-provenance"
+endef
+
 all: demo stress bench llam_broker server server_lossless server_flood static shared
 
 ifeq ($(LLAM_BUILD_RESEARCH),1)
@@ -1005,6 +1021,7 @@ static: libllam_runtime.a
 libllam_runtime.a: $(RUNTIME_OBJS)
 	rm -f $@
 	$(AR) rcs $@ $(RUNTIME_OBJS)
+	$(WRITE_BUILD_PROVENANCE)
 
 shared: $(SHLIB_LINK)
 
@@ -1279,6 +1296,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.2.2.0; do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
@@ -1325,6 +1344,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.2.2.0; do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/target"; \
 	if (umask 000; LLAM_RELEASE_VERSION=ci LLAM_VERSION=2.2.0 LLAM_ABI_MAJOR=2 sh "$$tmp_dir/repo/scripts/package_release.sh" "$$package_target") >"$$tmp_dir/package.out" 2>&1; then \
 		echo "package_release.sh accepted a non-directory release output path component" >&2; \
@@ -1351,6 +1372,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.2.2.0; do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
@@ -1397,6 +1420,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.2.2.0; do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
@@ -1443,6 +1468,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.2.2.0; do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
@@ -1491,6 +1518,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.2.2.0; do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
@@ -1536,6 +1565,8 @@ test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_m
 	esac; \
 	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
+	cp scripts/check_release_provenance.py "$$tmp_dir/repo/scripts/check_release_provenance.py"; \
+	for artifact in demo stress bench server server_lossless server_flood libllam_runtime.a libllam_runtime.2.dylib libllam_runtime.so.2.2.0; do printf 'LLAM_BUILD_RESEARCH=0\n' > "$$tmp_dir/repo/$$artifact.llam-build-provenance"; done; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
 	: > "$$tmp_dir/repo/README.md"; \
@@ -2294,6 +2325,7 @@ $(SHLIB_LINK): $(SHLIB_REAL)
 
 $(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)
 	$(CC) $(CFLAGS) $(SHLIB_LDFLAGS) -o $@ $(SHARED_RUNTIME_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 else
 $(SHLIB_LINK): $(SHLIB_SONAME)
 	ln -sf $(SHLIB_SONAME) $(SHLIB_LINK)
@@ -2303,28 +2335,35 @@ $(SHLIB_SONAME): $(SHLIB_REAL)
 
 $(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)
 	$(CC) $(CFLAGS) $(SHLIB_LDFLAGS) -o $@ $(SHARED_RUNTIME_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 endif
 
 demo: $(RUNTIME_OBJS) $(DEMO_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(DEMO_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 stress: $(RUNTIME_OBJS) $(STRESS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(STRESS_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 bench: $(RUNTIME_OBJS) $(BENCH_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BENCH_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 llam_broker: $(RUNTIME_OBJS) $(BROKER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(BROKER_OBJS) $(LDLIBS)
 
 server: $(RUNTIME_OBJS) $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 server_lossless: $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(SERVER_LOSSLESS_OBJS) $(LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 server_flood: $(SERVER_FLOOD_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(SERVER_FLOOD_OBJS) $(SERVER_FLOOD_LDLIBS)
+	$(WRITE_BUILD_PROVENANCE)
 
 test_lcwe_model: $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(LCWE_MODEL_CORE_OBJS) $(LCWE_MODEL_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)

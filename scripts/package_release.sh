@@ -9,13 +9,14 @@ if [ "${LLAM_BUILD_RESEARCH:-0}" != 0 ]; then
     exit 2
 fi
 
+script_dir="$(dirname "$0")"
+root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
+
 target="${1:-}"
 version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"
 version="${version#v}"
 abi_major="${LLAM_ABI_MAJOR:-2}"
 library_version="${LLAM_VERSION:-2.2.0}"
-script_dir="$(dirname "$0")"
-root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
 out_dir="$root_dir/target/dist"
 host_os="$(uname -s)"
 
@@ -64,6 +65,26 @@ if [ "$target" != "$host_target" ]; then
     echo "target $target must be packaged on $host_target, not $host_os/$host_arch" >&2
     exit 1
 fi
+
+set -- \
+    "$root_dir/demo.llam-build-provenance" \
+    "$root_dir/stress.llam-build-provenance" \
+    "$root_dir/bench.llam-build-provenance" \
+    "$root_dir/server.llam-build-provenance" \
+    "$root_dir/server_lossless.llam-build-provenance" \
+    "$root_dir/server_flood.llam-build-provenance" \
+    "$root_dir/libllam_runtime.a.llam-build-provenance"
+case "$host_os" in
+    Darwin)
+        set -- "$@" \
+            "$root_dir/libllam_runtime.$abi_major.dylib.llam-build-provenance"
+        ;;
+    Linux|FreeBSD|OpenBSD|NetBSD|DragonFly)
+        set -- "$@" \
+            "$root_dir/libllam_runtime.so.$library_version.llam-build-provenance"
+        ;;
+esac
+python3 "$script_dir/check_release_provenance.py" "$@"
 
 missing_inputs=0
 require_input() {

@@ -190,6 +190,39 @@ if (-not (Test-Path -LiteralPath $ConfigDir)) {
 }
 Assert-NoReparsePoints $BuildRoot
 
+function Find-BuildArtifact([string]$Name, [string]$Fallback) {
+    if ($Fallback -and (Test-Path -LiteralPath $Fallback)) {
+        return (Resolve-Path -LiteralPath $Fallback).Path
+    }
+
+    $Match = Get-ChildItem -LiteralPath $BuildRoot -Recurse -File -Filter $Name |
+        Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } |
+        Select-Object -First 1
+    if (-not $Match) {
+        throw "missing build artifact: $Name under $BuildRoot"
+    }
+    return $Match.FullName
+}
+
+$StaticLib = Find-BuildArtifact "llam_runtime.lib" (Join-Path $ConfigDir "llam_runtime.lib")
+$SharedDll = Find-BuildArtifact "llam_runtime.dll" (Join-Path $ConfigDir "llam_runtime.dll")
+$SharedImportLib = Find-BuildArtifact "llam_runtime_shared.lib" (Join-Path $ConfigDir "llam_runtime_shared.lib")
+$BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
+$Python = Get-Command python -ErrorAction SilentlyContinue
+if ($null -eq $Python) {
+    $Python = Get-Command python3 -ErrorAction SilentlyContinue
+}
+if ($null -eq $Python) {
+    throw "python is required to validate build provenance"
+}
+& $Python.Source (Join-Path $PSScriptRoot "check_release_provenance.py") `
+    "$StaticLib.llam-build-provenance" `
+    "$SharedDll.llam-build-provenance" `
+    "$BenchExe.llam-build-provenance"
+if ($LASTEXITCODE -ne 0) {
+    throw "build provenance rejected release packaging"
+}
+
 $OutDir = Join-Path $Root "target\dist"
 $PackageName = "llam-$Version-$Target"
 $Stage = Join-Path $OutDir $PackageName
@@ -231,25 +264,6 @@ Assert-SafeOutputPath $Stage $false
 Assert-SafeOutputPath $Archive
 Assert-SafeOutputPath "$Archive.sha256"
 Assert-NoReparsePoints $Stage
-
-function Find-BuildArtifact([string]$Name, [string]$Fallback) {
-    if ($Fallback -and (Test-Path -LiteralPath $Fallback)) {
-        return (Resolve-Path -LiteralPath $Fallback).Path
-    }
-
-    $Match = Get-ChildItem -LiteralPath $BuildRoot -Recurse -File -Filter $Name |
-        Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } |
-        Select-Object -First 1
-    if (-not $Match) {
-        throw "missing build artifact: $Name under $BuildRoot"
-    }
-    return $Match.FullName
-}
-
-$StaticLib = Find-BuildArtifact "llam_runtime.lib" (Join-Path $ConfigDir "llam_runtime.lib")
-$SharedDll = Find-BuildArtifact "llam_runtime.dll" (Join-Path $ConfigDir "llam_runtime.dll")
-$SharedImportLib = Find-BuildArtifact "llam_runtime_shared.lib" (Join-Path $ConfigDir "llam_runtime_shared.lib")
-$BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 
 Require-Input (Join-Path $Root "LICENSE")
 Require-Input (Join-Path $Root "README.md")

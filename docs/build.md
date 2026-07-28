@@ -84,8 +84,10 @@ ctest --test-dir build-research --output-on-failure
 
 `LLAM_BUILD_RESEARCH` accepts only `0` or `1` with Make and defaults to `0`;
 the CMake option defaults to `OFF`. Research-enabled builds cannot be
-packaged. Clean before switching modes if custom object directories or build
-tooling bypass the build-signature checks.
+packaged. Package artifacts carry individual build-mode provenance sidecars,
+and both POSIX and Windows packagers require every packaged compiled artifact
+to record stable mode. Clean before switching modes if custom object
+directories or build tooling bypass the build-signature checks.
 
 ## Useful Targets
 

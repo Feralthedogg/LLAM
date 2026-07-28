@@ -290,6 +290,23 @@ target_compile_definitions(llam_runtime_shared PRIVATE
 target_compile_definitions(llam_runtime_testhooks PRIVATE
                            ${LLAM_RESEARCH_DEFINE})
 
+if(LLAM_BUILD_RESEARCH)
+    set(LLAM_BUILD_RESEARCH_NORMALIZED 1)
+else()
+    set(LLAM_BUILD_RESEARCH_NORMALIZED 0)
+endif()
+function(llam_attach_build_provenance LLAM_PROVENANCE_TARGET)
+    add_custom_command(TARGET ${LLAM_PROVENANCE_TARGET} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}"
+                "-DLLAM_BUILD_PROVENANCE_PATH=$<TARGET_FILE:${LLAM_PROVENANCE_TARGET}>.llam-build-provenance"
+                "-DLLAM_BUILD_RESEARCH_MODE=${LLAM_BUILD_RESEARCH_NORMALIZED}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_build_provenance.cmake"
+        VERBATIM
+    )
+endfunction()
+llam_attach_build_provenance(llam_runtime)
+llam_attach_build_provenance(llam_runtime_shared)
+
 set_target_properties(llam_runtime
     PROPERTIES
         OUTPUT_NAME llam_runtime
@@ -436,6 +453,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(bench PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
 endif()
 target_link_libraries(bench PRIVATE llam_runtime)
+llam_attach_build_provenance(bench)
 
 add_executable(llam_broker
     examples/broker.c
