@@ -86,8 +86,9 @@ typedef struct blocking_result_disposal_state {
     llam_cancel_token_t *token;
     llam_blocking_result_test_kind_t kind;
     atomic_uint gate_reached;
-    atomic_uint release_gate;
+    atomic_uint connection_ready;
     atomic_uint created;
+    atomic_uint release_created;
     atomic_uint discarded;
     uintptr_t created_value;
     uintptr_t discarded_value;
@@ -122,16 +123,34 @@ static void blocking_result_disposal_hook(
             &state->discarded, 1U, memory_order_release);
         return;
     }
+    if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT &&
+        event == LLAM_BLOCKING_RESULT_TEST_BEFORE_CREATE) {
+        if (atomic_exchange_explicit(
+                &state->gate_reached,
+                1U,
+                memory_order_acq_rel) != 0U) {
+            return;
+        }
+        while (atomic_load_explicit(
+                   &state->connection_ready,
+                   memory_order_acquire) == 0U) {
+            sched_yield();
+        }
+        return;
+    }
     if (event == LLAM_BLOCKING_RESULT_TEST_CREATED) {
         state->created_value = value;
         atomic_store_explicit(
             &state->created, 1U, memory_order_release);
         if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+            while (atomic_load_explicit(
+                       &state->release_created,
+                       memory_order_acquire) == 0U) {
+                sched_yield();
+            }
             return;
         }
-    } else if (
-        event != LLAM_BLOCKING_RESULT_TEST_BEFORE_CREATE ||
-        kind != LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
+    } else {
         return;
     }
 
@@ -142,7 +161,7 @@ static void blocking_result_disposal_hook(
         return;
     }
     while (atomic_load_explicit(
-               &state->release_gate,
+               &state->release_created,
                memory_order_acquire) == 0U) {
         sched_yield();
     }
@@ -194,10 +213,6 @@ static void blocking_result_disposal_canceller(void *context) {
                memory_order_acquire) == 0U) {
         llam_yield();
     }
-    errno = 0;
-    state->cancel_result =
-        llam_cancel_token_cancel(state->token);
-    state->cancel_errno = errno;
     if (state->kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT) {
         state->client = socket(AF_INET, SOCK_STREAM, 0);
         if (state->client >= 0) {
@@ -212,9 +227,22 @@ static void blocking_result_disposal_canceller(void *context) {
             state->connect_result = -1;
             state->connect_errno = errno;
         }
+        atomic_store_explicit(
+            &state->connection_ready, 1U, memory_order_release);
+        if (state->connect_result == 0) {
+            while (atomic_load_explicit(
+                       &state->created,
+                       memory_order_acquire) == 0U) {
+                llam_yield();
+            }
+        }
     }
+    errno = 0;
+    state->cancel_result =
+        llam_cancel_token_cancel(state->token);
+    state->cancel_errno = errno;
     atomic_store_explicit(
-        &state->release_gate, 1U, memory_order_release);
+        &state->release_created, 1U, memory_order_release);
 }
 
 static int blocking_result_disposal_listener_init(
@@ -281,8 +309,9 @@ static int run_blocking_result_disposal_case(
     state.client = -1;
     state.connect_result = -2;
     atomic_init(&state.gate_reached, 0U);
-    atomic_init(&state.release_gate, 0U);
+    atomic_init(&state.connection_ready, 0U);
     atomic_init(&state.created, 0U);
+    atomic_init(&state.release_created, 0U);
     atomic_init(&state.discarded, 0U);
     if (kind == LLAM_BLOCKING_RESULT_TEST_ACCEPT &&
         blocking_result_disposal_listener_init(&state) != 0) {
@@ -376,6 +405,10 @@ static int run_blocking_result_disposal_case(
     }
 
 cleanup:
+    atomic_store_explicit(
+        &state.connection_ready, 1U, memory_order_release);
+    atomic_store_explicit(
+        &state.release_created, 1U, memory_order_release);
     llam_io_test_set_blocking_result_hook(NULL, NULL);
     if (state.addrinfo_result != NULL) {
         freeaddrinfo(state.addrinfo_result);
