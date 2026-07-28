@@ -6208,6 +6208,193 @@ done:
     return rc;
 }
 
+static int exercise_inflight_rehome_generation_mismatch_fails_closed(void) {
+    enum {
+        allocation_owner = 0U,
+        source_id = 1U,
+        target_id = 2U
+    };
+    const uint64_t timeout_ns = 2000000000ULL;
+    inflight_reuse_fixture_t fixture;
+    inflight_rehome_call_t rehome_call;
+    llam_task_t *task;
+    llam_io_req_t *req;
+    pthread_t rehome_thread;
+    uint64_t operation_generation;
+    uint64_t mismatched_generation;
+    uint64_t wait_generation;
+    bool rehome_started = false;
+    bool rehome_joined = false;
+    bool hook_armed = false;
+    int rc = 1;
+
+    if (init_inflight_reuse_fixture(
+            &fixture, allocation_owner, source_id) != 0) {
+        return fail_errno("FR08-002 mismatch fixture init failed");
+    }
+    task = &fixture.task;
+    req = &task->embedded_io_req;
+    operation_generation = atomic_load_explicit(
+        &req->operation_generation, memory_order_acquire);
+    wait_generation = atomic_load_explicit(
+        &task->wait_generation, memory_order_acquire);
+    mismatched_generation = operation_generation + 1U;
+
+    memset(&rehome_call, 0, sizeof(rehome_call));
+    rehome_call.fixture = &fixture;
+    rehome_call.source_id = source_id;
+    rehome_call.target_id = target_id;
+    atomic_init(&rehome_call.done, 0U);
+
+    arm_inflight_owner_hook(req);
+    hook_armed = true;
+    if (pthread_create(&rehome_thread,
+                       NULL,
+                       inflight_rehome_thread_main,
+                       &rehome_call) != 0) {
+        (void)fail_errno(
+            "FR08-002 mismatch rehome thread create failed");
+        goto done;
+    }
+    rehome_started = true;
+    if (!wait_inflight_owner_hook_bounded(timeout_ns)) {
+        (void)fail_msg(
+            "FR08-002 mismatch owner publication hook timed out");
+        goto done;
+    }
+    if (atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != target_id ||
+        atomic_load_explicit(
+            &fixture.shards[source_id].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shards[target_id].inflight_io_waiters,
+            memory_order_acquire) != 1U) {
+        (void)fail_msg(
+            "FR08-002 mismatch missed credited publication window");
+        goto done;
+    }
+
+    /*
+     * operation_generation is immutable for a valid activation. Corrupt it
+     * only at the deterministic post-publication hook to exercise the
+     * fail-closed invariant branch after the owner move is irreversible.
+     */
+    atomic_store_explicit(&req->operation_generation,
+                          mismatched_generation,
+                          memory_order_release);
+    release_inflight_owner_hook();
+    if (pthread_join(rehome_thread, NULL) != 0) {
+        (void)fail_msg("FR08-002 mismatch rehome join failed");
+        goto done;
+    }
+    rehome_joined = true;
+    clear_inflight_owner_hook();
+    hook_armed = false;
+
+    if (rehome_call.migrated != 0U ||
+        atomic_load_explicit(&rehome_call.done,
+                             memory_order_acquire) != 1U ||
+        atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != target_id ||
+        atomic_load_explicit(
+            &fixture.shards[source_id].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[target_id].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(&task->parked_shard,
+                             memory_order_acquire) != source_id ||
+        atomic_load_explicit(&req->owner_shard,
+                             memory_order_acquire) != source_id ||
+        task->home_shard != source_id ||
+        llam_task_active_io_req_load(task) != req ||
+        atomic_load_explicit(&task->active_io_generation,
+                             memory_order_acquire) !=
+            operation_generation ||
+        atomic_load_explicit(&task->wait_generation,
+                             memory_order_acquire) != wait_generation ||
+        atomic_load_explicit(&req->operation_generation,
+                             memory_order_acquire) !=
+            mismatched_generation ||
+        atomic_load_explicit(&task->wait_resolver_state,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != EPROTO ||
+        atomic_load_explicit(&fixture.runtime.deferred_fatal_pending,
+                             memory_order_acquire) != 1U) {
+        fprintf(
+            stderr,
+            "test_runtime_shutdown_internal: FR08-002 post-publication "
+            "mismatch did not fail closed: migrated=%u inflight=%u "
+            "source_count=%u target_count=%u parked=%u owner=%u home=%u "
+            "resolver=%u fatal=%d deferred=%u\n",
+            rehome_call.migrated,
+            atomic_load_explicit(&req->inflight_owner_shard,
+                                 memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.shards[source_id].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.shards[target_id].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(&task->parked_shard,
+                                 memory_order_acquire),
+            atomic_load_explicit(&req->owner_shard,
+                                 memory_order_acquire),
+            task->home_shard,
+            atomic_load_explicit(&task->wait_resolver_state,
+                                 memory_order_acquire),
+            atomic_load_explicit(&fixture.runtime.fatal_errno,
+                                 memory_order_acquire),
+            atomic_load_explicit(&fixture.runtime.deferred_fatal_pending,
+                                 memory_order_acquire));
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (hook_armed) {
+        release_inflight_owner_hook();
+    }
+    if (rehome_started && !rehome_joined) {
+        (void)pthread_join(rehome_thread, NULL);
+    }
+    if (hook_armed) {
+        clear_inflight_owner_hook();
+    }
+    atomic_store_explicit(&req->operation_generation,
+                          operation_generation,
+                          memory_order_release);
+    atomic_store_explicit(&req->inflight_owner_shard,
+                          UINT_MAX,
+                          memory_order_release);
+    atomic_store_explicit(&req->wait_mode,
+                          LLAM_IO_WAIT_MODE_NONE,
+                          memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[source_id].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[target_id].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    if (llam_task_active_io_req_load(task) == req) {
+        (void)llam_task_clear_wait_tracking(task);
+    }
+    if (atomic_load_explicit(&req->lifetime_refs,
+                             memory_order_acquire) != 0U) {
+        g_llam_tls_task = task;
+        g_llam_tls_shard = &fixture.shards[source_id];
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+    }
+    destroy_inflight_reuse_fixture(&fixture);
+    return rc;
+}
+
 static int exercise_merge_request_before_ack_keeps_wake_on_source(void) {
     submit_rehome_fixture_t fixture;
     llam_task_t *task;
@@ -6602,6 +6789,9 @@ static int exercise_submit_cancel_rehome_regressions(void) {
     if (exercise_inflight_rehome_is_generation_bound() != 0) {
         failed = 1;
     }
+    if (exercise_inflight_rehome_generation_mismatch_fails_closed() != 0) {
+        failed = 1;
+    }
     if (exercise_merge_request_before_ack_keeps_wake_on_source() != 0) {
         failed = 1;
     }
@@ -6623,7 +6813,19 @@ static int exercise_submit_cancel_rehome_regressions(void) {
 
 int main(void) {
 #if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
-    if (getenv("LLAM_VALIDATE_FR08_002_ONLY") != NULL) {
+    const char *fr08_mode = getenv("LLAM_VALIDATE_FR08_002_ONLY");
+
+    if (fr08_mode != NULL &&
+        strcmp(fr08_mode, "mismatch") == 0) {
+        return exercise_inflight_rehome_generation_mismatch_fails_closed();
+    }
+    if (fr08_mode != NULL && strcmp(fr08_mode, "all") == 0) {
+        if (exercise_inflight_rehome_is_generation_bound() != 0) {
+            return 1;
+        }
+        return exercise_inflight_rehome_generation_mismatch_fails_closed();
+    }
+    if (fr08_mode != NULL) {
         return exercise_inflight_rehome_is_generation_bound();
     }
 #endif

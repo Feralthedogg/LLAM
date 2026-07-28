@@ -307,6 +307,12 @@ void llam_rehome_inflight_io_waiters(llam_runtime_t *rt, llam_shard_t *source, l
                     req,
                     wait_generation,
                     operation_generation)) {
+                /*
+                 * Owner publication is irreversible: completion may already
+                 * have consumed the target credit. Do not write metadata for
+                 * an unprovable activation, but make the split fatal.
+                 */
+                llam_record_fatal_deferred(rt, EPROTO);
                 goto release_resolver;
             }
             atomic_store_explicit(&task->parked_shard,
