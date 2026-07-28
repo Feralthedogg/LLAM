@@ -10424,6 +10424,347 @@ static int test_fill_fd_until_eagain(int fd) {
     return rc;
 }
 
+static llam_broker_descriptor_slot_t *broker_descriptor_slot_for_token(
+    llam_broker_t *broker,
+    const llam_capability_token_t *token) {
+    if (broker == NULL || token == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        llam_broker_descriptor_slot_t *slot = &broker->descriptors[i];
+
+        if (slot->active &&
+            slot->id == token->slot &&
+            slot->generation == token->generation) {
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+static int run_broker_borrowed_fd_identity_case(bool write_op) {
+    static const unsigned char original_read[] = "original-read-authority";
+    static const unsigned char replacement_read[] = "replacement-read-authority";
+    static const unsigned char write_payload[] = "original-write-authority";
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    llam_broker_descriptor_slot_t *slot;
+    int original[2] = {-1, -1};
+    int replacement[2] = {-1, -1};
+    int reused_fd = -1;
+    int original_number = -1;
+    int original_flags;
+    int pinned_flags;
+    int caller_flags;
+    unsigned char received[64];
+    unsigned char replacement_received[64];
+    bool broker_initialized = false;
+    bool metadata_bound = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, original) != 0 ||
+        socketpair(AF_UNIX, SOCK_STREAM, 0, replacement) != 0) {
+        goto done;
+    }
+
+    original_flags = fcntl(original[0], F_GETFD);
+    if (original_flags < 0 ||
+        fcntl(original[0], F_SETFD, original_flags & ~FD_CLOEXEC) != 0 ||
+        llam_broker_register_fd(
+            &broker,
+            original[0],
+            write_op ? LLAM_CAP_RIGHT_WRITE : LLAM_CAP_RIGHT_READ,
+            false,
+            &token) != 0) {
+        goto done;
+    }
+    slot = broker_descriptor_slot_for_token(&broker, &token);
+    pinned_flags = slot != NULL && slot->fd >= 0
+                       ? fcntl(slot->fd, F_GETFD)
+                       : -1;
+    caller_flags = fcntl(original[0], F_GETFD);
+    metadata_bound =
+        slot != NULL &&
+        slot->fd >= 0 &&
+        slot->fd != original[0] &&
+        slot->close_on_destroy &&
+        pinned_flags >= 0 &&
+        (pinned_flags & FD_CLOEXEC) != 0 &&
+        caller_flags >= 0 &&
+        (caller_flags & FD_CLOEXEC) == 0;
+
+    if (!write_op &&
+        send(
+            original[1],
+            original_read,
+            sizeof(original_read),
+            0) != (ssize_t)sizeof(original_read)) {
+        goto done;
+    }
+    original_number = original[0];
+    if (close(original[0]) != 0) {
+        goto done;
+    }
+    original[0] = -1;
+    if (dup2(replacement[0], original_number) != original_number) {
+        goto done;
+    }
+    reused_fd = original_number;
+
+    memset(received, 0, sizeof(received));
+    memset(replacement_received, 0, sizeof(replacement_received));
+    if (write_op) {
+        ssize_t original_result;
+        ssize_t replacement_result;
+
+        if (llam_broker_write_fd(
+                &broker,
+                &token,
+                write_payload,
+                sizeof(write_payload)) !=
+            (ssize_t)sizeof(write_payload)) {
+            goto done;
+        }
+        original_result = recv(
+            original[1],
+            received,
+            sizeof(received),
+            MSG_DONTWAIT);
+        errno = 0;
+        replacement_result = recv(
+            replacement[1],
+            replacement_received,
+            sizeof(replacement_received),
+            MSG_DONTWAIT);
+        if (original_result != (ssize_t)sizeof(write_payload) ||
+            memcmp(received, write_payload, sizeof(write_payload)) != 0 ||
+            replacement_result != -1 ||
+            (errno != EAGAIN && errno != EWOULDBLOCK)) {
+            goto done;
+        }
+    } else {
+        ssize_t replacement_result;
+
+        if (send(
+                replacement[1],
+                replacement_read,
+                sizeof(replacement_read),
+                0) != (ssize_t)sizeof(replacement_read) ||
+            llam_broker_read_fd(
+                &broker,
+                &token,
+                received,
+                sizeof(original_read)) !=
+                (ssize_t)sizeof(original_read) ||
+            memcmp(received, original_read, sizeof(original_read)) != 0) {
+            goto done;
+        }
+        replacement_result = recv(
+            reused_fd,
+            replacement_received,
+            sizeof(replacement_received),
+            MSG_DONTWAIT);
+        if (replacement_result != (ssize_t)sizeof(replacement_read) ||
+            memcmp(
+                replacement_received,
+                replacement_read,
+                sizeof(replacement_read)) != 0) {
+            goto done;
+        }
+    }
+    if (!metadata_bound) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed descriptor did not pin "
+            "registration-time identity write=%u\n",
+            write_op ? 1U : 0U);
+        goto done;
+    }
+
+    llam_broker_destroy(&broker);
+    broker_initialized = false;
+    if (fcntl(reused_fd, F_GETFD) < 0 ||
+        fcntl(replacement[0], F_GETFD) < 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed descriptor cleanup closed "
+            "caller-owned fd write=%u\n",
+            write_op ? 1U : 0U);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (reused_fd >= 0) {
+        close(reused_fd);
+    }
+    if (original[0] >= 0) {
+        close(original[0]);
+    }
+    if (original[1] >= 0) {
+        close(original[1]);
+    }
+    if (replacement[0] >= 0) {
+        close(replacement[0]);
+    }
+    if (replacement[1] >= 0) {
+        close(replacement[1]);
+    }
+    return rc;
+}
+
+static int test_broker_borrowed_fd_identity_is_registration_bound(void) {
+    int failed = 0;
+
+    if (run_broker_borrowed_fd_identity_case(false) != 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed read authority retargeted "
+            "after fd reuse\n");
+        failed = 1;
+    }
+    if (run_broker_borrowed_fd_identity_case(true) != 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] borrowed write authority retargeted "
+            "after fd reuse\n");
+        failed = 1;
+    }
+    return failed != 0 ? -1 : 0;
+}
+
+static int test_broker_borrowed_fd_registration_failure_releases_pin(void) {
+    llam_runtime_opts_t opts;
+    llam_broker_t broker;
+    llam_capability_token_t token;
+    int sockets[2] = {-1, -1};
+    int before_fds;
+    int after_fds;
+    int flags;
+    bool entropy_forced = false;
+    bool broker_initialized = false;
+    int rc = -1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    if (llam_broker_init(&broker, &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    broker_initialized = true;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+        goto done;
+    }
+    flags = fcntl(sockets[0], F_GETFD);
+    if (flags < 0 ||
+        fcntl(sockets[0], F_SETFD, flags & ~FD_CLOEXEC) != 0) {
+        goto done;
+    }
+    before_fds = broker_count_open_fds();
+    if (before_fds < 0) {
+        goto done;
+    }
+
+    memset(&token, 0xa5, sizeof(token));
+    llam_capability_test_force_entropy_failure(true);
+    entropy_forced = true;
+    errno = 0;
+    if (expect_errno(
+            llam_broker_register_fd(
+                &broker,
+                sockets[0],
+                LLAM_CAP_RIGHT_READ,
+                false,
+                &token),
+            EIO,
+            "borrowed descriptor registration entropy failure") != 0) {
+        goto done;
+    }
+    llam_capability_test_force_entropy_failure(false);
+    entropy_forced = false;
+    after_fds = broker_count_open_fds();
+    if (after_fds != before_fds ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U) ||
+        fcntl(sockets[0], F_GETFD) < 0 ||
+        (fcntl(sockets[0], F_GETFD) & FD_CLOEXEC) != 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] failed borrowed registration leaked "
+            "a pin or mutated caller fd before=%d after=%d\n",
+            before_fds,
+            after_fds);
+        goto done;
+    }
+
+    /*
+     * Ownership transfer commits only when token issuance succeeds. On a
+     * post-slot failure the caller still owns the supplied descriptor and the
+     * transport layer may close it exactly once.
+     */
+    memset(&token, 0xa5, sizeof(token));
+    llam_capability_test_force_entropy_failure(true);
+    entropy_forced = true;
+    errno = 0;
+    if (expect_errno(
+            llam_broker_register_fd(
+                &broker,
+                sockets[0],
+                LLAM_CAP_RIGHT_READ,
+                true,
+                &token),
+            EIO,
+            "transferred descriptor registration entropy failure") != 0) {
+        goto done;
+    }
+    llam_capability_test_force_entropy_failure(false);
+    entropy_forced = false;
+    after_fds = broker_count_open_fds();
+    if (after_fds != before_fds ||
+        broker_active_descriptor_count(&broker) != 0U ||
+        !memory_is_byte(&token, sizeof(token), 0U) ||
+        fcntl(sockets[0], F_GETFD) < 0) {
+        fprintf(
+            stderr,
+            "[test_security_capability] failed transferred registration "
+            "consumed or leaked caller fd before=%d after=%d\n",
+            before_fds,
+            after_fds);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (entropy_forced) {
+        llam_capability_test_force_entropy_failure(false);
+    }
+    if (broker_initialized) {
+        llam_broker_destroy(&broker);
+    }
+    if (sockets[0] >= 0) {
+        close(sockets[0]);
+    }
+    if (sockets[1] >= 0) {
+        close(sockets[1]);
+    }
+    return rc;
+}
+
 static int test_broker_descriptor_io_is_per_call_nonblocking(void) {
     static const unsigned char outbound[] = "full pipe write";
     llam_runtime_opts_t opts;
@@ -12767,11 +13108,12 @@ done:
     return rc;
 }
 
-static int test_broker_register_handle_clears_inherit_flag(void) {
+static int test_broker_register_handle_pins_noninheritable_duplicate(void) {
     SECURITY_ATTRIBUTES attrs;
     llam_runtime_opts_t opts;
     llam_broker_t broker;
     llam_capability_token_t token;
+    llam_broker_descriptor_slot_t *slot = NULL;
     HANDLE read_pipe_read = INVALID_HANDLE_VALUE;
     HANDLE read_pipe_write = INVALID_HANDLE_VALUE;
     DWORD flags = 0U;
@@ -12800,10 +13142,9 @@ static int test_broker_register_handle_clears_inherit_flag(void) {
     broker_initialized = true;
 
     /*
-     * POSIX descriptor registration clears FD_CLOEXEC.  Windows must clear the
-     * equivalent HANDLE_FLAG_INHERIT bit too; otherwise broker-registered
-     * HANDLE authority can leak into child processes created with handle
-     * inheritance enabled.
+     * Borrowed registration must not mutate caller-owned HANDLE flags. The
+     * broker pins a private duplicate and only that stored authority must be
+     * non-inheritable.
      */
     if (llam_broker_register_handle(&broker,
                                     (llam_handle_t)read_pipe_read,
@@ -12812,10 +13153,27 @@ static int test_broker_register_handle_clears_inherit_flag(void) {
                                     &token) != 0) {
         goto done;
     }
-    flags = HANDLE_FLAG_INHERIT;
+    for (size_t i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        if (broker.descriptors[i].active &&
+            broker.descriptors[i].id == token.slot &&
+            broker.descriptors[i].generation == token.generation) {
+            slot = &broker.descriptors[i];
+            break;
+        }
+    }
+    flags = 0U;
     if (!GetHandleInformation(read_pipe_read, &flags) ||
+        (flags & HANDLE_FLAG_INHERIT) == 0U ||
+        slot == NULL ||
+        slot->handle == (llam_handle_t)read_pipe_read ||
+        !slot->close_on_destroy) {
+        fprintf(stderr, "[test_security_capability] borrowed HANDLE was not pinned independently\n");
+        goto done;
+    }
+    flags = HANDLE_FLAG_INHERIT;
+    if (!GetHandleInformation((HANDLE)slot->handle, &flags) ||
         (flags & HANDLE_FLAG_INHERIT) != 0U) {
-        fprintf(stderr, "[test_security_capability] broker registered HANDLE remained inheritable\n");
+        fprintf(stderr, "[test_security_capability] broker HANDLE duplicate remained inheritable\n");
         goto done;
     }
     rc = 0;
@@ -15272,6 +15630,8 @@ int main(int argc, char **argv) {
         LLAM_RUN_SECURITY_TEST(test_broker_channel_close_releases_slot);
         LLAM_RUN_SECURITY_TEST(test_broker_sleep_task_budget_reserves_quick_capacity);
         LLAM_RUN_SECURITY_TEST(test_broker_overauthorized_descriptor_array_closes_all_received_fds);
+        LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_identity_is_registration_bound);
+        LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_registration_failure_releases_pin);
         LLAM_RUN_SECURITY_TEST(test_broker_descriptor_io_is_per_call_nonblocking);
         LLAM_RUN_SECURITY_TEST(test_broker_descriptor_sigpipe_toggle_is_process_safe);
         LLAM_RUN_SECURITY_TEST(test_broker_forget_subject_pins_destroy_reclaim);
@@ -15400,6 +15760,8 @@ int main(int argc, char **argv) {
     LLAM_RUN_SECURITY_TEST(test_broker_end_op_requires_thread_local_owner);
     LLAM_RUN_SECURITY_TEST(test_broker_begin_active_op_sentinel_fails_busy);
     LLAM_RUN_SECURITY_TEST(test_broker_destroy_waits_for_active_ring_io);
+    LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_identity_is_registration_bound);
+    LLAM_RUN_SECURITY_TEST(test_broker_borrowed_fd_registration_failure_releases_pin);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_io_is_per_call_nonblocking);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_sigpipe_toggle_is_process_safe);
     LLAM_RUN_SECURITY_TEST(test_broker_forget_subject_pins_destroy_reclaim);
@@ -15418,7 +15780,7 @@ int main(int argc, char **argv) {
 #else
     LLAM_RUN_SECURITY_TEST(test_broker_ring_handle_data_plane);
     LLAM_RUN_SECURITY_TEST(test_broker_descriptor_rejects_synchronous_handles);
-    LLAM_RUN_SECURITY_TEST(test_broker_register_handle_clears_inherit_flag);
+    LLAM_RUN_SECURITY_TEST(test_broker_register_handle_pins_noninheritable_duplicate);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_mapping_flood);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_flood);
     LLAM_RUN_SECURITY_TEST(test_broker_ring_windows_cross_process_session_replay_guard);

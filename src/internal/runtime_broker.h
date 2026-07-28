@@ -114,6 +114,11 @@ typedef struct llam_broker_descriptor_slot {
     uint64_t rights;
     uint64_t subject_id;
     bool active;
+    /*
+     * Every live slot owns the stored descriptor/HANDLE. A registration with
+     * close_on_destroy=false pins a private duplicate and leaves the caller's
+     * original untouched; true transfers the supplied value itself.
+     */
     bool close_on_destroy;
 } llam_broker_descriptor_slot_t;
 
@@ -370,6 +375,10 @@ void llam_broker_reclaim_subject_buffers(llam_broker_t *broker, uint64_t subject
 llam_broker_buffer_slot_t *llam_broker_find_buffer_unlocked(llam_broker_t *broker,
                                                             const llam_capability_token_t *token,
                                                             uint64_t required_rights);
+/*
+ * close_on_destroy=false leaves the supplied descriptor with the caller and
+ * pins a broker-owned duplicate. true transfers the supplied value itself.
+ */
 int llam_broker_register_fd(llam_broker_t *broker,
                             int fd,
                             uint64_t rights,

@@ -147,15 +147,15 @@ ThreadSanitizer where supported.
 - Modify: `src/internal/runtime_broker.h`
 - Modify: `tests/test_security_capability.c`
 
-- [ ] Add read and write tests that register a borrowed fd, start an operation,
+- [x] Add read and write tests that register a borrowed fd, start an operation,
   close/reuse the original numeric fd for a different object, and assert that
   the broker cannot read from or write to the replacement object.
-- [ ] Duplicate borrowed descriptors into broker-owned CLOEXEC storage at
+- [x] Duplicate borrowed descriptors into broker-owned CLOEXEC storage at
   registration and use only the duplicate for asynchronous operations.
-- [ ] Close the duplicate exactly once on unregister, rollback, broker
+- [x] Close the duplicate exactly once on unregister, rollback, broker
   shutdown, and all partial-registration failures.
-- [ ] Run capability tests plus ASan leak detection.
-- [ ] Commit as `fix: stabilize borrowed broker descriptors`.
+- [x] Run capability tests plus ASan leak detection.
+- [x] Commit as `fix: stabilize borrowed broker descriptors`.
 
 ### Task 6: Make scheduler ownership publication transactional
 

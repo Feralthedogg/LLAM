@@ -79,6 +79,76 @@ static bool llam_broker_descriptor_handle_invalid(llam_handle_t handle) {
 #endif
 }
 
+static void llam_broker_descriptor_close_handle_value(llam_handle_t handle) {
+#if LLAM_PLATFORM_WINDOWS
+    if (!LLAM_HANDLE_IS_INVALID(handle)) {
+        (void)CloseHandle((HANDLE)handle);
+    }
+#else
+    if (handle >= 0) {
+        (void)close((int)handle);
+    }
+#endif
+}
+
+static int llam_broker_descriptor_acquire_registration_handle(
+    llam_handle_t handle,
+    bool transfer_handle,
+    llam_handle_t *out_handle,
+    bool *out_is_duplicate) {
+    if (out_handle == NULL || out_is_duplicate == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_handle = LLAM_INVALID_HANDLE;
+    *out_is_duplicate = false;
+
+    if (transfer_handle) {
+        if (llam_broker_descriptor_set_cloexec(handle) != 0) {
+            return -1;
+        }
+        *out_handle = handle;
+        return 0;
+    }
+
+#if LLAM_PLATFORM_WINDOWS
+    {
+        HANDLE duplicate = NULL;
+
+        if (!DuplicateHandle(GetCurrentProcess(),
+                             (HANDLE)handle,
+                             GetCurrentProcess(),
+                             &duplicate,
+                             0U,
+                             FALSE,
+                             DUPLICATE_SAME_ACCESS)) {
+            errno = llam_windows_system_error_to_errno(GetLastError());
+            return -1;
+        }
+        if (llam_broker_descriptor_set_cloexec(
+                (llam_handle_t)duplicate) != 0) {
+            int saved_errno = errno;
+
+            (void)CloseHandle(duplicate);
+            errno = saved_errno;
+            return -1;
+        }
+        *out_handle = (llam_handle_t)duplicate;
+    }
+#else
+    {
+        int duplicate = llam_broker_dup_cloexec_fd((int)handle);
+
+        if (duplicate < 0) {
+            return -1;
+        }
+        *out_handle = (llam_handle_t)duplicate;
+    }
+#endif
+    *out_is_duplicate = true;
+    return 0;
+}
+
 #if LLAM_PLATFORM_WINDOWS
 /*
  * Keep the ntdll query ABI local instead of including winternl.h after the
@@ -397,11 +467,11 @@ static void llam_broker_descriptor_close_owned_slot(llam_broker_descriptor_slot_
     }
 #if LLAM_PLATFORM_WINDOWS
     if (!LLAM_HANDLE_IS_INVALID(slot->handle)) {
-        (void)CloseHandle((HANDLE)slot->handle);
+        llam_broker_descriptor_close_handle_value(slot->handle);
     }
 #else
     if (slot->fd >= 0) {
-        (void)close(slot->fd);
+        llam_broker_descriptor_close_handle_value((llam_handle_t)slot->fd);
     }
 #endif
 }
@@ -517,6 +587,10 @@ int llam_broker_register_handle(llam_broker_t *broker,
                                 bool close_on_destroy,
                                 llam_capability_token_t *out_token) {
     llam_broker_descriptor_slot_t *slot = NULL;
+    llam_handle_t registration_handle = LLAM_INVALID_HANDLE;
+    bool registration_is_duplicate = false;
+    bool registration_needs_cleanup = false;
+    int saved_errno;
     size_t i;
 
     if (out_token != NULL) {
@@ -532,21 +606,33 @@ int llam_broker_register_handle(llam_broker_t *broker,
     if (llam_broker_validate_object_rights(LLAM_BROKER_CAP_FAMILY_DESCRIPTOR, rights) != 0) {
         return -1;
     }
-    if (llam_broker_descriptor_set_cloexec(handle) != 0) {
-        return -1;
-    }
     if (llam_broker_begin_op(broker) != 0) {
         return -1;
     }
-    if (llam_broker_lock(broker) != 0) {
+    if (llam_broker_descriptor_acquire_registration_handle(
+            handle,
+            close_on_destroy,
+            &registration_handle,
+            &registration_is_duplicate) != 0) {
+        saved_errno = errno;
         llam_broker_end_op(broker);
+        errno = saved_errno;
+        return -1;
+    }
+    registration_needs_cleanup = registration_is_duplicate;
+    if (llam_broker_lock(broker) != 0) {
+        saved_errno = errno;
+        if (registration_needs_cleanup) {
+            llam_broker_descriptor_close_handle_value(
+                registration_handle);
+        }
+        llam_broker_end_op(broker);
+        errno = saved_errno;
         return -1;
     }
     if (LLAM_UNLIKELY(!broker->initialized || broker->runtime == NULL)) {
-        llam_broker_unlock(broker);
-        llam_broker_end_op(broker);
-        errno = EINVAL;
-        return -1;
+        saved_errno = EINVAL;
+        goto fail_locked;
     }
     for (i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
         if (!broker->descriptors[i].active) {
@@ -555,15 +641,12 @@ int llam_broker_register_handle(llam_broker_t *broker,
         }
     }
     if (slot == NULL) {
-        llam_broker_unlock(broker);
-        llam_broker_end_op(broker);
-        errno = ENOSPC;
-        return -1;
+        saved_errno = ENOSPC;
+        goto fail_locked;
     }
     if (llam_broker_validate_next_object_id(broker->next_descriptor_id) != 0) {
-        llam_broker_unlock(broker);
-        llam_broker_end_op(broker);
-        return -1;
+        saved_errno = errno;
+        goto fail_locked;
     }
     /*
      * Free-list selection is based on active=false. If a previous internal
@@ -574,15 +657,19 @@ int llam_broker_register_handle(llam_broker_t *broker,
     llam_broker_descriptor_reset_slot(slot);
 
 #if LLAM_PLATFORM_WINDOWS
-    slot->handle = handle;
+    slot->handle = registration_handle;
 #else
-    slot->fd = handle;
+    slot->fd = (int)registration_handle;
 #endif
     slot->id = broker->next_descriptor_id++;
     slot->generation = 1U;
     slot->rights = rights;
     slot->subject_id = llam_broker_current_subject(broker);
-    slot->close_on_destroy = close_on_destroy;
+    /*
+     * The stored value is always broker-owned. false at the API boundary
+     * means the caller retains its original while this slot owns a pin.
+     */
+    slot->close_on_destroy = true;
     slot->active = true;
     if (llam_broker_issue_object_cap_unlocked(broker,
                                               LLAM_BROKER_CAP_FAMILY_DESCRIPTOR,
@@ -590,19 +677,28 @@ int llam_broker_register_handle(llam_broker_t *broker,
                                               slot->generation,
                                               rights,
                                               out_token) != 0) {
-        memset(slot, 0, sizeof(*slot));
-#if LLAM_PLATFORM_WINDOWS
-        slot->handle = LLAM_INVALID_HANDLE;
-#else
-        slot->fd = -1;
-#endif
-        llam_broker_unlock(broker);
-        llam_broker_end_op(broker);
-        return -1;
+        saved_errno = errno;
+        /*
+         * A failed transfer registration leaves the supplied value with the
+         * caller. A failed borrowed registration drops only its private pin.
+         */
+        llam_broker_descriptor_reset_slot(slot);
+        goto fail_locked;
     }
+    registration_needs_cleanup = false;
     llam_broker_unlock(broker);
     llam_broker_end_op(broker);
     return 0;
+
+fail_locked:
+    llam_broker_unlock(broker);
+    if (registration_needs_cleanup) {
+        llam_broker_descriptor_close_handle_value(
+            registration_handle);
+    }
+    llam_broker_end_op(broker);
+    errno = saved_errno;
+    return -1;
 }
 
 static int llam_broker_duplicate_descriptor_unlocked(llam_broker_t *broker,
