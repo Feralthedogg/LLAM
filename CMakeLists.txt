@@ -51,10 +51,8 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/lifecycle/runtime.c
     src/core/base/abi.c
     src/core/base/errno.c
-    src/core/memory/alloc.c
-    src/core/memory/allocator_quiescent.c
-    src/core/api/core_api.c
-    src/core/api/blocking_api.c
+    src/core/base/util.c
+    src/core/base/io_udata.c
     src/core/registry/capability.c
     src/core/broker/broker.c
     src/core/broker/broker_lifecycle.c
@@ -91,97 +89,99 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/broker/ring/broker_ring_shm.c
     src/core/broker/ring/broker_ring_shm_posix.c
     src/core/broker/ring/broker_ring_shm_windows.c
-    src/core/api/cancel_api.c
-    src/core/context/context_portable.c
-    src/core/debug/debug.c
-    src/core/debug/debug_dump_helpers.c
-    src/core/debug/debug_stats_json.c
     src/core/debug/fault.c
+    src/core/base/names.c
+    src/core/time/time.c
     src/core/context/fp.c
+    src/core/context/stack_sample.c
+    src/core/context/context_portable.c
+    src/core/sched/queue_base.c
+    src/core/sched/norm_queue_depth.c
+    src/core/sched/norm_queue.c
+    src/core/sched/core_queue.c
+    src/core/memory/alloc.c
+    src/core/memory/allocator_quiescent.c
+    src/core/task/task_alloc.c
+    src/core/task/task_handle_registry.c
+    src/core/task/task_handle_claim.c
     src/core/memory/io_object_alloc.c
-    src/core/base/io_udata.c
-    src/core/lifecycle/init.c
+    src/core/wait/wait_timer_alloc.c
+    src/core/debug/trace.c
+    src/core/sched/wake.c
+    src/core/platform/platform.c
+    src/core/platform/windows_policy.c
+    src/core/sched/safepoint.c
+    src/core/wait/wait.c
+    src/core/task/task_reclaim.c
+    src/core/task/task_stack.c
+    src/core/sched/reinject.c
+    src/core/wait/wait_accounting.c
+    src/core/wait/wait_tracking.c
+    src/core/time/timer_heap.c
+    src/core/time/timer.c
+    src/core/api/timer_api.c
+    src/core/api/signal_api.c
+    src/engine/scheduler/scheduler_engine.c
+    src/engine/scheduler/block.c
+    src/io/engine/io_engine.c
+    src/engine/watchdog/watchdog.c
+    src/engine/watchdog/watchdog_probe.c
+    src/engine/watchdog/watchdog_merge.c
+    src/engine/watchdog/watchdog_rehome.c
+    src/engine/watchdog/watchdog_scale.c
+    src/engine/watchdog/watchdog_worker.c
+    src/engine/watchdog/watchdog_autotune.c
+    src/core/api/core_api.c
+    src/core/task/spawn.c
+    src/core/task/yield_join_sleep.c
+    src/core/api/blocking_api.c
+    src/core/api/cancel_api.c
     src/core/lifecycle/lifecycle.c
+    src/core/sched/scheduler.c
+    src/core/lifecycle/init.c
+    src/core/lifecycle/shutdown.c
+    src/core/lifecycle/run.c
+    src/core/sync/sync.c
+    src/core/sync/mutex_lifecycle.c
+    src/core/sync/mutex.c
+    src/core/sync/cond_lifecycle.c
+    src/core/sync/cond.c
     src/core/sync/channel_cache.c
     src/core/sync/channel_lifecycle.c
     src/core/sync/channel_fast.c
     src/core/sync/channel.c
     src/core/sync/channel_select_fast.c
     src/core/sync/channel_select.c
-    src/core/sync/cond_lifecycle.c
-    src/core/sync/cond.c
     src/core/registry/handle.c
     src/core/registry/owner.c
     src/core/registry/registry.c
-    src/core/sync/mutex_lifecycle.c
-    src/core/sync/mutex.c
-    src/core/base/names.c
-    src/core/sched/norm_queue_depth.c
-    src/core/sched/norm_queue.c
-    src/core/platform/platform.c
-    src/core/sched/queue_base.c
-    src/core/sched/core_queue.c
-    src/core/sched/reinject.c
-    src/core/sched/safepoint.c
-    src/core/lifecycle/run.c
-    src/core/sched/scheduler.c
-    src/core/lifecycle/shutdown.c
-    src/core/context/stack_sample.c
-    src/core/sync/sync.c
-    src/core/task/spawn.c
-    src/core/task/task_alloc.c
-    src/core/task/task_handle_registry.c
-    src/core/task/task_handle_claim.c
     src/core/task/task_group.c
     src/core/task/task_group_registry.c
     src/core/task/task_local.c
-    src/core/task/task_reclaim.c
-    src/core/task/task_stack.c
-    src/core/wait/wait_accounting.c
-    src/core/time/timer_heap.c
-    src/core/time/timer.c
-    src/core/api/timer_api.c
-    src/core/api/signal_api.c
-    src/core/time/time.c
-    src/core/debug/trace.c
-    src/core/base/util.c
-    src/core/wait/wait.c
-    src/core/wait/wait_timer_alloc.c
-    src/core/wait/wait_tracking.c
-    src/core/sched/wake.c
-    src/core/platform/windows_policy.c
-    src/core/task/yield_join_sleep.c
-    src/engine/scheduler/block.c
-    src/engine/scheduler/scheduler_engine.c
-    src/engine/watchdog/watchdog.c
-    src/engine/watchdog/watchdog_autotune.c
-    src/engine/watchdog/watchdog_merge.c
-    src/engine/watchdog/watchdog_probe.c
-    src/engine/watchdog/watchdog_rehome.c
-    src/engine/watchdog/watchdog_scale.c
-    src/engine/watchdog/watchdog_worker.c
     src/io/api/io_api.c
-    src/io/api/blocking_ops.c
     src/io/api/direct.c
     src/io/api/direct_tuning.c
     src/io/api/issue.c
-    src/io/buffer/buffer_registry.c
+    src/io/api/blocking_ops.c
     src/io/api/blocking_file_ops.c
     src/io/api/blocking_wrappers.c
+    src/io/buffer/buffer_registry.c
+    src/io/api/owned.c
     src/io/api/datagram.c
     src/io/api/handle_positional.c
-    src/io/api/owned.c
     src/io/api/positional.c
     src/io/api/positional_util.c
     src/io/api/public.c
-    src/io/engine/io_engine.c
+    src/io/windows/watch/iocp.c
+    src/core/debug/debug_dump_helpers.c
+    src/core/debug/debug_stats_json.c
+    src/core/debug/debug.c
     src/io/watch/watch.c
     src/io/watch/close.c
     src/io/watch/watch_lookup.c
     src/io/watch/migration.c
     src/io/watch/watch_queue.c
     src/io/watch/waiter.c
-    src/io/windows/watch/iocp.c
 )
 
 set(LLAM_RUNTIME_LINUX_SOURCES

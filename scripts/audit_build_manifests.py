@@ -8,6 +8,7 @@ from collections.abc import Iterable
 import json
 from pathlib import Path, PurePosixPath
 import re
+import stat
 import sys
 from typing import Any
 
@@ -39,7 +40,13 @@ MAKE_LINK_VARIABLES = {
     "RUNTIME_OBJS": "llam_runtime",
     "RUNTIME_TESTHOOK_OBJS": "llam_runtime_testhooks",
     "SERVER_FLOOD_LDLIBS": "Threads::Threads",
+    "DL_LIBS": "system_dynamic_loader",
 }
+RUNTIME_LIBRARY_TARGETS = (
+    "llam_runtime",
+    "llam_runtime_shared",
+    "llam_runtime_testhooks",
+)
 
 
 class DuplicateKeyError(ValueError):
@@ -58,8 +65,17 @@ class Audit:
         path = self.root / relative
         try:
             return path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            self.error(f"{relative}: cannot read UTF-8 text: {exc}")
+        except OSError as exc:
+            self.error(
+                f"{relative}: cannot read UTF-8 text: "
+                f"{exc.__class__.__name__}"
+            )
+            return None
+        except UnicodeError as exc:
+            self.error(
+                f"{relative}: cannot read UTF-8 text: "
+                f"{exc.__class__.__name__}"
+            )
             return None
 
     def load_json(self, relative: str) -> dict[str, Any] | None:
@@ -159,7 +175,11 @@ class Audit:
             manifest.get("version"),
             "llam-version.json.version",
         )
-        if version is not None and re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+        version_valid = (
+            version is not None
+            and re.fullmatch(r"\d+\.\d+\.\d+", version) is not None
+        )
+        if version is not None and not version_valid:
             self.error(
                 "llam-version.json.version: expected numeric major.minor.patch"
             )
@@ -169,7 +189,7 @@ class Audit:
             return None
         if abi_major < 0:
             self.error("llam-version.json.abi_major: expected non-negative integer")
-        if version is None:
+        if not version_valid:
             return None
         return version, abi_major
 
@@ -202,10 +222,30 @@ class Audit:
         )
         if not sources:
             self.error(f"{location}.sources: must not be empty")
-        links = self.require_string_array(
-            target.get("link_dependencies"),
-            f"{location}.link_dependencies",
-        )
+        raw_links = target.get("link_dependencies")
+        link_platforms = ("linux", "darwin", "bsd", "windows")
+        if isinstance(raw_links, dict):
+            link_object = self.require_object(
+                raw_links,
+                f"{location}.link_dependencies",
+                set(link_platforms),
+            )
+            links = {
+                platform: self.require_string_array(
+                    link_object.get(platform),
+                    f"{location}.link_dependencies.{platform}",
+                )
+                for platform in link_platforms
+            }
+        else:
+            uniform_links = self.require_string_array(
+                raw_links,
+                f"{location}.link_dependencies",
+            )
+            links = {
+                platform: list(uniform_links)
+                for platform in link_platforms
+            }
         if research:
             family = self.require_string(
                 target.get("family"),
@@ -351,9 +391,7 @@ class Audit:
         for target in research_targets:
             all_paths.update(target["sources"])
         for relative in sorted(all_paths):
-            path = self.root / relative
-            if not path.is_file() or path.is_symlink():
-                self.error(f"{relative}: manifest path is not a regular file")
+            self.check_manifest_path(relative)
 
         return {
             "common_sources": common_sources,
@@ -363,6 +401,37 @@ class Audit:
             "private_headers": private_headers,
             "research_targets": research_targets,
         }
+
+    def check_manifest_path(self, relative: str) -> None:
+        current = self.root
+        parts = PurePosixPath(relative).parts
+        for index, part in enumerate(parts):
+            current /= part
+            display = PurePosixPath(*parts[: index + 1]).as_posix()
+            try:
+                mode = current.lstat().st_mode
+            except OSError as exc:
+                self.error(
+                    f"{relative}: cannot inspect manifest path component "
+                    f"{display}: {exc.__class__.__name__}"
+                )
+                return
+            if stat.S_ISLNK(mode):
+                self.error(
+                    f"{relative}: manifest path traverses symlink at "
+                    f"{display}"
+                )
+                return
+            if index < len(parts) - 1 and not stat.S_ISDIR(mode):
+                self.error(
+                    f"{relative}: manifest path ancestor is not a "
+                    f"directory: {display}"
+                )
+                return
+            if index == len(parts) - 1 and not stat.S_ISREG(mode):
+                self.error(
+                    f"{relative}: manifest path is not a regular file"
+                )
 
     def check_versions(self, version: str, abi_major: int) -> None:
         components = tuple(int(part) for part in version.split("."))
@@ -502,6 +571,16 @@ class Audit:
                         ),
                         str(abi_major),
                     ),
+                    (
+                        "package GITHUB_REF_NAME fallback",
+                        find_required(
+                            package,
+                            r"GITHUB_REF_NAME:-v([^}]+)",
+                            self,
+                            "package GITHUB_REF_NAME fallback",
+                        ),
+                        version,
+                    ),
                 ]
             )
 
@@ -587,6 +666,14 @@ class Audit:
                 make_sources,
                 cmake_sources,
             )
+        self.check_runtime_graphs(
+            manifest,
+            make_text,
+            cmake_text,
+            make,
+            cmake,
+        )
+        self.check_enforcement(make_text, cmake_text)
 
         expected_headers = manifest["private_headers"]
         actual_headers = make.literal_variable("RESEARCH_PRIVATE_HDRS")
@@ -604,7 +691,6 @@ class Audit:
         for targets in manifest["test_targets"].values():
             for target in targets:
                 self.check_target(target, make, cmake, research=False)
-        ctest_platforms = cmake_registered_test_platforms(cmake_text)
         all_platforms = {"linux", "darwin", "bsd", "windows"}
         for targets in manifest["test_targets"].values():
             for target in targets:
@@ -612,8 +698,13 @@ class Audit:
                 expected = set(target["platforms"])
                 if expected == {"all"}:
                     expected = all_platforms
-                actual = ctest_platforms.get(name)
-                if actual is None:
+                actual = cmake_target_registration_platforms(
+                    cmake_text,
+                    name,
+                    research=0,
+                    audit=self,
+                )
+                if not actual:
                     self.error(f"{name}: CTest registration is missing")
                 elif actual != expected:
                     actual_label = (
@@ -632,6 +723,25 @@ class Audit:
                     )
         for target in manifest["research_targets"]:
             self.check_target(target, make, cmake, research=True)
+            name = target["name"]
+            expected = expand_platforms(target["platforms"])
+            actual = cmake_target_registration_platforms(
+                cmake_text,
+                name,
+                research=1,
+                audit=self,
+            )
+            if actual != expected:
+                self.error(
+                    f"{name}: CTest platforms "
+                    f"{platform_label(actual)} != "
+                    f"{platform_label(expected)}"
+                )
+        self.check_target_platform_graphs(
+            manifest,
+            make_text,
+            cmake_text,
+        )
 
         expected_stable_targets = {
             target["name"]
@@ -807,36 +917,388 @@ class Audit:
             make_text,
         ) is None:
             self.error("Make dependency files are not included")
-        if "audit-build-manifests" not in make.rules.get("test", []):
+        expected_depfiles = [
+            "$(BUILD_OBJS:.o=.d)",
+            "$(RESEARCH_OBJS:.o=.d)",
+            "$(SHARED_RUNTIME_OBJS:.o=.d)",
+            "$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)",
+        ]
+        actual_depfiles = make.raw_tokens("ALL_DEPFILES")
+        for token in expected_depfiles:
+            if token not in actual_depfiles:
+                self.error(f"Make ALL_DEPFILES omits {token}")
+        for token in actual_depfiles:
+            if token not in expected_depfiles:
+                self.error(f"Make ALL_DEPFILES has extra token {token}")
+        if actual_depfiles != expected_depfiles:
             self.error(
-                "Make test target does not depend on audit-build-manifests"
+                f"Make ALL_DEPFILES order {actual_depfiles} "
+                f"!= {expected_depfiles}"
             )
-        audit_recipe = "\n".join(
-            make.recipes.get("audit-build-manifests", [])
-        )
-        if (
-            "scripts/audit_build_manifests.py" not in audit_recipe
-            or "--root . --check" not in audit_recipe
+        for signature in (
+            "$(BUILD_SIGNATURE)",
+            "$(SHARED_BUILD_SIGNATURE)",
+            "$(TESTHOOK_BUILD_SIGNATURE)",
         ):
-            self.error("Make audit-build-manifests recipe is missing")
-
-        cmake_build_manifest = False
-        for command, body in cmake_commands(cmake_text):
-            if command != "add_test":
-                continue
-            tokens = cmake_tokens(body)
-            if (
-                "NAME" in tokens
-                and "build_manifest" in tokens
-                and any(
-                    token.endswith("scripts/audit_build_manifests.py")
-                    for token in tokens
+            signature_recipe = "\n".join(
+                make.recipes.get(signature, [])
+            )
+            active_recipe = "\n".join(
+                line.split("#", 1)[0]
+                for line in signature_recipe.splitlines()
+            )
+            if "$(DEPFLAGS)" not in active_recipe:
+                self.error(
+                    f"Make {signature} does not record DEPFLAGS"
                 )
-                and "--check" in tokens
-            ):
-                cmake_build_manifest = True
-        if not cmake_build_manifest:
-            self.error("CMake build_manifest test is missing")
+    def check_enforcement(
+        self,
+        make_text: str,
+        cmake_text: str,
+    ) -> None:
+        exact_make_recipe = (
+            "python3 scripts/audit_build_manifests.py --root . --check"
+        )
+        for config in runtime_configurations(cmake=False):
+            active_text = active_make_text(make_text, config, self)
+            projection = MakeProjection(self.root, active_text, self)
+            for target in ("test", "check"):
+                if not make_target_reaches(
+                    projection.rules,
+                    target,
+                    "audit-build-manifests",
+                ):
+                    self.error(
+                        f"Make {config['label']} "
+                        f"research={config['research']} {target} target "
+                        "does not reach audit-build-manifests"
+                    )
+            recipes = projection.recipes.get(
+                "audit-build-manifests",
+                [],
+            )
+            active_recipes = [
+                recipe.split("#", 1)[0].strip().removeprefix("@")
+                for recipe in recipes
+                if recipe.split("#", 1)[0].strip()
+            ]
+            if active_recipes != [exact_make_recipe]:
+                self.error(
+                    "Make audit-build-manifests recipe is not exact: "
+                    f"{active_recipes}"
+                )
+
+        exact_cmake_tokens = [
+            "NAME",
+            "build_manifest",
+            "COMMAND",
+            "${Python3_EXECUTABLE}",
+            (
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/"
+                "audit_build_manifests.py"
+            ),
+            "--root",
+            "${CMAKE_CURRENT_SOURCE_DIR}",
+            "--check",
+        ]
+        for research in (0, 1):
+            config = {
+                "label": "linux-x86_64",
+                "platform": "linux",
+                "processor": "x86_64",
+                "msvc": False,
+                "research": research,
+            }
+            registrations = active_cmake_tests(
+                cmake_text,
+                config,
+                self,
+            )
+            tokens = registrations.get("build_manifest")
+            if tokens is None:
+                self.error(
+                    "CMake build_manifest test is inactive for "
+                    f"research={research}"
+                )
+            elif tokens != exact_cmake_tokens:
+                self.error(
+                    "CMake build_manifest test command is not exact: "
+                    f"{tokens}"
+                )
+
+        workflow = self.read_text(".github/workflows/linux.yml")
+        if workflow is not None and re.search(
+            (
+                r"(?m)^\s*-\s+name:\s+Audit build manifests\s*$\n"
+                r"^\s+run:\s+python3 "
+                r"scripts/audit_build_manifests\.py "
+                r"--root \. --check\s*$"
+            ),
+            workflow,
+        ) is None:
+            self.error("Linux CI build-manifest audit step is missing")
+
+    def check_runtime_graphs(
+        self,
+        manifest: dict[str, Any],
+        make_text: str,
+        cmake_text: str,
+        make: "MakeProjection",
+        cmake: "CMakeProjection",
+    ) -> None:
+        for config in runtime_configurations(cmake=False):
+            expected = expected_runtime_sources(manifest, config)
+            actual = make_runtime_sources(
+                make_text,
+                make,
+                config,
+                self,
+            )
+            compare_ordered(
+                expected,
+                actual,
+                f"Make {config['label']} research={config['research']} "
+                "runtime graph",
+                self,
+            )
+            self.check_make_derived_runtime_closures(
+                make_text,
+                make,
+                actual,
+                config,
+            )
+
+        for config in runtime_configurations(cmake=True):
+            expected = expected_runtime_sources(manifest, config)
+            actual = cmake_runtime_sources(
+                cmake_text,
+                cmake,
+                config,
+                self,
+            )
+            compare_ordered(
+                expected,
+                actual,
+                f"CMake {config['label']} research={config['research']} "
+                "runtime graph",
+                self,
+            )
+            for target in RUNTIME_LIBRARY_TARGETS:
+                exists, library_sources = active_cmake_runtime_library(
+                    cmake_text,
+                    target,
+                    config,
+                    actual,
+                    cmake,
+                    self,
+                )
+                if not exists:
+                    self.error(
+                        f"CMake {target} is missing for "
+                        f"{config['label']} research={config['research']}"
+                    )
+                compare_ordered(
+                    expected,
+                    library_sources,
+                    f"CMake {target} sources",
+                    self,
+                )
+
+        static_rules = make.rules.get("libllam_runtime.a", [])
+        static_recipe = " ".join(make.recipes.get("libllam_runtime.a", []))
+        expected_static = "$(RUNTIME_OBJS)"
+        if expected_static not in static_rules:
+            self.error(
+                "libllam_runtime.a: Make prerequisites omit RUNTIME_OBJS"
+            )
+        runtime_recipe_inputs = make_recipe_object_variables(static_recipe)
+        if runtime_recipe_inputs != ["RUNTIME_OBJS"]:
+            self.error(
+                "libllam_runtime.a: Make link recipe inputs "
+                f"{runtime_recipe_inputs} != ['RUNTIME_OBJS']"
+            )
+        for config in runtime_configurations(cmake=False):
+            if config["platform"] == "windows":
+                continue
+            projection = MakeProjection(
+                self.root,
+                active_make_text(make_text, config, self),
+                self,
+            )
+            shared_targets = [
+                target
+                for target, prerequisites in projection.rules.items()
+                if "$(SHARED_RUNTIME_OBJS)" in prerequisites
+            ]
+            if len(shared_targets) != 1:
+                self.error(
+                    f"Make {config['label']} research={config['research']} "
+                    "must have exactly one shared runtime link target"
+                )
+                continue
+            recipe = " ".join(
+                projection.recipes.get(shared_targets[0], [])
+            )
+            inputs = make_recipe_object_variables(recipe)
+            if inputs != ["SHARED_RUNTIME_OBJS"]:
+                self.error(
+                    "Make shared runtime link recipe inputs "
+                    f"{inputs} != ['SHARED_RUNTIME_OBJS']"
+                )
+
+    def check_target_platform_graphs(
+        self,
+        manifest: dict[str, Any],
+        make_text: str,
+        cmake_text: str,
+    ) -> None:
+        stable_targets = [
+            target
+            for targets in manifest["test_targets"].values()
+            for target in targets
+        ]
+        for target, research in [
+            *((target, False) for target in stable_targets),
+            *((target, True) for target in manifest["research_targets"]),
+        ]:
+            name = target["name"]
+            supported = expand_platforms(target["platforms"])
+            for platform in ("linux", "darwin", "bsd", "windows"):
+                expected_links = sorted(
+                    target["link_dependencies"][platform]
+                )
+                research_modes = (1,) if research else (0, 1)
+                for research_mode in research_modes:
+                    config = {
+                        "label": f"{platform}-x86_64",
+                        "platform": platform,
+                        "processor": "x86_64",
+                        "msvc": platform == "windows",
+                        "research": research_mode,
+                    }
+                    exists, links = active_cmake_target(
+                        cmake_text,
+                        name,
+                        config,
+                        self,
+                    )
+                    if platform in supported and not exists:
+                        self.error(
+                            f"{name}: CMake {platform} target is missing"
+                        )
+                    if platform in supported and sorted(links) != expected_links:
+                        self.error(
+                            f"{name}: CMake {platform} link dependencies "
+                            f"{sorted(links)} != {expected_links}"
+                        )
+                if research:
+                    off_config = {
+                        "label": f"{platform}-x86_64",
+                        "platform": platform,
+                        "processor": "x86_64",
+                        "msvc": platform == "windows",
+                        "research": 0,
+                    }
+                    exists, _ = active_cmake_target(
+                        cmake_text,
+                        name,
+                        off_config,
+                        self,
+                    )
+                    if exists:
+                        self.error(
+                            f"{name}: CMake target is active with "
+                            "research=0"
+                        )
+
+                if platform == "windows" or platform not in supported:
+                    continue
+                make_config = {
+                    "label": f"{platform}-x86_64",
+                    "platform": platform,
+                    "processor": "x86_64",
+                    "msvc": False,
+                    "research": 1 if research else 0,
+                }
+                make = MakeProjection(
+                    self.root,
+                    active_make_text(make_text, make_config, self),
+                    self,
+                )
+                if name not in make.rules:
+                    self.error(
+                        f"{name}: Make {platform} target is missing"
+                    )
+                    continue
+                actual_links = sorted(make.target_links(name))
+                if actual_links != expected_links:
+                    self.error(
+                        f"{name}: Make {platform} link dependencies "
+                        f"{actual_links} != {expected_links}"
+                    )
+
+    def check_make_derived_runtime_closures(
+        self,
+        make_text: str,
+        make: "MakeProjection",
+        runtime_sources: list[str],
+        config: dict[str, Any],
+    ) -> None:
+        shared_values = make_assignment_values(
+            make_text,
+            "SHARED_RUNTIME_OBJS",
+        )
+        expected_shared = (
+            "$(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))"
+        )
+        if shared_values != [expected_shared]:
+            self.error(
+                "Make SHARED_RUNTIME_OBJS must be the canonical "
+                "RUNTIME_OBJS projection"
+            )
+
+        testhook_values = make_assignment_values(
+            make_text,
+            "RUNTIME_TESTHOOK_OBJS",
+        )
+        if len(testhook_values) != 1:
+            self.error(
+                "Make RUNTIME_TESTHOOK_OBJS must have exactly one projection"
+            )
+            return
+        value = testhook_values[0]
+        match = re.fullmatch(
+            r"\$\(filter-out\s+(.+),\s*\$\(RUNTIME_OBJS\)\)\s+"
+            r"\$\(TESTHOOK_RUNTIME_OVERRIDE_OBJS\)",
+            value,
+        )
+        if match is None:
+            self.error(
+                "Make RUNTIME_TESTHOOK_OBJS must be the canonical "
+                "filter-out/override projection"
+            )
+            return
+        excluded: list[str] = []
+        for token in match.group(1).split():
+            source = make.object_to_source(token)
+            if source is None:
+                self.error(
+                    "Make RUNTIME_TESTHOOK_OBJS has unsupported exclusion "
+                    f"{token}"
+                )
+                continue
+            excluded.append(source)
+        overrides = make.source_variable("TESTHOOK_RUNTIME_OVERRIDE_OBJS")
+        label = (
+            f"Make {config['label']} research={config['research']} "
+            "test-hook replacement"
+        )
+        compare_ordered(excluded, overrides, label, self)
+        missing = [source for source in excluded if source not in runtime_sources]
+        if missing:
+            self.error(
+                f"{label}: replaces sources outside runtime graph {missing}"
+            )
 
     def compare_source_group(
         self,
@@ -847,7 +1309,6 @@ class Audit:
         *,
         report_missing: bool = True,
     ) -> None:
-        del label
         compare_members(
             expected,
             make,
@@ -862,6 +1323,8 @@ class Audit:
             self,
             report_missing=report_missing,
         )
+        compare_projection_order(expected, make, label, "Make", self)
+        compare_projection_order(expected, cmake, label, "CMake", self)
 
     def check_classifications(
         self,
@@ -891,26 +1354,86 @@ class Audit:
     ) -> None:
         name = target["name"]
         expected_sources = target["sources"]
+        make_sources = make.target_sources(name)
+        make_recipe_sources = make.target_recipe_sources(name)
+        cmake_sources = cmake.target_sources(name)
         compare_members(
             expected_sources,
-            make.target_sources(name),
+            make_sources,
             f"Make target {name}",
             self,
         )
         compare_members(
             expected_sources,
-            cmake.target_sources(name),
+            make_recipe_sources,
+            f"Make target {name} recipe",
+            self,
+        )
+        compare_members(
+            expected_sources,
+            cmake_sources,
             f"CMake target {name}",
             self,
         )
-        expected_links = sorted(target["link_dependencies"])
-        make_links = sorted(make.target_links(name))
+        compare_projection_order(
+            expected_sources,
+            make_sources,
+            f"target {name} sources",
+            "Make",
+            self,
+        )
+        compare_projection_order(
+            expected_sources,
+            make_recipe_sources,
+            f"target {name} recipe sources",
+            "Make",
+            self,
+        )
+        compare_projection_order(
+            expected_sources,
+            cmake_sources,
+            f"target {name} sources",
+            "CMake",
+            self,
+        )
+        expected_links = sorted(
+            {
+                dependency
+                for links in target["link_dependencies"].values()
+                for dependency in links
+            }
+        )
+        make_prerequisite_links = sorted(
+            make.target_prerequisite_links(name)
+        )
+        make_recipe_links = sorted(make.target_recipe_links(name))
+        make_links = sorted(
+            set(make_prerequisite_links) | set(make_recipe_links)
+        )
         cmake_links = sorted(cmake.target_links(name))
         if make_links != expected_links:
             self.error(
                 f"{name}: Make link dependencies {make_links} "
                 f"!= {expected_links}"
             )
+        prerequisite_expected = sorted(
+            dependency
+            for dependency in expected_links
+            if dependency in {"llam_runtime", "llam_runtime_testhooks"}
+        )
+        if make_prerequisite_links != prerequisite_expected:
+            self.error(
+                f"{name}: Make prerequisite link dependencies "
+                f"{make_prerequisite_links} != {prerequisite_expected}"
+            )
+        if make_recipe_links != expected_links:
+            self.error(
+                f"{name}: Make recipe link dependencies "
+                f"{make_recipe_links} != {expected_links}"
+            )
+        recipe = "\n".join(make.recipes.get(name, []))
+        if prerequisite_expected and "$(LDLIBS)" not in recipe:
+            self.error(f"{name}: Make link recipe omits LDLIBS")
         if cmake_links != expected_links:
             self.error(
                 f"{name}: CMake link dependencies {cmake_links} "
@@ -1065,6 +1588,12 @@ class MakeProjection:
         return result
 
     def target_links(self, target: str) -> list[str]:
+        return sorted(
+            set(self.target_prerequisite_links(target))
+            | set(self.target_recipe_links(target))
+        )
+
+    def target_prerequisite_links(self, target: str) -> list[str]:
         links: list[str] = []
         for token in self.rules.get(target, []):
             match = re.fullmatch(r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)", token)
@@ -1072,14 +1601,82 @@ class MakeProjection:
                 dependency = MAKE_LINK_VARIABLES.get(match.group(1))
                 if dependency is not None and dependency not in links:
                     links.append(dependency)
-        if links:
-            return links
-        recipe = "\n".join(self.recipes.get(target, []))
-        if "$(SERVER_FLOOD_LDLIBS)" in recipe:
-            links.append("Threads::Threads")
-        if "$(DL_LIBS)" in recipe:
-            links.append("system_dynamic_loader")
         return links
+
+    def target_recipe_links(self, target: str) -> list[str]:
+        links: list[str] = []
+        recipe = "\n".join(self.recipes.get(target, []))
+        for variable, dependency in MAKE_LINK_VARIABLES.items():
+            if f"$({variable})" in recipe and dependency not in links:
+                links.append(dependency)
+        known_library_variables = {
+            "LDLIBS",
+            "SERVER_FLOOD_LDLIBS",
+            "DL_LIBS",
+        }
+        for variable in re.findall(
+            r"\$\(([A-Za-z_][A-Za-z0-9_]*(?:LDLIBS|LIBS))\)",
+            recipe,
+        ):
+            if variable not in known_library_variables:
+                self.audit.error(
+                    f"{target}: Make recipe has unknown library "
+                    f"expansion $({variable})"
+                )
+        return links
+
+    def target_recipe_sources(self, target: str) -> list[str]:
+        recipe = "\n".join(self.recipes.get(target, []))
+        result: list[str] = []
+        link_variables = set(MAKE_LINK_VARIABLES)
+        object_variables = list(
+            dict.fromkeys(
+                re.findall(
+                r"\$\(([A-Za-z_][A-Za-z0-9_]*_OBJS)\)",
+                recipe,
+                )
+            )
+        )
+        for variable in object_variables:
+            if variable in link_variables:
+                continue
+            if variable not in self.variables:
+                self.audit.error(
+                    f"{target}: Make recipe has unknown object "
+                    f"expansion $({variable})"
+                )
+                continue
+            result.extend(self.source_variable(variable))
+        for token in re.findall(
+            r"\$\((?:OBJDIR|TESTHOOK_OBJDIR|SHARED_OBJDIR)\)/"
+            r"[A-Za-z0-9_./-]+\.o",
+            recipe,
+        ):
+            source = self.object_to_source(token)
+            if source is not None:
+                result.append(source)
+        allowed_expansions = {
+            "CC",
+            "CFLAGS",
+            "CPPFLAGS",
+            "LDFLAGS",
+            "LDLIBS",
+            "OBJDIR",
+            "TESTHOOK_OBJDIR",
+            "SHARED_OBJDIR",
+            *link_variables,
+            *object_variables,
+        }
+        for variable in re.findall(
+            r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)",
+            recipe,
+        ):
+            if variable not in allowed_expansions:
+                self.audit.error(
+                    f"{target}: Make recipe has unknown expansion "
+                    f"$({variable})"
+                )
+        return result
 
     def has_rule_dependency(self, target: str, dependency: str) -> bool:
         return dependency in self.rules.get(target, [])
@@ -1158,7 +1755,6 @@ class CMakeProjection:
             result.append(token)
         return result
 
-
 def valid_relative_path(value: str) -> bool:
     path = PurePosixPath(value)
     return (
@@ -1211,6 +1807,866 @@ def logical_make_lines(text: str) -> list[str]:
     return result
 
 
+def runtime_configurations(*, cmake: bool) -> list[dict[str, Any]]:
+    if cmake:
+        platforms = [
+            ("linux-x86_64", "linux", "x86_64", False),
+            ("linux-amd64", "linux", "amd64", False),
+            ("linux-aarch64", "linux", "aarch64", False),
+            ("linux-arm64", "linux", "arm64", False),
+            ("darwin-x86_64", "darwin", "x86_64", False),
+            ("darwin-amd64", "darwin", "amd64", False),
+            ("darwin-arm64", "darwin", "arm64", False),
+            ("darwin-aarch64", "darwin", "aarch64", False),
+            ("bsd-x86_64", "bsd", "x86_64", False),
+            ("bsd-amd64", "bsd", "amd64", False),
+            ("bsd-aarch64", "bsd", "aarch64", False),
+            ("bsd-arm64", "bsd", "arm64", False),
+            ("windows-gnu-x86_64", "windows", "x86_64", False),
+            ("windows-gnu-amd64", "windows", "amd64", False),
+            ("windows-msvc-x86_64", "windows", "x86_64", True),
+            ("windows-msvc-amd64", "windows", "amd64", True),
+        ]
+    else:
+        platforms = [
+            ("linux-x86_64", "linux", "x86_64", False),
+            ("linux-aarch64", "linux", "aarch64", False),
+            ("darwin-x86_64", "darwin", "x86_64", False),
+            ("darwin-arm64", "darwin", "arm64", False),
+            ("bsd-x86_64", "bsd", "x86_64", False),
+            ("bsd-amd64", "bsd", "amd64", False),
+            ("bsd-aarch64", "bsd", "aarch64", False),
+            ("bsd-arm64", "bsd", "arm64", False),
+            ("windows-gnu-x86_64", "windows", "x86_64", False),
+            ("windows-gnu-AMD64", "windows", "AMD64", False),
+        ]
+    return [
+        {
+            "label": label,
+            "platform": platform,
+            "processor": processor,
+            "msvc": msvc,
+            "research": research,
+        }
+        for label, platform, processor, msvc in platforms
+        for research in (0, 1)
+    ]
+
+
+def expected_runtime_sources(
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+) -> list[str]:
+    platform = config["platform"]
+    processor = config["processor"]
+    groups: list[str] = []
+    if platform == "linux":
+        groups.append("linux")
+    elif platform in {"darwin", "bsd"}:
+        groups.append("kqueue")
+    elif platform == "windows":
+        groups.append("windows")
+    result = list(manifest["common_sources"])
+    for group in groups:
+        result.extend(manifest["platform_sources"][group])
+    if platform == "linux" and config["research"]:
+        result.extend(manifest["research_runtime"]["linux"])
+    if platform == "linux" and processor in {"x86_64", "amd64"}:
+        result.extend(manifest["platform_sources"]["linux_x86_64"])
+        result.extend(
+            manifest["platform_sources"]["linux_x86_64_wake"]
+        )
+    elif platform in {"linux", "bsd"} and processor in {
+        "aarch64",
+        "arm64",
+    }:
+        result.extend(manifest["platform_sources"]["context_arm64"])
+        result.extend(manifest["platform_sources"]["linux_arm64"])
+    elif platform == "bsd" and processor in {"x86_64", "amd64"}:
+        result.extend(manifest["platform_sources"]["linux_x86_64"])
+    elif platform == "darwin" and processor in {"x86_64", "amd64"}:
+        result.extend(manifest["platform_sources"]["darwin_x86_64"])
+    elif platform == "darwin" and processor in {"aarch64", "arm64"}:
+        result.extend(manifest["platform_sources"]["context_arm64"])
+        result.extend(manifest["platform_sources"]["darwin_arm64"])
+    elif platform == "windows":
+        group = (
+            "windows_msvc_x86_64"
+            if config["msvc"]
+            else "windows_gnu_x86_64"
+        )
+        result.extend(manifest["platform_sources"][group])
+    return result
+
+
+def tri_and(left: bool | None, right: bool | None) -> bool | None:
+    if left is False or right is False:
+        return False
+    if left is None or right is None:
+        return None
+    return True
+
+
+def tri_or(left: bool | None, right: bool | None) -> bool | None:
+    if left is True or right is True:
+        return True
+    if left is None or right is None:
+        return None
+    return False
+
+
+def tri_not(value: bool | None) -> bool | None:
+    return None if value is None else not value
+
+
+def make_condition(
+    directive: str,
+    env: dict[str, str],
+) -> bool | None:
+    match = re.fullmatch(r"(ifeq|ifneq)\s*\((.*?),(.*?)\)", directive)
+    if match is None:
+        return None
+    operator, left, right = match.groups()
+
+    def value(token: str) -> str | None:
+        token = token.strip().strip("\"'")
+        variable = re.fullmatch(
+            r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)",
+            token,
+        )
+        if variable:
+            return env.get(variable.group(1))
+        if "$(" in token:
+            return None
+        return token
+
+    left_value = value(left)
+    right_value = value(right)
+    if left_value is None or right_value is None:
+        return None
+    equal = left_value == right_value
+    return equal if operator == "ifeq" else not equal
+
+
+def make_runtime_sources(
+    text: str,
+    make: MakeProjection,
+    config: dict[str, Any],
+    audit: Audit,
+) -> list[str]:
+    platform = config["platform"]
+    system_names = {
+        "linux": "Linux",
+        "darwin": "Darwin",
+        "bsd": "FreeBSD",
+        "windows": "Windows_NT",
+    }
+    env = {
+        "HOST_PLATFORM": platform,
+        "UNAME_S": system_names[platform],
+        "UNAME_M": config["processor"],
+        "LLAM_BUILD_RESEARCH": str(config["research"]),
+        "OS": "Windows_NT" if platform == "windows" else "",
+    }
+    frames: list[dict[str, bool | None]] = []
+    active: bool | None = True
+    runtime_tokens: list[str] = []
+    for line in logical_make_lines(text):
+        if line.startswith(("ifeq ", "ifneq ")):
+            condition = make_condition(line, env)
+            frames.append(
+                {
+                    "parent": active,
+                    "prior": condition,
+                }
+            )
+            active = tri_and(active, condition)
+            continue
+        if line.startswith(("else ifeq ", "else ifneq ")):
+            if not frames:
+                continue
+            frame = frames[-1]
+            condition = make_condition(line.removeprefix("else "), env)
+            remaining = tri_not(frame["prior"])
+            active = tri_and(
+                frame["parent"],
+                tri_and(remaining, condition),
+            )
+            frame["prior"] = tri_or(frame["prior"], condition)
+            continue
+        if line == "else":
+            if not frames:
+                continue
+            frame = frames[-1]
+            active = tri_and(frame["parent"], tri_not(frame["prior"]))
+            frame["prior"] = True
+            continue
+        if line == "endif":
+            if frames:
+                frame = frames.pop()
+                active = frame["parent"]
+            continue
+        assignment = re.match(
+            r"^RUNTIME_OBJS\s*(\+=|:=|\?=|=)\s*(.*)$",
+            line,
+        )
+        if assignment is None:
+            continue
+        if active is None:
+            audit.error(
+                "Make RUNTIME_OBJS construction is guarded by an "
+                f"unsupported condition: {line}"
+            )
+            continue
+        if not active:
+            continue
+        operator, value = assignment.groups()
+        tokens = value.split()
+        if operator == "+=":
+            runtime_tokens.extend(tokens)
+        elif operator in {"=", ":="}:
+            runtime_tokens = tokens
+        else:
+            audit.error(
+                f"Make RUNTIME_OBJS uses unsupported assignment {operator}"
+            )
+
+    result: list[str] = []
+    allowed_variables = {
+        "RUNTIME_COMMON_OBJS",
+        *(f"RUNTIME_{group.upper()}_OBJS" for group in PLATFORM_GROUPS),
+        "RESEARCH_RUNTIME_LINUX_OBJS",
+    }
+    for token in runtime_tokens:
+        variable = re.fullmatch(
+            r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)",
+            token,
+        )
+        if variable and variable.group(1) in allowed_variables:
+            result.extend(make.source_variable(variable.group(1)))
+            continue
+        source = make.object_to_source(token)
+        if source is not None:
+            result.append(source)
+        audit.error(
+            f"Make {config['label']} research={config['research']} "
+            f"runtime graph has unsupported token {token}"
+        )
+    return result
+
+
+def active_make_text(
+    text: str,
+    config: dict[str, Any],
+    audit: Audit,
+) -> str:
+    platform = config["platform"]
+    system_names = {
+        "linux": "Linux",
+        "darwin": "Darwin",
+        "bsd": "FreeBSD",
+        "windows": "Windows_NT",
+    }
+    env = {
+        "HOST_PLATFORM": platform,
+        "UNAME_S": system_names[platform],
+        "UNAME_M": config["processor"],
+        "LLAM_BUILD_RESEARCH": str(config["research"]),
+        "OS": "Windows_NT" if platform == "windows" else "",
+    }
+    frames: list[dict[str, bool | None]] = []
+    active: bool | None = True
+    output: list[str] = []
+    for physical in text.splitlines():
+        line = physical.strip()
+        if line.startswith(("ifeq ", "ifneq ")):
+            condition = make_condition(line, env)
+            frames.append({"parent": active, "prior": condition})
+            active = tri_and(active, condition)
+            continue
+        if line.startswith(("else ifeq ", "else ifneq ")):
+            if frames:
+                frame = frames[-1]
+                condition = make_condition(line.removeprefix("else "), env)
+                active = tri_and(
+                    frame["parent"],
+                    tri_and(tri_not(frame["prior"]), condition),
+                )
+                frame["prior"] = tri_or(frame["prior"], condition)
+            continue
+        if line == "else":
+            if frames:
+                frame = frames[-1]
+                active = tri_and(
+                    frame["parent"],
+                    tri_not(frame["prior"]),
+                )
+                frame["prior"] = True
+            continue
+        if line == "endif":
+            if frames:
+                frame = frames.pop()
+                active = frame["parent"]
+            continue
+        if active is True:
+            output.append(physical)
+        elif active is None and re.match(
+            r"^(?:test|check|audit-build-manifests)(?:\s|:)",
+            line,
+        ):
+            audit.error(
+                "Make audit enforcement is guarded by an unsupported "
+                f"condition near: {line}"
+            )
+    return "\n".join(output) + "\n"
+
+
+def make_target_reaches(
+    rules: dict[str, list[str]],
+    start: str,
+    wanted: str,
+) -> bool:
+    pending = [start]
+    visited: set[str] = set()
+    while pending:
+        target = pending.pop()
+        if target == wanted:
+            return True
+        if target in visited:
+            continue
+        visited.add(target)
+        pending.extend(
+            prerequisite
+            for prerequisite in rules.get(target, [])
+            if not prerequisite.startswith("$(")
+        )
+    return False
+
+
+def cmake_condition(
+    tokens: list[str],
+    env: dict[str, Any],
+) -> bool | None:
+    if not tokens:
+        return None
+    if "OR" in tokens:
+        index = tokens.index("OR")
+        return tri_or(
+            cmake_condition(tokens[:index], env),
+            cmake_condition(tokens[index + 1 :], env),
+        )
+    if "AND" in tokens:
+        index = tokens.index("AND")
+        return tri_and(
+            cmake_condition(tokens[:index], env),
+            cmake_condition(tokens[index + 1 :], env),
+        )
+    if tokens[0] == "NOT":
+        return tri_not(cmake_condition(tokens[1:], env))
+    if len(tokens) == 1:
+        token = tokens[0]
+        if token in {"TRUE", "ON", "1"}:
+            return True
+        if token in {"FALSE", "OFF", "0"}:
+            return False
+        value = env.get(token)
+        return bool(value) if value is not None else None
+    if len(tokens) == 3 and tokens[1] in {"STREQUAL", "MATCHES"}:
+        left = env.get(tokens[0])
+        if left is None:
+            return None
+        right = tokens[2]
+        if tokens[1] == "STREQUAL":
+            return str(left) == right
+        try:
+            return re.search(right, str(left)) is not None
+        except re.error:
+            return None
+    return None
+
+
+def cmake_runtime_sources(
+    text: str,
+    cmake: CMakeProjection,
+    config: dict[str, Any],
+    audit: Audit,
+) -> list[str]:
+    system_names = {
+        "linux": "Linux",
+        "darwin": "Darwin",
+        "bsd": "FreeBSD",
+        "windows": "Windows",
+    }
+    env = {
+        "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
+        "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
+        "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
+        "LLAM_BUILD_RESEARCH": bool(config["research"]),
+        "LLAM_TARGET_PROCESSOR": config["processor"],
+        "MSVC": bool(config["msvc"]),
+        "Python3_Interpreter_FOUND": True,
+        "Python3_FOUND": True,
+    }
+    uncommented = "\n".join(
+        line.split("#", 1)[0] for line in text.splitlines()
+    )
+    frames: list[dict[str, bool | None]] = []
+    active: bool | None = True
+    runtime_tokens: list[str] = []
+    for command, body in cmake_commands(uncommented):
+        tokens = cmake_tokens(body)
+        if command == "if":
+            condition = cmake_condition(tokens, env)
+            frames.append({"parent": active, "prior": condition})
+            active = tri_and(active, condition)
+            continue
+        if command == "elseif":
+            if not frames:
+                continue
+            frame = frames[-1]
+            condition = cmake_condition(tokens, env)
+            active = tri_and(
+                frame["parent"],
+                tri_and(tri_not(frame["prior"]), condition),
+            )
+            frame["prior"] = tri_or(frame["prior"], condition)
+            continue
+        if command == "else":
+            if not frames:
+                continue
+            frame = frames[-1]
+            active = tri_and(
+                frame["parent"],
+                tri_not(frame["prior"]),
+            )
+            frame["prior"] = True
+            continue
+        if command == "endif":
+            if frames:
+                frame = frames.pop()
+                active = frame["parent"]
+            continue
+        touches_runtime = (
+            command == "set"
+            and tokens
+            and tokens[0] == "LLAM_RUNTIME_SOURCES"
+        ) or (
+            command == "list"
+            and len(tokens) >= 2
+            and tokens[:2] == ["APPEND", "LLAM_RUNTIME_SOURCES"]
+        )
+        if not touches_runtime:
+            continue
+        if active is None:
+            audit.error(
+                "CMake LLAM_RUNTIME_SOURCES construction is guarded by "
+                f"an unsupported condition: {command}({body.strip()})"
+            )
+            continue
+        if not active:
+            continue
+        if command == "set":
+            runtime_tokens = tokens[1:]
+        else:
+            runtime_tokens.extend(tokens[2:])
+
+    result: list[str] = []
+    for token in runtime_tokens:
+        variable = re.fullmatch(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+            token,
+        )
+        if variable and variable.group(1) != "LLAM_RUNTIME_SOURCES":
+            result.extend(cmake.source_variable(variable.group(1)))
+        elif source_suffix(token):
+            result.append(token)
+            audit.error(
+                f"CMake {config['label']} research={config['research']} "
+                f"runtime graph has unsupported direct source {token}"
+            )
+        else:
+            audit.error(
+                f"CMake {config['label']} research={config['research']} "
+                f"runtime graph has unsupported token {token}"
+            )
+    return result
+
+
+def active_cmake_tests(
+    text: str,
+    config: dict[str, Any],
+    audit: Audit,
+) -> dict[str, list[str]]:
+    system_names = {
+        "linux": "Linux",
+        "darwin": "Darwin",
+        "bsd": "FreeBSD",
+        "windows": "Windows",
+    }
+    env = {
+        "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
+        "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
+        "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
+        "LLAM_BUILD_RESEARCH": bool(config["research"]),
+        "LLAM_TARGET_PROCESSOR": config["processor"],
+        "MSVC": bool(config["msvc"]),
+        "Python3_Interpreter_FOUND": True,
+        "Python3_FOUND": True,
+    }
+    uncommented = "\n".join(
+        line.split("#", 1)[0] for line in text.splitlines()
+    )
+    frames: list[dict[str, bool | None]] = []
+    active: bool | None = True
+    registrations: dict[str, list[str]] = {}
+    for command, body in cmake_commands(uncommented):
+        tokens = cmake_tokens(body)
+        if command == "if":
+            condition = cmake_condition(tokens, env)
+            frames.append({"parent": active, "prior": condition})
+            active = tri_and(active, condition)
+            continue
+        if command == "elseif":
+            if frames:
+                frame = frames[-1]
+                condition = cmake_condition(tokens, env)
+                active = tri_and(
+                    frame["parent"],
+                    tri_and(tri_not(frame["prior"]), condition),
+                )
+                frame["prior"] = tri_or(frame["prior"], condition)
+            continue
+        if command == "else":
+            if frames:
+                frame = frames[-1]
+                active = tri_and(
+                    frame["parent"],
+                    tri_not(frame["prior"]),
+                )
+                frame["prior"] = True
+            continue
+        if command == "endif":
+            if frames:
+                frame = frames.pop()
+                active = frame["parent"]
+            continue
+        if command != "add_test":
+            continue
+        if active is None:
+            audit.error(
+                "CMake add_test is guarded by an unsupported condition: "
+                f"add_test({body.strip()})"
+            )
+            continue
+        if not active or "NAME" not in tokens:
+            continue
+        index = tokens.index("NAME")
+        if index + 1 >= len(tokens):
+            continue
+        name = tokens[index + 1]
+        if name in registrations:
+            audit.error(
+                f"CMake duplicate active CTest registration {name}"
+            )
+        registrations[name] = tokens
+    return registrations
+
+
+def active_cmake_target(
+    text: str,
+    target: str,
+    config: dict[str, Any],
+    audit: Audit,
+) -> tuple[bool, list[str]]:
+    system_names = {
+        "linux": "Linux",
+        "darwin": "Darwin",
+        "bsd": "FreeBSD",
+        "windows": "Windows",
+    }
+    env = {
+        "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
+        "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
+        "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
+        "LLAM_BUILD_RESEARCH": bool(config["research"]),
+        "LLAM_TARGET_PROCESSOR": config["processor"],
+        "MSVC": bool(config["msvc"]),
+        "Python3_Interpreter_FOUND": True,
+        "Python3_FOUND": True,
+    }
+    uncommented = "\n".join(
+        line.split("#", 1)[0] for line in text.splitlines()
+    )
+    frames: list[dict[str, bool | None]] = []
+    active: bool | None = True
+    exists = False
+    links: list[str] = []
+    for command, body in cmake_commands(uncommented):
+        tokens = cmake_tokens(body)
+        if command == "if":
+            condition = cmake_condition(tokens, env)
+            frames.append({"parent": active, "prior": condition})
+            active = tri_and(active, condition)
+            continue
+        if command == "elseif":
+            if frames:
+                frame = frames[-1]
+                condition = cmake_condition(tokens, env)
+                active = tri_and(
+                    frame["parent"],
+                    tri_and(tri_not(frame["prior"]), condition),
+                )
+                frame["prior"] = tri_or(frame["prior"], condition)
+            continue
+        if command == "else":
+            if frames:
+                frame = frames[-1]
+                active = tri_and(
+                    frame["parent"],
+                    tri_not(frame["prior"]),
+                )
+                frame["prior"] = True
+            continue
+        if command == "endif":
+            if frames:
+                frame = frames.pop()
+                active = frame["parent"]
+            continue
+        relevant = (
+            command == "add_executable"
+            and tokens
+            and tokens[0] == target
+        ) or (
+            command == "target_link_libraries"
+            and tokens
+            and tokens[0] == target
+        )
+        if not relevant:
+            continue
+        if active is None:
+            audit.error(
+                f"CMake {target} is guarded by an unsupported condition: "
+                f"{command}({body.strip()})"
+            )
+            continue
+        if not active:
+            continue
+        if command == "add_executable":
+            if exists:
+                audit.error(
+                    f"CMake duplicate active target definition {target}"
+                )
+            exists = True
+        else:
+            for token in tokens[1:]:
+                if token in {"PRIVATE", "PUBLIC", "INTERFACE"}:
+                    continue
+                if token.startswith("$<"):
+                    continue
+                if token == "${CMAKE_DL_LIBS}":
+                    token = "system_dynamic_loader"
+                links.append(token)
+    return exists, links
+
+
+def active_cmake_runtime_library(
+    text: str,
+    target: str,
+    config: dict[str, Any],
+    runtime_sources: list[str],
+    cmake: CMakeProjection,
+    audit: Audit,
+) -> tuple[bool, list[str]]:
+    system_names = {
+        "linux": "Linux",
+        "darwin": "Darwin",
+        "bsd": "FreeBSD",
+        "windows": "Windows",
+    }
+    env = {
+        "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
+        "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
+        "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
+        "LLAM_BUILD_RESEARCH": bool(config["research"]),
+        "LLAM_TARGET_PROCESSOR": config["processor"],
+        "MSVC": bool(config["msvc"]),
+        "Python3_Interpreter_FOUND": True,
+        "Python3_FOUND": True,
+    }
+    uncommented = "\n".join(
+        line.split("#", 1)[0] for line in text.splitlines()
+    )
+    frames: list[dict[str, bool | None]] = []
+    active: bool | None = True
+    exists = False
+    source_tokens: list[str] = []
+    for command, body in cmake_commands(uncommented):
+        tokens = cmake_tokens(body)
+        if command == "if":
+            condition = cmake_condition(tokens, env)
+            frames.append({"parent": active, "prior": condition})
+            active = tri_and(active, condition)
+            continue
+        if command == "elseif":
+            if frames:
+                frame = frames[-1]
+                condition = cmake_condition(tokens, env)
+                active = tri_and(
+                    frame["parent"],
+                    tri_and(tri_not(frame["prior"]), condition),
+                )
+                frame["prior"] = tri_or(frame["prior"], condition)
+            continue
+        if command == "else":
+            if frames:
+                frame = frames[-1]
+                active = tri_and(
+                    frame["parent"],
+                    tri_not(frame["prior"]),
+                )
+                frame["prior"] = True
+            continue
+        if command == "endif":
+            if frames:
+                frame = frames.pop()
+                active = frame["parent"]
+            continue
+        relevant = (
+            command == "add_library"
+            and tokens
+            and tokens[0] == target
+        ) or (
+            command == "target_sources"
+            and tokens
+            and tokens[0] == target
+        )
+        if not relevant:
+            continue
+        if active is None:
+            audit.error(
+                f"CMake {target} is guarded by an unsupported condition: "
+                f"{command}({body.strip()})"
+            )
+            continue
+        if not active:
+            continue
+        if command == "add_library":
+            if exists:
+                audit.error(
+                    f"CMake duplicate active library definition {target}"
+                )
+            exists = True
+            source_tokens.extend(
+                token
+                for token in tokens[1:]
+                if token
+                not in {
+                    "STATIC",
+                    "SHARED",
+                    "MODULE",
+                    "OBJECT",
+                    "INTERFACE",
+                    "EXCLUDE_FROM_ALL",
+                    "IMPORTED",
+                    "GLOBAL",
+                }
+            )
+        else:
+            source_tokens.extend(
+                token
+                for token in tokens[1:]
+                if token not in {"PRIVATE", "PUBLIC", "INTERFACE"}
+            )
+
+    result: list[str] = []
+    for token in source_tokens:
+        if token == "${LLAM_RUNTIME_SOURCES}":
+            result.extend(runtime_sources)
+            continue
+        variable = re.fullmatch(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+            token,
+        )
+        if variable:
+            result.extend(cmake.source_variable(variable.group(1)))
+        elif source_suffix(token):
+            result.append(token)
+        else:
+            audit.error(
+                f"CMake {target} has unsupported source token {token}"
+            )
+    return exists, result
+
+
+def expand_platforms(platforms: Iterable[str]) -> set[str]:
+    values = set(platforms)
+    if values == {"all"}:
+        return {"linux", "darwin", "bsd", "windows"}
+    return values
+
+
+def platform_label(platforms: set[str]) -> list[str]:
+    if platforms == {"linux", "darwin", "bsd", "windows"}:
+        return ["all"]
+    return sorted(platforms)
+
+
+def cmake_target_registration_platforms(
+    text: str,
+    target: str,
+    *,
+    research: int,
+    audit: Audit,
+) -> set[str]:
+    result: set[str] = set()
+    for platform in ("linux", "darwin", "bsd", "windows"):
+        config = {
+            "label": f"{platform}-x86_64",
+            "platform": platform,
+            "processor": "x86_64",
+            "msvc": platform == "windows",
+            "research": research,
+        }
+        registrations = active_cmake_tests(text, config, audit)
+        if any(
+            ctest_registration_targets(tokens, target)
+            for tokens in registrations.values()
+        ):
+            result.add(platform)
+    return result
+
+
+def ctest_registration_targets(tokens: list[str], target: str) -> bool:
+    if "NAME" in tokens:
+        index = tokens.index("NAME")
+        if index + 1 < len(tokens) and tokens[index + 1] == target:
+            return True
+    target_file = f"$<TARGET_FILE:{target}>"
+    return target in tokens or any(target_file in token for token in tokens)
+
+
+def make_assignment_values(text: str, variable: str) -> list[str]:
+    values: list[str] = []
+    for line in logical_make_lines(text):
+        match = re.match(
+            rf"^{re.escape(variable)}\s*(?:\+=|:=|\?=|=)\s*(.*)$",
+            line,
+        )
+        if match:
+            values.append(match.group(1).strip())
+    return values
+
+
+def make_recipe_object_variables(recipe: str) -> list[str]:
+    return [
+        name
+        for name in re.findall(
+            r"\$\(([A-Za-z_][A-Za-z0-9_]*_OBJS)\)",
+            recipe,
+        )
+    ]
+
+
 def cmake_commands(text: str) -> list[tuple[str, str]]:
     commands: list[tuple[str, str]] = []
     index = 0
@@ -1258,92 +2714,6 @@ def cmake_tokens(body: str) -> list[str]:
     ]
 
 
-def cmake_registered_test_platforms(text: str) -> dict[str, set[str]]:
-    all_platforms = {"linux", "darwin", "bsd", "windows"}
-    posix_platforms = all_platforms - {"windows"}
-    allowed_stack = [set(all_platforms)]
-    frames: list[tuple[set[str], set[str], set[str]]] = []
-    registrations: dict[str, set[str]] = {}
-    command_lines: list[str] = []
-    command_allowed: set[str] = set()
-    depth = 0
-
-    for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if command_lines:
-            command_lines.append(line)
-            depth += line.count("(") - line.count(")")
-            if depth > 0:
-                continue
-            command = "\n".join(command_lines)
-            parsed = cmake_commands(command)
-            if parsed and parsed[0][0] == "add_test":
-                tokens = cmake_tokens(parsed[0][1])
-                if "NAME" in tokens:
-                    index = tokens.index("NAME")
-                    if index + 1 < len(tokens):
-                        registrations.setdefault(tokens[index + 1], set()).update(
-                            command_allowed
-                        )
-            command_lines = []
-            continue
-
-        if line.startswith("if("):
-            parent = allowed_stack[-1]
-            if re.fullmatch(
-                r'if\(CMAKE_SYSTEM_NAME\s+STREQUAL\s+"Windows"\)',
-                line,
-            ):
-                true_allowed = {"windows"}
-                false_allowed = posix_platforms
-            elif re.fullmatch(
-                r'if\(NOT\s+CMAKE_SYSTEM_NAME\s+STREQUAL\s+"Windows"\)',
-                line,
-            ):
-                true_allowed = posix_platforms
-                false_allowed = {"windows"}
-            else:
-                true_allowed = all_platforms
-                false_allowed = all_platforms
-            frames.append((set(parent), true_allowed, false_allowed))
-            allowed_stack.append(parent & true_allowed)
-            continue
-        if line.startswith("else("):
-            if frames:
-                parent, _, false_allowed = frames[-1]
-                allowed_stack[-1] = parent & false_allowed
-            continue
-        if line.startswith("elseif("):
-            if frames:
-                parent, _, _ = frames[-1]
-                allowed_stack[-1] = set(parent)
-            continue
-        if line.startswith("endif("):
-            if frames:
-                frames.pop()
-                allowed_stack.pop()
-            continue
-        if re.match(r"add_test\s*\(", line):
-            command_lines = [line]
-            command_allowed = set(allowed_stack[-1])
-            depth = line.count("(") - line.count(")")
-            if depth <= 0:
-                parsed = cmake_commands(line)
-                if parsed:
-                    tokens = cmake_tokens(parsed[0][1])
-                    if "NAME" in tokens:
-                        index = tokens.index("NAME")
-                        if index + 1 < len(tokens):
-                            registrations.setdefault(
-                                tokens[index + 1],
-                                set(),
-                            ).update(command_allowed)
-                command_lines = []
-    return registrations
-
-
 def compare_members(
     expected: Iterable[str],
     actual: Iterable[str],
@@ -1369,6 +2739,70 @@ def compare_members(
             audit.error(f"{item}: missing from {build_system}")
     for item in sorted(actual_set - expected_set):
         audit.error(f"{item}: extra in {build_system}")
+
+
+def compare_ordered(
+    expected: Iterable[str],
+    actual: Iterable[str],
+    label: str,
+    audit: Audit,
+) -> None:
+    expected_values = list(expected)
+    actual_values = list(actual)
+    if actual_values != expected_values:
+        mismatch = next(
+            (
+                index
+                for index, (actual_item, expected_item) in enumerate(
+                    zip(actual_values, expected_values, strict=False)
+                )
+                if actual_item != expected_item
+            ),
+            min(len(actual_values), len(expected_values)),
+        )
+        actual_item = (
+            actual_values[mismatch]
+            if mismatch < len(actual_values)
+            else "<end>"
+        )
+        expected_item = (
+            expected_values[mismatch]
+            if mismatch < len(expected_values)
+            else "<end>"
+        )
+        audit.error(
+            f"{label}: source drift at index {mismatch}: "
+            f"{actual_item} != {expected_item} "
+            f"(actual count {len(actual_values)}, "
+            f"expected count {len(expected_values)})"
+        )
+
+
+def compare_projection_order(
+    expected: Iterable[str],
+    actual: Iterable[str],
+    label: str,
+    build_system: str,
+    audit: Audit,
+) -> None:
+    expected_values = list(expected)
+    actual_values = list(actual)
+    if (
+        actual_values == expected_values
+        or sorted(actual_values) != sorted(expected_values)
+    ):
+        return
+    mismatch = next(
+        index
+        for index, (actual_item, expected_item) in enumerate(
+            zip(actual_values, expected_values, strict=True)
+        )
+        if actual_item != expected_item
+    )
+    audit.error(
+        f"{label}: {build_system} order drift at index {mismatch}: "
+        f"{actual_values[mismatch]} != {expected_values[mismatch]}"
+    )
 
 
 def compare_target_sets(

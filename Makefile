@@ -957,6 +957,7 @@ $(BUILD_SIGNATURE): FORCE
 		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
 		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'DEPFLAGS=%s\n' '$(DEPFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'OBJDIR=%s\n' '$(OBJDIR)'; \
 		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \
@@ -977,6 +978,7 @@ $(SHARED_BUILD_SIGNATURE): FORCE
 		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
 		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'DEPFLAGS=%s\n' '$(DEPFLAGS)'; \
 		printf 'PICFLAGS=%s\n' '$(PICFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'SHARED_OBJDIR=%s\n' '$(SHARED_OBJDIR)'; \
@@ -997,6 +999,7 @@ $(TESTHOOK_BUILD_SIGNATURE): FORCE
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1'; \
 		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
+		printf 'DEPFLAGS=%s\n' '$(DEPFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'TESTHOOK_OBJDIR=%s\n' '$(TESTHOOK_OBJDIR)'; \
 		printf 'HOST_PLATFORM=%s\n' '$(HOST_PLATFORM)'; \

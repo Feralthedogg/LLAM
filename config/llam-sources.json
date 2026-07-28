@@ -446,7 +446,12 @@
           "experiments/lcwe/lcwe_workloads.c",
           "experiments/lcwe/test_lcwe_model.c"
         ],
-        "link_dependencies": ["Threads::Threads"]
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
       },
       {
         "family": "lcwe",
@@ -457,7 +462,12 @@
           "experiments/lcwe/lcwe_workloads.c",
           "experiments/lcwe/bench_lcwe_model.c"
         ],
-        "link_dependencies": ["Threads::Threads"]
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
       },
       {
         "family": "lccf",
@@ -469,7 +479,12 @@
           "experiments/lccf/lccf_workloads.c",
           "experiments/lccf/test_lccf_model.c"
         ],
-        "link_dependencies": ["Threads::Threads"]
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
       },
       {
         "family": "lccf",
@@ -481,7 +496,12 @@
           "experiments/lccf/lccf_workloads.c",
           "experiments/lccf/bench_lccf_model.c"
         ],
-        "link_dependencies": ["Threads::Threads"]
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
       },
       {
         "family": "srem",
@@ -493,7 +513,12 @@
           "experiments/srem/srem_workloads.c",
           "experiments/srem/test_srem_model.c"
         ],
-        "link_dependencies": ["Threads::Threads"]
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
       },
       {
         "family": "srem",
@@ -505,7 +530,12 @@
           "experiments/srem/srem_workloads.c",
           "experiments/srem/bench_srem_model.c"
         ],
-        "link_dependencies": ["Threads::Threads"]
+        "link_dependencies": {
+          "linux": ["Threads::Threads"],
+          "darwin": ["Threads::Threads"],
+          "bsd": ["Threads::Threads"],
+          "windows": []
+        }
       }
     ]
   }
