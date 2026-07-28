@@ -5086,6 +5086,27 @@ typedef struct inflight_owner_transfer_call {
     bool result;
 } inflight_owner_transfer_call_t;
 
+typedef struct inflight_reuse_fixture {
+    llam_runtime_t runtime;
+    llam_shard_t shards[4];
+    llam_node_t node;
+    llam_task_t task;
+} inflight_reuse_fixture_t;
+
+typedef struct inflight_rehome_call {
+    inflight_reuse_fixture_t *fixture;
+    unsigned source_id;
+    unsigned target_id;
+    unsigned migrated;
+    atomic_uint done;
+} inflight_rehome_call_t;
+
+typedef struct inflight_completion_call {
+    llam_node_t *node;
+    llam_io_req_t *req;
+    atomic_uint done;
+} inflight_completion_call_t;
+
 static pthread_mutex_t g_submit_detach_hook_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_submit_detach_hook_cv = PTHREAD_COND_INITIALIZER;
 static llam_io_req_t *g_submit_detach_hook_req;
@@ -5250,6 +5271,64 @@ static void clear_inflight_owner_hook(void) {
     pthread_mutex_unlock(&g_inflight_owner_hook_lock);
 }
 
+static bool wait_inflight_owner_hook_bounded(uint64_t timeout_ns) {
+    uint64_t deadline = llam_now_ns() + timeout_ns;
+    bool reached;
+
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    while (!g_inflight_owner_hook_reached &&
+           llam_now_ns() < deadline) {
+        struct timespec interval = {.tv_sec = 0, .tv_nsec = 1000000L};
+
+        pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+        (void)nanosleep(&interval, NULL);
+        pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    }
+    reached = g_inflight_owner_hook_reached;
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+    return reached;
+}
+
+static bool wait_atomic_uint_mask_bounded(atomic_uint *value,
+                                          unsigned mask,
+                                          unsigned expected,
+                                          uint64_t timeout_ns) {
+    uint64_t deadline = llam_now_ns() + timeout_ns;
+
+    while ((atomic_load_explicit(value, memory_order_acquire) & mask) !=
+           expected) {
+        if (llam_now_ns() >= deadline) {
+            return false;
+        }
+        sched_yield();
+    }
+    return true;
+}
+
+static bool wait_completion_or_resolver_close_bounded(
+    atomic_uint *completion_done,
+    atomic_uint *resolver_state,
+    uint64_t timeout_ns) {
+    uint64_t deadline = llam_now_ns() + timeout_ns;
+    unsigned state;
+
+    for (;;) {
+        if (atomic_load_explicit(completion_done,
+                                 memory_order_acquire) != 0U) {
+            return true;
+        }
+        state = atomic_load_explicit(resolver_state, memory_order_acquire);
+        if ((state & LLAM_WAIT_RESOLVER_CLOSED_BIT) != 0U &&
+            (state & LLAM_WAIT_RESOLVER_REF_MASK) != 0U) {
+            return true;
+        }
+        if (llam_now_ns() >= deadline) {
+            return false;
+        }
+        sched_yield();
+    }
+}
+
 static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
                                       bool published) {
     llam_runtime_t *rt;
@@ -5363,6 +5442,235 @@ static void destroy_submit_rehome_fixture(submit_rehome_fixture_t *fixture) {
         pthread_mutex_destroy(&fixture->nodes[i].submit_lock);
         pthread_mutex_destroy(&fixture->shards[i].lock);
     }
+}
+
+static int init_inflight_reuse_fixture(inflight_reuse_fixture_t *fixture,
+                                       unsigned allocation_owner,
+                                       unsigned source_id) {
+    llam_runtime_t *rt;
+    llam_task_t *task;
+    llam_io_req_t *req;
+    uint64_t operation_generation;
+
+    if (fixture == NULL || allocation_owner >= 4U ||
+        source_id >= 4U) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(fixture, 0, sizeof(*fixture));
+    rt = &fixture->runtime;
+    task = &fixture->task;
+    req = &task->embedded_io_req;
+
+    rt->shards = fixture->shards;
+    rt->nodes = &fixture->node;
+    rt->active_shards = 4U;
+    rt->active_nodes = 1U;
+    atomic_init(&rt->initialized, false);
+    atomic_init(&rt->online_shards, 4U);
+    atomic_init(&rt->fatal_errno, 0);
+    atomic_init(&rt->deferred_fatal_pending, 0U);
+    atomic_init(&rt->overflow_depth, 0U);
+    atomic_init(&rt->active_io_waiters, 0U);
+
+    for (unsigned i = 0U; i < 4U; ++i) {
+        llam_shard_t *shard = &fixture->shards[i];
+
+        shard->runtime = rt;
+        shard->id = i;
+        shard->io_node_index = 0U;
+        shard->event_fd = LLAM_INVALID_FD;
+        atomic_init(&shard->online, 1U);
+        atomic_init(&shard->current, NULL);
+        atomic_init(&shard->inflight_io_waiters, 0U);
+        atomic_init(&shard->merge_pause_requested, 0U);
+        atomic_init(&shard->merge_pause_ack, 0U);
+        atomic_init(&shard->inject_depth, 0U);
+        atomic_init(&shard->timer_count, 0U);
+        atomic_init(&shard->timer_callbacks_active, 0U);
+        if (pthread_mutex_init(&shard->lock, NULL) != 0) {
+            return -1;
+        }
+    }
+
+    fixture->node.runtime = rt;
+    fixture->node.index = 0U;
+    fixture->node.event_fd = LLAM_INVALID_FD;
+    atomic_init(&fixture->node.pending_ops, 0U);
+    if (pthread_mutex_init(&fixture->node.watch_lock, NULL) != 0) {
+        return -1;
+    }
+
+    task->owner_runtime = rt;
+    task->home_shard = source_id;
+    task->live_shard = source_id;
+    task->alloc_owner_shard = allocation_owner;
+    atomic_init(&task->state, LLAM_TASK_STATE_PARKED);
+    atomic_init(&task->wait_reason, LLAM_WAIT_IO);
+    atomic_init(&task->last_shard, source_id);
+    atomic_init(&task->parked_shard, source_id);
+    atomic_init(&task->task_class, LLAM_TASK_CLASS_DEFAULT);
+    atomic_init(&task->base_task_class, LLAM_TASK_CLASS_DEFAULT);
+    atomic_init(&task->wake_error_code, 0);
+    atomic_init(&task->wait_resolver_state, 0U);
+    atomic_init(&task->wait_generation, 1U);
+    atomic_init(&task->scan_refs, 0U);
+    atomic_init(&task->active_wait_node, NULL);
+    atomic_init(&task->active_wait_queue, NULL);
+    atomic_init(&task->active_wait_queue_lock, NULL);
+    atomic_init(&task->active_select_state, NULL);
+    atomic_init(&task->active_wait_lifetime_ops, NULL);
+    atomic_init(&task->active_block_job, NULL);
+    atomic_init(&task->join_target, NULL);
+    atomic_init(&task->active_io_req, NULL);
+    atomic_init(&task->active_io_generation, 0U);
+    task->active_timer = NULL;
+
+    llam_io_req_reset(req, rt, source_id, UINT_MAX);
+    if (!llam_io_req_lifetime_activate(req)) {
+        return -1;
+    }
+    operation_generation = atomic_load_explicit(
+        &req->operation_generation, memory_order_acquire);
+    req->task = task;
+    atomic_store_explicit(&req->owner_shard,
+                          source_id,
+                          memory_order_release);
+    atomic_store_explicit(&req->inflight_owner_shard,
+                          source_id,
+                          memory_order_release);
+    atomic_store_explicit(&req->wait_mode,
+                          LLAM_IO_WAIT_MODE_INFLIGHT,
+                          memory_order_release);
+    atomic_store_explicit(&task->active_io_generation,
+                          operation_generation,
+                          memory_order_release);
+    atomic_store_explicit(&task->active_io_req,
+                          req,
+                          memory_order_release);
+    fixture->shards[allocation_owner].all_tasks = task;
+    atomic_store_explicit(
+        &fixture->shards[source_id].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    return 0;
+}
+
+static void destroy_inflight_reuse_fixture(
+    inflight_reuse_fixture_t *fixture) {
+    if (fixture == NULL) {
+        return;
+    }
+    pthread_mutex_destroy(&fixture->node.watch_lock);
+    for (unsigned i = 0U; i < 4U; ++i) {
+        pthread_mutex_destroy(&fixture->shards[i].lock);
+    }
+}
+
+static void *inflight_rehome_thread_main(void *opaque) {
+    inflight_rehome_call_t *call = opaque;
+
+    llam_rehome_inflight_io_waiters(
+        &call->fixture->runtime,
+        &call->fixture->shards[call->source_id],
+        &call->fixture->shards[call->target_id],
+        &call->migrated);
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void *inflight_completion_thread_main(void *opaque) {
+    inflight_completion_call_t *call = opaque;
+
+#if LLAM_RUNTIME_BACKEND_KQUEUE
+    llam_io_complete_req(call->node, call->req, 0, false);
+#elif LLAM_RUNTIME_BACKEND_LINUX
+    llam_io_complete_req(call->node, call->req, 0, 0U, false);
+#else
+#error "FR08-002 regression requires the kqueue or Linux backend"
+#endif
+    atomic_store_explicit(&call->done, 1U, memory_order_release);
+    return NULL;
+}
+
+static void clear_inflight_reuse_inject_queue(
+    inflight_reuse_fixture_t *fixture,
+    unsigned shard_id) {
+    llam_shard_t *shard = &fixture->shards[shard_id];
+
+    pthread_mutex_lock(&shard->lock);
+    while (llam_queue_pop_head(&shard->inject_q) != NULL) {
+    }
+    atomic_store_explicit(&shard->inject_depth,
+                          0U,
+                          memory_order_release);
+    pthread_mutex_unlock(&shard->lock);
+    fixture->task.queue_next = NULL;
+    fixture->task.queue_prev = NULL;
+}
+
+static bool reuse_inflight_generation(inflight_reuse_fixture_t *fixture,
+                                      unsigned source_id,
+                                      unsigned completed_on,
+                                      unsigned reuse_id,
+                                      uint64_t old_generation,
+                                      uint64_t *new_generation_out) {
+    llam_task_t *task = &fixture->task;
+    llam_io_req_t *old_req = &task->embedded_io_req;
+    llam_io_req_t *new_req;
+    uint64_t new_generation;
+
+    if (llam_task_active_io_req_load(task) != NULL ||
+        atomic_load_explicit(&task->state,
+                             memory_order_acquire) !=
+            LLAM_TASK_STATE_RUNNABLE ||
+        fixture->shards[completed_on].inject_q.head != task) {
+        return false;
+    }
+
+    clear_inflight_reuse_inject_queue(fixture, completed_on);
+    atomic_store_explicit(&task->state,
+                          LLAM_TASK_STATE_RUNNING,
+                          memory_order_release);
+    atomic_store_explicit(&task->last_shard,
+                          reuse_id,
+                          memory_order_release);
+    /*
+     * A stolen task may retain its prior home while beginning the fresh wait.
+     * The old rehome must not rewrite this generation's placement metadata.
+     */
+    task->home_shard = source_id;
+    g_llam_tls_task = task;
+    g_llam_tls_shard = &fixture->shards[reuse_id];
+    llam_api_io_req_release(g_llam_tls_shard, old_req);
+    new_req = llam_api_io_req_acquire(g_llam_tls_shard);
+    if (new_req != old_req) {
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+        return false;
+    }
+    new_generation = atomic_load_explicit(
+        &new_req->operation_generation, memory_order_acquire);
+    if (new_generation == 0U || new_generation == old_generation ||
+        !llam_task_set_io_tracking(task, new_req, reuse_id)) {
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+        return false;
+    }
+    atomic_store_explicit(&new_req->wait_mode,
+                          LLAM_IO_WAIT_MODE_INFLIGHT,
+                          memory_order_release);
+    atomic_store_explicit(&new_req->inflight_owner_shard,
+                          reuse_id,
+                          memory_order_release);
+    atomic_store_explicit(
+        &fixture->shards[reuse_id].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    g_llam_tls_task = NULL;
+    g_llam_tls_shard = NULL;
+    *new_generation_out = new_generation;
+    return true;
 }
 
 static bool migrate_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
@@ -5629,6 +5937,274 @@ static int exercise_inflight_owner_credit_precedes_publication(void) {
 
 done:
     destroy_submit_rehome_fixture(&fixture);
+    return rc;
+}
+
+/*
+ * LLAM-DIFF-FR08-002: a rehome for generation N must pin that wait until all
+ * ownership stores finish.  The task allocation owner is deliberately
+ * distinct from its parked shard, matching a supported stolen-task state.
+ */
+static int exercise_inflight_rehome_is_generation_bound(void) {
+    enum {
+        allocation_owner = 0U,
+        source_id = 1U,
+        target_id = 2U,
+        reuse_id = 3U
+    };
+    const uint64_t timeout_ns = 2000000000ULL;
+    inflight_reuse_fixture_t fixture;
+    inflight_rehome_call_t rehome_call;
+    inflight_completion_call_t completion_call;
+    llam_task_t *task;
+    llam_io_req_t *req;
+    pthread_t rehome_thread;
+    pthread_t completion_thread;
+    uint64_t old_generation;
+    uint64_t old_wait_generation;
+    uint64_t new_generation = 0U;
+    bool completion_finished_while_paused;
+    bool rehome_started = false;
+    bool rehome_joined = false;
+    bool completion_started = false;
+    bool completion_joined = false;
+    bool hook_armed = false;
+    bool fresh_started = false;
+    int rc = 1;
+
+    if (init_inflight_reuse_fixture(
+            &fixture, allocation_owner, source_id) != 0) {
+        return fail_errno("FR08-002 fixture init failed");
+    }
+    task = &fixture.task;
+    req = &task->embedded_io_req;
+    old_generation = atomic_load_explicit(
+        &req->operation_generation, memory_order_acquire);
+    old_wait_generation = atomic_load_explicit(
+        &task->wait_generation, memory_order_acquire);
+
+    memset(&rehome_call, 0, sizeof(rehome_call));
+    rehome_call.fixture = &fixture;
+    rehome_call.source_id = source_id;
+    rehome_call.target_id = target_id;
+    atomic_init(&rehome_call.done, 0U);
+    memset(&completion_call, 0, sizeof(completion_call));
+    completion_call.node = &fixture.node;
+    completion_call.req = req;
+    atomic_init(&completion_call.done, 0U);
+
+    arm_inflight_owner_hook(req);
+    hook_armed = true;
+    if (pthread_create(&rehome_thread,
+                       NULL,
+                       inflight_rehome_thread_main,
+                       &rehome_call) != 0) {
+        (void)fail_errno("FR08-002 rehome thread create failed");
+        goto done;
+    }
+    rehome_started = true;
+    if (!wait_inflight_owner_hook_bounded(timeout_ns)) {
+        (void)fail_msg("FR08-002 owner publication hook timed out");
+        goto done;
+    }
+    if (atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != target_id ||
+        atomic_load_explicit(&task->parked_shard,
+                             memory_order_acquire) != source_id ||
+        atomic_load_explicit(&req->owner_shard,
+                             memory_order_acquire) != source_id ||
+        task->home_shard != source_id) {
+        (void)fail_msg(
+            "FR08-002 fixture missed the post-publication metadata window");
+        goto done;
+    }
+
+    if (pthread_create(&completion_thread,
+                       NULL,
+                       inflight_completion_thread_main,
+                       &completion_call) != 0) {
+        (void)fail_errno("FR08-002 completion thread create failed");
+        goto done;
+    }
+    completion_started = true;
+    if (!wait_atomic_uint_mask_bounded(
+            &req->wait_mode,
+            UINT_MAX,
+            LLAM_IO_WAIT_MODE_NONE,
+            timeout_ns) ||
+        atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(
+            &fixture.shards[target_id].inflight_io_waiters,
+            memory_order_acquire) != 0U) {
+        (void)fail_msg(
+            "FR08-002 completion did not consume the transferred owner");
+        goto done;
+    }
+
+    if (!wait_completion_or_resolver_close_bounded(
+            &completion_call.done,
+            &task->wait_resolver_state,
+            timeout_ns)) {
+        (void)fail_msg(
+            "FR08-002 completion reached neither reuse nor resolver drain");
+        goto done;
+    }
+    completion_finished_while_paused =
+        atomic_load_explicit(&completion_call.done,
+                             memory_order_acquire) != 0U;
+    if (completion_finished_while_paused) {
+        if (pthread_join(completion_thread, NULL) != 0) {
+            (void)fail_msg("FR08-002 early completion join failed");
+            goto done;
+        }
+        completion_joined = true;
+        /*
+         * Vulnerable code reaches this branch: completion clears generation N,
+         * so publish N+1 at the same embedded address before old rehome resumes.
+         */
+        if (!reuse_inflight_generation(&fixture,
+                                       source_id,
+                                       target_id,
+                                       reuse_id,
+                                       old_generation,
+                                       &new_generation)) {
+            (void)fail_msg(
+                "FR08-002 could not reuse the prematurely cleared request");
+            goto done;
+        }
+        fresh_started = true;
+    } else if (!wait_atomic_uint_mask_bounded(
+                   &task->wait_resolver_state,
+                   LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                   LLAM_WAIT_RESOLVER_CLOSED_BIT,
+                   timeout_ns) ||
+               (atomic_load_explicit(&task->wait_resolver_state,
+                                     memory_order_acquire) &
+                LLAM_WAIT_RESOLVER_REF_MASK) == 0U ||
+               llam_task_active_io_req_load(task) != req ||
+               atomic_load_explicit(&task->active_io_generation,
+                                    memory_order_acquire) != old_generation ||
+               atomic_load_explicit(&task->wait_generation,
+                                    memory_order_acquire) !=
+                   old_wait_generation) {
+        (void)fail_msg(
+            "FR08-002 completion was blocked without retaining generation N");
+        goto done;
+    }
+
+    release_inflight_owner_hook();
+    if (pthread_join(rehome_thread, NULL) != 0) {
+        (void)fail_msg("FR08-002 rehome join failed");
+        goto done;
+    }
+    rehome_joined = true;
+    clear_inflight_owner_hook();
+    hook_armed = false;
+
+    if (completion_started && !completion_joined) {
+        if (pthread_join(completion_thread, NULL) != 0) {
+            (void)fail_msg("FR08-002 completion join failed");
+            goto done;
+        }
+        completion_joined = true;
+    }
+    if (!fresh_started) {
+        if (!reuse_inflight_generation(&fixture,
+                                       source_id,
+                                       target_id,
+                                       reuse_id,
+                                       old_generation,
+                                       &new_generation)) {
+            (void)fail_msg(
+                "FR08-002 could not start a fresh post-rehome generation");
+            goto done;
+        }
+        fresh_started = true;
+    }
+
+    if (rehome_call.migrated != 1U ||
+        atomic_load_explicit(&rehome_call.done,
+                             memory_order_acquire) != 1U ||
+        llam_task_active_io_req_load(task) != req ||
+        atomic_load_explicit(&task->active_io_generation,
+                             memory_order_acquire) != new_generation ||
+        atomic_load_explicit(&req->operation_generation,
+                             memory_order_acquire) != new_generation ||
+        atomic_load_explicit(&task->wait_generation,
+                             memory_order_acquire) ==
+            old_wait_generation ||
+        atomic_load_explicit(&req->inflight_owner_shard,
+                             memory_order_acquire) != reuse_id ||
+        atomic_load_explicit(&task->parked_shard,
+                             memory_order_acquire) != reuse_id ||
+        atomic_load_explicit(&req->owner_shard,
+                             memory_order_acquire) != reuse_id ||
+        task->home_shard != source_id ||
+        atomic_load_explicit(
+            &fixture.shards[reuse_id].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(&fixture.runtime.fatal_errno,
+                             memory_order_acquire) != 0 ||
+        atomic_load_explicit(&fixture.runtime.deferred_fatal_pending,
+                             memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "test_runtime_shutdown_internal: FR08-002 old generation "
+            "overwrote fresh ownership: old_gen=%llu new_gen=%llu "
+            "parked=%u owner=%u home=%u inflight=%u\n",
+            (unsigned long long)old_generation,
+            (unsigned long long)new_generation,
+            atomic_load_explicit(&task->parked_shard,
+                                 memory_order_acquire),
+            atomic_load_explicit(&req->owner_shard,
+                                 memory_order_acquire),
+            task->home_shard,
+            atomic_load_explicit(&req->inflight_owner_shard,
+                                 memory_order_acquire));
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+    if (hook_armed) {
+        release_inflight_owner_hook();
+    }
+    if (rehome_started && !rehome_joined) {
+        (void)pthread_join(rehome_thread, NULL);
+    }
+    if (completion_started && !completion_joined) {
+        (void)pthread_join(completion_thread, NULL);
+    }
+    if (hook_armed) {
+        clear_inflight_owner_hook();
+    }
+
+    for (unsigned i = 0U; i < 4U; ++i) {
+        atomic_store_explicit(&fixture.shards[i].inflight_io_waiters,
+                              0U,
+                              memory_order_release);
+        clear_inflight_reuse_inject_queue(&fixture, i);
+    }
+    atomic_store_explicit(&req->inflight_owner_shard,
+                          UINT_MAX,
+                          memory_order_release);
+    atomic_store_explicit(&req->wait_mode,
+                          LLAM_IO_WAIT_MODE_NONE,
+                          memory_order_release);
+    if (llam_task_active_io_req_load(task) == req) {
+        (void)llam_task_clear_wait_tracking(task);
+    }
+    if (atomic_load_explicit(&req->lifetime_refs,
+                             memory_order_acquire) != 0U) {
+        g_llam_tls_task = task;
+        g_llam_tls_shard = &fixture.shards[reuse_id];
+        llam_api_io_req_release(g_llam_tls_shard, req);
+        g_llam_tls_task = NULL;
+        g_llam_tls_shard = NULL;
+    }
+    destroy_inflight_reuse_fixture(&fixture);
     return rc;
 }
 
@@ -6023,6 +6599,9 @@ static int exercise_submit_cancel_rehome_regressions(void) {
     if (exercise_inflight_owner_credit_precedes_publication() != 0) {
         failed = 1;
     }
+    if (exercise_inflight_rehome_is_generation_bound() != 0) {
+        failed = 1;
+    }
     if (exercise_merge_request_before_ack_keeps_wake_on_source() != 0) {
         failed = 1;
     }
@@ -6043,6 +6622,11 @@ static int exercise_submit_cancel_rehome_regressions(void) {
 #endif
 
 int main(void) {
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+    if (getenv("LLAM_VALIDATE_FR08_002_ONLY") != NULL) {
+        return exercise_inflight_rehome_is_generation_bound();
+    }
+#endif
     if (exercise_io_lifetime_invariants_are_lock_safe() != 0) {
         return 1;
     }
