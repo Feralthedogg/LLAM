@@ -39,7 +39,17 @@
 #include <unistd.h>
 #endif
 
-#define LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS 250
+uint64_t llam_broker_descriptor_io_deadline(void) {
+    const uint64_t timeout_ns =
+        (uint64_t)LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS *
+        UINT64_C(1000000);
+    uint64_t now_ns = llam_now_ns();
+
+    if (now_ns == 0U || UINT64_MAX - now_ns < timeout_ns) {
+        return 0U;
+    }
+    return now_ns + timeout_ns;
+}
 
 static int llam_broker_descriptor_set_cloexec(llam_handle_t handle) {
 #if LLAM_PLATFORM_WINDOWS
@@ -235,7 +245,8 @@ static int llam_broker_descriptor_require_overlapped(HANDLE handle) {
 static ssize_t llam_broker_descriptor_overlapped_rw(HANDLE handle,
                                                     void *buffer,
                                                     size_t length,
-                                                    bool write_op) {
+                                                    bool write_op,
+                                                    uint64_t deadline_ns) {
     OVERLAPPED overlapped;
     HANDLE event;
     DWORD transferred = 0U;
@@ -248,6 +259,16 @@ static ssize_t llam_broker_descriptor_overlapped_rw(HANDLE handle,
                       length > (size_t)ULONG_MAX)) {
         errno = EINVAL;
         return -1;
+    }
+    {
+        uint64_t now_ns = llam_now_ns();
+
+        if (deadline_ns == 0U ||
+            now_ns == 0U ||
+            now_ns >= deadline_ns) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
     }
     if (llam_broker_descriptor_require_overlapped(handle) != 0) {
         return -1;
@@ -270,7 +291,30 @@ static ssize_t llam_broker_descriptor_overlapped_rw(HANDLE handle,
             errno = llam_windows_system_error_to_errno(error_code);
             return -1;
         }
-        error_code = WaitForSingleObject(event, LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS);
+        {
+            uint64_t now_ns = llam_now_ns();
+            uint64_t remaining_ns;
+            uint64_t remaining_ms;
+            DWORD timeout_ms;
+
+            if (now_ns == 0U || now_ns >= deadline_ns) {
+                timeout_ms = 0U;
+            } else {
+                remaining_ns = deadline_ns - now_ns;
+                remaining_ms =
+                    remaining_ns / UINT64_C(1000000);
+                if ((remaining_ns % UINT64_C(1000000)) != 0U) {
+                    ++remaining_ms;
+                }
+                if (remaining_ms >
+                    (uint64_t)LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS) {
+                    remaining_ms =
+                        LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS;
+                }
+                timeout_ms = (DWORD)remaining_ms;
+            }
+            error_code = WaitForSingleObject(event, timeout_ms);
+        }
         if (error_code != WAIT_OBJECT_0) {
             (void)CancelIoEx(handle, &overlapped);
             (void)WaitForSingleObject(event, INFINITE);
@@ -394,45 +438,49 @@ static ssize_t llam_broker_descriptor_send_nonblocking(int fd, const void *data,
 #endif
 }
 
-static int llam_broker_descriptor_wait_fd_ready(int fd, short events) {
+static int llam_broker_descriptor_wait_fd_ready_until(
+    int fd,
+    short events,
+    uint64_t deadline_ns) {
     struct pollfd pfd;
-    uint64_t start_ns;
-    uint64_t deadline_ns;
 
     if (LLAM_UNLIKELY(fd < 0)) {
         errno = EINVAL;
         return -1;
     }
+    if (LLAM_UNLIKELY(deadline_ns == 0U)) {
+        errno = EAGAIN;
+        return -1;
+    }
     memset(&pfd, 0, sizeof(pfd));
     pfd.fd = fd;
     pfd.events = events;
-    start_ns = llam_now_ns();
-    deadline_ns = start_ns + ((uint64_t)LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS * UINT64_C(1000000));
-    if (deadline_ns < start_ns) {
-        deadline_ns = UINT64_MAX;
-    }
     for (;;) {
         uint64_t now_ns = llam_now_ns();
-        int timeout_ms = LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS;
+        uint64_t remaining_ns;
+        uint64_t remaining_ms;
+        int timeout_ms;
         int rc;
 
-        if (start_ns != 0U && now_ns != 0U) {
-            uint64_t remaining_ns;
-            uint64_t remaining_ms;
-
-            if (now_ns >= deadline_ns) {
-                errno = EAGAIN;
-                return -1;
-            }
-            remaining_ns = deadline_ns - now_ns;
-            remaining_ms = remaining_ns / UINT64_C(1000000);
-            if ((remaining_ns % UINT64_C(1000000)) != 0U) {
-                ++remaining_ms;
-            }
-            timeout_ms = remaining_ms > (uint64_t)INT_MAX ? INT_MAX : (int)remaining_ms;
-            if (timeout_ms < 1) {
-                timeout_ms = 1;
-            }
+        if (now_ns == 0U || now_ns >= deadline_ns) {
+            errno = EAGAIN;
+            return -1;
+        }
+        remaining_ns = deadline_ns - now_ns;
+        remaining_ms = remaining_ns / UINT64_C(1000000);
+        if ((remaining_ns % UINT64_C(1000000)) != 0U) {
+            ++remaining_ms;
+        }
+        if (remaining_ms >
+            (uint64_t)LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS) {
+            remaining_ms = LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS;
+        }
+        timeout_ms =
+            remaining_ms > (uint64_t)INT_MAX
+                ? INT_MAX
+                : (int)remaining_ms;
+        if (timeout_ms < 1) {
+            timeout_ms = 1;
         }
         rc = poll(&pfd, 1U, timeout_ms);
 
@@ -561,6 +609,23 @@ static llam_broker_descriptor_slot_t *llam_broker_find_descriptor_unlocked(
     return NULL;
 }
 
+static size_t llam_broker_subject_descriptor_count_unlocked(
+    const llam_broker_t *broker,
+    uint64_t subject_id) {
+    size_t count = 0U;
+    size_t i;
+
+    for (i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
+        const llam_broker_descriptor_slot_t *slot =
+            &broker->descriptors[i];
+
+        if (slot->active && slot->subject_id == subject_id) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 int llam_broker_register_fd(llam_broker_t *broker,
                             int fd,
                             uint64_t rights,
@@ -590,6 +655,7 @@ int llam_broker_register_handle(llam_broker_t *broker,
     llam_handle_t registration_handle = LLAM_INVALID_HANDLE;
     bool registration_is_duplicate = false;
     bool registration_needs_cleanup = false;
+    uint64_t subject_id;
     int saved_errno;
     size_t i;
 
@@ -634,6 +700,14 @@ int llam_broker_register_handle(llam_broker_t *broker,
         saved_errno = EINVAL;
         goto fail_locked;
     }
+    subject_id = llam_broker_current_subject(broker);
+    if (subject_id != 0U &&
+        llam_broker_subject_descriptor_count_unlocked(
+            broker, subject_id) >=
+            LLAM_BROKER_DESCRIPTORS_PER_SUBJECT) {
+        saved_errno = LLAM_BROKER_QUOTA_ERRNO;
+        goto fail_locked;
+    }
     for (i = 0U; i < LLAM_BROKER_DESCRIPTOR_SLOTS; ++i) {
         if (!broker->descriptors[i].active) {
             slot = &broker->descriptors[i];
@@ -664,7 +738,7 @@ int llam_broker_register_handle(llam_broker_t *broker,
     slot->id = broker->next_descriptor_id++;
     slot->generation = 1U;
     slot->rights = rights;
-    slot->subject_id = llam_broker_current_subject(broker);
+    slot->subject_id = subject_id;
     /*
      * The stored value is always broker-owned. false at the API boundary
      * means the caller retains its original while this slot owns a pin.
@@ -785,10 +859,12 @@ ssize_t llam_broker_write_fd(llam_broker_t *broker,
 #endif
 }
 
-ssize_t llam_broker_read_handle(llam_broker_t *broker,
-                                const llam_capability_token_t *token,
-                                void *out_data,
-                                size_t length) {
+ssize_t llam_broker_read_handle_until(
+    llam_broker_t *broker,
+    const llam_capability_token_t *token,
+    void *out_data,
+    size_t length,
+    uint64_t deadline_ns) {
     llam_handle_t handle;
 #if !LLAM_PLATFORM_WINDOWS
     ssize_t result;
@@ -820,7 +896,12 @@ ssize_t llam_broker_read_handle(llam_broker_t *broker,
     {
         ssize_t transferred;
 
-        transferred = llam_broker_descriptor_overlapped_rw((HANDLE)handle, out_data, length, false);
+        transferred = llam_broker_descriptor_overlapped_rw(
+            (HANDLE)handle,
+            out_data,
+            length,
+            false,
+            deadline_ns);
         if (transferred < 0) {
             int saved_errno = errno;
 
@@ -835,7 +916,8 @@ ssize_t llam_broker_read_handle(llam_broker_t *broker,
         int fd = (int)handle;
 
         if (llam_broker_descriptor_require_socket(fd) != 0 ||
-            llam_broker_descriptor_wait_fd_ready(fd, POLLIN) != 0) {
+            llam_broker_descriptor_wait_fd_ready_until(
+                fd, POLLIN, deadline_ns) != 0) {
             int saved_errno = errno;
 
             (void)close(fd);
@@ -853,10 +935,25 @@ ssize_t llam_broker_read_handle(llam_broker_t *broker,
 #endif
 }
 
-ssize_t llam_broker_write_handle(llam_broker_t *broker,
-                                 const llam_capability_token_t *token,
-                                 const void *data,
-                                 size_t length) {
+ssize_t llam_broker_read_handle(
+    llam_broker_t *broker,
+    const llam_capability_token_t *token,
+    void *out_data,
+    size_t length) {
+    return llam_broker_read_handle_until(
+        broker,
+        token,
+        out_data,
+        length,
+        llam_broker_descriptor_io_deadline());
+}
+
+ssize_t llam_broker_write_handle_until(
+    llam_broker_t *broker,
+    const llam_capability_token_t *token,
+    const void *data,
+    size_t length,
+    uint64_t deadline_ns) {
     llam_handle_t handle;
 #if !LLAM_PLATFORM_WINDOWS
     ssize_t result;
@@ -884,7 +981,12 @@ ssize_t llam_broker_write_handle(llam_broker_t *broker,
     {
         ssize_t transferred;
 
-        transferred = llam_broker_descriptor_overlapped_rw((HANDLE)handle, (void *)data, length, true);
+        transferred = llam_broker_descriptor_overlapped_rw(
+            (HANDLE)handle,
+            (void *)data,
+            length,
+            true,
+            deadline_ns);
         if (transferred < 0) {
             int saved_errno = errno;
 
@@ -900,7 +1002,8 @@ ssize_t llam_broker_write_handle(llam_broker_t *broker,
         int fd = (int)handle;
 
         if (llam_broker_descriptor_require_socket(fd) != 0 ||
-            llam_broker_descriptor_wait_fd_ready(fd, POLLOUT) != 0) {
+            llam_broker_descriptor_wait_fd_ready_until(
+                fd, POLLOUT, deadline_ns) != 0) {
             int saved_errno = errno;
 
             (void)close(fd);
@@ -917,4 +1020,17 @@ ssize_t llam_broker_write_handle(llam_broker_t *broker,
     }
     return result;
 #endif
+}
+
+ssize_t llam_broker_write_handle(
+    llam_broker_t *broker,
+    const llam_capability_token_t *token,
+    const void *data,
+    size_t length) {
+    return llam_broker_write_handle_until(
+        broker,
+        token,
+        data,
+        length,
+        llam_broker_descriptor_io_deadline());
 }

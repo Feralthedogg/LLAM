@@ -267,13 +267,17 @@ void llam_broker_process_request_with_descriptors(llam_broker_t *broker,
         break;
     case LLAM_BROKER_WIRE_OP_SERVE_RING:
         {
+            uint64_t request_deadline_ns =
+                llam_broker_descriptor_io_deadline();
             size_t served = 0U;
 
-            if (llam_broker_ring_serve_session_batch(broker,
-                                                     request->slot,
-                                                     llam_broker_current_subject(broker),
-                                                     llam_broker_transport_serve_ring_batch_size(request),
-                                                     &served) == 0) {
+            if (llam_broker_ring_serve_session_batch_until(
+                    broker,
+                    request->slot,
+                    llam_broker_current_subject(broker),
+                    llam_broker_transport_serve_ring_batch_size(request),
+                    &served,
+                    request_deadline_ns) == 0) {
                 response->status = 0;
                 response->result0 = (uint64_t)served;
             } else {

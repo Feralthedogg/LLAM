@@ -184,7 +184,7 @@ ThreadSanitizer where supported.
 - [x] Run shutdown, core, stress, invariant, production-hook audit, host
   ASan/UBSan and TSan, privileged Linux ASan/UBSan, and Windows cross-build
   suites.
-- [ ] Commit as `fix: serialize scheduler ownership publication`.
+- [x] Commit as `fix: serialize scheduler ownership publication`.
 
 ### Task 7: Enforce broker fairness and one batch deadline
 
@@ -200,20 +200,21 @@ ThreadSanitizer where supported.
 - Modify: `src/core/broker/transport/broker_transport_ring.c`
 - Modify: `tests/test_security_capability.c`
 
-- [ ] Add per-subject exhaustion tests for buffers, channels, descriptors, and
+- [x] Add per-subject exhaustion tests for buffers, channels, descriptors, and
   ring sessions. One subject must hit `EDQUOT` while a different authenticated
   subject can still allocate the reserved capacity.
-- [ ] Add batched read/write tests with multiple blocking entries and a small
+- [x] Add batched read/write tests with multiple blocking entries and a small
   timeout. Assert elapsed time is bounded by one timeout plus scheduler jitter,
   not entry count times timeout.
-- [ ] Run the tests and observe current monopolization and multiplied waits.
-- [ ] Track live counts by authenticated subject and resource kind. Enforce a
+- [x] Run the tests and observe current monopolization and multiplied waits.
+- [x] Track live counts by authenticated subject and resource kind. Enforce a
   bounded per-subject quota while preserving one peer/recovery reserve; release
   counts on all normal, rollback, disconnect, and shutdown paths.
-- [ ] Convert the request timeout once to a monotonic absolute deadline and
-  pass only remaining time to each readiness wait; return `ETIMEDOUT` when no
-  budget remains.
-- [ ] Run capability, ring, transport, timing, and stress tests.
+- [x] Convert the request timeout once to a monotonic absolute deadline and
+  pass only remaining time to each readiness wait; preserve the platform
+  timeout contract (`EAGAIN` on POSIX, `ETIMEDOUT` on Windows) when no budget
+  remains.
+- [x] Run capability, ring, transport, timing, and stress tests.
 - [ ] Commit as `fix: bound broker subjects and batch deadlines`.
 
 ### Task 8: Generation-bind Windows socket IOCP association

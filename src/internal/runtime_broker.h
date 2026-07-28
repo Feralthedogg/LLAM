@@ -30,6 +30,7 @@
 
 #include "runtime_capability.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #if LLAM_PLATFORM_WINDOWS
 #include "runtime_windows_compat.h"
@@ -47,18 +48,30 @@
 #define LLAM_BROKER_DESCRIPTOR_SLOTS 64U
 #define LLAM_BROKER_CHANNEL_SLOTS 64U
 #define LLAM_BROKER_TASK_SLOTS 64U
+#define LLAM_BROKER_BUFFER_MAX_BYTES (1024U * 1024U)
+#define LLAM_BROKER_BUFFERS_PER_SUBJECT 16U
+#define LLAM_BROKER_BUFFER_BYTES_PER_SUBJECT \
+    (16U * LLAM_BROKER_BUFFER_MAX_BYTES)
+#define LLAM_BROKER_DESCRIPTORS_PER_SUBJECT 16U
+#define LLAM_BROKER_CHANNELS_PER_SUBJECT 16U
 #define LLAM_BROKER_TASKS_PER_SUBJECT 16U
 #define LLAM_BROKER_LONG_SLEEP_TASKS_MAX 16U
 #define LLAM_BROKER_SLEEP_MAX_NS (60ULL * 1000ULL * 1000ULL * 1000ULL)
 #define LLAM_BROKER_RING_SESSIONS 16U
+#define LLAM_BROKER_RINGS_PER_SUBJECT 8U
 #define LLAM_BROKER_RING_MAPPING_NAME_BYTES 128U
 #define LLAM_BROKER_TRANSPORT_SESSIONS 64U
-#define LLAM_BROKER_BUFFER_MAX_BYTES (1024U * 1024U)
 #define LLAM_BROKER_CHANNEL_CAPACITY 64U
 #define LLAM_BROKER_CHANNEL_MESSAGE_BYTES 256U
 #define LLAM_BROKER_WIRE_DATA_BYTES 256U
 #define LLAM_BROKER_SESSION_REQUEST_MAX 64U
 #define LLAM_BROKER_SESSION_LIFETIME_NS (2ULL * 1000ULL * 1000ULL * 1000ULL)
+#define LLAM_BROKER_DESCRIPTOR_IO_TIMEOUT_MS 250U
+#if defined(EDQUOT)
+#define LLAM_BROKER_QUOTA_ERRNO EDQUOT
+#else
+#define LLAM_BROKER_QUOTA_ERRNO ENOSPC
+#endif
 /*
  * Broker active_ops is a bounded lifecycle gate, not a request counter. The
  * high half is reserved as corrupted/exhausted state so destroy can fail closed
@@ -403,10 +416,21 @@ ssize_t llam_broker_read_handle(llam_broker_t *broker,
                                 const llam_capability_token_t *token,
                                 void *out_data,
                                 size_t length);
+ssize_t llam_broker_read_handle_until(llam_broker_t *broker,
+                                      const llam_capability_token_t *token,
+                                      void *out_data,
+                                      size_t length,
+                                      uint64_t deadline_ns);
 ssize_t llam_broker_write_handle(llam_broker_t *broker,
                                  const llam_capability_token_t *token,
                                  const void *data,
                                  size_t length);
+ssize_t llam_broker_write_handle_until(llam_broker_t *broker,
+                                       const llam_capability_token_t *token,
+                                       const void *data,
+                                       size_t length,
+                                       uint64_t deadline_ns);
+uint64_t llam_broker_descriptor_io_deadline(void);
 int llam_broker_create_channel(llam_broker_t *broker,
                                size_t capacity,
                                uint64_t rights,
