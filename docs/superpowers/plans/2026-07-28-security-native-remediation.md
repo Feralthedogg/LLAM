@@ -264,30 +264,35 @@ ThreadSanitizer where supported.
 - Modify: `.github/workflows/docs.yml`
 - Modify: `.github/workflows/leir-research.yml`
 - Modify: `.github/workflows/leir-native-research.yml`
+- Modify: `.github/workflows/linux.yml`
+- Modify: `.github/workflows/macos.yml`
+- Modify: `.github/workflows/nightly.yml`
 - Modify: `.github/workflows/release.yml`
+- Modify: `.github/workflows/soak.yml`
 - Modify: `.github/workflows/srem-research.yml`
 - Modify: `.github/workflows/stress.yml`
+- Modify: `Makefile`
 - Modify: `docs/requirements.txt`
 - Add: `scripts/check_ci_supply_chain.py`
 - Add: `scripts/test_check_ci_supply_chain.py`
 
-- [ ] Add a repository policy test that rejects external `uses:` values not
+- [x] Add a repository policy test that rejects external `uses:` values not
   pinned to a 40-hex commit, broad workflow-level write permissions, plain
   HTTP package repositories, and unhashed docs requirements.
-- [ ] Run the policy test and observe all current violations.
-- [ ] Resolve each existing action tag to its reviewed upstream commit and pin
+- [x] Run the policy test and observe all current violations.
+- [x] Resolve each existing action tag to its reviewed upstream commit and pin
   it with a trailing version comment.
-- [ ] Pin docs dependencies to exact versions and hashes; install with
+- [x] Pin docs dependencies to exact versions and hashes; install with
   `pip --require-hashes`.
-- [ ] Remove the DragonFly HTTP fallback. Require authenticated HTTPS plus
+- [x] Remove the DragonFly HTTP fallback. Require authenticated HTTPS plus
   trusted signed repository metadata; fail closed instead of publishing a
   platform archive when verification is unavailable.
-- [ ] Set release workflow default permissions to `contents: read`; give only
+- [x] Set release workflow default permissions to `contents: read`; give only
   the final publisher job `contents: write`; disable credential persistence in
   builder checkouts.
-- [ ] Run the policy unit test, parse every workflow, build docs from the locked
+- [x] Run the policy unit test, parse every workflow, build docs from the locked
   requirements, and dry-run platform packaging where available.
-- [ ] Commit as `security: pin CI and isolate release authority`.
+- [x] Commit as `security: pin CI and isolate release authority`.
 
 ### Task 10: Verify, record fix outcomes, publish the branch
 

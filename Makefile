@@ -717,7 +717,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -2219,6 +2219,10 @@ test-process-utils:
 	python3 scripts/test_stress_server_logic.py
 	python3 scripts/test_c_env_helpers.py
 
+test-ci-supply-chain:
+	python3 -m unittest scripts/test_check_ci_supply_chain.py -v
+	python3 scripts/check_ci_supply_chain.py
+
 test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress test_runtime_shutdown_internal test_io_buffers
 	python3 scripts/runtime_soak.py \
 		--duration $(RUNTIME_SOAK_SECONDS) \
@@ -2227,7 +2231,7 @@ test-runtime-soak: test_runtime_fuzz test_multi_runtime_core test_runtime_stress
 		--fuzz-scenarios $(RUNTIME_SOAK_FUZZ_SCENARIOS) \
 		--multi-fuzz-scenarios $(RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS)
 
-test-hardening: analyze-cppcheck audit-deps test-process-utils test-asan test-tsan test-fuzz-heavy
+test-hardening: analyze-cppcheck audit-deps test-process-utils test-ci-supply-chain test-asan test-tsan test-fuzz-heavy
 
 test-quick: test server-stress-composite-quick
 
