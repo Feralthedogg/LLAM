@@ -204,12 +204,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/io/linux/watch/linux_migration_rehome.c
         src/io/linux/watch/linux_control.c
         src/io/linux/watch/linux_submit.c
-        src/io/linux/watch/linux_segment.c
-        src/io/linux/watch/linux_segment_cancel.c
-        src/io/linux/watch/linux_segment_resources.c
         src/io/linux/watch/cqe.c
         src/io/linux/watch/linux_worker.c
     )
+    if(LLAM_BUILD_RESEARCH)
+        list(APPEND LLAM_RUNTIME_SOURCES
+            src/io/linux/watch/linux_segment.c
+            src/io/linux/watch/linux_segment_cancel.c
+            src/io/linux/watch/linux_segment_resources.c
+        )
+    endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -440,7 +444,10 @@ target_include_directories(stress PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
 )
-target_compile_definitions(stress PRIVATE _GNU_SOURCE)
+target_compile_definitions(stress PRIVATE
+    _GNU_SOURCE
+    ${LLAM_RESEARCH_DEFINE}
+)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(stress PRIVATE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
 endif()
@@ -827,7 +834,10 @@ foreach(LLAM_RESEARCH_TEST_TARGET
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
     )
-    target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE _GNU_SOURCE)
+    target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+        _GNU_SOURCE
+        ${LLAM_RESEARCH_DEFINE}
+    )
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
             _XOPEN_SOURCE=700
@@ -995,7 +1005,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND LLAM_ENABLE_TEST_HOOKS=1)
+    target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND LLAM_ENABLE_TEST_HOOKS=1 ${LLAM_RESEARCH_DEFINE})
     target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime_testhooks)
 
     add_executable(test_windows_handle_io
@@ -1006,7 +1016,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(test_windows_handle_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+    target_compile_definitions(test_windows_handle_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND ${LLAM_RESEARCH_DEFINE})
     target_link_libraries(test_windows_handle_io PRIVATE llam_runtime)
 
     add_executable(test_windows_iocp_dump
@@ -1017,7 +1027,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(test_windows_iocp_dump PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
+    target_compile_definitions(test_windows_iocp_dump PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND ${LLAM_RESEARCH_DEFINE})
     target_link_libraries(test_windows_iocp_dump PRIVATE llam_runtime)
 endif()
 
@@ -1052,7 +1062,10 @@ foreach(LLAM_TEST_TARGET
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
     )
-    target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _GNU_SOURCE)
+    target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE
+        _GNU_SOURCE
+        ${LLAM_RESEARCH_DEFINE}
+    )
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         target_compile_definitions(${LLAM_TEST_TARGET} PRIVATE _XOPEN_SOURCE=700 _DARWIN_C_SOURCE)
     elseif(LLAM_SYSTEM_IS_BSD)

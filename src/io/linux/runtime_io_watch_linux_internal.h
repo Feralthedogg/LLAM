@@ -28,7 +28,9 @@
 #define LLAM_RUNTIME_IO_WATCH_LINUX_INTERNAL_H
 
 #include "runtime_internal.h"
+#if LLAM_BUILD_RESEARCH
 #include "io/linux/runtime_io_segment_linux_internal.h"
+#endif
 
 /** Busy-spin budget for SQPOLL completion polling before sleeping. */
 #define LLAM_IO_SQPOLL_SPIN_NS 50000ULL

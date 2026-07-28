@@ -311,6 +311,7 @@ bool llam_io_completion_begin(llam_node_t *node, llam_io_req_t *req, bool decrem
     return true;
 }
 
+#if LLAM_BUILD_RESEARCH
 bool llam_io_dispatch_completion_sink(llam_node_t *node,
                                       llam_io_req_t *req,
                                       unsigned completion_owner,
@@ -328,6 +329,7 @@ bool llam_io_dispatch_completion_sink(llam_node_t *node,
                 wake_reason,
                 req->completion_sink_context);
 }
+#endif
 
 bool llam_io_req_transfer_inflight_owner(llam_io_req_t *req, unsigned from_shard, unsigned to_shard) {
     unsigned expected;

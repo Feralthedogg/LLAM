@@ -194,16 +194,20 @@ void llam_io_queue_shutdown_controls(llam_node_t *node) {
  */
 void llam_io_submit_batch(llam_node_t *node) {
     llam_io_control_op_t *controls;
+#if LLAM_BUILD_RESEARCH
     llam_linux_native_batch_t *batches;
     llam_linux_native_batch_t *cancellations;
+#endif
     llam_io_req_t *reqs;
     unsigned submitted = 0U;
 
     /* Keep fd resolution at io_uring_enter inside the public close boundary. */
     llam_fd_watch_lifecycle_lock();
     controls = llam_take_node_controls(node);
+#if LLAM_BUILD_RESEARCH
     batches = llam_linux_native_batch_take_all(node);
     cancellations = llam_linux_native_cancel_take_all(node);
+#endif
     reqs = llam_take_node_submissions(node);
 
     while (controls != NULL) {
@@ -215,6 +219,7 @@ void llam_io_submit_batch(llam_node_t *node) {
         submitted += 1U;
     }
 
+#if LLAM_BUILD_RESEARCH
     while (batches != NULL) {
         llam_linux_native_batch_t *next = batches->next;
 
@@ -234,6 +239,7 @@ void llam_io_submit_batch(llam_node_t *node) {
                 node, cancellations);
         cancellations = next;
     }
+#endif
 
     while (reqs != NULL) {
         llam_io_req_t *next = reqs->next;

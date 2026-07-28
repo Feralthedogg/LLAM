@@ -473,7 +473,8 @@ static int exercise_canceled_blocking_results_are_disposed(void) {
 }
 #endif
 
-#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS && \
+    LLAM_BUILD_RESEARCH
 typedef enum close_watch_unpublish_kind {
     CLOSE_WATCH_UNPUBLISH_POLL = 0,
     CLOSE_WATCH_UNPUBLISH_ACCEPT = 1,

@@ -210,11 +210,14 @@ typedef struct llam_wait_node llam_wait_node_t;
 /** @brief One recyclable logical I/O operation. */
 struct llam_io_req;
 #if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
 /** @brief One backend-native compiled Linux effect segment. */
 struct llam_linux_native_segment;
 /** @brief One owner ticket for a bounded native segment batch. */
 struct llam_linux_native_batch;
 #endif
+#endif
+#if LLAM_BUILD_RESEARCH
 /** @brief Trusted internal consumer for a normalized I/O completion. */
 typedef bool (*llam_io_completion_sink_fn)(
     llam_node_t *node,
@@ -222,6 +225,7 @@ typedef bool (*llam_io_completion_sink_fn)(
     unsigned completion_owner,
     llam_wait_reason_t *wake_reason,
     void *context);
+#endif
 
 /** @brief Simple FIFO task queue used for hot, inject, overflow, and blocking queues. */
 typedef struct llam_queue {
@@ -580,10 +584,14 @@ typedef struct llam_io_req {
     unsigned short provided_bid;
     void *platform_data;
 #if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
     _Atomic(struct llam_linux_native_batch *) linux_native_batch;
 #endif
+#endif
+#if LLAM_BUILD_RESEARCH
     llam_io_completion_sink_fn completion_sink;
     void *completion_sink_context;
+#endif
     atomic_uint wait_mode;
     atomic_uint abort_reason;
     /* Unique nonzero identity for this activation of recyclable request storage. */
@@ -1263,6 +1271,7 @@ struct llam_node {
 #if LLAM_RUNTIME_BACKEND_LINUX
     llam_io_control_op_t *linux_backend_control_head;
     llam_io_control_op_t *linux_backend_control_tail;
+#if LLAM_BUILD_RESEARCH
     struct llam_linux_native_batch *native_batch_head;
     struct llam_linux_native_batch *native_batch_tail;
     struct llam_linux_native_batch *native_cancel_head;
@@ -1290,6 +1299,7 @@ struct llam_node {
         unsigned count,
         void *arg);
     void *native_resource_update_override_arg;
+#endif
 #endif
     llam_poll_watch_t *poll_watches;
     llam_accept_watch_t *accept_watches;

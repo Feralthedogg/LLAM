@@ -108,10 +108,14 @@ void llam_io_req_reset(llam_io_req_t *req, llam_runtime_t *owner_runtime, unsign
     req->provided_bid = 0U;
     req->platform_data = NULL;
 #if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
     atomic_init(&req->linux_native_batch, NULL);
 #endif
+#endif
+#if LLAM_BUILD_RESEARCH
     req->completion_sink = NULL;
     req->completion_sink_context = NULL;
+#endif
     atomic_init(&req->wait_mode, LLAM_IO_WAIT_MODE_NONE);
     atomic_init(&req->abort_reason, LLAM_IO_ABORT_NONE);
     atomic_init(&req->operation_generation, 0U);

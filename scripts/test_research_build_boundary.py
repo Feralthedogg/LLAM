@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -91,6 +93,7 @@ class ResearchBoundaryTests(unittest.TestCase):
                 "-B",
                 str(cls.default_cmake_dir),
                 "-DLLAM_BUILD_RESEARCH=OFF",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
             ]
         )
         cls.assert_command_succeeded(default_configure, "default CMake configure")
@@ -115,6 +118,7 @@ class ResearchBoundaryTests(unittest.TestCase):
                 "-B",
                 str(cls.research_cmake_dir),
                 "-DLLAM_BUILD_RESEARCH=ON",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
             ]
         )
         cls.assert_command_succeeded(research_configure, "research CMake configure")
@@ -208,6 +212,161 @@ class ResearchBoundaryTests(unittest.TestCase):
                 f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
             )
 
+    @classmethod
+    def _internal_probe_flags(cls, mode: int) -> list[str]:
+        flags = [
+            "-std=c11",
+            "-Iinclude",
+            "-Isrc/internal",
+            "-Isrc",
+            "-D_GNU_SOURCE",
+            f"-DLLAM_BUILD_RESEARCH={mode}",
+        ]
+        if os.uname().sysname == "Darwin":
+            flags.extend(["-D_XOPEN_SOURCE=700", "-D_DARWIN_C_SOURCE"])
+        return flags
+
+    @classmethod
+    def _runtime_type_size(cls, mode: int) -> int:
+        probe = cls.work / f"runtime-layout-{mode}.c"
+        binary = cls.work / f"runtime-layout-{mode}"
+        probe.write_text(
+            '#include "runtime_internal.h"\n'
+            "#include <stdio.h>\n"
+            "int main(void) {\n"
+            '    printf("%zu\\n", sizeof(llam_io_req_t));\n'
+            "    return 0;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        compile_result = cls._run(
+            [
+                os.environ.get("CC", "cc"),
+                *cls._internal_probe_flags(mode),
+                str(probe),
+                "-o",
+                str(binary),
+            ]
+        )
+        cls.assert_command_succeeded(
+            compile_result, f"research mode {mode} layout probe compile"
+        )
+        run_result = cls._run([str(binary)])
+        cls.assert_command_succeeded(
+            run_result, f"research mode {mode} layout probe run"
+        )
+        return int(run_result.stdout.strip())
+
+    @classmethod
+    def _preprocessed_runtime_state(cls, mode: int) -> str:
+        probe = cls.work / f"runtime-state-{mode}.c"
+        probe.write_text(
+            '#include "runtime_state.h"\n',
+            encoding="utf-8",
+        )
+        result = cls._run(
+            [
+                os.environ.get("CC", "cc"),
+                *cls._internal_probe_flags(mode),
+                "-E",
+                "-P",
+                str(probe),
+            ]
+        )
+        cls.assert_command_succeeded(
+            result, f"research mode {mode} runtime state preprocess"
+        )
+        return cls._combined_output(result)
+
+    @classmethod
+    def _build_cmake_mode(cls, build_dir: Path, mode: str) -> None:
+        result = cls._run(
+            [
+                "cmake",
+                "--build",
+                str(build_dir),
+                "--parallel",
+                "4",
+            ]
+        )
+        cls.assert_command_succeeded(result, f"{mode} CMake build")
+
+    @classmethod
+    def _find_static_library(cls, build_dir: Path) -> Path:
+        matches = [
+            path
+            for path in build_dir.rglob("libllam_runtime.a")
+            if path.is_file() and path.name == "libllam_runtime.a"
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected one static runtime in {build_dir}, got {matches}"
+            )
+        return matches[0]
+
+    @classmethod
+    def _find_shared_library(cls, build_dir: Path) -> Path:
+        if os.uname().sysname == "Darwin":
+            pattern = "*llam_runtime*.dylib"
+        else:
+            pattern = "*llam_runtime*.so*"
+        matches = [
+            path
+            for path in build_dir.rglob(pattern)
+            if path.is_file() and not path.is_symlink()
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected one shared runtime in {build_dir}, got {matches}"
+            )
+        return matches[0]
+
+    @classmethod
+    def _defined_dynamic_exports(cls, library: Path) -> set[str]:
+        if os.uname().sysname == "Darwin":
+            command = ["nm", "-gU", str(library)]
+        else:
+            command = ["nm", "-D", "--defined-only", str(library)]
+        result = cls._run(command)
+        cls.assert_command_succeeded(
+            result, f"dynamic export inspection for {library}"
+        )
+        exports = set()
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if not fields:
+                continue
+            symbol = fields[-1]
+            if os.uname().sysname == "Darwin" and symbol.startswith("_"):
+                symbol = symbol[1:]
+            if symbol.startswith("llam_"):
+                exports.add(symbol)
+        return exports
+
+    @classmethod
+    def _installed_public_header_hashes(
+        cls, build_dir: Path, mode: str
+    ) -> dict[str, str]:
+        prefix = cls.work / f"install-{mode}"
+        result = cls._run(
+            [
+                "cmake",
+                "--install",
+                str(build_dir),
+                "--prefix",
+                str(prefix),
+            ]
+        )
+        cls.assert_command_succeeded(result, f"{mode} CMake install")
+        include_dir = prefix / "include" / "llam"
+        return {
+            str(path.relative_to(include_dir)): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in sorted(include_dir.rglob("*"))
+            if path.is_file()
+        }
+
     def test_default_graph_has_no_experiment_objects(self) -> None:
         self.assertNotIn("/experiments/", self.default_make_trace)
         self.assertNotIn("test_leir_", self.default_cmake_targets)
@@ -282,6 +441,153 @@ class ResearchBoundaryTests(unittest.TestCase):
             "research targets require LLAM_BUILD_RESEARCH=1",
             self.raw_research_object_off.stderr,
         )
+
+    def test_native_internals_absent_when_off(self) -> None:
+        linux_make_common = [
+            "make",
+            "-n",
+            "-B",
+            "HOST_PLATFORM=linux",
+            f"OBJDIR={self.work / 'simulated-linux-object'}",
+            f"SHARED_OBJDIR={self.work / 'simulated-linux-object-pic'}",
+            f"TESTHOOK_OBJDIR={self.work / 'simulated-linux-object-testhooks'}",
+            "MAKE=:",
+            "libllam_runtime.a",
+        ]
+        off_make = self._run(
+            [*linux_make_common, "LLAM_BUILD_RESEARCH=0"]
+        )
+        on_make = self._run(
+            [*linux_make_common, "LLAM_BUILD_RESEARCH=1"]
+        )
+        self.assert_command_succeeded(
+            off_make, "simulated Linux research-off Make graph"
+        )
+        self.assert_command_succeeded(
+            on_make, "simulated Linux research-on Make graph"
+        )
+        off_compile_commands = self._combined_output(off_make)
+        on_compile_commands = self._combined_output(on_make)
+        for source in (
+            "linux_segment.c",
+            "linux_segment_cancel.c",
+            "linux_segment_resources.c",
+        ):
+            with self.subTest(source=source):
+                self.assertNotIn(source, off_compile_commands)
+                self.assertIn(source, on_compile_commands)
+
+        off_cmake_commands = json.loads(
+            (self.default_cmake_dir / "compile_commands.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        on_cmake_commands = json.loads(
+            (self.research_cmake_dir / "compile_commands.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertTrue(
+            all(
+                "linux_segment.c" not in entry["file"].replace("\\", "/")
+                for entry in off_cmake_commands
+            )
+        )
+        for mode, commands, suffixes in (
+            (
+                0,
+                off_cmake_commands,
+                (
+                    "/src/core/base/abi.c",
+                    "/tests/test_runtime_core.c",
+                    "/tests/test_runtime_shutdown_internal.c",
+                    "/examples/stress.c",
+                ),
+            ),
+            (
+                1,
+                on_cmake_commands,
+                (
+                    "/src/core/base/abi.c",
+                    "/tests/test_runtime_core.c",
+                    "/tests/test_runtime_shutdown_internal.c",
+                    "/examples/stress.c",
+                    "/experiments/leir/leir_engine.c",
+                ),
+            ),
+        ):
+            for suffix in suffixes:
+                matches = [
+                    entry
+                    for entry in commands
+                    if entry["file"].replace("\\", "/").endswith(suffix)
+                ]
+                self.assertTrue(matches, f"missing CMake command for {suffix}")
+                for entry in matches:
+                    with self.subTest(
+                        mode=mode,
+                        source=suffix,
+                        command=entry["command"],
+                    ):
+                        self.assertIn(
+                            f"-DLLAM_BUILD_RESEARCH={mode}",
+                            entry["command"],
+                        )
+
+        off_runtime_type_size = self._runtime_type_size(0)
+        on_runtime_type_size = self._runtime_type_size(1)
+        self.assertGreater(on_runtime_type_size, off_runtime_type_size)
+
+        off_preprocessed_state = self._preprocessed_runtime_state(0)
+        self.assertNotIn(
+            "LLAM_IO_UDATA_LINUX_NATIVE", off_preprocessed_state
+        )
+        self.assertNotIn(
+            "LLAM_IO_UDATA_NATIVE_SEGMENT", off_preprocessed_state
+        )
+        self.assertNotIn(
+            "LLAM_IO_UDATA_NATIVE_CANCEL", off_preprocessed_state
+        )
+
+        self._build_cmake_mode(self.default_cmake_dir, "research-off")
+        self._build_cmake_mode(self.research_cmake_dir, "research-on")
+
+        off_static = self._find_static_library(self.default_cmake_dir)
+        off_static_symbols = self._run(["nm", str(off_static)])
+        self.assert_command_succeeded(
+            off_static_symbols, "research-off static symbol inspection"
+        )
+        self.assertNotIn(
+            "llam_issue_linux_native_segment",
+            self._combined_output(off_static_symbols),
+        )
+
+        off_headers = self._installed_public_header_hashes(
+            self.default_cmake_dir, "off"
+        )
+        on_headers = self._installed_public_header_hashes(
+            self.research_cmake_dir, "on"
+        )
+        self.assertTrue(off_headers)
+        self.assertEqual(on_headers, off_headers)
+        for mode in ("off", "on"):
+            install_dir = self.work / f"install-{mode}"
+            metadata = "\n".join(
+                path.read_text(encoding="utf-8")
+                for path in sorted(install_dir.rglob("*"))
+                if path.is_file()
+                and path.suffix in {".cmake", ".h", ".pc"}
+            )
+            self.assertNotIn("LLAM_BUILD_RESEARCH", metadata)
+
+        off_exports = self._defined_dynamic_exports(
+            self._find_shared_library(self.default_cmake_dir)
+        )
+        on_exports = self._defined_dynamic_exports(
+            self._find_shared_library(self.research_cmake_dir)
+        )
+        self.assertTrue(off_exports)
+        self.assertEqual(on_exports, off_exports)
 
     def test_windows_test_objects_rebuild_across_in_place_mode_toggles(
         self,

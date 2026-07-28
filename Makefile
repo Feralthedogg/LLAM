@@ -238,6 +238,10 @@ RUNTIME_PRIV_HDRS = \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
 	src/io/linux/runtime_io_watch_linux_internal.h \
 	src/io/windows/runtime_io_watch_windows_internal.h
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+RUNTIME_PRIV_HDRS += \
+	src/io/linux/runtime_io_segment_linux_internal.h
+endif
 
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/lifecycle/runtime.o \
@@ -390,11 +394,14 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/linux/watch/linux_migration_rehome.o \
 	$(OBJDIR)/src/io/linux/watch/linux_control.o \
 	$(OBJDIR)/src/io/linux/watch/linux_submit.o \
-	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
-	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
-	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o \
 	$(OBJDIR)/src/io/linux/watch/cqe.o \
 	$(OBJDIR)/src/io/linux/watch/linux_worker.o
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+RUNTIME_OBJS += \
+	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o
+endif
 ifeq ($(UNAME_M),x86_64)
 RUNTIME_OBJS += \
 	$(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o \

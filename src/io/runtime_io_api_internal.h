@@ -443,6 +443,7 @@ int llam_issue_multishot_accept(llam_io_req_t *req);
 int llam_issue_multishot_recv(llam_io_req_t *req);
 int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns);
 #if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_BUILD_RESEARCH
 struct llam_linux_native_segment;
 struct llam_linux_native_batch;
 LLAM_INTERNAL_API int llam_issue_linux_native_batch(
@@ -451,6 +452,7 @@ LLAM_INTERNAL_API int llam_issue_linux_native_batch(
 LLAM_INTERNAL_API int llam_issue_linux_native_segment(
     struct llam_linux_native_segment *segment,
     llam_io_req_t *req);
+#endif
 #endif
 bool llam_drop_node_control_locked(llam_node_t *node, llam_io_control_kind_t kind, const void *target);
 

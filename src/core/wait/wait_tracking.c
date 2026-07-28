@@ -1068,7 +1068,7 @@ static bool llam_abort_io_wait_impl(llam_task_t *task,
         node = &rt->nodes[(unsigned)node_index];
 
         if (mode == LLAM_IO_WAIT_MODE_SUBMIT_QUEUE) {
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
             struct llam_linux_native_batch *native_batch =
                 atomic_load_explicit(
                     &req->linux_native_batch,
@@ -1162,7 +1162,7 @@ static bool llam_abort_io_wait_impl(llam_task_t *task,
             goto release_req;
         }
         if (mode == LLAM_IO_WAIT_MODE_INFLIGHT) {
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
             struct llam_linux_native_batch *native_batch =
                 atomic_load_explicit(
                     &req->linux_native_batch,
@@ -1182,7 +1182,7 @@ static bool llam_abort_io_wait_impl(llam_task_t *task,
                     attached_node_index) {
                 continue;
             }
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
             if (native_batch != NULL) {
                 atomic_store_explicit(
                     &req->abort_reason,

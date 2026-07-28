@@ -140,16 +140,20 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
              * storage, then retire controls before their target watch refs.
              */
             if (rt->nodes[i].ring_ready) {
+#if LLAM_BUILD_RESEARCH
                 llam_linux_native_resources_before_ring_exit(
                     &rt->nodes[i]);
+#endif
                 llam_node_unregister_cq_eventfd(&rt->nodes[i]);
                 llam_node_destroy_recv_buf_ring(&rt->nodes[i]);
                 io_uring_queue_exit(&rt->nodes[i].ring);
                 rt->nodes[i].ring_ready = false;
                 rt->nodes[i].linux_ring_features = 0U;
             }
+#if LLAM_BUILD_RESEARCH
             llam_linux_native_resources_after_ring_exit(
                 &rt->nodes[i]);
+#endif
             if (rt->nodes[i].watch_lock_initialized) {
                 llam_linux_retire_backend_controls(&rt->nodes[i]);
                 llam_linux_retire_backend_watch_refs(&rt->nodes[i]);

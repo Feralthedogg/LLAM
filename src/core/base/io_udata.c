@@ -25,7 +25,11 @@
 
 #include "runtime_internal.h"
 
+#if LLAM_BUILD_RESEARCH
 _Static_assert(LLAM_IO_UDATA_NATIVE_CANCEL <= 7U, "LLAM I/O user-data tags must fit in three low bits");
+#else
+_Static_assert(LLAM_IO_UDATA_CONTROL <= 7U, "LLAM I/O user-data tags must fit in three low bits");
+#endif
 _Static_assert(_Alignof(llam_io_req_t) >= 8U, "LLAM I/O requests must keep three tag bits clear");
 _Static_assert(_Alignof(llam_poll_watch_t) >= 8U, "LLAM poll watches must keep three tag bits clear");
 _Static_assert(_Alignof(llam_accept_watch_t) >= 8U, "LLAM accept watches must keep three tag bits clear");

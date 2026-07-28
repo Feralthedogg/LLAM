@@ -1116,7 +1116,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             return -1;
         }
         rt->nodes[i].recv_buf_lock_initialized = true;
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
         rc = pthread_mutex_init(
             &rt->nodes[i].native_resource_lock, NULL);
         if (rc != 0) {
@@ -1130,7 +1130,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             rt->nodes[i].ring_ready = true;
             llam_probe_ring_support(&rt->nodes[i]);
             (void)llam_node_setup_recv_buf_ring(&rt->nodes[i]);
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
             (void)llam_linux_native_resources_setup(
                 &rt->nodes[i]);
 #endif
@@ -1142,7 +1142,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             if (pthread_create(&rt->nodes[i].thread, NULL, llam_io_worker_main, &rt->nodes[i]) == 0) {
                 rt->nodes[i].thread_started = true;
             } else {
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
                 llam_linux_native_resources_before_ring_exit(
                     &rt->nodes[i]);
 #endif
@@ -1150,8 +1150,10 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                 rt->nodes[i].ring_ready = false;
 #if LLAM_RUNTIME_BACKEND_LINUX
                 rt->nodes[i].linux_ring_features = 0U;
+#if LLAM_BUILD_RESEARCH
                 llam_linux_native_resources_after_ring_exit(
                     &rt->nodes[i]);
+#endif
 #endif
             }
         }

@@ -26,7 +26,7 @@
 
 #include "io/runtime_io_api_internal.h"
 
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
 #include "io/linux/runtime_io_segment_linux_internal.h"
 #endif
 
@@ -1075,6 +1075,7 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
                 ? node->supports_send
             : llam_node_supports_kind(node, req->kind);
 #if LLAM_RUNTIME_BACKEND_KQUEUE
+#if LLAM_BUILD_RESEARCH
     /*
      * Generic public read/write keeps using its conservative blocking fallback
      * on kqueue. A trusted internal completion sink, however, can use the
@@ -1086,6 +1087,7 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
          req->kind == LLAM_IO_KIND_WRITE)) {
         kind_supported = true;
     }
+#endif
 #endif
     /*
      * Do not inspect a socket through the caller's descriptor before queuing a
@@ -1137,7 +1139,7 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
     return 0;
 }
 
-#if LLAM_RUNTIME_BACKEND_LINUX
+#if LLAM_RUNTIME_BACKEND_LINUX && LLAM_BUILD_RESEARCH
 /**
  * @brief Submit one bounded native batch and park its task exactly once.
  */
