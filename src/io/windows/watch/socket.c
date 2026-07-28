@@ -201,6 +201,7 @@ static int llam_windows_duplicate_socket_authority(
     uintptr_t *authority_out) {
     WSAPROTOCOL_INFOW protocol_info;
     SOCKET duplicate;
+    DWORD error_code;
 
     if (authority_out == NULL) {
         errno = EINVAL;
@@ -226,6 +227,24 @@ static int llam_windows_duplicate_socket_authority(
     if (duplicate == INVALID_SOCKET) {
         errno =
             llam_windows_wsa_error_to_errno(WSAGetLastError());
+        return -1;
+    }
+    /*
+     * Windows Server 2022 can ignore WSA_FLAG_NO_HANDLE_INHERIT when
+     * WSASocket consumes WSADuplicateSocket protocol information. Keep the
+     * creation flag for providers that honor the atomic contract, then enforce
+     * the actual handle postcondition before publishing the retained
+     * authority. Fail closed rather than retain a socket that a child process
+     * could inherit.
+     */
+    if (!SetHandleInformation(
+            (HANDLE)(uintptr_t)duplicate,
+            HANDLE_FLAG_INHERIT,
+            0U)) {
+        error_code = GetLastError();
+        (void)closesocket(duplicate);
+        errno =
+            llam_windows_system_error_to_errno(error_code);
         return -1;
     }
     *authority_out = (uintptr_t)duplicate;
