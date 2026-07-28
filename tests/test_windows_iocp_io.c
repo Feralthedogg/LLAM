@@ -50,6 +50,8 @@ int main(void) {
 #define LLAM_WINDOWS_ASSOC_RACE_ROUNDS 64U
 #define LLAM_WINDOWS_SOCKET_REUSE_LIMIT 65536U
 #define LLAM_WINDOWS_SOCKET_REUSE_TIMEOUT_MS 2000U
+#define LLAM_WINDOWS_SOCKET_AUTHORITY_CHILD_TIMEOUT_MS 10000U
+#define LLAM_WINDOWS_SOCKET_AUTHORITY_CHILD_INHERITED 3U
 
 typedef struct windows_iocp_state {
     llam_fd_t listener;
@@ -161,6 +163,148 @@ static SOCKET capture_socket_authority_create(
         protocol_info,
         group,
         flags);
+}
+
+static int socket_authority_inheritance_child(
+    const char *authority_text,
+    const char *sentinel_text,
+    const char *port_text) {
+    struct sockaddr_in address;
+    char *authority_end = NULL;
+    char *sentinel_end = NULL;
+    char *port_end = NULL;
+    unsigned long long authority_value;
+    unsigned long long sentinel_value;
+    unsigned long port_value;
+    int address_length = (int)sizeof(address);
+    WSADATA winsock_data;
+    int result = 2;
+
+    errno = 0;
+    authority_value = strtoull(authority_text, &authority_end, 10);
+    sentinel_value = strtoull(sentinel_text, &sentinel_end, 10);
+    port_value = strtoul(port_text, &port_end, 10);
+    if (errno != 0 ||
+        authority_end == authority_text ||
+        *authority_end != '\0' ||
+        sentinel_end == sentinel_text ||
+        *sentinel_end != '\0' ||
+        port_end == port_text ||
+        *port_end != '\0' ||
+        authority_value > (unsigned long long)UINTPTR_MAX ||
+        sentinel_value > (unsigned long long)UINTPTR_MAX ||
+        port_value == 0UL ||
+        port_value > UINT16_MAX) {
+        return result;
+    }
+    if (WSAStartup(MAKEWORD(2, 2), &winsock_data) != 0) {
+        return result;
+    }
+    if (!SetEvent((HANDLE)(uintptr_t)sentinel_value)) {
+        goto cleanup;
+    }
+
+    memset(&address, 0, sizeof(address));
+    if (getsockname(
+            (SOCKET)(uintptr_t)authority_value,
+            (struct sockaddr *)&address,
+            &address_length) == 0 &&
+        address.sin_family == AF_INET &&
+        ntohs(address.sin_port) == (unsigned short)port_value) {
+        result = (int)LLAM_WINDOWS_SOCKET_AUTHORITY_CHILD_INHERITED;
+    } else {
+        result = 0;
+    }
+
+cleanup:
+    (void)WSACleanup();
+    return result;
+}
+
+static int socket_authority_is_inherited_by_child(
+    uintptr_t authority,
+    unsigned short port) {
+    SECURITY_ATTRIBUTES attributes;
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    char executable[MAX_PATH];
+    char command[(MAX_PATH * 2U) + 128U];
+    HANDLE sentinel = NULL;
+    DWORD wait_result;
+    DWORD sentinel_result;
+    DWORD exit_code = 2U;
+    DWORD executable_length;
+    int command_length;
+    int result = -1;
+
+    memset(&attributes, 0, sizeof(attributes));
+    attributes.nLength = sizeof(attributes);
+    attributes.bInheritHandle = TRUE;
+    sentinel = CreateEventA(&attributes, TRUE, FALSE, NULL);
+    if (sentinel == NULL) {
+        goto cleanup;
+    }
+    executable_length =
+        GetModuleFileNameA(NULL, executable, sizeof(executable));
+    if (executable_length == 0U ||
+        executable_length >= sizeof(executable)) {
+        goto cleanup;
+    }
+    command_length = snprintf(
+        command,
+        sizeof(command),
+        "\"%s\" --socket-authority-inheritance-child %llu %llu %u",
+        executable,
+        (unsigned long long)authority,
+        (unsigned long long)(uintptr_t)sentinel,
+        (unsigned)port);
+    if (command_length < 0 ||
+        (size_t)command_length >= sizeof(command)) {
+        goto cleanup;
+    }
+
+    memset(&startup, 0, sizeof(startup));
+    memset(&process, 0, sizeof(process));
+    startup.cb = sizeof(startup);
+    if (!CreateProcessA(
+            NULL,
+            command,
+            NULL,
+            NULL,
+            TRUE,
+            0U,
+            NULL,
+            NULL,
+            &startup,
+            &process)) {
+        goto cleanup;
+    }
+    wait_result = WaitForSingleObject(
+        process.hProcess,
+        LLAM_WINDOWS_SOCKET_AUTHORITY_CHILD_TIMEOUT_MS);
+    sentinel_result = WaitForSingleObject(sentinel, 0U);
+    if (wait_result == WAIT_OBJECT_0 &&
+        sentinel_result == WAIT_OBJECT_0 &&
+        GetExitCodeProcess(process.hProcess, &exit_code)) {
+        if (exit_code ==
+            LLAM_WINDOWS_SOCKET_AUTHORITY_CHILD_INHERITED) {
+            result = 1;
+        } else if (exit_code == 0U) {
+            result = 0;
+        }
+    }
+    if (wait_result != WAIT_OBJECT_0) {
+        (void)TerminateProcess(process.hProcess, 2U);
+        (void)WaitForSingleObject(process.hProcess, 1000U);
+    }
+    (void)CloseHandle(process.hThread);
+    (void)CloseHandle(process.hProcess);
+
+cleanup:
+    if (sentinel != NULL) {
+        (void)CloseHandle(sentinel);
+    }
+    return result;
 }
 
 static SOCKET reacquire_same_udp_socket_value(SOCKET wanted,
@@ -343,8 +487,12 @@ static int test_socket_authority_is_non_inheritable(void) {
     llam_node_t node;
     SOCKET source = INVALID_SOCKET;
     uintptr_t authority = (uintptr_t)INVALID_SOCKET;
+    struct sockaddr_in source_address;
+    struct sockaddr_in authority_address;
+    int source_address_length = (int)sizeof(source_address);
+    int authority_address_length = (int)sizeof(authority_address);
     DWORD source_flags = 0U;
-    DWORD authority_flags = 0U;
+    int inherited;
     int failed = 1;
     bool node_initialized = false;
 
@@ -363,6 +511,21 @@ static int test_socket_authority_is_non_inheritable(void) {
         !GetHandleInformation((HANDLE)(uintptr_t)source, &source_flags) ||
         (source_flags & HANDLE_FLAG_INHERIT) != 0U) {
         (void)fail_errno("non-inheritable source socket setup failed");
+        goto cleanup;
+    }
+    memset(&source_address, 0, sizeof(source_address));
+    source_address.sin_family = AF_INET;
+    source_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(
+            source,
+            (const struct sockaddr *)&source_address,
+            (int)sizeof(source_address)) != 0 ||
+        getsockname(
+            source,
+            (struct sockaddr *)&source_address,
+            &source_address_length) != 0 ||
+        source_address.sin_port == 0U) {
+        (void)fail_errno("socket authority source bind failed");
         goto cleanup;
     }
 
@@ -392,10 +555,28 @@ static int test_socket_authority_is_non_inheritable(void) {
                 (unsigned long)g_socket_authority_create_flags);
         goto cleanup;
     }
+    memset(&authority_address, 0, sizeof(authority_address));
     if (!isolated_assoc_snapshot(&node, source, NULL, &authority) ||
-        !GetHandleInformation((HANDLE)authority, &authority_flags) ||
-        (authority_flags & HANDLE_FLAG_INHERIT) != 0U) {
-        (void)fail_errno("retained socket authority is inheritable");
+        getsockname(
+            (SOCKET)authority,
+            (struct sockaddr *)&authority_address,
+            &authority_address_length) != 0 ||
+        authority_address.sin_family != AF_INET ||
+        authority_address.sin_port != source_address.sin_port) {
+        (void)fail_errno("retained socket authority is invalid");
+        goto cleanup;
+    }
+    inherited = socket_authority_is_inherited_by_child(
+        authority,
+        ntohs(source_address.sin_port));
+    if (inherited != 0) {
+        if (inherited > 0) {
+            errno = EACCES;
+            (void)fail_errno("retained socket authority was inherited");
+        } else {
+            (void)fail_errno(
+                "retained socket authority inheritance probe failed");
+        }
         goto cleanup;
     }
     failed = 0;
@@ -1012,12 +1193,20 @@ static void client_task(void *arg) {
     maybe_stop_after_all_tasks(state);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     windows_iocp_state_t state;
     llam_runtime_opts_t opts;
     llam_task_t *server;
     llam_task_t *client;
     llam_task_t *assoc_tasks[LLAM_WINDOWS_ASSOC_RACE_TASKS];
+
+    if (argc == 5 &&
+        strcmp(
+            argv[1],
+            "--socket-authority-inheritance-child") == 0) {
+        return socket_authority_inheritance_child(
+            argv[2], argv[3], argv[4]);
+    }
 
     memset(&state, 0, sizeof(state));
     state.listener = LLAM_INVALID_FD;
