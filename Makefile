@@ -5,6 +5,19 @@ CC ?= cc
 AR ?= ar
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer
 CPPFLAGS ?= -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE
+LLAM_BUILD_RESEARCH ?= 0
+ifneq ($(LLAM_BUILD_RESEARCH),0)
+ifneq ($(LLAM_BUILD_RESEARCH),1)
+$(error LLAM_BUILD_RESEARCH must be 0 or 1)
+endif
+endif
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+ifneq ($(strip $(filter package,$(MAKECMDGOALS))),)
+$(error research-enabled builds cannot be packaged)
+endif
+endif
+RESEARCH_CPPFLAGS = -DLLAM_BUILD_RESEARCH=$(LLAM_BUILD_RESEARCH)
+CPPFLAGS := $(CPPFLAGS) $(RESEARCH_CPPFLAGS)
 LDLIBS ?= -pthread -luring
 SERVER_FLOOD_LDLIBS ?= -pthread
 OBJDIR ?= object
@@ -624,6 +637,61 @@ SREM_MODEL_TEST_OBJS = \
 	$(OBJDIR)/experiments/srem/test_srem_model.o
 SREM_MODEL_BENCH_OBJS = \
 	$(OBJDIR)/experiments/srem/bench_srem_model.o
+RESEARCH_OBJS = \
+	$(LEIR_PHASE0_CORE_OBJS) \
+	$(LEIR_PHASE0_TEST_OBJS) \
+	$(LEIR_PHASE0_BENCH_OBJS) \
+	$(LEIR_NATIVE_PLAN_TEST_OBJS) \
+	$(LEIR_NATIVE_SEGMENT_TEST_OBJS) \
+	$(LEIR_NATIVE_LINUX_TEST_OBJS) \
+	$(LEIR_NATIVE_BENCH_OBJS) \
+	$(LEIR_NATIVE_PIPELINE_BENCH_OBJS) \
+	$(LCWE_MODEL_CORE_OBJS) \
+	$(LCWE_MODEL_TEST_OBJS) \
+	$(LCWE_MODEL_BENCH_OBJS) \
+	$(LCCF_MODEL_CORE_OBJS) \
+	$(LCCF_MODEL_TEST_OBJS) \
+	$(LCCF_MODEL_BENCH_OBJS) \
+	$(SREM_MODEL_CORE_OBJS) \
+	$(SREM_MODEL_TEST_OBJS) \
+	$(SREM_MODEL_BENCH_OBJS)
+RESEARCH_LINK_TARGETS = \
+	test_leir_phase0 \
+	test_leir_native_plan \
+	test_leir_native_segment \
+	test_leir_native_linux \
+	bench_leir_native_segment \
+	bench_leir_native_pipeline \
+	bench_leir_phase0 \
+	test_lcwe_model \
+	bench_lcwe_model \
+	test_lccf_model \
+	bench_lccf_model \
+	test_srem_model \
+	bench_srem_model
+RESEARCH_ENTRY_TARGETS = \
+	$(RESEARCH_LINK_TARGETS) \
+	research \
+	research-test \
+	test-leir-phase0 \
+	test-leir-native \
+	test-leir-native-plan \
+	test-leir-native-segment \
+	test-leir-native-linux \
+	leir-phase0a-screen \
+	leir-native-screen \
+	test-lcwe-model \
+	lcwe-model-report \
+	test-lccf-model \
+	lccf-model-report \
+	test-srem-model \
+	srem-model-screen \
+	srem-model-report
+ifeq ($(LLAM_BUILD_RESEARCH),0)
+ifneq ($(strip $(filter $(RESEARCH_ENTRY_TARGETS),$(MAKECMDGOALS))),)
+$(error research targets require LLAM_BUILD_RESEARCH=1)
+endif
+endif
 RUNTIME_ENGINE_FRAGMENTS = $(wildcard src/engine/detail/*.inc)
 EXAMPLE_SHARED_HDRS = examples/env_compat.h
 BUILD_OBJS = \
@@ -655,24 +723,7 @@ BUILD_OBJS = \
 	$(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) \
 	$(TEST_WINDOWS_IOCP_DUMP_OBJS) \
 	$(TEST_SECURITY_CAPABILITY_OBJS) \
-	$(TEST_SHARED_LOAD_OBJS) \
-	$(LEIR_PHASE0_CORE_OBJS) \
-	$(LEIR_PHASE0_TEST_OBJS) \
-	$(LEIR_PHASE0_BENCH_OBJS) \
-	$(LEIR_NATIVE_PLAN_TEST_OBJS) \
-	$(LEIR_NATIVE_SEGMENT_TEST_OBJS) \
-	$(LEIR_NATIVE_LINUX_TEST_OBJS) \
-	$(LEIR_NATIVE_BENCH_OBJS) \
-	$(LEIR_NATIVE_PIPELINE_BENCH_OBJS) \
-	$(LCWE_MODEL_CORE_OBJS) \
-	$(LCWE_MODEL_TEST_OBJS) \
-	$(LCWE_MODEL_BENCH_OBJS) \
-	$(LCCF_MODEL_CORE_OBJS) \
-	$(LCCF_MODEL_TEST_OBJS) \
-	$(LCCF_MODEL_BENCH_OBJS) \
-	$(SREM_MODEL_CORE_OBJS) \
-	$(SREM_MODEL_TEST_OBJS) \
-	$(SREM_MODEL_BENCH_OBJS)
+	$(TEST_SHARED_LOAD_OBJS)
 LINK_TARGETS = \
 	demo \
 	stress \
@@ -681,19 +732,6 @@ LINK_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
-	test_leir_phase0 \
-	test_leir_native_plan \
-	test_leir_native_segment \
-	test_leir_native_linux \
-	bench_leir_native_segment \
-	bench_leir_native_pipeline \
-	bench_leir_phase0 \
-	test_lccf_model \
-	bench_lccf_model \
-	test_srem_model \
-	bench_srem_model \
-	test_lcwe_model \
-	bench_lcwe_model \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -719,7 +757,7 @@ LINK_TARGETS = \
 	test_shared_load \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 require-sanitizer-target:
@@ -734,7 +772,7 @@ WINDOWS_CMAKE_BUILD_DIR ?= build-windows-native
 WINDOWS_CMAKE_CONFIG ?= Release
 WINDOWS_CMAKE_ARGS ?=
 WINDOWS_CTEST_ARGS ?= --timeout 180
-WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|test_leir_phase0|test_leir_native_plan|test_leir_native_segment|test_leir_native_linux|test_bench_leir_native|test_bench_leir_phase0|test_lcwe_model|test_bench_lcwe_model|test_lccf_model|test_bench_lccf_model|test_srem_model|test_bench_srem_native|test_bench_srem_model|llam_broker_self_test
+WINDOWS_CTEST_REGEX ?= test_abi_contract|test_abi_compat|test_runtime_core|test_multi_runtime_core|test_runtime_api_edges|test_runtime_select_edges|test_runtime_group_local_edges|test_runtime_unmanaged_join|test_runtime_stress|test_runtime_fuzz|test_runtime_invariants|test_runtime_shutdown_internal|test_sync_primitives|test_windows_policy|test_windows_runtime_smoke|test_windows_iocp_io|test_windows_iocp_dump|test_windows_handle_io|test_security_capability|llam_broker_self_test
 WINDOWS_CMAKE_TARGETS = \
 	demo \
 	stress \
@@ -743,16 +781,6 @@ WINDOWS_CMAKE_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
-	test_leir_phase0 \
-	test_leir_native_segment \
-	test_leir_native_linux \
-	bench_leir_phase0 \
-	test_lccf_model \
-	bench_lccf_model \
-	test_srem_model \
-	bench_srem_model \
-	test_lcwe_model \
-	bench_lcwe_model \
 	test_abi_contract \
 	test_abi_compat \
 	test_connect_io \
@@ -789,6 +817,12 @@ shared: windows-cmake-configure
 
 test check: windows-cmake-test
 
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+research: windows-cmake-configure
+	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $(RESEARCH_LINK_TARGETS)
+
+research-test: test-leir-phase0 test-leir-native test-leir-native-linux test-lcwe-model test-lccf-model test-srem-model
+
 test-lcwe-model: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_lcwe_model bench_lcwe_model
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_lcwe_model|test_bench_lcwe_model" $(WINDOWS_CTEST_ARGS)
@@ -812,11 +846,17 @@ test-leir-native: windows-cmake-configure
 test-leir-native-linux: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target test_leir_native_linux
 	ctest --test-dir "$(WINDOWS_CMAKE_BUILD_DIR)" --output-on-failure -C "$(WINDOWS_CMAKE_CONFIG)" -R "test_leir_native_linux" $(WINDOWS_CTEST_ARGS)
+else
+research research-test test-lcwe-model test-lccf-model test-srem-model test-leir-phase0 test-leir-native test-leir-native-linux:
+	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
+	@exit 2
+endif
 
 $(WINDOWS_CMAKE_TARGETS): windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target $@
 
 package: windows-cmake-build
+	@if [ "$(LLAM_BUILD_RESEARCH)" != 0 ]; then echo "research-enabled builds cannot be packaged" >&2; exit 2; fi
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release_windows.ps1 -BuildDir "$(WINDOWS_CMAKE_BUILD_DIR)" -Configuration "$(WINDOWS_CMAKE_CONFIG)"
 
 bench-matrix: bench
@@ -830,7 +870,7 @@ platform-status:
 	@echo "Makefile Windows targets delegate to CMake. Override WINDOWS_CMAKE_ARGS to select a generator, for example WINDOWS_CMAKE_ARGS='-G Ninja'."
 
 windows-cmake-configure: platform-status
-	cmake -S . -B "$(WINDOWS_CMAKE_BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(WINDOWS_CMAKE_CONFIG)" -DLLAM_ENABLE_WINDOWS_BACKEND=ON $(WINDOWS_CMAKE_ARGS)
+	cmake -S . -B "$(WINDOWS_CMAKE_BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(WINDOWS_CMAKE_CONFIG)" -DLLAM_ENABLE_WINDOWS_BACKEND=ON -DLLAM_BUILD_RESEARCH=$(if $(filter 1,$(LLAM_BUILD_RESEARCH)),ON,OFF) $(WINDOWS_CMAKE_ARGS)
 
 windows-cmake-build: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)"
@@ -859,6 +899,7 @@ $(BUILD_SIGNATURE): FORCE
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
 		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
+		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'OBJDIR=%s\n' '$(OBJDIR)'; \
@@ -878,6 +919,7 @@ $(SHARED_BUILD_SIGNATURE): FORCE
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS)'; \
 		printf 'SHARED_CPPFLAGS=%s\n' '$(SHARED_CPPFLAGS)'; \
+		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
 		printf 'PICFLAGS=%s\n' '$(PICFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
@@ -897,6 +939,7 @@ $(TESTHOOK_BUILD_SIGNATURE): FORCE
 	{ \
 		printf 'CC=%s\n' '$(CC)'; \
 		printf 'CPPFLAGS=%s\n' '$(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1'; \
+		printf 'LLAM_BUILD_RESEARCH=%s\n' '$(LLAM_BUILD_RESEARCH)'; \
 		printf 'CFLAGS=%s\n' '$(CFLAGS)'; \
 		printf 'LDLIBS=%s\n' '$(LDLIBS)'; \
 		printf 'TESTHOOK_OBJDIR=%s\n' '$(TESTHOOK_OBJDIR)'; \
@@ -911,11 +954,15 @@ $(TESTHOOK_BUILD_SIGNATURE): FORCE
 
 $(BUILD_OBJS): $(BUILD_SIGNATURE)
 
+$(RESEARCH_OBJS): $(BUILD_SIGNATURE)
+
 $(SHARED_RUNTIME_OBJS): $(SHARED_BUILD_SIGNATURE)
 
 $(TESTHOOK_RUNTIME_OVERRIDE_OBJS): $(TESTHOOK_BUILD_SIGNATURE)
 
 $(LINK_TARGETS): %: %.link-signature
+
+$(RESEARCH_LINK_TARGETS): %: %.link-signature
 
 $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 
@@ -942,6 +989,17 @@ $(SHLIB_REAL): $(SHLIB_REAL).link-signature
 
 all: demo stress bench llam_broker server server_lossless server_flood static shared
 
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+research: $(RESEARCH_LINK_TARGETS)
+
+research-test: test-leir-phase0 test-leir-native test-leir-native-linux \
+	test-lcwe-model test-lccf-model test-srem-model
+else
+research research-test:
+	@echo "research targets require LLAM_BUILD_RESEARCH=1" >&2
+	@exit 2
+endif
+
 static: libllam_runtime.a
 
 libllam_runtime.a: $(RUNTIME_OBJS)
@@ -962,18 +1020,7 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: test_leir_phase0 test_leir_native_plan test_leir_native_segment test_leir_native_linux test_lcwe_model bench_lcwe_model test_lccf_model bench_lccf_model test_srem_model bench_srem_model test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
-	./test_leir_phase0
-	./test_leir_native_plan
-	./test_leir_native_segment
-	./test_leir_native_linux --unit-only
-	./test_lcwe_model
-	LCWE_MODEL_TEST_BINARY=./bench_lcwe_model python3 scripts/test_bench_lcwe_model.py
-	./test_lccf_model
-	LCCF_MODEL_TEST_BINARY=./bench_lccf_model python3 scripts/test_bench_lccf_model.py
-	./test_srem_model
-	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_native.py
-	SREM_MODEL_TEST_BINARY=./bench_srem_model python3 scripts/test_bench_srem_model.py
+test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -2647,6 +2694,7 @@ clean:
 	done
 
 package: all test
+	@if [ "$(LLAM_BUILD_RESEARCH)" != 0 ]; then echo "research-enabled builds cannot be packaged" >&2; exit 2; fi
 	./scripts/package_release.sh
 
 bench-matrix: bench

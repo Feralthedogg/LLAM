@@ -3,6 +3,9 @@
 
 name: macos
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 on:
   push:
     branches:
@@ -54,7 +57,7 @@ jobs:
 
       - name: CMake build
         run: |
-          cmake -S . -B build/macos -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang
+          cmake -S . -B build/macos -DCMAKE_C_COMPILER=clang -DCMAKE_ASM_COMPILER=clang -DLLAM_BUILD_RESEARCH=OFF
           cmake --build build/macos
           LLAM_SELECT_RACE_ROUNDS=4 ctest --test-dir build/macos --output-on-failure --timeout 180
 

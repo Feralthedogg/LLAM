@@ -3,6 +3,9 @@
 
 name: linux
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 on:
   push:
     branches:
@@ -158,7 +161,7 @@ jobs:
       - name: CMake build
         if: ${{ !contains(matrix.name, 'sanitizer') }}
         run: |
-          cmake -S . -B build/linux -DCMAKE_C_COMPILER=gcc -DCMAKE_ASM_COMPILER=gcc
+          cmake -S . -B build/linux -DCMAKE_C_COMPILER=gcc -DCMAKE_ASM_COMPILER=gcc -DLLAM_BUILD_RESEARCH=OFF
           cmake --build build/linux
           # The Make-based Verify Linux step above owns the full runtime suite.
           # Keep CMake here as a build/package smoke so a single ctest hang does

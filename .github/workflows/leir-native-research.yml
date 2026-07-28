@@ -3,6 +3,9 @@
 
 name: LEIR Linux Native Segment Research
 
+env:
+  LLAM_BUILD_RESEARCH: "1"
+
 on:
   pull_request:
     paths:
@@ -95,11 +98,8 @@ jobs:
           set -o pipefail
           make clean
           make -j2 \
-            test_leir_native_plan \
-            test_leir_native_segment \
-            test_leir_native_linux \
-            bench_leir_native_segment \
-            bench_leir_native_pipeline \
+            test-leir-native \
+            test-leir-native-linux \
             CC=gcc \
             CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O3 -g -fno-omit-frame-pointer" \
             2>&1 | tee "$OUT_DIR/make-test-leir-native.log"
@@ -181,6 +181,7 @@ jobs:
           set -o pipefail
           cmake -S . -B object/leir-native-ci-cmake \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=ON \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_ASM_COMPILER=clang \
             2>&1 | tee "$OUT_DIR/cmake-configure.log"
@@ -206,6 +207,7 @@ jobs:
           set -o pipefail
           cmake -S . -B object/leir-native-ci-asan \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
             -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_ASM_COMPILER=gcc \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
@@ -299,6 +301,7 @@ jobs:
           set -o pipefail
           cmake -S . -B object/leir-native-ci-tsan \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
             -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_ASM_COMPILER=gcc \
             -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \

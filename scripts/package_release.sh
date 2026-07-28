@@ -4,6 +4,11 @@
 
 set -eu
 
+if [ "${LLAM_BUILD_RESEARCH:-0}" != 0 ]; then
+    echo "research-enabled builds cannot be packaged" >&2
+    exit 2
+fi
+
 target="${1:-}"
 version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"
 version="${version#v}"

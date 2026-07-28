@@ -3,6 +3,9 @@
 
 name: Weekly Soak
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 on:
   schedule:
     - cron: "15 16 * * 6"
@@ -70,6 +73,7 @@ jobs:
         run: |
           cmake -S . -B build/soak \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=OFF \
             -DCMAKE_C_COMPILER="${{ matrix.cc }}" \
             -DCMAKE_ASM_COMPILER="${{ matrix.cc }}"
 

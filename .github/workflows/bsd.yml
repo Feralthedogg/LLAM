@@ -3,6 +3,9 @@
 
 name: bsd
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 on:
   push:
     branches:
@@ -218,7 +221,7 @@ jobs:
             cat .llam-bsd-infra-skip
             exit 0
           fi
-          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
+          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc -DLLAM_BUILD_RESEARCH=OFF
           cmake --build build/bsd --parallel 2 --target \
             test_abi_contract \
             test_abi_compat \

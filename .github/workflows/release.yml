@@ -3,6 +3,9 @@
 
 name: Release
 
+env:
+  LLAM_BUILD_RESEARCH: "0"
+
 permissions:
   contents: read
 
@@ -141,7 +144,7 @@ jobs:
       - name: Configure Windows release build
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cmake -S . -B build/release-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build/release-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLAM_BUILD_RESEARCH=OFF
 
       - name: Build and test Windows release
         if: runner.os == 'Windows'
@@ -445,7 +448,7 @@ jobs:
           ./test_runtime_select_edges
           ./test_io_buffers
           ./test_shared_load ./libllam_runtime.so."$version"
-          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc
+          cmake -S . -B build/bsd -DCMAKE_C_COMPILER=cc -DCMAKE_ASM_COMPILER=cc -DLLAM_BUILD_RESEARCH=OFF
           cmake --build build/bsd --parallel 2 --target \
             test_abi_contract \
             test_abi_compat \

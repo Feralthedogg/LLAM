@@ -3,6 +3,9 @@
 
 name: LEIR Phase 0A Research
 
+env:
+  LLAM_BUILD_RESEARCH: "1"
+
 on:
   pull_request:
     paths:
@@ -108,6 +111,7 @@ jobs:
           set -o pipefail
           cmake -S . -B object/leir-ci-cmake \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLAM_BUILD_RESEARCH=ON \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_ASM_COMPILER=clang \
             2>&1 | tee "$OUT_DIR/cmake-configure.log"
@@ -126,6 +130,7 @@ jobs:
           set -o pipefail
           cmake -S . -B object/leir-ci-asan \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
             -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_ASM_COMPILER=gcc \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
@@ -145,6 +150,7 @@ jobs:
           set -o pipefail
           cmake -S . -B object/leir-ci-tsan \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DLLAM_BUILD_RESEARCH=ON \
             -DCMAKE_C_COMPILER=gcc \
             -DCMAKE_ASM_COMPILER=gcc \
             -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \

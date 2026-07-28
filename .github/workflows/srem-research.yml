@@ -3,6 +3,9 @@
 
 name: SREM Research
 
+env:
+  LLAM_BUILD_RESEARCH: "1"
+
 on:
   workflow_dispatch:
     inputs:

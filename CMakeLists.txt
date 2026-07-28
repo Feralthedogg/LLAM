@@ -21,6 +21,8 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 option(LLAM_ENABLE_WINDOWS_BACKEND "Enable the native Windows 10/11 backend when building on Windows" ON)
+option(LLAM_BUILD_RESEARCH
+       "Build private LLAM research implementations and experiments" OFF)
 add_compile_options($<$<COMPILE_LANG_AND_ID:C,MSVC>:/experimental:c11atomics>)
 
 set(LLAM_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
@@ -280,6 +282,14 @@ add_library(llam_runtime_testhooks STATIC ${LLAM_RUNTIME_SOURCES})
 add_library(llam::runtime ALIAS llam_runtime)
 add_library(llam::runtime_shared ALIAS llam_runtime_shared)
 
+set(LLAM_RESEARCH_DEFINE
+    "LLAM_BUILD_RESEARCH=$<BOOL:${LLAM_BUILD_RESEARCH}>")
+target_compile_definitions(llam_runtime PRIVATE ${LLAM_RESEARCH_DEFINE})
+target_compile_definitions(llam_runtime_shared PRIVATE
+                           ${LLAM_RESEARCH_DEFINE})
+target_compile_definitions(llam_runtime_testhooks PRIVATE
+                           ${LLAM_RESEARCH_DEFINE})
+
 set_target_properties(llam_runtime
     PROPERTIES
         OUTPUT_NAME llam_runtime
@@ -499,6 +509,7 @@ endif()
 
 enable_testing()
 
+if(LLAM_BUILD_RESEARCH)
 set(LLAM_LEIR_PHASE0_SOURCES
     experiments/leir/leir_engine.c
     experiments/leir/leir_peer_process.c
@@ -776,6 +787,71 @@ foreach(LLAM_SREM_MODEL_TARGET test_srem_model bench_srem_model)
     endif()
 endforeach()
 
+foreach(LLAM_RESEARCH_TEST_TARGET
+        test_leir_phase0
+        test_leir_native_plan
+        test_leir_native_segment
+        bench_leir_native_segment
+        bench_leir_native_pipeline
+        test_leir_native_linux
+        bench_leir_phase0)
+    target_include_directories(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+    )
+    target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE _GNU_SOURCE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+            _XOPEN_SOURCE=700
+            _DARWIN_C_SOURCE
+        )
+    elseif(LLAM_SYSTEM_IS_BSD)
+        target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+            ${LLAM_BSD_FEATURE_DEFINITIONS}
+        )
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        target_compile_definitions(${LLAM_RESEARCH_TEST_TARGET} PRIVATE
+            _WIN32_WINNT=0x0A00
+            LLAM_ENABLE_WINDOWS_BACKEND
+        )
+    endif()
+endforeach()
+
+add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
+add_test(NAME test_lccf_model COMMAND test_lccf_model)
+add_test(NAME test_srem_model COMMAND test_srem_model)
+if(Python3_FOUND)
+    add_test(
+        NAME test_bench_lcwe_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lcwe_model.py
+    )
+    add_test(
+        NAME test_bench_lccf_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "LCCF_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lccf_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lccf_model.py
+    )
+    add_test(
+        NAME test_bench_srem_native
+        COMMAND ${CMAKE_COMMAND} -E env
+                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_native.py
+    )
+    add_test(
+        NAME test_bench_srem_model
+        COMMAND ${CMAKE_COMMAND} -E env
+                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_model.py
+    )
+endif()
+endif()
+
 add_executable(test_abi_contract
     tests/test_abi_contract.c
 )
@@ -924,13 +1000,6 @@ target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS})
 add_dependencies(test_shared_load llam_runtime_shared)
 
 foreach(LLAM_TEST_TARGET
-        test_leir_phase0
-        test_leir_native_plan
-        test_leir_native_segment
-        bench_leir_native_segment
-        bench_leir_native_pipeline
-        test_leir_native_linux
-        bench_leir_phase0
         test_abi_contract
         test_abi_compat
         test_connect_io
@@ -980,39 +1049,6 @@ add_test(NAME test_sync_primitives COMMAND test_sync_primitives)
 add_test(NAME test_windows_policy COMMAND test_windows_policy)
 add_test(NAME test_windows_runtime_smoke COMMAND test_windows_runtime_smoke)
 add_test(NAME test_security_capability COMMAND test_security_capability)
-add_test(NAME test_lcwe_model COMMAND test_lcwe_model)
-add_test(NAME test_lccf_model COMMAND test_lccf_model)
-add_test(NAME test_srem_model COMMAND test_srem_model)
-if(Python3_FOUND)
-    add_test(
-        NAME test_bench_lcwe_model
-        COMMAND ${CMAKE_COMMAND} -E env
-                "LCWE_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lcwe_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lcwe_model.py
-    )
-    add_test(
-        NAME test_bench_lccf_model
-        COMMAND ${CMAKE_COMMAND} -E env
-                "LCCF_MODEL_TEST_BINARY=$<TARGET_FILE:bench_lccf_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_lccf_model.py
-    )
-    add_test(
-        NAME test_bench_srem_native
-        COMMAND ${CMAKE_COMMAND} -E env
-                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_native.py
-    )
-    add_test(
-        NAME test_bench_srem_model
-        COMMAND ${CMAKE_COMMAND} -E env
-                "SREM_MODEL_TEST_BINARY=$<TARGET_FILE:bench_srem_model>"
-                ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_bench_srem_model.py
-    )
-endif()
 add_test(NAME llam_broker_self_test COMMAND llam_broker --self-test)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     add_test(NAME test_windows_iocp_io COMMAND test_windows_iocp_io)
