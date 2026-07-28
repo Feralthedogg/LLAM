@@ -536,6 +536,23 @@ class BuildManifestAuditTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_rejects_dead_package_fallback_before_effective_drift(self) -> None:
+        self.fixture.files["scripts/package_release.sh"] = (
+            'abi_major="${LLAM_ABI_MAJOR:-2}"\n'
+            'library_version="${LLAM_VERSION:-2.2.0}"\n'
+            ': "${GITHUB_REF_NAME:-v2.2.0}"\n'
+            'version="v9.9.9"\n'
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "package version assignment does not use the canonical fallback",
+            result.stderr,
+        )
+
     def test_rejects_duplicate_array_members(self) -> None:
         self.fixture.sources["stable"]["common_sources"].append("src/common.c")
         self.fixture.write()
@@ -757,6 +774,27 @@ class BuildManifestAuditTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_rejects_cmake_target_sources_test_injection(self) -> None:
+        self.fixture.files["tests/audit_extra.c"] = ""
+        self.fixture.files["CMakeLists.txt"] = self.fixture.files[
+            "CMakeLists.txt"
+        ].replace(
+            "add_executable(test_public tests/test_public.c)",
+            (
+                "add_executable(test_public tests/test_public.c)\n"
+                "target_sources(test_public PRIVATE tests/audit_extra.c)"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "test_public: CMake linux-x86_64 research=0 sources",
+            result.stderr,
+        )
+
     def test_rejects_omitted_make_common_group_consumption(self) -> None:
         self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
             "RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)",
@@ -828,6 +866,205 @@ class BuildManifestAuditTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_rejects_override_mutation_of_audited_make_state(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "RUNTIME_COMMON_OBJS = $(OBJDIR)/src/common.o",
+            (
+                "RUNTIME_COMMON_OBJS = $(OBJDIR)/src/common.o\n"
+                "override RUNTIME_COMMON_OBJS := "
+                "$(filter-out $(OBJDIR)/src/common.o,"
+                "$(RUNTIME_COMMON_OBJS))"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Make audited variable RUNTIME_COMMON_OBJS uses unsupported",
+            result.stderr,
+        )
+
+    def test_rejects_unsupported_condition_on_audited_make_assignment(
+        self,
+    ) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "SHARED_RUNTIME_OBJS =",
+            (
+                "ifdef OPTIONAL_RUNTIME_MUTATION\n"
+                "RUNTIME_OBJS += $(RUNTIME_COMMON_OBJS)\n"
+                "endif\n"
+                "SHARED_RUNTIME_OBJS ="
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Make audited build state is guarded by an unsupported condition",
+            result.stderr,
+        )
+
+    def test_rejects_make_metaprogramming_of_audited_state(self) -> None:
+        mutations = (
+            "export RUNTIME_COMMON_OBJS := $(OBJDIR)/src/common.o",
+            "unexport RUNTIME_COMMON_OBJS",
+            "define RUNTIME_COMMON_OBJS\n$(OBJDIR)/src/common.o\nendef",
+            (
+                "$(eval RUNTIME_COMMON_OBJS := "
+                "$(OBJDIR)/src/common.o)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(call identity,"
+                "$(OBJDIR)/src/common.o)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(foreach item,common,"
+                "$(OBJDIR)/src/$(item).o)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(addprefix $(OBJDIR)/src/,"
+                "common.o)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(addsuffix .o,"
+                "$(OBJDIR)/src/common)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(filter %.o,"
+                "$(OBJDIR)/src/common.o)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(filter-out other.o,"
+                "$(OBJDIR)/src/common.o)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(subst other,common,"
+                "$(OBJDIR)/src/other.o)"
+            ),
+            (
+                "RUNTIME_COMMON_OBJS := $(patsubst %.c,"
+                "$(OBJDIR)/%.o,src/common.c)"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] += mutation + "\n"
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1, mutation)
+                self.assertIn("unsupported", result.stderr)
+
+    def test_rejects_cmake_list_removal_from_audited_state(self) -> None:
+        self.fixture.files["CMakeLists.txt"] = self.fixture.files[
+            "CMakeLists.txt"
+        ].replace(
+            "set(LLAM_RUNTIME_COMMON_SOURCES src/common.c)",
+            (
+                "set(LLAM_RUNTIME_COMMON_SOURCES src/common.c)\n"
+                "list(REMOVE_ITEM LLAM_RUNTIME_COMMON_SOURCES src/common.c)"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "CMake audited variable LLAM_RUNTIME_COMMON_SOURCES uses "
+            "unsupported list(REMOVE_ITEM)",
+            result.stderr,
+        )
+
+    def test_rejects_other_cmake_list_mutators_of_audited_state(self) -> None:
+        mutations = (
+            "unset(LLAM_RUNTIME_COMMON_SOURCES)",
+            "list(REMOVE_AT LLAM_RUNTIME_COMMON_SOURCES 0)",
+            (
+                "list(FILTER LLAM_RUNTIME_COMMON_SOURCES "
+                "EXCLUDE REGEX common)"
+            ),
+            (
+                "list(INSERT LLAM_RUNTIME_COMMON_SOURCES 0 "
+                "src/common.c)"
+            ),
+            (
+                "list(PREPEND LLAM_RUNTIME_COMMON_SOURCES "
+                "src/common.c)"
+            ),
+            (
+                "list(TRANSFORM LLAM_RUNTIME_COMMON_SOURCES "
+                "REPLACE common other)"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += mutation + "\n"
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("uses unsupported", result.stderr)
+
+    def test_rejects_cmake_property_and_object_indirection(self) -> None:
+        mutations = (
+            (
+                "set_property(TARGET test_public APPEND "
+                "PROPERTY SOURCES tests/audit_extra.c)"
+            ),
+            (
+                "set_target_properties(test_public PROPERTIES "
+                "SOURCES tests/audit_extra.c)"
+            ),
+            (
+                "set_source_files_properties(tests/test_public.c "
+                "PROPERTIES GENERATED TRUE)"
+            ),
+            (
+                "add_library(audit_objects OBJECT tests/audit_extra.c)\n"
+                "target_sources(test_public PRIVATE "
+                "$<TARGET_OBJECTS:audit_objects>)"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["tests/audit_extra.c"] = ""
+                self.fixture.files["CMakeLists.txt"] += mutation + "\n"
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("unsupported", result.stderr)
+
+    def test_accepts_unrelated_and_quoted_unsupported_syntax(self) -> None:
+        self.fixture.files["Makefile"] += (
+            "# override RUNTIME_COMMON_OBJS := hidden\n"
+            "DEMO_OBJS := $(foreach item,demo,$(OBJDIR)/$(item).o)\n"
+        )
+        self.fixture.files["CMakeLists.txt"] += (
+            "# list(REMOVE_ITEM LLAM_RUNTIME_COMMON_SOURCES src/common.c)\n"
+            'message("target_sources(test_public PRIVATE hidden.c)")\n'
+            "set(UNRELATED_SOURCES tools/other.c)\n"
+            "list(REMOVE_ITEM UNRELATED_SOURCES tools/other.c)\n"
+            "set_source_files_properties(tools/other.c "
+            "PROPERTIES GENERATED TRUE)\n"
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejects_make_runtime_drift_in_supported_arch_alias(self) -> None:
         self.fixture.files["src/direct.c"] = ""
         self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
@@ -886,6 +1123,40 @@ class BuildManifestAuditTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(
             "libllam_runtime.a: Make link recipe inputs",
+            result.stderr,
+        )
+
+    def test_rejects_literal_object_in_make_static_recipe(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "$(AR) rcs $@ $(RUNTIME_OBJS)",
+            (
+                "$(AR) rcs $@ $(RUNTIME_OBJS) "
+                "$(OBJDIR)/src/common.o"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "libllam_runtime.a: Make link recipe has additional input",
+            result.stderr,
+        )
+
+    def test_rejects_unknown_input_in_make_static_recipe(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "$(AR) rcs $@ $(RUNTIME_OBJS)",
+            "$(AR) rcs $@ $(RUNTIME_OBJS) $(MYSTERY_INPUT)",
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "libllam_runtime.a: Make link recipe has unknown expansion "
+            "$(MYSTERY_INPUT)",
             result.stderr,
         )
 
@@ -1018,6 +1289,126 @@ class BuildManifestAuditTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn(
             "test_research: CTest platforms ['all'] != ['windows']",
+            result.stderr,
+        )
+
+    def test_rejects_stable_cmake_target_narrowed_to_x86_aliases(self) -> None:
+        declaration = (
+            "add_executable(test_public tests/test_public.c)\n"
+            "target_link_libraries(test_public PRIVATE llam_runtime)"
+        )
+        self.fixture.files["CMakeLists.txt"] = self.fixture.files[
+            "CMakeLists.txt"
+        ].replace(
+            declaration,
+            (
+                'if(LLAM_TARGET_PROCESSOR MATCHES "^(x86_64|amd64)$")\n'
+                f"{declaration}\n"
+                "endif()"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "test_public: CMake linux-aarch64 research=0 target is missing",
+            result.stderr,
+        )
+
+    def test_rejects_configured_cmake_target_source_variable_drift(
+        self,
+    ) -> None:
+        self.fixture.files["tests/audit_extra.c"] = ""
+        self.fixture.files["CMakeLists.txt"] = self.fixture.files[
+            "CMakeLists.txt"
+        ].replace(
+            "add_executable(test_public tests/test_public.c)",
+            (
+                "set(PUBLIC_SOURCES tests/test_public.c)\n"
+                'if(LLAM_TARGET_PROCESSOR MATCHES "^(aarch64|arm64)$")\n'
+                "set(PUBLIC_SOURCES tests/audit_extra.c)\n"
+                "endif()\n"
+                "add_executable(test_public ${PUBLIC_SOURCES})"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "test_public: CMake linux-aarch64 research=0 sources",
+            result.stderr,
+        )
+
+    def test_rejects_unsupported_condition_on_cmake_target_source_variable(
+        self,
+    ) -> None:
+        self.fixture.files["CMakeLists.txt"] = self.fixture.files[
+            "CMakeLists.txt"
+        ].replace(
+            "add_executable(test_public tests/test_public.c)",
+            (
+                "set(PUBLIC_SOURCES tests/test_public.c)\n"
+                "if(UNMODELED_SOURCE_TOGGLE)\n"
+                "set(PUBLIC_SOURCES)\n"
+                "endif()\n"
+                "add_executable(test_public ${PUBLIC_SOURCES})"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "CMake audited variable mutation is guarded by an unsupported "
+            "condition",
+            result.stderr,
+        )
+
+    def test_rejects_stable_make_rule_missing_only_in_research_mode(self) -> None:
+        rule = (
+            "test_public: $(RUNTIME_OBJS) $(TEST_PUBLIC_OBJS)\n"
+            "\t$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) "
+            "$(TEST_PUBLIC_OBJS) $(LDLIBS)"
+        )
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            rule,
+            f"ifeq ($(LLAM_BUILD_RESEARCH),0)\n{rule}\nendif",
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "test_public: Make linux-x86_64 research=1 target is missing",
+            result.stderr,
+        )
+
+    def test_rejects_stable_ctest_missing_only_in_research_mode(self) -> None:
+        registration = "add_test(NAME test_public COMMAND test_public)"
+        self.fixture.files["CMakeLists.txt"] = self.fixture.files[
+            "CMakeLists.txt"
+        ].replace(
+            registration,
+            (
+                "if(NOT LLAM_BUILD_RESEARCH)\n"
+                f"{registration}\n"
+                "endif()"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "test_public: CTest linux-x86_64 research=1 registration "
+            "is missing",
             result.stderr,
         )
 
@@ -1178,6 +1569,35 @@ class BuildManifestAuditTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_rejects_plain_object_only_in_make_target_inputs(self) -> None:
+        for location in ("prerequisite", "recipe"):
+            with self.subTest(location=location):
+                self.fixture = Fixture(self.root)
+                if location == "prerequisite":
+                    self.fixture.files["Makefile"] = self.fixture.files[
+                        "Makefile"
+                    ].replace(
+                        "test_public: $(RUNTIME_OBJS) $(TEST_PUBLIC_OBJS)",
+                        (
+                            "test_public: $(RUNTIME_OBJS) "
+                            "$(TEST_PUBLIC_OBJS) rogue.o"
+                        ),
+                    )
+                else:
+                    self.fixture.files["Makefile"] = self.fixture.files[
+                        "Makefile"
+                    ].replace(
+                        "$(TEST_PUBLIC_OBJS) $(LDLIBS)",
+                        "$(TEST_PUBLIC_OBJS) rogue.o $(LDLIBS)",
+                        1,
+                    )
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("additional", result.stderr)
+
     def test_rejects_make_recipe_only_library_expansion(self) -> None:
         self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
             "$(TEST_PUBLIC_OBJS) $(LDLIBS)",
@@ -1273,6 +1693,62 @@ class BuildManifestAuditTests(unittest.TestCase):
         )
         self.assertNotIn(str(self.root), result.stderr)
 
+    def test_invalid_roots_fail_without_traceback_or_path_leak(self) -> None:
+        loop = self.root / "loop"
+        loop.symlink_to("loop")
+        non_directory = self.root / "not-a-directory"
+        non_directory.write_text("", encoding="utf-8")
+        for invalid_root in (loop, non_directory):
+            with self.subTest(invalid_root=invalid_root.name):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        str(AUDIT),
+                        "--root",
+                        str(invalid_root),
+                        "--check",
+                    ],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                )
+
+                self.assertEqual(result.returncode, 1)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertNotIn(str(self.root), result.stderr)
+                self.assertEqual(
+                    result.stderr.splitlines(),
+                    sorted(result.stderr.splitlines()),
+                )
+
+    def test_inaccessible_root_fails_with_sorted_diagnostics(self) -> None:
+        inaccessible = self.root / "inaccessible"
+        inaccessible.mkdir()
+        inaccessible.chmod(0)
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(AUDIT),
+                    "--root",
+                    str(inaccessible),
+                    "--check",
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+        finally:
+            inaccessible.chmod(0o700)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertNotIn(str(self.root), result.stderr)
+        self.assertEqual(
+            result.stderr.splitlines(),
+            sorted(result.stderr.splitlines()),
+        )
+
     def test_rejects_unknown_fields(self) -> None:
         self.fixture.sources["stable"]["mystery_sources"] = []
         self.fixture.write()
@@ -1342,6 +1818,24 @@ class BuildManifestAuditTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_rejects_reordered_compile_recipe_without_depflags(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            (
+                "\t$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) "
+                "-c -o $@ $<"
+            ),
+            "\t$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ -c $<",
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Make ordinary compile recipe omits DEPFLAGS",
+            result.stderr,
+        )
+
     def assert_depfile_category_rejected(self, token: str) -> None:
         self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
             f" {token}",
@@ -1398,6 +1892,40 @@ class BuildManifestAuditTests(unittest.TestCase):
 
     def test_rejects_testhook_signature_without_depflags(self) -> None:
         self.assert_signature_depflags_rejected("$(TESTHOOK_BUILD_SIGNATURE)")
+
+    def test_rejects_decorative_depflags_in_signature_recipe(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "\tprintf 'DEPFLAGS=%s\\n' '$(DEPFLAGS)' > $@",
+            "\t: '$(DEPFLAGS)'",
+            1,
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Make $(BUILD_SIGNATURE) does not emit DEPFLAGS",
+            result.stderr,
+        )
+
+    def test_rejects_depflags_printf_redirected_away_from_signature(
+        self,
+    ) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "\tprintf 'DEPFLAGS=%s\\n' '$(DEPFLAGS)' > $@",
+            "\tprintf 'DEPFLAGS=%s\\n' '$(DEPFLAGS)' > /dev/null",
+            1,
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Make $(BUILD_SIGNATURE) does not emit DEPFLAGS",
+            result.stderr,
+        )
 
     def test_rejects_missing_build_test_wiring(self) -> None:
         self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
@@ -1465,6 +1993,70 @@ class BuildManifestAuditTests(unittest.TestCase):
         )
         self.assertIn(
             "CMake build_manifest test is inactive for research=1",
+            result.stderr,
+        )
+
+    def test_rejects_unsupported_make_condition_hiding_audit_rule(self) -> None:
+        rule = (
+            "audit-build-manifests:\n"
+            "\tpython3 scripts/audit_build_manifests.py --root . --check"
+        )
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            rule,
+            f"ifdef NEVER\n{rule}\nendif",
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Make audit enforcement is guarded by an unsupported condition",
+            result.stderr,
+        )
+
+    def test_rejects_manifest_test_disabled_by_cmake_property(self) -> None:
+        mutations = (
+            (
+                "set_tests_properties(build_manifest "
+                "PROPERTIES DISABLED TRUE)"
+            ),
+            (
+                "set_property(TEST build_manifest "
+                "PROPERTY DISABLED TRUE)"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += mutation + "\n"
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "CMake build_manifest test is disabled",
+                    result.stderr,
+                )
+
+    def test_rejects_false_condition_on_linux_workflow_audit_step(self) -> None:
+        self.fixture.files[".github/workflows/linux.yml"] = self.fixture.files[
+            ".github/workflows/linux.yml"
+        ].replace(
+            "      - name: Audit build manifests\n",
+            (
+                "      - name: Audit build manifests\n"
+                "        if: ${{ false }}\n"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Linux CI build-manifest audit step is disabled",
             result.stderr,
         )
 

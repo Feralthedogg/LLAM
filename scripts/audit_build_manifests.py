@@ -47,6 +47,19 @@ RUNTIME_LIBRARY_TARGETS = (
     "llam_runtime_shared",
     "llam_runtime_testhooks",
 )
+CMAKE_MUTATING_LIST_OPERATIONS = {
+    "REMOVE_ITEM",
+    "REMOVE_AT",
+    "REMOVE_DUPLICATES",
+    "FILTER",
+    "INSERT",
+    "PREPEND",
+    "POP_BACK",
+    "POP_FRONT",
+    "REVERSE",
+    "SORT",
+    "TRANSFORM",
+}
 
 
 class DuplicateKeyError(ValueError):
@@ -57,6 +70,10 @@ class Audit:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.diagnostics: set[str] = set()
+        self.manifest_targets: set[str] = set()
+        self.manifest_sources: set[str] = set()
+        self.audited_make_variables: set[str] = set()
+        self.audited_cmake_variables: set[str] = set()
 
     def error(self, message: str) -> None:
         self.diagnostics.add(message)
@@ -573,12 +590,7 @@ class Audit:
                     ),
                     (
                         "package GITHUB_REF_NAME fallback",
-                        find_required(
-                            package,
-                            r"GITHUB_REF_NAME:-v([^}]+)",
-                            self,
-                            "package GITHUB_REF_NAME fallback",
-                        ),
+                        package_version_fallback(package, self),
                         version,
                     ),
                 ]
@@ -608,6 +620,38 @@ class Audit:
         cmake_text = self.read_text("CMakeLists.txt")
         if make_text is None or cmake_text is None:
             return
+        self.manifest_targets = {
+            target["name"]
+            for targets in manifest["test_targets"].values()
+            for target in targets
+        } | {
+            target["name"] for target in manifest["research_targets"]
+        }
+        self.manifest_sources = {
+            *manifest["common_sources"],
+            *(
+                source
+                for sources in manifest["platform_sources"].values()
+                for source in sources
+            ),
+            *(
+                source
+                for sources in manifest["research_runtime"].values()
+                for source in sources
+            ),
+            *(
+                source
+                for targets in manifest["test_targets"].values()
+                for target in targets
+                for source in target["sources"]
+            ),
+            *(
+                source
+                for target in manifest["research_targets"]
+                for source in target["sources"]
+            ),
+        }
+        check_declarative_subset(make_text, cmake_text, self)
         make = MakeProjection(self.root, make_text, self)
         cmake = CMakeProjection(cmake_text, self)
 
@@ -898,19 +942,33 @@ class Audit:
             self.error(
                 f"Make DEPFLAGS {depflags} != ['-MMD', '-MP']"
             )
-        compile_recipes = [
-            line.strip()
-            for line in make_text.splitlines()
-            if line.startswith("\t")
-            and "$(CC)" in line
-            and "-c -o $@" in line
-        ]
+        compile_recipes: list[tuple[str, str]] = []
+        for target, recipes in make.recipes.items():
+            for recipe in recipes:
+                tokens = recipe.split()
+                if (
+                    "$(CC)" in tokens
+                    and "-c" in tokens
+                    and "$@" in tokens
+                    and "$<" in tokens
+                ):
+                    category = (
+                        "shared"
+                        if target.startswith("$(SHARED_OBJDIR)/")
+                        else "test-hook"
+                        if target.startswith("$(TESTHOOK_OBJDIR)/")
+                        else "research"
+                        if "experiments/" in target
+                        else "ordinary"
+                    )
+                    compile_recipes.append((category, recipe.strip()))
         if not compile_recipes:
             self.error("Make compile recipes are missing")
-        for recipe in compile_recipes:
-            if "$(DEPFLAGS)" not in recipe:
+        for category, recipe in compile_recipes:
+            if "$(DEPFLAGS)" not in recipe.split():
                 self.error(
-                    f"Make compile recipe omits DEPFLAGS: {recipe}"
+                    f"Make {category} compile recipe omits DEPFLAGS: "
+                    f"{recipe}"
                 )
         if re.search(
             r"(?m)^-include\s+\$\(ALL_DEPFILES\)\s*$",
@@ -943,13 +1001,13 @@ class Audit:
             signature_recipe = "\n".join(
                 make.recipes.get(signature, [])
             )
-            active_recipe = "\n".join(
-                line.split("#", 1)[0]
-                for line in signature_recipe.splitlines()
-            )
-            if "$(DEPFLAGS)" not in active_recipe:
+            active_recipe = uncomment_text(signature_recipe)
+            if not signature_recipe_emits_depflags(active_recipe):
                 self.error(
                     f"Make {signature} does not record DEPFLAGS"
+                )
+                self.error(
+                    f"Make {signature} does not emit DEPFLAGS"
                 )
     def check_enforcement(
         self,
@@ -1027,16 +1085,8 @@ class Audit:
                 )
 
         workflow = self.read_text(".github/workflows/linux.yml")
-        if workflow is not None and re.search(
-            (
-                r"(?m)^\s*-\s+name:\s+Audit build manifests\s*$\n"
-                r"^\s+run:\s+python3 "
-                r"scripts/audit_build_manifests\.py "
-                r"--root \. --check\s*$"
-            ),
-            workflow,
-        ) is None:
-            self.error("Linux CI build-manifest audit step is missing")
+        if workflow is not None:
+            check_linux_workflow_audit_step(workflow, self)
 
     def check_runtime_graphs(
         self,
@@ -1111,7 +1161,12 @@ class Audit:
             self.error(
                 "libllam_runtime.a: Make prerequisites omit RUNTIME_OBJS"
             )
-        runtime_recipe_inputs = make_recipe_object_variables(static_recipe)
+        runtime_recipe_inputs = validate_make_link_recipe_inputs(
+            static_recipe,
+            "libllam_runtime.a",
+            "RUNTIME_OBJS",
+            self,
+        )
         if runtime_recipe_inputs != ["RUNTIME_OBJS"]:
             self.error(
                 "libllam_runtime.a: Make link recipe inputs "
@@ -1139,7 +1194,12 @@ class Audit:
             recipe = " ".join(
                 projection.recipes.get(shared_targets[0], [])
             )
-            inputs = make_recipe_object_variables(recipe)
+            inputs = validate_make_link_recipe_inputs(
+                recipe,
+                shared_targets[0],
+                "SHARED_RUNTIME_OBJS",
+                self,
+            )
             if inputs != ["SHARED_RUNTIME_OBJS"]:
                 self.error(
                     "Make shared runtime link recipe inputs "
@@ -1152,6 +1212,10 @@ class Audit:
         make_text: str,
         cmake_text: str,
     ) -> None:
+        cmake_variable_cache: dict[
+            tuple[str, int],
+            dict[str, list[str]],
+        ] = {}
         stable_targets = [
             target
             for targets in manifest["test_targets"].values()
@@ -1163,77 +1227,117 @@ class Audit:
         ]:
             name = target["name"]
             supported = expand_platforms(target["platforms"])
-            for platform in ("linux", "darwin", "bsd", "windows"):
-                expected_links = sorted(
-                    target["link_dependencies"][platform]
+            expected_sources = target["sources"]
+            for config in runtime_configurations(cmake=True):
+                cache_key = (config["label"], config["research"])
+                if cache_key not in cmake_variable_cache:
+                    cmake_variable_cache[cache_key] = (
+                        configured_cmake_variables(
+                            cmake_text,
+                            config,
+                            self,
+                        )
+                    )
+                cmake_variables = cmake_variable_cache[cache_key]
+                expected_active = (
+                    config["platform"] in supported
+                    and (not research or config["research"] == 1)
                 )
-                research_modes = (1,) if research else (0, 1)
-                for research_mode in research_modes:
-                    config = {
-                        "label": f"{platform}-x86_64",
-                        "platform": platform,
-                        "processor": "x86_64",
-                        "msvc": platform == "windows",
-                        "research": research_mode,
-                    }
-                    exists, links = active_cmake_target(
-                        cmake_text,
-                        name,
-                        config,
+                exists, sources, links = active_cmake_target(
+                    cmake_text,
+                    name,
+                    config,
+                    cmake_variables,
+                    self,
+                )
+                label = (
+                    f"{name}: CMake {config['label']} "
+                    f"research={config['research']}"
+                )
+                if expected_active and not exists:
+                    self.error(f"{label} target is missing")
+                if expected_active:
+                    compare_ordered(
+                        expected_sources,
+                        sources,
+                        f"{label} sources",
                         self,
                     )
-                    if platform in supported and not exists:
+                    expected_links = sorted(
+                        target["link_dependencies"][config["platform"]]
+                    )
+                    if sorted(links) != expected_links:
                         self.error(
-                            f"{name}: CMake {platform} target is missing"
-                        )
-                    if platform in supported and sorted(links) != expected_links:
-                        self.error(
-                            f"{name}: CMake {platform} link dependencies "
+                            f"{label} link dependencies "
                             f"{sorted(links)} != {expected_links}"
                         )
-                if research:
-                    off_config = {
-                        "label": f"{platform}-x86_64",
-                        "platform": platform,
-                        "processor": "x86_64",
-                        "msvc": platform == "windows",
-                        "research": 0,
-                    }
-                    exists, _ = active_cmake_target(
-                        cmake_text,
-                        name,
-                        off_config,
-                        self,
-                    )
-                    if exists:
                         self.error(
-                            f"{name}: CMake target is active with "
-                            "research=0"
+                            f"{name}: CMake {config['platform']} "
+                            f"link dependencies {sorted(links)} "
+                            f"!= {expected_links}"
                         )
+                elif research and config["research"] == 0 and exists:
+                    self.error(f"{label} target is active")
 
-                if platform == "windows" or platform not in supported:
+                registrations = active_cmake_tests(
+                    cmake_text,
+                    config,
+                    self,
+                )
+                registered = any(
+                    ctest_registration_targets(tokens, name)
+                    for tokens in registrations.values()
+                )
+                if expected_active and not registered:
+                    self.error(f"{label.replace('CMake', 'CTest')} "
+                               "registration is missing")
+                elif not expected_active and registered:
+                    self.error(f"{label.replace('CMake', 'CTest')} "
+                               "registration is active")
+
+            for config in runtime_configurations(cmake=False):
+                if (
+                    config["platform"] == "windows"
+                    or config["platform"] not in supported
+                ):
                     continue
-                make_config = {
-                    "label": f"{platform}-x86_64",
-                    "platform": platform,
-                    "processor": "x86_64",
-                    "msvc": False,
-                    "research": 1 if research else 0,
-                }
                 make = MakeProjection(
                     self.root,
-                    active_make_text(make_text, make_config, self),
+                    active_make_text(make_text, config, self),
                     self,
                 )
                 if name not in make.rules:
                     self.error(
-                        f"{name}: Make {platform} target is missing"
+                        f"{name}: Make {config['label']} "
+                        f"research={config['research']} target is missing"
                     )
                     continue
+                label = (
+                    f"{name}: Make {config['label']} "
+                    f"research={config['research']}"
+                )
+                make.validate_target_prerequisites(name)
+                compare_ordered(
+                    expected_sources,
+                    make.target_sources(name),
+                    f"{label} prerequisite sources",
+                    self,
+                )
+                compare_ordered(
+                    expected_sources,
+                    make.target_recipe_sources(name),
+                    f"{label} recipe sources",
+                    self,
+                )
+                if not make.recipes.get(name):
+                    self.error(f"{label} recipe is missing")
+                expected_links = sorted(
+                    target["link_dependencies"][config["platform"]]
+                )
                 actual_links = sorted(make.target_links(name))
                 if actual_links != expected_links:
                     self.error(
-                        f"{name}: Make {platform} link dependencies "
+                        f"{label} link dependencies "
                         f"{actual_links} != {expected_links}"
                     )
 
@@ -1463,6 +1567,369 @@ class Audit:
         return 1 if self.diagnostics else 0
 
 
+def is_audited_make_variable(
+    name: str,
+    audit: Audit | None = None,
+) -> bool:
+    return (
+        name
+        in {
+            "DEPFLAGS",
+            "LLAM_VERSION",
+            "LLAM_ABI_MAJOR",
+            "RUNTIME_OBJS",
+            "RUNTIME_PRIV_HDRS",
+            "RESEARCH_PRIVATE_HDRS",
+            "BUILD_OBJS",
+            "RESEARCH_OBJS",
+            "ALL_DEPFILES",
+            "BUILD_SIGNATURE",
+            "SHARED_BUILD_SIGNATURE",
+            "TESTHOOK_BUILD_SIGNATURE",
+            "LINK_TARGETS",
+            "RESEARCH_LINK_TARGETS",
+        }
+        or (
+            name.startswith("RUNTIME_")
+            and name.endswith("_OBJS")
+        )
+        or (
+            name.startswith("RESEARCH_RUNTIME_")
+            and name.endswith("_OBJS")
+        )
+        or name.endswith("_TEST_TARGETS")
+        or name.endswith("_RESEARCH_TARGETS")
+        or (
+            audit is not None
+            and name in audit.audited_make_variables
+        )
+    )
+
+
+def is_audited_cmake_variable(
+    name: str,
+    audit: Audit | None = None,
+) -> bool:
+    return (
+        name
+        in {
+            "LLAM_ABI_VERSION_MAJOR",
+            "LLAM_RUNTIME_SOURCES",
+        }
+        or (
+            name.startswith("LLAM_RUNTIME_")
+            and name.endswith("_SOURCES")
+        )
+        or (
+            name.startswith("LLAM_RESEARCH_RUNTIME_")
+            and name.endswith("_SOURCES")
+        )
+        or name.endswith("_TEST_TARGETS")
+        or name.endswith("_RESEARCH_TARGETS")
+        or (
+            audit is not None
+            and name in audit.audited_cmake_variables
+        )
+    )
+
+
+def strip_unquoted_comment(line: str) -> str:
+    result: list[str] = []
+    quote = ""
+    escaped = False
+    for char in line:
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            result.append(char)
+            escaped = True
+            continue
+        if quote:
+            result.append(char)
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            result.append(char)
+            quote = char
+            continue
+        if char == "#":
+            break
+        result.append(char)
+    return "".join(result)
+
+
+def uncomment_text(text: str) -> str:
+    return "\n".join(
+        strip_unquoted_comment(line) for line in text.splitlines()
+    )
+
+
+def make_line_touches_audited(line: str, audit: Audit) -> bool:
+    stripped = strip_unquoted_comment(line).strip()
+    assignment = re.match(
+        (
+            r"^(?:(?:override|export|private)\s+)?"
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\+=|:=|\?=|=)"
+        ),
+        stripped,
+    )
+    if assignment and is_audited_make_variable(assignment.group(1), audit):
+        return True
+    unexport = re.match(
+        r"^(?:export|unexport|define|undefine)\s+"
+        r"([A-Za-z_][A-Za-z0-9_]*)",
+        stripped,
+    )
+    if unexport and is_audited_make_variable(unexport.group(1), audit):
+        return True
+    rule = re.match(r"^([^:=\s][^:]*)\s*:", stripped)
+    if rule:
+        relevant_targets = (
+            audit.manifest_targets
+            | {
+                "test",
+                "check",
+                "audit-build-manifests",
+                "libllam_runtime.a",
+                "static",
+                "shared",
+            }
+        )
+        return bool(set(rule.group(1).split()) & relevant_targets)
+    return any(
+        re.search(rf"\b{re.escape(name)}\b", stripped)
+        for name in audit.manifest_targets
+    )
+
+
+def check_make_declarative_subset(text: str, audit: Audit) -> None:
+    audit.audited_make_variables = {
+        variable
+        for line in logical_make_lines(text)
+        for rule in [re.match(r"^([^:=\s][^:]*)\s*:\s*(.*)$", line)]
+        if rule is not None
+        and bool(set(rule.group(1).split()) & audit.manifest_targets)
+        for variable in re.findall(
+            r"\$\(([A-Za-z_][A-Za-z0-9_]*_OBJS)\)",
+            rule.group(2),
+        )
+    }
+    define_name: str | None = None
+    for line in logical_make_lines(text):
+        clean = strip_unquoted_comment(line).strip()
+        if not clean:
+            continue
+        define = re.match(
+            r"^(?:override\s+)?define\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)",
+            clean,
+        )
+        if define:
+            define_name = define.group(1)
+            if is_audited_make_variable(define_name, audit):
+                audit.error(
+                    f"Make audited variable {define_name} uses "
+                    "unsupported define"
+                )
+            continue
+        if clean == "endef":
+            define_name = None
+            continue
+        if define_name is not None:
+            continue
+        modifier = re.match(
+            (
+                r"^(override|export|private)\s+"
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*"
+                r"(?:\+=|:=|\?=|=)"
+            ),
+            clean,
+        )
+        if modifier and is_audited_make_variable(modifier.group(2), audit):
+            audit.error(
+                f"Make audited variable {modifier.group(2)} uses "
+                f"unsupported {modifier.group(1)} assignment"
+            )
+            continue
+        unexport = re.match(
+            r"^(export|unexport|undefine)\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*$",
+            clean,
+        )
+        if unexport and is_audited_make_variable(unexport.group(2), audit):
+            audit.error(
+                f"Make audited variable {unexport.group(2)} uses "
+                f"unsupported {unexport.group(1)}"
+            )
+            continue
+        assignment = re.match(
+            (
+                r"^([A-Za-z_][A-Za-z0-9_]*)\s*"
+                r"(\+=|:=|\?=|=)\s*(.*)$"
+            ),
+            clean,
+        )
+        if assignment and is_audited_make_variable(
+            assignment.group(1),
+            audit,
+        ):
+            name, _, value = assignment.groups()
+            allowed_function: str | None = None
+            if name == "SHARED_RUNTIME_OBJS":
+                allowed_function = "patsubst"
+            elif name == "RUNTIME_TESTHOOK_OBJS":
+                allowed_function = "filter-out"
+            functions = {
+                function
+                for function in re.findall(
+                    r"\$\(([A-Za-z_][A-Za-z0-9_-]*)(?=[\s,])",
+                    value,
+                )
+                if function != allowed_function
+            }
+            for function in sorted(functions):
+                audit.error(
+                    f"Make audited variable {name} uses unsupported "
+                    f"$({function} ...)"
+                )
+        if "$(eval " in clean:
+            body = clean.partition("$(eval ")[2]
+            identifiers = re.findall(
+                r"[A-Za-z_][A-Za-z0-9_]*",
+                body,
+            )
+            if (
+                any(
+                    is_audited_make_variable(name, audit)
+                    for name in identifiers
+                )
+                or bool(set(identifiers) & audit.manifest_targets)
+            ):
+                audit.error(
+                    "Make audited state uses unsupported $(eval ...)"
+                )
+
+
+def check_cmake_declarative_subset(text: str, audit: Audit) -> None:
+    relevant_targets = audit.manifest_targets | set(RUNTIME_LIBRARY_TARGETS)
+    commands = cmake_commands(uncomment_text(text))
+    audit.audited_cmake_variables = {
+        variable
+        for command, body in commands
+        if command in {"add_executable", "target_sources"}
+        for tokens in [cmake_tokens(body)]
+        if tokens and tokens[0] in audit.manifest_targets
+        for token in tokens[1:]
+        for match in [
+            re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", token)
+        ]
+        if match is not None
+        for variable in [match.group(1)]
+    }
+    for command, body in commands:
+        tokens = cmake_tokens(body)
+        if not tokens:
+            continue
+        if (
+            command == "list"
+            and len(tokens) >= 2
+            and tokens[0] in CMAKE_MUTATING_LIST_OPERATIONS
+            and is_audited_cmake_variable(tokens[1], audit)
+        ):
+            audit.error(
+                f"CMake audited variable {tokens[1]} uses unsupported "
+                f"list({tokens[0]})"
+            )
+        if (
+            command == "unset"
+            and is_audited_cmake_variable(tokens[0], audit)
+        ):
+            audit.error(
+                f"CMake audited variable {tokens[0]} uses unsupported "
+                "unset()"
+            )
+        if command in {"set_property", "set_target_properties"}:
+            targets = set(tokens) & relevant_targets
+            closure_properties = {
+                "SOURCES",
+                "LINK_LIBRARIES",
+                "INTERFACE_LINK_LIBRARIES",
+                "EXCLUDE_FROM_ALL",
+            }
+            if targets and set(tokens) & closure_properties:
+                audit.error(
+                    "CMake audited target property mutation is unsupported: "
+                    f"{command}({body.strip()})"
+                )
+        if (
+            command == "set_property"
+            and tokens[0] == "SOURCE"
+            and bool(set(tokens) & audit.manifest_sources)
+        ):
+            audit.error(
+                "CMake source property mutation in an audited closure "
+                f"is unsupported: {command}({body.strip()})"
+            )
+        if command == "set_source_files_properties":
+            sources = {
+                token for token in tokens if source_suffix(token)
+            }
+            if sources & audit.manifest_sources:
+                audit.error(
+                    "CMake source property mutation in an audited closure "
+                    f"is unsupported: {command}({body.strip()})"
+                )
+        relevant_command = (
+            command in {
+                "set",
+                "list",
+                "add_executable",
+                "add_library",
+                "target_sources",
+                "target_link_libraries",
+            }
+            and (
+                (
+                    tokens
+                    and is_audited_cmake_variable(tokens[0], audit)
+                )
+                or bool(set(tokens) & relevant_targets)
+                or (
+                    command == "list"
+                    and len(tokens) >= 2
+                    and is_audited_cmake_variable(tokens[1], audit)
+                )
+            )
+        )
+        if relevant_command and any("$<" in token for token in tokens):
+            audit.error(
+                "CMake generator-expression indirection in an audited "
+                f"closure is unsupported: {command}({body.strip()})"
+            )
+        if (
+            command == "add_library"
+            and tokens
+            and tokens[0] in relevant_targets
+            and "OBJECT" in tokens
+        ):
+            audit.error(
+                f"CMake audited target {tokens[0]} uses unsupported "
+                "OBJECT library indirection"
+            )
+
+
+def check_declarative_subset(
+    make_text: str,
+    cmake_text: str,
+    audit: Audit,
+) -> None:
+    check_make_declarative_subset(make_text, audit)
+    check_cmake_declarative_subset(cmake_text, audit)
+
+
 class MakeProjection:
     def __init__(self, root: Path, text: str, audit: Audit) -> None:
         self.root = root
@@ -1587,6 +2054,28 @@ class MakeProjection:
                     result.append(source)
         return result
 
+    def validate_target_prerequisites(self, target: str) -> None:
+        for token in self.rules.get(target, []):
+            variable = re.fullmatch(
+                r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)",
+                token,
+            )
+            if variable:
+                name = variable.group(1)
+                if name not in self.variables and name not in MAKE_LINK_VARIABLES:
+                    self.audit.error(
+                        f"{target}: Make prerequisites have unknown "
+                        f"expansion $({name})"
+                    )
+                continue
+            if self.object_to_source(token) is not None:
+                continue
+            if token.endswith(".o"):
+                self.audit.error(
+                    f"{target}: Make prerequisites have additional "
+                    f"input {token}"
+                )
+
     def target_links(self, target: str) -> list[str]:
         return sorted(
             set(self.target_prerequisite_links(target))
@@ -1655,6 +2144,12 @@ class MakeProjection:
             source = self.object_to_source(token)
             if source is not None:
                 result.append(source)
+        for token in recipe.split():
+            if token.endswith(".o") and "$(" not in token:
+                self.audit.error(
+                    f"{target}: Make recipe has additional object "
+                    f"input {token}"
+                )
         allowed_expansions = {
             "CC",
             "CFLAGS",
@@ -1688,7 +2183,7 @@ class CMakeProjection:
         self.variables: dict[str, list[str]] = {}
         self.targets: dict[str, list[str]] = {}
         self.links: dict[str, list[str]] = {}
-        uncommented = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+        uncommented = uncomment_text(text)
         for command, body in cmake_commands(uncommented):
             tokens = cmake_tokens(body)
             if not tokens:
@@ -1699,6 +2194,12 @@ class CMakeProjection:
                 self.variables.setdefault(tokens[1], []).extend(tokens[2:])
             elif command == "add_executable":
                 self.targets[tokens[0]] = tokens[1:]
+            elif command == "target_sources" and tokens[0] in self.targets:
+                self.targets[tokens[0]].extend(
+                    token
+                    for token in tokens[1:]
+                    if token not in {"PRIVATE", "PUBLIC", "INTERFACE"}
+                )
             elif command == "target_link_libraries":
                 target = tokens[0]
                 values = [
@@ -1781,6 +2282,61 @@ def find_required(
         audit.error(f"{label}: expected exactly one projection, found {len(matches)}")
         return ""
     return matches[0]
+
+
+def package_version_fallback(text: str, audit: Audit) -> str:
+    assignment_pattern = re.compile(
+        (
+            r"""^\s*version\s*=\s*['"]"""
+            r"(?:\$\{LLAM_RELEASE_VERSION:-)?"
+            r"\$\{GITHUB_REF_NAME:-v([^}]+)\}"
+            r"\}?"
+            r"""['"]\s*$"""
+        )
+    )
+    normalization_pattern = re.compile(
+        r"""^\s*version\s*=\s*['"]\$\{version#v\}['"]\s*$"""
+    )
+    fallback: str | None = None
+    fallback_index = -1
+    for index, physical in enumerate(text.splitlines()):
+        line = strip_unquoted_comment(physical).strip()
+        if not line:
+            continue
+        assignment = assignment_pattern.fullmatch(line)
+        if assignment:
+            if fallback is not None:
+                audit.error(
+                    "package version fallback assignment is duplicated"
+                )
+            else:
+                fallback = assignment.group(1)
+                fallback_index = index
+            continue
+        if re.match(r"^version\s*=", line):
+            if normalization_pattern.fullmatch(line):
+                if fallback is None:
+                    audit.error(
+                        "package version normalization precedes fallback"
+                    )
+                continue
+            audit.error(
+                "package version assignment does not use the canonical "
+                "fallback"
+            )
+        if (
+            fallback is None
+            and index != fallback_index
+            and re.search(r"\$(?:\{version\}|version\b)", line)
+        ):
+            audit.error("package version is used before canonical fallback")
+    if fallback is None:
+        audit.error(
+            "package GITHUB_REF_NAME fallback: expected exactly one "
+            "effective projection, found 0"
+        )
+        return ""
+    return fallback
 
 
 def logical_make_lines(text: str) -> list[str]:
@@ -1948,77 +2504,117 @@ def make_condition(
     return equal if operator == "ifeq" else not equal
 
 
-def make_runtime_sources(
-    text: str,
-    make: MakeProjection,
-    config: dict[str, Any],
-    audit: Audit,
-) -> list[str]:
-    platform = config["platform"]
+def make_environment(config: dict[str, Any]) -> dict[str, str]:
     system_names = {
         "linux": "Linux",
         "darwin": "Darwin",
         "bsd": "FreeBSD",
         "windows": "Windows_NT",
     }
-    env = {
+    platform = config["platform"]
+    return {
         "HOST_PLATFORM": platform,
         "UNAME_S": system_names[platform],
         "UNAME_M": config["processor"],
         "LLAM_BUILD_RESEARCH": str(config["research"]),
         "OS": "Windows_NT" if platform == "windows" else "",
     }
+
+
+def active_make_lines(
+    text: str,
+    config: dict[str, Any],
+    audit: Audit,
+) -> list[str]:
+    env = make_environment(config)
     frames: list[dict[str, bool | None]] = []
     active: bool | None = True
-    runtime_tokens: list[str] = []
-    for line in logical_make_lines(text):
-        if line.startswith(("ifeq ", "ifneq ")):
-            condition = make_condition(line, env)
-            frames.append(
-                {
-                    "parent": active,
-                    "prior": condition,
-                }
+    output: list[str] = []
+    unknown_reported = False
+    for physical in text.splitlines():
+        line = strip_unquoted_comment(physical).strip()
+        conditional = re.match(
+            r"^(ifeq|ifneq|ifdef|ifndef)(?:\s+|$)",
+            line,
+        )
+        if conditional:
+            condition = (
+                make_condition(line, env)
+                if conditional.group(1) in {"ifeq", "ifneq"}
+                else None
             )
+            frames.append({"parent": active, "prior": condition})
             active = tri_and(active, condition)
             continue
-        if line.startswith(("else ifeq ", "else ifneq ")):
-            if not frames:
-                continue
-            frame = frames[-1]
-            condition = make_condition(line.removeprefix("else "), env)
-            remaining = tri_not(frame["prior"])
-            active = tri_and(
-                frame["parent"],
-                tri_and(remaining, condition),
-            )
-            frame["prior"] = tri_or(frame["prior"], condition)
+        else_conditional = re.match(
+            r"^else\s+(ifeq|ifneq|ifdef|ifndef)(?:\s+|$)",
+            line,
+        )
+        if else_conditional:
+            if frames:
+                frame = frames[-1]
+                condition = (
+                    make_condition(line.removeprefix("else "), env)
+                    if else_conditional.group(1) in {"ifeq", "ifneq"}
+                    else None
+                )
+                active = tri_and(
+                    frame["parent"],
+                    tri_and(tri_not(frame["prior"]), condition),
+                )
+                frame["prior"] = tri_or(frame["prior"], condition)
             continue
         if line == "else":
-            if not frames:
-                continue
-            frame = frames[-1]
-            active = tri_and(frame["parent"], tri_not(frame["prior"]))
-            frame["prior"] = True
+            if frames:
+                frame = frames[-1]
+                active = tri_and(
+                    frame["parent"],
+                    tri_not(frame["prior"]),
+                )
+                frame["prior"] = True
             continue
         if line == "endif":
             if frames:
                 frame = frames.pop()
                 active = frame["parent"]
             continue
+        if active is True:
+            output.append(physical)
+        elif (
+            active is None
+            and not unknown_reported
+            and make_line_touches_audited(line, audit)
+        ):
+            label = (
+                "Make audit enforcement"
+                if re.match(
+                    r"^(?:test|check|audit-build-manifests)(?:\s|:)",
+                    line,
+                )
+                else "Make audited build state"
+            )
+            audit.error(
+                f"{label} is guarded by an unsupported condition "
+                f"near: {line}"
+            )
+            unknown_reported = True
+    return output
+
+
+def make_runtime_sources(
+    text: str,
+    make: MakeProjection,
+    config: dict[str, Any],
+    audit: Audit,
+) -> list[str]:
+    runtime_tokens: list[str] = []
+    active_text = "\n".join(active_make_lines(text, config, audit))
+    for line in logical_make_lines(active_text):
         assignment = re.match(
             r"^RUNTIME_OBJS\s*(\+=|:=|\?=|=)\s*(.*)$",
             line,
         )
         if assignment is None:
-            continue
-        if active is None:
-            audit.error(
-                "Make RUNTIME_OBJS construction is guarded by an "
-                f"unsupported condition: {line}"
-            )
-            continue
-        if not active:
             continue
         operator, value = assignment.groups()
         tokens = value.split()
@@ -2060,65 +2656,7 @@ def active_make_text(
     config: dict[str, Any],
     audit: Audit,
 ) -> str:
-    platform = config["platform"]
-    system_names = {
-        "linux": "Linux",
-        "darwin": "Darwin",
-        "bsd": "FreeBSD",
-        "windows": "Windows_NT",
-    }
-    env = {
-        "HOST_PLATFORM": platform,
-        "UNAME_S": system_names[platform],
-        "UNAME_M": config["processor"],
-        "LLAM_BUILD_RESEARCH": str(config["research"]),
-        "OS": "Windows_NT" if platform == "windows" else "",
-    }
-    frames: list[dict[str, bool | None]] = []
-    active: bool | None = True
-    output: list[str] = []
-    for physical in text.splitlines():
-        line = physical.strip()
-        if line.startswith(("ifeq ", "ifneq ")):
-            condition = make_condition(line, env)
-            frames.append({"parent": active, "prior": condition})
-            active = tri_and(active, condition)
-            continue
-        if line.startswith(("else ifeq ", "else ifneq ")):
-            if frames:
-                frame = frames[-1]
-                condition = make_condition(line.removeprefix("else "), env)
-                active = tri_and(
-                    frame["parent"],
-                    tri_and(tri_not(frame["prior"]), condition),
-                )
-                frame["prior"] = tri_or(frame["prior"], condition)
-            continue
-        if line == "else":
-            if frames:
-                frame = frames[-1]
-                active = tri_and(
-                    frame["parent"],
-                    tri_not(frame["prior"]),
-                )
-                frame["prior"] = True
-            continue
-        if line == "endif":
-            if frames:
-                frame = frames.pop()
-                active = frame["parent"]
-            continue
-        if active is True:
-            output.append(physical)
-        elif active is None and re.match(
-            r"^(?:test|check|audit-build-manifests)(?:\s|:)",
-            line,
-        ):
-            audit.error(
-                "Make audit enforcement is guarded by an unsupported "
-                f"condition near: {line}"
-            )
-    return "\n".join(output) + "\n"
+    return "\n".join(active_make_lines(text, config, audit)) + "\n"
 
 
 def make_target_reaches(
@@ -2141,6 +2679,67 @@ def make_target_reaches(
             if not prerequisite.startswith("$(")
         )
     return False
+
+
+def check_linux_workflow_audit_step(text: str, audit: Audit) -> None:
+    lines = text.splitlines()
+    matching_step = False
+    exact_run = False
+    disabled = False
+    index = 0
+    while index < len(lines):
+        match = re.match(
+            r"^(\s*)-\s+name:\s+Audit build manifests\s*$",
+            lines[index],
+        )
+        if match is None:
+            index += 1
+            continue
+        matching_step = True
+        base_indent = len(match.group(1))
+        index += 1
+        while index < len(lines):
+            line = lines[index]
+            next_step = re.match(r"^(\s*)-\s+name:", line)
+            if next_step and len(next_step.group(1)) == base_indent:
+                break
+            field = re.match(r"^\s+(run|if):\s*(.*?)\s*$", line)
+            if field:
+                name, value = field.groups()
+                value = value.strip().strip("\"'")
+                if name == "run" and value == (
+                    "python3 scripts/audit_build_manifests.py "
+                    "--root . --check"
+                ):
+                    exact_run = True
+                elif name == "if":
+                    normalized = re.sub(r"\s+", "", value).lower()
+                    if normalized in {
+                        "false",
+                        "0",
+                        "no",
+                        "off",
+                        "${{false}}",
+                        "${{0}}",
+                    }:
+                        disabled = True
+                    elif normalized not in {
+                        "true",
+                        "1",
+                        "yes",
+                        "on",
+                        "${{true}}",
+                        "${{1}}",
+                    }:
+                        audit.error(
+                            "Linux CI build-manifest audit step has an "
+                            "unsupported condition"
+                        )
+            index += 1
+    if disabled:
+        audit.error("Linux CI build-manifest audit step is disabled")
+    if not matching_step or not exact_run:
+        audit.error("Linux CI build-manifest audit step is missing")
 
 
 def cmake_condition(
@@ -2185,19 +2784,14 @@ def cmake_condition(
     return None
 
 
-def cmake_runtime_sources(
-    text: str,
-    cmake: CMakeProjection,
-    config: dict[str, Any],
-    audit: Audit,
-) -> list[str]:
+def cmake_environment(config: dict[str, Any]) -> dict[str, Any]:
     system_names = {
         "linux": "Linux",
         "darwin": "Darwin",
         "bsd": "FreeBSD",
         "windows": "Windows",
     }
-    env = {
+    return {
         "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
         "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
         "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
@@ -2207,13 +2801,17 @@ def cmake_runtime_sources(
         "Python3_Interpreter_FOUND": True,
         "Python3_FOUND": True,
     }
-    uncommented = "\n".join(
-        line.split("#", 1)[0] for line in text.splitlines()
-    )
+
+
+def configured_cmake_commands(
+    text: str,
+    config: dict[str, Any],
+) -> list[tuple[str, str, list[str], bool | None]]:
+    env = cmake_environment(config)
     frames: list[dict[str, bool | None]] = []
     active: bool | None = True
-    runtime_tokens: list[str] = []
-    for command, body in cmake_commands(uncommented):
+    result: list[tuple[str, str, list[str], bool | None]] = []
+    for command, body in cmake_commands(uncomment_text(text)):
         tokens = cmake_tokens(body)
         if command == "if":
             condition = cmake_condition(tokens, env)
@@ -2221,31 +2819,109 @@ def cmake_runtime_sources(
             active = tri_and(active, condition)
             continue
         if command == "elseif":
-            if not frames:
-                continue
-            frame = frames[-1]
-            condition = cmake_condition(tokens, env)
-            active = tri_and(
-                frame["parent"],
-                tri_and(tri_not(frame["prior"]), condition),
-            )
-            frame["prior"] = tri_or(frame["prior"], condition)
+            if frames:
+                frame = frames[-1]
+                condition = cmake_condition(tokens, env)
+                active = tri_and(
+                    frame["parent"],
+                    tri_and(tri_not(frame["prior"]), condition),
+                )
+                frame["prior"] = tri_or(frame["prior"], condition)
             continue
         if command == "else":
-            if not frames:
-                continue
-            frame = frames[-1]
-            active = tri_and(
-                frame["parent"],
-                tri_not(frame["prior"]),
-            )
-            frame["prior"] = True
+            if frames:
+                frame = frames[-1]
+                active = tri_and(
+                    frame["parent"],
+                    tri_not(frame["prior"]),
+                )
+                frame["prior"] = True
             continue
         if command == "endif":
             if frames:
                 frame = frames.pop()
                 active = frame["parent"]
             continue
+        result.append((command, body, tokens, active))
+    return result
+
+
+def configured_cmake_variables(
+    text: str,
+    config: dict[str, Any],
+    audit: Audit,
+) -> dict[str, list[str]]:
+    variables: dict[str, list[str]] = {}
+    for command, body, tokens, active in configured_cmake_commands(
+        text,
+        config,
+    ):
+        relevant = (
+            command == "set"
+            and tokens
+            and is_audited_cmake_variable(tokens[0], audit)
+        ) or (
+            command == "list"
+            and len(tokens) >= 2
+            and is_audited_cmake_variable(tokens[1], audit)
+        )
+        if active is None and relevant:
+            audit.error(
+                "CMake audited variable mutation is guarded by an "
+                f"unsupported condition: {command}({body.strip()})"
+            )
+            continue
+        if not active or not tokens:
+            continue
+        if command == "set":
+            variables[tokens[0]] = tokens[1:]
+        elif (
+            command == "list"
+            and len(tokens) >= 2
+            and tokens[0] == "APPEND"
+        ):
+            variables.setdefault(tokens[1], []).extend(tokens[2:])
+    return variables
+
+
+def expand_cmake_values(
+    tokens: Iterable[str],
+    variables: dict[str, list[str]],
+    audit: Audit,
+    seen: frozenset[str] = frozenset(),
+) -> list[str]:
+    result: list[str] = []
+    for token in tokens:
+        match = re.fullmatch(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", token)
+        if match and match.group(1) in variables:
+            name = match.group(1)
+            if name in seen:
+                audit.error(f"CMake variable expansion cycle at {name}")
+                continue
+            result.extend(
+                expand_cmake_values(
+                    variables[name],
+                    variables,
+                    audit,
+                    seen | {name},
+                )
+            )
+        else:
+            result.append(token)
+    return result
+
+
+def cmake_runtime_sources(
+    text: str,
+    cmake: CMakeProjection,
+    config: dict[str, Any],
+    audit: Audit,
+) -> list[str]:
+    runtime_tokens: list[str] = []
+    for command, body, tokens, active in configured_cmake_commands(
+        text,
+        config,
+    ):
         touches_runtime = (
             command == "set"
             and tokens
@@ -2297,78 +2973,90 @@ def active_cmake_tests(
     config: dict[str, Any],
     audit: Audit,
 ) -> dict[str, list[str]]:
-    system_names = {
-        "linux": "Linux",
-        "darwin": "Darwin",
-        "bsd": "FreeBSD",
-        "windows": "Windows",
-    }
-    env = {
-        "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
-        "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
-        "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
-        "LLAM_BUILD_RESEARCH": bool(config["research"]),
-        "LLAM_TARGET_PROCESSOR": config["processor"],
-        "MSVC": bool(config["msvc"]),
-        "Python3_Interpreter_FOUND": True,
-        "Python3_FOUND": True,
-    }
-    uncommented = "\n".join(
-        line.split("#", 1)[0] for line in text.splitlines()
-    )
-    frames: list[dict[str, bool | None]] = []
-    active: bool | None = True
     registrations: dict[str, list[str]] = {}
-    for command, body in cmake_commands(uncommented):
-        tokens = cmake_tokens(body)
-        if command == "if":
-            condition = cmake_condition(tokens, env)
-            frames.append({"parent": active, "prior": condition})
-            active = tri_and(active, condition)
-            continue
-        if command == "elseif":
-            if frames:
-                frame = frames[-1]
-                condition = cmake_condition(tokens, env)
-                active = tri_and(
-                    frame["parent"],
-                    tri_and(tri_not(frame["prior"]), condition),
-                )
-                frame["prior"] = tri_or(frame["prior"], condition)
-            continue
-        if command == "else":
-            if frames:
-                frame = frames[-1]
-                active = tri_and(
-                    frame["parent"],
-                    tri_not(frame["prior"]),
-                )
-                frame["prior"] = True
-            continue
-        if command == "endif":
-            if frames:
-                frame = frames.pop()
-                active = frame["parent"]
-            continue
-        if command != "add_test":
+    disabled: set[str] = set()
+    for command, body, tokens, active in configured_cmake_commands(
+        text,
+        config,
+    ):
+        relevant = command == "add_test" or (
+            command == "set_tests_properties"
+            and "build_manifest" in tokens
+        ) or (
+            command == "set_property"
+            and len(tokens) >= 2
+            and tokens[0] == "TEST"
+            and "build_manifest" in tokens[1:]
+        )
+        if not relevant:
             continue
         if active is None:
+            if command == "add_test":
+                audit.error(
+                    "CMake add_test is guarded by an unsupported "
+                    f"condition: add_test({body.strip()})"
+                )
+            else:
+                audit.error(
+                    "CMake test property is guarded by an unsupported "
+                    f"condition: {command}({body.strip()})"
+                )
+            continue
+        if not active:
+            continue
+        if command == "add_test":
+            if "NAME" not in tokens:
+                continue
+            index = tokens.index("NAME")
+            if index + 1 >= len(tokens):
+                continue
+            name = tokens[index + 1]
+            if name in registrations:
+                audit.error(
+                    f"CMake duplicate active CTest registration {name}"
+                )
+            registrations[name] = tokens
+            continue
+        property_index = (
+            tokens.index("PROPERTIES") + 1
+            if "PROPERTIES" in tokens
+            else tokens.index("PROPERTY") + 1
+            if "PROPERTY" in tokens
+            else -1
+        )
+        if property_index < 1 or property_index + 1 >= len(tokens):
             audit.error(
-                "CMake add_test is guarded by an unsupported condition: "
-                f"add_test({body.strip()})"
+                "CMake build_manifest test property mutation is unsupported: "
+                f"{command}({body.strip()})"
             )
             continue
-        if not active or "NAME" not in tokens:
-            continue
-        index = tokens.index("NAME")
-        if index + 1 >= len(tokens):
-            continue
-        name = tokens[index + 1]
-        if name in registrations:
+        property_name = tokens[property_index]
+        property_value = tokens[property_index + 1].upper()
+        if property_name == "DISABLED" and property_value in {
+            "TRUE",
+            "ON",
+            "1",
+            "YES",
+        }:
+            disabled.add("build_manifest")
             audit.error(
-                f"CMake duplicate active CTest registration {name}"
+                "CMake build_manifest test is disabled"
             )
-        registrations[name] = tokens
+        elif (
+            command == "set_tests_properties"
+            and property_name == "WORKING_DIRECTORY"
+            and tokens[property_index + 1]
+            == "${CMAKE_CURRENT_SOURCE_DIR}"
+            and property_index + 2 == len(tokens)
+        ):
+            continue
+        else:
+            audit.error(
+                "CMake build_manifest test property mutation is unsupported: "
+                f"{command}({body.strip()})"
+            )
+    for name in disabled:
+        registrations.pop(name, None)
     return registrations
 
 
@@ -2376,64 +3064,22 @@ def active_cmake_target(
     text: str,
     target: str,
     config: dict[str, Any],
+    variables: dict[str, list[str]],
     audit: Audit,
-) -> tuple[bool, list[str]]:
-    system_names = {
-        "linux": "Linux",
-        "darwin": "Darwin",
-        "bsd": "FreeBSD",
-        "windows": "Windows",
-    }
-    env = {
-        "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
-        "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
-        "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
-        "LLAM_BUILD_RESEARCH": bool(config["research"]),
-        "LLAM_TARGET_PROCESSOR": config["processor"],
-        "MSVC": bool(config["msvc"]),
-        "Python3_Interpreter_FOUND": True,
-        "Python3_FOUND": True,
-    }
-    uncommented = "\n".join(
-        line.split("#", 1)[0] for line in text.splitlines()
-    )
-    frames: list[dict[str, bool | None]] = []
-    active: bool | None = True
+) -> tuple[bool, list[str], list[str]]:
     exists = False
+    sources: list[str] = []
     links: list[str] = []
-    for command, body in cmake_commands(uncommented):
-        tokens = cmake_tokens(body)
-        if command == "if":
-            condition = cmake_condition(tokens, env)
-            frames.append({"parent": active, "prior": condition})
-            active = tri_and(active, condition)
-            continue
-        if command == "elseif":
-            if frames:
-                frame = frames[-1]
-                condition = cmake_condition(tokens, env)
-                active = tri_and(
-                    frame["parent"],
-                    tri_and(tri_not(frame["prior"]), condition),
-                )
-                frame["prior"] = tri_or(frame["prior"], condition)
-            continue
-        if command == "else":
-            if frames:
-                frame = frames[-1]
-                active = tri_and(
-                    frame["parent"],
-                    tri_not(frame["prior"]),
-                )
-                frame["prior"] = True
-            continue
-        if command == "endif":
-            if frames:
-                frame = frames.pop()
-                active = frame["parent"]
-            continue
+    for command, body, tokens, active in configured_cmake_commands(
+        text,
+        config,
+    ):
         relevant = (
             command == "add_executable"
+            and tokens
+            and tokens[0] == target
+        ) or (
+            command == "target_sources"
             and tokens
             and tokens[0] == target
         ) or (
@@ -2457,16 +3103,52 @@ def active_cmake_target(
                     f"CMake duplicate active target definition {target}"
                 )
             exists = True
+            source_tokens = tokens[1:]
+            for token in expand_cmake_values(
+                source_tokens,
+                variables,
+                audit,
+            ):
+                if source_suffix(token):
+                    sources.append(token)
+                elif token in {"EXCLUDE_FROM_ALL", "WIN32", "MACOSX_BUNDLE"}:
+                    continue
+                elif token.startswith("$<"):
+                    audit.error(
+                        f"CMake {target} has unsupported source token {token}"
+                    )
+                elif token.startswith("${"):
+                    audit.error(
+                        f"CMake {target} has unsupported source "
+                        f"indirection {token}"
+                    )
+        elif command == "target_sources":
+            for token in expand_cmake_values(
+                tokens[1:],
+                variables,
+                audit,
+            ):
+                if token in {"PRIVATE", "PUBLIC", "INTERFACE"}:
+                    continue
+                if source_suffix(token):
+                    sources.append(token)
+                else:
+                    audit.error(
+                        f"CMake {target} has unsupported source token {token}"
+                    )
         else:
             for token in tokens[1:]:
                 if token in {"PRIVATE", "PUBLIC", "INTERFACE"}:
                     continue
                 if token.startswith("$<"):
+                    audit.error(
+                        f"CMake {target} has unsupported link token {token}"
+                    )
                     continue
                 if token == "${CMAKE_DL_LIBS}":
                     token = "system_dynamic_loader"
                 links.append(token)
-    return exists, links
+    return exists, sources, links
 
 
 def active_cmake_runtime_library(
@@ -2477,60 +3159,12 @@ def active_cmake_runtime_library(
     cmake: CMakeProjection,
     audit: Audit,
 ) -> tuple[bool, list[str]]:
-    system_names = {
-        "linux": "Linux",
-        "darwin": "Darwin",
-        "bsd": "FreeBSD",
-        "windows": "Windows",
-    }
-    env = {
-        "CMAKE_SYSTEM_NAME": system_names[config["platform"]],
-        "LLAM_SYSTEM_IS_BSD": config["platform"] == "bsd",
-        "LLAM_SYSTEM_IS_KQUEUE": config["platform"] in {"darwin", "bsd"},
-        "LLAM_BUILD_RESEARCH": bool(config["research"]),
-        "LLAM_TARGET_PROCESSOR": config["processor"],
-        "MSVC": bool(config["msvc"]),
-        "Python3_Interpreter_FOUND": True,
-        "Python3_FOUND": True,
-    }
-    uncommented = "\n".join(
-        line.split("#", 1)[0] for line in text.splitlines()
-    )
-    frames: list[dict[str, bool | None]] = []
-    active: bool | None = True
     exists = False
     source_tokens: list[str] = []
-    for command, body in cmake_commands(uncommented):
-        tokens = cmake_tokens(body)
-        if command == "if":
-            condition = cmake_condition(tokens, env)
-            frames.append({"parent": active, "prior": condition})
-            active = tri_and(active, condition)
-            continue
-        if command == "elseif":
-            if frames:
-                frame = frames[-1]
-                condition = cmake_condition(tokens, env)
-                active = tri_and(
-                    frame["parent"],
-                    tri_and(tri_not(frame["prior"]), condition),
-                )
-                frame["prior"] = tri_or(frame["prior"], condition)
-            continue
-        if command == "else":
-            if frames:
-                frame = frames[-1]
-                active = tri_and(
-                    frame["parent"],
-                    tri_not(frame["prior"]),
-                )
-                frame["prior"] = True
-            continue
-        if command == "endif":
-            if frames:
-                frame = frames.pop()
-                active = frame["parent"]
-            continue
+    for command, body, tokens, active in configured_cmake_commands(
+        text,
+        config,
+    ):
         relevant = (
             command == "add_library"
             and tokens
@@ -2665,6 +3299,92 @@ def make_recipe_object_variables(recipe: str) -> list[str]:
             recipe,
         )
     ]
+
+
+def validate_make_link_recipe_inputs(
+    recipe: str,
+    target: str,
+    expected_variable: str,
+    audit: Audit,
+) -> list[str]:
+    object_variables = make_recipe_object_variables(recipe)
+    allowed_expansions = {
+        expected_variable,
+        "AR",
+        "CC",
+        "CFLAGS",
+        "CPPFLAGS",
+        "SHARED_CPPFLAGS",
+        "LDFLAGS",
+        "SHLIB_LDFLAGS",
+        "LDLIBS",
+        "WRITE_BUILD_PROVENANCE",
+        "OBJDIR",
+        "SHARED_OBJDIR",
+        "TESTHOOK_OBJDIR",
+    }
+    for variable in re.findall(
+        r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)",
+        recipe,
+    ):
+        if variable not in allowed_expansions:
+            audit.error(
+                f"{target}: Make link recipe has unknown expansion "
+                f"$({variable})"
+            )
+    literal_objects = re.findall(
+        (
+            r"\$\((?:OBJDIR|SHARED_OBJDIR|TESTHOOK_OBJDIR)\)/"
+            r"[A-Za-z0-9_./%-]+\.o"
+        ),
+        recipe,
+    )
+    for literal in literal_objects:
+        audit.error(
+            f"{target}: Make link recipe has additional input {literal}"
+        )
+    for token in recipe.split():
+        if (
+            token.endswith(".o")
+            and "$(" not in token
+            and token not in literal_objects
+        ):
+            audit.error(
+                f"{target}: Make link recipe has additional input {token}"
+            )
+    return object_variables
+
+
+def signature_recipe_emits_depflags(recipe: str) -> bool:
+    printf_pattern = re.compile(
+        (
+            r"""printf\s+['"]DEPFLAGS=%s\\n['"]\s+"""
+            r"""['"]\$\(DEPFLAGS\)['"]"""
+        )
+    )
+    for match in printf_pattern.finditer(recipe):
+        line_end = recipe.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(recipe)
+        if re.search(
+            r""">\s*['"]?\$@['"]?""",
+            recipe[match.end() : line_end],
+        ):
+            return True
+        prefix = recipe[: match.start()]
+        suffix = recipe[match.end() :]
+        inside_group = prefix.rfind("{") > prefix.rfind("}")
+        group_redirect = re.search(
+            r"""}\s*>\s*['"]\$\$tmp['"]""",
+            suffix,
+        )
+        installs_signature = re.search(
+            r"""mv\s+['"]\$\$tmp['"]\s+['"]\$@['"]""",
+            suffix,
+        )
+        if inside_group and group_redirect and installs_signature:
+            return True
+    return False
 
 
 def cmake_commands(text: str) -> list[tuple[str, str]]:
@@ -2837,10 +3557,27 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    root = args.root.resolve()
-    if not root.is_dir():
+    try:
+        root = args.root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
         print(
-            f"audit-build-manifests: root is not a directory: {root}",
+            "audit-build-manifests: root cannot be resolved: "
+            f"{exc.__class__.__name__}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        is_directory = root.is_dir()
+    except OSError as exc:
+        print(
+            "audit-build-manifests: root cannot be inspected: "
+            f"{exc.__class__.__name__}",
+            file=sys.stderr,
+        )
+        return 1
+    if not is_directory:
+        print(
+            "audit-build-manifests: root is not a directory",
             file=sys.stderr,
         )
         return 1
