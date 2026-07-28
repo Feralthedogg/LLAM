@@ -1087,14 +1087,18 @@ int llam_issue_io(llam_io_req_t *req, bool has_deadline, uint64_t deadline_ns) {
         kind_supported = true;
     }
 #endif
-#if LLAM_RUNTIME_BACKEND_WINDOWS
-    if (req->kind == LLAM_IO_KIND_POLL && !llam_windows_iocp_poll_supported(req->fd, req->poll_events)) {
-        atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
-        shard->metrics.io_fallbacks += 1U;
-        errno = EAGAIN;
-        return -1;
-    }
-#endif
+    /*
+     * Do not inspect a socket through the caller's descriptor before queuing a
+     * poll. Windows submissions are generation-bound to a retained duplicate,
+     * and ConnectEx/SO_UPDATE_CONNECT_CONTEXT is performed on that association
+     * authority. The raw descriptor is still the lookup key, but it is not the
+     * authoritative handle for post-connect capability state.
+     *
+     * llam_windows_submit_poll() validates the event mask, socket family, and
+     * type after the association has been revalidated and pinned. Unsupported
+     * requests complete with a capability error and retain the normal public
+     * blocking-fallback contract.
+     */
     if (!node->ring_ready || !kind_supported) {
         atomic_fetch_add_explicit(&node->unsupported_ops, 1U, memory_order_relaxed);
         shard->metrics.io_fallbacks += 1U;

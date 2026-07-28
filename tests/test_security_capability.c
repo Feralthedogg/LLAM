@@ -3038,7 +3038,17 @@ static int test_register_private_ring_for_subject(
     memset(&mapping, 0, sizeof(mapping));
     mapping.fd = -1;
     mapping.mapping_handle = LLAM_INVALID_HANDLE;
-    if (llam_broker_ring_create_private_shm(&mapping) != 0) {
+    /*
+     * Broker-session mappings must have an immutable extent. On Linux, named
+     * POSIX shm remains deliberately shrinkable and is rejected by
+     * llam_broker_ring_register_mapping(); use the sealed private-fd/unnamed
+     * HANDLE transport fixture that production broker sessions use.
+     */
+#if LLAM_PLATFORM_WINDOWS
+    if (llam_broker_ring_create_private_handle(&mapping) != 0) {
+#else
+    if (llam_broker_ring_create_private_fd(&mapping) != 0) {
+#endif
         return -1;
     }
     rc = llam_broker_ring_register_mapping(
