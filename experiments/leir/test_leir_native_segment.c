@@ -2899,6 +2899,22 @@ static int test_native_cancel_batch_ownership(void) {
 #endif
 
 int main(void) {
+    int failed = 0;
+
+#if LLAM_PLATFORM_WINDOWS
+    WSADATA winsock_data;
+    int winsock_result =
+        WSAStartup(MAKEWORD(2, 2), &winsock_data);
+
+    if (winsock_result != 0) {
+        fprintf(
+            stderr,
+            "WSAStartup failed: %d\n",
+            winsock_result);
+        return 1;
+    }
+#endif
+
     if (test_init_validates_storage() != 0 ||
         test_bind_rejects_wrong_value_count() != 0 ||
         test_bind_rejects_negative_signed_length() != 0 ||
@@ -2911,28 +2927,41 @@ int main(void) {
         test_batch_validates_width_and_members() != 0 ||
         test_batch_rejects_unbound_member_and_rolls_back() != 0 ||
         test_valid_batch_without_runtime_releases_instances() != 0) {
-        return 1;
+        failed = 1;
     }
 #if defined(__linux__)
-    if (test_bind_rejects_regular_file_with_enotsock() != 0 ||
-        test_bind_rejects_stream_socket_with_eprototype() != 0 ||
-        test_bind_rejects_unconnected_seqpacket() != 0 ||
-        test_destroy_releases_pinned_fd() != 0 ||
-        test_native_runtime_link_and_skip() != 0 ||
-        test_native_runtime_pins_bound_fd() != 0 ||
-        test_native_runtime_batches_width_two() != 0 ||
-        test_direct_recv_send_pipeline_requires_semantic_barrier() != 0 ||
-        test_fixed_recv_send_pipeline() != 0 ||
-        test_fixed_short_read_does_not_copy_prior_activation() != 0 ||
-        test_native_cancel_batch_ownership() != 0) {
-        return 1;
+    if (failed == 0 &&
+        (test_bind_rejects_regular_file_with_enotsock() != 0 ||
+         test_bind_rejects_stream_socket_with_eprototype() != 0 ||
+         test_bind_rejects_unconnected_seqpacket() != 0 ||
+         test_destroy_releases_pinned_fd() != 0 ||
+         test_native_runtime_link_and_skip() != 0 ||
+         test_native_runtime_pins_bound_fd() != 0 ||
+         test_native_runtime_batches_width_two() != 0 ||
+         test_direct_recv_send_pipeline_requires_semantic_barrier() != 0 ||
+         test_fixed_recv_send_pipeline() != 0 ||
+         test_fixed_short_read_does_not_copy_prior_activation() != 0 ||
+         test_native_cancel_batch_ownership() != 0)) {
+        failed = 1;
+    }
+    if (failed == 0 &&
+        test_destroyed_instance_cannot_reenter_bind() != 0) {
+        failed = 1;
     }
 #endif
-#if defined(__linux__)
-    if (test_destroyed_instance_cannot_reenter_bind() != 0) {
-        return 1;
+
+#if LLAM_PLATFORM_WINDOWS
+    if (WSACleanup() == SOCKET_ERROR) {
+        fprintf(
+            stderr,
+            "WSACleanup failed: %d\n",
+            WSAGetLastError());
+        failed = 1;
     }
 #endif
+    if (failed != 0) {
+        return 1;
+    }
     puts("LEIR native segment binding tests passed");
     return 0;
 }

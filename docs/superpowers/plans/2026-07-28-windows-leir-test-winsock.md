@@ -26,7 +26,7 @@
 - Consumes: Winsock `WSAStartup(MAKEWORD(2, 2), &winsock_data)` and `WSACleanup()`.
 - Produces: A standalone `main` that initializes sockets before the first `leir_test_socketpair_type` call and cleans up on every post-startup exit.
 
-- [ ] **Step 1: Verify the existing integration test fails for the missing lifecycle**
+- [x] **Step 1: Verify the existing integration test fails for the missing lifecycle**
 
 Run:
 
@@ -40,7 +40,7 @@ env WINEDEBUG=+winsock \
 Expected: exit 1 with `WSASocketW not initialised` followed by
 `wrong-count fixture init: Input/output error`.
 
-- [ ] **Step 2: Add the minimal Windows process lifecycle**
+- [x] **Step 2: Add the minimal Windows process lifecycle**
 
 Replace the early-return structure in `main` with a `failed` accumulator and
 add these Windows-only boundaries:
@@ -116,7 +116,7 @@ int main(void) {
 }
 ```
 
-- [ ] **Step 3: Rebuild and verify the Windows regression turns green**
+- [x] **Step 3: Rebuild and verify the Windows regression turns green**
 
 Run:
 
@@ -131,7 +131,7 @@ env WINEDEBUG=-all \
 
 Expected: exit 0 with `LEIR native segment binding tests passed`.
 
-- [ ] **Step 4: Verify adjacent Windows and host suites**
+- [x] **Step 4: Verify adjacent Windows and host suites**
 
 Run:
 
@@ -154,7 +154,7 @@ git diff --check
 Expected: every command exits 0; Linux-only native tests may report their
 documented platform skip on macOS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add experiments/leir/test_leir_native_segment.c
