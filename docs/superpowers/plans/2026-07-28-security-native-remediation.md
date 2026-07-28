@@ -300,10 +300,10 @@ ThreadSanitizer where supported.
 - Add outside repository:
   `/private/var/folders/vx/23xrg8c53d54db_ypgjnhw8r0000gn/T/codex-security-scans-7oG684/leir-native-segment/ba596579d9777348981021553bdbcf4596ed8a0f_20260727T215134Z_4xvuww_u/artifacts/fix_report.md`
 
-- [ ] Run formatting/static checks and every focused test introduced above.
-- [ ] Run the full Make and CMake/CTest suites on the host.
-- [ ] Run ASan/UBSan and supported race/stress suites.
-- [ ] Run privileged Linux io_uring tests and the connected RECV → SEND
+- [x] Run formatting/static checks and every focused test introduced above.
+- [x] Run the full Make and CMake/CTest suites on the host.
+- [x] Run ASan/UBSan and supported race/stress suites.
+- [x] Run privileged Linux io_uring tests and the connected RECV → SEND
   benchmark matrix with portable and Linux-specific gates reported separately.
 - [x] Reproduce the legacy native screen timeout and show that its single-CPU
   affinity serialized the runtime with its peer (`120s` runner timeout;
@@ -320,7 +320,7 @@ ThreadSanitizer where supported.
   changes, push `codex/leir-native-segment`, and wait for every required GitHub
   check.
 - [ ] Fix CI failures within scope and repeat until green.
-- [ ] Run the specialized performance decision gate. If it fails or regresses,
+- [x] Run the specialized performance decision gate. If it fails or regresses,
   keep this as an unreleased research/security branch. Only if correctness,
   full CI, and performance all pass, bump the version, tag, push, and verify
   the release workflow and assets.
