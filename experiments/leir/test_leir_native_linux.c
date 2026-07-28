@@ -76,6 +76,7 @@ static int configure_segment(
         return -1;
     }
     segment->generation = UINT64_C(42);
+    segment->atomic_submission = true;
     for (i = 0U; i < count; i += 1U) {
         segment->tokens[i].generation = UINT64_C(42);
     }
@@ -131,6 +132,7 @@ static int queue_fixture_init(
     fixture->node.index = 0U;
     fixture->node.event_fd = -1;
     fixture->node.linux_ring_features = IORING_FEAT_CQE_SKIP;
+    fixture->node.linux_submit_all = true;
     atomic_init(&fixture->node.event_pending, 0U);
     atomic_init(&fixture->node.pending_ops, 0U);
     rc = pthread_mutex_init(&fixture->node.submit_lock, NULL);
@@ -2063,6 +2065,41 @@ static int test_skip_mode_rejects_missing_feature(void) {
     return 0;
 }
 
+static int test_linked_batch_requires_submit_all(void) {
+    queue_fixture_t fixture;
+    unsigned completions = 0U;
+
+    if (queue_fixture_init(
+            &fixture,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP,
+            4U,
+            &completions) != 0) {
+        perror("submit-all queue fixture init");
+        return 1;
+    }
+    fixture.node.linux_submit_all = false;
+    errno = 0;
+    if (llam_linux_native_batch_enqueue(
+            &fixture.node,
+            &fixture.batch,
+            &fixture.req) ||
+        errno != ENOTSUP ||
+        fixture.node.native_batch_head != NULL ||
+        atomic_load_explicit(
+            &fixture.node.pending_ops,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_IDLE) {
+        fprintf(stderr, "linked batch without SUBMIT_ALL was accepted\n");
+        queue_fixture_destroy(&fixture);
+        return 1;
+    }
+    queue_fixture_destroy(&fixture);
+    return 0;
+}
+
 static int test_validates_configuration(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
@@ -2599,6 +2636,167 @@ static int test_skip_failure_records_chain_index(void) {
     return 0;
 }
 
+static int test_fixed_skip_short_read_retires_omitted_tail(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    int terminal_result = INT_MIN;
+
+    fill_operations(ops, buffers, 2U);
+    ops[0].kind = LLAM_LINUX_NATIVE_OP_RECV;
+    ops[0].flags =
+        LLAM_LINUX_NATIVE_OP_FIXED_FILE |
+        LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER;
+    ops[0].fixed_file_slot = 0U;
+    ops[0].fixed_buffer_slot = 0U;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("configure fixed short-read segment");
+        return 1;
+    }
+    segment.generation = UINT64_C(42);
+    segment.tokens[0].generation = segment.generation;
+    segment.tokens[1].generation = segment.generation;
+    segment.atomic_submission = true;
+    atomic_store_explicit(
+        &segment.state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[0],
+            (int)ops[0].length - 1,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
+        terminal_result != -EMSGSIZE ||
+        segment.first_error_index != 0U ||
+        segment.first_error != EMSGSIZE ||
+        segment.observed_operation_mask != UINT64_C(1) ||
+        segment.observed_cqes != 1U ||
+        atomic_load_explicit(
+            &segment.target_retired,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED) {
+        fprintf(stderr, "fixed short read did not retire omitted tail\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_fixed_skip_eof_retires_omitted_tail(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    int terminal_result = INT_MIN;
+
+    fill_operations(ops, buffers, 2U);
+    ops[0].kind = LLAM_LINUX_NATIVE_OP_RECV;
+    ops[0].flags =
+        LLAM_LINUX_NATIVE_OP_FIXED_FILE |
+        LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER;
+    ops[0].fixed_file_slot = 0U;
+    ops[0].fixed_buffer_slot = 0U;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP) != 0) {
+        perror("configure fixed EOF segment");
+        return 1;
+    }
+    segment.generation = UINT64_C(42);
+    segment.tokens[0].generation = segment.generation;
+    segment.tokens[1].generation = segment.generation;
+    segment.atomic_submission = true;
+    atomic_store_explicit(
+        &segment.state,
+        LLAM_LINUX_NATIVE_SEGMENT_INFLIGHT,
+        memory_order_release);
+
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[0],
+            0,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
+        terminal_result != -EMSGSIZE ||
+        segment.first_error_index != 0U ||
+        segment.first_error != EMSGSIZE ||
+        segment.observed_operation_mask != UINT64_C(1) ||
+        segment.observed_cqes != 1U ||
+        atomic_load_explicit(
+            &segment.target_retired,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED) {
+        fprintf(stderr, "fixed EOF did not retire omitted tail\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_skip_failure_without_atomic_submit_waits_for_tail(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned char buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    int terminal_result = INT_MIN;
+
+    if (configure_segment(
+            &segment,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP,
+            4U,
+            ops,
+            buffers) != 0) {
+        perror("configure fragmented skip segment");
+        return 1;
+    }
+    segment.atomic_submission = false;
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[1],
+            -ECONNRESET,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_SEMANTIC ||
+        terminal_result != -ECONNRESET ||
+        atomic_load_explicit(
+            &segment.target_retired,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRING) {
+        fprintf(stderr, "fragmented chain retired on prefix failure\n");
+        return 1;
+    }
+    if (llam_linux_native_segment_apply_cqe(
+            &segment,
+            &segment.tokens[3],
+            (int)ops[3].length,
+            &terminal_result) !=
+            LLAM_LINUX_NATIVE_CQE_RETIRED_ERROR ||
+        terminal_result != -ECONNRESET ||
+        atomic_load_explicit(
+            &segment.target_retired,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &segment.state,
+            memory_order_acquire) !=
+            LLAM_LINUX_NATIVE_SEGMENT_RETIRED) {
+        fprintf(stderr, "fragmented chain did not wait for visible tail\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int test_final_short_success_becomes_emsgsize(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
@@ -2766,6 +2964,12 @@ int main(int argc, char **argv) {
          test_skip_rejects_duplicate_operation_cqe},
         {"skip failure records chain index",
          test_skip_failure_records_chain_index},
+        {"fixed skip short read retires omitted tail",
+         test_fixed_skip_short_read_retires_omitted_tail},
+        {"fixed skip EOF retires omitted tail",
+         test_fixed_skip_eof_retires_omitted_tail},
+        {"skip failure without atomic submit waits for tail",
+         test_skip_failure_without_atomic_submit_waits_for_tail},
         {"final short success becomes EMSGSIZE",
          test_final_short_success_becomes_emsgsize},
         {"stale generation is fatal",
@@ -2796,6 +3000,8 @@ int main(int argc, char **argv) {
          test_chain_prepares_all_sqes},
         {"skip mode rejects missing feature",
          test_skip_mode_rejects_missing_feature},
+        {"linked batch requires SUBMIT_ALL",
+         test_linked_batch_requires_submit_all},
     };
     static const test_case_t dispatch_tests[] = {
         {"link dispatch wakes only after final CQE",

@@ -155,6 +155,7 @@ struct llam_linux_native_segment {
     int first_error;
     int semantic_result;
     llam_linux_native_segment_mode_t mode;
+    bool atomic_submission;
     atomic_uint state;
     atomic_uint semantic_claimed;
     atomic_uint target_retired;

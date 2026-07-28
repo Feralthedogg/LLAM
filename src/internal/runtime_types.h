@@ -1304,6 +1304,7 @@ struct llam_node {
     bool sqpoll_enabled;
 #if LLAM_RUNTIME_BACKEND_LINUX
     uint32_t linux_ring_features;
+    bool linux_submit_all;
     bool linux_submit_retry;
     bool linux_submit_terminal;
     int (*linux_submit_override)(struct llam_node *node,

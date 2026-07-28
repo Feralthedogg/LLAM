@@ -272,11 +272,7 @@ llam_linux_native_segment_apply_cqe(
     index = token->operation_index;
     bit = UINT64_C(1) << index;
     old_mask = segment->observed_operation_mask;
-    if ((old_mask & bit) != 0U ||
-        (segment->mode ==
-             LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
-         index + 1U < segment->op_count &&
-         result >= 0)) {
+    if ((old_mask & bit) != 0U) {
         return LLAM_LINUX_NATIVE_CQE_FATAL;
     }
     if (segment->mode ==
@@ -324,6 +320,7 @@ llam_linux_native_segment_apply_cqe(
     if (error != 0 &&
         segment->mode ==
             LLAM_LINUX_NATIVE_SEGMENT_LINK_CQE_SKIP &&
+        segment->atomic_submission &&
         index + 1U < segment->op_count) {
         unsigned expected = 0U;
 
@@ -458,6 +455,10 @@ static int llam_linux_native_batch_validate(
              IORING_FEAT_CQE_SKIP) == 0U) {
             return ENOTSUP;
         }
+        if (segment->op_count > 1U &&
+            !node->linux_submit_all) {
+            return ENOTSUP;
+        }
         for (j = 0U; j < i; j += 1U) {
             if (batch->segments[j] == segment) {
                 return EINVAL;
@@ -483,6 +484,7 @@ static void llam_linux_native_segment_activate(
     segment->first_error = 0;
     segment->first_error_index = UINT_MAX;
     segment->semantic_result = 0;
+    segment->atomic_submission = node->linux_submit_all;
     atomic_store_explicit(
         &segment->semantic_claimed, 0U, memory_order_release);
     atomic_store_explicit(

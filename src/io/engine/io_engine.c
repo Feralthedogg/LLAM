@@ -201,11 +201,15 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     }
 
     node->linux_ring_features = 0U;
+    node->linux_submit_all = false;
     memset(&params, 0, sizeof(params));
     if (rt->experimental_sqpoll_requested != 0U && rt->experimental_shard_rings == 0U) {
         unsigned sqpoll_cpu = rt->sqpoll_cpu >= 0 ? (unsigned)rt->sqpoll_cpu : llam_node_default_sqpoll_cpu(rt, node->index);
 
         params.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+#if defined(IORING_SETUP_SUBMIT_ALL)
+        params.flags |= IORING_SETUP_SUBMIT_ALL;
+#endif
         params.sq_thread_cpu = sqpoll_cpu;
         params.sq_thread_idle = 2000U;
         rc = io_uring_queue_init_params(LLAM_IO_RING_DEPTH, &node->ring, &params);
@@ -217,6 +221,9 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
             }
             node->ring_ready = true;
             node->linux_ring_features = params.features;
+#if defined(IORING_SETUP_SUBMIT_ALL)
+            node->linux_submit_all = true;
+#endif
             node->sqpoll_enabled = true;
             node->sqpoll_cpu = sqpoll_cpu;
             rt->experimental_sqpoll_active = 1U;
@@ -231,15 +238,36 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     }
 
     memset(&params, 0, sizeof(params));
+#if defined(IORING_SETUP_SUBMIT_ALL)
+    params.flags = IORING_SETUP_SUBMIT_ALL;
+#endif
     rc = io_uring_queue_init_params(
         LLAM_IO_RING_DEPTH, &node->ring, &params);
     if (rc == 0) {
         llam_node_disable_cq_eventfd(node);
         node->ring_ready = true;
         node->linux_ring_features = params.features;
+#if defined(IORING_SETUP_SUBMIT_ALL)
+        node->linux_submit_all = true;
+#endif
         return 0;
     }
+#if defined(IORING_SETUP_SUBMIT_ALL)
+    if (rc == -EINVAL || rc == -EOPNOTSUPP) {
+        memset(&params, 0, sizeof(params));
+        rc = io_uring_queue_init_params(
+            LLAM_IO_RING_DEPTH, &node->ring, &params);
+        if (rc == 0) {
+            llam_node_disable_cq_eventfd(node);
+            node->ring_ready = true;
+            node->linux_ring_features = params.features;
+            node->linux_submit_all = false;
+            return 0;
+        }
+    }
+#endif
     node->linux_ring_features = 0U;
+    node->linux_submit_all = false;
     errno = -rc;
     return -1;
 }

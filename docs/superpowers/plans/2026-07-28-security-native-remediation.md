@@ -1,0 +1,285 @@
+# Native Segment and Security Remediation Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> `superpowers:executing-plans` to implement this plan task-by-task. Every
+> behavior change follows RED → GREEN → focused regression → commit.
+
+**Goal:** Close the correctness blockers in the compiled LEIR native-segment
+path and remediate every validated Codex Security finding without changing
+LEIR semantics or the supported public ABI.
+
+**Architecture:** LEIR remains the compiler/planner meaning contract. The
+Linux backend owns kernel submission and retirement with generation-tagged
+tickets; the experimental adapter owns an explicit terminal lifecycle.
+Runtime cleanup paths retain typed ownership of results until either delivery
+or discard. Broker requests use stable descriptor identity, per-subject
+capacity reservations, and one aggregate deadline. CI and release inputs are
+immutable and least-privileged.
+
+**Tech Stack:** C11 atomics, pthreads, io_uring, Windows IOCP, CMake/Make,
+Python `unittest`, GitHub Actions, AddressSanitizer, UndefinedBehaviorSanitizer,
+ThreadSanitizer where supported.
+
+## Non-negotiable contracts
+
+- Do not change LEIR program semantics or expose the private experimental API.
+- Do not reuse a segment, batch, watch, descriptor, or native instance until
+  its final owner has retired.
+- Never infer kernel retirement for SQEs that were not submitted.
+- Positive short reads and EOF are semantic outcomes, not malformed CQEs.
+- Cancellation transfers a produced resource to a typed discard path.
+- One broker batch owns one absolute deadline; entry count cannot multiply it.
+- Preserve capacity for at least one authenticated peer/recovery subject.
+- Default GitHub token permissions are read-only; only publication receives
+  `contents: write`.
+- Do not bump or release unless correctness, all CI, and the specialized Linux
+  performance gate independently pass.
+
+---
+
+### Task 1: Make native CQE reduction total for short reads and partial submit
+
+**Files:**
+- Modify: `src/io/linux/watch/linux_segment.c`
+- Modify: `src/io/linux/watch/prelude.c`
+- Modify: `src/io/linux/runtime_io_segment_linux_internal.h`
+- Modify: `src/io/engine/io_engine.c`
+- Modify: `src/internal/runtime_types.h`
+- Modify: `experiments/leir/test_leir_native_linux.c`
+
+- [ ] Add reducer tests where a non-tail `READ_FIXED` returns `0` and a
+  positive value smaller than the requested length. Assert semantic EOF/error
+  selection, target retirement, no fatal runtime state, and reusable batch.
+- [ ] Add an injected `io_uring_enter` short-submit test for a linked batch.
+  Assert only the submitted prefix is considered in flight, the unsubmitted
+  suffix remains owned by the caller, and token storage is not released.
+- [ ] Run `make -j4 test_leir_native_linux && ./test_leir_native_linux` and
+  record both intended failures.
+- [ ] Replace the sign-only non-tail CQE guard with opcode-aware expected-result
+  classification. A successful non-tail CQE is impossible only when the
+  operation's semantic contract says it should have been skipped; EOF/short
+  reads transition to a real semantic failure and wait for kernel-proven
+  retirement.
+- [ ] Request `IORING_SETUP_SUBMIT_ALL` and record whether the kernel accepted
+  it. Reject multi-operation native chains when that setup guarantee is absent.
+  Guard omitted-tail retirement with the same recorded guarantee so even an
+  injected fragmented submit cannot release caller-owned token storage.
+- [ ] Run the focused test natively and in the privileged Linux 6.x io_uring
+  container.
+- [ ] Commit as `fix: make native segment retirement submission-aware`.
+
+### Task 2: Close native adapter copy and lifecycle races
+
+**Files:**
+- Modify: `experiments/leir/leir_native_segment.c`
+- Modify: `experiments/leir/leir_native_segment.h`
+- Modify: `experiments/leir/test_leir_native_segment.c`
+
+- [ ] Add tests proving a failed/short fixed receive never copies uninitialized
+  or stale scratch bytes into the caller buffer.
+- [ ] Add deterministic bind-vs-run and bind-vs-destroy barriers. Assert one
+  operation owns the instance, a loser gets `EBUSY`/`EINVAL`, and destroy leaves
+  a permanent terminal state.
+- [ ] Run `make -j4 test_leir_native_segment && ./test_leir_native_segment` and
+  observe the stale-copy and lifecycle failures.
+- [ ] Claim `BINDING` before reading `program`, slots, or values; validate under
+  that claim; roll back only to live `IDLE`.
+- [ ] Add `DESTROYED` as a one-way state. Destroy claims live `IDLE`, clears
+  resources, then publishes `DESTROYED`; no delayed operation can win an ABA.
+- [ ] Copy only the exact successful receive byte count and only after a
+  successful terminal result. Clear scratch/result metadata before each run.
+- [ ] Run native segment tests, UBSan, and the deterministic race loops.
+- [ ] Commit as `fix: seal native instance ownership transitions`.
+
+### Task 3: Dispose blocking results suppressed by cancellation
+
+**Files:**
+- Modify: `src/io/api/blocking_wrappers.c`
+- Modify: `src/io/api/public.c`
+- Modify: `tests/test_runtime_api_edges.c`
+- Modify: `tests/test_runtime_shutdown_internal.c`
+
+- [ ] Add deterministic cancellation tests in which `getaddrinfo`, managed
+  `open`, and blocking `accept` first produce a valid result and cancellation
+  wins before delivery. Count resolver frees and verify descriptor/handle
+  closure through reuse-safe probes.
+- [ ] Run only the new tests and observe the leaked resolver allocation and
+  live descriptors.
+- [ ] On every error return from `llam_call_blocking_result` or
+  `llam_call_blocking_io`, inspect the typed output. Call `freeaddrinfo`, close
+  a produced managed-open handle, or close a produced accepted socket before
+  recycling request storage.
+- [ ] Keep ordinary worker failure and no-result cancellation unchanged.
+- [ ] Run API edge, shutdown, and sanitizer tests.
+- [ ] Commit as `fix: discard canceled blocking results`.
+
+### Task 4: Unpublish watch waiters before reclaiming watches
+
+**Files:**
+- Modify: `src/io/watch/close.c`
+- Modify: `src/io/watch/waiter.c`
+- Modify: `src/io/watch/watch_lookup.c`
+- Modify: `tests/test_runtime_shutdown_internal.c`
+
+- [ ] Add deterministic poll-watch and accept-watch tests that pause close
+  after detaching a waiter and race request cancellation. Run under ASan and
+  observe the stale watch dereference.
+- [ ] While holding `watch_lock`, transfer each detached waiter away from the
+  watch: clear the request's watch pointer/owner metadata and publish
+  `LLAM_IO_WAIT_MODE_NONE` before any path can free the watch.
+- [ ] If the completion queue itself needs the object, take one explicit
+  lifetime reference per queued completion and release it after completion.
+- [ ] Make cancellation treat an already-unpublished waiter as a completed
+  race, without dereferencing the old watch.
+- [ ] Run the two race loops under ASan/TSan and all watch/API tests.
+- [ ] Commit as `fix: retire watch waiters before reclamation`.
+
+### Task 5: Bind broker I/O to stable descriptor identities
+
+**Files:**
+- Modify: `src/core/broker/broker_descriptor.c`
+- Modify: `src/internal/runtime_broker.h`
+- Modify: `tests/test_security_capability.c`
+
+- [ ] Add read and write tests that register a borrowed fd, start an operation,
+  close/reuse the original numeric fd for a different object, and assert that
+  the broker cannot read from or write to the replacement object.
+- [ ] Duplicate borrowed descriptors into broker-owned CLOEXEC storage at
+  registration and use only the duplicate for asynchronous operations.
+- [ ] Close the duplicate exactly once on unregister, rollback, broker
+  shutdown, and all partial-registration failures.
+- [ ] Run capability tests plus ASan leak detection.
+- [ ] Commit as `fix: stabilize borrowed broker descriptors`.
+
+### Task 6: Make scheduler ownership publication transactional
+
+**Files:**
+- Modify: `src/engine/watchdog/watchdog_rehome.c`
+- Modify: `src/core/sched/reinject.c`
+- Modify: `src/core/task/yield_join_sleep.c`
+- Modify: `src/core/wait/wait_tracking.c`
+- Modify: `tests/test_scheduler_state_machine.c`
+- Modify: `tests/test_runtime_shutdown_internal.c`
+
+- [ ] Add a rehome test that pauses between source removal and target
+  publication. Assert the target in-flight counter is credited before it is
+  visible and rollback balances exactly once.
+- [ ] Add a dynamic-merge race test that parks and makes the same joiner
+  runnable concurrently. Assert exactly one dispatch and one terminal result.
+- [ ] Run the focused tests and observe the underflow/double-dispatch.
+- [ ] Acquire target in-flight credit before publishing target ownership; undo
+  publication and credit as one transaction on every rollback.
+- [ ] Publish the joiner parked state before merge can wake it and claim
+  terminal delivery with one CAS shared by merge and ordinary wake paths.
+- [ ] Run scheduler state-machine, stress, and sanitizer suites.
+- [ ] Commit as `fix: serialize scheduler ownership publication`.
+
+### Task 7: Enforce broker fairness and one batch deadline
+
+**Files:**
+- Modify: `src/internal/runtime_broker.h`
+- Modify: `src/core/broker/broker_buffer.c`
+- Modify: `src/core/broker/broker_channel.c`
+- Modify: `src/core/broker/broker_descriptor.c`
+- Modify: `src/core/broker/ring/broker_ring.c`
+- Modify: `src/core/broker/ring/broker_ring_dispatch.c`
+- Modify: `src/core/broker/ring/broker_ring_ops.c`
+- Modify: `src/core/broker/transport/broker_transport_ops.c`
+- Modify: `src/core/broker/transport/broker_transport_ring.c`
+- Modify: `tests/test_security_capability.c`
+
+- [ ] Add per-subject exhaustion tests for buffers, channels, descriptors, and
+  ring sessions. One subject must hit `EDQUOT` while a different authenticated
+  subject can still allocate the reserved capacity.
+- [ ] Add batched read/write tests with multiple blocking entries and a small
+  timeout. Assert elapsed time is bounded by one timeout plus scheduler jitter,
+  not entry count times timeout.
+- [ ] Run the tests and observe current monopolization and multiplied waits.
+- [ ] Track live counts by authenticated subject and resource kind. Enforce a
+  bounded per-subject quota while preserving one peer/recovery reserve; release
+  counts on all normal, rollback, disconnect, and shutdown paths.
+- [ ] Convert the request timeout once to a monotonic absolute deadline and
+  pass only remaining time to each readiness wait; return `ETIMEDOUT` when no
+  budget remains.
+- [ ] Run capability, ring, transport, timing, and stress tests.
+- [ ] Commit as `fix: bound broker subjects and batch deadlines`.
+
+### Task 8: Generation-bind Windows socket IOCP association
+
+**Files:**
+- Modify: `src/io/windows/watch/socket.c`
+- Modify: `src/io/windows/watch/windows_submit.c`
+- Modify: `src/io/windows/watch/windows_completion.c`
+- Modify: `src/io/windows/watch/pool.c`
+- Modify: `src/internal/runtime_types.h`
+- Modify: `tests/test_windows_handle_io.c`
+- Modify: `tests/test_windows_iocp_io.c`
+
+- [ ] Add a Windows test that closes an associated socket, forces numeric
+  `SOCKET` reuse, then submits through the new watch. Assert the new generation
+  is associated and stale completions cannot target it.
+- [ ] Store association in a generation-owned watch object, not a process-wide
+  numeric-socket cache. Put generation in every overlapped request and verify
+  it before completion delivery.
+- [ ] Reassociate every new watch generation with the runtime IOCP and retire
+  old generation storage only after all overlapped operations complete.
+- [ ] Cross-compile locally, then require the native Windows CI tests.
+- [ ] Commit as `fix: generation-bind Windows IOCP sockets`.
+
+### Task 9: Make CI and release inputs immutable and least-privileged
+
+**Files:**
+- Modify: `.github/workflows/benchmarks.yml`
+- Modify: `.github/workflows/bsd.yml`
+- Modify: `.github/workflows/docs.yml`
+- Modify: `.github/workflows/leir-research.yml`
+- Modify: `.github/workflows/leir-native-research.yml`
+- Modify: `.github/workflows/release.yml`
+- Modify: `.github/workflows/srem-research.yml`
+- Modify: `.github/workflows/stress.yml`
+- Modify: `docs/requirements.txt`
+- Add: `scripts/check_ci_supply_chain.py`
+- Add: `scripts/test_check_ci_supply_chain.py`
+
+- [ ] Add a repository policy test that rejects external `uses:` values not
+  pinned to a 40-hex commit, broad workflow-level write permissions, plain
+  HTTP package repositories, and unhashed docs requirements.
+- [ ] Run the policy test and observe all current violations.
+- [ ] Resolve each existing action tag to its reviewed upstream commit and pin
+  it with a trailing version comment.
+- [ ] Pin docs dependencies to exact versions and hashes; install with
+  `pip --require-hashes`.
+- [ ] Remove the DragonFly HTTP fallback. Require authenticated HTTPS plus
+  trusted signed repository metadata; fail closed instead of publishing a
+  platform archive when verification is unavailable.
+- [ ] Set release workflow default permissions to `contents: read`; give only
+  the final publisher job `contents: write`; disable credential persistence in
+  builder checkouts.
+- [ ] Run the policy unit test, parse every workflow, build docs from the locked
+  requirements, and dry-run platform packaging where available.
+- [ ] Commit as `security: pin CI and isolate release authority`.
+
+### Task 10: Verify, record fix outcomes, publish the branch
+
+**Files:**
+- Add outside repository:
+  `/private/var/folders/vx/23xrg8c53d54db_ypgjnhw8r0000gn/T/codex-security-scans-7oG684/leir-native-segment/ba596579d9777348981021553bdbcf4596ed8a0f_20260727T215134Z_4xvuww_u/artifacts/fix_report.md`
+
+- [ ] Run formatting/static checks and every focused test introduced above.
+- [ ] Run the full Make and CMake/CTest suites on the host.
+- [ ] Run ASan/UBSan and supported race/stress suites.
+- [ ] Run privileged Linux io_uring tests and the connected RECV → SEND
+  benchmark matrix with portable and Linux-specific gates reported separately.
+- [ ] Re-scan the branch with a normal Codex Security scan or perform a
+  security diff scan against the sealed baseline.
+- [ ] Write one outcome per original rule ID to `fix_report.md`, including
+  root cause, changed files, RED/GREEN commands, and any platform validation
+  completed by CI.
+- [ ] Review the diff, remove generated binaries, commit any evidence-only
+  changes, push `codex/leir-native-segment`, and wait for every required GitHub
+  check.
+- [ ] Fix CI failures within scope and repeat until green.
+- [ ] Run the specialized performance decision gate. If it fails or regresses,
+  keep this as an unreleased research/security branch. Only if correctness,
+  full CI, and performance all pass, bump the version, tag, push, and verify
+  the release workflow and assets.
