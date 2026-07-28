@@ -10884,7 +10884,7 @@ static int run_broker_ring_descriptor_batch_deadline_case(bool write_op) {
             stderr,
             "[test_security_capability] descriptor %s batch multiplied "
             "deadlines served=%zu completions=%zu elapsed_ms=%.3f "
-            "submit=%llu/%u\n",
+            "submit=%llu/%d\n",
             write_op ? "write" : "read",
             served,
             completion_count,
