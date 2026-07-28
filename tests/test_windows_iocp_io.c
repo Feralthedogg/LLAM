@@ -139,6 +139,30 @@ static llam_fd_t create_overlapped_udp_socket(void) {
     return (llam_fd_t)socket_fd;
 }
 
+static atomic_uint g_socket_authority_create_calls;
+static DWORD g_socket_authority_create_flags;
+
+static SOCKET capture_socket_authority_create(
+    int address_family,
+    int socket_type,
+    int protocol,
+    LPWSAPROTOCOL_INFOW protocol_info,
+    GROUP group,
+    DWORD flags) {
+    atomic_fetch_add_explicit(
+        &g_socket_authority_create_calls,
+        1U,
+        memory_order_relaxed);
+    g_socket_authority_create_flags = flags;
+    return WSASocketW(
+        address_family,
+        socket_type,
+        protocol,
+        protocol_info,
+        group,
+        flags);
+}
+
 static SOCKET reacquire_same_udp_socket_value(SOCKET wanted,
                                               unsigned *out_attempts) {
     SOCKET *held;
@@ -313,6 +337,78 @@ static bool isolated_assoc_snapshot(
     }
     (void)pthread_mutex_unlock(&node->windows_assoc_lock);
     return found;
+}
+
+static int test_socket_authority_is_non_inheritable(void) {
+    llam_node_t node;
+    SOCKET source = INVALID_SOCKET;
+    uintptr_t authority = (uintptr_t)INVALID_SOCKET;
+    DWORD source_flags = 0U;
+    DWORD authority_flags = 0U;
+    int failed = 1;
+    bool node_initialized = false;
+
+    if (init_isolated_iocp_node(&node) != 0) {
+        return fail_errno("socket authority test IOCP node setup failed");
+    }
+    node_initialized = true;
+    source = WSASocketW(
+        AF_INET,
+        SOCK_DGRAM,
+        IPPROTO_UDP,
+        NULL,
+        0U,
+        WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (source == INVALID_SOCKET ||
+        !GetHandleInformation((HANDLE)(uintptr_t)source, &source_flags) ||
+        (source_flags & HANDLE_FLAG_INHERIT) != 0U) {
+        (void)fail_errno("non-inheritable source socket setup failed");
+        goto cleanup;
+    }
+
+    atomic_store_explicit(
+        &g_socket_authority_create_calls,
+        0U,
+        memory_order_relaxed);
+    g_socket_authority_create_flags = 0U;
+    llam_windows_test_set_socket_authority_create_hook(
+        capture_socket_authority_create);
+    if (llam_windows_associate_fd(&node, (llam_fd_t)source) != 0) {
+        (void)fail_errno("socket authority association failed");
+        goto cleanup;
+    }
+    llam_windows_test_set_socket_authority_create_hook(NULL);
+    if (atomic_load_explicit(
+            &g_socket_authority_create_calls,
+            memory_order_relaxed) != 1U ||
+        g_socket_authority_create_flags !=
+            (WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT)) {
+        fprintf(stderr,
+                "[test_windows_iocp_io] socket authority creation did not "
+                "request atomic non-inheritance calls=%u flags=0x%08lx\n",
+                atomic_load_explicit(
+                    &g_socket_authority_create_calls,
+                    memory_order_relaxed),
+                (unsigned long)g_socket_authority_create_flags);
+        goto cleanup;
+    }
+    if (!isolated_assoc_snapshot(&node, source, NULL, &authority) ||
+        !GetHandleInformation((HANDLE)authority, &authority_flags) ||
+        (authority_flags & HANDLE_FLAG_INHERIT) != 0U) {
+        (void)fail_errno("retained socket authority is inheritable");
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    llam_windows_test_set_socket_authority_create_hook(NULL);
+    if (source != INVALID_SOCKET) {
+        (void)closesocket(source);
+    }
+    if (node_initialized) {
+        cleanup_isolated_iocp_node(&node);
+    }
+    return failed;
 }
 
 static int test_raw_socket_reuse_revalidates_iocp(void) {
@@ -945,7 +1041,8 @@ int main(void) {
         return 1;
     }
     test_note("begin raw socket reuse probes");
-    if (test_raw_socket_reuse_revalidates_iocp() != 0 ||
+    if (test_socket_authority_is_non_inheritable() != 0 ||
+        test_raw_socket_reuse_revalidates_iocp() != 0 ||
         test_raw_socket_reuse_rejects_foreign_iocp() != 0) {
         llam_runtime_shutdown();
         return 1;

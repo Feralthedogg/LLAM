@@ -891,8 +891,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
         ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND)
-    target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime)
+    target_compile_definitions(test_windows_iocp_io PRIVATE _GNU_SOURCE _WIN32_WINNT=0x0A00 LLAM_ENABLE_WINDOWS_BACKEND LLAM_ENABLE_TEST_HOOKS=1)
+    target_link_libraries(test_windows_iocp_io PRIVATE llam_runtime_testhooks)
 
     add_executable(test_windows_handle_io
         tests/test_windows_handle_io.c

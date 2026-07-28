@@ -159,6 +159,43 @@ static int llam_windows_same_kernel_object(
     return 0;
 }
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static llam_windows_socket_authority_create_hook_t
+    g_llam_windows_socket_authority_create_hook;
+
+void llam_windows_test_set_socket_authority_create_hook(
+    llam_windows_socket_authority_create_hook_t hook) {
+    g_llam_windows_socket_authority_create_hook = hook;
+}
+#endif
+
+static SOCKET llam_windows_create_socket_authority(
+    int address_family,
+    int socket_type,
+    int protocol,
+    LPWSAPROTOCOL_INFOW protocol_info,
+    GROUP group,
+    DWORD flags) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (g_llam_windows_socket_authority_create_hook != NULL) {
+        return g_llam_windows_socket_authority_create_hook(
+            address_family,
+            socket_type,
+            protocol,
+            protocol_info,
+            group,
+            flags);
+    }
+#endif
+    return WSASocketW(
+        address_family,
+        socket_type,
+        protocol,
+        protocol_info,
+        group,
+        flags);
+}
+
 static int llam_windows_duplicate_socket_authority(
     SOCKET socket_fd,
     uintptr_t *authority_out) {
@@ -179,13 +216,13 @@ static int llam_windows_duplicate_socket_authority(
             llam_windows_wsa_error_to_errno(WSAGetLastError());
         return -1;
     }
-    duplicate = WSASocketW(
+    duplicate = llam_windows_create_socket_authority(
         FROM_PROTOCOL_INFO,
         FROM_PROTOCOL_INFO,
         FROM_PROTOCOL_INFO,
         &protocol_info,
         0U,
-        WSA_FLAG_OVERLAPPED);
+        WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
     if (duplicate == INVALID_SOCKET) {
         errno =
             llam_windows_wsa_error_to_errno(WSAGetLastError());

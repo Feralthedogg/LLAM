@@ -47,6 +47,19 @@ typedef struct llam_windows_fd_assoc {
     struct llam_windows_fd_assoc *next;
 } llam_windows_fd_assoc_t;
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef SOCKET (*llam_windows_socket_authority_create_hook_t)(
+    int address_family,
+    int socket_type,
+    int protocol,
+    LPWSAPROTOCOL_INFOW protocol_info,
+    GROUP group,
+    DWORD flags);
+
+void llam_windows_test_set_socket_authority_create_hook(
+    llam_windows_socket_authority_create_hook_t hook);
+#endif
+
 typedef struct llam_windows_io_op {
     OVERLAPPED overlapped;
     WSABUF wsabuf;
