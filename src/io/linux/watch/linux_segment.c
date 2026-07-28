@@ -94,6 +94,19 @@ int llam_linux_native_segment_configure(
             errno = EINVAL;
             return -1;
         }
+        if (ops[i].kind == LLAM_LINUX_NATIVE_OP_RECV &&
+            i + 1U < op_count &&
+            (flags &
+             LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER) == 0U) {
+            /*
+             * A positive short RECV is soft-link success, so the
+             * kernel may execute a successor before user space can
+             * enforce READ_EXACT. A direct-buffer continuation needs
+             * a semantic barrier and is not one native segment.
+             */
+            errno = ENOTSUP;
+            return -1;
+        }
     }
 
     memcpy(copied, ops, op_count * sizeof(ops[0]));

@@ -310,6 +310,28 @@ class RunnerContractTests(unittest.TestCase):
                 runner=runner,
             )
 
+    def test_return_77_semantic_barrier_is_unavailable(self) -> None:
+        cell = _cell("link_skip")
+
+        def runner(command: list[str], **_: object) -> CapturedProcess:
+            return CapturedProcess(
+                command,
+                77,
+                "",
+                "LEIR_PIPELINE_SKIP candidate=link_skip "
+                "reason=exact_result_semantic_barrier\n",
+            )
+
+        with self.assertRaises(NativeUnavailable):
+            run_one(
+                Path("bench"),
+                cell,
+                process_sample=1,
+                activations=8,
+                min_mode_ms=1,
+                runner=runner,
+            )
+
     def test_truncated_output_is_rejected(self) -> None:
         cell = _cell()
 

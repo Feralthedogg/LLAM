@@ -1806,7 +1806,17 @@ int main(int argc, char **argv) {
     return PIPELINE_UNAVAILABLE;
 #else
     {
-        int result = run_benchmark(&options);
+        int result;
+
+        if (!candidate_uses_fixed(options.candidate)) {
+            fprintf(
+                stderr,
+                "LEIR_PIPELINE_SKIP candidate=%s "
+                "reason=exact_result_semantic_barrier\n",
+                candidate_name(options.candidate));
+            return PIPELINE_UNAVAILABLE;
+        }
+        result = run_benchmark(&options);
 
         if (result == PIPELINE_UNAVAILABLE) {
             fprintf(

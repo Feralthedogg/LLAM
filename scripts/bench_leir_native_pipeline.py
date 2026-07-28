@@ -424,19 +424,38 @@ def run_one(
             result,
         )
     if result.returncode == 77:
-        expected = (
+        prefix = (
             f"LEIR_PIPELINE_SKIP candidate={cell.candidate} "
-            "reason=backend_unavailable\n"
+            "reason="
         )
-        if result.stdout or result.stderr != expected:
+        reasons = {
+            "backend_unavailable",
+            "exact_result_semantic_barrier",
+        }
+        reason = (
+            result.stderr[len(prefix) : -1]
+            if (
+                not result.stdout
+                and result.stderr.startswith(prefix)
+                and result.stderr.endswith("\n")
+            )
+            else ""
+        )
+        if (
+            reason not in reasons
+            or (
+                reason == "exact_result_semantic_barrier"
+                and cell.candidate == "fixed_link_skip"
+            )
+        ):
             raise _run_error(
                 f"sample {process_sample} malformed pipeline skip",
                 command,
                 result,
             )
         raise NativeUnavailable(
-            f"native pipeline backend unavailable for "
-            f"{_cell_key(cell)}",
+            f"native pipeline unavailable for "
+            f"{_cell_key(cell)}: {reason}",
             command=command,
             stdout=result.stdout,
             stderr=result.stderr,

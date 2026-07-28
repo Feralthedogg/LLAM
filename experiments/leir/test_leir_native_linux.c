@@ -2100,6 +2100,54 @@ static int test_linked_batch_requires_submit_all(void) {
     return 0;
 }
 
+static int
+test_rejects_direct_nonterminal_recv_before_prepare(void) {
+    llam_linux_native_segment_t segment;
+    llam_linux_native_op_t
+        ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
+    unsigned char
+        buffers[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS][32];
+    struct io_uring_sqe recv_sqe;
+    struct io_uring_sqe send_sqe;
+
+    memset(&segment, 0, sizeof(segment));
+    fill_operations(ops, buffers, 2U);
+    ops[0].kind = LLAM_LINUX_NATIVE_OP_RECV;
+    errno = 0;
+    if (llam_linux_native_segment_configure(
+            &segment,
+            ops,
+            2U,
+            LLAM_LINUX_NATIVE_SEGMENT_LINK) == 0) {
+        memset(&recv_sqe, 0, sizeof(recv_sqe));
+        memset(&send_sqe, 0, sizeof(send_sqe));
+        llam_linux_native_segment_prepare_sqe(
+            &segment, 0U, &recv_sqe);
+        llam_linux_native_segment_prepare_sqe(
+            &segment, 1U, &send_sqe);
+        fprintf(
+            stderr,
+            "unsafe direct exact receive was accepted: "
+            "recv_opcode=%u recv_flags=%u "
+            "successor_opcode=%u successor_len=%u\n",
+            (unsigned)recv_sqe.opcode,
+            (unsigned)recv_sqe.flags,
+            (unsigned)send_sqe.opcode,
+            (unsigned)send_sqe.len);
+        return 1;
+    }
+    if (errno != ENOTSUP || segment.op_count != 0U) {
+        fprintf(
+            stderr,
+            "unsafe direct exact receive rejection mismatch: "
+            "errno=%d configured_ops=%u\n",
+            errno,
+            segment.op_count);
+        return 1;
+    }
+    return 0;
+}
+
 static int test_validates_configuration(void) {
     llam_linux_native_segment_t segment;
     llam_linux_native_op_t ops[LLAM_LINUX_NATIVE_SEGMENT_MAX_OPS];
@@ -2138,12 +2186,16 @@ static int test_validates_configuration(void) {
     fill_operations(ops, buffers, 2U);
     ops[0].kind = LLAM_LINUX_NATIVE_OP_RECV;
     ops[1].kind = LLAM_LINUX_NATIVE_OP_SEND;
+    errno = 0;
     if (llam_linux_native_segment_configure(
             &segment,
             ops,
             2U,
-            LLAM_LINUX_NATIVE_SEGMENT_LINK) != 0) {
-        fprintf(stderr, "receive-send pipeline was rejected\n");
+            LLAM_LINUX_NATIVE_SEGMENT_LINK) == 0 ||
+        errno != ENOTSUP) {
+        fprintf(
+            stderr,
+            "unsafe receive-send pipeline was accepted\n");
         return 1;
     }
     fill_operations(ops, buffers, 4U);
@@ -2942,6 +2994,8 @@ int main(int argc, char **argv) {
          test_resource_attach_reports_capacity},
         {"resource teardown invalidates live leases",
          test_resource_teardown_invalidates_live_leases},
+        {"reject direct nonterminal recv before prepare",
+         test_rejects_direct_nonterminal_recv_before_prepare},
         {"validate configuration",
          test_validates_configuration},
         {"encode recv and send fields",

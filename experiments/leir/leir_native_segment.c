@@ -516,6 +516,13 @@ static int configure_linux_segment(
                 ? LLAM_LINUX_NATIVE_OP_RECV
                 : LLAM_LINUX_NATIVE_OP_SEND;
         ops[i].result_slot = step->result_slot;
+        if (fixed) {
+            ops[i].flags = LLAM_LINUX_NATIVE_OP_FIXED_FILE;
+            if (step->kind == LEIR_NATIVE_STEP_RECV) {
+                ops[i].flags |=
+                    LLAM_LINUX_NATIVE_OP_FIXED_RECV_BUFFER;
+            }
+        }
         ops[i].fd = pinned_fds[pinned];
         ops[i].buffer = fixed
             ? fixed_buffers[buffer_index].scratch

@@ -1734,6 +1734,59 @@ static int fixed_pipeline_state_init(
         FIXED_PIPELINE_SLOT_COUNT);
 }
 
+static int
+test_direct_recv_send_pipeline_requires_semantic_barrier(void) {
+    fixed_pipeline_state_t state;
+    unsigned char attack[4] = {0x41U, 0x54U, 0x4bU, 0x21U};
+    unsigned char echoed[FIXED_PIPELINE_BYTES];
+    ssize_t peer_received = -2;
+    int peer_errno = 0;
+    int result;
+    int saved_errno;
+    int failed = 0;
+
+    errno = 0;
+    result = fixed_pipeline_state_init(
+        &state, LEIR_NATIVE_MODE_LINK);
+    saved_errno = errno;
+    if (!LLAM_FD_IS_INVALID(state.pair[1]) &&
+        leir_test_write_all(
+            state.pair[1], attack, sizeof(attack)) == 0) {
+        errno = 0;
+        peer_received = recv(
+            (int)state.pair[1],
+            echoed,
+            sizeof(echoed),
+            MSG_DONTWAIT);
+        peer_errno = errno;
+    }
+    if (result == 0 ||
+        saved_errno != ENOTSUP ||
+        peer_received != -1 ||
+        (peer_errno != EAGAIN &&
+         peer_errno != EWOULDBLOCK)) {
+        fprintf(
+            stderr,
+            "direct receive-send semantic barrier mismatch: "
+            "result=%d errno=%d peer_received=%zd "
+            "peer_errno=%d\n",
+            result,
+            saved_errno,
+            peer_received,
+            peer_errno);
+        failed = 1;
+    }
+    if (state.instance != NULL &&
+        leir_native_instance_destroy(state.instance) != 0) {
+        perror("destroy rejected direct pipeline instance");
+        failed = 1;
+    }
+    leir_test_close(&state.pair[0]);
+    leir_test_close(&state.pair[1]);
+    leir_phase0_program_destroy(state.program);
+    return failed;
+}
+
 static void fixed_pipeline_fail(
     fixed_pipeline_state_t *state,
     int error) {
@@ -2593,8 +2646,17 @@ static int run_native_cancel_batch_case(
             mode,
             completion_race,
             runtime_stop) != 0) {
-        perror("native cancel batch fixture init");
+        int saved_errno = errno;
+
         (void)native_cancel_batch_state_destroy(&state);
+        if (!fixed_mode && saved_errno == ENOTSUP) {
+            puts(
+                "SKIP: direct receive-send cancellation "
+                "requires an exact-result semantic barrier");
+            return 0;
+        }
+        errno = saved_errno;
+        perror("native cancel batch fixture init");
         return 1;
     }
     memset(&runtime_opts, 0, sizeof(runtime_opts));
@@ -2859,6 +2921,7 @@ int main(void) {
         test_native_runtime_link_and_skip() != 0 ||
         test_native_runtime_pins_bound_fd() != 0 ||
         test_native_runtime_batches_width_two() != 0 ||
+        test_direct_recv_send_pipeline_requires_semantic_barrier() != 0 ||
         test_fixed_recv_send_pipeline() != 0 ||
         test_fixed_short_read_does_not_copy_prior_activation() != 0 ||
         test_native_cancel_batch_ownership() != 0) {
