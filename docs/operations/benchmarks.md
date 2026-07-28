@@ -82,6 +82,13 @@ This is explicitly a **Linux/io_uring specialized evidence** run. It covers
 payloads 64/512/4096. Each cell has one discarded fresh-process warmup and
 nine measured fresh-process pairs with alternating ABBA/BAAB order.
 
+CI constrains the runner and its peer process to the first two available CPUs.
+Using one CPU for both processes serializes the socket peer with the runtime
+under test and is not valid evidence. The job fails closed when fewer than two
+CPUs are available and records both the selected and allowed affinity masks.
+The earlier whole-matrix native-segment screen is no longer a release input;
+its focused direct, ASan, and TSan mechanism checks remain in the workflow.
+
 The output directory contains:
 
 - `raw.csv`: every accepted process result and structural counter.

@@ -305,6 +305,12 @@ ThreadSanitizer where supported.
 - [ ] Run ASan/UBSan and supported race/stress suites.
 - [ ] Run privileged Linux io_uring tests and the connected RECV → SEND
   benchmark matrix with portable and Linux-specific gates reported separately.
+- [x] Reproduce the legacy native screen timeout and show that its single-CPU
+  affinity serialized the runtime with its peer (`120s` runner timeout;
+  direct unpinned control completed).
+- [x] Remove the obsolete whole-matrix screen from release evidence and pin
+  the connected pipeline to two available CPUs, failing closed when the runner
+  cannot provide both.
 - [ ] Re-scan the branch with a normal Codex Security scan or perform a
   security diff scan against the sealed baseline.
 - [ ] Write one outcome per original rule ID to `fix_report.md`, including

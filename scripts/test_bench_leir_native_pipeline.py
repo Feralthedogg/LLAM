@@ -531,6 +531,9 @@ class LinuxIntegrationContractTests(unittest.TestCase):
             "asan-linux-test-$iteration.log",
             "asan-pipeline-bench.log",
             "tsan-pipeline-bench.log",
+            "benchmark_cpus=",
+            "expected at least two benchmark CPUs",
+            'taskset -c "$benchmark_cpus"',
             "--output-dir \"$OUT_DIR/pipeline\"",
             "--audit-existing \"$OUT_DIR/pipeline\"",
             "leir_native_pipeline_tracked_report.md",
@@ -538,6 +541,10 @@ class LinuxIntegrationContractTests(unittest.TestCase):
         for fragment in workflow_fragments:
             with self.subTest(workflow=fragment):
                 self.assertIn(fragment, workflow)
+        self.assertNotIn(
+            "python3 scripts/bench_leir_native.py",
+            workflow,
+        )
 
         verify_fragments = (
             "bench_leir_native_pipeline",

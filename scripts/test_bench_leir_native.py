@@ -527,9 +527,11 @@ class WorkflowContractTests(unittest.TestCase):
             "audit-shared-exports",
             "audit-production-test-hooks",
             "scripts/verify_linux.sh",
-            "taskset -c",
-            "--samples 5",
-            "--min-mode-ms 100",
+            "benchmark_cpus=",
+            "expected at least two benchmark CPUs",
+            'taskset -c "$benchmark_cpus"',
+            "--samples 9",
+            "--min-mode-ms 20",
             "uname -a",
             "lscpu",
             "gcc --version",
@@ -546,6 +548,10 @@ class WorkflowContractTests(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, workflow)
+        self.assertNotIn(
+            "python3 scripts/bench_leir_native.py",
+            workflow,
+        )
         self.assertNotIn("uses: actions/checkout@v", workflow)
         self.assertNotIn("uses: actions/setup-python@v", workflow)
         self.assertNotIn("uses: actions/upload-artifact@v", workflow)

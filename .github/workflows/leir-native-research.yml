@@ -380,35 +380,24 @@ jobs:
           JOBS=2 scripts/verify_linux.sh \
             2>&1 | tee "$OUT_DIR/verify-linux.log"
 
-      - name: Run pinned native and connected pipeline evidence
+      - name: Run pinned connected pipeline evidence
         shell: bash
         run: |
           set -o pipefail
-          server_cpu="$(
+          benchmark_cpus="$(
             python3 - <<'PY'
           import os
-          print(min(os.sched_getaffinity(0)))
+          cpus = sorted(os.sched_getaffinity(0))
+          if len(cpus) < 2:
+              raise SystemExit("expected at least two benchmark CPUs")
+          print(",".join(str(cpu) for cpu in cpus[:2]))
           PY
           )"
           {
-            echo "server_cpu=$server_cpu"
+            echo "benchmark_cpus=$benchmark_cpus"
             echo "allowed_cpus=$(taskset -pc $$)"
           } | tee "$OUT_DIR/affinity.txt"
-          taskset -c "$server_cpu" \
-            python3 scripts/bench_leir_native.py \
-              --binary ./bench_leir_native_segment \
-              --phase screen \
-              --samples 5 \
-              --min-mode-ms 100 \
-              --output-dir "$OUT_DIR" \
-              --tracked-report \
-                "$OUT_DIR/leir_native_tracked_report.md" \
-            2> >(tee "$OUT_DIR/runner-stderr.log" >&2) |
-            tee "$OUT_DIR/runner-stdout.log"
-          cmp \
-            "$OUT_DIR/leir_native_report.md" \
-            "$OUT_DIR/leir_native_tracked_report.md"
-          taskset -c "$server_cpu" \
+          taskset -c "$benchmark_cpus" \
             python3 scripts/bench_leir_native_pipeline.py \
               --binary ./bench_leir_native_pipeline \
               --samples 9 \
