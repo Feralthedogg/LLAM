@@ -160,24 +160,30 @@ ThreadSanitizer where supported.
 ### Task 6: Make scheduler ownership publication transactional
 
 **Files:**
-- Modify: `src/engine/watchdog/watchdog_rehome.c`
-- Modify: `src/core/sched/reinject.c`
-- Modify: `src/core/task/yield_join_sleep.c`
-- Modify: `src/core/wait/wait_tracking.c`
-- Modify: `tests/test_scheduler_state_machine.c`
+- Modify: `src/core/sched/queue_base.c`
+- Modify: `src/internal/runtime_proto_io.h`
+- Modify: `src/io/watch/watch_queue.c`
 - Modify: `tests/test_runtime_shutdown_internal.c`
 
-- [ ] Add a rehome test that pauses between source removal and target
-  publication. Assert the target in-flight counter is credited before it is
-  visible and rollback balances exactly once.
-- [ ] Add a dynamic-merge race test that parks and makes the same joiner
-  runnable concurrently. Assert exactly one dispatch and one terminal result.
-- [ ] Run the focused tests and observe the underflow/double-dispatch.
-- [ ] Acquire target in-flight credit before publishing target ownership; undo
-  publication and credit as one transaction on every rollback.
-- [ ] Publish the joiner parked state before merge can wake it and claim
-  terminal delivery with one CAS shared by merge and ordinary wake paths.
-- [ ] Run scheduler state-machine, stress, and sanitizer suites.
+- [x] Add a deterministic in-flight rehome test that pauses immediately after
+  owner publication. Simulate completion there and assert the target counter
+  was credited before publication, both counters drain to zero, and CAS-lost
+  provisional credit rolls back exactly once.
+- [x] Add target-counter saturation coverage that proves rehome fails before
+  target ownership becomes visible.
+- [x] Add a dynamic-merge admission test with a join waiter on the executing
+  source. Assert request-before-ack keeps the wake on the source and
+  request-plus-ack permits migration.
+- [x] Run the focused tests and observe the uncredited owner publication,
+  deferred underflow fatal, and pre-ack wake reroute.
+- [x] Acquire target in-flight credit before publishing target ownership; roll
+  back only the provisional target credit when the owner CAS loses, then debit
+  the source after successful publication.
+- [x] Keep a requested-but-unacknowledged shard accepting its wake traffic
+  until the scheduler publishes the merge-safe context-save acknowledgement.
+- [x] Run shutdown, core, stress, invariant, production-hook audit, host
+  ASan/UBSan and TSan, privileged Linux ASan/UBSan, and Windows cross-build
+  suites.
 - [ ] Commit as `fix: serialize scheduler ownership publication`.
 
 ### Task 7: Enforce broker fairness and one batch deadline

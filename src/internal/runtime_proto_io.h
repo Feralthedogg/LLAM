@@ -46,6 +46,12 @@ bool llam_runtime_note_active_io_waiter(llam_runtime_t *rt, int delta);
 llam_io_req_t *llam_task_active_io_req_load(const llam_task_t *task);
 bool llam_task_set_io_tracking(llam_task_t *task, llam_io_req_t *req, unsigned parked_shard);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_io_inflight_owner_published_hook_fn)(
+    llam_io_req_t *req,
+    unsigned from_shard,
+    unsigned to_shard);
+void llam_io_test_set_inflight_owner_published_hook(
+    llam_io_inflight_owner_published_hook_fn hook);
 typedef void (*llam_io_submit_detach_snapshot_hook_fn)(llam_io_req_t *req,
                                                         unsigned node_index);
 void llam_io_test_set_submit_detach_snapshot_hook(

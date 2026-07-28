@@ -5079,6 +5079,13 @@ typedef struct submit_evacuation_call {
     bool rc;
 } submit_evacuation_call_t;
 
+typedef struct inflight_owner_transfer_call {
+    llam_io_req_t *req;
+    unsigned from_shard;
+    unsigned to_shard;
+    bool result;
+} inflight_owner_transfer_call_t;
+
 static pthread_mutex_t g_submit_detach_hook_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_submit_detach_hook_cv = PTHREAD_COND_INITIALIZER;
 static llam_io_req_t *g_submit_detach_hook_req;
@@ -5088,6 +5095,13 @@ static pthread_mutex_t g_submit_evacuation_hook_lock = PTHREAD_MUTEX_INITIALIZER
 static pthread_cond_t g_submit_evacuation_hook_cv = PTHREAD_COND_INITIALIZER;
 static bool g_submit_evacuation_hook_reached;
 static bool g_submit_evacuation_hook_release;
+static pthread_mutex_t g_inflight_owner_hook_lock =
+    PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_inflight_owner_hook_cv =
+    PTHREAD_COND_INITIALIZER;
+static llam_io_req_t *g_inflight_owner_hook_req;
+static bool g_inflight_owner_hook_reached;
+static bool g_inflight_owner_hook_release;
 
 static void submit_detach_snapshot_hook(llam_io_req_t *req,
                                         unsigned node_index) {
@@ -5181,6 +5195,61 @@ static void clear_submit_evacuation_hook(void) {
     pthread_mutex_unlock(&g_submit_evacuation_hook_lock);
 }
 
+static void inflight_owner_published_hook(
+    llam_io_req_t *req,
+    unsigned from_shard,
+    unsigned to_shard) {
+    (void)from_shard;
+    (void)to_shard;
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    if (req == g_inflight_owner_hook_req) {
+        g_inflight_owner_hook_reached = true;
+        pthread_cond_broadcast(&g_inflight_owner_hook_cv);
+        while (!g_inflight_owner_hook_release) {
+            pthread_cond_wait(
+                &g_inflight_owner_hook_cv,
+                &g_inflight_owner_hook_lock);
+        }
+    }
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
+static void arm_inflight_owner_hook(llam_io_req_t *req) {
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    g_inflight_owner_hook_req = req;
+    g_inflight_owner_hook_reached = false;
+    g_inflight_owner_hook_release = false;
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+    llam_io_test_set_inflight_owner_published_hook(
+        inflight_owner_published_hook);
+}
+
+static void wait_inflight_owner_hook(void) {
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    while (!g_inflight_owner_hook_reached) {
+        pthread_cond_wait(
+            &g_inflight_owner_hook_cv,
+            &g_inflight_owner_hook_lock);
+    }
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
+static void release_inflight_owner_hook(void) {
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    g_inflight_owner_hook_release = true;
+    pthread_cond_broadcast(&g_inflight_owner_hook_cv);
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
+static void clear_inflight_owner_hook(void) {
+    llam_io_test_set_inflight_owner_published_hook(NULL);
+    pthread_mutex_lock(&g_inflight_owner_hook_lock);
+    g_inflight_owner_hook_req = NULL;
+    g_inflight_owner_hook_reached = false;
+    g_inflight_owner_hook_release = false;
+    pthread_mutex_unlock(&g_inflight_owner_hook_lock);
+}
+
 static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
                                       bool published) {
     llam_runtime_t *rt;
@@ -5201,6 +5270,7 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
     rt->active_nodes = 2U;
     atomic_init(&rt->initialized, false);
     atomic_init(&rt->fatal_errno, 0);
+    atomic_init(&rt->deferred_fatal_pending, 0U);
     atomic_init(&rt->overflow_depth, 0U);
     atomic_init(&rt->active_io_waiters, 0U);
 
@@ -5213,7 +5283,10 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
         shard->io_node_index = i;
         shard->event_fd = LLAM_INVALID_FD;
         atomic_init(&shard->online, 1U);
+        atomic_init(&shard->current, NULL);
+        atomic_init(&shard->inflight_io_waiters, 0U);
         atomic_init(&shard->merge_pause_requested, 0U);
+        atomic_init(&shard->merge_pause_ack, 0U);
         atomic_init(&shard->inject_depth, 0U);
         atomic_init(&shard->timer_count, 0U);
         atomic_init(&shard->timer_callbacks_active, 0U);
@@ -5342,6 +5415,317 @@ static void *submit_evacuation_thread_main(void *opaque) {
         &fixture->shards[1],
         &call->migrated);
     return NULL;
+}
+
+static void *inflight_owner_transfer_thread_main(void *opaque) {
+    inflight_owner_transfer_call_t *call = opaque;
+
+    call->result = llam_io_req_transfer_inflight_owner(
+        call->req,
+        call->from_shard,
+        call->to_shard);
+    return NULL;
+}
+
+static void clear_fixture_task_queues(
+    submit_rehome_fixture_t *fixture) {
+    for (unsigned i = 0U; i < 2U; ++i) {
+        fixture->shards[i].inject_q.head = NULL;
+        fixture->shards[i].inject_q.tail = NULL;
+        fixture->shards[i].inject_q.depth = 0U;
+        fixture->shards[i].hot_q.head = NULL;
+        fixture->shards[i].hot_q.tail = NULL;
+        fixture->shards[i].hot_q.depth = 0U;
+        fixture->shards[i].norm_q.head = NULL;
+        fixture->shards[i].norm_q.tail = NULL;
+        fixture->shards[i].norm_q.depth = 0U;
+        atomic_store_explicit(
+            &fixture->shards[i].inject_depth,
+            0U,
+            memory_order_release);
+    }
+    fixture->task.queue_next = NULL;
+    fixture->task.queue_prev = NULL;
+}
+
+static int exercise_inflight_owner_credit_precedes_publication(void) {
+    submit_rehome_fixture_t fixture;
+    inflight_owner_transfer_call_t call;
+    pthread_t thread;
+    unsigned completion_owner;
+    bool published_with_credit;
+    int rc = 1;
+
+    if (init_submit_rehome_fixture(&fixture, false) != 0) {
+        return fail_errno(
+            "inflight owner transaction fixture init failed");
+    }
+    atomic_store_explicit(
+        &fixture.req.inflight_owner_shard,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[1].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    call.req = &fixture.req;
+    call.from_shard = 0U;
+    call.to_shard = 1U;
+    call.result = false;
+
+    arm_inflight_owner_hook(&fixture.req);
+    if (pthread_create(
+            &thread,
+            NULL,
+            inflight_owner_transfer_thread_main,
+            &call) != 0) {
+        clear_inflight_owner_hook();
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_errno(
+            "inflight owner transaction thread create failed");
+    }
+    wait_inflight_owner_hook();
+    published_with_credit =
+        atomic_load_explicit(
+            &fixture.req.inflight_owner_shard,
+            memory_order_acquire) == 1U &&
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) == 1U &&
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) == 1U;
+    completion_owner = atomic_exchange_explicit(
+        &fixture.req.inflight_owner_shard,
+        UINT_MAX,
+        memory_order_acq_rel);
+    if (completion_owner < fixture.runtime.active_shards) {
+        llam_shard_note_inflight_io_waiter(
+            &fixture.runtime,
+            completion_owner,
+            -1);
+    }
+    release_inflight_owner_hook();
+    pthread_join(thread, NULL);
+    clear_inflight_owner_hook();
+
+    if (!published_with_credit ||
+        !call.result ||
+        completion_owner != 1U ||
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != 0 ||
+        atomic_load_explicit(
+            &fixture.runtime.deferred_fatal_pending,
+            memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "inflight owner publication was uncredited: "
+            "credit=%u moved=%u owner=%u source=%u target=%u fatal=%d "
+            "deferred=%u\n",
+            published_with_credit ? 1U : 0U,
+            call.result ? 1U : 0U,
+            completion_owner,
+            atomic_load_explicit(
+                &fixture.shards[0].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.shards[1].inflight_io_waiters,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.runtime.fatal_errno,
+                memory_order_acquire),
+            atomic_load_explicit(
+                &fixture.runtime.deferred_fatal_pending,
+                memory_order_acquire));
+        goto done;
+    }
+
+    /*
+     * If completion consumes the source before the CAS, the provisional
+     * target unit was never authoritative and must roll back exactly once.
+     */
+    atomic_store_explicit(
+        &fixture.req.inflight_owner_shard,
+        UINT_MAX,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].inflight_io_waiters,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[1].inflight_io_waiters,
+        7U,
+        memory_order_release);
+    if (llam_io_req_transfer_inflight_owner(
+            &fixture.req, 0U, 1U) ||
+        atomic_load_explicit(
+            &fixture.req.inflight_owner_shard,
+            memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) != 7U ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != 0) {
+        goto done;
+    }
+
+    /*
+     * Saturation must fail before the target owner is visible. Publishing
+     * first would leave a request owned by a counter that could not be
+     * credited.
+     */
+    atomic_store_explicit(
+        &fixture.req.inflight_owner_shard,
+        0U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].inflight_io_waiters,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[1].inflight_io_waiters,
+        UINT_MAX,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.runtime.fatal_errno,
+        0,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.runtime.deferred_fatal_pending,
+        0U,
+        memory_order_release);
+    if (llam_io_req_transfer_inflight_owner(
+            &fixture.req, 0U, 1U) ||
+        atomic_load_explicit(
+            &fixture.req.inflight_owner_shard,
+            memory_order_acquire) != 0U ||
+        atomic_load_explicit(
+            &fixture.shards[0].inflight_io_waiters,
+            memory_order_acquire) != 1U ||
+        atomic_load_explicit(
+            &fixture.shards[1].inflight_io_waiters,
+            memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(
+            &fixture.runtime.fatal_errno,
+            memory_order_acquire) != EOVERFLOW) {
+        goto done;
+    }
+    rc = 0;
+
+done:
+    destroy_submit_rehome_fixture(&fixture);
+    return rc;
+}
+
+static int exercise_merge_request_before_ack_keeps_wake_on_source(void) {
+    submit_rehome_fixture_t fixture;
+    llam_task_t *task;
+    llam_runtime_t *rt;
+    bool request_before_ack_stayed;
+    bool acknowledged_request_moved;
+    int rc = 1;
+
+    if (init_submit_rehome_fixture(&fixture, false) != 0) {
+        return fail_errno(
+            "merge admission transaction fixture init failed");
+    }
+    task = &fixture.task;
+    rt = &fixture.runtime;
+    rt->experimental_dynamic_shards = 1U;
+    atomic_store_explicit(
+        &fixture.shards[0].current,
+        task,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].merge_pause_requested,
+        1U,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].merge_pause_ack,
+        0U,
+        memory_order_release);
+    if (!llam_task_set_join_tracking(
+            task, &fixture.caller, 0U)) {
+        goto done;
+    }
+    g_llam_tls_task = NULL;
+    g_llam_tls_shard = NULL;
+    llam_reinject_task_on_shard(
+        rt,
+        task,
+        0U,
+        true,
+        LLAM_TRACE_WAKE,
+        LLAM_WAIT_JOIN);
+    request_before_ack_stayed =
+        fixture.shards[0].inject_q.head == task &&
+        fixture.shards[1].inject_q.head == NULL;
+
+    clear_fixture_task_queues(&fixture);
+    atomic_store_explicit(
+        &fixture.shards[0].current,
+        NULL,
+        memory_order_release);
+    atomic_store_explicit(
+        &fixture.shards[0].merge_pause_ack,
+        1U,
+        memory_order_release);
+    if (!llam_task_set_join_tracking(
+            task, &fixture.caller, 0U)) {
+        goto done;
+    }
+    llam_reinject_task_on_shard(
+        rt,
+        task,
+        0U,
+        true,
+        LLAM_TRACE_WAKE,
+        LLAM_WAIT_JOIN);
+    acknowledged_request_moved =
+        fixture.shards[0].inject_q.head == NULL &&
+        fixture.shards[1].inject_q.head == task;
+
+    if (!request_before_ack_stayed ||
+        !acknowledged_request_moved ||
+        atomic_load_explicit(
+            &rt->fatal_errno,
+            memory_order_acquire) != 0) {
+        fprintf(
+            stderr,
+            "merge admission rerouted an executing waiter: "
+            "before_ack_source=%u after_ack_target=%u fatal=%d\n",
+            request_before_ack_stayed ? 1U : 0U,
+            acknowledged_request_moved ? 1U : 0U,
+            atomic_load_explicit(
+                &rt->fatal_errno,
+                memory_order_acquire));
+        goto done;
+    }
+    rc = 0;
+
+done:
+    clear_fixture_task_queues(&fixture);
+    atomic_store_explicit(
+        &fixture.shards[0].current,
+        NULL,
+        memory_order_release);
+    destroy_submit_rehome_fixture(&fixture);
+    return rc;
 }
 
 static int run_public_cancel_submit_case(bool migrate) {
@@ -5634,15 +6018,23 @@ static int exercise_evacuation_pending_transfer_is_atomic(void) {
 }
 
 static int exercise_submit_cancel_rehome_regressions(void) {
+    int failed = 0;
+
+    if (exercise_inflight_owner_credit_precedes_publication() != 0) {
+        failed = 1;
+    }
+    if (exercise_merge_request_before_ack_keeps_wake_on_source() != 0) {
+        failed = 1;
+    }
     if (run_public_cancel_submit_case(false) != 0 ||
         run_public_cancel_submit_case(true) != 0 ||
         run_setup_abort_submit_case(false) != 0 ||
         run_setup_abort_submit_case(true) != 0 ||
         exercise_prepublication_cancel_rejects_late_submit() != 0 ||
         exercise_evacuation_pending_transfer_is_atomic() != 0) {
-        return 1;
+        failed = 1;
     }
-    return 0;
+    return failed;
 }
 #else
 static int exercise_submit_cancel_rehome_regressions(void) {
