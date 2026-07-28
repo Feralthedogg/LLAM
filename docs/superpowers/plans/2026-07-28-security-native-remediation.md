@@ -75,20 +75,22 @@ ThreadSanitizer where supported.
 - Modify: `experiments/leir/leir_native_segment.h`
 - Modify: `experiments/leir/test_leir_native_segment.c`
 
-- [ ] Add tests proving a failed/short fixed receive never copies uninitialized
+- [x] Add tests proving a failed/short fixed receive never copies uninitialized
   or stale scratch bytes into the caller buffer.
-- [ ] Add deterministic bind-vs-run and bind-vs-destroy barriers. Assert one
+- [x] Add deterministic bind-vs-run and bind-vs-destroy barriers. Assert one
   operation owns the instance, a loser gets `EBUSY`/`EINVAL`, and destroy leaves
   a permanent terminal state.
-- [ ] Run `make -j4 test_leir_native_segment && ./test_leir_native_segment` and
+- [x] Run `make -j4 test_leir_native_segment && ./test_leir_native_segment` and
   observe the stale-copy and lifecycle failures.
-- [ ] Claim `BINDING` before reading `program`, slots, or values; validate under
+- [x] Claim `BINDING` before reading `program`, slots, or values; validate under
   that claim; roll back only to live `IDLE`.
-- [ ] Add `DESTROYED` as a one-way state. Destroy claims live `IDLE`, clears
+- [x] Add `DESTROYED` as a one-way state. Destroy claims live `IDLE`, clears
   resources, then publishes `DESTROYED`; no delayed operation can win an ABA.
-- [ ] Copy only the exact successful receive byte count and only after a
-  successful terminal result. Clear scratch/result metadata before each run.
-- [ ] Run native segment tests, UBSan, and the deterministic race loops.
+- [x] Snapshot each caller buffer before activation, copy output only when a
+  receive in that activation completed, and treat an unset error index as no
+  successful prefix. A short receive can preserve caller bytes but cannot
+  disclose scratch bytes from an earlier activation.
+- [x] Run native segment tests, ASan/UBSan, and the deterministic race loops.
 - [ ] Commit as `fix: seal native instance ownership transitions`.
 
 ### Task 3: Dispose blocking results suppressed by cancellation

@@ -13,6 +13,32 @@ static int fail_with_errno(int error_code) {
     return -1;
 }
 
+enum {
+    LEIR_PHASE0_INSTANCE_IDLE = 0U,
+    LEIR_PHASE0_INSTANCE_RUNNING = 1U,
+    LEIR_PHASE0_INSTANCE_BINDING = 2U,
+};
+
+static leir_phase0_test_hook_fn
+    leir_phase0_bind_precommit_hook;
+static void *leir_phase0_bind_precommit_context;
+
+void leir_phase0_test_set_bind_precommit_hook(
+    leir_phase0_test_hook_fn hook,
+    void *context) {
+    leir_phase0_bind_precommit_context = context;
+    leir_phase0_bind_precommit_hook = hook;
+}
+
+static void run_bind_precommit_hook(void) {
+    leir_phase0_test_hook_fn hook =
+        leir_phase0_bind_precommit_hook;
+
+    if (hook != NULL) {
+        hook(leir_phase0_bind_precommit_context);
+    }
+}
+
 static bool fd_is_valid(llam_fd_t fd) {
 #if LLAM_PLATFORM_WINDOWS
     return !LLAM_FD_IS_INVALID(fd);
@@ -130,7 +156,9 @@ int leir_phase0_instance_init(
     atomic_init(&instance->cancel_readers, 0U);
     atomic_init(
         &instance->cancel_phase, LEIR_PHASE0_CANCEL_PHASE_IDLE);
-    atomic_init(&instance->running, 0U);
+    atomic_init(
+        &instance->running,
+        LEIR_PHASE0_INSTANCE_IDLE);
     atomic_init(&instance->terminal_claimed, 0U);
     atomic_init(&instance->terminal, 0U);
     atomic_init(&instance->initial_submit_observed, 0U);
@@ -147,28 +175,40 @@ int leir_phase0_instance_bind(
     size_t value_count,
     const leir_phase0_run_opts_t *opts) {
     const leir_phase0_program_t *program;
+    unsigned expected = LEIR_PHASE0_INSTANCE_IDLE;
+    int result = -1;
+    int saved_errno = EINVAL;
 
     if (instance == NULL || values == NULL || opts == NULL) {
         return fail_with_errno(EINVAL);
     }
+    if (!atomic_compare_exchange_strong_explicit(
+            &instance->running,
+            &expected,
+            LEIR_PHASE0_INSTANCE_BINDING,
+            memory_order_acq_rel,
+            memory_order_acquire)) {
+        return fail_with_errno(EBUSY);
+    }
     program = instance->program;
     if (program == NULL || value_count != program->slot_count) {
-        return fail_with_errno(EINVAL);
+        goto done;
     }
     if (atomic_load_explicit(
-            &instance->running, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&instance->req, memory_order_acquire) != NULL ||
+            &instance->req, memory_order_acquire) != NULL ||
         atomic_load_explicit(&instance->task, memory_order_acquire) != NULL ||
         atomic_load_explicit(
             &instance->cancel_readers, memory_order_acquire) != 0U ||
         atomic_load_explicit(
             &instance->cancel_phase, memory_order_acquire) !=
             LEIR_PHASE0_CANCEL_PHASE_IDLE) {
-        return fail_with_errno(EBUSY);
+        saved_errno = EBUSY;
+        goto done;
     }
     if (!bindings_are_valid(program, values)) {
-        return fail_with_errno(EINVAL);
+        goto done;
     }
+    run_bind_precommit_hook();
 
     memcpy(
         instance->slots,
@@ -198,7 +238,16 @@ int leir_phase0_instance_bind(
     atomic_store_explicit(
         &instance->request_generation, 0U, memory_order_release);
     (void)advance_activation_generation(instance);
-    return 0;
+    result = 0;
+    saved_errno = 0;
+
+done:
+    atomic_store_explicit(
+        &instance->running,
+        LEIR_PHASE0_INSTANCE_IDLE,
+        memory_order_release);
+    errno = saved_errno;
+    return result;
 }
 
 static bool cancel_reader_acquire(
@@ -259,15 +308,22 @@ static void cancel_wait_yield(void) {
 int leir_phase0_instance_cancel(
     leir_phase0_instance_t *instance) {
     llam_task_t *task;
+    unsigned activity;
 
     if (instance == NULL || instance->program == NULL) {
         return fail_with_errno(EINVAL);
     }
-    atomic_store_explicit(
-        &instance->cancel_requested, 1U, memory_order_release);
     if (!cancel_reader_acquire(instance)) {
         return -1;
     }
+    activity = atomic_load_explicit(
+        &instance->running, memory_order_acquire);
+    if (activity == LEIR_PHASE0_INSTANCE_BINDING) {
+        cancel_reader_release(instance);
+        return fail_with_errno(EBUSY);
+    }
+    atomic_store_explicit(
+        &instance->cancel_requested, 1U, memory_order_release);
 
     task = atomic_load_explicit(
         &instance->task, memory_order_acquire);
@@ -276,7 +332,8 @@ int leir_phase0_instance_cancel(
                &instance->cancel_phase, memory_order_acquire) ==
                LEIR_PHASE0_CANCEL_PHASE_SUBMITTING &&
            atomic_load_explicit(
-               &instance->running, memory_order_acquire) != 0U &&
+               &instance->running, memory_order_acquire) ==
+               LEIR_PHASE0_INSTANCE_RUNNING &&
            atomic_load_explicit(
                &instance->terminal, memory_order_acquire) == 0U &&
            atomic_load_explicit(
@@ -633,7 +690,8 @@ static bool request_completion_identity_is_live(
         : 0U;
     bool live =
         atomic_load_explicit(
-            &instance->running, memory_order_acquire) == 1U &&
+            &instance->running, memory_order_acquire) ==
+            LEIR_PHASE0_INSTANCE_RUNNING &&
         atomic_load_explicit(
             &instance->terminal_claimed, memory_order_acquire) == 0U &&
         atomic_load_explicit(
@@ -673,7 +731,8 @@ bool leir_phase0_test_inject_completion(
         &instance->activation_generation, memory_order_acquire);
     live =
         atomic_load_explicit(
-            &instance->running, memory_order_acquire) == 1U &&
+            &instance->running, memory_order_acquire) ==
+            LEIR_PHASE0_INSTANCE_RUNNING &&
         atomic_load_explicit(
             &instance->terminal_claimed, memory_order_acquire) == 0U &&
         atomic_load_explicit(
@@ -1012,37 +1071,48 @@ int leir_phase0_instance_run(
     leir_phase0_value_t *values_out,
     size_t value_count,
     leir_phase0_metrics_t *metrics_out) {
+    const leir_phase0_program_t *program;
     llam_io_req_t *req;
     llam_task_t *task = g_llam_tls_task;
-    unsigned expected_running = 0U;
+    unsigned expected_running = LEIR_PHASE0_INSTANCE_IDLE;
     uint64_t request_generation;
     int issue_result;
     int saved_errno;
     int result;
 
-    if (instance == NULL || instance->program == NULL ||
+    if (instance == NULL ||
         values_out == NULL || metrics_out == NULL ||
-        value_count != instance->program->slot_count ||
-        g_llam_tls_shard == NULL || task == NULL ||
-        atomic_load_explicit(
-            &instance->activation_generation,
-            memory_order_acquire) == 0U) {
+        g_llam_tls_shard == NULL || task == NULL) {
         return fail_with_errno(EINVAL);
     }
     if (!atomic_compare_exchange_strong_explicit(
             &instance->running,
             &expected_running,
-            1U,
+            LEIR_PHASE0_INSTANCE_RUNNING,
             memory_order_acq_rel,
             memory_order_acquire)) {
         return fail_with_errno(EBUSY);
+    }
+    program = instance->program;
+    if (program == NULL ||
+        value_count != program->slot_count ||
+        atomic_load_explicit(
+            &instance->activation_generation,
+            memory_order_acquire) == 0U) {
+        atomic_store_explicit(
+            &instance->running,
+            LEIR_PHASE0_INSTANCE_IDLE,
+            memory_order_release);
+        return fail_with_errno(EINVAL);
     }
     if (atomic_load_explicit(
             &instance->cancel_requested, memory_order_acquire) != 0U) {
         (void)publish_cancellation(instance);
         copy_outputs(instance, values_out, metrics_out);
         atomic_store_explicit(
-            &instance->running, 0U, memory_order_release);
+            &instance->running,
+            LEIR_PHASE0_INSTANCE_IDLE,
+            memory_order_release);
         errno = ECANCELED;
         return -1;
     }
@@ -1050,7 +1120,9 @@ int leir_phase0_instance_run(
     req = acquire_embedded_request(g_llam_tls_shard, task);
     if (req == NULL) {
         atomic_store_explicit(
-            &instance->running, 0U, memory_order_release);
+            &instance->running,
+            LEIR_PHASE0_INSTANCE_IDLE,
+            memory_order_release);
         return -1;
     }
     if (req != &task->embedded_io_req) {
@@ -1064,7 +1136,9 @@ int leir_phase0_instance_run(
         saved_errno = request_generation == 0U ? EIO : errno;
         llam_api_io_req_release(g_llam_tls_shard, req);
         atomic_store_explicit(
-            &instance->running, 0U, memory_order_release);
+            &instance->running,
+            LEIR_PHASE0_INSTANCE_IDLE,
+            memory_order_release);
         return fail_with_errno(saved_errno);
     }
 
@@ -1090,7 +1164,9 @@ int leir_phase0_instance_run(
         llam_api_io_req_release(g_llam_tls_shard, req);
         copy_outputs(instance, values_out, metrics_out);
         atomic_store_explicit(
-            &instance->running, 0U, memory_order_release);
+            &instance->running,
+            LEIR_PHASE0_INSTANCE_IDLE,
+            memory_order_release);
         errno = saved_errno;
         return -1;
     }
@@ -1152,7 +1228,9 @@ int leir_phase0_instance_run(
     }
     copy_outputs(instance, values_out, metrics_out);
     atomic_store_explicit(
-        &instance->running, 0U, memory_order_release);
+        &instance->running,
+        LEIR_PHASE0_INSTANCE_IDLE,
+        memory_order_release);
     errno = saved_errno;
     return result;
 }

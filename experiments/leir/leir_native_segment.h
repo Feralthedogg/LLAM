@@ -18,6 +18,7 @@ typedef enum leir_native_mode {
 } leir_native_mode_t;
 
 typedef struct leir_native_instance leir_native_instance_t;
+typedef void (*leir_native_test_hook_fn)(void *context);
 
 typedef struct leir_native_metrics {
     uint64_t activations;
@@ -70,5 +71,8 @@ int leir_native_batch_run(
     leir_native_metrics_t *metrics_out,
     size_t instance_count,
     leir_native_batch_metrics_t *batch_metrics_out);
+void leir_native_test_set_bind_before_claim_hook(
+    leir_native_test_hook_fn hook,
+    void *context);
 
 #endif

@@ -12,6 +12,7 @@
 #if !LLAM_PLATFORM_WINDOWS
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -733,6 +734,137 @@ static int test_destroy_releases_pinned_fd(void) {
     bind_fixture_destroy(&fixture);
     return failed;
 }
+
+#if !LLAM_PLATFORM_WINDOWS
+typedef struct native_destroy_bind_race {
+    pthread_mutex_t lock;
+    pthread_cond_t ready;
+    pthread_cond_t release;
+    bind_fixture_t *fixture;
+    bool entered;
+    bool resume;
+    int bind_result;
+    int bind_errno;
+} native_destroy_bind_race_t;
+
+static void native_destroy_bind_hook(void *context) {
+    native_destroy_bind_race_t *race = context;
+
+    pthread_mutex_lock(&race->lock);
+    race->entered = true;
+    pthread_cond_signal(&race->ready);
+    while (!race->resume) {
+        pthread_cond_wait(&race->release, &race->lock);
+    }
+    pthread_mutex_unlock(&race->lock);
+}
+
+static void *native_destroy_bind_thread(void *context) {
+    native_destroy_bind_race_t *race = context;
+
+    errno = 0;
+    race->bind_result = leir_native_instance_bind(
+        race->fixture->instance,
+        race->fixture->values,
+        race->fixture->value_count);
+    race->bind_errno = errno;
+    return NULL;
+}
+
+static int run_native_destroy_bind_race_child(void) {
+    bind_fixture_t fixture;
+    native_destroy_bind_race_t race;
+    pthread_t thread;
+    int destroy_result;
+    int destroy_errno;
+    int failed = 1;
+
+    memset(&race, 0, sizeof(race));
+    if (bind_fixture_init(&fixture, false) != 0 ||
+        pthread_mutex_init(&race.lock, NULL) != 0 ||
+        pthread_cond_init(&race.ready, NULL) != 0 ||
+        pthread_cond_init(&race.release, NULL) != 0) {
+        return 1;
+    }
+    race.fixture = &fixture;
+    leir_native_test_set_bind_before_claim_hook(
+        native_destroy_bind_hook, &race);
+    if (pthread_create(
+            &thread, NULL, native_destroy_bind_thread, &race) != 0) {
+        leir_native_test_set_bind_before_claim_hook(NULL, NULL);
+        goto cleanup;
+    }
+    pthread_mutex_lock(&race.lock);
+    while (!race.entered) {
+        pthread_cond_wait(&race.ready, &race.lock);
+    }
+    pthread_mutex_unlock(&race.lock);
+
+    errno = 0;
+    destroy_result =
+        leir_native_instance_destroy(fixture.instance);
+    destroy_errno = errno;
+    if (destroy_result == 0) {
+        fixture.instance = NULL;
+    }
+    pthread_mutex_lock(&race.lock);
+    race.resume = true;
+    pthread_cond_signal(&race.release);
+    pthread_mutex_unlock(&race.lock);
+    if (pthread_join(thread, NULL) != 0) {
+        leir_native_test_set_bind_before_claim_hook(NULL, NULL);
+        goto cleanup;
+    }
+    leir_native_test_set_bind_before_claim_hook(NULL, NULL);
+    if (destroy_result == 0 &&
+        destroy_errno == 0 &&
+        race.bind_result == -1 &&
+        race.bind_errno == EINVAL) {
+        failed = 0;
+    } else {
+        fprintf(
+            stderr,
+            "destroy/bind ABA: destroy=%d/%d bind=%d/%d\n",
+            destroy_result,
+            destroy_errno,
+            race.bind_result,
+            race.bind_errno);
+    }
+
+cleanup:
+    leir_native_test_set_bind_before_claim_hook(NULL, NULL);
+    pthread_cond_destroy(&race.release);
+    pthread_cond_destroy(&race.ready);
+    pthread_mutex_destroy(&race.lock);
+    bind_fixture_destroy(&fixture);
+    return failed;
+}
+
+static int test_destroyed_instance_cannot_reenter_bind(void) {
+    unsigned iteration;
+
+    for (iteration = 0U; iteration < 32U; iteration += 1U) {
+        pid_t child = fork();
+        int status;
+
+        if (child < 0) {
+            return 1;
+        }
+        if (child == 0) {
+            _Exit(run_native_destroy_bind_race_child());
+        }
+        if (waitpid(child, &status, 0) != child ||
+            !WIFEXITED(status) ||
+            WEXITSTATUS(status) != 0) {
+            fputs(
+                "destroyed native instance reentered bind\n",
+                stderr);
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
 
 typedef struct native_integration_state {
     leir_phase0_program_t *program;
@@ -1819,6 +1951,307 @@ static int test_fixed_recv_send_pipeline(void) {
     return 0;
 }
 
+enum {
+    FIXED_STALE_FD_SLOT = 0U,
+    FIXED_STALE_SHORT_LENGTH_SLOT = 1U,
+    FIXED_STALE_LONG_LENGTH_SLOT = 2U,
+    FIXED_STALE_BUFFER_SLOT = 3U,
+    FIXED_STALE_FIRST_RESULT_SLOT = 4U,
+    FIXED_STALE_SECOND_RESULT_SLOT = 5U,
+    FIXED_STALE_SLOT_COUNT = 6U,
+    FIXED_STALE_SHORT_BYTES = 4U,
+    FIXED_STALE_LONG_BYTES = 64U,
+};
+
+typedef struct fixed_stale_state {
+    leir_phase0_program_t *program;
+    leir_native_plan_t plan;
+    test_instance_storage_t storage;
+    leir_native_instance_t *instance;
+    leir_phase0_value_t values[LEIR_PHASE0_MAX_SLOTS];
+    leir_phase0_value_t values_out[LEIR_PHASE0_MAX_SLOTS];
+    unsigned char external_buffer[FIXED_STALE_LONG_BYTES];
+    unsigned char prior_payload[FIXED_STALE_LONG_BYTES];
+    unsigned char short_payloads[3][FIXED_STALE_SHORT_BYTES];
+    llam_fd_t pair[2];
+    atomic_uint failures;
+    int first_errno;
+} fixed_stale_state_t;
+
+static int create_fixed_stale_program(
+    leir_phase0_program_t **out) {
+    leir_phase0_node_desc_t nodes[4];
+    leir_phase0_slot_kind_t slots[FIXED_STALE_SLOT_COUNT];
+    leir_phase0_program_desc_t desc;
+
+    memset(nodes, 0, sizeof(nodes));
+    memset(slots, 0, sizeof(slots));
+    slots[FIXED_STALE_FD_SLOT] = LEIR_PHASE0_SLOT_FD;
+    slots[FIXED_STALE_SHORT_LENGTH_SLOT] =
+        LEIR_PHASE0_SLOT_U64;
+    slots[FIXED_STALE_LONG_LENGTH_SLOT] =
+        LEIR_PHASE0_SLOT_U64;
+    slots[FIXED_STALE_BUFFER_SLOT] =
+        LEIR_PHASE0_SLOT_MUT_BUFFER;
+    slots[FIXED_STALE_FIRST_RESULT_SLOT] =
+        LEIR_PHASE0_SLOT_I64;
+    slots[FIXED_STALE_SECOND_RESULT_SLOT] =
+        LEIR_PHASE0_SLOT_I64;
+
+    nodes[0].opcode = LEIR_PHASE0_OP_READ_EXACT;
+    nodes[0].fd_slot = FIXED_STALE_FD_SLOT;
+    nodes[0].buffer_slot = FIXED_STALE_BUFFER_SLOT;
+    nodes[0].length_slot = FIXED_STALE_SHORT_LENGTH_SLOT;
+    nodes[0].result_slot = FIXED_STALE_FIRST_RESULT_SLOT;
+    nodes[0].on_success = 1U;
+    nodes[0].on_eof = 3U;
+    nodes[0].on_error = 3U;
+
+    nodes[1].opcode = LEIR_PHASE0_OP_READ_EXACT;
+    nodes[1].fd_slot = FIXED_STALE_FD_SLOT;
+    nodes[1].buffer_slot = FIXED_STALE_BUFFER_SLOT;
+    nodes[1].length_slot = FIXED_STALE_LONG_LENGTH_SLOT;
+    nodes[1].result_slot = FIXED_STALE_SECOND_RESULT_SLOT;
+    nodes[1].on_success = 2U;
+    nodes[1].on_eof = 3U;
+    nodes[1].on_error = 3U;
+    nodes[2] = terminal_node(
+        LEIR_PHASE0_OP_RETURN,
+        FIXED_STALE_SECOND_RESULT_SLOT);
+    nodes[3] = terminal_node(
+        LEIR_PHASE0_OP_FAIL,
+        FIXED_STALE_SECOND_RESULT_SLOT);
+
+    memset(&desc, 0, sizeof(desc));
+    desc.nodes = nodes;
+    desc.slot_kinds = slots;
+    desc.node_count = 4U;
+    desc.slot_count = FIXED_STALE_SLOT_COUNT;
+    desc.entry_node = 0U;
+    return leir_phase0_program_create(&desc, out);
+}
+
+static int fixed_stale_state_init(fixed_stale_state_t *state) {
+    unsigned i;
+
+    memset(state, 0, sizeof(*state));
+    state->pair[0] = LLAM_INVALID_FD;
+    state->pair[1] = LLAM_INVALID_FD;
+    atomic_init(&state->failures, 0U);
+    if (create_fixed_stale_program(&state->program) != 0 ||
+        leir_native_plan_compile(
+            state->program, &state->plan) != 0 ||
+        leir_native_instance_init(
+            state->storage.bytes,
+            sizeof(state->storage.bytes),
+            state->program,
+            &state->plan,
+            LEIR_NATIVE_MODE_FIXED_LINK) != 0 ||
+        leir_test_socketpair_type(
+            SOCK_SEQPACKET, state->pair) != 0) {
+        return -1;
+    }
+    state->instance =
+        (leir_native_instance_t *)state->storage.bytes;
+    state->values[FIXED_STALE_FD_SLOT].fd =
+        state->pair[0];
+    state->values[FIXED_STALE_SHORT_LENGTH_SLOT].u64 =
+        FIXED_STALE_SHORT_BYTES;
+    state->values[FIXED_STALE_LONG_LENGTH_SLOT].u64 =
+        FIXED_STALE_LONG_BYTES;
+    state->values[FIXED_STALE_BUFFER_SLOT].buffer.data =
+        state->external_buffer;
+    state->values[FIXED_STALE_BUFFER_SLOT].buffer.size =
+        sizeof(state->external_buffer);
+    leir_test_fill_pattern(
+        state->prior_payload,
+        sizeof(state->prior_payload),
+        UINT64_C(0x5052494f52534543));
+    for (i = 0U; i < 3U; i += 1U) {
+        leir_test_fill_pattern(
+            state->short_payloads[i],
+            sizeof(state->short_payloads[i]),
+            UINT64_C(0x53484f5254000000) + i);
+    }
+    return leir_native_instance_bind(
+        state->instance,
+        state->values,
+        FIXED_STALE_SLOT_COUNT);
+}
+
+static void fixed_stale_fail(
+    fixed_stale_state_t *state,
+    int error) {
+    if (atomic_fetch_add_explicit(
+            &state->failures,
+            1U,
+            memory_order_relaxed) == 0U) {
+        state->first_errno = error;
+    }
+    if (!LLAM_FD_IS_INVALID(state->pair[0])) {
+        (void)shutdown((int)state->pair[0], SHUT_RDWR);
+    }
+    if (!LLAM_FD_IS_INVALID(state->pair[1])) {
+        (void)shutdown((int)state->pair[1], SHUT_RDWR);
+    }
+}
+
+static void fixed_stale_peer_task(void *arg) {
+    fixed_stale_state_t *state = arg;
+
+    if (leir_test_write_all(
+            state->pair[1],
+            state->short_payloads[0],
+            FIXED_STALE_SHORT_BYTES) != 0 ||
+        leir_test_write_all(
+            state->pair[1],
+            state->prior_payload,
+            FIXED_STALE_LONG_BYTES) != 0 ||
+        leir_test_write_all(
+            state->pair[1],
+            state->short_payloads[1],
+            FIXED_STALE_SHORT_BYTES) != 0 ||
+        leir_test_write_all(
+            state->pair[1],
+            state->short_payloads[2],
+            FIXED_STALE_SHORT_BYTES) != 0) {
+        fixed_stale_fail(
+            state, errno != 0 ? errno : EPROTO);
+    }
+}
+
+static void fixed_stale_instance_task(void *arg) {
+    fixed_stale_state_t *state = arg;
+    leir_native_metrics_t metrics;
+    size_t i;
+    int run_result;
+    int run_errno;
+
+    memset(&metrics, 0, sizeof(metrics));
+    if (leir_native_instance_run(
+            state->instance,
+            state->values_out,
+            FIXED_STALE_SLOT_COUNT,
+            &metrics) != 0 ||
+        memcmp(
+            state->external_buffer,
+            state->prior_payload,
+            sizeof(state->prior_payload)) != 0) {
+        fixed_stale_fail(
+            state, errno != 0 ? errno : EPROTO);
+        return;
+    }
+
+    memset(
+        state->external_buffer,
+        0,
+        sizeof(state->external_buffer));
+    memset(&metrics, 0, sizeof(metrics));
+    errno = 0;
+    run_result = leir_native_instance_run(
+        state->instance,
+        state->values_out,
+        FIXED_STALE_SLOT_COUNT,
+        &metrics);
+    run_errno = errno;
+    if (run_result != -1 ||
+        run_errno != EMSGSIZE ||
+        metrics.first_error_operation != 1U ||
+        state->values_out[
+            FIXED_STALE_FIRST_RESULT_SLOT].i64 !=
+            FIXED_STALE_SHORT_BYTES ||
+        state->values_out[
+            FIXED_STALE_SECOND_RESULT_SLOT].i64 != -1) {
+        fixed_stale_fail(
+            state, run_errno != 0 ? run_errno : EPROTO);
+        return;
+    }
+    for (i = FIXED_STALE_SHORT_BYTES;
+         i < sizeof(state->external_buffer);
+         i += 1U) {
+        if (state->external_buffer[i] != 0U) {
+            fixed_stale_fail(state, EPROTO);
+            return;
+        }
+    }
+}
+
+static int test_fixed_short_read_does_not_copy_prior_activation(void) {
+    fixed_stale_state_t state;
+    llam_runtime_opts_t opts;
+    llam_task_t *peer = NULL;
+    llam_task_t *instance_task = NULL;
+    bool runtime_started = false;
+    bool fixed_available = false;
+    int failed = 1;
+
+    if (fixed_stale_state_init(&state) != 0) {
+        perror("fixed stale fixture init");
+        return 1;
+    }
+    memset(&opts, 0, sizeof(opts));
+    opts.deterministic = 1U;
+    opts.forced_yield_every = 1U;
+    if (llam_runtime_init(&opts) != 0) {
+        perror("fixed stale runtime init");
+        goto cleanup;
+    }
+    runtime_started = true;
+    fixed_available =
+        g_llam_runtime.active_nodes != 0U &&
+        g_llam_runtime.nodes != NULL &&
+        g_llam_runtime.nodes[0].ring_ready &&
+        g_llam_runtime.nodes[0].linux_submit_all &&
+        g_llam_runtime.nodes[0].supports_native_fixed_files &&
+        g_llam_runtime.nodes[0].supports_native_fixed_buffers;
+    if (!fixed_available) {
+        failed = 0;
+        goto cleanup;
+    }
+
+    peer = llam_spawn(fixed_stale_peer_task, &state, NULL);
+    instance_task = llam_spawn(
+        fixed_stale_instance_task, &state, NULL);
+    if (peer == NULL ||
+        instance_task == NULL ||
+        llam_run() != 0 ||
+        llam_join(peer) != 0 ||
+        llam_join(instance_task) != 0 ||
+        atomic_load_explicit(
+            &state.failures,
+            memory_order_acquire) != 0U) {
+        fprintf(
+            stderr,
+            "fixed stale copy failed errno=%d\n",
+            state.first_errno);
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    if (state.instance != NULL) {
+        if (leir_native_instance_destroy(
+                state.instance) != 0) {
+            perror("destroy fixed stale instance");
+            failed = 1;
+        } else {
+            state.instance = NULL;
+        }
+    }
+    if (!fixed_available && runtime_started) {
+        puts(
+            "SKIP: Linux fixed short-read "
+            "integration unavailable");
+    }
+    if (runtime_started) {
+        llam_runtime_shutdown();
+    }
+    leir_test_close(&state.pair[0]);
+    leir_test_close(&state.pair[1]);
+    leir_phase0_program_destroy(state.program);
+    return failed;
+}
+
 typedef struct native_cancel_batch_state
     native_cancel_batch_state_t;
 
@@ -2427,7 +2860,13 @@ int main(void) {
         test_native_runtime_pins_bound_fd() != 0 ||
         test_native_runtime_batches_width_two() != 0 ||
         test_fixed_recv_send_pipeline() != 0 ||
+        test_fixed_short_read_does_not_copy_prior_activation() != 0 ||
         test_native_cancel_batch_ownership() != 0) {
+        return 1;
+    }
+#endif
+#if defined(__linux__)
+    if (test_destroyed_instance_cannot_reenter_bind() != 0) {
         return 1;
     }
 #endif

@@ -631,6 +631,146 @@ cleanup_program:
     return failed;
 }
 
+typedef struct bind_run_claim_race {
+    pthread_mutex_t lock;
+    pthread_cond_t ready;
+    pthread_cond_t release;
+    leir_phase0_instance_t *instance;
+    const leir_phase0_value_t *values;
+    const leir_phase0_run_opts_t *opts;
+    bool entered;
+    bool resume;
+    int bind_result;
+    int bind_errno;
+} bind_run_claim_race_t;
+
+static void bind_run_precommit_hook(void *context) {
+    bind_run_claim_race_t *race = context;
+
+    pthread_mutex_lock(&race->lock);
+    race->entered = true;
+    pthread_cond_signal(&race->ready);
+    while (!race->resume) {
+        pthread_cond_wait(&race->release, &race->lock);
+    }
+    pthread_mutex_unlock(&race->lock);
+}
+
+static void *bind_run_bind_thread(void *context) {
+    bind_run_claim_race_t *race = context;
+
+    errno = 0;
+    race->bind_result = leir_phase0_instance_bind(
+        race->instance,
+        race->values,
+        4U,
+        race->opts);
+    race->bind_errno = errno;
+    return NULL;
+}
+
+static int test_bind_and_run_claim_are_linearized_once(void) {
+    leir_phase0_program_desc_t desc = valid_program_desc();
+    leir_phase0_program_t *program = NULL;
+    leir_phase0_instance_t instance;
+    leir_phase0_run_opts_t opts = {
+        .inline_budget = 8U,
+    };
+    leir_phase0_value_t initial[4] = {0};
+    leir_phase0_value_t replacement[4] = {0};
+    unsigned char buffer[64];
+    bind_run_claim_race_t race;
+    pthread_t thread;
+    unsigned expected = 0U;
+    bool run_claimed;
+    int failed = 1;
+
+    memset(&race, 0, sizeof(race));
+    initial[0].fd = (llam_fd_t)0;
+    initial[1].buffer.data = buffer;
+    initial[1].buffer.size = sizeof(buffer);
+    initial[2].u64 = sizeof(buffer);
+    initial[3].i64 = 11;
+    memcpy(replacement, initial, sizeof(replacement));
+    replacement[3].i64 = 29;
+    if (leir_phase0_program_create(&desc, &program) != 0 ||
+        leir_phase0_instance_init(
+            &instance, sizeof(instance), program) != 0 ||
+        leir_phase0_instance_bind(
+            &instance, initial, 4U, &opts) != 0 ||
+        pthread_mutex_init(&race.lock, NULL) != 0 ||
+        pthread_cond_init(&race.ready, NULL) != 0 ||
+        pthread_cond_init(&race.release, NULL) != 0) {
+        goto cleanup_program;
+    }
+    race.instance = &instance;
+    race.values = replacement;
+    race.opts = &opts;
+    leir_phase0_test_set_bind_precommit_hook(
+        bind_run_precommit_hook, &race);
+    if (pthread_create(
+            &thread, NULL, bind_run_bind_thread, &race) != 0) {
+        leir_phase0_test_set_bind_precommit_hook(NULL, NULL);
+        goto cleanup_sync;
+    }
+    pthread_mutex_lock(&race.lock);
+    while (!race.entered) {
+        pthread_cond_wait(&race.ready, &race.lock);
+    }
+    pthread_mutex_unlock(&race.lock);
+
+    run_claimed = atomic_compare_exchange_strong_explicit(
+        &instance.running,
+        &expected,
+        1U,
+        memory_order_acq_rel,
+        memory_order_acquire);
+    pthread_mutex_lock(&race.lock);
+    race.resume = true;
+    pthread_cond_signal(&race.release);
+    pthread_mutex_unlock(&race.lock);
+    if (pthread_join(thread, NULL) != 0) {
+        leir_phase0_test_set_bind_precommit_hook(NULL, NULL);
+        goto cleanup_sync;
+    }
+    leir_phase0_test_set_bind_precommit_hook(NULL, NULL);
+    if (run_claimed) {
+        atomic_store_explicit(
+            &instance.running, 0U, memory_order_release);
+    }
+    if (!run_claimed &&
+        race.bind_result == 0 &&
+        instance.slots[3].i64 == 29) {
+        failed = 0;
+    } else {
+        fprintf(
+            stderr,
+            "bind/run claim overlap: run=%d bind=%d errno=%d\n",
+            run_claimed ? 1 : 0,
+            race.bind_result,
+            race.bind_errno);
+    }
+
+cleanup_sync:
+    pthread_cond_destroy(&race.release);
+    pthread_cond_destroy(&race.ready);
+    pthread_mutex_destroy(&race.lock);
+cleanup_program:
+    leir_phase0_program_destroy(program);
+    return failed;
+}
+
+static int test_bind_and_run_claim_are_linearized(void) {
+    unsigned iteration;
+
+    for (iteration = 0U; iteration < 32U; iteration += 1U) {
+        if (test_bind_and_run_claim_are_linearized_once() != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int test_instance_cancel_before_run_publishes_request(void) {
     leir_phase0_program_desc_t desc = valid_program_desc();
     leir_phase0_program_t *program = NULL;
@@ -3069,6 +3209,10 @@ int main(void) {
     if (test_instance_rejects_invalid_storage_and_bindings() != 0) {
         fputs("test_instance_rejects_invalid_storage_and_bindings failed\n",
               stderr);
+        return 1;
+    }
+    if (test_bind_and_run_claim_are_linearized() != 0) {
+        fputs("test_bind_and_run_claim_are_linearized failed\n", stderr);
         return 1;
     }
     if (test_instance_cancel_before_run_publishes_request() != 0) {

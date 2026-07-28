@@ -31,7 +31,28 @@ enum {
     LEIR_NATIVE_INSTANCE_IDLE = 0U,
     LEIR_NATIVE_INSTANCE_RUNNING = 1U,
     LEIR_NATIVE_INSTANCE_BINDING = 2U,
+    LEIR_NATIVE_INSTANCE_DESTROYED = 3U,
 };
+
+static leir_native_test_hook_fn
+    leir_native_bind_before_claim_hook;
+static void *leir_native_bind_before_claim_context;
+
+void leir_native_test_set_bind_before_claim_hook(
+    leir_native_test_hook_fn hook,
+    void *context) {
+    leir_native_bind_before_claim_context = context;
+    leir_native_bind_before_claim_hook = hook;
+}
+
+static void run_bind_before_claim_hook(void) {
+    leir_native_test_hook_fn hook =
+        leir_native_bind_before_claim_hook;
+
+    if (hook != NULL) {
+        hook(leir_native_bind_before_claim_context);
+    }
+}
 
 #if LLAM_RUNTIME_BACKEND_LINUX
 typedef struct leir_native_fixed_buffer {
@@ -42,7 +63,6 @@ typedef struct leir_native_fixed_buffer {
     size_t recv_copy_size;
     unsigned first_recv_operation;
     uint16_t slot;
-    bool first_use_send;
     bool recv_written;
 } leir_native_fixed_buffer_t;
 #endif
@@ -353,8 +373,7 @@ static int allocate_linux_fixed_buffer(
     leir_native_fixed_buffer_t *buffer,
     uint16_t slot,
     void *external,
-    size_t logical_size,
-    bool first_use_send) {
+    size_t logical_size) {
     long page_value = sysconf(_SC_PAGESIZE);
     size_t page_size =
         page_value > 0 ? (size_t)page_value : 4096U;
@@ -382,7 +401,6 @@ static int allocate_linux_fixed_buffer(
     buffer->registered_size = rounded_size;
     buffer->first_recv_operation = UINT_MAX;
     buffer->slot = slot;
-    buffer->first_use_send = first_use_send;
     return 0;
 }
 
@@ -473,9 +491,7 @@ static int configure_linux_segment(
                         values[step->buffer_slot]
                             .buffer.data,
                         values[step->buffer_slot]
-                            .buffer.size,
-                        step->kind ==
-                            LEIR_NATIVE_STEP_SEND) != 0) {
+                            .buffer.size) != 0) {
                     goto fail;
                 }
                 buffer_index = fixed_buffer_count;
@@ -647,12 +663,16 @@ static void copy_linux_fixed_inputs(
         leir_native_fixed_buffer_t *buffer =
             &instance->fixed_buffers[i];
 
-        if (buffer->first_use_send) {
-            memcpy(
-                buffer->scratch,
-                buffer->external,
-                buffer->logical_size);
-        }
+        /*
+         * A fixed buffer outlives one activation. Snapshot the caller's
+         * current buffer every time so a short or failed receive can only
+         * expose bytes from this activation, matching direct-buffer
+         * untouched-byte semantics.
+         */
+        memcpy(
+            buffer->scratch,
+            buffer->external,
+            buffer->logical_size);
     }
 }
 
@@ -665,10 +685,17 @@ static void copy_linux_fixed_outputs(
     if (!activated || !mode_is_fixed(instance->mode)) {
         return;
     }
-    successful_operations =
-        instance->segment.first_error == 0
-            ? instance->segment.op_count
-            : instance->segment.first_error_index;
+    if (instance->segment.first_error == 0) {
+        successful_operations =
+            instance->segment.op_count;
+    } else if (
+        instance->segment.first_error_index <
+        instance->segment.op_count) {
+        successful_operations =
+            instance->segment.first_error_index;
+    } else {
+        successful_operations = 0U;
+    }
     for (i = 0U;
          i < instance->fixed_buffer_count;
          i += 1U) {
@@ -845,28 +872,35 @@ int leir_native_instance_bind(
     leir_native_instance_t *instance,
     const leir_phase0_value_t *values,
     size_t value_count) {
+    const leir_phase0_program_t *program;
     unsigned expected = LEIR_NATIVE_INSTANCE_IDLE;
     int result = -1;
     int saved_errno = EINVAL;
     unsigned i;
 
-    if (instance == NULL ||
-        instance->program == NULL ||
-        values == NULL ||
-        value_count != instance->program->slot_count) {
+    if (instance == NULL || values == NULL) {
         return fail_with_errno(EINVAL);
     }
+    run_bind_before_claim_hook();
     if (!atomic_compare_exchange_strong_explicit(
             &instance->activity,
             &expected,
             LEIR_NATIVE_INSTANCE_BINDING,
             memory_order_acq_rel,
             memory_order_acquire)) {
-        return fail_with_errno(EBUSY);
+        return fail_with_errno(
+            expected == LEIR_NATIVE_INSTANCE_DESTROYED
+                ? EINVAL
+                : EBUSY);
+    }
+    program = instance->program;
+    if (program == NULL ||
+        value_count != program->slot_count) {
+        saved_errno = EINVAL;
+        goto done;
     }
 
-    if (validate_slot_values(
-            instance->program, values) != 0) {
+    if (validate_slot_values(program, values) != 0) {
         saved_errno = errno;
         goto done;
     }
@@ -874,7 +908,7 @@ int leir_native_instance_bind(
         uint32_t ignored_length;
 
         if (step_length(
-                instance->program,
+                program,
                 &instance->plan.steps[i],
                 values,
                 &ignored_length) != 0) {
@@ -909,8 +943,11 @@ done:
 int leir_native_instance_destroy(
     leir_native_instance_t *instance) {
     unsigned expected = LEIR_NATIVE_INSTANCE_IDLE;
+#if LLAM_RUNTIME_BACKEND_LINUX
+    unsigned was_bound;
+#endif
 
-    if (instance == NULL || instance->program == NULL) {
+    if (instance == NULL) {
         return fail_with_errno(EINVAL);
     }
     if (!atomic_compare_exchange_strong_explicit(
@@ -919,17 +956,29 @@ int leir_native_instance_destroy(
             LEIR_NATIVE_INSTANCE_BINDING,
             memory_order_acq_rel,
             memory_order_acquire)) {
-        return fail_with_errno(EBUSY);
+        return fail_with_errno(
+            expected == LEIR_NATIVE_INSTANCE_DESTROYED
+                ? EINVAL
+                : EBUSY);
+    }
+    if (instance->program == NULL) {
+        atomic_store_explicit(
+            &instance->activity,
+            LEIR_NATIVE_INSTANCE_DESTROYED,
+            memory_order_release);
+        return fail_with_errno(EINVAL);
     }
 
-    atomic_store_explicit(
-        &instance->bound, 0U, memory_order_release);
 #if LLAM_RUNTIME_BACKEND_LINUX
+    was_bound = atomic_exchange_explicit(
+        &instance->bound, 0U, memory_order_acq_rel);
     if (detach_linux_fixed_lease(instance) != 0) {
         int saved_errno = errno;
 
         atomic_store_explicit(
-            &instance->bound, 1U, memory_order_release);
+            &instance->bound,
+            was_bound,
+            memory_order_release);
         atomic_store_explicit(
             &instance->activity,
             LEIR_NATIVE_INSTANCE_IDLE,
@@ -938,13 +987,16 @@ int leir_native_instance_destroy(
     }
     close_linux_pinned_fds(instance);
     free_linux_fixed_buffers(instance);
+#else
+    atomic_store_explicit(
+        &instance->bound, 0U, memory_order_release);
 #endif
     memset(&instance->plan, 0, sizeof(instance->plan));
     memset(instance->slots, 0, sizeof(instance->slots));
     instance->program = NULL;
     atomic_store_explicit(
         &instance->activity,
-        LEIR_NATIVE_INSTANCE_IDLE,
+        LEIR_NATIVE_INSTANCE_DESTROYED,
         memory_order_release);
     errno = 0;
     return 0;
@@ -962,7 +1014,7 @@ static void release_running_instances(
     }
 }
 
-static int validate_batch_arguments(
+static int validate_batch_container(
     leir_native_instance_t *const *instances,
     leir_phase0_value_t *const *values_out,
     const size_t *value_counts,
@@ -986,21 +1038,36 @@ static int validate_batch_arguments(
         leir_native_instance_t *instance = instances[i];
 
         if (instance == NULL ||
-            instance->program == NULL ||
-            values_out[i] == NULL ||
-            value_counts[i] !=
-                instance->program->slot_count ||
-            atomic_load_explicit(
-                &instance->bound,
-                memory_order_acquire) == 0U ||
-            (i != 0U &&
-             instance->mode != instances[0]->mode)) {
+            values_out[i] == NULL) {
             return EINVAL;
         }
         for (j = 0U; j < i; j += 1U) {
             if (instances[j] == instance) {
                 return EINVAL;
             }
+        }
+    }
+    return 0;
+}
+
+static int validate_acquired_batch(
+    leir_native_instance_t *const *instances,
+    const size_t *value_counts,
+    size_t instance_count) {
+    size_t i;
+    leir_native_mode_t mode = instances[0]->mode;
+
+    for (i = 0U; i < instance_count; i += 1U) {
+        leir_native_instance_t *instance = instances[i];
+
+        if (instance->program == NULL ||
+            value_counts[i] !=
+                instance->program->slot_count ||
+            atomic_load_explicit(
+                &instance->bound,
+                memory_order_acquire) == 0U ||
+            instance->mode != mode) {
+            return EINVAL;
         }
     }
     return 0;
@@ -1022,15 +1089,10 @@ static int acquire_running_instances(
                 memory_order_acquire)) {
             release_running_instances(
                 instances, acquired);
-            return EBUSY;
-        }
-        if (atomic_load_explicit(
-                &instances[acquired]->bound,
-                memory_order_acquire) == 0U) {
-            acquired += 1U;
-            release_running_instances(
-                instances, acquired);
-            return EINVAL;
+            return expected ==
+                    LEIR_NATIVE_INSTANCE_DESTROYED
+                ? EINVAL
+                : EBUSY;
         }
         acquired += 1U;
     }
@@ -1044,7 +1106,7 @@ int leir_native_batch_run(
     leir_native_metrics_t *metrics_out,
     size_t instance_count,
     leir_native_batch_metrics_t *batch_metrics_out) {
-    int error = validate_batch_arguments(
+    int error = validate_batch_container(
         instances,
         values_out,
         value_counts,
@@ -1062,6 +1124,13 @@ int leir_native_batch_run(
     error = acquire_running_instances(
         instances, instance_count);
     if (error != 0) {
+        return fail_with_errno(error);
+    }
+    error = validate_acquired_batch(
+        instances, value_counts, instance_count);
+    if (error != 0) {
+        release_running_instances(
+            instances, instance_count);
         return fail_with_errno(error);
     }
 

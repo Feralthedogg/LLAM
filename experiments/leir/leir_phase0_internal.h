@@ -6,6 +6,7 @@
 #include <stdatomic.h>
 
 typedef void *(*leir_phase0_calloc_fn)(size_t count, size_t size);
+typedef void (*leir_phase0_test_hook_fn)(void *context);
 
 typedef enum leir_phase0_advance_result {
     LEIR_PHASE0_ADVANCE_TERMINAL = 0,
@@ -61,5 +62,8 @@ bool leir_phase0_test_inject_completion(
     uint64_t activation_generation,
     ssize_t result,
     int error_code);
+void leir_phase0_test_set_bind_precommit_hook(
+    leir_phase0_test_hook_fn hook,
+    void *context);
 
 #endif
