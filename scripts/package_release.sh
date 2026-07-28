@@ -13,6 +13,7 @@ script_dir="$(dirname "$0")"
 root_dir="$(CDPATH='' cd "$script_dir/.." && pwd)"
 
 target="${1:-}"
+# Audited package projections of config/llam-version.json.
 version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"
 version="${version#v}"
 abi_major="${LLAM_ABI_MAJOR:-2}"

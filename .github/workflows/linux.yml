@@ -5,6 +5,7 @@ name: linux
 
 env:
   LLAM_BUILD_RESEARCH: "0"
+  LLAM_CI_VERSION: "2.2.0"
 
 on:
   push:
@@ -24,9 +25,6 @@ on:
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
-env:
-  LLAM_CI_VERSION: "2.2.0"
-
 concurrency:
   group: linux-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -38,6 +36,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Audit build manifests
+        run: python3 scripts/audit_build_manifests.py --root . --check
 
       - name: Verify CI supply-chain policy
         run: make test-ci-supply-chain

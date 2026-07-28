@@ -1,0 +1,5 @@
+{
+  "schema": "llam.build-manifest.v1",
+  "version": "2.2.0",
+  "abi_major": 2
+}

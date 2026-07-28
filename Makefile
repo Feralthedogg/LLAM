@@ -4,6 +4,7 @@
 CC ?= cc
 AR ?= ar
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-pointer
+DEPFLAGS ?= -MMD -MP
 CPPFLAGS ?= -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE
 LLAM_BUILD_RESEARCH ?= 0
 ifneq ($(LLAM_BUILD_RESEARCH),0)
@@ -29,6 +30,7 @@ else
 override SHARED_CPPFLAGS := $(SHARED_CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)
 endif
 PICFLAGS ?= -fPIC -fvisibility=hidden
+# Audited projections of config/llam-version.json.
 LLAM_ABI_MAJOR ?= 2
 LLAM_VERSION ?= 2.2.0
 SANITIZER_TARGETS_ENABLED ?= 0
@@ -238,9 +240,10 @@ RUNTIME_PRIV_HDRS = \
 	src/io/darwin/runtime_io_watch_darwin_internal.h \
 	src/io/linux/runtime_io_watch_linux_internal.h \
 	src/io/windows/runtime_io_watch_windows_internal.h
-ifeq ($(LLAM_BUILD_RESEARCH),1)
-RUNTIME_PRIV_HDRS += \
+RESEARCH_PRIVATE_HDRS = \
 	src/io/linux/runtime_io_segment_linux_internal.h
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+RUNTIME_PRIV_HDRS += $(RESEARCH_PRIVATE_HDRS)
 endif
 
 RUNTIME_COMMON_OBJS = \
@@ -379,14 +382,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/watch/watch_queue.o \
 	$(OBJDIR)/src/io/watch/waiter.o
 
-ifeq ($(HOST_PLATFORM),linux)
-LDLIBS += -lm
-LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '%b' '\043include <liburing.h>\012int main\050void\051 \173 struct io_uring_buf_ring *\050*p\051\050struct io_uring *, unsigned int, int, unsigned int, int *\051 = io_uring_setup_buf_ring; return p == 0; \175\012' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
-ifeq ($(LLAM_HAVE_IO_URING_BUF_RING_HELPERS),1)
-CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
-endif
-RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
-RUNTIME_OBJS += \
+RUNTIME_LINUX_OBJS = \
 	$(OBJDIR)/src/io/linux/watch/prelude.o \
 	$(OBJDIR)/src/io/linux/watch/linux_state.o \
 	$(OBJDIR)/src/io/linux/watch/linux_lookup.o \
@@ -396,26 +392,7 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/linux/watch/linux_submit.o \
 	$(OBJDIR)/src/io/linux/watch/cqe.o \
 	$(OBJDIR)/src/io/linux/watch/linux_worker.o
-ifeq ($(LLAM_BUILD_RESEARCH),1)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
-	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
-	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o
-endif
-ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o \
-	$(OBJDIR)/src/asm/linux/x86_64/wake_syscalls_x86_64.o
-else ifeq ($(UNAME_M),aarch64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
-endif
-else ifeq ($(HOST_PLATFORM),darwin)
-RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
-LDLIBS := $(filter-out -luring,$(LDLIBS))
-CPPFLAGS += -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE
-RUNTIME_OBJS += \
+RUNTIME_KQUEUE_OBJS = \
 	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
 	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
 	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
@@ -423,17 +400,7 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
 	$(OBJDIR)/src/io/darwin/watch/events.o \
 	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
-ifeq ($(UNAME_M),arm64)
-RUNTIME_OBJS += $(OBJDIR)/src/core/context/context_arm64.o
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/arm64/darwin_context_arm64.o
-else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/darwin/x86_64/darwin_context_x86_64.o
-endif
-else ifeq ($(HOST_PLATFORM),windows)
-RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
-LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock -ladvapi32
-CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
-RUNTIME_OBJS += \
+RUNTIME_WINDOWS_OBJS = \
 	$(OBJDIR)/src/io/windows/watch/windows_state.o \
 	$(OBJDIR)/src/io/windows/watch/socket.o \
 	$(OBJDIR)/src/io/windows/watch/pool.o \
@@ -442,10 +409,67 @@ RUNTIME_OBJS += \
 	$(OBJDIR)/src/io/windows/watch/windows_completion.o \
 	$(OBJDIR)/src/io/windows/watch/fallback.o \
 	$(OBJDIR)/src/io/windows/watch/windows_watch.o
-ifeq ($(UNAME_M),AMD64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
+RUNTIME_CONTEXT_ARM64_OBJS = \
+	$(OBJDIR)/src/core/context/context_arm64.o
+RUNTIME_LINUX_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
+RUNTIME_LINUX_X86_64_WAKE_OBJS = \
+	$(OBJDIR)/src/asm/linux/x86_64/wake_syscalls_x86_64.o
+RUNTIME_LINUX_ARM64_OBJS = \
+	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
+RUNTIME_DARWIN_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/darwin/x86_64/darwin_context_x86_64.o
+RUNTIME_DARWIN_ARM64_OBJS = \
+	$(OBJDIR)/src/asm/darwin/arm64/darwin_context_arm64.o
+RUNTIME_WINDOWS_GNU_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
+# Native Make uses the GNU assembler on Windows. This audited-but-unused
+# projection keeps the complete MSVC/MASM source set visible for parity.
+RUNTIME_WINDOWS_MSVC_X86_64_OBJS = \
+	$(OBJDIR)/src/asm/windows/x86_64/context_x86_64.o
+RESEARCH_RUNTIME_LINUX_OBJS = \
+	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o
+
+ifeq ($(HOST_PLATFORM),linux)
+LDLIBS += -lm
+LLAM_HAVE_IO_URING_BUF_RING_HELPERS := $(shell printf '%b' '\043include <liburing.h>\012int main\050void\051 \173 struct io_uring_buf_ring *\050*p\051\050struct io_uring *, unsigned int, int, unsigned int, int *\051 = io_uring_setup_buf_ring; return p == 0; \175\012' | $(CC) $(CPPFLAGS) $(CFLAGS) -x c - -luring -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(LLAM_HAVE_IO_URING_BUF_RING_HELPERS),1)
+CPPFLAGS += -DLLAM_HAVE_IO_URING_BUF_RING_HELPERS=1
+endif
+RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_OBJS)
+ifeq ($(LLAM_BUILD_RESEARCH),1)
+RUNTIME_OBJS += $(RESEARCH_RUNTIME_LINUX_OBJS)
+endif
+ifeq ($(UNAME_M),x86_64)
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_WAKE_OBJS)
+else ifeq ($(UNAME_M),aarch64)
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_ARM64_OBJS)
+endif
+else ifeq ($(HOST_PLATFORM),darwin)
+RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
+LDLIBS := $(filter-out -luring,$(LDLIBS))
+CPPFLAGS += -D_XOPEN_SOURCE=700 -D_DARWIN_C_SOURCE
+RUNTIME_OBJS += $(RUNTIME_KQUEUE_OBJS)
+ifeq ($(UNAME_M),arm64)
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_DARWIN_ARM64_OBJS)
 else ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/windows/x86_64/windows_context_x86_64.o
+RUNTIME_OBJS += $(RUNTIME_DARWIN_X86_64_OBJS)
+endif
+else ifeq ($(HOST_PLATFORM),windows)
+RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
+LDLIBS := $(filter-out -pthread -luring,$(LDLIBS)) -lws2_32 -lmswsock -ladvapi32
+CPPFLAGS += -D_WIN32_WINNT=0x0A00 -DLLAM_ENABLE_WINDOWS_BACKEND
+RUNTIME_OBJS += $(RUNTIME_WINDOWS_OBJS)
+ifeq ($(UNAME_M),AMD64)
+RUNTIME_OBJS += $(RUNTIME_WINDOWS_GNU_X86_64_OBJS)
+else ifeq ($(UNAME_M),x86_64)
+RUNTIME_OBJS += $(RUNTIME_WINDOWS_GNU_X86_64_OBJS)
 endif
 else
 RUNTIME_OBJS = $(RUNTIME_COMMON_OBJS)
@@ -455,26 +479,17 @@ SERVER_FLOOD_LDLIBS += -lm
 ifeq ($(UNAME_S),NetBSD)
 LDLIBS += -lrt
 endif
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/io/darwin/watch/darwin_state.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_migration_live.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_migration_rehome.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_control.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_completion.o \
-	$(OBJDIR)/src/io/darwin/watch/events.o \
-	$(OBJDIR)/src/io/darwin/watch/darwin_worker.o
+RUNTIME_OBJS += $(RUNTIME_KQUEUE_OBJS)
 ifeq ($(UNAME_M),x86_64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_OBJS)
 else ifeq ($(UNAME_M),amd64)
-RUNTIME_OBJS += $(OBJDIR)/src/asm/linux/x86_64/linux_context_x86_64.o
+RUNTIME_OBJS += $(RUNTIME_LINUX_X86_64_OBJS)
 else ifeq ($(UNAME_M),aarch64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_ARM64_OBJS)
 else ifeq ($(UNAME_M),arm64)
-RUNTIME_OBJS += \
-	$(OBJDIR)/src/core/context/context_arm64.o \
-	$(OBJDIR)/src/asm/linux/arm64/linux_context_arm64.o
+RUNTIME_OBJS += $(RUNTIME_CONTEXT_ARM64_OBJS)
+RUNTIME_OBJS += $(RUNTIME_LINUX_ARM64_OBJS)
 endif
 endif
 endif
@@ -667,20 +682,28 @@ RESEARCH_OBJS = \
 	$(SREM_MODEL_CORE_OBJS) \
 	$(SREM_MODEL_TEST_OBJS) \
 	$(SREM_MODEL_BENCH_OBJS)
-RESEARCH_LINK_TARGETS = \
+LEIR_RESEARCH_TARGETS = \
 	test_leir_phase0 \
 	test_leir_native_plan \
 	test_leir_native_segment \
 	test_leir_native_linux \
 	bench_leir_native_segment \
 	bench_leir_native_pipeline \
-	bench_leir_phase0 \
+	bench_leir_phase0
+LCWE_RESEARCH_TARGETS = \
 	test_lcwe_model \
-	bench_lcwe_model \
+	bench_lcwe_model
+LCCF_RESEARCH_TARGETS = \
 	test_lccf_model \
-	bench_lccf_model \
+	bench_lccf_model
+SREM_RESEARCH_TARGETS = \
 	test_srem_model \
 	bench_srem_model
+RESEARCH_LINK_TARGETS = \
+	$(LEIR_RESEARCH_TARGETS) \
+	$(LCWE_RESEARCH_TARGETS) \
+	$(LCCF_RESEARCH_TARGETS) \
+	$(SREM_RESEARCH_TARGETS)
 RESEARCH_ENTRY_TARGETS = \
 	$(RESEARCH_LINK_TARGETS) \
 	research \
@@ -741,6 +764,32 @@ BUILD_OBJS = \
 	$(TEST_WINDOWS_HANDLE_IO_OBJS) \
 	$(TEST_SECURITY_CAPABILITY_OBJS) \
 	$(TEST_SHARED_LOAD_OBJS)
+PUBLIC_TEST_TARGETS = \
+	test_abi_contract \
+	test_connect_io \
+	test_runtime_group_local_edges \
+	test_runtime_fuzz \
+	test_runtime_invariants \
+	test_runtime_io_dump \
+	test_runtime_select_edges \
+	test_runtime_stress \
+	test_runtime_unmanaged_join \
+	test_sync_primitives \
+	test_windows_iocp_dump \
+	test_windows_runtime_smoke \
+	test_shared_load
+INTERNAL_TEST_TARGETS = \
+	test_abi_compat \
+	test_io_buffers \
+	test_multi_runtime_core \
+	test_runtime_api_edges \
+	test_runtime_core \
+	test_windows_handle_io \
+	test_windows_policy
+TEST_HOOK_TEST_TARGETS = \
+	test_runtime_shutdown_internal \
+	test_security_capability \
+	test_windows_iocp_io
 LINK_TARGETS = \
 	demo \
 	stress \
@@ -749,33 +798,23 @@ LINK_TARGETS = \
 	server \
 	server_lossless \
 	server_flood \
-	test_abi_contract \
-	test_abi_compat \
-	test_connect_io \
-	test_runtime_core \
-	test_multi_runtime_core \
-	test_runtime_api_edges \
-	test_runtime_select_edges \
-	test_runtime_io_dump \
-	test_runtime_group_local_edges \
-	test_runtime_unmanaged_join \
-	test_runtime_stress \
-	test_runtime_fuzz \
-	test_runtime_invariants \
-	test_runtime_shutdown_internal \
-	test_sync_primitives \
-	test_io_buffers \
-	test_windows_policy \
-	test_windows_runtime_smoke \
-	test_windows_iocp_io \
-	test_windows_iocp_dump \
-	test_windows_handle_io \
-	test_security_capability \
-	test_shared_load \
+	$(PUBLIC_TEST_TARGETS) \
+	$(INTERNAL_TEST_TARGETS) \
+	$(TEST_HOOK_TEST_TARGETS) \
 	libllam_runtime.a
 
-.PHONY: all clean static shared audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+ALL_DEPFILES = \
+	$(BUILD_OBJS:.o=.d) \
+	$(RESEARCH_OBJS:.o=.d) \
+	$(SHARED_RUNTIME_OBJS:.o=.d) \
+	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
+-include $(ALL_DEPFILES)
+
+.PHONY: all clean static shared audit-build-manifests audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
+
+audit-build-manifests:
+	python3 scripts/audit_build_manifests.py --root . --check
 
 require-sanitizer-target:
 	@if [ "$(SANITIZER_TARGETS_ENABLED)" != "1" ]; then \
@@ -832,7 +871,7 @@ static: windows-cmake-configure
 shared: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target llam_runtime_shared
 
-test check: windows-cmake-test
+test check: audit-build-manifests windows-cmake-test
 
 ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: windows-cmake-configure
@@ -1044,7 +1083,7 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: audit-build-manifests test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -2393,8 +2432,8 @@ bench_srem_model: $(SREM_MODEL_CORE_OBJS) $(SREM_MODEL_BENCH_OBJS)
 test_leir_phase0: $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_PHASE0_CORE_OBJS) $(LEIR_PHASE0_TEST_OBJS) $(LDLIBS)
 
-test_leir_native_plan: $(LEIR_NATIVE_PLAN_TEST_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(LEIR_NATIVE_PLAN_TEST_OBJS) $(SERVER_FLOOD_LDLIBS)
+test_leir_native_plan: $(RUNTIME_OBJS) $(LEIR_NATIVE_PLAN_TEST_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_PLAN_TEST_OBJS) $(LDLIBS)
 
 test_leir_native_segment: $(RUNTIME_OBJS) $(LEIR_NATIVE_SEGMENT_TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(LEIR_NATIVE_SEGMENT_TEST_OBJS) $(LDLIBS)
@@ -2489,8 +2528,8 @@ test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 test_windows_runtime_smoke: $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_RUNTIME_SMOKE_OBJS) $(LDLIBS)
 
-test_windows_iocp_io: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS) $(LDLIBS)
+test_windows_iocp_io: $(RUNTIME_TESTHOOK_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_WINDOWS_IOCP_IO_OBJS) $(LDLIBS)
 
 test_windows_iocp_dump: $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_IOCP_DUMP_OBJS) $(LDLIBS)
@@ -2508,21 +2547,21 @@ $(OBJDIR)/experiments/lcwe/%.o: experiments/lcwe/%.c \
 		experiments/lcwe/lcwe_model.h \
 		experiments/lcwe/lcwe_model_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lcwe -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lcwe $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/experiments/lccf/%.o: experiments/lccf/%.c \
 		experiments/lccf/lccf_model.h \
 		experiments/lccf/lccf_model_internal.h \
 		experiments/lccf/lccf_platform.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lccf -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/lccf $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/experiments/srem/%.o: experiments/srem/%.c \
 		experiments/srem/srem_model.h \
 		experiments/srem/srem_model_internal.h \
 		experiments/srem/srem_platform.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/srem -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/srem $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c \
 		$(RUNTIME_PRIV_HDRS) \
@@ -2533,51 +2572,51 @@ $(OBJDIR)/experiments/leir/%.o: experiments/leir/%.c \
 		experiments/leir/leir_peer_process.h \
 		experiments/leir/leir_test_support.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iexperiments/leir $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(TESTHOOK_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(TESTHOOK_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(TESTHOOK_OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/core/%.o: src/core/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/engine/%.o: src/engine/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/io/%.o: src/io/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/io/windows/%.o: src/io/windows/%.c $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
@@ -2585,150 +2624,150 @@ $(SHARED_OBJDIR)/src/engine/watchdog/watchdog.o: $(RUNTIME_ENGINE_FRAGMENTS)
 
 $(OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/linux/x86_64/%.o: src/asm/linux/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/linux/arm64/%.o: src/asm/linux/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/darwin/arm64/%.o: src/asm/darwin/arm64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/darwin/x86_64/%.o: src/asm/darwin/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(SHARED_OBJDIR)/src/asm/windows/x86_64/%.o: src/asm/windows/x86_64/%.S src/internal/llam_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) -c -o $@ $<
+	$(CC) $(SHARED_CPPFLAGS) $(CFLAGS) $(PICFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo.o: examples/demo.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo_tasks.o: examples/demo_tasks.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/demo_entry.o: examples/demo_entry.c $(LLAM_PUBLIC_HDRS) examples/demo_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress.o: examples/stress.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h examples/diagnostic_output.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/diagnostic_output.o: examples/diagnostic_output.c examples/diagnostic_output.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_support.o: examples/stress_support.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_tasks.o: examples/stress_tasks.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_core_cases.o: examples/stress_core_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_timeout_cases.o: examples/stress_timeout_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_dynamic_cases.o: examples/stress_dynamic_cases.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_suite.o: examples/stress_suite.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_entry.o: examples/stress_entry.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/stress_signal_dump.o: examples/stress_signal_dump.c $(LLAM_PUBLIC_HDRS) examples/stress_internal.h examples/diagnostic_output.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/bench.o: examples/bench.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/bench_support.o: examples/bench_support.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/bench_entry.o: examples/bench_entry.c $(LLAM_PUBLIC_HDRS) examples/bench_internal.h $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/broker.o: examples/broker.c $(LLAM_PUBLIC_HDRS) $(RUNTIME_PRIV_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server.o: examples/server.c examples/server_support.h $(LLAM_PUBLIC_HDRS) $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_lossless.o: examples/server.c examples/server_support.h $(LLAM_PUBLIC_HDRS) $(EXAMPLE_SHARED_HDRS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_CHAT_LOSSLESS_DEFAULT=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_CHAT_LOSSLESS_DEFAULT=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_support.o: examples/server_support.c examples/server_support.h examples/diagnostic_output.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_flood.o: examples/server_flood.c examples/server_flood_stats.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_flood_stats.o: examples/server_flood_stats.c examples/server_flood_stats.h examples/server_flood_stats_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/examples/server_flood_stats_open.o: examples/server_flood_stats_open.c examples/server_flood_stats_internal.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 # Some tests intentionally include private runtime headers to validate teardown,
 # ownership, and backend invariants. Rebuild all test objects on private layout
 # changes so internal tests cannot link against a stale object view of structs.
 $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 $(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) -c -o $@ $<
+	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 clean:
 	rm -rf $(CLEAN_DIRS)

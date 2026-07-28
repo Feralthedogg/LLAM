@@ -53,6 +53,7 @@
 extern "C" {
 #endif
 
+/* Audited public projection of config/llam-version.json. */
 #define LLAM_VERSION_MAJOR 2U
 #define LLAM_VERSION_MINOR 2U
 #define LLAM_VERSION_PATCH 0U

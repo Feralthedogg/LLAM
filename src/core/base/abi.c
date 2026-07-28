@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <string.h>
 
+/* Audited runtime projection of config/llam-version.json. */
 #define LLAM_VERSION_STRING_LITERAL "2.2.0"
 
 /** @brief Return the smaller of two byte counts. */
