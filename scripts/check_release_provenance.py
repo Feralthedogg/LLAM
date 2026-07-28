@@ -31,11 +31,29 @@ def check_release_provenance(path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("provenance", type=Path, nargs="+")
+    parser.add_argument("provenance", type=Path, nargs="*")
+    parser.add_argument(
+        "--windows-artifacts",
+        type=Path,
+        nargs=4,
+        metavar=("STATIC_LIB", "SHARED_DLL", "SHARED_IMPORT_LIB", "BENCH_EXE"),
+    )
     args = parser.parse_args()
+    provenance_paths = args.provenance
+    if args.windows_artifacts is not None:
+        if provenance_paths:
+            parser.error(
+                "provenance paths and --windows-artifacts are mutually exclusive"
+            )
+        provenance_paths = [
+            Path(f"{artifact}.llam-build-provenance")
+            for artifact in args.windows_artifacts
+        ]
+    elif not provenance_paths:
+        parser.error("at least one provenance path is required")
 
     try:
-        for provenance in args.provenance:
+        for provenance in provenance_paths:
             check_release_provenance(provenance)
     except ValueError as error:
         print(error, file=sys.stderr)

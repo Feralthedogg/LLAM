@@ -304,8 +304,18 @@ function(llam_attach_build_provenance LLAM_PROVENANCE_TARGET)
         VERBATIM
     )
 endfunction()
+function(llam_attach_linker_build_provenance LLAM_PROVENANCE_TARGET)
+    add_custom_command(TARGET ${LLAM_PROVENANCE_TARGET} POST_BUILD
+        COMMAND "${CMAKE_COMMAND}"
+                "-DLLAM_BUILD_PROVENANCE_PATH=$<TARGET_LINKER_FILE:${LLAM_PROVENANCE_TARGET}>.llam-build-provenance"
+                "-DLLAM_BUILD_RESEARCH_MODE=${LLAM_BUILD_RESEARCH_NORMALIZED}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/write_build_provenance.cmake"
+        VERBATIM
+    )
+endfunction()
 llam_attach_build_provenance(llam_runtime)
 llam_attach_build_provenance(llam_runtime_shared)
+llam_attach_linker_build_provenance(llam_runtime_shared)
 
 set_target_properties(llam_runtime
     PROPERTIES

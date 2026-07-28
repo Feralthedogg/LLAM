@@ -347,6 +347,74 @@ class ResearchBoundaryTests(unittest.TestCase):
         self.assertIn(
             "research-enabled builds cannot be packaged", result.stderr
         )
+        shared_build = self._run(
+            [
+                "cmake",
+                "--build",
+                str(self.research_cmake_dir),
+                "--target",
+                "llam_runtime_shared",
+                "--parallel",
+                "4",
+                "--verbose",
+            ]
+        )
+        self.assert_command_succeeded(
+            shared_build, "research CMake shared runtime build"
+        )
+        shared_trace = self._combined_output(shared_build)
+        self.assertEqual(
+            shared_trace.count("cmake/write_build_provenance.cmake"),
+            2,
+        )
+
+    def test_windows_provenance_requires_shared_import_library(
+        self,
+    ) -> None:
+        package_dir = self.work / "windows-package-provenance"
+        package_dir.mkdir(parents=True, exist_ok=True)
+        artifacts = [
+            package_dir / "llam_runtime.lib",
+            package_dir / "llam_runtime.dll",
+            package_dir / "llam_runtime_shared.lib",
+            package_dir / "bench.exe",
+        ]
+        for artifact in artifacts:
+            artifact.write_bytes(b"artifact")
+            Path(f"{artifact}.llam-build-provenance").write_text(
+                "LLAM_BUILD_RESEARCH=0\n", encoding="utf-8"
+            )
+        command = [
+            "python3",
+            str(self.source / "scripts/check_release_provenance.py"),
+            "--windows-artifacts",
+            *(str(artifact) for artifact in artifacts),
+        ]
+
+        stable = self._run(command)
+        self.assert_command_succeeded(
+            stable, "stable Windows artifact provenance check"
+        )
+
+        import_provenance = Path(
+            f"{artifacts[2]}.llam-build-provenance"
+        )
+        import_provenance.unlink()
+        missing = self._run(command)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn(
+            f"missing trustworthy build provenance: {import_provenance}",
+            missing.stderr,
+        )
+
+        import_provenance.write_text(
+            "LLAM_BUILD_RESEARCH=1\n", encoding="utf-8"
+        )
+        research = self._run(command)
+        self.assertNotEqual(research.returncode, 0)
+        self.assertIn(
+            "research-enabled builds cannot be packaged", research.stderr
+        )
 
 
 def _parse_args() -> argparse.Namespace:

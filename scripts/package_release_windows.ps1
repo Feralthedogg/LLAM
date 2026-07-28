@@ -216,9 +216,11 @@ if ($null -eq $Python) {
     throw "python is required to validate build provenance"
 }
 & $Python.Source (Join-Path $PSScriptRoot "check_release_provenance.py") `
-    "$StaticLib.llam-build-provenance" `
-    "$SharedDll.llam-build-provenance" `
-    "$BenchExe.llam-build-provenance"
+    --windows-artifacts `
+    $StaticLib `
+    $SharedDll `
+    $SharedImportLib `
+    $BenchExe
 if ($LASTEXITCODE -ne 0) {
     throw "build provenance rejected release packaging"
 }
