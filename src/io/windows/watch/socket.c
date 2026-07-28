@@ -20,6 +20,42 @@
 
 #include "io/windows/runtime_io_watch_windows_internal.h"
 
+typedef BOOL(WINAPI *llam_windows_compare_object_handles_fn)(
+    HANDLE,
+    HANDLE);
+
+static INIT_ONCE g_llam_windows_compare_handles_once =
+    INIT_ONCE_STATIC_INIT;
+static llam_windows_compare_object_handles_fn
+    g_llam_windows_compare_handles;
+
+static BOOL CALLBACK llam_windows_load_compare_handles(
+    PINIT_ONCE once,
+    PVOID parameter,
+    PVOID *context) {
+    HMODULE module;
+    FARPROC symbol;
+
+    (void)once;
+    (void)parameter;
+    (void)context;
+    module = GetModuleHandleW(L"kernelbase.dll");
+    if (module == NULL) {
+        module = GetModuleHandleW(L"kernel32.dll");
+    }
+    symbol =
+        module != NULL
+            ? GetProcAddress(module, "CompareObjectHandles")
+            : NULL;
+    if (symbol != NULL &&
+        sizeof(g_llam_windows_compare_handles) == sizeof(symbol)) {
+        memcpy(&g_llam_windows_compare_handles,
+               &symbol,
+               sizeof(g_llam_windows_compare_handles));
+    }
+    return TRUE;
+}
+
 static llam_windows_fd_assoc_t *llam_windows_find_assoc_locked(llam_node_t *node, uintptr_t key) {
     llam_windows_fd_assoc_t *assoc;
 
@@ -32,6 +68,157 @@ static llam_windows_fd_assoc_t *llam_windows_find_assoc_locked(llam_node_t *node
         }
     }
     return NULL;
+}
+
+static void llam_windows_unlink_assoc_locked(
+    llam_node_t *node,
+    llam_windows_fd_assoc_t *target) {
+    llam_windows_fd_assoc_t **link;
+
+    if (node == NULL || target == NULL) {
+        return;
+    }
+    link = (llam_windows_fd_assoc_t **)&node->windows_fd_assoc_head;
+    while (*link != NULL) {
+        if (*link == target) {
+            *link = target->next;
+            target->next = NULL;
+            return;
+        }
+        link = &(*link)->next;
+    }
+}
+
+static bool llam_windows_assoc_authority_valid(
+    const llam_windows_fd_assoc_t *assoc) {
+    if (assoc == NULL) {
+        return false;
+    }
+    if (assoc->is_socket) {
+        return (SOCKET)assoc->authority != INVALID_SOCKET;
+    }
+    return (HANDLE)assoc->authority != NULL &&
+           (HANDLE)assoc->authority != INVALID_HANDLE_VALUE;
+}
+
+void llam_windows_fd_assoc_destroy(
+    llam_windows_fd_assoc_t *assoc) {
+    if (assoc == NULL) {
+        return;
+    }
+    if (llam_windows_assoc_authority_valid(assoc)) {
+        if (assoc->is_socket) {
+            (void)closesocket((SOCKET)assoc->authority);
+        } else {
+            (void)CloseHandle((HANDLE)assoc->authority);
+        }
+    }
+    assoc->authority =
+        assoc->is_socket
+            ? (uintptr_t)INVALID_SOCKET
+            : (uintptr_t)INVALID_HANDLE_VALUE;
+    free(assoc);
+}
+
+static void llam_windows_cancel_assoc(
+    const llam_windows_fd_assoc_t *assoc) {
+    if (llam_windows_assoc_authority_valid(assoc)) {
+        /*
+         * Managed close and stale-generation replacement retire the stable
+         * authority, not the caller's reusable numeric value. Cancel every
+         * operation issued through that authority so its final IOCP packet can
+         * release the last association pin.
+         */
+        (void)CancelIoEx((HANDLE)assoc->authority, NULL);
+    }
+}
+
+static int llam_windows_same_kernel_object(
+    uintptr_t current,
+    const llam_windows_fd_assoc_t *assoc) {
+    if (!InitOnceExecuteOnce(
+            &g_llam_windows_compare_handles_once,
+            llam_windows_load_compare_handles,
+            NULL,
+            NULL) ||
+        g_llam_windows_compare_handles == NULL) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    SetLastError(ERROR_SUCCESS);
+    if (g_llam_windows_compare_handles(
+            (HANDLE)current,
+            (HANDLE)assoc->authority)) {
+        return 1;
+    }
+    /*
+     * FALSE is the kernel-authoritative stale/invalid answer. The subsequent
+     * duplication step distinguishes a valid replacement from a closed value;
+     * no numeric cache hit is trusted after this point.
+     */
+    return 0;
+}
+
+static int llam_windows_duplicate_socket_authority(
+    SOCKET socket_fd,
+    uintptr_t *authority_out) {
+    WSAPROTOCOL_INFOW protocol_info;
+    SOCKET duplicate;
+
+    if (authority_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *authority_out = (uintptr_t)INVALID_SOCKET;
+    memset(&protocol_info, 0, sizeof(protocol_info));
+    if (WSADuplicateSocketW(
+            socket_fd,
+            GetCurrentProcessId(),
+            &protocol_info) != 0) {
+        errno =
+            llam_windows_wsa_error_to_errno(WSAGetLastError());
+        return -1;
+    }
+    duplicate = WSASocketW(
+        FROM_PROTOCOL_INFO,
+        FROM_PROTOCOL_INFO,
+        FROM_PROTOCOL_INFO,
+        &protocol_info,
+        0U,
+        WSA_FLAG_OVERLAPPED);
+    if (duplicate == INVALID_SOCKET) {
+        errno =
+            llam_windows_wsa_error_to_errno(WSAGetLastError());
+        return -1;
+    }
+    *authority_out = (uintptr_t)duplicate;
+    return 0;
+}
+
+static int llam_windows_duplicate_handle_authority(
+    HANDLE handle,
+    uintptr_t *authority_out) {
+    HANDLE duplicate = INVALID_HANDLE_VALUE;
+
+    if (authority_out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *authority_out = (uintptr_t)INVALID_HANDLE_VALUE;
+    if (!DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            GetCurrentProcess(),
+            &duplicate,
+            0U,
+            FALSE,
+            DUPLICATE_SAME_ACCESS)) {
+        errno =
+            llam_windows_system_error_to_errno(GetLastError());
+        return -1;
+    }
+    *authority_out = (uintptr_t)duplicate;
+    return 0;
 }
 
 static unsigned llam_windows_try_skip_completion_on_success(llam_node_t *node, HANDLE handle) {
@@ -49,19 +236,20 @@ static unsigned llam_windows_try_skip_completion_on_success(llam_node_t *node, H
     return 0U;
 }
 
-int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
-    llam_windows_fd_assoc_t *assoc;
+static int llam_windows_associate_object(
+    llam_node_t *node,
+    uintptr_t key,
+    bool is_socket) {
+    llam_windows_fd_assoc_t *assoc = NULL;
+    llam_windows_fd_assoc_t *existing;
+    llam_windows_fd_assoc_t *retired = NULL;
     HANDLE handle;
     DWORD error_code;
+    int same_object;
+    int saved_errno = 0;
 
-    if (node == NULL || node->windows_iocp_handle == NULL || LLAM_FD_IS_INVALID(fd)) {
+    if (node == NULL || node->windows_iocp_handle == NULL) {
         errno = EINVAL;
-        return -1;
-    }
-
-    assoc = calloc(1, sizeof(*assoc));
-    if (assoc == NULL) {
-        errno = ENOMEM;
         return -1;
     }
 
@@ -73,71 +261,119 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
      */
     llam_fd_watch_lifecycle_lock();
     pthread_mutex_lock(&node->windows_assoc_lock);
-    if (llam_windows_find_assoc_locked(node, (uintptr_t)fd) != NULL) {
-        pthread_mutex_unlock(&node->windows_assoc_lock);
-        llam_fd_watch_lifecycle_unlock();
-        free(assoc);
-        return 0;
+    existing = llam_windows_find_assoc_locked(node, key);
+    if (existing != NULL) {
+        same_object =
+            existing->is_socket == is_socket
+                ? llam_windows_same_kernel_object(key, existing)
+                : 0;
+        if (same_object < 0) {
+            saved_errno = errno;
+            goto fail_locked;
+        }
+        if (same_object > 0 && !existing->closing) {
+            pthread_mutex_unlock(&node->windows_assoc_lock);
+            llam_fd_watch_lifecycle_unlock();
+            return 0;
+        }
+
+        /*
+         * Raw closesocket()/CloseHandle bypasses LLAM's close boundary, and
+         * Windows can immediately recycle the numeric value. Retire the old
+         * generation before attempting to publish one for the replacement.
+         * In-flight operations keep their authority alive until their canceled
+         * completion packets release the final pins.
+         */
+        llam_windows_unlink_assoc_locked(node, existing);
+        existing->closing = true;
+        llam_windows_cancel_assoc(existing);
+        if (existing->inflight_ops == 0U) {
+            retired = existing;
+        }
     }
-    handle = CreateIoCompletionPort((HANDLE)(uintptr_t)fd, (HANDLE)node->windows_iocp_handle, 0, 0);
-    if (handle == NULL) {
+    if (node->windows_assoc_generation == UINT64_MAX) {
+        saved_errno = EOVERFLOW;
+        goto fail_locked;
+    }
+    assoc = calloc(1, sizeof(*assoc));
+    if (assoc == NULL) {
+        saved_errno = ENOMEM;
+        goto fail_locked;
+    }
+    assoc->fd = (llam_fd_t)key;
+    assoc->authority =
+        is_socket
+            ? (uintptr_t)INVALID_SOCKET
+            : (uintptr_t)INVALID_HANDLE_VALUE;
+    assoc->owner_node = node;
+    assoc->is_socket = is_socket;
+    if ((is_socket
+             ? llam_windows_duplicate_socket_authority(
+                   (SOCKET)key, &assoc->authority)
+             : llam_windows_duplicate_handle_authority(
+                   (HANDLE)key, &assoc->authority)) != 0) {
+        saved_errno = errno;
+        goto fail_locked;
+    }
+
+    /*
+     * Bind the retained authority rather than the caller-owned numeric value.
+     * All OVERLAPPED submissions use this same authority, so a concurrent raw
+     * close/reuse cannot retarget an operation after object validation.
+     */
+    handle = CreateIoCompletionPort(
+        (HANDLE)assoc->authority,
+        (HANDLE)node->windows_iocp_handle,
+        (ULONG_PTR)(uintptr_t)node,
+        0U);
+    if (handle == NULL ||
+        handle != (HANDLE)node->windows_iocp_handle) {
         error_code = GetLastError();
-        pthread_mutex_unlock(&node->windows_assoc_lock);
-        llam_fd_watch_lifecycle_unlock();
-        free(assoc);
-        errno = error_code == ERROR_NOT_ENOUGH_MEMORY ? ENOMEM : EINVAL;
-        return -1;
+        saved_errno =
+            handle == NULL
+                ? llam_windows_system_error_to_errno(error_code)
+                : EXDEV;
+        goto fail_locked;
     }
-    assoc->fd = fd;
-    assoc->skip_completion_on_success = llam_windows_try_skip_completion_on_success(node, (HANDLE)(uintptr_t)fd);
+    assoc->generation =
+        ++node->windows_assoc_generation;
+    assoc->skip_completion_on_success =
+        llam_windows_try_skip_completion_on_success(
+            node, (HANDLE)assoc->authority);
     assoc->next = node->windows_fd_assoc_head;
     node->windows_fd_assoc_head = assoc;
     pthread_mutex_unlock(&node->windows_assoc_lock);
     llam_fd_watch_lifecycle_unlock();
+    llam_windows_fd_assoc_destroy(retired);
     return 0;
+
+fail_locked:
+    pthread_mutex_unlock(&node->windows_assoc_lock);
+    llam_fd_watch_lifecycle_unlock();
+    llam_windows_fd_assoc_destroy(assoc);
+    llam_windows_fd_assoc_destroy(retired);
+    errno = saved_errno != 0 ? saved_errno : EIO;
+    return -1;
 }
 
-int llam_windows_associate_handle(llam_node_t *node, llam_handle_t raw_handle) {
-    uintptr_t key = (uintptr_t)raw_handle;
-    llam_windows_fd_assoc_t *assoc;
-    HANDLE handle;
-    DWORD error_code;
-
-    if (node == NULL || node->windows_iocp_handle == NULL || LLAM_HANDLE_IS_INVALID(raw_handle)) {
+int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd) {
+    if (LLAM_FD_IS_INVALID(fd)) {
         errno = EINVAL;
         return -1;
     }
+    return llam_windows_associate_object(
+        node, (uintptr_t)fd, true);
+}
 
-    assoc = calloc(1, sizeof(*assoc));
-    if (assoc == NULL) {
-        errno = ENOMEM;
+int llam_windows_associate_handle(
+    llam_node_t *node,
+    llam_handle_t raw_handle) {
+    if (LLAM_HANDLE_IS_INVALID(raw_handle)) {
+        errno = EINVAL;
         return -1;
     }
-
-    llam_fd_watch_lifecycle_lock();
-    pthread_mutex_lock(&node->windows_assoc_lock);
-    if (llam_windows_find_assoc_locked(node, key) != NULL) {
-        pthread_mutex_unlock(&node->windows_assoc_lock);
-        llam_fd_watch_lifecycle_unlock();
-        free(assoc);
-        return 0;
-    }
-    handle = CreateIoCompletionPort((HANDLE)raw_handle, (HANDLE)node->windows_iocp_handle, 0, 0);
-    if (handle == NULL) {
-        error_code = GetLastError();
-        pthread_mutex_unlock(&node->windows_assoc_lock);
-        llam_fd_watch_lifecycle_unlock();
-        free(assoc);
-        errno = llam_windows_system_error_to_errno(error_code);
-        return -1;
-    }
-    assoc->fd = (llam_fd_t)key;
-    assoc->skip_completion_on_success = llam_windows_try_skip_completion_on_success(node, (HANDLE)raw_handle);
-    assoc->next = node->windows_fd_assoc_head;
-    node->windows_fd_assoc_head = assoc;
-    pthread_mutex_unlock(&node->windows_assoc_lock);
-    llam_fd_watch_lifecycle_unlock();
-    return 0;
+    return llam_windows_associate_object(
+        node, (uintptr_t)raw_handle, false);
 }
 
 llam_windows_fd_assoc_t *llam_windows_fd_assoc_pin(llam_node_t *node, uintptr_t key) {
@@ -180,7 +416,7 @@ void llam_windows_fd_assoc_unpin(llam_node_t *node, llam_windows_fd_assoc_t *ass
     }
     pthread_mutex_unlock(&node->windows_assoc_lock);
     if (free_assoc) {
-        free(assoc);
+        llam_windows_fd_assoc_destroy(assoc);
     }
     llam_fd_watch_lifecycle_unlock();
 }
@@ -209,6 +445,7 @@ void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
                 }
                 assoc->next = NULL;
                 assoc->closing = true;
+                llam_windows_cancel_assoc(assoc);
                 if (assoc->inflight_ops == 0U) {
                     retired = assoc;
                 }
@@ -218,7 +455,7 @@ void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd) {
             assoc = assoc->next;
         }
         pthread_mutex_unlock(&node->windows_assoc_lock);
-        free(retired);
+        llam_windows_fd_assoc_destroy(retired);
     }
     llam_fd_watch_lifecycle_unlock();
 }

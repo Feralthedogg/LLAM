@@ -681,6 +681,7 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
     node->windows_use_skip_completion_on_success = policy.use_skip_completion_on_success;
     node->windows_io_op_free = NULL;
     node->windows_accept_socket_free = NULL;
+    node->windows_assoc_generation = 0U;
     node->windows_io_op_free_count = 0U;
     node->windows_accept_socket_free_count = 0U;
     node->windows_io_op_free_max = policy.recv_prepost != 0U ? policy.recv_prepost * 4U : 64U;

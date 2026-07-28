@@ -1094,6 +1094,14 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             return -1;
         }
         rt->nodes[i].windows_assoc_lock_initialized = true;
+        rc = pthread_mutex_init(
+            &rt->nodes[i].windows_op_pool_lock, NULL);
+        if (rc != 0) {
+            errno = rc;
+            llam_runtime_shutdown_rt(rt);
+            return -1;
+        }
+        rt->nodes[i].windows_op_pool_lock_initialized = true;
         rc = pthread_mutex_init(&rt->nodes[i].watch_lock, NULL);
         if (rc != 0) {
             errno = rc;

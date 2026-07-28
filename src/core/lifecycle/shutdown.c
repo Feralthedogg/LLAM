@@ -280,6 +280,11 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 pthread_mutex_destroy(&rt->nodes[i].windows_assoc_lock);
                 rt->nodes[i].windows_assoc_lock_initialized = false;
             }
+            if (rt->nodes[i].windows_op_pool_lock_initialized) {
+                pthread_mutex_destroy(
+                    &rt->nodes[i].windows_op_pool_lock);
+                rt->nodes[i].windows_op_pool_lock_initialized = false;
+            }
             if (rt->nodes[i].watch_lock_initialized) {
                 pthread_mutex_destroy(&rt->nodes[i].watch_lock);
                 rt->nodes[i].watch_lock_initialized = false;

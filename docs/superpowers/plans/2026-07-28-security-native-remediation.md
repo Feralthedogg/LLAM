@@ -215,7 +215,7 @@ ThreadSanitizer where supported.
   timeout contract (`EAGAIN` on POSIX, `ETIMEDOUT` on Windows) when no budget
   remains.
 - [x] Run capability, ring, transport, timing, and stress tests.
-- [ ] Commit as `fix: bound broker subjects and batch deadlines`.
+- [x] Commit as `fix: bound broker subjects and batch deadlines`.
 
 ### Task 8: Generation-bind Windows socket IOCP association
 
@@ -223,21 +223,38 @@ ThreadSanitizer where supported.
 - Modify: `src/io/windows/watch/socket.c`
 - Modify: `src/io/windows/watch/windows_submit.c`
 - Modify: `src/io/windows/watch/windows_completion.c`
+- Modify: `src/io/windows/watch/windows_control.c`
 - Modify: `src/io/windows/watch/pool.c`
+- Modify: `src/io/windows/watch/windows_watch.c`
+- Modify: `src/io/windows/runtime_io_watch_windows_internal.h`
 - Modify: `src/internal/runtime_types.h`
-- Modify: `tests/test_windows_handle_io.c`
+- Modify: `src/core/lifecycle/init.c`
+- Modify: `src/core/lifecycle/shutdown.c`
+- Modify: `src/io/engine/io_engine.c`
 - Modify: `tests/test_windows_iocp_io.c`
 
-- [ ] Add a Windows test that closes an associated socket, forces numeric
+- [x] Add a Windows test that closes an associated socket, forces numeric
   `SOCKET` reuse, then submits through the new watch. Assert the new generation
-  is associated and stale completions cannot target it.
-- [ ] Store association in a generation-owned watch object, not a process-wide
+  is associated with the node completion key and a replacement already bound
+  to a foreign IOCP is rejected.
+- [x] Store association in a generation-owned watch object, not a process-wide
   numeric-socket cache. Put generation in every overlapped request and verify
   it before completion delivery.
-- [ ] Reassociate every new watch generation with the runtime IOCP and retire
-  old generation storage only after all overlapped operations complete.
-- [ ] Cross-compile locally, then require the native Windows CI tests.
-- [ ] Commit as `fix: generation-bind Windows IOCP sockets`.
+- [x] Retain a broker-owned socket/HANDLE authority for each generation. Use
+  `CompareObjectHandles` to distinguish the same live kernel object from
+  numeric reuse, associate only a genuinely new object, and issue/cancel/
+  finalize I/O through the retained authority so reuse cannot retarget an
+  operation.
+- [x] Retire stale generation storage only after every overlapped operation
+  releases its pin; synchronize the operation pool for fail-closed foreign
+  completion handling.
+- [x] Record the RED result: the stale numeric hit produced no packet on the
+  runtime IOCP; naively calling `CreateIoCompletionPort` again on an unchanged
+  live socket then broke ordinary `POLLOUT` with `EINVAL`.
+- [x] Cross-compile the IOCP, HANDLE, and API-edge targets with MinGW and run
+  them under Wine; repeat the socket reuse/round-trip test five times.
+- [ ] Require the native Windows CI tests after push.
+- [x] Commit as `fix: generation-bind Windows IOCP sockets`.
 
 ### Task 9: Make CI and release inputs immutable and least-privileged
 

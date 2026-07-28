@@ -37,8 +37,12 @@
 
 typedef struct llam_windows_fd_assoc {
     llam_fd_t fd;
+    uintptr_t authority;
+    llam_node_t *owner_node;
+    uint64_t generation;
     unsigned skip_completion_on_success;
     unsigned inflight_ops;
+    bool is_socket;
     bool closing;
     struct llam_windows_fd_assoc *next;
 } llam_windows_fd_assoc_t;
@@ -51,6 +55,7 @@ typedef struct llam_windows_io_op {
     llam_windows_fd_assoc_t *association;
     SOCKET accept_socket;
     uint64_t magic;
+    uint64_t association_generation;
     unsigned kind;
     unsigned poll_backend;
     short poll_events;
@@ -73,6 +78,7 @@ int llam_windows_associate_fd(llam_node_t *node, llam_fd_t fd);
 int llam_windows_associate_handle(llam_node_t *node, llam_handle_t handle);
 llam_windows_fd_assoc_t *llam_windows_fd_assoc_pin(llam_node_t *node, uintptr_t key);
 void llam_windows_fd_assoc_unpin(llam_node_t *node, llam_windows_fd_assoc_t *assoc);
+void llam_windows_fd_assoc_destroy(llam_windows_fd_assoc_t *assoc);
 void llam_windows_forget_fd_assoc(llam_runtime_t *rt, llam_fd_t fd);
 bool llam_windows_fd_skips_completion_on_success(llam_node_t *node, llam_fd_t fd);
 bool llam_windows_handle_skips_completion_on_success(llam_node_t *node, llam_handle_t handle);

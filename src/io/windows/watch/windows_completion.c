@@ -161,12 +161,14 @@ static void llam_windows_copy_accept_addr(llam_windows_io_op_t *op) {
 
 static int llam_windows_finalize_accept(llam_windows_io_op_t *op) {
     llam_io_req_t *req = op->req;
+    SOCKET listener =
+        (SOCKET)op->association->authority;
 
     if (setsockopt(op->accept_socket,
                    SOL_SOCKET,
                    SO_UPDATE_ACCEPT_CONTEXT,
-                   (const char *)&req->fd,
-                   (int)sizeof(req->fd)) != 0) {
+                   (const char *)&listener,
+                   (int)sizeof(listener)) != 0) {
         return llam_windows_wsa_error_to_errno(WSAGetLastError());
     }
     llam_windows_copy_accept_addr(op);
@@ -176,22 +178,32 @@ static int llam_windows_finalize_accept(llam_windows_io_op_t *op) {
 }
 
 static int llam_windows_finalize_connect(llam_windows_io_op_t *op) {
-    llam_io_req_t *req = op->req;
+    SOCKET socket_fd =
+        (SOCKET)op->association->authority;
 
-    if (setsockopt(req->fd, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0) != 0) {
+    if (setsockopt(
+            socket_fd,
+            SOL_SOCKET,
+            SO_UPDATE_CONNECT_CONTEXT,
+            NULL,
+            0) != 0) {
         return llam_windows_wsa_error_to_errno(WSAGetLastError());
     }
     return 0;
 }
 
-static void llam_windows_handle_completion(const llam_windows_iocp_completion_t *completion) {
+static void llam_windows_handle_completion(
+    llam_node_t *draining_node,
+    const llam_windows_iocp_completion_t *completion) {
     llam_windows_io_op_t *op = (llam_windows_io_op_t *)completion->overlapped;
+    llam_windows_fd_assoc_t *association;
     llam_io_req_t *req;
     llam_node_t *node;
     DWORD transferred;
     DWORD flags = 0;
     int result;
     int err = 0;
+    bool owner_mismatch;
 
     if (completion->overlapped == 0U) {
         return;
@@ -204,7 +216,25 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
     node = op->node;
     transferred = completion->bytes;
     llam_fd_watch_lifecycle_lock();
-    if (op->association == NULL || op->association->closing) {
+    association = op->association;
+    owner_mismatch =
+        draining_node != node ||
+        completion->key != (uintptr_t)node ||
+        association == NULL ||
+        (association != NULL &&
+         association->owner_node != node);
+    if (owner_mismatch) {
+        /*
+         * A packet drained by the wrong node or carrying a foreign completion
+         * key must not mutate descriptor state or recycle the operation into an
+         * unowned worker pool. The pool itself is synchronized as a second
+         * line of defense, and the request is retired fail-closed.
+         */
+        llam_record_fatal(node->runtime, EXDEV);
+        err = ECANCELED;
+    } else if (association->generation !=
+                   op->association_generation ||
+               association->closing) {
         /*
          * Public close has already invalidated this exact association
          * generation.  The completion packet still owns op/request lifetime,
@@ -216,11 +246,25 @@ static void llam_windows_handle_completion(const llam_windows_iocp_completion_t 
                req->kind == LLAM_IO_KIND_HANDLE_WRITE ||
                req->kind == LLAM_IO_KIND_HANDLE_PREAD ||
                req->kind == LLAM_IO_KIND_HANDLE_PWRITE) {
-        if (!GetOverlappedResult((HANDLE)req->handle, &op->overlapped, &transferred, FALSE)) {
+        if (association->is_socket) {
+            err = EINVAL;
+        } else if (!GetOverlappedResult(
+                       (HANDLE)association->authority,
+                       &op->overlapped,
+                       &transferred,
+                       FALSE)) {
             err = llam_windows_system_error_to_errno(GetLastError());
         }
-    } else if (!WSAGetOverlappedResult(req->fd, &op->overlapped, &transferred, FALSE, &flags)) {
-        err = llam_windows_wsa_error_to_errno(WSAGetLastError());
+    } else if (!association->is_socket) {
+        err = EINVAL;
+    } else if (!WSAGetOverlappedResult(
+                   (SOCKET)association->authority,
+                   &op->overlapped,
+                   &transferred,
+                   FALSE,
+                   &flags)) {
+        err =
+            llam_windows_wsa_error_to_errno(WSAGetLastError());
     }
 
     if (req->kind == LLAM_IO_KIND_POLL && err == EMSGSIZE &&
@@ -266,9 +310,10 @@ void llam_windows_complete_immediate_op(llam_windows_io_op_t *op, DWORD bytes) {
      * sizing, owner routing, and op recycling stay identical to queued packets.
      */
     memset(&completion, 0, sizeof(completion));
+    completion.key = (uintptr_t)op->node;
     completion.overlapped = (uintptr_t)&op->overlapped;
     completion.bytes = (uint32_t)bytes;
-    llam_windows_handle_completion(&completion);
+    llam_windows_handle_completion(op->node, &completion);
 }
 
 void llam_windows_drain_completions(llam_node_t *node, DWORD timeout_ms) {
@@ -296,7 +341,7 @@ void llam_windows_drain_completions(llam_node_t *node, DWORD timeout_ms) {
                 llam_drain_node_wake(node);
                 continue;
             }
-            llam_windows_handle_completion(&entries[i]);
+            llam_windows_handle_completion(node, &entries[i]);
         }
         rounds += 1U;
         if (count < batch || rounds >= 4U) {

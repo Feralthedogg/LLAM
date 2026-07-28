@@ -72,15 +72,16 @@ void llam_windows_iocp_cleanup_node(llam_node_t *node) {
         pthread_mutex_lock(&node->windows_assoc_lock);
     }
     assoc = node->windows_fd_assoc_head;
-    while (assoc != NULL) {
-        llam_windows_fd_assoc_t *next = assoc->next;
-
-        free(assoc);
-        assoc = next;
-    }
     node->windows_fd_assoc_head = NULL;
     if (node->windows_assoc_lock_initialized) {
         pthread_mutex_unlock(&node->windows_assoc_lock);
+    }
+    while (assoc != NULL) {
+        llam_windows_fd_assoc_t *next = assoc->next;
+
+        assoc->next = NULL;
+        llam_windows_fd_assoc_destroy(assoc);
+        assoc = next;
     }
     llam_windows_accept_socket_pool_destroy(node);
     llam_windows_io_op_pool_destroy(node);

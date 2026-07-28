@@ -48,6 +48,8 @@ int main(void) {
 
 #define LLAM_WINDOWS_ASSOC_RACE_TASKS 4U
 #define LLAM_WINDOWS_ASSOC_RACE_ROUNDS 64U
+#define LLAM_WINDOWS_SOCKET_REUSE_LIMIT 65536U
+#define LLAM_WINDOWS_SOCKET_REUSE_TIMEOUT_MS 2000U
 
 typedef struct windows_iocp_state {
     llam_fd_t listener;
@@ -135,6 +137,417 @@ static llam_fd_t create_overlapped_udp_socket(void) {
         return LLAM_INVALID_FD;
     }
     return (llam_fd_t)socket_fd;
+}
+
+static SOCKET reacquire_same_udp_socket_value(SOCKET wanted,
+                                              unsigned *out_attempts) {
+    SOCKET *held;
+    SOCKET result = INVALID_SOCKET;
+    unsigned held_count = 0U;
+    unsigned attempts;
+
+    if (out_attempts != NULL) {
+        *out_attempts = 0U;
+    }
+    held = calloc(LLAM_WINDOWS_SOCKET_REUSE_LIMIT, sizeof(*held));
+    if (held == NULL) {
+        errno = ENOMEM;
+        return INVALID_SOCKET;
+    }
+    for (attempts = 1U;
+         attempts <= LLAM_WINDOWS_SOCKET_REUSE_LIMIT;
+         ++attempts) {
+        SOCKET current =
+            (SOCKET)create_overlapped_udp_socket();
+
+        if (current == INVALID_SOCKET) {
+            break;
+        }
+        if (current == wanted) {
+            result = current;
+            break;
+        }
+        held[held_count++] = current;
+    }
+    for (unsigned i = 0U; i < held_count; ++i) {
+        (void)closesocket(held[i]);
+    }
+    free(held);
+    if (out_attempts != NULL) {
+        *out_attempts =
+            attempts <= LLAM_WINDOWS_SOCKET_REUSE_LIMIT
+                ? attempts
+                : LLAM_WINDOWS_SOCKET_REUSE_LIMIT;
+    }
+    return result;
+}
+
+static int bind_loopback_udp(SOCKET receiver,
+                             struct sockaddr_in *out_address) {
+    struct sockaddr_in address;
+    int address_length = (int)sizeof(address);
+
+    if (receiver == INVALID_SOCKET || out_address == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    if (bind(receiver,
+             (const struct sockaddr *)&address,
+             (int)sizeof(address)) != 0 ||
+        getsockname(receiver,
+                    (struct sockaddr *)&address,
+                    &address_length) != 0) {
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+        return -1;
+    }
+    *out_address = address;
+    return 0;
+}
+
+static int wait_for_native_udp_completion(SOCKET receiver,
+                                          OVERLAPPED *overlapped) {
+    DWORD bytes = 0U;
+    DWORD flags = 0U;
+
+    for (unsigned i = 0U; i < 200U; ++i) {
+        if (WSAGetOverlappedResult(
+                receiver, overlapped, &bytes, FALSE, &flags)) {
+            return bytes == 1U ? 0 : -1;
+        }
+        if (WSAGetLastError() != WSA_IO_INCOMPLETE) {
+            return -1;
+        }
+        Sleep(10U);
+    }
+    return -1;
+}
+
+static int init_isolated_iocp_node(llam_node_t *node) {
+    int lock_rc;
+
+    if (node == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    memset(node, 0, sizeof(*node));
+    node->runtime = llam_runtime_default_storage();
+    lock_rc = pthread_mutex_init(&node->windows_assoc_lock, NULL);
+    if (lock_rc != 0) {
+        errno = lock_rc;
+        return -1;
+    }
+    node->windows_assoc_lock_initialized = true;
+    if (llam_windows_iocp_create(
+            NULL, &node->windows_iocp_handle) != 0) {
+        (void)pthread_mutex_destroy(&node->windows_assoc_lock);
+        node->windows_assoc_lock_initialized = false;
+        return -1;
+    }
+    return 0;
+}
+
+static void cleanup_isolated_iocp_node(llam_node_t *node) {
+    llam_windows_fd_assoc_t *association;
+
+    if (node == NULL) {
+        return;
+    }
+    if (node->windows_assoc_lock_initialized) {
+        (void)pthread_mutex_lock(&node->windows_assoc_lock);
+    }
+    association =
+        (llam_windows_fd_assoc_t *)node->windows_fd_assoc_head;
+    node->windows_fd_assoc_head = NULL;
+    if (node->windows_assoc_lock_initialized) {
+        (void)pthread_mutex_unlock(&node->windows_assoc_lock);
+    }
+    while (association != NULL) {
+        llam_windows_fd_assoc_t *next = association->next;
+
+        association->next = NULL;
+        llam_windows_fd_assoc_destroy(association);
+        association = next;
+    }
+    llam_windows_iocp_close(node->windows_iocp_handle);
+    node->windows_iocp_handle = NULL;
+    if (node->windows_assoc_lock_initialized) {
+        (void)pthread_mutex_destroy(&node->windows_assoc_lock);
+        node->windows_assoc_lock_initialized = false;
+    }
+}
+
+static bool isolated_assoc_snapshot(
+    llam_node_t *node,
+    SOCKET socket_fd,
+    uint64_t *generation_out,
+    uintptr_t *authority_out) {
+    llam_windows_fd_assoc_t *association;
+    bool found = false;
+
+    if (node == NULL) {
+        return false;
+    }
+    (void)pthread_mutex_lock(&node->windows_assoc_lock);
+    association =
+        (llam_windows_fd_assoc_t *)node->windows_fd_assoc_head;
+    while (association != NULL) {
+        if ((uintptr_t)association->fd ==
+            (uintptr_t)socket_fd) {
+            if (generation_out != NULL) {
+                *generation_out = association->generation;
+            }
+            if (authority_out != NULL) {
+                *authority_out = association->authority;
+            }
+            found =
+                association->is_socket &&
+                association->owner_node == node &&
+                !association->closing;
+            break;
+        }
+        association = association->next;
+    }
+    (void)pthread_mutex_unlock(&node->windows_assoc_lock);
+    return found;
+}
+
+static int test_raw_socket_reuse_revalidates_iocp(void) {
+    llam_windows_iocp_completion_t completion;
+    llam_node_t node;
+    SOCKET original = INVALID_SOCKET;
+    SOCKET receiver = INVALID_SOCKET;
+    SOCKET sender = INVALID_SOCKET;
+    SOCKET wanted = INVALID_SOCKET;
+    struct sockaddr_in address;
+    struct sockaddr_storage from;
+    OVERLAPPED overlapped;
+    WSABUF buffer;
+    DWORD flags = 0U;
+    DWORD bytes = 0U;
+    size_t count = 0U;
+    unsigned attempts = 0U;
+    uint64_t initial_generation = 0U;
+    uint64_t replacement_generation = 0U;
+    uintptr_t initial_authority = 0U;
+    uintptr_t replacement_authority = 0U;
+    int from_length = (int)sizeof(from);
+    char byte = '\0';
+    int failed = 1;
+    bool operation_submitted = false;
+    bool node_initialized = false;
+
+    if (init_isolated_iocp_node(&node) != 0) {
+        return fail_errno("socket reuse test IOCP node setup failed");
+    }
+    node_initialized = true;
+    original = (SOCKET)create_overlapped_udp_socket();
+    if (original == INVALID_SOCKET ||
+        llam_windows_associate_fd(&node, (llam_fd_t)original) != 0) {
+        (void)fail_errno("initial socket IOCP association failed");
+        goto cleanup;
+    }
+    if (!isolated_assoc_snapshot(
+            &node,
+            original,
+            &initial_generation,
+            &initial_authority)) {
+        (void)fail_errno(
+            "initial socket association metadata missing");
+        goto cleanup;
+    }
+    wanted = original;
+    if (closesocket(original) != 0) {
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+        (void)fail_errno("raw close before socket reuse failed");
+        goto cleanup;
+    }
+    original = INVALID_SOCKET;
+    receiver = reacquire_same_udp_socket_value(wanted, &attempts);
+    if (receiver == INVALID_SOCKET) {
+        printf("[test_windows_iocp_io] socket reuse unavailable attempts=%u; skipped\n",
+               attempts);
+        failed = 0;
+        goto cleanup;
+    }
+    /*
+     * The numeric cache still describes the closed object. This call must ask
+     * the kernel about the replacement instead of treating the equal value as
+     * proof of an existing association.
+     */
+    if (llam_windows_associate_fd(
+            &node, (llam_fd_t)receiver) != 0 ||
+        bind_loopback_udp(receiver, &address) != 0) {
+        (void)fail_errno("replacement socket IOCP revalidation failed");
+        goto cleanup;
+    }
+    if (!isolated_assoc_snapshot(
+            &node,
+            receiver,
+            &replacement_generation,
+            &replacement_authority) ||
+        replacement_generation <= initial_generation ||
+        replacement_authority == initial_authority) {
+        fprintf(stderr,
+                "[test_windows_iocp_io] replacement did not publish a new "
+                "owned association generation\n");
+        goto cleanup;
+    }
+
+    memset(&from, 0, sizeof(from));
+    memset(&overlapped, 0, sizeof(overlapped));
+    memset(&completion, 0, sizeof(completion));
+    buffer.buf = &byte;
+    buffer.len = 1U;
+    if (WSARecvFrom(receiver,
+                    &buffer,
+                    1U,
+                    &bytes,
+                    &flags,
+                    (struct sockaddr *)&from,
+                    &from_length,
+                    &overlapped,
+                    NULL) != SOCKET_ERROR ||
+        WSAGetLastError() != WSA_IO_PENDING) {
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+        (void)fail_errno("replacement receive did not pend");
+        goto cleanup;
+    }
+    operation_submitted = true;
+    sender = (SOCKET)create_overlapped_udp_socket();
+    if (sender == INVALID_SOCKET ||
+        sendto(sender,
+               "x",
+               1,
+               0,
+               (const struct sockaddr *)&address,
+               (int)sizeof(address)) != 1) {
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+        (void)fail_errno("replacement receive trigger failed");
+        goto cleanup;
+    }
+    if (llam_windows_iocp_drain(
+            node.windows_iocp_handle,
+            &completion,
+            1U,
+            LLAM_WINDOWS_SOCKET_REUSE_TIMEOUT_MS,
+            &count) != 0 ||
+        count != 1U ||
+        completion.key != (uintptr_t)&node ||
+        completion.overlapped != (uintptr_t)&overlapped ||
+        completion.bytes != 1U) {
+        fprintf(stderr,
+                "[test_windows_iocp_io] replacement completed without source "
+                "IOCP packet attempts=%u count=%zu key=%llu\n",
+                attempts,
+                count,
+                (unsigned long long)completion.key);
+        goto cleanup;
+    }
+    operation_submitted = false;
+    failed = 0;
+
+cleanup:
+    if (operation_submitted && receiver != INVALID_SOCKET) {
+        (void)CancelIoEx((HANDLE)(uintptr_t)receiver, &overlapped);
+        (void)wait_for_native_udp_completion(receiver, &overlapped);
+    }
+    if (sender != INVALID_SOCKET) {
+        (void)closesocket(sender);
+    }
+    if (receiver != INVALID_SOCKET) {
+        (void)closesocket(receiver);
+    }
+    if (original != INVALID_SOCKET) {
+        (void)closesocket(original);
+    }
+    if (node_initialized) {
+        cleanup_isolated_iocp_node(&node);
+    }
+    return failed;
+}
+
+static int test_raw_socket_reuse_rejects_foreign_iocp(void) {
+    llam_node_t node;
+    void *foreign_port = NULL;
+    SOCKET original = INVALID_SOCKET;
+    SOCKET replacement = INVALID_SOCKET;
+    SOCKET wanted = INVALID_SOCKET;
+    unsigned attempts = 0U;
+    int failed = 1;
+    bool node_initialized = false;
+
+    if (init_isolated_iocp_node(&node) != 0) {
+        return fail_errno("foreign source IOCP setup failed");
+    }
+    node_initialized = true;
+    if (llam_windows_iocp_create(NULL, &foreign_port) != 0) {
+        cleanup_isolated_iocp_node(&node);
+        return fail_errno("foreign IOCP setup failed");
+    }
+    original = (SOCKET)create_overlapped_udp_socket();
+    if (original == INVALID_SOCKET ||
+        llam_windows_associate_fd(&node, (llam_fd_t)original) != 0) {
+        (void)fail_errno("foreign test initial association failed");
+        goto cleanup;
+    }
+    wanted = original;
+    if (closesocket(original) != 0) {
+        errno = llam_windows_wsa_error_to_errno(WSAGetLastError());
+        (void)fail_errno("foreign test raw close failed");
+        goto cleanup;
+    }
+    original = INVALID_SOCKET;
+    replacement =
+        reacquire_same_udp_socket_value(wanted, &attempts);
+    if (replacement == INVALID_SOCKET) {
+        printf("[test_windows_iocp_io] foreign socket reuse unavailable "
+               "attempts=%u; skipped\n",
+               attempts);
+        failed = 0;
+        goto cleanup;
+    }
+    if (CreateIoCompletionPort((HANDLE)(uintptr_t)replacement,
+                               (HANDLE)foreign_port,
+                               (ULONG_PTR)UINT64_C(0x464f524549474e),
+                               0U) == NULL) {
+        errno = llam_windows_system_error_to_errno(GetLastError());
+        (void)fail_errno("foreign IOCP association failed");
+        goto cleanup;
+    }
+    errno = 0;
+    if (llam_windows_associate_fd(
+            &node, (llam_fd_t)replacement) == 0) {
+        fprintf(stderr,
+                "[test_windows_iocp_io] stale numeric association accepted "
+                "foreign replacement attempts=%u\n",
+                attempts);
+        goto cleanup;
+    }
+    if (isolated_assoc_snapshot(
+            &node, replacement, NULL, NULL)) {
+        fprintf(stderr,
+                "[test_windows_iocp_io] rejected foreign replacement left "
+                "stale source metadata\n");
+        goto cleanup;
+    }
+    failed = 0;
+
+cleanup:
+    if (replacement != INVALID_SOCKET) {
+        (void)closesocket(replacement);
+    }
+    if (original != INVALID_SOCKET) {
+        (void)closesocket(original);
+    }
+    llam_windows_iocp_close(foreign_port);
+    if (node_initialized) {
+        cleanup_isolated_iocp_node(&node);
+    }
+    return failed;
 }
 
 static int setup_listener(windows_iocp_state_t *state) {
@@ -528,6 +941,12 @@ int main(void) {
     }
     test_note("begin invalid fd probes");
     if (test_invalid_owned_fd_errors() != 0) {
+        llam_runtime_shutdown();
+        return 1;
+    }
+    test_note("begin raw socket reuse probes");
+    if (test_raw_socket_reuse_revalidates_iocp() != 0 ||
+        test_raw_socket_reuse_rejects_foreign_iocp() != 0) {
         llam_runtime_shutdown();
         return 1;
     }

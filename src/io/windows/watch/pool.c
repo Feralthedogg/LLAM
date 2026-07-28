@@ -136,12 +136,19 @@ void llam_windows_accept_socket_pool_destroy(llam_node_t *node) {
 llam_windows_io_op_t *llam_windows_io_op_create(llam_node_t *node, llam_io_req_t *req) {
     llam_windows_io_op_t *op = NULL;
 
-    if (node != NULL && node->windows_io_op_free != NULL) {
-        op = node->windows_io_op_free;
-        node->windows_io_op_free = op->next_free;
-        if (node->windows_io_op_free_count > 0U) {
-            node->windows_io_op_free_count -= 1U;
+    if (node != NULL &&
+        node->windows_op_pool_lock_initialized) {
+        pthread_mutex_lock(&node->windows_op_pool_lock);
+        if (node->windows_io_op_free != NULL) {
+            op = node->windows_io_op_free;
+            node->windows_io_op_free = op->next_free;
+            if (node->windows_io_op_free_count > 0U) {
+                node->windows_io_op_free_count -= 1U;
+            }
         }
+        pthread_mutex_unlock(&node->windows_op_pool_lock);
+    }
+    if (op != NULL) {
         memset(op, 0, sizeof(*op));
     } else {
         op = calloc(1, sizeof(*op));
@@ -180,13 +187,23 @@ void llam_windows_io_op_free(llam_windows_io_op_t *op) {
     }
     if (node != NULL) {
         max_free = node->windows_io_op_free_max != 0U ? node->windows_io_op_free_max : 64U;
+        if (node->windows_op_pool_lock_initialized) {
+            pthread_mutex_lock(&node->windows_op_pool_lock);
+        }
         if (node->windows_io_op_free_count < max_free) {
             memset(op, 0, sizeof(*op));
             op->accept_socket = INVALID_SOCKET;
             op->next_free = node->windows_io_op_free;
             node->windows_io_op_free = op;
             node->windows_io_op_free_count += 1U;
+            if (node->windows_op_pool_lock_initialized) {
+                pthread_mutex_unlock(
+                    &node->windows_op_pool_lock);
+            }
             return;
+        }
+        if (node->windows_op_pool_lock_initialized) {
+            pthread_mutex_unlock(&node->windows_op_pool_lock);
         }
     }
     free(op);
@@ -198,7 +215,15 @@ void llam_windows_io_op_pool_destroy(llam_node_t *node) {
     if (node == NULL) {
         return;
     }
+    if (node->windows_op_pool_lock_initialized) {
+        pthread_mutex_lock(&node->windows_op_pool_lock);
+    }
     op = node->windows_io_op_free;
+    node->windows_io_op_free = NULL;
+    node->windows_io_op_free_count = 0U;
+    if (node->windows_op_pool_lock_initialized) {
+        pthread_mutex_unlock(&node->windows_op_pool_lock);
+    }
     while (op != NULL) {
         llam_windows_io_op_t *next = op->next_free;
 
@@ -208,6 +233,4 @@ void llam_windows_io_op_pool_destroy(llam_node_t *node) {
         free(op);
         op = next;
     }
-    node->windows_io_op_free = NULL;
-    node->windows_io_op_free_count = 0U;
 }
