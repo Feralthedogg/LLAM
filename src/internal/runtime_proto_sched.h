@@ -56,6 +56,12 @@ void *llam_shard_worker_main(void *arg);
  * Normal queue and deque primitives.
  */
 void llam_cldeque_init(llam_cldeque_t *deque);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_cldeque_steal_claimed_hook_fn)(void *context);
+void llam_sched_test_set_cldeque_steal_claimed_hook(
+    llam_cldeque_steal_claimed_hook_fn hook,
+    void *context);
+#endif
 bool llam_lockfree_normq_enabled(const llam_runtime_t *rt);
 unsigned llam_norm_queue_depth(const llam_shard_t *shard);
 bool llam_norm_queue_note_enqueue(llam_shard_t *shard);

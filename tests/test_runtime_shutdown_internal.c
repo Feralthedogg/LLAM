@@ -4528,6 +4528,155 @@ static int exercise_norm_depth_counter_wrap_is_rejected(void) {
     return 0;
 }
 
+typedef struct cldeque_delayed_thief_state {
+    pthread_mutex_t lock;
+    pthread_cond_t cv;
+    unsigned hook_reached;
+    unsigned release_hook;
+    llam_shard_t *victim;
+    llam_task_t *stolen;
+} cldeque_delayed_thief_state_t;
+
+static void cldeque_delayed_thief_hook(void *context) {
+    cldeque_delayed_thief_state_t *state = context;
+
+    pthread_mutex_lock(&state->lock);
+    state->hook_reached = 1U;
+    pthread_cond_broadcast(&state->cv);
+    while (state->release_hook == 0U) {
+        pthread_cond_wait(&state->cv, &state->lock);
+    }
+    pthread_mutex_unlock(&state->lock);
+}
+
+static void *cldeque_delayed_thief_thread_main(void *context) {
+    cldeque_delayed_thief_state_t *state = context;
+
+    state->stolen = llam_norm_queue_steal(state->victim);
+    return NULL;
+}
+
+static int exercise_cldeque_delayed_thief_preserves_wrapped_task(void) {
+    llam_runtime_t runtime;
+    llam_shard_t shard;
+    cldeque_delayed_thief_state_t state;
+    llam_task_t *tasks = NULL;
+    pthread_t thief;
+    bool mutex_initialized = false;
+    bool cv_initialized = false;
+    bool thief_started = false;
+    const char *failure = NULL;
+    size_t i;
+
+    memset(&runtime, 0, sizeof(runtime));
+    memset(&shard, 0, sizeof(shard));
+    memset(&state, 0, sizeof(state));
+    tasks = calloc(LLAM_NORM_QUEUE_CAP + 1U, sizeof(*tasks));
+    if (tasks == NULL) {
+        return fail_errno("cldeque wraparound task allocation failed");
+    }
+    if (pthread_mutex_init(&state.lock, NULL) != 0) {
+        failure = "cldeque wraparound mutex init failed";
+        goto cleanup;
+    }
+    mutex_initialized = true;
+    if (pthread_cond_init(&state.cv, NULL) != 0) {
+        failure = "cldeque wraparound condition init failed";
+        goto cleanup;
+    }
+    cv_initialized = true;
+
+    runtime.experimental_lockfree_normq = 1U;
+    shard.runtime = &runtime;
+    state.victim = &shard;
+    atomic_init(&runtime.fatal_errno, 0);
+    atomic_init(&shard.norm_depth, 0U);
+    llam_cldeque_init(&shard.norm_cldeque);
+    llam_sched_test_set_cldeque_steal_claimed_hook(
+        cldeque_delayed_thief_hook, &state);
+
+    if (!llam_norm_queue_push_owner_locked(&shard, &tasks[0])) {
+        failure = "cldeque initial task push failed";
+        goto cleanup;
+    }
+    if (pthread_create(
+            &thief,
+            NULL,
+            cldeque_delayed_thief_thread_main,
+            &state) != 0) {
+        failure = "cldeque delayed thief thread create failed";
+        goto cleanup;
+    }
+    thief_started = true;
+
+    pthread_mutex_lock(&state.lock);
+    while (state.hook_reached == 0U) {
+        pthread_cond_wait(&state.cv, &state.lock);
+    }
+    pthread_mutex_unlock(&state.lock);
+
+    for (i = 1U; i <= LLAM_NORM_QUEUE_CAP; ++i) {
+        if (!llam_norm_queue_push_owner_locked(&shard, &tasks[i])) {
+            failure = "cldeque replacement task push failed";
+            goto cleanup;
+        }
+    }
+    if (atomic_load_explicit(
+            &shard.norm_cldeque.buffer[0],
+            memory_order_acquire) != &tasks[LLAM_NORM_QUEUE_CAP]) {
+        failure = "cldeque final replacement did not wrap to slot zero";
+        goto cleanup;
+    }
+
+    pthread_mutex_lock(&state.lock);
+    state.release_hook = 1U;
+    pthread_cond_broadcast(&state.cv);
+    pthread_mutex_unlock(&state.lock);
+    pthread_join(thief, NULL);
+    thief_started = false;
+    llam_sched_test_set_cldeque_steal_claimed_hook(NULL, NULL);
+
+    if (state.stolen != &tasks[0]) {
+        failure = "cldeque thief returned the wrong claimed task";
+        goto cleanup;
+    }
+    for (i = LLAM_NORM_QUEUE_CAP; i > 0U; --i) {
+        llam_task_t *popped =
+            llam_norm_queue_pop_owner_locked(&shard);
+
+        if (popped != &tasks[i]) {
+            failure = i == LLAM_NORM_QUEUE_CAP
+                          ? "cldeque delayed thief erased wrapped task"
+                          : "cldeque replacement pop order was corrupted";
+            goto cleanup;
+        }
+    }
+    if (llam_norm_queue_pop_owner_locked(&shard) != NULL ||
+        atomic_load_explicit(
+            &shard.norm_depth,
+            memory_order_acquire) != 0U) {
+        failure = "cldeque wraparound drain did not finish empty";
+    }
+
+cleanup:
+    if (thief_started) {
+        pthread_mutex_lock(&state.lock);
+        state.release_hook = 1U;
+        pthread_cond_broadcast(&state.cv);
+        pthread_mutex_unlock(&state.lock);
+        pthread_join(thief, NULL);
+    }
+    llam_sched_test_set_cldeque_steal_claimed_hook(NULL, NULL);
+    if (cv_initialized) {
+        pthread_cond_destroy(&state.cv);
+    }
+    if (mutex_initialized) {
+        pthread_mutex_destroy(&state.lock);
+    }
+    free(tasks);
+    return failure != NULL ? fail_msg(failure) : 0;
+}
+
 static int exercise_channel_inflight_waiter_counter_overflow_is_rejected(void) {
     llam_channel_t *handle;
     llam_channel_t *channel;
@@ -6940,6 +7089,9 @@ int main(void) {
         return 1;
     }
     if (exercise_norm_depth_counter_wrap_is_rejected() != 0) {
+        return 1;
+    }
+    if (exercise_cldeque_delayed_thief_preserves_wrapped_task() != 0) {
         return 1;
     }
     if (exercise_channel_inflight_waiter_counter_overflow_is_rejected() != 0) {

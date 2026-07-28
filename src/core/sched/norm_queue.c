@@ -28,6 +28,30 @@
 
 #define LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST 8U
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static llam_cldeque_steal_claimed_hook_fn g_cldeque_steal_claimed_hook;
+static void *g_cldeque_steal_claimed_hook_context;
+
+void llam_sched_test_set_cldeque_steal_claimed_hook(
+    llam_cldeque_steal_claimed_hook_fn hook,
+    void *context) {
+    g_cldeque_steal_claimed_hook = hook;
+    g_cldeque_steal_claimed_hook_context = context;
+}
+
+static void llam_cldeque_test_after_steal_claim(void) {
+    llam_cldeque_steal_claimed_hook_fn hook =
+        g_cldeque_steal_claimed_hook;
+
+    if (hook != NULL) {
+        hook(g_cldeque_steal_claimed_hook_context);
+    }
+}
+#else
+static void llam_cldeque_test_after_steal_claim(void) {
+}
+#endif
+
 /**
  * @brief Return the best-effort normal queue depth for a shard.
  *
@@ -180,7 +204,14 @@ static llam_task_t *llam_cldeque_steal_top(llam_cldeque_t *deque) {
         }
     }
 
-    atomic_store_explicit(&deque->buffer[top & (LLAM_NORM_QUEUE_CAP - 1U)], NULL, memory_order_release);
+    llam_cldeque_test_after_steal_claim();
+    /*
+     * Advancing top releases this logical slot immediately.  Do not clear its
+     * physical cell: the owner can reuse the released capacity, wrap the ring,
+     * and publish a new task here before this thief returns.  A stale pointer
+     * outside [top, bottom) is ignored and the owner overwrites it before
+     * publishing a wrapped logical index through bottom.
+     */
     return task;
 }
 
