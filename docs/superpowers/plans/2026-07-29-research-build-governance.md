@@ -168,8 +168,16 @@ git commit -m "test: stabilize canceled accept disposal"
 - Modify: `CMakeLists.txt`
 - Modify: `Makefile`
 - Create: `scripts/test_research_build_boundary.py`
-- Modify: `.github/workflows/ci.yml`
+- Modify: `.github/workflows/linux.yml`
+- Modify: `.github/workflows/macos.yml`
+- Modify: `.github/workflows/bsd.yml`
+- Modify: `.github/workflows/nightly.yml`
+- Modify: `.github/workflows/stress.yml`
+- Modify: `.github/workflows/soak.yml`
+- Modify: `.github/workflows/release.yml`
 - Modify: `.github/workflows/leir-native-research.yml`
+- Modify: `.github/workflows/leir-research.yml`
+- Modify: `.github/workflows/srem-research.yml`
 - Modify: `docs/build.md`
 
 **Interfaces:**
@@ -283,9 +291,12 @@ fi
 
 - [ ] **Step 6: Make CI intent explicit**
 
-Standard platform workflows configure `LLAM_BUILD_RESEARCH=OFF` and do not
-name research binaries. The dedicated LEIR workflow configures
-`LLAM_BUILD_RESEARCH=ON` and uses `research-test`.
+Stable build invocations in `linux.yml`, `macos.yml`, `bsd.yml`,
+`nightly.yml`, `stress.yml`, `soak.yml`, and `release.yml` configure
+`LLAM_BUILD_RESEARCH=OFF`/`0` and do not name research binaries. The
+`leir-native-research.yml`, `leir-research.yml`, and `srem-research.yml`
+workflows configure `LLAM_BUILD_RESEARCH=ON`/`1` and invoke their explicit
+research test targets.
 
 - [ ] **Step 7: Run boundary and build tests**
 
@@ -311,7 +322,13 @@ Expected: all pass. Default build logs contain no experiment compilation.
 
 ```bash
 git add CMakeLists.txt Makefile scripts/test_research_build_boundary.py \
-  .github/workflows/ci.yml .github/workflows/leir-native-research.yml \
+  .github/workflows/linux.yml .github/workflows/macos.yml \
+  .github/workflows/bsd.yml .github/workflows/nightly.yml \
+  .github/workflows/stress.yml .github/workflows/soak.yml \
+  .github/workflows/release.yml \
+  .github/workflows/leir-native-research.yml \
+  .github/workflows/leir-research.yml \
+  .github/workflows/srem-research.yml \
   docs/build.md
 git commit -m "build: isolate research targets by default"
 ```
@@ -334,8 +351,8 @@ git commit -m "build: isolate research targets by default"
 - Modify: `src/io/watch/watch_queue.c`
 - Modify: `src/io/linux/watch/linux_submit.c`
 - Modify: `src/io/linux/watch/cqe.c`
-- Modify: `src/io/darwin/watch/kqueue_watch.c`
-- Modify: `src/io/windows/watch/iocp_watch.c`
+- Modify: `src/io/darwin/watch/darwin_completion.c`
+- Modify: `src/io/windows/watch/windows_completion.c`
 - Modify: `Makefile`
 - Modify: `CMakeLists.txt`
 - Modify: `scripts/test_research_build_boundary.py`
@@ -446,7 +463,7 @@ git commit -m "build: exclude native research internals"
 - Modify: `include/llam/runtime.h`
 - Modify: `src/core/base/abi.c`
 - Modify: `scripts/package_release.sh`
-- Modify: `.github/workflows/ci.yml`
+- Modify: `.github/workflows/linux.yml`
 
 **Interfaces:**
 
@@ -540,7 +557,7 @@ Expected: all pass.
 git add config/llam-version.json config/llam-sources.json \
   scripts/audit_build_manifests.py scripts/test_audit_build_manifests.py \
   Makefile CMakeLists.txt include/llam/runtime.h src/core/base/abi.c \
-  scripts/package_release.sh .github/workflows/ci.yml
+  scripts/package_release.sh .github/workflows/linux.yml
 git commit -m "build: audit canonical source manifests"
 ```
 
@@ -761,8 +778,8 @@ git commit -m "ci: enforce native promotion verdict"
 - Create: `config/c-structure-baseline.json`
 - Modify: `Makefile`
 - Modify: `CMakeLists.txt`
-- Modify: `.github/workflows/ci.yml`
-- Modify: `docs/testing.md`
+- Modify: `.github/workflows/linux.yml`
+- Modify: `docs/internals/testing-strategy.md`
 
 **Interfaces:**
 
@@ -852,7 +869,7 @@ Expected: all pass.
 ```bash
 git add scripts/audit_c_structure.py scripts/test_audit_c_structure.py \
   config/c-structure-baseline.json Makefile CMakeLists.txt \
-  .github/workflows/ci.yml docs/testing.md
+  .github/workflows/linux.yml docs/internals/testing-strategy.md
 git commit -m "build: ratchet C structure budgets"
 ```
 
@@ -862,7 +879,7 @@ git commit -m "build: ratchet C structure budgets"
 
 - Modify: `scripts/test_research_build_boundary.py`
 - Modify: `docs/abi.md`
-- Modify: `docs/testing.md`
+- Modify: `docs/internals/testing-strategy.md`
 - Modify: `docs/operations/benchmarks.md`
 - Modify: `README.md`
 
@@ -949,7 +966,8 @@ retains the complete experimental suite.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/test_research_build_boundary.py docs/abi.md docs/testing.md \
+git add scripts/test_research_build_boundary.py docs/abi.md \
+  docs/internals/testing-strategy.md \
   docs/operations/benchmarks.md README.md
 git commit -m "docs: define stable and research build contracts"
 ```
