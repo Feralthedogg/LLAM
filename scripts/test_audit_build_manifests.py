@@ -521,20 +521,15 @@ def valid_package_script() -> str:
             'library_version="${LLAM_VERSION:-2.2.0}"',
             "readonly version abi_major library_version",
             "# AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR",
-            "read_packaged_archive_member() {",
-            'archive_path="$1"',
-            'member="$2"',
-            'if member_value="$(',
-            'tar -xOf "$archive_path" "$member" 2>/dev/null',
-            ')"; then',
-            'printf \'%s\' "$member_value"',
-            "return 0",
-            "fi",
-            "if ! command -v xz >/dev/null 2>&1; then",
+            "read_packaged_metadata_file() {",
+            'metadata_path="$1"',
+            (
+                'if [ -L "$metadata_path" ] || '
+                '[ ! -f "$metadata_path" ]; then'
+            ),
             "return 1",
             "fi",
-            'xz -dc "$archive_path" 2>/dev/null |',
-            'tar -xOf - "$member" 2>/dev/null',
+            'cat "$metadata_path"',
             "}",
             "validate_packaged_archive_metadata() (",
             'archive_path="$1"',
@@ -544,9 +539,17 @@ def valid_package_script() -> str:
                 'validate_release_component "archive package root" '
                 '"$package_root"'
             ),
+            (
+                'tmp_dir="$(mktemp -d '
+                '"${TMPDIR:-/tmp}/llam-release-metadata.XXXXXX")"'
+            ),
+            "trap 'rm -rf \"$tmp_dir\"' EXIT HUP INT TERM",
+            'extract_release_archive "$archive_path" "$tmp_dir"',
             'if ! archive_version="$(',
-            "read_packaged_archive_member \\",
-            '"$archive_path" "$package_root/VERSION"',
+            (
+                'read_packaged_metadata_file '
+                '"$tmp_dir/$package_root/VERSION"'
+            ),
             ')"; then',
             (
                 'echo "cannot read packaged VERSION metadata" >&2'
@@ -554,8 +557,10 @@ def valid_package_script() -> str:
             "exit 1",
             "fi",
             'if ! archive_abi_major="$(',
-            "read_packaged_archive_member \\",
-            '"$archive_path" "$package_root/ABI_MAJOR"',
+            (
+                'read_packaged_metadata_file '
+                '"$tmp_dir/$package_root/ABI_MAJOR"'
+            ),
             ')"; then',
             (
                 'echo "cannot read packaged ABI_MAJOR metadata" >&2'
@@ -563,8 +568,8 @@ def valid_package_script() -> str:
             "exit 1",
             "fi",
             'if ! archive_library_version="$(',
-            "read_packaged_archive_member \\",
-            '"$archive_path" "$package_root/LIBRARY_VERSION"',
+            "read_packaged_metadata_file \\",
+            '"$tmp_dir/$package_root/LIBRARY_VERSION"',
             ')"; then',
             (
                 'echo "cannot read packaged LIBRARY_VERSION metadata" '
@@ -3277,8 +3282,8 @@ class BuildManifestAuditTests(unittest.TestCase):
             base.replace(definition, "", 1),
             base.replace(definition, definition + definition, 1),
             base.replace(
-                '"$archive_path" "$package_root/ABI_MAJOR"',
-                '"$archive_path" "$package_root/VERSION"',
+                '"$tmp_dir/$package_root/ABI_MAJOR"',
+                '"$tmp_dir/$package_root/VERSION"',
                 1,
             ),
             base.replace(call, "", 1),

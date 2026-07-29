@@ -238,21 +238,13 @@ validate_packaged_archive_links() (
 )
 
 # AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR
-read_packaged_archive_member() {
-    archive_path="$1"
-    member="$2"
+read_packaged_metadata_file() {
+    metadata_path="$1"
 
-    if member_value="$(
-        tar -xOf "$archive_path" "$member" 2>/dev/null
-    )"; then
-        printf '%s' "$member_value"
-        return 0
-    fi
-    if ! command -v xz >/dev/null 2>&1; then
+    if [ -L "$metadata_path" ] || [ ! -f "$metadata_path" ]; then
         return 1
     fi
-    xz -dc "$archive_path" 2>/dev/null |
-        tar -xOf - "$member" 2>/dev/null
+    cat "$metadata_path"
 }
 
 validate_packaged_archive_metadata() (
@@ -260,24 +252,26 @@ validate_packaged_archive_metadata() (
     package_root="$2"
     validate_safe_output_path "$archive_path"
     validate_release_component "archive package root" "$package_root"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-metadata.XXXXXX")"
+
+    trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+    extract_release_archive "$archive_path" "$tmp_dir"
 
     if ! archive_version="$(
-        read_packaged_archive_member \
-            "$archive_path" "$package_root/VERSION"
+        read_packaged_metadata_file "$tmp_dir/$package_root/VERSION"
     )"; then
         echo "cannot read packaged VERSION metadata" >&2
         exit 1
     fi
     if ! archive_abi_major="$(
-        read_packaged_archive_member \
-            "$archive_path" "$package_root/ABI_MAJOR"
+        read_packaged_metadata_file "$tmp_dir/$package_root/ABI_MAJOR"
     )"; then
         echo "cannot read packaged ABI_MAJOR metadata" >&2
         exit 1
     fi
     if ! archive_library_version="$(
-        read_packaged_archive_member \
-            "$archive_path" "$package_root/LIBRARY_VERSION"
+        read_packaged_metadata_file \
+            "$tmp_dir/$package_root/LIBRARY_VERSION"
     )"; then
         echo "cannot read packaged LIBRARY_VERSION metadata" >&2
         exit 1

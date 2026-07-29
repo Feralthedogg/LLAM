@@ -25,13 +25,25 @@ from unittest import mock
 class PackageArchivePortabilityTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
 
-    def test_metadata_validator_falls_back_for_tar_without_xz(self) -> None:
+    def test_metadata_validator_avoids_nonportable_tar_output_flag(
+        self,
+    ) -> None:
         package_script = (
             self.source / "scripts" / "package_release.sh"
         ).read_text(encoding="utf-8")
         begin = "# AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR\n"
         end = "# AUDIT:END PACKAGE ARCHIVE METADATA VALIDATOR\n"
         validator = package_script.split(begin, 1)[1].split(end, 1)[0]
+        extractor_begin = "extract_release_archive() {\n"
+        extractor_end = "\n}\n\nvalidate_packaged_archive_links() ("
+        extractor = (
+            extractor_begin
+            + package_script.split(extractor_begin, 1)[1].split(
+                extractor_end,
+                1,
+            )[0]
+            + "\n}\n"
+        )
 
         with tempfile.TemporaryDirectory(
             prefix="llam-package-archive-portability-"
@@ -56,7 +68,10 @@ class PackageArchivePortabilityTests(unittest.TestCase):
             tar_wrapper = wrapper_dir / "tar"
             tar_wrapper.write_text(
                 "#!/bin/sh\n"
-                'if [ "$1" = "-xOf" ] && [ "$2" != "-" ]; then\n'
+                'if [ "$1" = "-xOf" ]; then\n'
+                "    exit 0\n"
+                "fi\n"
+                'if [ "$1" = "-xf" ] && [ "$2" != "-" ]; then\n'
                 "    exit 2\n"
                 "fi\n"
                 'exec "$REAL_TAR" "$@"\n',
@@ -73,6 +88,7 @@ class PackageArchivePortabilityTests(unittest.TestCase):
                 'version="ci"\n'
                 'abi_major="2"\n'
                 'library_version="2.2.0"\n'
+                f"{extractor}\n"
                 f"{validator}\n"
                 'validate_packaged_archive_metadata "$1" package\n',
                 encoding="utf-8",
