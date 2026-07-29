@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from scripts import bench_leir_native as native
 from scripts.evidence_bundle import PublicationUncertainError
 from scripts.bench_leir_native import (
     MAX_OUTPUT_BYTES,
@@ -71,7 +72,7 @@ def _pair_for_cell(
     terminal_ratio: float = 1.0,
     order: str = "ABBA",
 ) -> PairRow:
-    activations = 64
+    activations = max(64, cell.concurrency * 8)
     logical = activations * cell.ops
     observed = logical if cell.candidate == "link" else activations
     checksum = f"{abs(hash(_cell_key(cell))) & 0xFFFF_FFFF_FFFF_FFFF:016x}"
@@ -166,10 +167,19 @@ def _evidence_metadata(samples: int = 5) -> dict[str, object]:
         "commands": [["bench", "--samples", str(samples)]],
         "cpu_policy": {"scope": "server"},
         "samples": samples,
-        "activations": 128,
+        "activations": 8,
         "min_mode_ms": 100,
         "unavailable_reason": None,
     }
+
+
+def _unavailable_reason(cell_index: int = 1) -> str:
+    cells = screen_matrix()
+    return (
+        f"cell {cell_index}/{len(cells)}: "
+        "native backend unavailable for "
+        f"{_cell_key(cells[cell_index - 1])}"
+    )
 
 
 class ParserContractTests(unittest.TestCase):
@@ -462,6 +472,65 @@ class RunnerContractTests(unittest.TestCase):
 
 
 class EvidenceAndCliTests(unittest.TestCase):
+    def test_recompute_requires_canonical_raw_csv_bytes(self) -> None:
+        samples = _specialized_samples(1)[:1]
+        raw = native._csv_text(
+            native._raw_rows(samples),
+            native.RAW_FIELD_ORDER,
+        ).encode("utf-8")
+        metadata = _evidence_metadata(1)
+        metadata["activations"] = 8
+        missing = screen_matrix()[1]
+        metadata["unavailable_reason"] = (
+            "cell 2/72: native backend unavailable for "
+            f"{_cell_key(missing)}"
+        )
+        complete = native._bundle_metadata("screen", metadata)
+        with self.assertRaisesRegex(ValueError, "canonical"):
+            native._recompute_artifacts(
+                raw.replace(b"\n", b"\r\n"),
+                complete,
+            )
+
+    def test_native_unavailable_requires_exact_measured_prefix(
+        self,
+    ) -> None:
+        metadata = _evidence_metadata(1)
+        metadata["activations"] = 8
+        missing = screen_matrix()[1]
+        metadata["unavailable_reason"] = (
+            "cell 2/72: native backend unavailable for "
+            f"{_cell_key(missing)}"
+        )
+        complete = native._bundle_metadata("screen", metadata)
+        with self.assertRaisesRegex(ValueError, "prefix"):
+            native._recompute_artifacts(
+                native._csv_text(
+                    [],
+                    native.RAW_FIELD_ORDER,
+                ).encode("utf-8"),
+                complete,
+            )
+
+    def test_native_raw_activations_bind_to_schedule(self) -> None:
+        samples = _specialized_samples(1)[:1]
+        raw = native._csv_text(
+            native._raw_rows(samples),
+            native.RAW_FIELD_ORDER,
+        ).encode("utf-8")
+        metadata = _evidence_metadata(1)
+        metadata["activations"] = 9
+        missing = screen_matrix()[1]
+        metadata["unavailable_reason"] = (
+            "cell 2/72: native backend unavailable for "
+            f"{_cell_key(missing)}"
+        )
+        with self.assertRaisesRegex(ValueError, "activation"):
+            native._recompute_artifacts(
+                raw,
+                native._bundle_metadata("screen", metadata),
+            )
+
     def test_cli_reports_audit_recovery_for_uncertain_publication(
         self,
     ) -> None:
@@ -478,7 +547,7 @@ class EvidenceAndCliTests(unittest.TestCase):
             with mock.patch(
                 "scripts.bench_leir_native.run_matrix",
                 side_effect=NativeUnavailable(
-                    "cell 1/72: native backend unavailable",
+                    _unavailable_reason(),
                     (),
                 ),
             ), mock.patch(
@@ -557,7 +626,7 @@ class EvidenceAndCliTests(unittest.TestCase):
             binary.write_bytes(b"fixture")
             output = root / "evidence"
             unavailable = NativeUnavailable(
-                "cell 1/72: native backend unavailable",
+                _unavailable_reason(),
                 (),
             )
             with mock.patch(
@@ -581,7 +650,7 @@ class EvidenceAndCliTests(unittest.TestCase):
             self.assertEqual(verdict, "INCONCLUSIVE")
             self.assertEqual(
                 reasons,
-                ["cell 1/72: native backend unavailable"],
+                [_unavailable_reason()],
             )
 
     def test_evidence_bundle_names_audit_and_no_tracked_overwrite(

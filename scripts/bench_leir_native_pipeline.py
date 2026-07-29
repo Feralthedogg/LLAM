@@ -1265,6 +1265,12 @@ def _read_raw_samples(
         samples.append(
             SampleRow(process_sample, order, cell, result)
         )
+    canonical = _csv_text(
+        _raw_rows(samples),
+        RAW_FIELD_ORDER,
+    ).encode("utf-8")
+    if canonical != raw_csv:
+        raise ValueError("raw.csv is not canonical typed CSV")
     return samples
 
 
@@ -1378,6 +1384,43 @@ def _recompute_artifacts(
         raw_csv,
         min_mode_ns=min_mode_ms * 1_000_000,
     )
+    matrix_cells = full_matrix()
+    expected_sequence = [
+        (process_sample, *_cell_key(cell))
+        for cell in matrix_cells
+        if _cell_key(cell) not in observed_unavailable
+        for process_sample in range(1, expected_samples + 1)
+    ]
+    observed_sequence = [
+        (sample.process_sample, *_cell_key(sample.cell))
+        for sample in samples
+    ]
+    if observed_sequence != expected_sequence:
+        measured = {
+            _cell_key(sample.cell)
+            for sample in samples
+        }
+        zero_sample_cells = set(valid_cells) - measured
+        if zero_sample_cells != observed_unavailable:
+            raise ValueError(
+                "pipeline unavailable cells do not exactly match "
+                "zero-sample cells"
+            )
+        raise ValueError(
+            "pipeline raw sample indices or matrix order mismatch"
+        )
+    for sample in samples:
+        minimum_activations = (
+            max(activations, sample.cell.concurrency)
+            * BLOCKS_PER_MODE
+        )
+        if (
+            sample.result.activations < minimum_activations
+            or sample.result.activations % BLOCKS_PER_MODE != 0
+        ):
+            raise ValueError(
+                "pipeline raw activation count disagrees with schedule"
+            )
     summaries = summarize(samples)
     verdict, reasons = _classify_evidence(
         summaries,

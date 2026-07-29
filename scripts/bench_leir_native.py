@@ -1092,6 +1092,12 @@ def _samples_from_raw_bytes(
             raise ValueError("duplicate raw sample key")
         observed.add(key)
         samples.append(SampleRow(process_sample, row))
+    canonical = _csv_text(
+        _raw_rows(samples),
+        RAW_FIELD_ORDER,
+    ).encode("utf-8")
+    if canonical != raw_csv:
+        raise ValueError("raw.csv is not canonical typed CSV")
     return samples
 
 
@@ -1288,8 +1294,52 @@ def _recompute_artifacts(
         raw_csv,
         min_mode_ms=min_mode_ms,
     )
-    summaries = summarize(samples)
+    cells = screen_matrix()
     unavailable_reason = schedule["unavailable_reason"]
+    if unavailable_reason is None:
+        measured_cells = cells
+    else:
+        reasons_by_index = {
+            (
+                f"cell {index}/{len(cells)}: "
+                "native backend unavailable for "
+                f"{_cell_key(cell)}"
+            ): index - 1
+            for index, cell in enumerate(cells, start=1)
+        }
+        missing_index = reasons_by_index.get(unavailable_reason)
+        if missing_index is None:
+            raise ValueError(
+                "native unavailable reason does not name an exact cell"
+            )
+        measured_cells = cells[:missing_index]
+    expected_sequence = [
+        (process_sample, *_cell_key(cell))
+        for cell in measured_cells
+        for process_sample in range(1, samples_count + 1)
+    ]
+    observed_sequence = [
+        (sample.process_sample, *_cell_key(sample.row.cell))
+        for sample in samples
+    ]
+    if observed_sequence != expected_sequence:
+        raise ValueError(
+            "raw samples are not the exact measured matrix prefix"
+        )
+    for sample in samples:
+        minimum_activations = (
+            max(activations, sample.row.concurrency)
+            * sample.row.blocks_per_mode
+        )
+        if (
+            sample.row.blocks_per_mode != BLOCKS_PER_MODE
+            or sample.row.activations < minimum_activations
+            or sample.row.activations % BLOCKS_PER_MODE != 0
+        ):
+            raise ValueError(
+                "raw sample activation count disagrees with schedule"
+            )
+    summaries = summarize(samples)
     if unavailable_reason is None:
         verdict, reasons = classify(
             summaries,

@@ -38,6 +38,9 @@ REPORT_NAME = "report.md"
 MANIFEST_NAME = "MANIFEST.sha256"
 MAX_FILE_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_STATE_BYTES = 8 * 1024 * 1024
+MAX_JSON_DEPTH = 64
+MAX_JSON_NODES = 10_000
+MAX_JSON_STRING_BYTES = 4 * 1024 * 1024
 
 _CALLER_ARTIFACTS = frozenset(
     {"raw.csv", "summary.csv", "verdict.json", REPORT_NAME}
@@ -94,7 +97,11 @@ class UnsupportedPlatformError(EvidenceError):
 class PublicationUncertainError(RuntimeError):
     """The atomic publish occurred but durable directory sync was not proven."""
 
-    def __init__(self, final_path: Path | str, cause: OSError) -> None:
+    def __init__(
+        self,
+        final_path: Path | str,
+        cause: BaseException,
+    ) -> None:
         self.final_path = Path(final_path)
         self.cause = cause
         super().__init__(
@@ -102,6 +109,62 @@ class PublicationUncertainError(RuntimeError):
             f"{self.final_path}; do not retry creation or delete it; "
             f"recover with --audit-existing {self.final_path}: {cause}"
         )
+
+
+_NOT_PUBLISHED = "not-published"
+_PUBLISHED = "published"
+_AMBIGUOUS = "ambiguous"
+
+
+def _posix_identity(metadata: os.stat_result) -> tuple[int, int]:
+    return (metadata.st_dev, metadata.st_ino)
+
+
+def _named_posix_identity(
+    parent_fd: int,
+    name: str,
+) -> tuple[int, int] | None:
+    try:
+        metadata = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(metadata.st_mode):
+        return (-1, -1)
+    return _posix_identity(metadata)
+
+
+def _require_posix_rename_authority(
+    parent_fd: int,
+    *,
+    expected_stage_uid: int | None = None,
+) -> tuple[int, int]:
+    if not hasattr(os, "geteuid"):
+        raise UnsupportedPlatformError(
+            "effective uid is required for POSIX rename authority"
+        )
+    effective_uid = os.geteuid()
+    metadata = os.fstat(parent_fd)
+    mode = stat.S_IMODE(metadata.st_mode)
+    owner_private = (
+        metadata.st_uid == effective_uid
+        and mode & 0o022 == 0
+        and mode & 0o300 == 0o300
+    )
+    trusted_sticky = (
+        bool(mode & stat.S_ISVTX)
+        and metadata.st_uid in {0, effective_uid}
+        and bool(mode & 0o022)
+        and expected_stage_uid in {None, effective_uid}
+    )
+    if not (owner_private or trusted_sticky):
+        raise EvidenceError(
+            "immediate parent lacks trusted POSIX rename authority"
+        )
+    return _posix_identity(metadata)
 
 
 @dataclass(frozen=True)
@@ -131,6 +194,7 @@ class AuditResult:
 def canonical_json_bytes(value: object) -> bytes:
     """Return the only accepted deterministic JSON representation."""
 
+    _check_json_safe(value, where="value")
     try:
         text = json.dumps(
             value,
@@ -139,9 +203,14 @@ def canonical_json_bytes(value: object) -> bytes:
             indent=2,
             sort_keys=True,
         )
-    except (TypeError, ValueError) as exc:
+        return (text + "\n").encode("utf-8")
+    except (
+        TypeError,
+        ValueError,
+        RecursionError,
+        UnicodeError,
+    ) as exc:
         raise EvidenceError(f"value is not deterministic JSON: {exc}") from exc
-    return (text + "\n").encode("utf-8")
 
 
 def normalize_architecture(value: str) -> str:
@@ -172,7 +241,13 @@ def _read_untracked_source(
     relative_name: str,
     *,
     remaining: int,
-) -> tuple[bytes, bytes]:
+) -> tuple[
+    bytes,
+    bytes,
+    bytes,
+    tuple[tuple[int, int, int], ...],
+    tuple[int, int, int, int, int, int],
+]:
     if (
         not relative_name
         or "\x00" in relative_name
@@ -189,26 +264,38 @@ def _read_untracked_source(
     if len(path_bytes) > remaining:
         raise EvidenceError("untracked source inventory is oversized")
     current = root
+    ancestor_paths = [root]
     for component in relative.parts[:-1]:
         current = current / component
+        ancestor_paths.append(current)
         metadata = current.lstat()
         if not stat.S_ISDIR(metadata.st_mode):
             raise EvidenceError(
                 "untracked source has a non-directory ancestor"
             )
+    ancestor_identities = tuple(
+        (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+        )
+        for metadata in (ancestor.lstat() for ancestor in ancestor_paths)
+    )
     path = root / relative
     before = path.lstat()
+    file_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    mode = stat.S_IMODE(before.st_mode).to_bytes(4, "big")
     if stat.S_ISLNK(before.st_mode):
         target = os.fsencode(os.readlink(path))
         after = path.lstat()
-        if (
-            before.st_dev,
-            before.st_ino,
-            before.st_mode,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        ) != (
+        if file_identity != (
             after.st_dev,
             after.st_ino,
             after.st_mode,
@@ -217,9 +304,28 @@ def _read_untracked_source(
             after.st_ctime_ns,
         ):
             raise EvidenceError("untracked symlink changed while hashing")
+        if ancestor_identities != tuple(
+            (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_mode,
+            )
+            for metadata in (
+                ancestor.lstat() for ancestor in ancestor_paths
+            )
+        ):
+            raise EvidenceError(
+                "untracked source ancestor changed while hashing"
+            )
         if len(path_bytes) + len(target) > remaining:
             raise EvidenceError("untracked source content is oversized")
-        return b"symlink", target
+        return (
+            b"symlink",
+            mode,
+            target,
+            ancestor_identities,
+            file_identity,
+        )
     if not stat.S_ISREG(before.st_mode):
         raise EvidenceError("untracked source is not a regular file")
     if before.st_size > remaining - len(path_bytes):
@@ -230,7 +336,7 @@ def _read_untracked_source(
         flags |= no_follow
     flags |= getattr(os, "O_BINARY", 0)
     descriptor = os.open(path, flags)
-    try:
+    with _managed_fd(descriptor):
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -269,9 +375,193 @@ def _read_untracked_source(
         data = b"".join(chunks)
         if len(data) != opened.st_size:
             raise EvidenceError("untracked source read was incomplete")
-        return b"regular", data
-    finally:
-        os.close(descriptor)
+        if ancestor_identities != tuple(
+            (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_mode,
+            )
+            for metadata in (
+                ancestor.lstat() for ancestor in ancestor_paths
+            )
+        ):
+            raise EvidenceError(
+                "untracked source ancestor changed while hashing"
+            )
+        return (
+            b"regular",
+            mode,
+            data,
+            ancestor_identities,
+            file_identity,
+        )
+
+
+def _git_result_text(
+    result: object,
+    *,
+    where: str,
+) -> str:
+    if (
+        getattr(result, "returncode", 1) != 0
+        or getattr(result, "stderr", "")
+        or getattr(result, "stdout_truncated", True)
+        or getattr(result, "stderr_truncated", True)
+    ):
+        raise EvidenceError(f"{where} command failed")
+    text = getattr(result, "stdout", None)
+    if not isinstance(text, str) or "\ufffd" in text:
+        raise EvidenceError(f"{where} output is not strict UTF-8")
+    return text
+
+
+def _capture_git_source_snapshot(
+    run_process: Callable[..., object],
+    *,
+    cwd: Path | None,
+) -> tuple[
+    Path,
+    tuple[int, int, int],
+    bytes,
+    bytes,
+    bytes,
+    tuple[
+        tuple[
+            bytes,
+            bytes,
+            bytes,
+            bytes,
+            tuple[tuple[int, int, int], ...],
+            tuple[int, int, int, int, int, int],
+        ],
+        ...,
+    ],
+]:
+    root_text = _git_result_text(
+        run_process(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            timeout=5.0,
+            max_output_bytes=4096,
+        ),
+        where="git root",
+    ).rstrip("\n")
+    if (
+        not root_text
+        or "\n" in root_text
+        or "\x00" in root_text
+        or "\ufffd" in root_text
+    ):
+        raise EvidenceError("unsafe Git root")
+    root = Path(root_text).resolve(strict=True)
+    root_before = root.lstat()
+    if not stat.S_ISDIR(root_before.st_mode):
+        raise EvidenceError("Git root is not a directory")
+    root_identity = (
+        root_before.st_dev,
+        root_before.st_ino,
+        root_before.st_mode,
+    )
+    worktree_text = _git_result_text(
+        run_process(
+            ["git", "diff", "--binary", "--no-ext-diff", "--"],
+            cwd=cwd,
+            timeout=10.0,
+            max_output_bytes=MAX_SOURCE_STATE_BYTES,
+        ),
+        where="Git worktree diff",
+    )
+    index_text = _git_result_text(
+        run_process(
+            [
+                "git",
+                "diff",
+                "--binary",
+                "--no-ext-diff",
+                "--cached",
+                "HEAD",
+                "--",
+            ],
+            cwd=cwd,
+            timeout=10.0,
+            max_output_bytes=MAX_SOURCE_STATE_BYTES,
+        ),
+        where="Git index diff",
+    )
+    inventory_text = _git_result_text(
+        run_process(
+            [
+                "git",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            cwd=cwd,
+            timeout=10.0,
+            max_output_bytes=MAX_SOURCE_STATE_BYTES,
+        ),
+        where="Git untracked inventory",
+    )
+    if inventory_text:
+        if not inventory_text.endswith("\x00"):
+            raise EvidenceError("invalid untracked source inventory")
+        untracked_names = inventory_text[:-1].split("\x00")
+    else:
+        untracked_names = []
+    encoded_names = [name.encode("utf-8") for name in untracked_names]
+    if (
+        len(set(untracked_names)) != len(untracked_names)
+        or encoded_names != sorted(encoded_names)
+    ):
+        raise EvidenceError("untracked source inventory is not canonical")
+    worktree = worktree_text.encode("utf-8")
+    index = index_text.encode("utf-8")
+    inventory = inventory_text.encode("utf-8")
+    consumed = len(worktree) + len(index) + len(inventory)
+    if consumed > MAX_SOURCE_STATE_BYTES:
+        raise EvidenceError("Git source state is oversized")
+    entries = []
+    for name, path_bytes in zip(
+        untracked_names,
+        encoded_names,
+        strict=True,
+    ):
+        kind, mode, data, ancestors, file_identity = (
+            _read_untracked_source(
+                root,
+                name,
+                remaining=MAX_SOURCE_STATE_BYTES - consumed,
+            )
+        )
+        consumed += len(path_bytes) + len(mode) + len(data)
+        if consumed > MAX_SOURCE_STATE_BYTES:
+            raise EvidenceError("Git source state is oversized")
+        entries.append(
+            (
+                path_bytes,
+                kind,
+                mode,
+                data,
+                ancestors,
+                file_identity,
+            )
+        )
+    root_after = root.lstat()
+    if root_identity != (
+        root_after.st_dev,
+        root_after.st_ino,
+        root_after.st_mode,
+    ):
+        raise EvidenceError("Git root changed during source capture")
+    return (
+        root,
+        root_identity,
+        worktree,
+        index,
+        inventory,
+        tuple(entries),
+    )
 
 
 def git_source_dirty_digest(
@@ -287,92 +577,29 @@ def git_source_dirty_digest(
     """
 
     try:
-        root_result = run_process(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=cwd,
-            timeout=5.0,
-            max_output_bytes=4096,
-        )
-        diff_result = run_process(
-            ["git", "diff", "--binary", "--no-ext-diff", "HEAD", "--"],
-            cwd=cwd,
-            timeout=10.0,
-            max_output_bytes=MAX_SOURCE_STATE_BYTES,
-        )
-        untracked_result = run_process(
-            [
-                "git",
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ],
-            cwd=cwd,
-            timeout=10.0,
-            max_output_bytes=MAX_SOURCE_STATE_BYTES,
-        )
-    except (OSError, RuntimeError):
-        return "unavailable"
-    results = (root_result, diff_result, untracked_result)
-    if any(
-        getattr(result, "returncode", 1) != 0
-        or getattr(result, "stderr", "")
-        or getattr(result, "stdout_truncated", True)
-        or getattr(result, "stderr_truncated", True)
-        for result in results
-    ):
-        return "unavailable"
-    root_text = getattr(root_result, "stdout", "").rstrip("\n")
-    tracked_text = getattr(diff_result, "stdout", "")
-    inventory_text = getattr(untracked_result, "stdout", "")
-    if (
-        not root_text
-        or "\n" in root_text
-        or "\x00" in root_text
-        or "\ufffd" in root_text
-        or "\ufffd" in tracked_text
-        or "\ufffd" in inventory_text
-    ):
-        return "unavailable"
-    if inventory_text:
-        if not inventory_text.endswith("\x00"):
+        first = _capture_git_source_snapshot(run_process, cwd=cwd)
+        second = _capture_git_source_snapshot(run_process, cwd=cwd)
+        if first != second:
             return "unavailable"
-        untracked_names = inventory_text[:-1].split("\x00")
-    else:
-        untracked_names = []
-    encoded_names = [name.encode("utf-8") for name in untracked_names]
-    if (
-        len(set(untracked_names)) != len(untracked_names)
-        or encoded_names != sorted(encoded_names)
-    ):
-        return "unavailable"
-    tracked = tracked_text.encode("utf-8")
-    inventory = inventory_text.encode("utf-8")
-    consumed = len(tracked) + len(inventory)
-    if consumed > MAX_SOURCE_STATE_BYTES:
-        return "unavailable"
-    if not tracked and not untracked_names:
-        return "clean"
-    try:
-        root = Path(root_text).resolve(strict=True)
+        _, _, worktree, index, _, entries = first
+        if not worktree and not index and not entries:
+            return "clean"
         digest = hashlib.sha256()
-        digest.update(b"llam-source-dirty-v1\x00")
-        _source_hash_frame(digest, b"tracked-diff", tracked)
-        for name, path_bytes in zip(
-            untracked_names,
-            encoded_names,
-            strict=True,
-        ):
-            kind, data = _read_untracked_source(
-                root,
-                name,
-                remaining=MAX_SOURCE_STATE_BYTES - consumed,
-            )
-            consumed += len(path_bytes) + len(data)
+        digest.update(b"llam-source-dirty-v2\x00")
+        _source_hash_frame(digest, b"worktree-diff", worktree)
+        _source_hash_frame(digest, b"index-diff", index)
+        for path_bytes, kind, mode, data, _, _ in entries:
             _source_hash_frame(digest, b"path", path_bytes)
             _source_hash_frame(digest, b"kind", kind)
+            _source_hash_frame(digest, b"mode", mode)
             _source_hash_frame(digest, b"content", data)
-    except (EvidenceError, OSError, UnicodeError, ValueError):
+    except (
+        EvidenceError,
+        OSError,
+        RuntimeError,
+        UnicodeError,
+        ValueError,
+    ):
         return "unavailable"
     return digest.hexdigest()
 
@@ -387,39 +614,105 @@ def _require_no_follow() -> int:
 
 
 def _check_json_safe(value: object, *, where: str) -> None:
-    if value is None or isinstance(value, bool):
-        return
-    if isinstance(value, int):
-        return
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise EvidenceError(f"{where} contains NaN or infinity")
-        return
-    if isinstance(value, str):
-        if "\x00" in value:
+    nodes = 0
+    string_bytes = 0
+    active_containers: set[int] = set()
+    stack: list[tuple[object, int, str, bool]] = [
+        (value, 0, where, False)
+    ]
+    while stack:
+        item, depth, location, exiting = stack.pop()
+        if exiting:
+            active_containers.remove(id(item))
+            continue
+        nodes += 1
+        if nodes > MAX_JSON_NODES:
             raise EvidenceError(
-                f"{where} contains a NUL-bearing string"
+                f"{where} JSON structure is too complex"
             )
-        return
-    if isinstance(value, list):
-        for index, item in enumerate(value):
-            _check_json_safe(item, where=f"{where}[{index}]")
-        return
-    if isinstance(value, dict):
-        for key, item in value.items():
+        if item is None or isinstance(item, bool):
+            continue
+        if isinstance(item, int):
+            continue
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise EvidenceError(
+                    f"{location} contains NaN or infinity"
+                )
+            continue
+        if isinstance(item, str):
+            if "\x00" in item:
+                raise EvidenceError(
+                    f"{location} contains a NUL-bearing string"
+                )
+            try:
+                string_bytes += len(item.encode("utf-8"))
+            except UnicodeError as exc:
+                raise EvidenceError(
+                    f"{location} is not valid UTF-8 text"
+                ) from exc
+            if string_bytes > MAX_JSON_STRING_BYTES:
+                raise EvidenceError(
+                    f"{where} JSON strings are too large"
+                )
+            continue
+        if not isinstance(item, (list, dict)):
+            raise EvidenceError(
+                f"{location} contains unsupported JSON type "
+                f"{type(item).__name__}"
+            )
+        if depth >= MAX_JSON_DEPTH:
+            raise EvidenceError(
+                f"{where} JSON structure is too deep"
+            )
+        identity = id(item)
+        if identity in active_containers:
+            raise EvidenceError(f"{where} contains a JSON cycle")
+        active_containers.add(identity)
+        stack.append((item, depth, location, True))
+        if isinstance(item, list):
+            for index in range(len(item) - 1, -1, -1):
+                stack.append(
+                    (
+                        item[index],
+                        depth + 1,
+                        f"{location}[{index}]",
+                        False,
+                    )
+                )
+            continue
+        for key, child in reversed(tuple(item.items())):
+            nodes += 1
+            if nodes > MAX_JSON_NODES:
+                raise EvidenceError(
+                    f"{where} JSON structure is too complex"
+                )
             if (
                 not isinstance(key, str)
                 or not key
                 or "\x00" in key
             ):
                 raise EvidenceError(
-                    f"{where} contains an invalid object key"
+                    f"{location} contains an invalid object key"
                 )
-            _check_json_safe(item, where=f"{where}.{key}")
-        return
-    raise EvidenceError(
-        f"{where} contains unsupported JSON type {type(value).__name__}"
-    )
+            try:
+                string_bytes += len(key.encode("utf-8"))
+            except UnicodeError as exc:
+                raise EvidenceError(
+                    f"{location} contains an invalid object key"
+                ) from exc
+            if string_bytes > MAX_JSON_STRING_BYTES:
+                raise EvidenceError(
+                    f"{where} JSON strings are too large"
+                )
+            stack.append(
+                (
+                    child,
+                    depth + 1,
+                    f"{location}.{key}",
+                    False,
+                )
+            )
 
 
 def _require_exact_fields(
@@ -555,7 +848,11 @@ def _strict_json_object(
 
     try:
         value = json.loads(text, parse_constant=reject_constant)
-    except (json.JSONDecodeError, UnicodeError) as exc:
+    except (
+        json.JSONDecodeError,
+        UnicodeError,
+        RecursionError,
+    ) as exc:
         raise EvidenceError(f"{where} is invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise EvidenceError(f"{where} must be a JSON object")
@@ -724,6 +1021,7 @@ def _managed_fd(descriptor: int) -> object:
 
 _WIN_GENERIC_READ = 0x80000000
 _WIN_GENERIC_WRITE = 0x40000000
+_WIN_DELETE = 0x00010000
 _WIN_READ_CONTROL = 0x00020000
 _WIN_FILE_READ_ATTRIBUTES = 0x00000080
 _WIN_FILE_SHARE_READ = 0x00000001
@@ -739,12 +1037,16 @@ _WIN_ERROR_FILE_NOT_FOUND = 2
 _WIN_ERROR_PATH_NOT_FOUND = 3
 _WIN_ERROR_ACCESS_DENIED = 5
 _WIN_ERROR_INVALID_FUNCTION = 1
+_WIN_ERROR_NOT_SUPPORTED = 50
+_WIN_ERROR_INVALID_PARAMETER = 87
 _WIN_ERROR_FILE_EXISTS = 80
 _WIN_ERROR_ALREADY_EXISTS = 183
 _WIN_SE_FILE_OBJECT = 1
 _WIN_DACL_SECURITY_INFORMATION = 0x00000004
 _WIN_SDDL_REVISION_1 = 1
 _WIN_PRIVATE_DACL_SDDL = "D:P(A;;FA;;;OW)"
+_WIN_FILE_RENAME_INFO = 3
+_WIN_FILE_RENAME_INFO_EX = 22
 
 
 class _WinSecurityAttributes(ctypes.Structure):
@@ -752,6 +1054,24 @@ class _WinSecurityAttributes(ctypes.Structure):
         ("length", ctypes.c_uint32),
         ("security_descriptor", ctypes.c_void_p),
         ("inherit_handle", ctypes.c_int),
+    ]
+
+
+class _WinFileRenameInfoEx(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint32),
+        ("root_directory", ctypes.c_void_p),
+        ("file_name_length", ctypes.c_uint32),
+        ("file_name", ctypes.c_uint16 * 1),
+    ]
+
+
+class _WinFileRenameInfo(ctypes.Structure):
+    _fields_ = [
+        ("replace_if_exists", ctypes.c_ubyte),
+        ("root_directory", ctypes.c_void_p),
+        ("file_name_length", ctypes.c_uint32),
+        ("file_name", ctypes.c_uint16 * 1),
     ]
 
 
@@ -851,6 +1171,13 @@ class _WindowsAPI:
         self._kernel32.FlushFileBuffers.restype = ctypes.c_int
         self._kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         self._kernel32.CloseHandle.restype = ctypes.c_int
+        self._kernel32.SetFileInformationByHandle.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        self._kernel32.SetFileInformationByHandle.restype = ctypes.c_int
         self._kernel32.LocalFree.argtypes = [ctypes.c_void_p]
         self._kernel32.LocalFree.restype = ctypes.c_void_p
         self._advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
@@ -1072,6 +1399,98 @@ class _WindowsAPI:
                 "Windows evidence object lacks the exact private DACL"
             )
 
+    @staticmethod
+    def _rename_information_buffer(
+        header_type: type[ctypes.Structure],
+        *,
+        parent_handle: object,
+        final_name: str,
+    ) -> ctypes.Array[ctypes.c_char]:
+        encoded_name = final_name.encode("utf-16-le")
+        name_offset = header_type.file_name.offset
+        buffer = ctypes.create_string_buffer(
+            name_offset + len(encoded_name)
+        )
+        header = header_type.from_buffer(buffer)
+        if isinstance(header, _WinFileRenameInfoEx):
+            header.flags = 0
+        else:
+            header.replace_if_exists = 0
+        header.root_directory = parent_handle
+        header.file_name_length = len(encoded_name)
+        ctypes.memmove(
+            ctypes.addressof(buffer) + name_offset,
+            encoded_name,
+            len(encoded_name),
+        )
+        return buffer
+
+    def rename_handle_noreplace(
+        self,
+        stage_handle: object,
+        parent_handle: object,
+        final_name: str,
+    ) -> None:
+        _validate_bundle_leaf(final_name)
+        attempts = (
+            (_WIN_FILE_RENAME_INFO_EX, _WinFileRenameInfoEx),
+            (_WIN_FILE_RENAME_INFO, _WinFileRenameInfo),
+        )
+        for index, (information_class, header_type) in enumerate(
+            attempts
+        ):
+            buffer = self._rename_information_buffer(
+                header_type,
+                parent_handle=parent_handle,
+                final_name=final_name,
+            )
+            if self._kernel32.SetFileInformationByHandle(
+                stage_handle,
+                information_class,
+                buffer,
+                len(buffer),
+            ):
+                return
+            error_number = self._last_error()
+            if (
+                index == 0
+                and error_number
+                in {
+                    _WIN_ERROR_INVALID_FUNCTION,
+                    _WIN_ERROR_NOT_SUPPORTED,
+                    _WIN_ERROR_INVALID_PARAMETER,
+                }
+            ):
+                continue
+            self._raise_windows_error(
+                error_number,
+                Path(final_name),
+            )
+        raise UnsupportedPlatformError(
+            "Windows handle-bound no-replace rename is unavailable"
+        )
+
+    def directory_identity(
+        self,
+        path: Path,
+    ) -> tuple[int, int, int] | None:
+        try:
+            handle = self.create_file(
+                path,
+                creation_disposition=_WIN_OPEN_EXISTING,
+                flags=(
+                    _WIN_FILE_FLAG_BACKUP_SEMANTICS
+                    | _WIN_FILE_FLAG_OPEN_REPARSE_POINT
+                ),
+                access=_WIN_FILE_READ_ATTRIBUTES,
+                share=_WIN_FILE_SHARE_READ | _WIN_FILE_SHARE_WRITE,
+            )
+        except FileNotFoundError:
+            return None
+        with _win_managed_handle(self, handle):
+            self.require_directory_no_reparse(handle)
+            return self.info(handle).identity
+
     def write_all(self, handle: object, data: bytes) -> None:
         offset = 0
         while offset < len(data):
@@ -1257,6 +1676,7 @@ def _win_open_directory(
     api: _WindowsAPI,
     require_private: bool = False,
     writable: bool = False,
+    rename_source: bool = False,
 ) -> object:
     handle = api.create_file(
         path,
@@ -1268,6 +1688,7 @@ def _win_open_directory(
         access=(
             _WIN_FILE_READ_ATTRIBUTES
             | (_WIN_GENERIC_WRITE if writable else 0)
+            | (_WIN_DELETE if rename_source else 0)
             | (_WIN_READ_CONTROL if require_private else 0)
         ),
         share=_WIN_FILE_SHARE_READ | _WIN_FILE_SHARE_WRITE,
@@ -1424,32 +1845,9 @@ def _atomic_rename_noreplace(
             _raise_rename_error(ctypes.get_errno(), destination)
         return
     if sys.platform == "win32":
-        if source_parent_fd is not None or destination_parent_fd is not None:
-            raise UnsupportedPlatformError(
-                "Windows non-replacing move requires absolute paths"
-            )
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        move_file = kernel32.MoveFileExW
-        move_file.argtypes = [
-            ctypes.c_wchar_p,
-            ctypes.c_wchar_p,
-            ctypes.c_uint,
-        ]
-        move_file.restype = ctypes.c_int
-        if not move_file(os.fspath(source), os.fspath(destination), 0):
-            error_number = ctypes.get_last_error()
-            if error_number in {80, 183}:
-                raise FileExistsError(
-                    error_number,
-                    "destination already exists",
-                    os.fspath(destination),
-                )
-            raise OSError(
-                error_number,
-                "MoveFileExW failed",
-                os.fspath(destination),
-            )
-        return
+        raise UnsupportedPlatformError(
+            "Windows publication requires handle-bound rename"
+        )
     raise UnsupportedPlatformError(
         f"atomic no-replace directory move unsupported on {sys.platform}"
     )
@@ -1464,12 +1862,16 @@ class EvidenceBundle:
         stage_path: Path,
         parent_fd: int,
         stage_fd: int,
+        parent_identity: tuple[int, int],
+        stage_identity: tuple[int, int],
         metadata: dict[str, object],
     ) -> None:
         self._final_path = final_path
         self._stage_path = stage_path
         self._parent_fd = parent_fd
         self._stage_fd = stage_fd
+        self._parent_identity = parent_identity
+        self._stage_identity = stage_identity
         self._metadata = metadata
         self._written: set[str] = set()
         self._active = True
@@ -1498,12 +1900,22 @@ class EvidenceBundle:
             raise EvidenceError("filesystem root cannot be a bundle")
         _validate_bundle_leaf(final_path.name)
         parent_fd = _open_directory_nofollow(final_path.parent)
+        try:
+            parent_identity = _require_posix_rename_authority(parent_fd)
+        except BaseException:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+            raise
         stage_name = (
             f".{final_path.name}.staging-{os.getpid()}-"
             f"{secrets.token_hex(16)}"
         )
         stage_path = final_path.parent / stage_name
         stage_fd: int | None = None
+        stage_identity: tuple[int, int] | None = None
+        stage_created = False
         bundle_owns_descriptors = False
         try:
             try:
@@ -1521,6 +1933,7 @@ class EvidenceBundle:
                     os.fspath(final_path),
                 )
             os.mkdir(stage_name, mode=0o700, dir_fd=parent_fd)
+            stage_created = True
             nofollow = _require_no_follow()
             stage_fd = os.open(
                 stage_name,
@@ -1530,13 +1943,32 @@ class EvidenceBundle:
                 | getattr(os, "O_CLOEXEC", 0),
                 dir_fd=parent_fd,
             )
-            if stat.S_IMODE(os.fstat(stage_fd).st_mode) != 0o700:
+            stage_metadata = os.fstat(stage_fd)
+            if (
+                not stat.S_ISDIR(stage_metadata.st_mode)
+                or stage_metadata.st_uid != os.geteuid()
+            ):
+                raise EvidenceError("created staging identity is invalid")
+            if stat.S_IMODE(stage_metadata.st_mode) != 0o700:
                 os.fchmod(stage_fd, 0o700)
+                stage_metadata = os.fstat(stage_fd)
+            stage_identity = _posix_identity(stage_metadata)
+            if (
+                _named_posix_identity(parent_fd, stage_name)
+                != stage_identity
+            ):
+                raise EvidenceError("staging name does not match held stage")
+            _require_posix_rename_authority(
+                parent_fd,
+                expected_stage_uid=stage_metadata.st_uid,
+            )
             bundle = cls(
                 final_path,
                 stage_path,
                 parent_fd,
                 stage_fd,
+                parent_identity,
+                stage_identity,
                 validated_metadata,
             )
             bundle_owns_descriptors = True
@@ -1549,12 +1981,34 @@ class EvidenceBundle:
             if bundle_owns_descriptors:
                 raise
             if stage_fd is not None:
-                os.close(stage_fd)
+                try:
+                    held = _posix_identity(os.fstat(stage_fd))
+                    source = _named_posix_identity(parent_fd, stage_name)
+                    final = _named_posix_identity(
+                        parent_fd,
+                        final_path.name,
+                    )
+                    if (
+                        stage_created
+                        and stage_identity is not None
+                        and held == stage_identity
+                        and source == stage_identity
+                        and final is None
+                    ):
+                        os.close(stage_fd)
+                        stage_fd = None
+                        os.rmdir(stage_name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+            if stage_fd is not None:
+                try:
+                    os.close(stage_fd)
+                except OSError:
+                    pass
             try:
-                os.rmdir(stage_name, dir_fd=parent_fd)
+                os.close(parent_fd)
             except OSError:
                 pass
-            os.close(parent_fd)
             raise
 
     def _ensure_active(self) -> None:
@@ -1654,6 +2108,70 @@ class EvidenceBundle:
             records.append(f"{digest}  {name}\n".encode("ascii"))
         return b"".join(records)
 
+    def _publication_state(self) -> str:
+        try:
+            held_metadata = os.fstat(self._stage_fd)
+            if (
+                not stat.S_ISDIR(held_metadata.st_mode)
+                or _posix_identity(held_metadata) != self._stage_identity
+                or _posix_identity(os.fstat(self._parent_fd))
+                != self._parent_identity
+            ):
+                return _AMBIGUOUS
+            _require_posix_rename_authority(
+                self._parent_fd,
+                expected_stage_uid=held_metadata.st_uid,
+            )
+            path_parent_fd = _open_directory_nofollow(
+                self._final_path.parent
+            )
+            try:
+                if (
+                    _posix_identity(os.fstat(path_parent_fd))
+                    != self._parent_identity
+                ):
+                    return _AMBIGUOUS
+            finally:
+                try:
+                    os.close(path_parent_fd)
+                except OSError:
+                    return _AMBIGUOUS
+            source = _named_posix_identity(
+                self._parent_fd,
+                self._stage_path.name,
+            )
+            final = _named_posix_identity(
+                self._parent_fd,
+                self._final_path.name,
+            )
+        except (OSError, EvidenceError):
+            return _AMBIGUOUS
+        if (
+            source == self._stage_identity
+            and final != self._stage_identity
+        ):
+            return _NOT_PUBLISHED
+        if (
+            final == self._stage_identity
+            and source != self._stage_identity
+        ):
+            return _PUBLISHED
+        return _AMBIGUOUS
+
+    def _close_without_cleanup(self) -> OSError | None:
+        close_error: OSError | None = None
+        for attribute in ("_stage_fd", "_parent_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    if close_error is None:
+                        close_error = exc
+                setattr(self, attribute, -1)
+        self._active = False
+        return close_error
+
     def finalize(self) -> Path:
         """Seal and atomically publish this bundle exactly once."""
 
@@ -1666,33 +2184,69 @@ class EvidenceBundle:
             _fsync_directory(self._stage_fd)
             self._write_owned(MANIFEST_NAME, self._build_manifest())
             _fsync_directory(self._stage_fd)
+            if self._publication_state() != _NOT_PUBLISHED:
+                raise PublicationUncertainError(
+                    self._final_path,
+                    EvidenceError(
+                        "staging identity is ambiguous before publication"
+                    ),
+                )
+        except PublicationUncertainError:
+            self._close_without_cleanup()
+            raise
+        except BaseException:
+            self._abort()
+            raise
+
+        rename_error: BaseException | None = None
+        try:
             _atomic_rename_noreplace(
                 self._stage_path,
                 self._final_path,
                 self._parent_fd,
                 self._parent_fd,
             )
-        except BaseException:
+        except BaseException as exc:
+            rename_error = exc
+        publication_state = self._publication_state()
+        if publication_state == _NOT_PUBLISHED:
             self._abort()
-            raise
+            if rename_error is not None:
+                raise rename_error
+            raise EvidenceError("atomic rename returned without publishing")
+        if publication_state != _PUBLISHED:
+            self._close_without_cleanup()
+            cause = rename_error or EvidenceError(
+                "publication identity is ambiguous after rename"
+            )
+            raise PublicationUncertainError(
+                self._final_path,
+                cause,
+            ) from cause
         self._active = False
-        publication_error: OSError | None = None
-        try:
-            os.close(self._stage_fd)
-        except OSError as exc:
-            publication_error = exc
-        self._stage_fd = -1
+        publication_error: BaseException | None = rename_error
         try:
             _fsync_directory(self._parent_fd)
         except OSError as exc:
             if publication_error is None:
                 publication_error = exc
+        if self._publication_state() != _PUBLISHED:
+            if publication_error is None:
+                publication_error = EvidenceError(
+                    "published final identity changed before success"
+                )
+        try:
+            os.close(self._stage_fd)
+        except OSError as exc:
+            if publication_error is None:
+                publication_error = exc
+        self._stage_fd = -1
+        try:
+            os.close(self._parent_fd)
+        except OSError as exc:
+            if publication_error is None:
+                publication_error = exc
         finally:
-            try:
-                os.close(self._parent_fd)
-            except OSError as exc:
-                if publication_error is None:
-                    publication_error = exc
             self._parent_fd = -1
         if publication_error is not None:
             raise PublicationUncertainError(
@@ -1703,6 +2257,10 @@ class EvidenceBundle:
 
     def _abort(self) -> None:
         if not self._active:
+            return
+        publication_state = self._publication_state()
+        if publication_state != _NOT_PUBLISHED:
+            self._close_without_cleanup()
             return
         try:
             try:
@@ -1722,25 +2280,15 @@ class EvidenceBundle:
                         os.unlink(name, dir_fd=self._stage_fd)
                 except OSError:
                     pass
-            try:
-                os.close(self._stage_fd)
-            except OSError:
-                pass
-            self._stage_fd = -1
-            try:
+            if self._publication_state() == _NOT_PUBLISHED:
                 os.rmdir(
                     self._stage_path.name,
                     dir_fd=self._parent_fd,
                 )
-            except OSError:
-                pass
+        except OSError:
+            pass
         finally:
-            try:
-                os.close(self._parent_fd)
-            except OSError:
-                pass
-            self._parent_fd = -1
-            self._active = False
+            self._close_without_cleanup()
 
 
 class _WindowsEvidenceBundle:
@@ -1753,6 +2301,8 @@ class _WindowsEvidenceBundle:
         api: _WindowsAPI,
         parent_handles: list[object],
         stage_handle: object,
+        parent_identity: tuple[int, int, int],
+        stage_identity: tuple[int, int, int],
         metadata: dict[str, object],
     ) -> None:
         self._final_path = final_path
@@ -1760,11 +2310,12 @@ class _WindowsEvidenceBundle:
         self._api = api
         self._parent_handles = parent_handles
         self._stage_handle: object | None = stage_handle
+        self._parent_identity = parent_identity
+        self._stage_identity = stage_identity
         self._metadata = metadata
         self._written: set[str] = set()
         self._active = True
         self._finalize_called = False
-        self._stage_exists = True
 
     @classmethod
     def create(
@@ -1784,11 +2335,18 @@ class _WindowsEvidenceBundle:
             api=api,
             writable_leaf=True,
         )
+        parent_identity = api.info(parent_handles[-1]).identity
+        if api.directory_identity(final_path.parent) != parent_identity:
+            _win_close_handles(api, parent_handles)
+            raise EvidenceError(
+                "Windows parent path does not match held parent"
+            )
         stage_path = final_path.parent / (
             f".{final_path.name}.staging-{os.getpid()}-"
             f"{secrets.token_hex(16)}"
         )
         stage_handle: object | None = None
+        stage_identity: tuple[int, int, int] | None = None
         stage_created = False
         writer_owns_resources = False
         try:
@@ -1825,13 +2383,21 @@ class _WindowsEvidenceBundle:
                 api=api,
                 require_private=True,
                 writable=True,
+                rename_source=True,
             )
+            stage_identity = api.info(stage_handle).identity
+            if api.directory_identity(stage_path) != stage_identity:
+                raise EvidenceError(
+                    "Windows staging name does not match held stage"
+                )
             writer = cls(
                 final_path,
                 stage_path,
                 api,
                 parent_handles,
                 stage_handle,
+                parent_identity,
+                stage_identity,
                 validated_metadata,
             )
             writer_owns_resources = True
@@ -1840,12 +2406,26 @@ class _WindowsEvidenceBundle:
         except BaseException:
             if writer_owns_resources:
                 raise
+            safe_cleanup = False
             if stage_handle is not None:
+                try:
+                    safe_cleanup = (
+                        stage_created
+                        and stage_identity is not None
+                        and api.info(stage_handle).identity
+                        == stage_identity
+                        and api.directory_identity(stage_path)
+                        == stage_identity
+                        and api.directory_identity(final_path)
+                        != stage_identity
+                    )
+                except OSError:
+                    pass
                 try:
                     api.close(stage_handle)
                 except OSError:
                     pass
-            if stage_created:
+            if safe_cleanup:
                 try:
                     api.remove_directory(stage_path)
                 except OSError:
@@ -1948,43 +2528,117 @@ class _WindowsEvidenceBundle:
             records.append(f"{digest}  {name}\n".encode("ascii"))
         return b"".join(records)
 
-    def finalize(self) -> Path:
-        self._ensure_active()
-        if self._finalize_called:
-            raise RuntimeError("finalize is single-use")
-        self._finalize_called = True
+    def _publication_state(self) -> str:
+        if self._stage_handle is None or not self._parent_handles:
+            return _AMBIGUOUS
         try:
-            self._validate_before_finalize()
-            if self._stage_handle is None:
-                raise EvidenceError("Windows staging handle is unavailable")
-            self._api.flush_directory(self._stage_handle)
-            self._write_owned(MANIFEST_NAME, self._build_manifest())
-            self._api.flush_directory(self._stage_handle)
-            self._api.close(self._stage_handle)
-            self._stage_handle = None
-            _atomic_rename_noreplace(
-                self._stage_path,
-                self._final_path,
-                None,
-                None,
+            if (
+                self._api.info(self._stage_handle).identity
+                != self._stage_identity
+                or self._api.info(self._parent_handles[-1]).identity
+                != self._parent_identity
+                or self._api.directory_identity(
+                    self._final_path.parent
+                )
+                != self._parent_identity
+            ):
+                return _AMBIGUOUS
+            source_identity = self._api.directory_identity(
+                self._stage_path
             )
-            self._stage_exists = False
-        except BaseException:
-            self._abort()
-            raise
-        self._active = False
-        publication_error: OSError | None = None
-        try:
-            self._api.flush_directory(self._parent_handles[-1])
-        except OSError as exc:
-            publication_error = exc
+            final_identity = self._api.directory_identity(
+                self._final_path
+            )
+        except (OSError, EvidenceError):
+            return _AMBIGUOUS
+        if (
+            source_identity == self._stage_identity
+            and final_identity != self._stage_identity
+        ):
+            return _NOT_PUBLISHED
+        if (
+            final_identity == self._stage_identity
+            and source_identity != self._stage_identity
+        ):
+            return _PUBLISHED
+        return _AMBIGUOUS
+
+    def _close_without_cleanup(self) -> OSError | None:
+        close_error: OSError | None = None
+        if self._stage_handle is not None:
+            try:
+                self._api.close(self._stage_handle)
+            except OSError as exc:
+                close_error = exc
+            self._stage_handle = None
         while self._parent_handles:
             handle = self._parent_handles.pop()
             try:
                 self._api.close(handle)
             except OSError as exc:
-                if publication_error is None:
-                    publication_error = exc
+                if close_error is None:
+                    close_error = exc
+        self._active = False
+        return close_error
+
+    def finalize(self) -> Path:
+        self._ensure_active()
+        if self._finalize_called:
+            raise RuntimeError("finalize is single-use")
+        self._finalize_called = True
+        rename_error: BaseException | None = None
+        try:
+            self._validate_before_finalize()
+            if self._stage_handle is None:
+                raise EvidenceError("Windows staging handle is unavailable")
+            if self._publication_state() != _NOT_PUBLISHED:
+                raise EvidenceError(
+                    "Windows staging publication identity is ambiguous"
+                )
+            self._api.flush_directory(self._stage_handle)
+            self._write_owned(MANIFEST_NAME, self._build_manifest())
+            self._api.flush_directory(self._stage_handle)
+            if self._publication_state() != _NOT_PUBLISHED:
+                raise EvidenceError(
+                    "Windows staging publication identity changed"
+                )
+            self._api.rename_handle_noreplace(
+                self._stage_handle,
+                self._parent_handles[-1],
+                self._final_path.name,
+            )
+        except BaseException as exc:
+            rename_error = exc
+
+        state = self._publication_state()
+        if state == _NOT_PUBLISHED:
+            self._abort()
+            if rename_error is not None:
+                raise rename_error
+            raise EvidenceError("Windows publication did not occur")
+        if state == _AMBIGUOUS:
+            self._close_without_cleanup()
+            cause = rename_error or EvidenceError(
+                "Windows publication identity is ambiguous"
+            )
+            raise PublicationUncertainError(
+                self._final_path,
+                cause,
+            ) from cause
+
+        publication_error: BaseException | None = rename_error
+        try:
+            self._api.flush_directory(self._parent_handles[-1])
+            if self._publication_state() != _PUBLISHED:
+                raise EvidenceError(
+                    "published Windows bundle identity changed"
+                )
+        except BaseException as exc:
+            if publication_error is None:
+                publication_error = exc
+        close_error = self._close_without_cleanup()
+        if publication_error is None:
+            publication_error = close_error
         if publication_error is not None:
             raise PublicationUncertainError(
                 self._final_path,
@@ -1996,13 +2650,7 @@ class _WindowsEvidenceBundle:
         if not self._active:
             return
         try:
-            if self._stage_handle is not None:
-                try:
-                    self._api.close(self._stage_handle)
-                except OSError:
-                    pass
-                self._stage_handle = None
-            if self._stage_exists:
+            if self._publication_state() == _NOT_PUBLISHED:
                 try:
                     names = os.listdir(self._stage_path)
                 except OSError:
@@ -2016,50 +2664,256 @@ class _WindowsEvidenceBundle:
                             self._api.delete_file(entry)
                     except OSError:
                         pass
-                try:
+                if self._publication_state() == _NOT_PUBLISHED:
                     self._api.remove_directory(self._stage_path)
-                    self._stage_exists = False
+        except OSError:
+            pass
+        finally:
+            self._close_without_cleanup()
+
+
+def _win_audit_info_signature(
+    information: _WinByHandleFileInformation,
+) -> tuple[
+    tuple[int, int, int],
+    int,
+    tuple[int, int],
+    int,
+    int,
+]:
+    return (
+        information.identity,
+        information.size,
+        information.write_time,
+        information.number_of_links,
+        information.file_attributes,
+    )
+
+
+@dataclass
+class _WindowsAuditFile:
+    handle: object
+    information: _WinByHandleFileInformation
+    data: bytes
+
+
+def _win_open_audit_file(
+    path: Path,
+    *,
+    api: _WindowsAPI,
+) -> _WindowsAuditFile:
+    handle = api.create_file(
+        path,
+        creation_disposition=_WIN_OPEN_EXISTING,
+        flags=(
+            _WIN_FILE_ATTRIBUTE_NORMAL
+            | _WIN_FILE_FLAG_OPEN_REPARSE_POINT
+        ),
+        access=(
+            _WIN_GENERIC_READ
+            | _WIN_FILE_READ_ATTRIBUTES
+            | _WIN_READ_CONTROL
+        ),
+        # Permit readers only.  This denies write and delete sharing for
+        # the complete lifetime of an audit snapshot.
+        share=_WIN_FILE_SHARE_READ,
+    )
+    try:
+        api.require_regular_single_link(handle)
+        api.require_private_acl(handle)
+        before = api.info(handle)
+        data = api.read_all(handle, before.size)
+        after = api.info(handle)
+        if (
+            _win_audit_info_signature(before)
+            != _win_audit_info_signature(after)
+            or len(data) != before.size
+        ):
+            raise EvidenceError(
+                f"{path.name} changed while being read"
+            )
+        return _WindowsAuditFile(handle, before, data)
+    except BaseException:
+        try:
+            api.close(handle)
+        except OSError:
+            pass
+        raise
+
+
+class _WindowsAuditSnapshot:
+    def __init__(
+        self,
+        path: Path,
+        api: _WindowsAPI,
+        directory_handles: list[object],
+        directory_information: _WinByHandleFileInformation,
+        files: dict[str, _WindowsAuditFile],
+    ) -> None:
+        self.path = path
+        self.api = api
+        self.directory_handles = directory_handles
+        self.directory_information = directory_information
+        self.files = files
+        self.payloads = {
+            name: record.data for name, record in files.items()
+        }
+        self._closed = False
+
+    def revalidate(self) -> None:
+        directory_handle = self.directory_handles[-1]
+        self.api.require_directory_no_reparse(directory_handle)
+        self.api.require_private_acl(directory_handle)
+        if (
+            _win_audit_info_signature(
+                self.api.info(directory_handle)
+            )
+            != _win_audit_info_signature(
+                self.directory_information
+            )
+            or self.api.directory_identity(self.path)
+            != self.directory_information.identity
+        ):
+            raise EvidenceError(
+                "bundle path identity changed during Windows audit"
+            )
+        names = os.listdir(self.path)
+        if (
+            set(names) != _ALL_ARTIFACTS
+            or len(names) != len(_ALL_ARTIFACTS)
+        ):
+            raise EvidenceError(
+                "bundle membership changed during Windows audit"
+            )
+        for name, record in self.files.items():
+            self.api.require_regular_single_link(record.handle)
+            self.api.require_private_acl(record.handle)
+            if (
+                _win_audit_info_signature(
+                    self.api.info(record.handle)
+                )
+                != _win_audit_info_signature(record.information)
+            ):
+                raise EvidenceError(
+                    f"{name} changed during Windows audit"
+                )
+            reopened = _win_open_audit_file(
+                self.path / name,
+                api=self.api,
+            )
+            try:
+                if (
+                    _win_audit_info_signature(
+                        reopened.information
+                    )
+                    != _win_audit_info_signature(
+                        record.information
+                    )
+                    or reopened.data != record.data
+                ):
+                    raise EvidenceError(
+                        f"{name} identity or bytes changed during "
+                        "Windows audit"
+                    )
+            except BaseException:
+                try:
+                    self.api.close(reopened.handle)
                 except OSError:
                     pass
-        finally:
-            _win_close_handles(self._api, self._parent_handles)
-            self._active = False
+                raise
+            else:
+                self.api.close(reopened.handle)
+
+    def close(self, *, suppress: bool) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_error: OSError | None = None
+        for record in reversed(tuple(self.files.values())):
+            try:
+                self.api.close(record.handle)
+            except OSError as exc:
+                if close_error is None:
+                    close_error = exc
+        while self.directory_handles:
+            handle = self.directory_handles.pop()
+            try:
+                self.api.close(handle)
+            except OSError as exc:
+                if close_error is None:
+                    close_error = exc
+        if close_error is not None and not suppress:
+            raise close_error
 
 
-def _win_read_bundle_payloads(
+def _open_windows_audit_snapshot(
     path: Path | str,
-) -> dict[str, bytes]:
+) -> _WindowsAuditSnapshot:
     api = _WindowsAPI()
     bundle_path, handles = _win_open_directory_chain(
         _safe_absolute(path),
         api=api,
         require_private_leaf=True,
     )
+    files: dict[str, _WindowsAuditFile] = {}
     try:
+        directory_information = api.info(handles[-1])
+        if (
+            api.directory_identity(bundle_path)
+            != directory_information.identity
+        ):
+            raise EvidenceError(
+                "Windows bundle path does not match held directory"
+            )
         names = os.listdir(bundle_path)
-        if set(names) != _ALL_ARTIFACTS or len(names) != len(
-            _ALL_ARTIFACTS
+        if (
+            set(names) != _ALL_ARTIFACTS
+            or len(names) != len(_ALL_ARTIFACTS)
         ):
             raise EvidenceError(
                 "bundle membership mismatch: "
                 f"expected={sorted(_ALL_ARTIFACTS)} "
                 f"actual={sorted(names)}"
             )
-        payloads = {
-            name: _win_read_regular_file(
+        for name in sorted(_ALL_ARTIFACTS):
+            files[name] = _win_open_audit_file(
                 bundle_path / name,
                 api=api,
             )
-            for name in sorted(_ALL_ARTIFACTS)
-        }
         after = os.listdir(bundle_path)
         if set(after) != set(names) or len(after) != len(names):
             raise EvidenceError(
                 "bundle membership changed during Windows audit"
             )
-        return payloads
-    finally:
+        return _WindowsAuditSnapshot(
+            bundle_path,
+            api,
+            handles,
+            directory_information,
+            files,
+        )
+    except BaseException:
+        for record in reversed(tuple(files.values())):
+            try:
+                api.close(record.handle)
+            except OSError:
+                pass
         _win_close_handles(api, handles)
+        raise
+
+
+def _win_read_bundle_payloads(
+    path: Path | str,
+) -> dict[str, bytes]:
+    snapshot = _open_windows_audit_snapshot(path)
+    try:
+        payloads = dict(snapshot.payloads)
+        snapshot.revalidate()
+    except BaseException:
+        snapshot.close(suppress=True)
+        raise
+    snapshot.close(suppress=False)
+    return payloads
 
 
 def _read_regular_file(directory_fd: int, name: str) -> bytes:
@@ -2125,6 +2979,264 @@ def _read_regular_file(directory_fd: int, name: str) -> bytes:
         return data
 
 
+def _posix_audit_stat_signature(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_posix_audit_fd(
+    descriptor: int,
+    *,
+    expected_size: int,
+    name: str,
+) -> bytes:
+    if expected_size > MAX_FILE_BYTES:
+        raise EvidenceError(f"{name} exceeds {MAX_FILE_BYTES} bytes")
+    chunks: list[bytes] = []
+    remaining = expected_size
+    while remaining:
+        chunk = os.read(descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    data = b"".join(chunks)
+    if len(data) != expected_size:
+        raise EvidenceError(f"{name} changed while being read")
+    return data
+
+
+@dataclass
+class _PosixAuditFile:
+    descriptor: int
+    metadata: os.stat_result
+    data: bytes
+
+
+class _PosixAuditSnapshot:
+    def __init__(
+        self,
+        path: Path,
+        directory_fd: int,
+        directory_metadata: os.stat_result,
+        files: dict[str, _PosixAuditFile],
+    ) -> None:
+        self.path = path
+        self.directory_fd = directory_fd
+        self.directory_metadata = directory_metadata
+        self.files = files
+        self.payloads = {
+            name: record.data for name, record in files.items()
+        }
+        self._closed = False
+
+    def revalidate(self) -> None:
+        current_directory = os.fstat(self.directory_fd)
+        if (
+            _posix_audit_stat_signature(current_directory)
+            != _posix_audit_stat_signature(
+                self.directory_metadata
+            )
+        ):
+            raise EvidenceError(
+                "bundle directory changed during POSIX audit"
+            )
+        names = os.listdir(self.directory_fd)
+        if (
+            set(names) != _ALL_ARTIFACTS
+            or len(names) != len(_ALL_ARTIFACTS)
+        ):
+            raise EvidenceError(
+                "bundle membership changed during POSIX audit"
+            )
+        for name, record in self.files.items():
+            opened = os.fstat(record.descriptor)
+            if (
+                _posix_audit_stat_signature(opened)
+                != _posix_audit_stat_signature(record.metadata)
+            ):
+                raise EvidenceError(
+                    f"{name} changed during POSIX audit"
+                )
+            named = os.stat(
+                name,
+                dir_fd=self.directory_fd,
+                follow_symlinks=False,
+            )
+            if (
+                _posix_audit_stat_signature(named)
+                != _posix_audit_stat_signature(record.metadata)
+            ):
+                raise EvidenceError(
+                    f"{name} identity changed during POSIX audit"
+                )
+            os.lseek(record.descriptor, 0, os.SEEK_SET)
+            reread = _read_posix_audit_fd(
+                record.descriptor,
+                expected_size=record.metadata.st_size,
+                name=name,
+            )
+            after = os.fstat(record.descriptor)
+            if (
+                reread != record.data
+                or _posix_audit_stat_signature(after)
+                != _posix_audit_stat_signature(record.metadata)
+            ):
+                raise EvidenceError(
+                    f"{name} bytes changed during POSIX audit"
+                )
+        reopened = _open_directory_nofollow(self.path)
+        try:
+            if (
+                _posix_identity(os.fstat(reopened))
+                != _posix_identity(self.directory_metadata)
+            ):
+                raise EvidenceError(
+                    "bundle path identity changed during POSIX audit"
+                )
+        except BaseException:
+            try:
+                os.close(reopened)
+            except OSError:
+                pass
+            raise
+        else:
+            os.close(reopened)
+
+    def close(self, *, suppress: bool) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close_error: OSError | None = None
+        for record in reversed(tuple(self.files.values())):
+            try:
+                os.close(record.descriptor)
+            except OSError as exc:
+                if close_error is None:
+                    close_error = exc
+        try:
+            os.close(self.directory_fd)
+        except OSError as exc:
+            if close_error is None:
+                close_error = exc
+        if close_error is not None and not suppress:
+            raise close_error
+
+
+def _open_posix_audit_snapshot(
+    path: Path | str,
+) -> _PosixAuditSnapshot:
+    bundle_path = _safe_absolute(path)
+    directory_fd = _open_directory_nofollow(bundle_path)
+    files: dict[str, _PosixAuditFile] = {}
+    try:
+        directory_metadata = os.fstat(directory_fd)
+        if stat.S_IMODE(directory_metadata.st_mode) != 0o700:
+            raise EvidenceError(
+                "bundle directory mode must be exactly 0700"
+            )
+        names = os.listdir(directory_fd)
+        if (
+            set(names) != _ALL_ARTIFACTS
+            or len(names) != len(_ALL_ARTIFACTS)
+        ):
+            raise EvidenceError(
+                "bundle membership mismatch: "
+                f"expected={sorted(_ALL_ARTIFACTS)} "
+                f"actual={sorted(names)}"
+            )
+        for name in sorted(_ALL_ARTIFACTS):
+            before = os.stat(
+                name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size > MAX_FILE_BYTES
+                or stat.S_IMODE(before.st_mode) != 0o600
+            ):
+                raise EvidenceError(
+                    f"{name} must be one bounded, non-hardlinked "
+                    "regular file"
+                )
+            descriptor = os.open(
+                name,
+                os.O_RDONLY
+                | _require_no_follow()
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    _posix_audit_stat_signature(opened)
+                    != _posix_audit_stat_signature(before)
+                ):
+                    raise EvidenceError(
+                        f"{name} changed during safe open"
+                    )
+                data = _read_posix_audit_fd(
+                    descriptor,
+                    expected_size=opened.st_size,
+                    name=name,
+                )
+                after = os.fstat(descriptor)
+                if (
+                    _posix_audit_stat_signature(after)
+                    != _posix_audit_stat_signature(opened)
+                ):
+                    raise EvidenceError(
+                        f"{name} changed while being read"
+                    )
+            except BaseException:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                raise
+            files[name] = _PosixAuditFile(
+                descriptor,
+                opened,
+                data,
+            )
+        after_names = os.listdir(directory_fd)
+        if (
+            set(after_names) != set(names)
+            or len(after_names) != len(names)
+        ):
+            raise EvidenceError(
+                "bundle membership changed during POSIX audit"
+            )
+        return _PosixAuditSnapshot(
+            bundle_path,
+            directory_fd,
+            directory_metadata,
+            files,
+        )
+    except BaseException:
+        for record in reversed(tuple(files.values())):
+            try:
+                os.close(record.descriptor)
+            except OSError:
+                pass
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass
+        raise
+
+
 def _parse_manifest(data: bytes) -> dict[str, str]:
     if not data or len(data) > MAX_FILE_BYTES:
         raise EvidenceError("manifest is empty or oversized")
@@ -2153,55 +3265,13 @@ def _parse_manifest(data: bytes) -> dict[str, str]:
     return dict(records)
 
 
-def audit_bundle(
-    path: Path | str,
+def _audit_payloads(
+    payloads: Mapping[str, bytes],
     recompute: RecomputeCallback,
     *,
     required_source_commit: str | None = None,
     required_source_dirty_digest: str | None = None,
 ) -> AuditResult:
-    """Audit without writes and return a valid semantic verdict.
-
-    Invalid evidence raises :class:`EvidenceError`; a valid ``REJECT`` bundle
-    returns an :class:`AuditResult` whose ``verdict`` is ``"REJECT"``.
-    """
-
-    platform_kind = _platform_kind()
-    if platform_kind == "windows":
-        payloads = _win_read_bundle_payloads(path)
-    elif platform_kind == "posix":
-        bundle_path = _safe_absolute(path)
-        directory_fd = _open_directory_nofollow(bundle_path)
-        try:
-            if stat.S_IMODE(os.fstat(directory_fd).st_mode) != 0o700:
-                raise EvidenceError(
-                    "bundle directory mode must be exactly 0700"
-                )
-            names = os.listdir(directory_fd)
-            if set(names) != _ALL_ARTIFACTS or len(names) != len(
-                _ALL_ARTIFACTS
-            ):
-                raise EvidenceError(
-                    "bundle membership mismatch: "
-                    f"expected={sorted(_ALL_ARTIFACTS)} "
-                    f"actual={sorted(names)}"
-                )
-            payloads = {
-                name: _read_regular_file(directory_fd, name)
-                for name in sorted(_ALL_ARTIFACTS)
-            }
-            after = os.listdir(directory_fd)
-            if set(after) != set(names) or len(after) != len(names):
-                raise EvidenceError(
-                    "bundle membership changed during POSIX audit"
-                )
-        finally:
-            os.close(directory_fd)
-    else:
-        raise UnsupportedPlatformError(
-            f"secure evidence audit unsupported on {sys.platform}"
-        )
-
     manifest = _parse_manifest(payloads[MANIFEST_NAME])
     for name in _MANIFEST_MEMBERS:
         actual = hashlib.sha256(payloads[name]).hexdigest()
@@ -2275,3 +3345,48 @@ def audit_bundle(
         reasons=tuple(stored_verdict["reasons"]),  # type: ignore[arg-type]
         metadata=metadata,
     )
+
+
+def audit_bundle(
+    path: Path | str,
+    recompute: RecomputeCallback,
+    *,
+    required_source_commit: str | None = None,
+    required_source_dirty_digest: str | None = None,
+) -> AuditResult:
+    """Audit without writes and return a valid semantic verdict.
+
+    Invalid evidence raises :class:`EvidenceError`; a valid ``REJECT`` bundle
+    returns an :class:`AuditResult` whose ``verdict`` is ``"REJECT"``.
+    """
+
+    platform_kind = _platform_kind()
+    if platform_kind == "windows":
+        snapshot = _open_windows_audit_snapshot(path)
+    elif platform_kind == "posix":
+        snapshot = _open_posix_audit_snapshot(path)
+    else:
+        raise UnsupportedPlatformError(
+            f"secure evidence audit unsupported on {sys.platform}"
+        )
+
+    try:
+        result = _audit_payloads(
+            snapshot.payloads,
+            recompute,
+            required_source_commit=required_source_commit,
+            required_source_dirty_digest=(
+                required_source_dirty_digest
+            ),
+        )
+        snapshot.revalidate()
+    except BaseException:
+        snapshot.close(suppress=True)
+        raise
+    try:
+        snapshot.close(suppress=False)
+    except OSError as exc:
+        raise EvidenceError(
+            f"cannot close {platform_kind} audit snapshot: {exc}"
+        ) from exc
+    return result

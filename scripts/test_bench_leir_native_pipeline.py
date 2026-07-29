@@ -11,6 +11,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
+from scripts import bench_leir_native_pipeline as pipeline
 from scripts.evidence_bundle import PublicationUncertainError
 from scripts.bench_leir_native_pipeline import (
     FIELD_ORDER,
@@ -49,7 +50,7 @@ def _evidence_metadata(samples: int) -> dict[str, object]:
         "commands": [["bench", "--samples", str(samples)]],
         "cpu_policy": {"scope": "server"},
         "samples": samples,
-        "activations": 32,
+        "activations": 8,
         "min_mode_ms": 1,
         "unavailable_cells": [],
     }
@@ -64,9 +65,32 @@ def _cell(
     return MatrixCell(candidate, width, concurrency, payload)
 
 
+def _unavailable(cell: MatrixCell) -> dict[str, object]:
+    key = (
+        cell.candidate,
+        cell.batch_width,
+        cell.concurrency,
+        cell.payload,
+    )
+    skip_reason = "backend_unavailable"
+    return {
+        "candidate": cell.candidate,
+        "batch_width": cell.batch_width,
+        "concurrency": cell.concurrency,
+        "payload": cell.payload,
+        "reason": (
+            f"native pipeline unavailable for {key}: {skip_reason}"
+        ),
+        "stderr": (
+            f"LEIR_PIPELINE_SKIP candidate={cell.candidate} "
+            f"reason={skip_reason}\n"
+        ),
+    }
+
+
 def _fields(cell: MatrixCell | None = None) -> dict[str, str]:
     cell = cell or _cell()
-    activations = 64
+    activations = max(64, cell.concurrency * 8)
     logical = activations * 2
     effective = min(cell.batch_width, cell.concurrency)
     publications = activations // effective
@@ -509,6 +533,87 @@ class SummaryAndClassifierTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def _one_sample(self, *, process_sample: int = 1) -> SampleRow:
+        cell = full_matrix()[0]
+        order = "ABBA" if process_sample % 2 else "BAAB"
+        result = parse_output(
+            _output(cell),
+            cell,
+            min_mode_ns=1_000_000,
+        )
+        return SampleRow(process_sample, order, cell, result)
+
+    def _complete_metadata(
+        self,
+        *,
+        samples: int = 1,
+        activations: int = 8,
+        measured_cells: int = 1,
+    ) -> dict[str, object]:
+        metadata = _evidence_metadata(samples)
+        metadata["activations"] = activations
+        metadata["unavailable_cells"] = [
+            _unavailable(cell)
+            for cell in full_matrix()[measured_cells:]
+        ]
+        return pipeline._bundle_metadata(metadata)
+
+    def test_recompute_requires_canonical_pipeline_raw_csv(
+        self,
+    ) -> None:
+        sample = self._one_sample()
+        raw = pipeline._csv_text(
+            pipeline._raw_rows([sample]),
+            pipeline.RAW_FIELD_ORDER,
+        ).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "canonical"):
+            pipeline._recompute_artifacts(
+                raw.replace(b"\n", b"\r\n"),
+                self._complete_metadata(),
+            )
+
+    def test_pipeline_unavailable_exactly_matches_zero_sample_cells(
+        self,
+    ) -> None:
+        metadata = _evidence_metadata(1)
+        metadata["activations"] = 8
+        metadata["unavailable_cells"] = [
+            _unavailable(full_matrix()[0])
+        ]
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            pipeline._recompute_artifacts(
+                pipeline._csv_text(
+                    [],
+                    pipeline.RAW_FIELD_ORDER,
+                ).encode("utf-8"),
+                pipeline._bundle_metadata(metadata),
+            )
+
+    def test_pipeline_process_indices_and_activations_bind_schedule(
+        self,
+    ) -> None:
+        wrong_index = self._one_sample(process_sample=2)
+        raw = pipeline._csv_text(
+            pipeline._raw_rows([wrong_index]),
+            pipeline.RAW_FIELD_ORDER,
+        ).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "sample"):
+            pipeline._recompute_artifacts(
+                raw,
+                self._complete_metadata(),
+            )
+
+        sample = self._one_sample()
+        raw = pipeline._csv_text(
+            pipeline._raw_rows([sample]),
+            pipeline.RAW_FIELD_ORDER,
+        ).encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "activation"):
+            pipeline._recompute_artifacts(
+                raw,
+                self._complete_metadata(activations=9),
+            )
+
     def test_cli_reports_audit_recovery_for_uncertain_publication(
         self,
     ) -> None:
@@ -597,22 +702,7 @@ class EvidenceTests(unittest.TestCase):
     def test_unavailable_cells_form_auditable_inconclusive_bundle(
         self,
     ) -> None:
-        unavailable = [
-            {
-                "candidate": "link_skip",
-                "batch_width": 1,
-                "concurrency": 1,
-                "payload": 64,
-                "reason": (
-                    "native pipeline unavailable for "
-                    "('link_skip', 1, 1, 64): backend_unavailable"
-                ),
-                "stderr": (
-                    "LEIR_PIPELINE_SKIP candidate=link_skip "
-                    "reason=backend_unavailable\n"
-                ),
-            }
-        ]
+        unavailable = [_unavailable(cell) for cell in full_matrix()]
         verdict, reasons = _classify_evidence(
             [],
             expected_samples=1,
