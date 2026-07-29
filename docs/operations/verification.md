@@ -39,10 +39,24 @@ protected SYSTEM-plus-current-token DACLs, compatible directory sharing,
 handle-bound no-replace publication, identity/cleanup, reparse and hardlink
 rejection, and concurrent finalization. The same test is a required step in
 the pull-request `windows-runtime-stress` job. This security boundary requires
-native Windows:
+native Windows.
 Wine currently neither preserves `SE_DACL_PROTECTED` on these filesystem
 objects nor implements the required handle-relative directory rename, so Wine
 is useful for diagnostics but is not an acceptance environment for the gate.
+
+Windows evidence identity uses the volume serial number plus the 16-byte
+`FILE_ID_INFO` identifier; failure to obtain that identifier is fatal. The
+native gate prints `NATIVE_WINDOWS_EVIDENCE_FILESYSTEM=<name>` from the actual
+test volume and accepts only an observed `NTFS` or `ReFS` name, so an NTFS run
+is not reported as ReFS coverage.
+
+On a Windows writer error, automatic abort is deliberately close-only. The
+library never enumerates or deletes through the mutable staging pathname and
+may therefore leave its private, high-entropy `.staging-<pid>-<random>`
+directory behind. This conservative fallback prevents a substituted foreign
+directory from being deleted, at the cost of possible disk residue under
+repeated invalid or interrupted writes. Such residue is not proof of ownership
+by pathname alone and is never removed automatically.
 
 BSD is covered by the VM workflow in `.github/workflows/bsd.yml`.
 

@@ -29,6 +29,7 @@ try:
         audit_bundle,
         canonical_json_bytes,
         git_source_dirty_digest,
+        git_source_provenance,
         normalize_architecture,
     )
     from process_utils import (
@@ -47,6 +48,7 @@ except ModuleNotFoundError:
         audit_bundle,
         canonical_json_bytes,
         git_source_dirty_digest,
+        git_source_provenance,
         normalize_architecture,
     )
     from scripts.process_utils import (
@@ -1478,27 +1480,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _source_commit() -> str:
-    try:
-        result = run_capture(
-            ["git", "rev-parse", "HEAD"],
-            timeout=5.0,
-            max_output_bytes=4096,
-        )
-    except (OSError, ProcessTimeoutError):
-        return "unavailable"
-    return (
-        result.stdout.strip()
-        if (
-            result.returncode == 0
-            and not result.stderr
-            and not result.stdout_truncated
-            and not result.stderr_truncated
-        )
-        else "unavailable"
-    )
-
-
 def _source_dirty_digest(*, cwd: Path | None = None) -> str:
     return git_source_dirty_digest(run_capture, cwd=cwd)
 
@@ -1572,6 +1553,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    provenance_override = (
+        args.source_commit is not None,
+        args.source_dirty_digest is not None,
+    )
+    if provenance_override[0] != provenance_override[1]:
+        print(
+            "[bench_leir_native.py] --source-commit and "
+            "--source-dirty-digest must be supplied together",
+            file=sys.stderr,
+        )
+        return 2
+    automatic_provenance = not provenance_override[0]
+    if automatic_provenance:
+        try:
+            source_provenance = git_source_provenance(run_capture)
+        except (EvidenceError, OSError, RuntimeError, ValueError) as exc:
+            print(
+                "[bench_leir_native.py] source provenance capture "
+                f"failed: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        source_provenance = (
+            args.source_commit,
+            args.source_dirty_digest,
+        )
 
     cells = screen_matrix()
     try:
@@ -1600,16 +1608,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if automatic_provenance:
+        try:
+            source_provenance_after = git_source_provenance(run_capture)
+        except (EvidenceError, OSError, RuntimeError, ValueError) as exc:
+            print(
+                "[bench_leir_native.py] source provenance capture "
+                f"failed after measurement: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        if source_provenance_after != source_provenance:
+            print(
+                "[bench_leir_native.py] source provenance changed "
+                "during measurement",
+                file=sys.stderr,
+            )
+            return 2
 
     invocation = [
         sys.executable,
         str(Path(__file__)),
         *(argv or sys.argv[1:]),
     ]
-    source_commit = args.source_commit or _source_commit()
-    dirty_digest = (
-        args.source_dirty_digest or _source_dirty_digest()
-    )
+    source_commit, dirty_digest = source_provenance
     unavailable_reason = (
         reasons[0] if verdict == "INCONCLUSIVE" and len(reasons) == 1
         and reasons[0].startswith("cell ")

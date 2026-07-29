@@ -699,6 +699,103 @@ class EvidenceTests(unittest.TestCase):
             (root / "ignored.bin").write_bytes(b"ignored")
             self.assertEqual(_source_dirty_digest(cwd=root), second)
 
+    def test_cli_rejects_partial_source_provenance_override(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            output = root / "pipeline"
+            unavailable = [_unavailable(cell) for cell in full_matrix()]
+            with mock.patch(
+                "scripts.bench_leir_native_pipeline.run_matrix",
+                return_value=([], unavailable),
+            ):
+                status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(output),
+                        "--source-dirty-digest",
+                        "clean",
+                    ]
+                )
+            self.assertEqual(status, 2)
+            self.assertFalse(output.exists())
+
+    def test_cli_rejects_source_change_during_measurement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            output = root / "pipeline"
+            unavailable = [_unavailable(cell) for cell in full_matrix()]
+            first = (SOURCE_COMMIT, "clean")
+            second = ("f" * 40, "clean")
+            with mock.patch(
+                "scripts.bench_leir_native_pipeline.git_source_provenance",
+                create=True,
+                side_effect=[first, second],
+            ), mock.patch(
+                "scripts.bench_leir_native_pipeline.run_matrix",
+                return_value=([], unavailable),
+            ):
+                status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(output),
+                    ]
+                )
+            self.assertEqual(status, 2)
+            self.assertFalse(output.exists())
+
+    def test_complete_source_override_is_atomic_and_skips_git(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            output = root / "pipeline"
+            unavailable = [_unavailable(cell) for cell in full_matrix()]
+            with mock.patch(
+                "scripts.bench_leir_native_pipeline.git_source_provenance",
+                create=True,
+                side_effect=AssertionError(
+                    "complete override must not inspect Git"
+                ),
+            ), mock.patch(
+                "scripts.bench_leir_native_pipeline.run_matrix",
+                return_value=([], unavailable),
+            ):
+                status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(output),
+                        "--source-commit",
+                        SOURCE_COMMIT,
+                        "--source-dirty-digest",
+                        "clean",
+                    ]
+                )
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                audit_existing(
+                    output,
+                    required_source_commit=SOURCE_COMMIT,
+                    required_source_dirty_digest="clean",
+                )[0],
+                "INCONCLUSIVE",
+            )
+
     def test_unavailable_cells_form_auditable_inconclusive_bundle(
         self,
     ) -> None:

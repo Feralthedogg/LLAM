@@ -149,20 +149,28 @@ def _require_posix_rename_authority(
     effective_uid = os.geteuid()
     metadata = os.fstat(parent_fd)
     mode = stat.S_IMODE(metadata.st_mode)
-    owner_private = (
-        metadata.st_uid == effective_uid
+    trusted_owner = metadata.st_uid in {0, effective_uid}
+    trusted_child = expected_stage_uid in {
+        None,
+        0,
+        effective_uid,
+    }
+    owner_controlled = (
+        trusted_owner
+        and trusted_child
         and mode & 0o022 == 0
         and mode & 0o300 == 0o300
     )
     trusted_sticky = (
         bool(mode & stat.S_ISVTX)
-        and metadata.st_uid in {0, effective_uid}
+        and trusted_owner
+        and trusted_child
         and bool(mode & 0o022)
-        and expected_stage_uid in {None, effective_uid}
+        and mode & 0o300 == 0o300
     )
-    if not (owner_private or trusted_sticky):
+    if not (owner_controlled or trusted_sticky):
         raise EvidenceError(
-            "immediate parent lacks trusted POSIX rename authority"
+            "directory binding lacks trusted POSIX rename authority"
         )
     return _posix_identity(metadata)
 
@@ -420,6 +428,7 @@ def _capture_git_source_snapshot(
     *,
     cwd: Path | None,
 ) -> tuple[
+    str,
     Path,
     tuple[int, int, int],
     bytes,
@@ -462,10 +471,21 @@ def _capture_git_source_snapshot(
         root_before.st_ino,
         root_before.st_mode,
     )
+    head_before = _git_result_text(
+        run_process(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=root,
+            timeout=5.0,
+            max_output_bytes=4096,
+        ),
+        where="Git HEAD",
+    ).rstrip("\n")
+    if _HEX40_RE.fullmatch(head_before) is None:
+        raise EvidenceError("Git HEAD is not one 40-character object ID")
     worktree_text = _git_result_text(
         run_process(
             ["git", "diff", "--binary", "--no-ext-diff", "--"],
-            cwd=cwd,
+            cwd=root,
             timeout=10.0,
             max_output_bytes=MAX_SOURCE_STATE_BYTES,
         ),
@@ -482,7 +502,7 @@ def _capture_git_source_snapshot(
                 "HEAD",
                 "--",
             ],
-            cwd=cwd,
+            cwd=root,
             timeout=10.0,
             max_output_bytes=MAX_SOURCE_STATE_BYTES,
         ),
@@ -497,7 +517,7 @@ def _capture_git_source_snapshot(
                 "--exclude-standard",
                 "-z",
             ],
-            cwd=cwd,
+            cwd=root,
             timeout=10.0,
             max_output_bytes=MAX_SOURCE_STATE_BYTES,
         ),
@@ -554,7 +574,19 @@ def _capture_git_source_snapshot(
         root_after.st_mode,
     ):
         raise EvidenceError("Git root changed during source capture")
+    head_after = _git_result_text(
+        run_process(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=root,
+            timeout=5.0,
+            max_output_bytes=4096,
+        ),
+        where="Git HEAD",
+    ).rstrip("\n")
+    if head_after != head_before:
+        raise EvidenceError("Git HEAD changed during source capture")
     return (
+        head_before,
         root,
         root_identity,
         worktree,
@@ -564,35 +596,75 @@ def _capture_git_source_snapshot(
     )
 
 
+def _git_snapshot_dirty_digest(
+    snapshot: tuple[
+        str,
+        Path,
+        tuple[int, int, int],
+        bytes,
+        bytes,
+        bytes,
+        tuple[
+            tuple[
+                bytes,
+                bytes,
+                bytes,
+                bytes,
+                tuple[tuple[int, int, int], ...],
+                tuple[int, int, int, int, int, int],
+            ],
+            ...,
+        ],
+    ],
+) -> str:
+    _, _, _, worktree, index, _, entries = snapshot
+    if not worktree and not index and not entries:
+        return "clean"
+    digest = hashlib.sha256()
+    digest.update(b"llam-source-dirty-v2\x00")
+    _source_hash_frame(digest, b"worktree-diff", worktree)
+    _source_hash_frame(digest, b"index-diff", index)
+    for path_bytes, kind, mode, data, _, _ in entries:
+        _source_hash_frame(digest, b"path", path_bytes)
+        _source_hash_frame(digest, b"kind", kind)
+        _source_hash_frame(digest, b"mode", mode)
+        _source_hash_frame(digest, b"content", data)
+    return digest.hexdigest()
+
+
+def git_source_provenance(
+    run_process: Callable[..., object],
+    *,
+    cwd: Path | None = None,
+) -> tuple[str, str]:
+    """Capture one atomic, stable ``(HEAD, dirty digest)`` pair.
+
+    Ignored files are excluded by Git.  Untracked paths and contents use
+    explicit length framing so distinct inventories cannot collide through
+    concatenation.  HEAD brackets every full snapshot, and two complete
+    snapshots must match so a commit from one state cannot be paired with a
+    dirty digest from another.
+    """
+
+    first = _capture_git_source_snapshot(run_process, cwd=cwd)
+    second = _capture_git_source_snapshot(run_process, cwd=cwd)
+    if first != second:
+        raise EvidenceError("Git source changed between full snapshots")
+    return (first[0], _git_snapshot_dirty_digest(first))
+
+
 def git_source_dirty_digest(
     run_process: Callable[..., object],
     *,
     cwd: Path | None = None,
 ) -> str:
-    """Hash tracked and untracked Git source state, or fail closed.
-
-    Ignored files are excluded by Git.  Untracked paths and contents use
-    explicit length framing so distinct inventories cannot collide through
-    concatenation.
-    """
+    """Hash tracked and untracked Git source state, or return unavailable."""
 
     try:
-        first = _capture_git_source_snapshot(run_process, cwd=cwd)
-        second = _capture_git_source_snapshot(run_process, cwd=cwd)
-        if first != second:
-            return "unavailable"
-        _, _, worktree, index, _, entries = first
-        if not worktree and not index and not entries:
-            return "clean"
-        digest = hashlib.sha256()
-        digest.update(b"llam-source-dirty-v2\x00")
-        _source_hash_frame(digest, b"worktree-diff", worktree)
-        _source_hash_frame(digest, b"index-diff", index)
-        for path_bytes, kind, mode, data, _, _ in entries:
-            _source_hash_frame(digest, b"path", path_bytes)
-            _source_hash_frame(digest, b"kind", kind)
-            _source_hash_frame(digest, b"mode", mode)
-            _source_hash_frame(digest, b"content", data)
+        _, dirty_digest = git_source_provenance(
+            run_process,
+            cwd=cwd,
+        )
     except (
         EvidenceError,
         OSError,
@@ -601,7 +673,7 @@ def git_source_dirty_digest(
         ValueError,
     ):
         return "unavailable"
-    return digest.hexdigest()
+    return dirty_digest
 
 
 def _require_no_follow() -> int:
@@ -992,6 +1064,236 @@ def _open_directory_nofollow(path: Path) -> int:
         raise
 
 
+class _PosixDirectoryChain:
+    """Retained root-to-directory bindings for pathname authority."""
+
+    def __init__(
+        self,
+        path: Path,
+        descriptors: list[int],
+        component_names: tuple[str, ...],
+        identities: tuple[tuple[int, int], ...],
+        owners: tuple[int, ...],
+    ) -> None:
+        self.path = path
+        self.descriptors = descriptors
+        self.component_names = component_names
+        self.identities = identities
+        self.owners = owners
+        self._closed = False
+
+    @property
+    def leaf_fd(self) -> int:
+        if self._closed or not self.descriptors:
+            raise RuntimeError("POSIX directory chain is closed")
+        return self.descriptors[-1]
+
+    @property
+    def leaf_identity(self) -> tuple[int, int]:
+        return self.identities[-1]
+
+    def revalidate(self) -> None:
+        if self._closed:
+            raise EvidenceError("POSIX directory chain is closed")
+        if not hasattr(os, "geteuid"):
+            raise UnsupportedPlatformError(
+                "effective uid is required for POSIX directory bindings"
+            )
+        effective_uid = os.geteuid()
+        for child_index in range(
+            len(self.descriptors) - 1,
+            0,
+            -1,
+        ):
+            parent_fd = self.descriptors[child_index - 1]
+            child_fd = self.descriptors[child_index]
+            parent_metadata = os.fstat(parent_fd)
+            child_metadata = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(parent_metadata.st_mode)
+                or _posix_identity(parent_metadata)
+                != self.identities[child_index - 1]
+                or parent_metadata.st_uid
+                != self.owners[child_index - 1]
+            ):
+                raise EvidenceError(
+                    "POSIX ancestor identity changed during revalidation"
+                )
+            if (
+                not stat.S_ISDIR(child_metadata.st_mode)
+                or _posix_identity(child_metadata)
+                != self.identities[child_index]
+                or child_metadata.st_uid != self.owners[child_index]
+                or child_metadata.st_uid not in {0, effective_uid}
+            ):
+                raise EvidenceError(
+                    "POSIX child binding identity or owner changed"
+                )
+            _require_posix_rename_authority(
+                parent_fd,
+                expected_stage_uid=child_metadata.st_uid,
+            )
+            if (
+                _named_posix_identity(
+                    parent_fd,
+                    self.component_names[child_index - 1],
+                )
+                != self.identities[child_index]
+            ):
+                raise EvidenceError(
+                    "POSIX ancestor pathname binding changed"
+                )
+
+        root_metadata = os.fstat(self.descriptors[0])
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or _posix_identity(root_metadata) != self.identities[0]
+            or root_metadata.st_uid != self.owners[0]
+            or root_metadata.st_uid not in {0, effective_uid}
+        ):
+            raise EvidenceError(
+                "POSIX filesystem root identity or owner changed"
+            )
+        flags = (
+            os.O_RDONLY
+            | _require_no_follow()
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        try:
+            reopened_root = os.open(os.sep, flags)
+        except OSError as exc:
+            raise EvidenceError(
+                f"cannot reopen POSIX filesystem root: {exc}"
+            ) from exc
+        primary_error: BaseException | None = None
+        try:
+            reopened_metadata = os.fstat(reopened_root)
+            if (
+                _posix_identity(reopened_metadata)
+                != self.identities[0]
+                or reopened_metadata.st_uid != self.owners[0]
+            ):
+                raise EvidenceError(
+                    "POSIX filesystem root pathname binding changed"
+                )
+        except BaseException as exc:
+            primary_error = exc
+        try:
+            os.close(reopened_root)
+        except BaseException as exc:
+            if primary_error is None:
+                primary_error = exc
+        if primary_error is not None:
+            raise primary_error
+
+    def close(self) -> BaseException | None:
+        if self._closed:
+            return None
+        self._closed = True
+        close_error: BaseException | None = None
+        while self.descriptors:
+            descriptor = self.descriptors.pop()
+            try:
+                os.close(descriptor)
+            except BaseException as exc:
+                if close_error is None:
+                    close_error = exc
+        return close_error
+
+
+def _open_posix_directory_chain(
+    path: Path | str,
+) -> _PosixDirectoryChain:
+    if os.name != "posix":
+        raise UnsupportedPlatformError(
+            "secure directory traversal requires POSIX dirfd support"
+        )
+    if not hasattr(os, "geteuid"):
+        raise UnsupportedPlatformError(
+            "effective uid is required for POSIX directory bindings"
+        )
+    absolute = _safe_absolute(path)
+    flags = (
+        os.O_RDONLY
+        | _require_no_follow()
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptors: list[int] = []
+    identities: list[tuple[int, int]] = []
+    owners: list[int] = []
+    try:
+        try:
+            root_fd = os.open(os.sep, flags)
+        except OSError as exc:
+            raise EvidenceError(
+                f"cannot open POSIX filesystem root: {exc}"
+            ) from exc
+        descriptors.append(root_fd)
+        root_metadata = os.fstat(root_fd)
+        effective_uid = os.geteuid()
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid not in {0, effective_uid}
+        ):
+            raise EvidenceError(
+                "POSIX filesystem root has an untrusted owner"
+            )
+        identities.append(_posix_identity(root_metadata))
+        owners.append(root_metadata.st_uid)
+        for component in absolute.parts[1:]:
+            parent_fd = descriptors[-1]
+            try:
+                child_fd = os.open(
+                    component,
+                    flags,
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                raise EvidenceError(
+                    "unsafe or unavailable POSIX directory ancestor "
+                    f"{absolute}: {exc}"
+                ) from exc
+            descriptors.append(child_fd)
+            child_metadata = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(child_metadata.st_mode)
+                or child_metadata.st_uid not in {0, effective_uid}
+            ):
+                raise EvidenceError(
+                    "POSIX directory binding has an untrusted owner"
+                )
+            child_identity = _posix_identity(child_metadata)
+            _require_posix_rename_authority(
+                parent_fd,
+                expected_stage_uid=child_metadata.st_uid,
+            )
+            if (
+                _named_posix_identity(parent_fd, component)
+                != child_identity
+            ):
+                raise EvidenceError(
+                    "POSIX directory name does not match held child"
+                )
+            identities.append(child_identity)
+            owners.append(child_metadata.st_uid)
+        return _PosixDirectoryChain(
+            absolute,
+            descriptors,
+            tuple(absolute.parts[1:]),
+            tuple(identities),
+            tuple(owners),
+        )
+    except BaseException:
+        while descriptors:
+            try:
+                os.close(descriptors.pop())
+            except BaseException:
+                pass
+        raise
+
+
 def _fsync_directory(descriptor: int) -> None:
     os.fsync(descriptor)
 
@@ -1049,6 +1351,7 @@ _WIN_SDDL_REVISION_1 = 1
 _WIN_SE_DACL_PROTECTED = 0x1000
 _WIN_TOKEN_QUERY = 0x0008
 _WIN_TOKEN_USER = 1
+_WIN_FILE_ID_INFO = 18
 _WIN_FILE_RENAME_INFO = 3
 _WIN_FILE_RENAME_INFO_EX = 22
 
@@ -1097,6 +1400,17 @@ class _WinFileTime(ctypes.Structure):
     ]
 
 
+class _WinFileId128(ctypes.Structure):
+    _fields_ = [("identifier", ctypes.c_ubyte * 16)]
+
+
+class _WinFileIdInfo(ctypes.Structure):
+    _fields_ = [
+        ("volume_serial_number", ctypes.c_uint64),
+        ("file_id", _WinFileId128),
+    ]
+
+
 class _WinByHandleFileInformation(ctypes.Structure):
     _fields_ = [
         ("file_attributes", ctypes.c_uint32),
@@ -1114,14 +1428,6 @@ class _WinByHandleFileInformation(ctypes.Structure):
     @property
     def size(self) -> int:
         return (self.file_size_high << 32) | self.file_size_low
-
-    @property
-    def identity(self) -> tuple[int, int, int]:
-        return (
-            self.volume_serial_number,
-            self.file_index_high,
-            self.file_index_low,
-        )
 
     @property
     def write_time(self) -> tuple[int, int]:
@@ -1156,17 +1462,29 @@ class _WindowsAPI:
             ctypes.c_void_p,
         ]
         self._kernel32.CreateDirectoryW.restype = ctypes.c_int
-        self._kernel32.RemoveDirectoryW.argtypes = [ctypes.c_wchar_p]
-        self._kernel32.RemoveDirectoryW.restype = ctypes.c_int
-        self._kernel32.DeleteFileW.argtypes = [ctypes.c_wchar_p]
-        self._kernel32.DeleteFileW.restype = ctypes.c_int
-        self._kernel32.GetFileAttributesW.argtypes = [ctypes.c_wchar_p]
-        self._kernel32.GetFileAttributesW.restype = ctypes.c_uint32
         self._kernel32.GetFileInformationByHandle.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(_WinByHandleFileInformation),
         ]
         self._kernel32.GetFileInformationByHandle.restype = ctypes.c_int
+        self._kernel32.GetFileInformationByHandleEx.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+        ]
+        self._kernel32.GetFileInformationByHandleEx.restype = ctypes.c_int
+        self._kernel32.GetVolumeInformationByHandleW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+        ]
+        self._kernel32.GetVolumeInformationByHandleW.restype = ctypes.c_int
         self._kernel32.WriteFile.argtypes = [
             ctypes.c_void_p,
             ctypes.c_void_p,
@@ -1438,22 +1756,6 @@ class _WindowsAPI:
             ):
                 self._raise_windows_error(self._last_error(), path)
 
-    def remove_directory(self, path: Path) -> None:
-        if not self._kernel32.RemoveDirectoryW(os.fspath(path)):
-            self._raise_windows_error(self._last_error(), path)
-
-    def delete_file(self, path: Path) -> None:
-        if not self._kernel32.DeleteFileW(os.fspath(path)):
-            self._raise_windows_error(self._last_error(), path)
-
-    def path_is_directory(self, path: Path) -> bool:
-        attributes = int(
-            self._kernel32.GetFileAttributesW(os.fspath(path))
-        )
-        if attributes == 0xFFFFFFFF:
-            self._raise_windows_error(self._last_error(), path)
-        return bool(attributes & _WIN_FILE_ATTRIBUTE_DIRECTORY)
-
     def info(self, handle: object) -> _WinByHandleFileInformation:
         information = _WinByHandleFileInformation()
         if not self._kernel32.GetFileInformationByHandle(
@@ -1465,6 +1767,43 @@ class _WindowsAPI:
                 "GetFileInformationByHandle failed",
             )
         return information
+
+    def identity(self, handle: object) -> tuple[int, bytes]:
+        information = _WinFileIdInfo()
+        if not self._kernel32.GetFileInformationByHandleEx(
+            handle,
+            _WIN_FILE_ID_INFO,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+        ):
+            raise OSError(
+                self._last_error(),
+                "GetFileInformationByHandleEx(FileIdInfo) failed",
+            )
+        return (
+            int(information.volume_serial_number),
+            bytes(information.file_id.identifier),
+        )
+
+    def filesystem_name(self, handle: object) -> str:
+        filesystem = ctypes.create_unicode_buffer(64)
+        if not self._kernel32.GetVolumeInformationByHandleW(
+            handle,
+            None,
+            0,
+            None,
+            None,
+            None,
+            filesystem,
+            len(filesystem),
+        ):
+            raise OSError(
+                self._last_error(),
+                "GetVolumeInformationByHandleW failed",
+            )
+        if not filesystem.value:
+            raise EvidenceError("Windows filesystem name is empty")
+        return filesystem.value
 
     def require_directory_no_reparse(self, handle: object) -> None:
         information = self.info(handle)
@@ -1642,7 +1981,7 @@ class _WindowsAPI:
     def directory_identity(
         self,
         path: Path,
-    ) -> tuple[int, int, int] | None:
+    ) -> tuple[int, bytes] | None:
         try:
             handle = self.create_file(
                 path,
@@ -1662,7 +2001,7 @@ class _WindowsAPI:
             return None
         with _win_managed_handle(self, handle):
             self.require_directory_no_reparse(handle)
-            return self.info(handle).identity
+            return self.identity(handle)
 
     def write_all(self, handle: object, data: bytes) -> None:
         offset = 0
@@ -1917,11 +2256,13 @@ def _win_read_regular_file(
     with _win_managed_handle(api, handle):
         api.require_regular_single_link(handle)
         api.require_private_acl(handle)
+        before_identity = api.identity(handle)
         before = api.info(handle)
         data = api.read_all(handle, before.size)
         after = api.info(handle)
+        after_identity = api.identity(handle)
         if (
-            before.identity != after.identity
+            before_identity != after_identity
             or before.size != after.size
             or before.write_time != after.write_time
             or len(data) != before.size
@@ -2054,6 +2395,7 @@ class EvidenceBundle:
         parent_identity: tuple[int, int],
         stage_identity: tuple[int, int],
         metadata: dict[str, object],
+        parent_chain: _PosixDirectoryChain,
     ) -> None:
         self._final_path = final_path
         self._stage_path = stage_path
@@ -2061,6 +2403,7 @@ class EvidenceBundle:
         self._stage_fd = stage_fd
         self._parent_identity = parent_identity
         self._stage_identity = stage_identity
+        self._parent_chain = parent_chain
         self._metadata = metadata
         self._written: set[str] = set()
         self._active = True
@@ -2089,13 +2432,23 @@ class EvidenceBundle:
             raise EvidenceError("filesystem root cannot be a bundle")
         _validate_bundle_leaf(final_path.name)
         parent_fd = _open_directory_nofollow(final_path.parent)
+        parent_chain: _PosixDirectoryChain | None = None
         try:
             parent_identity = _require_posix_rename_authority(parent_fd)
+            parent_chain = _open_posix_directory_chain(
+                final_path.parent
+            )
+            if parent_chain.leaf_identity != parent_identity:
+                raise EvidenceError(
+                    "POSIX parent handles identify different directories"
+                )
         except BaseException:
             try:
                 os.close(parent_fd)
             except OSError:
                 pass
+            if parent_chain is not None:
+                parent_chain.close()
             raise
         stage_name = (
             f".{final_path.name}.staging-{os.getpid()}-"
@@ -2159,6 +2512,7 @@ class EvidenceBundle:
                 parent_identity,
                 stage_identity,
                 validated_metadata,
+                parent_chain,
             )
             bundle_owns_descriptors = True
             bundle._write_owned(
@@ -2198,6 +2552,8 @@ class EvidenceBundle:
                 os.close(parent_fd)
             except OSError:
                 pass
+            if parent_chain is not None:
+                parent_chain.close()
             raise
 
     def _ensure_active(self) -> None:
@@ -2340,6 +2696,7 @@ class EvidenceBundle:
                 self._parent_fd,
                 self._final_path.name,
             )
+            self._parent_chain.revalidate()
         except (OSError, EvidenceError):
             return _AMBIGUOUS
         if (
@@ -2366,6 +2723,9 @@ class EvidenceBundle:
                         close_error = exc
                 finally:
                     setattr(self, attribute, -1)
+        chain_close_error = self._parent_chain.close()
+        if close_error is None:
+            close_error = chain_close_error
         self._active = False
         return close_error
 
@@ -2506,8 +2866,8 @@ class _WindowsEvidenceBundle:
         api: _WindowsAPI,
         parent_handles: list[object],
         stage_handle: object,
-        parent_identity: tuple[int, int, int],
-        stage_identity: tuple[int, int, int],
+        parent_identity: tuple[int, bytes],
+        stage_identity: tuple[int, bytes],
         metadata: dict[str, object],
     ) -> None:
         self._final_path = final_path
@@ -2540,7 +2900,7 @@ class _WindowsEvidenceBundle:
             api=api,
             writable_leaf=True,
         )
-        parent_identity = api.info(parent_handles[-1]).identity
+        parent_identity = api.identity(parent_handles[-1])
         if api.directory_identity(final_path.parent) != parent_identity:
             _win_close_handles(api, parent_handles)
             raise EvidenceError(
@@ -2551,8 +2911,7 @@ class _WindowsEvidenceBundle:
             f"{secrets.token_hex(16)}"
         )
         stage_handle: object | None = None
-        stage_identity: tuple[int, int, int] | None = None
-        stage_created = False
+        stage_identity: tuple[int, bytes] | None = None
         writer_owns_resources = False
         try:
             try:
@@ -2583,7 +2942,6 @@ class _WindowsEvidenceBundle:
                     final_path,
                 )
             api.create_directory(stage_path)
-            stage_created = True
             stage_handle = _win_open_directory(
                 stage_path,
                 api=api,
@@ -2591,7 +2949,7 @@ class _WindowsEvidenceBundle:
                 writable=True,
                 rename_source=False,
             )
-            stage_identity = api.info(stage_handle).identity
+            stage_identity = api.identity(stage_handle)
             if api.directory_identity(stage_path) != stage_identity:
                 raise EvidenceError(
                     "Windows staging name does not match held stage"
@@ -2612,28 +2970,9 @@ class _WindowsEvidenceBundle:
         except BaseException:
             if writer_owns_resources:
                 raise
-            safe_cleanup = False
             if stage_handle is not None:
                 try:
-                    safe_cleanup = (
-                        stage_created
-                        and stage_identity is not None
-                        and api.info(stage_handle).identity
-                        == stage_identity
-                        and api.directory_identity(stage_path)
-                        == stage_identity
-                        and api.directory_identity(final_path)
-                        != stage_identity
-                    )
-                except BaseException:
-                    pass
-                try:
                     api.close(stage_handle)
-                except OSError:
-                    pass
-            if safe_cleanup:
-                try:
-                    api.remove_directory(stage_path)
                 except OSError:
                     pass
             _win_close_handles(api, parent_handles)
@@ -2739,9 +3078,9 @@ class _WindowsEvidenceBundle:
             return _AMBIGUOUS
         try:
             if (
-                self._api.info(self._stage_handle).identity
+                self._api.identity(self._stage_handle)
                 != self._stage_identity
-                or self._api.info(self._parent_handles[-1]).identity
+                or self._api.identity(self._parent_handles[-1])
                 != self._parent_identity
                 or self._api.directory_identity(
                     self._final_path.parent
@@ -2817,7 +3156,7 @@ class _WindowsEvidenceBundle:
                 rename_source=True,
             )
             if (
-                self._api.info(publication_handle).identity
+                self._api.identity(publication_handle)
                 != self._stage_identity
             ):
                 raise EvidenceError(
@@ -2885,51 +3224,26 @@ class _WindowsEvidenceBundle:
     def _abort(self) -> None:
         if not self._active:
             return
-        try:
-            try:
-                state = self._publication_state()
-            except BaseException:
-                return
-            if state != _NOT_PUBLISHED:
-                return
-            try:
-                names = os.listdir(self._stage_path)
-            except BaseException:
-                names = []
-            for name in names:
-                entry = self._stage_path / name
-                try:
-                    if self._api.path_is_directory(entry):
-                        self._api.remove_directory(entry)
-                    else:
-                        self._api.delete_file(entry)
-                except BaseException:
-                    pass
-            try:
-                still_not_published = (
-                    self._publication_state() == _NOT_PUBLISHED
-                )
-            except BaseException:
-                still_not_published = False
-            if still_not_published:
-                self._api.remove_directory(self._stage_path)
-        except BaseException:
-            pass
-        finally:
-            self._close_without_cleanup()
+        # Win32 has no portable handle-relative tree deletion primitive.
+        # After an error the staging pathname is mutable, so inspecting or
+        # deleting through that pathname could target an attacker-controlled
+        # replacement.  Close our handles and intentionally leak the private,
+        # high-entropy staging directory instead.
+        self._close_without_cleanup()
 
 
 def _win_audit_info_signature(
     information: _WinByHandleFileInformation,
+    identity: tuple[int, bytes],
 ) -> tuple[
-    tuple[int, int, int],
+    tuple[int, bytes],
     int,
     tuple[int, int],
     int,
     int,
 ]:
     return (
-        information.identity,
+        identity,
         information.size,
         information.write_time,
         information.number_of_links,
@@ -2941,6 +3255,7 @@ def _win_audit_info_signature(
 class _WindowsAuditFile:
     handle: object
     information: _WinByHandleFileInformation
+    identity: tuple[int, bytes]
     data: bytes
 
 
@@ -2968,18 +3283,25 @@ def _win_open_audit_file(
     try:
         api.require_regular_single_link(handle)
         api.require_private_acl(handle)
+        before_identity = api.identity(handle)
         before = api.info(handle)
         data = api.read_all(handle, before.size)
         after = api.info(handle)
+        after_identity = api.identity(handle)
         if (
-            _win_audit_info_signature(before)
-            != _win_audit_info_signature(after)
+            _win_audit_info_signature(before, before_identity)
+            != _win_audit_info_signature(after, after_identity)
             or len(data) != before.size
         ):
             raise EvidenceError(
                 f"{path.name} changed while being read"
             )
-        return _WindowsAuditFile(handle, before, data)
+        return _WindowsAuditFile(
+            handle,
+            before,
+            before_identity,
+            data,
+        )
     except BaseException:
         try:
             api.close(handle)
@@ -2995,12 +3317,14 @@ class _WindowsAuditSnapshot:
         api: _WindowsAPI,
         directory_handles: list[object],
         directory_information: _WinByHandleFileInformation,
+        directory_identity: tuple[int, bytes],
         files: dict[str, _WindowsAuditFile],
     ) -> None:
         self.path = path
         self.api = api
         self.directory_handles = directory_handles
         self.directory_information = directory_information
+        self.directory_identity = directory_identity
         self.files = files
         self.payloads = {
             name: record.data for name, record in files.items()
@@ -3013,13 +3337,15 @@ class _WindowsAuditSnapshot:
         self.api.require_private_acl(directory_handle)
         if (
             _win_audit_info_signature(
-                self.api.info(directory_handle)
+                self.api.info(directory_handle),
+                self.api.identity(directory_handle),
             )
             != _win_audit_info_signature(
-                self.directory_information
+                self.directory_information,
+                self.directory_identity,
             )
             or self.api.directory_identity(self.path)
-            != self.directory_information.identity
+            != self.directory_identity
         ):
             raise EvidenceError(
                 "bundle path identity changed during Windows audit"
@@ -3037,9 +3363,13 @@ class _WindowsAuditSnapshot:
             self.api.require_private_acl(record.handle)
             if (
                 _win_audit_info_signature(
-                    self.api.info(record.handle)
+                    self.api.info(record.handle),
+                    self.api.identity(record.handle),
                 )
-                != _win_audit_info_signature(record.information)
+                != _win_audit_info_signature(
+                    record.information,
+                    record.identity,
+                )
             ):
                 raise EvidenceError(
                     f"{name} changed during Windows audit"
@@ -3051,10 +3381,12 @@ class _WindowsAuditSnapshot:
             try:
                 if (
                     _win_audit_info_signature(
-                        reopened.information
+                        reopened.information,
+                        reopened.identity,
                     )
                     != _win_audit_info_signature(
-                        record.information
+                        record.information,
+                        record.identity,
                     )
                     or reopened.data != record.data
                 ):
@@ -3075,7 +3407,7 @@ class _WindowsAuditSnapshot:
         if self._closed:
             return
         self._closed = True
-        close_error: OSError | None = None
+        close_error: BaseException | None = None
         for record in reversed(tuple(self.files.values())):
             try:
                 self.api.close(record.handle)
@@ -3106,9 +3438,10 @@ def _open_windows_audit_snapshot(
     files: dict[str, _WindowsAuditFile] = {}
     try:
         directory_information = api.info(handles[-1])
+        directory_identity = api.identity(handles[-1])
         if (
             api.directory_identity(bundle_path)
-            != directory_information.identity
+            != directory_identity
         ):
             raise EvidenceError(
                 "Windows bundle path does not match held directory"
@@ -3138,6 +3471,7 @@ def _open_windows_audit_snapshot(
             api,
             handles,
             directory_information,
+            directory_identity,
             files,
         )
     except BaseException:
@@ -3279,6 +3613,7 @@ class _PosixAuditSnapshot:
         directory_fd: int,
         directory_metadata: os.stat_result,
         files: dict[str, _PosixAuditFile],
+        parent_chain: _PosixDirectoryChain,
     ) -> None:
         self.path = path
         self.parent_fd = parent_fd
@@ -3286,6 +3621,7 @@ class _PosixAuditSnapshot:
         self.directory_fd = directory_fd
         self.directory_metadata = directory_metadata
         self.files = files
+        self.parent_chain = parent_chain
         self.payloads = {
             name: record.data for name, record in files.items()
         }
@@ -3405,6 +3741,7 @@ class _PosixAuditSnapshot:
             raise
         else:
             os.close(reopened_directory)
+        self.parent_chain.revalidate()
 
     def close(self, *, suppress: bool) -> None:
         if self._closed:
@@ -3427,6 +3764,9 @@ class _PosixAuditSnapshot:
         except OSError as exc:
             if close_error is None:
                 close_error = exc
+        chain_close_error = self.parent_chain.close()
+        if close_error is None:
+            close_error = chain_close_error
         if close_error is not None and not suppress:
             raise close_error
 
@@ -3439,10 +3779,19 @@ def _open_posix_audit_snapshot(
         raise EvidenceError("filesystem root cannot be a bundle")
     _validate_bundle_leaf(bundle_path.name)
     parent_fd = _open_directory_nofollow(bundle_path.parent)
+    parent_chain: _PosixDirectoryChain | None = None
     directory_fd = -1
     files: dict[str, _PosixAuditFile] = {}
     try:
         parent_identity = _require_posix_rename_authority(parent_fd)
+        parent_chain = _open_posix_directory_chain(
+            bundle_path.parent
+        )
+        if parent_chain.leaf_identity != parent_identity:
+            raise EvidenceError(
+                "POSIX audit parent handles identify different "
+                "directories"
+            )
         try:
             directory_fd = os.open(
                 bundle_path.name,
@@ -3554,6 +3903,7 @@ def _open_posix_audit_snapshot(
             directory_fd,
             directory_metadata,
             files,
+            parent_chain,
         )
     except BaseException:
         for record in reversed(tuple(files.values())):
@@ -3570,6 +3920,8 @@ def _open_posix_audit_snapshot(
             os.close(parent_fd)
         except OSError:
             pass
+        if parent_chain is not None:
+            parent_chain.close()
         raise
 
 

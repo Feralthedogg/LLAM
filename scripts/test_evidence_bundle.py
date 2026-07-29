@@ -42,6 +42,8 @@ VERDICT = (
 REPORT = b"# Deterministic report\n\nThe threshold was missed.\n"
 SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 DIRTY_DIGEST = "a" * 64
+WIN_STAGE_ID = (1, b"\x01" * 16)
+WIN_PARENT_ID = (4, b"\x04" * 16)
 
 
 def _metadata(
@@ -231,6 +233,107 @@ class ProvenanceTests(unittest.TestCase):
                 "unavailable",
             )
 
+    def test_head_advance_during_snapshot_cannot_form_provenance_pair(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            self._repository(root)
+            original_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            advanced = False
+
+            def advance_head_between_observations(
+                argv: list[str],
+                **kwargs: object,
+            ) -> object:
+                nonlocal advanced
+                result = _run_capture(
+                    argv,
+                    cwd=kwargs.get("cwd"),  # type: ignore[arg-type]
+                    timeout=kwargs["timeout"],  # type: ignore[arg-type]
+                    max_output_bytes=kwargs[
+                        "max_output_bytes"
+                    ],  # type: ignore[arg-type]
+                )
+                if (
+                    not advanced
+                    and argv[:3] == ["git", "diff", "--binary"]
+                ):
+                    subprocess.run(
+                        [
+                            "git",
+                            "commit",
+                            "--allow-empty",
+                            "-qm",
+                            "advanced",
+                        ],
+                        cwd=root,
+                        check=True,
+                    )
+                    advanced = True
+                return result
+
+            with self.assertRaises(EvidenceError):
+                evidence_bundle.git_source_provenance(
+                    advance_head_between_observations,
+                    cwd=root,
+                )
+            self.assertNotEqual(
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                original_commit,
+            )
+
+    def test_source_state_commands_are_bound_to_resolved_git_root(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            self._repository(root)
+            nested = root / "nested"
+            nested.mkdir()
+            state_cwds: list[Path | None] = []
+
+            def record_state_cwd(
+                argv: list[str],
+                **kwargs: object,
+            ) -> object:
+                if argv[:2] in (
+                    ["git", "diff"],
+                    ["git", "ls-files"],
+                ):
+                    state_cwds.append(
+                        kwargs.get("cwd")  # type: ignore[arg-type]
+                    )
+                return _run_capture(
+                    argv,
+                    cwd=kwargs.get("cwd"),  # type: ignore[arg-type]
+                    timeout=kwargs["timeout"],  # type: ignore[arg-type]
+                    max_output_bytes=kwargs[
+                        "max_output_bytes"
+                    ],  # type: ignore[arg-type]
+                )
+
+            commit, dirty = evidence_bundle.git_source_provenance(
+                record_state_cwd,
+                cwd=nested,
+            )
+            self.assertRegex(commit, r"[0-9a-f]{40}")
+            self.assertEqual(dirty, "clean")
+            self.assertEqual(len(state_cwds), 6)
+            self.assertEqual(set(state_cwds), {root})
+
     def test_untracked_executable_mode_is_bound_into_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -317,6 +420,50 @@ class CreationAndFinalizationTests(unittest.TestCase):
                 b"keep",
             )
             self.assertTrue((owned / "metadata.json").is_file())
+
+    def test_publication_revalidates_full_ancestor_chain_before_success(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            ancestor = root / "ancestor"
+            parent = ancestor / "parent"
+            parent.mkdir(parents=True)
+            final = parent / "bundle"
+            bundle = EvidenceBundle.create(final, _metadata())
+            bundle.write_bytes("raw.csv", RAW)
+            bundle.write_bytes("summary.csv", SUMMARY)
+            bundle.write_bytes("verdict.json", VERDICT)
+            bundle.write_bytes("report.md", REPORT)
+            moved = root / "moved"
+            published_leaf_checks = 0
+            real_named_identity = (
+                evidence_bundle._named_posix_identity
+            )
+
+            def swap_after_final_leaf_check(
+                parent_fd: int,
+                name: str,
+            ) -> tuple[int, int] | None:
+                nonlocal published_leaf_checks
+                identity = real_named_identity(parent_fd, name)
+                if name == final.name and identity == bundle._stage_identity:
+                    published_leaf_checks += 1
+                    if published_leaf_checks == 2:
+                        ancestor.rename(moved)
+                        (ancestor / "parent").mkdir(parents=True)
+                return identity
+
+            with mock.patch.object(
+                evidence_bundle,
+                "_named_posix_identity",
+                side_effect=swap_after_final_leaf_check,
+            ):
+                with self.assertRaises(PublicationUncertainError):
+                    bundle.finalize()
+            self.assertEqual(published_leaf_checks, 2)
+            self.assertFalse(final.exists())
+            self.assertTrue((moved / "parent" / "bundle").is_dir())
 
     def test_real_rename_then_base_exception_preserves_published_bundle(
         self,
@@ -1075,6 +1222,205 @@ class MetadataValidationTests(unittest.TestCase):
 
 
 class AuditTests(unittest.TestCase):
+    def test_binding_authority_accepts_only_trusted_owner_modes(
+        self,
+    ) -> None:
+        cases = (
+            (0, 0o755, 0, True),
+            (0, 0o755, 1000, True),
+            (1000, 0o700, 1000, True),
+            (1000, 0o755, 1000, True),
+            (0, 0o1777, 1000, True),
+            (0, 0o1770, 1000, True),
+            (0, 0o777, 1000, False),
+            (0, 0o775, 1000, False),
+            (1000, 0o777, 1000, False),
+            (1000, 0o775, 1000, False),
+        )
+        for parent_uid, mode, child_uid, accepted in cases:
+            with self.subTest(
+                parent_uid=parent_uid,
+                mode=oct(mode),
+                child_uid=child_uid,
+            ), mock.patch.object(
+                evidence_bundle.os,
+                "geteuid",
+                return_value=1000,
+            ), mock.patch.object(
+                evidence_bundle.os,
+                "fstat",
+                return_value=types.SimpleNamespace(
+                    st_uid=parent_uid,
+                    st_mode=stat.S_IFDIR | mode,
+                    st_dev=1,
+                    st_ino=2,
+                ),
+            ):
+                if accepted:
+                    self.assertEqual(
+                        evidence_bundle._require_posix_rename_authority(
+                            99,
+                            expected_stage_uid=child_uid,
+                        ),
+                        (1, 2),
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        EvidenceError,
+                        "rename authority",
+                    ):
+                        evidence_bundle._require_posix_rename_authority(
+                            99,
+                            expected_stage_uid=child_uid,
+                        )
+
+    def test_audit_rejects_untrusted_writable_ancestor(
+        self,
+    ) -> None:
+        for mode in (0o775, 0o777):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory(
+            ) as temporary:
+                root = Path(temporary).resolve()
+                ancestor = root / "ancestor"
+                parent = ancestor / "parent"
+                parent.mkdir(parents=True)
+                final = _build_bundle(parent)
+                ancestor.chmod(mode)
+                with self.assertRaisesRegex(
+                    EvidenceError,
+                    "rename authority",
+                ):
+                    audit_bundle(final, recompute=_recompute)
+
+    def test_audit_rejects_ancestor_authority_change_during_recompute(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            ancestor = root / "ancestor"
+            parent = ancestor / "parent"
+            parent.mkdir(parents=True)
+            final = _build_bundle(parent)
+
+            def relax_ancestor(
+                raw_csv: bytes,
+                metadata: dict[str, object],
+            ) -> RecomputedArtifacts:
+                ancestor.chmod(0o777)
+                return _recompute(raw_csv, metadata)
+
+            with self.assertRaisesRegex(
+                EvidenceError,
+                "rename authority",
+            ):
+                audit_bundle(final, recompute=relax_ancestor)
+
+    def test_audit_rejects_ancestor_swap_after_parent_reopen(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            ancestor = root / "ancestor"
+            parent = ancestor / "parent"
+            parent.mkdir(parents=True)
+            final = _build_bundle(parent)
+            moved = root / "moved"
+            snapshot = evidence_bundle._open_posix_audit_snapshot(final)
+            real_open_directory = (
+                evidence_bundle._open_directory_nofollow
+            )
+            real_close = os.close
+            reopened_parent: int | None = None
+
+            def capture_reopened_parent(path: Path) -> int:
+                nonlocal reopened_parent
+                descriptor = real_open_directory(path)
+                if path == final.parent:
+                    reopened_parent = descriptor
+                return descriptor
+
+            def swap_after_parent_close(descriptor: int) -> None:
+                real_close(descriptor)
+                if descriptor == reopened_parent:
+                    ancestor.rename(moved)
+                    (ancestor / "parent").mkdir(parents=True)
+
+            try:
+                with mock.patch.object(
+                    evidence_bundle,
+                    "_open_directory_nofollow",
+                    side_effect=capture_reopened_parent,
+                ), mock.patch.object(
+                    evidence_bundle.os,
+                    "close",
+                    side_effect=swap_after_parent_close,
+                ):
+                    with self.assertRaises(EvidenceError):
+                        snapshot.revalidate()
+            finally:
+                snapshot.close(suppress=True)
+            self.assertFalse(final.exists())
+            self.assertTrue((moved / "parent" / "bundle").is_dir())
+
+    def test_posix_chain_wraps_component_open_failure(
+        self,
+    ) -> None:
+        real_open = os.open
+
+        def fail_component(
+            path: object,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            if path == os.sep:
+                return real_open(path, flags, mode)
+            raise OSError(errno.EACCES, "injected ancestor denial")
+
+        with mock.patch.object(
+            evidence_bundle.os,
+            "open",
+            side_effect=fail_component,
+        ):
+            with self.assertRaisesRegex(
+                EvidenceError,
+                "unsafe or unavailable POSIX directory ancestor",
+            ):
+                evidence_bundle._open_posix_directory_chain(
+                    Path(os.sep) / "denied"
+                )
+
+    def test_posix_chain_close_preserves_first_error_and_closes_all(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            chain = evidence_bundle._open_posix_directory_chain(
+                Path(temporary).resolve()
+            )
+            descriptors = tuple(chain.descriptors)
+            first = descriptors[-1]
+            second = descriptors[-2]
+            real_close = os.close
+            closed: list[int] = []
+
+            def close_with_two_errors(descriptor: int) -> None:
+                real_close(descriptor)
+                closed.append(descriptor)
+                if descriptor == first:
+                    raise OSError(errno.EIO, "first chain close")
+                if descriptor == second:
+                    raise OSError(errno.EBADF, "later chain close")
+
+            with mock.patch.object(
+                evidence_bundle.os,
+                "close",
+                side_effect=close_with_two_errors,
+            ):
+                error = chain.close()
+            self.assertIsInstance(error, OSError)
+            self.assertIn("first chain close", str(error))
+            self.assertCountEqual(closed, descriptors)
     def test_audit_requires_trusted_immediate_parent_modes(
         self,
     ) -> None:
@@ -1523,6 +1869,137 @@ class AuditTests(unittest.TestCase):
 
 
 class AtomicPrimitiveTests(unittest.TestCase):
+    def test_windows_file_id_info_layout_is_volume_plus_128_bits(
+        self,
+    ) -> None:
+        self.assertEqual(
+            evidence_bundle.ctypes.sizeof(
+                evidence_bundle._WinFileId128
+            ),
+            16,
+        )
+        self.assertEqual(
+            evidence_bundle.ctypes.sizeof(
+                evidence_bundle._WinFileIdInfo
+            ),
+            24,
+        )
+        self.assertEqual(
+            evidence_bundle._WinFileIdInfo.file_id.offset,
+            8,
+        )
+
+    def test_windows_identity_uses_file_id_info_128_bits(
+        self,
+    ) -> None:
+        calls: list[tuple[object, int, int]] = []
+
+        class Kernel32:
+            @staticmethod
+            def GetFileInformationByHandleEx(
+                handle: object,
+                information_class: int,
+                buffer: object,
+                size: int,
+            ) -> int:
+                calls.append((handle, information_class, size))
+                information = evidence_bundle.ctypes.cast(
+                    buffer,
+                    evidence_bundle.ctypes.POINTER(
+                        evidence_bundle._WinFileIdInfo
+                    ),
+                ).contents
+                information.volume_serial_number = (
+                    0x0102030405060708
+                )
+                for index in range(16):
+                    information.file_id.identifier[index] = index
+                return 1
+
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        api._kernel32 = Kernel32()  # type: ignore[attr-defined]
+        self.assertEqual(
+            api.identity("handle"),
+            (
+                0x0102030405060708,
+                bytes(range(16)),
+            ),
+        )
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "handle",
+                    evidence_bundle._WIN_FILE_ID_INFO,
+                    24,
+                )
+            ],
+        )
+
+    def test_windows_identity_failure_is_fail_closed(
+        self,
+    ) -> None:
+        class Kernel32:
+            @staticmethod
+            def GetFileInformationByHandleEx(*args: object) -> int:
+                return 0
+
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        api._kernel32 = Kernel32()  # type: ignore[attr-defined]
+        api._last_error = mock.Mock(  # type: ignore[method-assign]
+            return_value=evidence_bundle._WIN_ERROR_ACCESS_DENIED
+        )
+        with self.assertRaises(OSError):
+            api.identity("handle")
+
+    def test_windows_filesystem_name_comes_from_handle_volume(
+        self,
+    ) -> None:
+        calls: list[object] = []
+
+        class Kernel32:
+            @staticmethod
+            def GetVolumeInformationByHandleW(
+                handle: object,
+                volume_name: object,
+                volume_name_size: int,
+                serial_number: object,
+                maximum_component_length: object,
+                filesystem_flags: object,
+                filesystem_name: object,
+                filesystem_name_size: int,
+            ) -> int:
+                calls.append(handle)
+                filesystem_name.value = "ReFS"
+                return 1
+
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        api._kernel32 = Kernel32()  # type: ignore[attr-defined]
+        self.assertEqual(api.filesystem_name("handle"), "ReFS")
+        self.assertEqual(calls, ["handle"])
+
+    def test_windows_directory_identity_ignores_legacy_file_index(
+        self,
+    ) -> None:
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        api.create_file = mock.Mock(  # type: ignore[method-assign]
+            return_value="handle"
+        )
+        api.require_directory_no_reparse = mock.Mock()  # type: ignore[method-assign]
+        api.info = mock.Mock(  # type: ignore[method-assign]
+            return_value=types.SimpleNamespace(
+                identity=(1, 2, 3),
+            )
+        )
+        api.identity = mock.Mock(  # type: ignore[method-assign]
+            return_value=(9, b"\xaa" * 16)
+        )
+        api.close = mock.Mock()  # type: ignore[method-assign]
+        self.assertEqual(
+            api.directory_identity(Path("C:\\stage")),
+            (9, b"\xaa" * 16),
+        )
+
     def test_windows_handle_bound_rename_uses_no_replace_and_parent_handle(
         self,
     ) -> None:
@@ -1613,12 +2090,10 @@ class AtomicPrimitiveTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.closed: list[object] = []
                 self.opens: list[dict[str, object]] = []
-                self.source_identity: tuple[int, int, int] | None = (
-                    1,
-                    2,
-                    3,
+                self.source_identity: tuple[int, bytes] | None = (
+                    WIN_STAGE_ID
                 )
-                self.final_identity: tuple[int, int, int] | None = None
+                self.final_identity: tuple[int, bytes] | None = None
                 self.renamed_with_publication_handle = False
 
             def create_file(
@@ -1643,20 +2118,19 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 if handle != "publication":
                     raise AssertionError("wrong publication handle")
 
-            def info(self, handle: object) -> object:
-                identity = (
-                    (1, 2, 3)
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                return (
+                    WIN_STAGE_ID
                     if handle in {"stage", "publication"}
-                    else (4, 5, 6)
+                    else WIN_PARENT_ID
                 )
-                return types.SimpleNamespace(identity=identity)
 
             def directory_identity(self, path: Path) -> object:
                 if path.name == ".evidence.staging":
                     return self.source_identity
                 if path.name == "evidence":
                     return self.final_identity
-                return (4, 5, 6)
+                return WIN_PARENT_ID
 
             def rename_handle_noreplace(
                 self,
@@ -1670,7 +2144,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                     and "stage" not in self.closed
                 )
                 self.source_identity = None
-                self.final_identity = (1, 2, 3)
+                self.final_identity = WIN_STAGE_ID
 
             def flush_directory(self, handle: object) -> None:
                 if handle == "parent":
@@ -1687,8 +2161,8 @@ class AtomicPrimitiveTests(unittest.TestCase):
             api,  # type: ignore[arg-type]
             ["parent"],
             "stage",
-            (4, 5, 6),
-            (1, 2, 3),
+            WIN_PARENT_ID,
+            WIN_STAGE_ID,
             _metadata(),
         )
         with mock.patch.object(
@@ -1738,12 +2212,10 @@ class AtomicPrimitiveTests(unittest.TestCase):
         class FakeWindowsAPI:
             def __init__(self) -> None:
                 self.closed: list[object] = []
-                self.source_identity: tuple[int, int, int] | None = (
-                    1,
-                    2,
-                    3,
+                self.source_identity: tuple[int, bytes] | None = (
+                    WIN_STAGE_ID
                 )
-                self.final_identity: tuple[int, int, int] | None = None
+                self.final_identity: tuple[int, bytes] | None = None
 
             def create_file(
                 self,
@@ -1761,20 +2233,19 @@ class AtomicPrimitiveTests(unittest.TestCase):
             def require_private_acl(self, handle: object) -> None:
                 pass
 
-            def info(self, handle: object) -> object:
-                identity = (
-                    (1, 2, 3)
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                return (
+                    WIN_STAGE_ID
                     if handle in {"stage", "publication"}
-                    else (4, 5, 6)
+                    else WIN_PARENT_ID
                 )
-                return types.SimpleNamespace(identity=identity)
 
             def directory_identity(self, path: Path) -> object:
                 if path.name == ".evidence.staging":
                     return self.source_identity
                 if path.name == "evidence":
                     return self.final_identity
-                return (4, 5, 6)
+                return WIN_PARENT_ID
 
             def rename_handle_noreplace(
                 self,
@@ -1783,7 +2254,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 final_name: str,
             ) -> None:
                 self.source_identity = None
-                self.final_identity = (1, 2, 3)
+                self.final_identity = WIN_STAGE_ID
 
             def flush_directory(self, handle: object) -> None:
                 pass
@@ -1799,8 +2270,8 @@ class AtomicPrimitiveTests(unittest.TestCase):
             api,  # type: ignore[arg-type]
             ["ancestor", "parent"],
             "stage",
-            (4, 5, 6),
-            (1, 2, 3),
+            WIN_PARENT_ID,
+            WIN_STAGE_ID,
             _metadata(),
         )
         real_state = writer._publication_state
@@ -1838,7 +2309,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
             api.closed,
             ["publication", "stage", "parent", "ancestor"],
         )
-        self.assertEqual(api.final_identity, (1, 2, 3))
+        self.assertEqual(api.final_identity, WIN_STAGE_ID)
 
     def test_public_create_and_audit_route_to_windows_backend(
         self,
@@ -2110,18 +2581,24 @@ class AtomicPrimitiveTests(unittest.TestCase):
 
             def info(self, handle: object) -> object:
                 if handle == "bundle":
-                    identity = (1, 2, 3)
                     size = 0
                 else:
                     name = str(handle).split(":")[1]
-                    identity = (4, 5, hash(name))
                     size = len(payloads[name])
                 return types.SimpleNamespace(
-                    identity=identity,
                     size=size,
                     write_time=(7, 8),
                     number_of_links=1,
                     file_attributes=0,
+                )
+
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                if handle == "bundle":
+                    return WIN_STAGE_ID
+                name = str(handle).split(":")[1]
+                return (
+                    9,
+                    hashlib.sha256(name.encode()).digest()[:16],
                 )
 
             def read_all(
@@ -2139,7 +2616,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                     raise AssertionError("wrong size")
 
             def directory_identity(self, path: Path) -> object:
-                return (1, 2, 3)
+                return WIN_STAGE_ID
 
             def close(self, handle: object) -> None:
                 self.closed.append(handle)
@@ -2193,11 +2670,11 @@ class AtomicPrimitiveTests(unittest.TestCase):
             def create_file(self, path: Path, **kwargs: object) -> object:
                 raise FileNotFoundError(path)
 
-            def info(self, handle: object) -> object:
-                return types.SimpleNamespace(identity=(1, 2, 3))
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                return WIN_PARENT_ID
 
             def directory_identity(self, path: Path) -> object:
-                return (1, 2, 3)
+                return WIN_PARENT_ID
 
             def create_directory(self, path: Path) -> None:
                 raise OSError(errno.EACCES, "private DACL creation failed")
@@ -2233,20 +2710,21 @@ class AtomicPrimitiveTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.closed: list[object] = []
                 self.remove_calls: list[Path] = []
-                self.stage_info_calls = 0
+                self.stage_identity_calls = 0
 
-            def info(self, handle: object) -> object:
+            def identity(self, handle: object) -> tuple[int, bytes]:
                 if handle == "stage":
-                    self.stage_info_calls += 1
-                    if self.stage_info_calls == 1:
+                    self.stage_identity_calls += 1
+                    if self.stage_identity_calls == 1:
                         raise OSError(
                             errno.EIO,
                             "stage identity failed",
                         )
-                return types.SimpleNamespace(identity=(1, 2, 3))
+                    return WIN_STAGE_ID
+                return WIN_PARENT_ID
 
             def directory_identity(self, path: Path) -> object:
-                return (1, 2, 3)
+                return WIN_PARENT_ID
 
             def create_file(self, path: Path, **kwargs: object) -> object:
                 raise FileNotFoundError(path)
@@ -2300,11 +2778,11 @@ class AtomicPrimitiveTests(unittest.TestCase):
             def create_file(self, path: Path, **kwargs: object) -> object:
                 raise FileNotFoundError(path)
 
-            def info(self, handle: object) -> object:
-                return types.SimpleNamespace(identity=(1, 2, 3))
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                return WIN_PARENT_ID
 
             def directory_identity(self, path: Path) -> object:
-                return (1, 2, 3)
+                return WIN_PARENT_ID
 
             def create_directory(self, path: Path) -> None:
                 self.foreign_stage = path
@@ -2524,6 +3002,140 @@ class AtomicPrimitiveTests(unittest.TestCase):
         self.assertFalse(writer._active)
         self.assertCountEqual(api.closed, ["stage", "parent"])
 
+    def test_windows_abort_never_touches_mutable_stage_path(
+        self,
+    ) -> None:
+        for boundary in (
+            "first-classification",
+            "enumeration",
+            "entry-delete",
+            "second-classification",
+        ):
+            with self.subTest(
+                boundary=boundary
+            ), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                stage = root / (
+                    ".evidence.staging-1234-"
+                    "0123456789abcdef0123456789abcdef"
+                )
+                stage.mkdir(mode=0o700)
+                sentinel = stage / "foreign-sentinel"
+                sentinel.write_bytes(b"owned-before-swap")
+                moved = root / "owned-stage"
+                swapped = False
+                state_calls = 0
+
+                def swap_stage(*, empty: bool = False) -> None:
+                    nonlocal swapped
+                    if swapped:
+                        return
+                    stage.rename(moved)
+                    stage.mkdir(mode=0o700)
+                    if not empty:
+                        (stage / "foreign-sentinel").write_bytes(
+                            b"foreign"
+                        )
+                    swapped = True
+
+                class FakeWindowsAPI:
+                    def __init__(self) -> None:
+                        self.closed: list[object] = []
+                        self.path_calls: list[tuple[str, Path]] = []
+
+                    def path_is_directory(self, path: Path) -> bool:
+                        self.path_calls.append(("inspect", path))
+                        return False
+
+                    def delete_file(self, path: Path) -> None:
+                        self.path_calls.append(("delete", path))
+                        if boundary == "entry-delete":
+                            swap_stage()
+                        path.unlink()
+
+                    def remove_directory(self, path: Path) -> None:
+                        self.path_calls.append(("rmdir", path))
+                        path.rmdir()
+
+                    def close(self, handle: object) -> None:
+                        self.closed.append(handle)
+
+                api = FakeWindowsAPI()
+                writer = evidence_bundle._WindowsEvidenceBundle(
+                    root / "evidence",
+                    stage,
+                    api,  # type: ignore[arg-type]
+                    ["parent"],
+                    "stage-handle",
+                    (4, 5, 6),
+                    (1, 2, 3),
+                    _metadata(),
+                )
+
+                def classify() -> str:
+                    nonlocal state_calls
+                    state_calls += 1
+                    if (
+                        boundary == "first-classification"
+                        and state_calls == 1
+                    ):
+                        swap_stage()
+                    if (
+                        boundary == "second-classification"
+                        and state_calls == 2
+                    ):
+                        swap_stage(empty=True)
+                    return evidence_bundle._NOT_PUBLISHED
+
+                real_listdir = os.listdir
+
+                def enumerate_stage(path: object) -> list[str]:
+                    if path == stage:
+                        api.path_calls.append(("listdir", stage))
+                        if boundary == "enumeration":
+                            swap_stage()
+                    return real_listdir(path)
+
+                with mock.patch.object(
+                    writer,
+                    "_publication_state",
+                    side_effect=classify,
+                ), mock.patch.object(
+                    evidence_bundle.os,
+                    "listdir",
+                    side_effect=enumerate_stage,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "unsafe artifact name",
+                    ):
+                        writer.write_bytes("../escape", b"x")
+
+                self.assertEqual(state_calls, 0)
+                self.assertEqual(api.path_calls, [])
+                self.assertFalse(writer._active)
+                self.assertCountEqual(
+                    api.closed,
+                    ["stage-handle", "parent"],
+                )
+                if swapped:
+                    self.assertEqual(
+                        (stage / "foreign-sentinel").read_bytes(),
+                        b"foreign",
+                    )
+                    self.assertTrue(
+                        (moved / "foreign-sentinel").is_file()
+                    )
+                else:
+                    self.assertEqual(
+                        sentinel.read_bytes(),
+                        b"owned-before-swap",
+                    )
+                    self.assertEqual(
+                        stat.S_IMODE(stage.stat().st_mode),
+                        0o700,
+                    )
+
     def test_windows_reparse_ancestor_rejection_closes_handles(
         self,
     ) -> None:
@@ -2599,7 +3211,6 @@ class AtomicPrimitiveTests(unittest.TestCase):
 
     def test_windows_short_read_is_rejected_and_closed(self) -> None:
         before = types.SimpleNamespace(
-            identity=(1, 2, 3),
             size=len(RAW),
             write_time=(4, 5),
         )
@@ -2619,6 +3230,9 @@ class AtomicPrimitiveTests(unittest.TestCase):
 
             def info(self, handle: object) -> object:
                 return before
+
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                return WIN_STAGE_ID
 
             def read_all(self, handle: object, size: int) -> bytes:
                 return RAW[:-1]
@@ -2636,7 +3250,6 @@ class AtomicPrimitiveTests(unittest.TestCase):
 
     def test_windows_failed_read_is_closed(self) -> None:
         before = types.SimpleNamespace(
-            identity=(1, 2, 3),
             size=len(RAW),
             write_time=(4, 5),
         )
@@ -2656,6 +3269,9 @@ class AtomicPrimitiveTests(unittest.TestCase):
 
             def info(self, handle: object) -> object:
                 return before
+
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                return WIN_STAGE_ID
 
             def read_all(self, handle: object, size: int) -> bytes:
                 raise OSError(errno.EIO, "failed ReadFile")
