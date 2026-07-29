@@ -551,53 +551,101 @@ int llam_allocator_grow_task_slab(llam_shard_t *shard) {
 }
 
 /**
- * @brief Prewarm task allocators across all active shards.
+ * @brief Return one quotient/remainder share of a runtime-total target.
  *
- * The prewarm target is controlled by @c LLAM_TASK_CACHE_PREWARM and capped to
- * avoid accidentally reserving unbounded task memory during process startup.
- *
- * @param rt Runtime whose shard task caches should be prefilled.
+ * Remainders are assigned in stable shard order. Invalid indices return zero
+ * so test and diagnostic callers cannot divide by zero or observe a fabricated
+ * share outside the selected runtime capacity.
  */
-void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt) {
-    const char *value;
-    unsigned target = 128U;
-    unsigned shard_id;
-    unsigned slabs;
-
-    if (rt == NULL || rt->shards == NULL || rt->active_shards == 0U) {
-        return;
+uint64_t llam_runtime_prewarm_share(uint64_t total, unsigned count, unsigned index) {
+    if (count == 0U || index >= count) {
+        return 0U;
     }
-    value = llam_env_get("LLAM_TASK_CACHE_PREWARM");
-    if (value != NULL && value[0] != '\0') {
-        char *end = NULL;
-        unsigned long parsed;
+    return total / count + (index < total % count ? 1U : 0U);
+}
 
-        if (!llam_ascii_is_space((unsigned char)value[0]) && value[0] != '-' && value[0] != '+') {
-            errno = 0;
-            parsed = strtoul(value, &end, 10);
-            if (errno == 0 && end != value && *end == '\0') {
-                if (parsed > 4096UL) {
-                    parsed = 4096UL;
-                }
-                target = (unsigned)parsed;
+/**
+ * @brief Prewarm task allocators from one runtime-total authority.
+ *
+ * Task storage grows in fixed-size slabs. The distributor nevertheless counts
+ * only the logical share requested for each shard, so diagnostics preserve the
+ * exact runtime-total contract even when the final slab contributes spare
+ * cache capacity.
+ *
+ * @param rt       Runtime whose shard task caches should be prefilled.
+ * @param total    Runtime-total logical task-object target.
+ * @param exact    Fail instead of accepting a partial result.
+ * @param achieved Receives the logical number of task objects covered.
+ * @return 0 on success or best-effort exhaustion, -1 for invalid input, an
+ *         over-limit target, or an unsatisfied exact request.
+ */
+int llam_runtime_prewarm_task_allocators(llam_runtime_t *rt,
+                                         uint64_t total,
+                                         bool exact,
+                                         uint64_t *achieved) {
+    uint64_t completed = 0U;
+    uint64_t storage_objects = 0U;
+    uint64_t max_storage =
+        LLAM_RUNTIME_METADATA_BUDGET_BYTES / sizeof(llam_task_t);
+    int saved_errno = errno;
+
+    if (achieved != NULL) {
+        *achieved = 0U;
+    }
+    if (rt == NULL || rt->shards == NULL || rt->active_shards == 0U ||
+        achieved == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (!llam_runtime_task_prewarm_storage_objects(total,
+                                                   rt->active_shards,
+                                                   &storage_objects)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    if (storage_objects > max_storage) {
+        errno = E2BIG;
+        return -1;
+    }
+
+    for (unsigned shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
+        uint64_t remaining =
+            llam_runtime_prewarm_share(total, rt->active_shards, shard_id);
+
+        while (remaining != 0U) {
+            uint64_t logical_objects =
+                remaining < LLAM_TASK_SLAB_COUNT ? remaining : LLAM_TASK_SLAB_COUNT;
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+            if (!llam_runtime_test_prewarm_allocation_permitted(
+                    LLAM_TEST_PREWARM_TASK,
+                    logical_objects)) {
+                errno = ENOMEM;
+                goto exhausted;
             }
-        }
-    }
-    if (target == 0U) {
-        return;
-    }
-    slabs = (target + LLAM_TASK_SLAB_COUNT - 1U) / LLAM_TASK_SLAB_COUNT;
-    // Prewarm evenly per shard so first-use latency does not concentrate on
-    // shard zero during spawn-heavy startup benchmarks.
-    for (shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
-        unsigned i;
-
-        for (i = 0U; i < slabs; ++i) {
+#endif
             if (llam_allocator_grow_task_slab(&rt->shards[shard_id]) != 0) {
-                return;
+                if (errno == 0) {
+                    errno = ENOMEM;
+                }
+                goto exhausted;
             }
+            completed += logical_objects;
+            remaining -= logical_objects;
         }
     }
+
+    *achieved = completed;
+    errno = saved_errno;
+    return 0;
+
+exhausted:
+    *achieved = completed;
+    if (exact) {
+        return -1;
+    }
+    errno = saved_errno;
+    return 0;
 }
 
 /**

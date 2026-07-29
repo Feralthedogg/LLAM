@@ -1364,6 +1364,17 @@ struct llam_runtime {
     atomic_bool initialized;
     atomic_bool exec_started;
     llam_runtime_resource_plan_t resource_plan;
+    uint64_t requested_task_prewarm_total;
+    uint64_t achieved_task_prewarm_total;
+    uint64_t requested_stack_prewarm_total;
+    uint64_t achieved_stack_prewarm_total;
+    uint64_t requested_timer_prewarm_total;
+    uint64_t achieved_timer_prewarm_total;
+    uint64_t estimated_metadata_bytes;
+    uint64_t estimated_stack_mapping_bytes;
+    unsigned task_prewarm_source;
+    unsigned stack_prewarm_source;
+    unsigned timer_prewarm_source;
     unsigned observed_shards;
     unsigned active_shards;
     atomic_uint online_shards;

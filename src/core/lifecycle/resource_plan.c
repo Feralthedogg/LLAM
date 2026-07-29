@@ -51,6 +51,38 @@ static bool mul_u64(uint64_t a, uint64_t b, uint64_t *out) {
     return true;
 }
 
+bool llam_runtime_task_prewarm_storage_objects(uint64_t logical_total,
+                                               unsigned worker_count,
+                                               uint64_t *out_objects) {
+    uint64_t physical_total = 0U;
+
+    if (worker_count == 0U || out_objects == NULL) {
+        return false;
+    }
+    for (unsigned index = 0U; index < worker_count; ++index) {
+        uint64_t share =
+            logical_total / worker_count +
+            (index < logical_total % worker_count ? 1U : 0U);
+        uint64_t slabs;
+        uint64_t objects;
+
+        if (share == 0U) {
+            continue;
+        }
+        if (share > UINT64_MAX - (LLAM_TASK_SLAB_COUNT - 1U)) {
+            return false;
+        }
+        slabs =
+            (share + LLAM_TASK_SLAB_COUNT - 1U) / LLAM_TASK_SLAB_COUNT;
+        if (!mul_u64(slabs, LLAM_TASK_SLAB_COUNT, &objects) ||
+            !add_u64(physical_total, objects, &physical_total)) {
+            return false;
+        }
+    }
+    *out_objects = physical_total;
+    return true;
+}
+
 /** @brief Return whether one CPU is present in the process-allowed set. */
 static bool cpu_is_allowed(unsigned cpu, const unsigned *allowed, unsigned count) {
     unsigned i;
@@ -161,6 +193,7 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     int reserved_cpu = -1;
     uint64_t metadata_bytes = 0U;
     uint64_t stack_mapping_bytes;
+    uint64_t task_storage_objects;
     size_t copy_size;
 
     if (out != NULL) {
@@ -404,9 +437,12 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         plan.timer_prewarm_total = raw_opts.timer_prewarm_total;
     }
 
-    if (!add_metadata_component(plan.worker_max, sizeof(llam_shard_t), &metadata_bytes) ||
+    if (!llam_runtime_task_prewarm_storage_objects(plan.task_prewarm_total,
+                                                   plan.worker_max,
+                                                   &task_storage_objects) ||
+        !add_metadata_component(plan.worker_max, sizeof(llam_shard_t), &metadata_bytes) ||
         !add_metadata_component(plan.blocking_max, sizeof(pthread_t), &metadata_bytes) ||
-        !add_metadata_component(plan.task_prewarm_total, sizeof(llam_task_t), &metadata_bytes) ||
+        !add_metadata_component(task_storage_objects, sizeof(llam_task_t), &metadata_bytes) ||
         !add_metadata_component(plan.timer_prewarm_total, sizeof(llam_timer_node_t), &metadata_bytes) ||
         !mul_u64(plan.stack_prewarm_total,
                  LLAM_RUNTIME_STACK_MAPPING_ESTIMATE_BYTES,

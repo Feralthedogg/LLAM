@@ -63,11 +63,25 @@ diagnostics, benchmarks, and CI.
 
 | Variable | Values | Meaning |
 | --- | --- | --- |
-| `LLAM_TASK_CACHE_PREWARM` | task count | Prewarm task metadata slabs. |
-| `LLAM_STACK_CACHE_PREWARM` | stack count | Prewarm stack caches. |
-| `LLAM_TIMER_HEAP_PREWARM` | timer slots | Preallocate timer heap capacity. |
+| `LLAM_TASK_CACHE_PREWARM_TOTAL` | task count | Best-effort runtime-total task metadata target. |
+| `LLAM_STACK_CACHE_PREWARM_TOTAL` | `0`-`4096` stacks | Best-effort runtime-total default-stack target. |
+| `LLAM_TIMER_HEAP_PREWARM_TOTAL` | timer slots | Best-effort runtime-total timer heap target. |
+| `LLAM_TASK_CACHE_PREWARM` | tasks per worker | Deprecated best-effort compatibility input; capped at 4096 per selected worker. |
+| `LLAM_STACK_CACHE_PREWARM` | stack count | Deprecated best-effort compatibility input; historically already runtime-total. |
+| `LLAM_TIMER_HEAP_PREWARM` | slots per worker | Deprecated best-effort compatibility input; capped at 1048576 per selected worker. |
 | `LLAM_STACK_SAMPLING` | `0`, `1` | Enable stack high-water diagnostics. |
 | `LLAM_OPAQUE_REDIRECT_FASTPATH` | `0`, `1` | Prefer redirect over helper handoff for opaque blocking. |
+
+The size-aware C options `task_prewarm_total`, `stack_prewarm_total`, and
+`timer_prewarm_total` have highest precedence and are exact: initialization
+fails and unwinds if the requested resources cannot be allocated. `_TOTAL`
+environment inputs take precedence over deprecated names but remain
+best-effort. Zero public fields select environment/profile compatibility
+policy. All metadata targets share a checked 1 GiB planning ceiling; stack
+prewarm is capped at 4096 mappings.
+
+`llam_runtime_stats_t` reports the resolved request, achieved total, and
+`llam_runtime_prewarm_source_t` authority independently for each resource.
 
 ## Diagnostics
 

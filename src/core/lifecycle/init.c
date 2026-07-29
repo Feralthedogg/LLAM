@@ -299,6 +299,350 @@ static uint64_t llam_runtime_env_u64(const char *name, uint64_t default_value, u
 }
 
 /**
+ * @brief Parse a present unsigned environment value and expose its authority.
+ *
+ * Missing, empty, signed, whitespace-prefixed, malformed, and overflowing
+ * values are ignored so a malformed newer compatibility name can still fall
+ * back to the historical name or profile default.
+ */
+static bool llam_runtime_env_u64_present(const char *name,
+                                         uint64_t max_value,
+                                         uint64_t *out_value) {
+    const char *env = llam_env_get(name);
+    char *end = NULL;
+    unsigned long long parsed;
+
+    if (out_value == NULL || env == NULL || env[0] == '\0' ||
+        llam_ascii_is_space((unsigned char)env[0]) ||
+        env[0] == '-' || env[0] == '+') {
+        return false;
+    }
+    errno = 0;
+    parsed = strtoull(env, &end, 10);
+    if (errno != 0 || end == env || *end != '\0') {
+        return false;
+    }
+    if ((uint64_t)parsed > max_value) {
+        parsed = (unsigned long long)max_value;
+    }
+    *out_value = (uint64_t)parsed;
+    return true;
+}
+
+/** @brief Multiply a per-shard compatibility target and clamp its total. */
+static uint64_t llam_runtime_prewarm_per_shard_total(uint64_t per_shard,
+                                                     unsigned shard_count,
+                                                     uint64_t max_total) {
+    if (shard_count == 0U || per_shard == 0U) {
+        return 0U;
+    }
+    if (per_shard > max_total / shard_count) {
+        return max_total;
+    }
+    return per_shard * shard_count;
+}
+
+/** @brief Clamp a logical task target to the bytes its rounded slabs consume. */
+static uint64_t llam_runtime_bound_task_prewarm_total(uint64_t requested,
+                                                      unsigned shard_count,
+                                                      uint64_t available_bytes,
+                                                      uint64_t *storage_objects) {
+    uint64_t low = 0U;
+    uint64_t high = requested;
+    uint64_t max_objects = available_bytes / sizeof(llam_task_t);
+
+    while (low < high) {
+        uint64_t delta = high - low;
+        uint64_t candidate = low + delta / 2U + delta % 2U;
+        uint64_t candidate_storage = 0U;
+
+        if (llam_runtime_task_prewarm_storage_objects(candidate,
+                                                      shard_count,
+                                                      &candidate_storage) &&
+            candidate_storage <= max_objects) {
+            low = candidate;
+        } else {
+            high = candidate - 1U;
+        }
+    }
+    if (!llam_runtime_task_prewarm_storage_objects(low,
+                                                   shard_count,
+                                                   storage_objects)) {
+        *storage_objects = 0U;
+        return 0U;
+    }
+    return low;
+}
+
+/**
+ * @brief Resolve exact public and best-effort compatibility prewarm authority.
+ *
+ * The immutable resource plan retains only caller-supplied exact totals.
+ * Effective profile/environment totals and their source are stored separately
+ * on the runtime so diagnostics do not rewrite the planner's semantic input.
+ */
+static int llam_runtime_resolve_prewarm_authority(llam_runtime_t *rt) {
+    const uint64_t task_max =
+        LLAM_RUNTIME_METADATA_BUDGET_BYTES / sizeof(llam_task_t);
+    const uint64_t timer_max =
+        LLAM_RUNTIME_METADATA_BUDGET_BYTES / sizeof(llam_timer_node_t);
+    uint64_t task_total;
+    uint64_t stack_total;
+    uint64_t timer_total;
+    uint64_t value;
+    uint64_t estimated_metadata;
+    uint64_t task_storage_objects = 0U;
+
+    if (rt == NULL || rt->active_shards == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    task_total = rt->resource_plan.task_prewarm_total;
+    rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_PUBLIC_EXACT;
+    if (task_total == 0U) {
+        if (llam_runtime_env_u64_present("LLAM_TASK_CACHE_PREWARM_TOTAL",
+                                         task_max,
+                                         &task_total)) {
+            rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_TOTAL;
+        } else if (llam_runtime_env_u64_present("LLAM_TASK_CACHE_PREWARM",
+                                                4096U,
+                                                &value)) {
+            task_total = llam_runtime_prewarm_per_shard_total(
+                value,
+                rt->active_shards,
+                task_max);
+            rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_LEGACY;
+        } else {
+            task_total = llam_runtime_prewarm_per_shard_total(
+                128U,
+                rt->active_shards,
+                task_max);
+            rt->task_prewarm_source = LLAM_RUNTIME_PREWARM_DEFAULT;
+        }
+    }
+
+    stack_total = rt->resource_plan.stack_prewarm_total;
+    rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_PUBLIC_EXACT;
+    if (stack_total == 0U) {
+        if (llam_runtime_env_u64_present("LLAM_STACK_CACHE_PREWARM_TOTAL",
+                                         LLAM_RUNTIME_MAX_STACK_PREWARM,
+                                         &stack_total)) {
+            rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_TOTAL;
+        } else if (llam_runtime_env_u64_present("LLAM_STACK_CACHE_PREWARM",
+                                                LLAM_RUNTIME_MAX_STACK_PREWARM,
+                                                &stack_total)) {
+            /*
+             * Unlike the two historical metadata knobs, the old stack knob
+             * was already runtime-total. Only its best-effort/source status is
+             * deprecated.
+             */
+            rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_LEGACY;
+        } else {
+            stack_total =
+                rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST ? 256U : 128U;
+            rt->stack_prewarm_source = LLAM_RUNTIME_PREWARM_DEFAULT;
+        }
+    }
+
+    timer_total = rt->resource_plan.timer_prewarm_total;
+    rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_PUBLIC_EXACT;
+    if (timer_total == 0U) {
+        if (llam_runtime_env_u64_present("LLAM_TIMER_HEAP_PREWARM_TOTAL",
+                                         timer_max,
+                                         &timer_total)) {
+            rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_TOTAL;
+        } else if (llam_runtime_env_u64_present("LLAM_TIMER_HEAP_PREWARM",
+                                                1048576U,
+                                                &value)) {
+            timer_total = llam_runtime_prewarm_per_shard_total(
+                value,
+                rt->active_shards,
+                timer_max);
+            rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_ENV_LEGACY;
+        } else {
+            value = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
+                        ? 1024U
+                        : (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE
+                               ? 0U
+                               : 512U);
+            timer_total = llam_runtime_prewarm_per_shard_total(
+                value,
+                rt->active_shards,
+                timer_max);
+            rt->timer_prewarm_source = LLAM_RUNTIME_PREWARM_DEFAULT;
+        }
+    }
+
+    /*
+     * Exact public components are already included in the pure plan estimate.
+     * Clamp only best-effort components to the remaining aggregate metadata
+     * budget, in stable task-then-timer order.
+     */
+    estimated_metadata = rt->resource_plan.estimated_metadata_bytes;
+    if (rt->task_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT) {
+        uint64_t available =
+            LLAM_RUNTIME_METADATA_BUDGET_BYTES - estimated_metadata;
+
+        task_total = llam_runtime_bound_task_prewarm_total(
+            task_total,
+            rt->active_shards,
+            available,
+            &task_storage_objects);
+        estimated_metadata += task_storage_objects * sizeof(llam_task_t);
+    }
+    if (rt->timer_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT) {
+        uint64_t available =
+            LLAM_RUNTIME_METADATA_BUDGET_BYTES - estimated_metadata;
+        uint64_t bounded = available / sizeof(llam_timer_node_t);
+
+        if (timer_total > bounded) {
+            timer_total = bounded;
+        }
+        estimated_metadata += timer_total * sizeof(llam_timer_node_t);
+    }
+
+    rt->requested_task_prewarm_total = task_total;
+    rt->requested_stack_prewarm_total = stack_total;
+    rt->requested_timer_prewarm_total = timer_total;
+    rt->achieved_task_prewarm_total = 0U;
+    rt->achieved_stack_prewarm_total = 0U;
+    rt->achieved_timer_prewarm_total = 0U;
+    rt->estimated_metadata_bytes = estimated_metadata;
+    rt->estimated_stack_mapping_bytes =
+        stack_total * LLAM_RUNTIME_STACK_MAPPING_ESTIMATE_BYTES;
+    return 0;
+}
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+/** Internal-only deterministic allocation budgets for exact rollback tests. */
+static atomic_uint_fast64_t g_llam_test_prewarm_limits[LLAM_TEST_PREWARM_KIND_COUNT] = {
+    ATOMIC_VAR_INIT(UINT64_MAX),
+    ATOMIC_VAR_INIT(UINT64_MAX),
+    ATOMIC_VAR_INIT(UINT64_MAX),
+};
+
+void llam_runtime_test_set_prewarm_allocation_limit(
+    llam_test_prewarm_kind_t kind,
+    uint64_t successful_objects) {
+    if ((unsigned)kind >= LLAM_TEST_PREWARM_KIND_COUNT) {
+        return;
+    }
+    atomic_store_explicit(&g_llam_test_prewarm_limits[kind],
+                          successful_objects,
+                          memory_order_release);
+}
+
+void llam_runtime_test_reset_prewarm_allocation_limits(void) {
+    for (unsigned kind = 0U; kind < LLAM_TEST_PREWARM_KIND_COUNT; ++kind) {
+        atomic_store_explicit(&g_llam_test_prewarm_limits[kind],
+                              UINT64_MAX,
+                              memory_order_release);
+    }
+}
+
+bool llam_runtime_test_prewarm_allocation_permitted(
+    llam_test_prewarm_kind_t kind,
+    uint64_t objects) {
+    uint64_t remaining;
+
+    if ((unsigned)kind >= LLAM_TEST_PREWARM_KIND_COUNT) {
+        return true;
+    }
+    remaining = atomic_load_explicit(&g_llam_test_prewarm_limits[kind],
+                                     memory_order_acquire);
+    for (;;) {
+        if (remaining == UINT64_MAX) {
+            return true;
+        }
+        if (objects > remaining) {
+            return false;
+        }
+        if (atomic_compare_exchange_weak_explicit(
+                &g_llam_test_prewarm_limits[kind],
+                &remaining,
+                remaining - objects,
+                memory_order_acq_rel,
+                memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+#endif
+
+/**
+ * @brief Preallocate timer heap slots from one runtime-total authority.
+ *
+ * Each shard receives its quotient/remainder share in stable order. Legacy and
+ * environment totals may complete partially; exact public requests instead
+ * make initialization unwind through normal runtime teardown.
+ */
+int llam_runtime_prewarm_timer_heaps(llam_runtime_t *rt,
+                                     uint64_t total,
+                                     bool exact,
+                                     uint64_t *achieved) {
+    const uint64_t max_total =
+        LLAM_RUNTIME_METADATA_BUDGET_BYTES / sizeof(llam_timer_node_t);
+    uint64_t completed = 0U;
+    int saved_errno = errno;
+
+    if (achieved != NULL) {
+        *achieved = 0U;
+    }
+    if (rt == NULL || rt->shards == NULL || rt->active_shards == 0U ||
+        achieved == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (total > max_total) {
+        errno = E2BIG;
+        return -1;
+    }
+
+    for (unsigned shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
+        uint64_t share =
+            llam_runtime_prewarm_share(total, rt->active_shards, shard_id);
+        llam_timer_node_t **heap;
+
+        if (share == 0U) {
+            continue;
+        }
+        if (share > SIZE_MAX / sizeof(*heap)) {
+            errno = E2BIG;
+            goto exhausted;
+        }
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+        if (!llam_runtime_test_prewarm_allocation_permitted(
+                LLAM_TEST_PREWARM_TIMER,
+                share)) {
+            errno = ENOMEM;
+            goto exhausted;
+        }
+#endif
+        heap = calloc((size_t)share, sizeof(*heap));
+        if (heap == NULL) {
+            errno = ENOMEM;
+            goto exhausted;
+        }
+        rt->shards[shard_id].timer_heap = heap;
+        rt->shards[shard_id].timer_heap_cap = (size_t)share;
+        completed += share;
+    }
+
+    *achieved = completed;
+    errno = saved_errno;
+    return 0;
+
+exhausted:
+    *achieved = completed;
+    if (exact) {
+        return -1;
+    }
+    errno = saved_errno;
+    return 0;
+}
+
+/**
  * @brief Parse the automatic preemption policy from an environment override.
  */
 static unsigned llam_runtime_preempt_mode_from_env(unsigned default_mode) {
@@ -385,7 +729,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     unsigned *selected_cpus;
     size_t opts_copy_size;
     uint64_t experimental_flags;
-    unsigned timer_heap_prewarm;
 #if LLAM_PLATFORM_WINDOWS && LLAM_ARCH_X86_64
     unsigned windows_unsafe_skip_scheduler_simd;
     unsigned windows_unsafe_skip_task_simd;
@@ -723,10 +1066,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     if (rt->channel_safepoint_interval == 0U) {
         rt->channel_safepoint_interval = 1U;
     }
-    timer_heap_prewarm = rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
-                             ? 1024U
-                             : (rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE ? 0U : 512U);
-    timer_heap_prewarm = llam_runtime_env_u32("LLAM_TIMER_HEAP_PREWARM", timer_heap_prewarm, 1048576U);
     /*
      * Some experimental policies are mutually exclusive because they assume a
      * specific ownership model for workers or kernel submission threads.  Resolve
@@ -737,6 +1076,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     }
     rt->observed_shards = observed_total;
     rt->active_shards = resource_plan.worker_max;
+    if (llam_runtime_resolve_prewarm_authority(rt) != 0) {
+        int saved_errno = errno;
+
+        free(cpus);
+        return llam_runtime_init_fail_registered(rt, saved_errno);
+    }
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     rt->direct_handoff_live_limit =
         llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT",
@@ -842,17 +1187,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_init(&rt->shards[i].norm_depth, 0U);
         atomic_init(&rt->shards[i].timer_count, 0U);
         atomic_init(&rt->shards[i].timer_callbacks_active, 0U);
-        if (timer_heap_prewarm > 0U) {
-            rt->shards[i].timer_heap = calloc(timer_heap_prewarm, sizeof(*rt->shards[i].timer_heap));
-            if (rt->shards[i].timer_heap == NULL) {
-                free(io_node_ids);
-                free(locality_node_ids);
-                errno = ENOMEM;
-                llam_runtime_shutdown_rt(rt);
-                return -1;
-            }
-            rt->shards[i].timer_heap_cap = timer_heap_prewarm;
-        }
         atomic_init(&rt->shards[i].current, NULL);
         atomic_init(&rt->shards[i].opaque_helper_active_hint, 0U);
 #if defined(__linux__)
@@ -970,7 +1304,24 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_store_explicit(&rt->shards[i].last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
         atomic_store(&rt->shards[i].last_run_started_ns, 0U);
     }
-    llam_runtime_prewarm_task_allocators(rt);
+    if (llam_runtime_prewarm_timer_heaps(
+            rt,
+            rt->requested_timer_prewarm_total,
+            rt->timer_prewarm_source == LLAM_RUNTIME_PREWARM_PUBLIC_EXACT,
+            &rt->achieved_timer_prewarm_total) != 0 ||
+        llam_runtime_prewarm_task_allocators(
+            rt,
+            rt->requested_task_prewarm_total,
+            rt->task_prewarm_source == LLAM_RUNTIME_PREWARM_PUBLIC_EXACT,
+            &rt->achieved_task_prewarm_total) != 0) {
+        int saved_errno = errno != 0 ? errno : ENOMEM;
+
+        free(io_node_ids);
+        free(locality_node_ids);
+        llam_runtime_shutdown_rt(rt);
+        errno = saved_errno;
+        return -1;
+    }
 
     rt->active_nodes = rt->experimental_shard_rings != 0U ? rt->active_shards : locality_nodes;
     llam_autotune_init(rt);
@@ -1134,7 +1485,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return -1;
     }
     rt->stack_cache_lock_initialized = true;
-    llam_runtime_prewarm_stack_cache(rt);
+    if (llam_runtime_prewarm_stack_cache(
+            rt,
+            rt->requested_stack_prewarm_total,
+            rt->stack_prewarm_source == LLAM_RUNTIME_PREWARM_PUBLIC_EXACT,
+            &rt->achieved_stack_prewarm_total) != 0) {
+        int saved_errno = errno != 0 ? errno : ENOMEM;
+
+        llam_runtime_shutdown_rt(rt);
+        errno = saved_errno;
+        return -1;
+    }
 
     rc = pthread_mutex_init(&rt->block_lock, NULL);
     if (rc != 0) {

@@ -407,12 +407,12 @@ static bool llam_shard_stack_cache_pop(llam_shard_t *shard,
  * @param stack_size    Usable stack size.
  * @param entry_storage Optional caller-owned metadata entry to reuse.
  */
-static void llam_runtime_stack_cache_push(llam_runtime_t *rt,
-                                        void *mapping,
-                                        size_t mapping_size,
-                                        void *stack_base,
-                                        size_t stack_size,
-                                        llam_stack_cache_entry_t *entry_storage) {
+static bool llam_runtime_stack_cache_push(llam_runtime_t *rt,
+                                          void *mapping,
+                                          size_t mapping_size,
+                                          void *stack_base,
+                                          size_t stack_size,
+                                          llam_stack_cache_entry_t *entry_storage) {
     llam_stack_cache_entry_t **head;
     unsigned *count;
     unsigned limit;
@@ -425,7 +425,7 @@ static void llam_runtime_stack_cache_push(llam_runtime_t *rt,
             // leaking a stack after task teardown.
             (void)munmap(mapping, mapping_size);
         }
-        return;
+        return false;
     }
 
     head = llam_runtime_stack_cache_head(rt, stack_size);
@@ -433,7 +433,7 @@ static void llam_runtime_stack_cache_push(llam_runtime_t *rt,
     limit = llam_runtime_stack_cache_limit(stack_size);
     if (head == NULL || count == NULL || limit == 0U) {
         (void)munmap(mapping, mapping_size);
-        return;
+        return false;
     }
 
     pthread_mutex_lock(&rt->stack_cache_lock);
@@ -445,7 +445,7 @@ static void llam_runtime_stack_cache_push(llam_runtime_t *rt,
         // Cache is full. Returning to the OS bounds memory usage for bursty
         // workloads that temporarily allocate many stacks.
         (void)munmap(mapping, mapping_size);
-        return;
+        return false;
     }
 
     entry = entry_storage;
@@ -456,7 +456,7 @@ static void llam_runtime_stack_cache_push(llam_runtime_t *rt,
         if (entry == NULL) {
             pthread_mutex_unlock(&rt->stack_cache_lock);
             (void)munmap(mapping, mapping_size);
-            return;
+            return false;
         }
     }
     entry->mapping = mapping;
@@ -467,6 +467,7 @@ static void llam_runtime_stack_cache_push(llam_runtime_t *rt,
     *head = entry;
     *count += 1U;
     pthread_mutex_unlock(&rt->stack_cache_lock);
+    return true;
 }
 
 /**
@@ -598,73 +599,102 @@ void llam_runtime_drain_stack_cache(llam_runtime_t *rt) {
 }
 
 /**
- * @brief Preallocate default-class stacks into shard/runtime caches.
+ * @brief Preallocate a runtime-total target of default-class stacks.
  *
- * @param rt Runtime whose stack cache should be warmed.
+ * @param rt       Runtime whose stack caches should be warmed.
+ * @param total    Runtime-total stack mapping target.
+ * @param exact    Fail instead of accepting a partial result.
+ * @param achieved Receives the number of retained stack mappings.
+ * @return 0 on success or best-effort exhaustion, -1 for invalid input, an
+ *         over-limit target, or an unsatisfied exact request.
  */
-void llam_runtime_prewarm_stack_cache(llam_runtime_t *rt) {
-    const char *value;
-    unsigned target = 128U;
-    unsigned i;
+int llam_runtime_prewarm_stack_cache(llam_runtime_t *rt,
+                                     uint64_t total,
+                                     bool exact,
+                                     uint64_t *achieved) {
+    uint64_t completed = 0U;
     long page_size;
     size_t stack_size;
     size_t mapping_size;
+    int saved_errno = errno;
 
-    if (rt == NULL || !rt->stack_cache_lock_initialized) {
-        return;
+    if (achieved != NULL) {
+        *achieved = 0U;
     }
-    if (rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST) {
-        target = 256U;
+    if (rt == NULL || !rt->stack_cache_lock_initialized ||
+        rt->shards == NULL || rt->active_shards == 0U || achieved == NULL) {
+        errno = EINVAL;
+        return -1;
     }
-    value = llam_env_get("LLAM_STACK_CACHE_PREWARM");
-    if (value != NULL && value[0] != '\0') {
-        char *end = NULL;
-        unsigned long parsed;
-
-        if (!llam_ascii_is_space((unsigned char)value[0]) && value[0] != '-' && value[0] != '+') {
-            errno = 0;
-            parsed = strtoul(value, &end, 10);
-            if (errno == 0 && end != value && *end == '\0') {
-                if (parsed > LLAM_STACK_CACHE_DEFAULT_LIMIT) {
-                    parsed = LLAM_STACK_CACHE_DEFAULT_LIMIT;
-                }
-                target = (unsigned)parsed;
-            }
-        }
-    }
-    if (target == 0U) {
-        return;
+    if (total > LLAM_RUNTIME_MAX_STACK_PREWARM) {
+        errno = E2BIG;
+        return -1;
     }
 
     page_size = llam_page_size();
     stack_size = llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT);
     mapping_size = stack_size + (size_t)page_size;
-    for (i = 0U; i < target; ++i) {
-        void *mapping = mmap(NULL,
-                             mapping_size,
-                             PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
-                             -1,
-                             0);
+    for (unsigned shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
+        uint64_t share =
+            llam_runtime_prewarm_share(total, rt->active_shards, shard_id);
 
-        if (mapping == MAP_FAILED) {
-            return;
-        }
-        if (mprotect(mapping, (size_t)page_size, PROT_NONE) != 0) {
-            (void)munmap(mapping, mapping_size);
-            return;
-        }
-        // Prefer per-shard warm stacks so early spawns avoid both global cache
-        // locking and fresh mmap/mprotect work.
-        if (rt->shards == NULL || rt->active_shards == 0U ||
-            !llam_shard_stack_cache_push(&rt->shards[i % rt->active_shards],
-                                       mapping,
-                                       mapping_size,
-                                       (char *)mapping + page_size,
-                                       stack_size)) {
-            llam_runtime_stack_cache_push(rt, mapping, mapping_size, (char *)mapping + page_size, stack_size, NULL);
+        for (uint64_t i = 0U; i < share; ++i) {
+            void *mapping;
+            bool cached;
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+            if (!llam_runtime_test_prewarm_allocation_permitted(
+                    LLAM_TEST_PREWARM_STACK,
+                    1U)) {
+                errno = ENOMEM;
+                goto exhausted;
+            }
+#endif
+            mapping = mmap(NULL,
+                           mapping_size,
+                           PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
+                           -1,
+                           0);
+            if (mapping == MAP_FAILED) {
+                goto exhausted;
+            }
+            if (mprotect(mapping, (size_t)page_size, PROT_NONE) != 0) {
+                (void)munmap(mapping, mapping_size);
+                goto exhausted;
+            }
+            cached = llam_shard_stack_cache_push(&rt->shards[shard_id],
+                                                 mapping,
+                                                 mapping_size,
+                                                 (char *)mapping + page_size,
+                                                 stack_size);
+            if (!cached) {
+                cached = llam_runtime_stack_cache_push(rt,
+                                                       mapping,
+                                                       mapping_size,
+                                                       (char *)mapping + page_size,
+                                                       stack_size,
+                                                       NULL);
+            }
+            if (!cached) {
+                errno = ENOMEM;
+                goto exhausted;
+            }
+            completed += 1U;
         }
     }
+
+    *achieved = completed;
+    errno = saved_errno;
+    return 0;
+
+exhausted:
+    *achieved = completed;
+    if (exact) {
+        return -1;
+    }
+    errno = saved_errno;
+    return 0;
 }
 
 /**

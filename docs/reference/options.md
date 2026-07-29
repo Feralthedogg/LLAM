@@ -95,6 +95,30 @@ opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
 | `preempt_mode` | One of `LLAM_PREEMPT_*`. |
 | `preempt_poll_period` | Safepoint flag-poll period; `0` selects a profile default. |
 | `preempt_quantum_ns` | Global preemption slice override; `0` uses task-class budgets. |
+| `worker_min` | Minimum online scheduler workers; `0` selects compatibility policy. |
+| `worker_count` | Initial online scheduler workers; a lone nonzero value selects a fixed count. |
+| `worker_max` | Allocated scheduler-worker capacity. |
+| `blocking_min` | Blocking workers requested at initialization. |
+| `blocking_max` | Hard blocking-worker capacity. |
+| `affinity_policy` | One of `LLAM_RUNTIME_AFFINITY_*`. |
+| `cpu_count` / `cpu_ids` | Ordered process-allowed CPU IDs copied during initialization. |
+| `task_prewarm_total` | Exact runtime-total logical task-object target; `0` selects compatibility policy. |
+| `stack_prewarm_total` | Exact runtime-total default-stack target, capped at 4096; `0` selects compatibility policy. |
+| `timer_prewarm_total` | Exact runtime-total timer-slot target; `0` selects compatibility policy. |
+
+Explicit worker bounds must satisfy
+`1 <= worker_min <= worker_count <= worker_max <= cpu_count`. Prewarm fields
+are exact only through size-aware lifecycle APIs: an allocation shortfall
+fails initialization and unwinds the partial runtime. Environment compatibility
+controls remain best-effort.
+
+Affinity policies:
+
+| Value | Use |
+| --- | --- |
+| `LLAM_RUNTIME_AFFINITY_NONE` | Do not change native thread affinity. |
+| `LLAM_RUNTIME_AFFINITY_PREFER` | Attempt placement and continue if it fails. |
+| `LLAM_RUNTIME_AFFINITY_REQUIRE` | Fail unless placement is supported and succeeds. |
 
 Runtime profiles:
 

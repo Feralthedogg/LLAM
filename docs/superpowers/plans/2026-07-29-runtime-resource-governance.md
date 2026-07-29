@@ -311,13 +311,21 @@ git commit -m "feat: apply runtime worker and CPU plans"
 ### Task 4: Convert prewarm controls to runtime-total authority
 
 **Files:**
+- Modify: `Makefile`
+- Modify: `include/llam/runtime.h`
+- Modify: `src/core/debug/debug.c`
+- Modify: `src/core/lifecycle/resource_plan.c`
 - Modify: `src/core/memory/alloc.c`
 - Modify: `src/core/task/task_stack.c`
 - Modify: `src/core/lifecycle/init.c`
 - Modify: `src/internal/runtime_proto_core.h`
+- Modify: `src/internal/runtime_resource_plan.h`
 - Modify: `src/internal/runtime_types.h`
+- Modify: `tests/test_abi_contract.c`
 - Modify: `tests/test_runtime_core.c`
+- Modify: `tests/test_runtime_shutdown_internal.c`
 - Modify: `docs/reference/environment.md`
+- Modify: `docs/reference/options.md`
 - Modify: `docs/operations.md`
 - Modify: `docs/guides/performance-tuning.md`
 
@@ -334,19 +342,19 @@ int llam_runtime_prewarm_timer_heaps(
     llam_runtime_t *rt, uint64_t total, bool exact, uint64_t *achieved);
 ```
 
-- [ ] **Step 1: Write aggregate-distribution and exact-failure tests**
+- [x] **Step 1: Write aggregate-distribution and exact-failure tests**
 
 For 1, 8, and synthetic 64-shard runtimes, assert quotient/remainder
 distribution sums exactly to the requested task/stack/timer total. Add injected
 allocation failure after N objects and assert exact requests fail and unwind,
 while legacy environment inputs remain best-effort and are reported as legacy.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Expected: task/timer prewarm multiplies the environment count by shard count
 and exact public totals are ignored.
 
-- [ ] **Step 3: Implement a shared total distributor**
+- [x] **Step 3: Implement a shared total distributor**
 
 Use:
 
@@ -360,19 +368,19 @@ Reject totals that exceed the documented ceiling before allocation. Return
 achieved totals explicitly and unwind exact partial allocations through each
 allocator's existing destroy/release path.
 
-- [ ] **Step 4: Add `_TOTAL` environment compatibility names**
+- [x] **Step 4: Add `_TOTAL` environment compatibility names**
 
 Current names preserve historical per-shard/best-effort meaning. New
 `LLAM_TASK_CACHE_PREWARM_TOTAL`, `LLAM_STACK_CACHE_PREWARM_TOTAL`, and
 `LLAM_TIMER_HEAP_PREWARM_TOTAL` are runtime totals; an explicit public field
 wins over either environment family.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run runtime core, init-failure, shutdown, manifest, and documentation link
 checks.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/core/memory/alloc.c src/core/task/task_stack.c \

@@ -74,6 +74,18 @@ typedef struct llam_runtime_resource_plan {
 } llam_runtime_resource_plan_t;
 
 /**
+ * @brief Compute task objects physically reserved by shard-local slab rounding.
+ *
+ * @param logical_total Exact logical runtime-total target.
+ * @param worker_count  Number of shard allocators receiving a share.
+ * @param out_objects   Receives the checked physical task-object count.
+ * @return true on success, false for invalid input or arithmetic overflow.
+ */
+bool llam_runtime_task_prewarm_storage_objects(uint64_t logical_total,
+                                               unsigned worker_count,
+                                               uint64_t *out_objects);
+
+/**
  * @brief Resolve a complete immutable resource plan without side effects.
  *
  * @param input Discovered platform capabilities and optional public options.

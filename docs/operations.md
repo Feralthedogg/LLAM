@@ -97,10 +97,19 @@ Stackful tasks are fast only when task metadata and stacks are reused. For
 high-fanout workloads, prewarm caches during service startup:
 
 ```bash
-LLAM_TASK_CACHE_PREWARM=65536 \
-LLAM_STACK_CACHE_PREWARM=8192 \
+LLAM_TASK_CACHE_PREWARM_TOTAL=65536 \
+LLAM_STACK_CACHE_PREWARM_TOTAL=2048 \
+LLAM_TIMER_HEAP_PREWARM_TOTAL=65536 \
 ./service
 ```
+
+The `_TOTAL` variables are runtime-wide and best-effort. Check the requested
+and achieved prewarm counters in `llam_runtime_stats_t` before treating startup
+capacity as an operational guarantee. Embedders that require exact startup
+capacity should use the corresponding size-aware `llam_runtime_opts_t` fields;
+an allocation shortfall then fails initialization and rolls back the partial
+runtime. The older names remain compatibility inputs and should not be used in
+new deployment configuration.
 
 Use larger stack classes only for known deep C call chains. Enable
 `LLAM_STACK_SAMPLING=1` during staging to catch near-overflow behavior, then

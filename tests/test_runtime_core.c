@@ -1160,6 +1160,59 @@ static int test_runtime_resource_plan_resolver(void) {
     return 0;
 }
 
+static int test_runtime_total_prewarm_distribution(void) {
+    static const unsigned shard_counts[] = {1U, 8U, 64U};
+    static const uint64_t totals[] = {UINT64_C(257), UINT64_C(129), UINT64_C(1025)};
+    uint64_t storage_objects = 0U;
+
+    for (size_t resource = 0U;
+         resource < sizeof(totals) / sizeof(totals[0]);
+         ++resource) {
+        for (size_t count_index = 0U;
+             count_index < sizeof(shard_counts) / sizeof(shard_counts[0]);
+             ++count_index) {
+            unsigned count = shard_counts[count_index];
+            uint64_t total = totals[resource];
+            uint64_t base = total / count;
+            uint64_t remainder = total % count;
+            uint64_t sum = 0U;
+
+            for (unsigned index = 0U; index < count; ++index) {
+                uint64_t share = llam_runtime_prewarm_share(total, count, index);
+                uint64_t expected = base + (index < remainder ? 1U : 0U);
+
+                if (share != expected) {
+                    fprintf(stderr,
+                            "[test_runtime_core] prewarm resource=%zu total=%llu count=%u index=%u share=%llu expected=%llu\n",
+                            resource,
+                            (unsigned long long)total,
+                            count,
+                            index,
+                            (unsigned long long)share,
+                            (unsigned long long)expected);
+                    return 1;
+                }
+                sum += share;
+            }
+            if (sum != total ||
+                llam_runtime_prewarm_share(total, count, count) != 0U ||
+                llam_runtime_prewarm_share(total, 0U, 0U) != 0U) {
+                return test_fail("runtime-total prewarm distribution did not preserve its aggregate");
+            }
+        }
+    }
+    if (!llam_runtime_task_prewarm_storage_objects(1U, 64U, &storage_objects) ||
+        storage_objects != LLAM_TASK_SLAB_COUNT ||
+        !llam_runtime_task_prewarm_storage_objects(65U, 64U, &storage_objects) ||
+        storage_objects != UINT64_C(64) * LLAM_TASK_SLAB_COUNT ||
+        llam_runtime_task_prewarm_storage_objects(UINT64_MAX,
+                                                  1U,
+                                                  &storage_objects)) {
+        return test_fail("task prewarm slab rounding was not checked exactly");
+    }
+    return 0;
+}
+
 static int assert_fixed_runtime_resource_stats(unsigned worker_count) {
     llam_runtime_opts_t opts;
     llam_runtime_stats_t stats;
@@ -2752,6 +2805,143 @@ static void test_restore_env_value(const char *name, char *value) {
     } else {
         unsetenv(name);
     }
+}
+
+static int test_runtime_total_prewarm_authority(void) {
+    static const char *const names[] = {
+        "LLAM_TASK_CACHE_PREWARM",
+        "LLAM_STACK_CACHE_PREWARM",
+        "LLAM_TIMER_HEAP_PREWARM",
+        "LLAM_TASK_CACHE_PREWARM_TOTAL",
+        "LLAM_STACK_CACHE_PREWARM_TOTAL",
+        "LLAM_TIMER_HEAP_PREWARM_TOTAL",
+    };
+    char *saved[sizeof(names) / sizeof(names[0])];
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    unsigned *cpus = NULL;
+    unsigned worker_count;
+    size_t saved_count = 0U;
+    int rc = 1;
+
+    memset(saved, 0, sizeof(saved));
+    for (size_t i = 0U; i < sizeof(names) / sizeof(names[0]); ++i) {
+        saved[i] = test_dup_env_value(names[i]);
+        saved_count = i + 1U;
+        if (unsetenv(names[i]) != 0) {
+            rc = test_fail_errno("clearing prewarm authority environment failed");
+            goto cleanup;
+        }
+    }
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = test_fail_errno("exact prewarm opts init failed");
+        goto cleanup;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 1U;
+    opts.blocking_max = 1U;
+    opts.task_prewarm_total = 17U;
+    opts.stack_prewarm_total = 3U;
+    opts.timer_prewarm_total = 7U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("exact runtime-total prewarm create/stats failed");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != 17U ||
+        stats.achieved_task_prewarm_total != 17U ||
+        stats.requested_stack_prewarm_total != 3U ||
+        stats.achieved_stack_prewarm_total != 3U ||
+        stats.requested_timer_prewarm_total != 7U ||
+        stats.achieved_timer_prewarm_total != 7U ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT ||
+        stats.stack_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT ||
+        stats.timer_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT) {
+        rc = test_fail("exact runtime-total prewarm diagnostics were inconsistent");
+        goto cleanup;
+    }
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+
+    if (setenv("LLAM_TASK_CACHE_PREWARM", "11", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "11", 1) != 0 ||
+        setenv("LLAM_TIMER_HEAP_PREWARM", "11", 1) != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM_TOTAL", "5", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM_TOTAL", "3", 1) != 0 ||
+        setenv("LLAM_TIMER_HEAP_PREWARM_TOTAL", "7", 1) != 0) {
+        rc = test_fail_errno("setting prewarm authority environment failed");
+        goto cleanup;
+    }
+    opts.task_prewarm_total = 9U;
+    opts.stack_prewarm_total = 0U;
+    opts.timer_prewarm_total = 0U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("mixed prewarm authority create/stats failed");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != 9U ||
+        stats.achieved_task_prewarm_total != 9U ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_PUBLIC_EXACT ||
+        stats.requested_stack_prewarm_total != 3U ||
+        stats.achieved_stack_prewarm_total != 3U ||
+        stats.stack_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_TOTAL ||
+        stats.requested_timer_prewarm_total != 7U ||
+        stats.achieved_timer_prewarm_total != 7U ||
+        stats.timer_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_TOTAL) {
+        rc = test_fail("public and _TOTAL prewarm authority precedence regressed");
+        goto cleanup;
+    }
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+
+    if (unsetenv("LLAM_TASK_CACHE_PREWARM_TOTAL") != 0 ||
+        unsetenv("LLAM_STACK_CACHE_PREWARM_TOTAL") != 0 ||
+        unsetenv("LLAM_TIMER_HEAP_PREWARM_TOTAL") != 0 ||
+        setenv("LLAM_TASK_CACHE_PREWARM", "2", 1) != 0 ||
+        setenv("LLAM_STACK_CACHE_PREWARM", "3", 1) != 0 ||
+        setenv("LLAM_TIMER_HEAP_PREWARM", "4", 1) != 0) {
+        rc = test_fail_errno("setting legacy prewarm environment failed");
+        goto cleanup;
+    }
+    worker_count = llam_count_allowed_cpus(&cpus) >= 2U ? 2U : 1U;
+    free(cpus);
+    cpus = NULL;
+    opts.worker_min = worker_count;
+    opts.worker_count = worker_count;
+    opts.worker_max = worker_count;
+    opts.task_prewarm_total = 0U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("legacy prewarm authority create/stats failed");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != UINT64_C(2) * worker_count ||
+        stats.achieved_task_prewarm_total != UINT64_C(2) * worker_count ||
+        stats.requested_stack_prewarm_total != 3U ||
+        stats.achieved_stack_prewarm_total != 3U ||
+        stats.requested_timer_prewarm_total != UINT64_C(4) * worker_count ||
+        stats.achieved_timer_prewarm_total != UINT64_C(4) * worker_count ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY ||
+        stats.stack_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY ||
+        stats.timer_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY) {
+        rc = test_fail("legacy prewarm inputs lost historical scope or reporting");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    free(cpus);
+    for (size_t i = 0U; i < saved_count; ++i) {
+        test_restore_env_value(names[i], saved[i]);
+    }
+    return rc;
 }
 
 static int collect_runtime_env_snapshot(runtime_env_snapshot_t *snapshot) {
@@ -5951,6 +6141,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
     RUN_RUNTIME_CORE_TEST(test_legacy_runtime_init_ignores_resource_tail);
     RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_resolver);
+    RUN_RUNTIME_CORE_TEST(test_runtime_total_prewarm_distribution);
     RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_initialization);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
 #if LLAM_PLATFORM_POSIX
@@ -5960,6 +6151,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_freezes_no_work_low_hit);
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_probe_defers_low_sample);
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_wake_guardrail_rolls_back);
+    RUN_RUNTIME_CORE_TEST(test_runtime_total_prewarm_authority);
     RUN_RUNTIME_CORE_TEST(test_unsigned_runtime_env_rejects_malformed_input);
     RUN_RUNTIME_CORE_TEST(test_runtime_env_flags_accept_false_tokens);
 #endif

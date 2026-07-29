@@ -54,7 +54,11 @@ void llam_try_reclaim_detached_task(llam_runtime_t *rt, llam_task_t *task);
 void llam_try_reclaim_joined_task(llam_runtime_t *rt, llam_task_t *task);
 llam_task_t *llam_task_alloc(llam_shard_t *shard);
 void llam_task_allocator_free(llam_task_t *task);
-void llam_runtime_prewarm_task_allocators(llam_runtime_t *rt);
+uint64_t llam_runtime_prewarm_share(uint64_t total, unsigned count, unsigned index);
+int llam_runtime_prewarm_task_allocators(llam_runtime_t *rt,
+                                         uint64_t total,
+                                         bool exact,
+                                         uint64_t *achieved);
 void llam_task_register_public_slab(llam_task_t *items, unsigned count);
 int llam_task_unregister_public_slab(llam_task_t *items, unsigned count);
 llam_task_t *llam_task_resolve_public_handle(const llam_task_t *handle);
@@ -211,7 +215,14 @@ void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer);
 llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard);
 void llam_shard_drain_stack_cache(llam_shard_t *shard);
 void llam_runtime_drain_stack_cache(llam_runtime_t *rt);
-void llam_runtime_prewarm_stack_cache(llam_runtime_t *rt);
+int llam_runtime_prewarm_stack_cache(llam_runtime_t *rt,
+                                     uint64_t total,
+                                     bool exact,
+                                     uint64_t *achieved);
+int llam_runtime_prewarm_timer_heaps(llam_runtime_t *rt,
+                                     uint64_t total,
+                                     bool exact,
+                                     uint64_t *achieved);
 
 /*
  * Small utility and environment helpers.
@@ -296,6 +307,17 @@ void llam_runtime_end_public_op(llam_runtime_t *runtime);
 int llam_runtime_for_each_live(llam_runtime_live_iter_fn fn, void *arg);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 void llam_runtime_test_force_live_iter_snapshot_alloc_failure(bool enabled);
+typedef enum llam_test_prewarm_kind {
+    LLAM_TEST_PREWARM_TASK = 0,
+    LLAM_TEST_PREWARM_STACK = 1,
+    LLAM_TEST_PREWARM_TIMER = 2,
+    LLAM_TEST_PREWARM_KIND_COUNT = 3
+} llam_test_prewarm_kind_t;
+void llam_runtime_test_set_prewarm_allocation_limit(llam_test_prewarm_kind_t kind,
+                                                    uint64_t successful_objects);
+void llam_runtime_test_reset_prewarm_allocation_limits(void);
+bool llam_runtime_test_prewarm_allocation_permitted(llam_test_prewarm_kind_t kind,
+                                                    uint64_t objects);
 #endif
 int llam_runtime_init_rt(llam_runtime_t *rt,
                          const llam_runtime_opts_t *opts,

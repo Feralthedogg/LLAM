@@ -202,11 +202,17 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     stats->configured_blocking_max = rt->resource_plan.blocking_max;
     stats->selected_cpu_count = rt->resource_plan.selected_cpu_count;
     stats->affinity_policy = rt->resource_plan.affinity_policy;
-    stats->requested_task_prewarm_total = rt->resource_plan.task_prewarm_total;
-    stats->requested_stack_prewarm_total = rt->resource_plan.stack_prewarm_total;
-    stats->requested_timer_prewarm_total = rt->resource_plan.timer_prewarm_total;
-    stats->estimated_metadata_bytes = rt->resource_plan.estimated_metadata_bytes;
-    stats->estimated_stack_mapping_bytes = rt->resource_plan.estimated_stack_mapping_bytes;
+    stats->requested_task_prewarm_total = rt->requested_task_prewarm_total;
+    stats->achieved_task_prewarm_total = rt->achieved_task_prewarm_total;
+    stats->requested_stack_prewarm_total = rt->requested_stack_prewarm_total;
+    stats->achieved_stack_prewarm_total = rt->achieved_stack_prewarm_total;
+    stats->requested_timer_prewarm_total = rt->requested_timer_prewarm_total;
+    stats->achieved_timer_prewarm_total = rt->achieved_timer_prewarm_total;
+    stats->estimated_metadata_bytes = rt->estimated_metadata_bytes;
+    stats->estimated_stack_mapping_bytes = rt->estimated_stack_mapping_bytes;
+    stats->task_prewarm_source = rt->task_prewarm_source;
+    stats->stack_prewarm_source = rt->stack_prewarm_source;
+    stats->timer_prewarm_source = rt->timer_prewarm_source;
     stats->overflow_depth = llam_runtime_overflow_depth(rt);
 
     /*

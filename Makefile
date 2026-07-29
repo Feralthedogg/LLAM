@@ -497,6 +497,9 @@ endif
 endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
+	$(TESTHOOK_OBJDIR)/src/core/lifecycle/init.o \
+	$(TESTHOOK_OBJDIR)/src/core/memory/alloc.o \
+	$(TESTHOOK_OBJDIR)/src/core/task/task_stack.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/norm_queue.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/broker_buffer.o \
@@ -512,6 +515,9 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
+		$(OBJDIR)/src/core/lifecycle/init.o \
+		$(OBJDIR)/src/core/memory/alloc.o \
+		$(OBJDIR)/src/core/task/task_stack.o \
 		$(OBJDIR)/src/core/sched/norm_queue.o \
 		$(OBJDIR)/src/core/registry/capability.o \
 		$(OBJDIR)/src/core/broker/broker_buffer.o \

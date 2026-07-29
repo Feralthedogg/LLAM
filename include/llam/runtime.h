@@ -215,6 +215,14 @@ typedef enum llam_runtime_affinity_policy {
     LLAM_RUNTIME_AFFINITY_REQUIRE = 2, /**< Require placement support and successful binding. */
 } llam_runtime_affinity_policy_t;
 
+/** @brief Authority that selected a resolved runtime prewarm target. */
+typedef enum llam_runtime_prewarm_source {
+    LLAM_RUNTIME_PREWARM_DEFAULT = 0,          /**< Profile/default compatibility policy. */
+    LLAM_RUNTIME_PREWARM_PUBLIC_EXACT = 1,     /**< Exact size-aware public option. */
+    LLAM_RUNTIME_PREWARM_ENV_TOTAL = 2,        /**< Best-effort runtime-total environment input. */
+    LLAM_RUNTIME_PREWARM_ENV_LEGACY = 3,       /**< Deprecated best-effort environment input. */
+} llam_runtime_prewarm_source_t;
+
 /** @brief Bit flags accepted by llam_spawn_opts_t::flags. */
 enum {
     LLAM_SPAWN_F_PINNED = 1U << 0,           /**< Prefer keeping the task on its home worker. */
@@ -371,6 +379,10 @@ typedef struct llam_runtime_stats {
     uint64_t achieved_timer_prewarm_total;  /**< Timer slots successfully prewarmed. */
     uint64_t estimated_metadata_bytes;      /**< Checked metadata-byte estimate for the resource plan. */
     uint64_t estimated_stack_mapping_bytes; /**< Checked virtual mapping estimate for prewarmed stacks. */
+    uint32_t task_prewarm_source;            /**< Authority for task prewarm; one of ::llam_runtime_prewarm_source_t. */
+    uint32_t stack_prewarm_source;           /**< Authority for stack prewarm; one of ::llam_runtime_prewarm_source_t. */
+    uint32_t timer_prewarm_source;           /**< Authority for timer prewarm; one of ::llam_runtime_prewarm_source_t. */
+    uint32_t prewarm_reserved0;              /**< Reserved ABI padding; currently 0. */
 } llam_runtime_stats_t;
 
 /** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */

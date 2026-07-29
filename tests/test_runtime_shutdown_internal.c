@@ -6994,6 +6994,99 @@ static int exercise_submit_cancel_rehome_regressions(void) {
 }
 #endif
 
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+static int exercise_exact_prewarm_failure_unwinds(void) {
+    const char *current = getenv("LLAM_TASK_CACHE_PREWARM");
+    char *saved = current != NULL ? strdup(current) : NULL;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    if (current != NULL && saved == NULL) {
+        return fail_errno("saving task prewarm environment failed");
+    }
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        rc = fail_errno("prewarm rollback opts init failed");
+        goto cleanup;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 1U;
+    opts.blocking_max = 1U;
+    opts.task_prewarm_total = 17U;
+    opts.stack_prewarm_total = 3U;
+    opts.timer_prewarm_total = 3U;
+
+    for (unsigned kind = 0U; kind < LLAM_TEST_PREWARM_KIND_COUNT; ++kind) {
+        uint64_t successful_objects =
+            kind == LLAM_TEST_PREWARM_TASK ? 16U : 1U;
+
+        llam_runtime_test_reset_prewarm_allocation_limits();
+        llam_runtime_test_set_prewarm_allocation_limit(
+            (llam_test_prewarm_kind_t)kind,
+            successful_objects);
+        errno = 0;
+        if (llam_runtime_create(&opts,
+                                LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+                                &runtime) != -1 ||
+            errno != ENOMEM || runtime != NULL) {
+            rc = fail_msg("exact prewarm allocation failure did not unwind initialization");
+            goto cleanup;
+        }
+    }
+
+    llam_runtime_test_reset_prewarm_allocation_limits();
+    if (setenv("LLAM_TASK_CACHE_PREWARM", "1", 1) != 0) {
+        rc = fail_errno("setting legacy task prewarm environment failed");
+        goto cleanup;
+    }
+    opts.task_prewarm_total = 0U;
+    opts.stack_prewarm_total = 1U;
+    opts.timer_prewarm_total = 1U;
+    llam_runtime_test_set_prewarm_allocation_limit(LLAM_TEST_PREWARM_TASK, 0U);
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = fail_errno("best-effort legacy prewarm did not survive allocation exhaustion");
+        goto cleanup;
+    }
+    if (stats.requested_task_prewarm_total != 1U ||
+        stats.achieved_task_prewarm_total != 0U ||
+        stats.task_prewarm_source != LLAM_RUNTIME_PREWARM_ENV_LEGACY) {
+        rc = fail_msg("best-effort legacy prewarm diagnostics were inconsistent");
+        goto cleanup;
+    }
+    llam_runtime_destroy(runtime);
+    runtime = NULL;
+
+    /*
+     * A failed exact request was registered before allocation. A later create
+     * proves teardown removed that partial handle and all prewarmed timer/task
+     * storage rather than poisoning the process registry.
+     */
+    llam_runtime_test_reset_prewarm_allocation_limits();
+    opts.task_prewarm_total = 1U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        rc = fail_errno("runtime create after exact prewarm rollback failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_prewarm_allocation_limits();
+    if (saved != NULL) {
+        (void)setenv("LLAM_TASK_CACHE_PREWARM", saved, 1);
+    } else {
+        (void)unsetenv("LLAM_TASK_CACHE_PREWARM");
+    }
+    free(saved);
+    return rc;
+}
+#endif
+
 int main(void) {
 #if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
     const char *fr08_mode = getenv("LLAM_VALIDATE_FR08_002_ONLY");
@@ -7010,6 +7103,11 @@ int main(void) {
     }
     if (fr08_mode != NULL) {
         return exercise_inflight_rehome_is_generation_bound();
+    }
+#endif
+#if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
+    if (exercise_exact_prewarm_failure_unwinds() != 0) {
+        return 1;
     }
 #endif
     if (exercise_io_lifetime_invariants_are_lock_safe() != 0) {

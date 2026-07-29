@@ -106,6 +106,10 @@ ASSERT_FIELD_U32(llam_runtime_stats_t, controller_threads);
 ASSERT_FIELD_U32(llam_runtime_stats_t, opaque_helper_threads);
 ASSERT_FIELD_U32(llam_runtime_stats_t, runtime_owned_threads);
 ASSERT_FIELD_U32(llam_runtime_stats_t, native_execution_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, task_prewarm_source);
+ASSERT_FIELD_U32(llam_runtime_stats_t, stack_prewarm_source);
+ASSERT_FIELD_U32(llam_runtime_stats_t, timer_prewarm_source);
+ASSERT_FIELD_U32(llam_runtime_stats_t, prewarm_reserved0);
 _Static_assert(sizeof(((llam_runtime_stats_t *)0)->affinity_failures) == sizeof(uint64_t),
                "llam_runtime_stats_t.affinity_failures must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_stats_t *)0)->requested_task_prewarm_total) == sizeof(uint64_t),

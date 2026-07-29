@@ -22,10 +22,18 @@ LLAM_RUNTIME_PROFILE=release-fast ./service
 ## Prewarm High-Fanout Services
 
 ```sh
-LLAM_TASK_CACHE_PREWARM=65536 \
-LLAM_STACK_CACHE_PREWARM=8192 \
+LLAM_TASK_CACHE_PREWARM_TOTAL=65536 \
+LLAM_STACK_CACHE_PREWARM_TOTAL=2048 \
+LLAM_TIMER_HEAP_PREWARM_TOTAL=65536 \
 ./service
 ```
+
+These environment targets are runtime-wide and best-effort. For an embedding
+contract that must either allocate the full capacity or fail cleanly, set
+`task_prewarm_total`, `stack_prewarm_total`, and `timer_prewarm_total` through
+the size-aware runtime options. Compare requested and achieved totals in
+`llam_runtime_stats_t`; source fields distinguish exact public options, new
+`_TOTAL` inputs, deprecated compatibility inputs, and profile defaults.
 
 Enable stack sampling in staging when validating stack class choices:
 
