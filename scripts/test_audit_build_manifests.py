@@ -28,6 +28,39 @@ PLATFORM_GROUPS = (
     "windows_gnu_x86_64",
     "windows_msvc_x86_64",
 )
+CANONICAL_CMAKE_FOREACH_BLOCK = """\
+foreach(LLAM_LEIR_PHASE0_TARGET test_leir_phase0 bench_leir_phase0)
+    target_include_directories(${LLAM_LEIR_PHASE0_TARGET} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
+        ${CMAKE_CURRENT_SOURCE_DIR}/experiments/leir
+    )
+endforeach()
+"""
+
+
+def canonical_cmake_foreach_inventory() -> str:
+    source = (AUDIT.parent.parent / "CMakeLists.txt").read_text(
+        encoding="utf-8"
+    )
+    blocks: list[str] = []
+    lines = source.splitlines(keepends=True)
+    active: list[str] | None = None
+    depth = 0
+    for line in lines:
+        stripped = line.lstrip().lower()
+        if stripped.startswith("foreach("):
+            if active is None:
+                active = []
+            depth += 1
+        if active is not None:
+            active.append(line)
+        if stripped.startswith("endforeach("):
+            depth -= 1
+            if depth == 0 and active is not None:
+                blocks.append("".join(active))
+                active = None
+    return "".join(blocks)
 
 
 def valid_sources_manifest() -> dict[str, object]:
@@ -103,6 +136,20 @@ def valid_makefile() -> str:
             "DEPFLAGS ?= -MMD -MP",
             "LLAM_VERSION ?= 2.2.0",
             "LLAM_ABI_MAJOR ?= 2",
+            (
+                "override LLAM_INTERNAL_CPPFLAGS := "
+                "-DLLAM_BUILD_RESEARCH=$(LLAM_BUILD_RESEARCH)"
+            ),
+            "override CPPFLAGS := $(CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)",
+            "ifeq ($(origin SHARED_CPPFLAGS),undefined)",
+            "SHARED_CPPFLAGS = $(CPPFLAGS) -DLLAM_BUILD_SHARED",
+            "else",
+            (
+                "override SHARED_CPPFLAGS := "
+                "$(SHARED_CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)"
+            ),
+            "endif",
+            "SHLIB_REAL = libllam_runtime.so",
             "RUNTIME_COMMON_OBJS = $(OBJDIR)/src/common.o",
             *platform_lines,
             "RESEARCH_RUNTIME_LINUX_OBJS = $(OBJDIR)/src/linux_research.o",
@@ -239,11 +286,48 @@ def valid_makefile() -> str:
             ),
             "libllam_runtime.a: $(RUNTIME_OBJS)",
             "\t$(AR) rcs $@ $(RUNTIME_OBJS)",
-            "libllam_runtime.so: $(SHARED_RUNTIME_OBJS)",
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "ifeq ($(HOST_PLATFORM),darwin)",
+            "$(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)",
             (
                 "\t$(CC) -shared -o $@ $(SHARED_RUNTIME_OBJS) "
                 "$(LDLIBS)"
             ),
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "else",
+            "$(SHLIB_REAL): $(SHARED_RUNTIME_OBJS)",
+            (
+                "\t$(CC) -shared -o $@ $(SHARED_RUNTIME_OBJS) "
+                "$(LDLIBS)"
+            ),
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "endif",
+            "define WRITE_BUILD_PROVENANCE",
+            '\t@tmp="$@.llam-build-provenance.$$$$.tmp"; \\',
+            (
+                "\tprintf 'LLAM_BUILD_RESEARCH=%s\\n' "
+                "'$(LLAM_BUILD_RESEARCH)' > \"$$tmp\"; \\"
+            ),
+            '\tmv "$$tmp" "$@.llam-build-provenance"',
+            "endef",
+            "demo:",
+            "\t@true",
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "stress:",
+            "\t@true",
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "bench:",
+            "\t@true",
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "server:",
+            "\t@true",
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "server_lossless:",
+            "\t@true",
+            "\t$(WRITE_BUILD_PROVENANCE)",
+            "server_flood:",
+            "\t@true",
+            "\t$(WRITE_BUILD_PROVENANCE)",
             "audit-build-manifests:",
             (
                 "\tpython3 scripts/audit_build_manifests.py "
@@ -270,7 +354,12 @@ def valid_cmakelists() -> str:
         [
             "cmake_minimum_required(VERSION 3.20)",
             "project(llam VERSION 2.2.0 LANGUAGES C)",
+            "include(GNUInstallDirs)",
+            "include(CMakePackageConfigHelpers)",
+            "include(CheckSymbolExists)",
             "set(LLAM_ABI_VERSION_MAJOR 2)",
+            "set(LLAM_ABI_VERSION_MINOR 0)",
+            'set(LLAM_LIBRARY_VERSION "${PROJECT_VERSION}")',
             "set(LLAM_RUNTIME_COMMON_SOURCES src/common.c)",
             *platform_lines,
             (
@@ -298,6 +387,46 @@ def valid_cmakelists() -> str:
             (
                 "add_library(llam_runtime_testhooks STATIC "
                 "${LLAM_RUNTIME_SOURCES})"
+            ),
+            "set(LLAM_BUILD_RESEARCH_NORMALIZED 0)",
+            "function(llam_attach_build_provenance LLAM_PROVENANCE_TARGET)",
+            (
+                "add_custom_command(TARGET ${LLAM_PROVENANCE_TARGET} "
+                "POST_BUILD COMMAND \"${CMAKE_COMMAND}\" "
+                "\"-DLLAM_BUILD_PROVENANCE_PATH="
+                "$<TARGET_FILE:${LLAM_PROVENANCE_TARGET}>"
+                ".llam-build-provenance\" "
+                "\"-DLLAM_BUILD_RESEARCH_MODE="
+                "${LLAM_BUILD_RESEARCH_NORMALIZED}\" "
+                "-P \"${CMAKE_CURRENT_SOURCE_DIR}/cmake/"
+                "write_build_provenance.cmake\" VERBATIM)"
+            ),
+            "endfunction()",
+            (
+                "function(llam_attach_linker_build_provenance "
+                "LLAM_PROVENANCE_TARGET)"
+            ),
+            (
+                "add_custom_command(TARGET ${LLAM_PROVENANCE_TARGET} "
+                "POST_BUILD COMMAND \"${CMAKE_COMMAND}\" "
+                "\"-DLLAM_BUILD_PROVENANCE_PATH="
+                "$<TARGET_LINKER_FILE:${LLAM_PROVENANCE_TARGET}>"
+                ".llam-build-provenance\" "
+                "\"-DLLAM_BUILD_RESEARCH_MODE="
+                "${LLAM_BUILD_RESEARCH_NORMALIZED}\" "
+                "-P \"${CMAKE_CURRENT_SOURCE_DIR}/cmake/"
+                "write_build_provenance.cmake\" VERBATIM)"
+            ),
+            "endfunction()",
+            "llam_attach_build_provenance(llam_runtime)",
+            "llam_attach_build_provenance(llam_runtime_shared)",
+            "llam_attach_linker_build_provenance(llam_runtime_shared)",
+            "add_executable(bench tools/bench.c)",
+            "llam_attach_build_provenance(bench)",
+            (
+                "set_target_properties(llam_runtime_shared PROPERTIES "
+                "VERSION ${LLAM_LIBRARY_VERSION} "
+                "SOVERSION ${LLAM_ABI_VERSION_MAJOR})"
             ),
             (
                 "set(LLAM_PUBLIC_TEST_TARGETS "
@@ -359,6 +488,7 @@ def valid_cmakelists() -> str:
                 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_build_manifests.py "
                 "--root ${CMAKE_CURRENT_SOURCE_DIR} --check)"
             ),
+            canonical_cmake_foreach_inventory(),
             "",
         ]
     )
@@ -371,6 +501,12 @@ def valid_runtime_header() -> str:
             "#define LLAM_VERSION_MINOR 2U",
             "#define LLAM_VERSION_PATCH 0U",
             "#define LLAM_ABI_VERSION_MAJOR 2U",
+            "#define LLAM_ABI_VERSION_MINOR 0U",
+            (
+                "#define LLAM_ABI_VERSION "
+                "((LLAM_ABI_VERSION_MAJOR << 16U) | "
+                "LLAM_ABI_VERSION_MINOR)"
+            ),
             "",
         ]
     )
@@ -379,9 +515,15 @@ def valid_runtime_header() -> str:
 def valid_package_script() -> str:
     return "\n".join(
         [
+            'version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"',
+            'version="${version#v}"',
             'abi_major="${LLAM_ABI_MAJOR:-2}"',
             'library_version="${LLAM_VERSION:-2.2.0}"',
-            'version="${GITHUB_REF_NAME:-v2.2.0}"',
+            'printf \'%s\\n\' "$version" > "$stage/VERSION"',
+            (
+                'printf \'%s\\n\' "$library_version" '
+                '> "$stage/LIBRARY_VERSION"'
+            ),
             "",
         ]
     )
@@ -425,6 +567,7 @@ class Fixture:
             "tests/test_shared_load.c",
             "tests/test_windows_iocp_io.c",
             "experiments/leir/test_research.c",
+            "tools/bench.c",
         ):
             self.files[source] = ""
 
@@ -2453,6 +2596,439 @@ class BuildManifestAuditTests(unittest.TestCase):
             getattr(audit, "parse_counts", None),
             {"make": 1, "cmake": 1},
         )
+
+    def test_requires_unconditional_exact_make_inventories(self) -> None:
+        makefile = self.fixture.files["Makefile"]
+        definition = (
+            "define WRITE_BUILD_PROVENANCE\n"
+            '\t@tmp="$@.llam-build-provenance.$$$$.tmp"; \\\n'
+            "\tprintf 'LLAM_BUILD_RESEARCH=%s\\n' "
+            "'$(LLAM_BUILD_RESEARCH)' > \"$$tmp\"; \\\n"
+            '\tmv "$$tmp" "$@.llam-build-provenance"\n'
+            "endef\n"
+        )
+        mutations = (
+            "\n".join(
+                line
+                for line in makefile.splitlines()
+                if not line.startswith("override ")
+            )
+            + "\n",
+            makefile.replace(definition, ""),
+            "\n".join(
+                line
+                for line in makefile.replace(definition, "").splitlines()
+                if "$(WRITE_BUILD_PROVENANCE)" not in line
+            )
+            + "\n",
+        )
+        for mutation in mutations:
+            with self.subTest(kind=len(mutation)):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("exact", result.stderr)
+
+    def test_rejects_total_make_assignment_grammar_bypasses(self) -> None:
+        mutations = (
+            "define EXTRA_HELPER =\n\t@true\nendef\n",
+            "override\tLDLIBS += -lm\n",
+            "test_public: private LDLIBS += -lm\n",
+            "test_public: private \\\n LDLIBS += -lm\n",
+            "override\tLLAM_VERSION \\\n := 9.9.9\n",
+            "private LLAM_ABI_MAJOR \\\n += 9\n",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[0]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Make", result.stderr)
+
+    def test_rejects_unconsumed_and_unbalanced_make_source(self) -> None:
+        mutations = (
+            "this is not Make syntax\n",
+            "define UNTERMINATED\n\t@true\n",
+            "ifeq ($(OS),Linux)\n",
+            "endef\n",
+            "endif\n",
+            "BROKEN = value \\",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[0]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Makefile:", result.stderr)
+
+    def test_rejects_duplicate_make_recipe_bearing_rules(self) -> None:
+        mutations = (
+            "libllam_runtime.a: $(RUNTIME_OBJS)\n\t@true\n",
+            "$(OBJDIR)/%.o: %.c\n\t@true\n",
+        )
+        for mutation in mutations:
+            with self.subTest(target=mutation.splitlines()[0]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("recipe-bearing rule", result.stderr)
+
+    def test_rejects_secondary_and_noncanonical_make_inputs(self) -> None:
+        mutations = (
+            ".SECONDEXPANSION:\n",
+            (
+                "HIDDEN_OBJS = $(OBJDIR)/tests/test_internal.o\n"
+                "libllam_runtime.a: $$(HIDDEN_OBJS)\n"
+            ),
+            (
+                "libllam_runtime.a: $(RUNTIME_OBJS)\n"
+                "\t$(AR) rcs $@ $(RUNTIME_OBJS) $^\n"
+            ),
+            (
+                "HIDDEN = hidden-input.a\n"
+                "libllam_runtime.a: $(RUNTIME_OBJS)\n"
+                "\t$(AR) rcs $@ $(RUNTIME_OBJS) $(value HIDDEN)\n"
+            ),
+            (
+                "HIDDEN = hidden-input.a\n"
+                "libllam_runtime.a: $(RUNTIME_OBJS)\n"
+                "\t$(AR) rcs $@ $(RUNTIME_OBJS) ${value HIDDEN}\n"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[-1]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Make", result.stderr)
+
+    def test_rejects_depflags_before_and_and_compiler_boundary(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            (
+                "\t$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) "
+                "-c -o $@ $<"
+            ),
+            (
+                "\t: $(DEPFLAGS) && $(CC) $(CPPFLAGS) $(CFLAGS) "
+                "-c -o $@ $<"
+            ),
+            1,
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("actual compiler command", result.stderr)
+
+    def test_requires_unconditional_exact_cmake_inventories(self) -> None:
+        cmake = self.fixture.files["CMakeLists.txt"]
+        without_includes = "\n".join(
+            line
+            for line in cmake.splitlines()
+            if not line.startswith("include(")
+        )
+        function_start = cmake.index(
+            "function(llam_attach_build_provenance"
+        )
+        function_end = cmake.index(
+            "set_target_properties(llam_runtime_shared",
+            function_start,
+        )
+        without_provenance = cmake[:function_start] + cmake[function_end:]
+        duplicate_foreach = (
+            cmake
+            + CANONICAL_CMAKE_FOREACH_BLOCK
+            + CANONICAL_CMAKE_FOREACH_BLOCK
+        )
+        for mutation in (
+            without_includes,
+            without_provenance,
+            duplicate_foreach,
+        ):
+            with self.subTest(length=len(mutation)):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("CMake", result.stderr)
+
+    def test_rejects_unconsumed_and_unbalanced_cmake_source(self) -> None:
+        mutations = (
+            "trailing ??? garbage\n",
+            "add_subdirectory(\n",
+            "if(TRUE)\n",
+            "endif()\n",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.strip()):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("CMakeLists.txt", result.stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_accepts_dangerous_text_in_cmake_bracket_comment(self) -> None:
+        self.fixture.files["CMakeLists.txt"] += (
+            "#[=[\n"
+            "add_subdirectory(hidden)\n"
+            "target_sources(llam_runtime PRIVATE hidden.c)\n"
+            "]=]\n"
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejects_case_independent_cmake_version_overrides(self) -> None:
+        mutations = (
+            "PROJECT(llam VERSION 9.9.9 LANGUAGES C)\n",
+            "SET(LLAM_ABI_VERSION_MAJOR 9)\n",
+            (
+                "set_target_properties(llam_runtime_shared PROPERTIES "
+                "VERSION 9.9.9 SOVERSION 9)\n"
+            ),
+            (
+                "set(ABI_NAME LLAM_ABI_VERSION_MAJOR)\n"
+                "set(${ABI_NAME} 9)\n"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[-1]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("CMake", result.stderr)
+
+    def test_rejects_header_undef_and_effective_redefinition(self) -> None:
+        self.fixture.files["include/llam/runtime.h"] += (
+            "#undef LLAM_VERSION_MAJOR\n"
+            "#define LLAM_VERSION_MAJOR (9U)\n"
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("runtime.h", result.stderr)
+
+    def test_rejects_package_final_writer_and_logical_mutations(self) -> None:
+        base = self.fixture.files["scripts/package_release.sh"]
+        mutations = (
+            base.replace(
+                'printf \'%s\\n\' "$version" > "$stage/VERSION"',
+                'printf \'%s\\n\' "9.9.9" > "$stage/VERSION"',
+            ),
+            base.replace(
+                (
+                    'printf \'%s\\n\' "$library_version" '
+                    '> "$stage/LIBRARY_VERSION"'
+                ),
+                (
+                    'printf \'%s\\n\' "9.9.9" '
+                    '> "$stage/LIBRARY_VERSION"'
+                ),
+            ),
+            base + 'library_\\\nversion="9.9.9"\n',
+            (
+                base
+                + 'printf \'%s\\n\' "9.9.9" > "$stage/VERSION"\n'
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[-1]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["scripts/package_release.sh"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("package", result.stderr)
+
+    def test_parses_workflow_keys_with_whitespace_and_hierarchy(self) -> None:
+        workflow = self.fixture.files[".github/workflows/linux.yml"]
+        mutations = (
+            workflow.replace(
+                "  audit:\n    steps:",
+                "  audit:\n    if : false\n    steps:",
+            ),
+            workflow + "    if : false\n",
+            workflow.replace(
+                "      - name: Audit build manifests\n",
+                (
+                    "      - name: Audit build manifests\n"
+                    "        if : false\n"
+                ),
+            ),
+            workflow.replace(
+                "      - name: Audit build manifests\n",
+                (
+                    "      - name: Audit build manifests\n"
+                    "        continue-on-error : true\n"
+                ),
+            ),
+            workflow
+            + "      - name: Audit build manifests\n"
+            + (
+                "        run: python3 scripts/audit_build_manifests.py "
+                "--root . --check\n"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(length=len(mutation)):
+                self.fixture = Fixture(self.root)
+                self.fixture.files[".github/workflows/linux.yml"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Linux CI build-manifest", result.stderr)
+
+    def test_accepts_harmless_workflow_anchor_comment(self) -> None:
+        workflow = self.fixture.files[".github/workflows/linux.yml"]
+        self.fixture.files[".github/workflows/linux.yml"] = (
+            "# *anchor if : false continue-on-error : true\n"
+            + workflow.replace(
+                "        run: python3 scripts/audit_build_manifests.py "
+                "--root . --check\n",
+                (
+                    "        run: python3 scripts/audit_build_manifests.py "
+                    "--root . --check\n"
+                    "        env:\n"
+                    '          if: "false"\n'
+                    '          continue-on-error: "true"\n'
+                ),
+            )
+            + "      # *anchor if : false\n"
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_configuration_caches_include_all_semantic_inputs(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "llam_audit_cache_test_module",
+            AUDIT,
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            audit = module.Audit(self.root)
+            make_text = (
+                "ifeq ($(HOST_PLATFORM),linux)\n"
+                "CACHE_VALUE = linux\n"
+                "else\n"
+                "CACHE_VALUE = other\n"
+                "endif\n"
+            )
+            cmake_text = (
+                'if(CMAKE_SYSTEM_NAME STREQUAL "Linux")\n'
+                "set(CACHE_VALUE linux)\n"
+                "else()\n"
+                "set(CACHE_VALUE other)\n"
+                "endif()\n"
+                "if(MSVC)\n"
+                "set(MSVC_VALUE yes)\n"
+                "else()\n"
+                "set(MSVC_VALUE no)\n"
+                "endif()\n"
+            )
+            audit.parse_build_inputs(
+                make_text,
+                module.uncomment_text(cmake_text),
+            )
+            common = {
+                "label": "collision",
+                "processor": "x86_64",
+                "research": 0,
+            }
+            linux = {
+                **common,
+                "platform": "linux",
+                "msvc": False,
+            }
+            darwin = {
+                **common,
+                "platform": "darwin",
+                "msvc": False,
+            }
+            windows_gnu = {
+                **common,
+                "platform": "windows",
+                "msvc": False,
+            }
+            windows_msvc = {
+                **common,
+                "platform": "windows",
+                "msvc": True,
+            }
+            make_linux = audit.active_make_text(make_text, linux)
+            make_darwin = audit.active_make_text(make_text, darwin)
+            cmake_linux = module.configured_cmake_variables(
+                cmake_text,
+                linux,
+                audit,
+            )
+            cmake_darwin = module.configured_cmake_variables(
+                cmake_text,
+                darwin,
+                audit,
+            )
+            cmake_gnu = module.configured_cmake_variables(
+                cmake_text,
+                windows_gnu,
+                audit,
+            )
+            cmake_msvc = module.configured_cmake_variables(
+                cmake_text,
+                windows_msvc,
+                audit,
+            )
+        finally:
+            sys.modules.pop(spec.name, None)
+
+        self.assertNotEqual(make_linux, make_darwin)
+        self.assertNotEqual(cmake_linux, cmake_darwin)
+        self.assertNotEqual(cmake_gnu, cmake_msvc)
 
     def test_diagnostics_are_sorted(self) -> None:
         self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(

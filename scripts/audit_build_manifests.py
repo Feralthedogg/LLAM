@@ -125,11 +125,22 @@ class DuplicateKeyError(ValueError):
 
 
 @dataclass(frozen=True)
+class MakeLogicalIR:
+    text: str
+    line: int
+    start: int
+    end: int
+    recipe: bool
+
+
+@dataclass(frozen=True)
 class MakeIR:
     """A single, source-located parse of the canonical Makefile."""
 
     text: str
-    logical_lines: tuple[tuple[int, str], ...]
+    logical_lines: tuple[MakeLogicalIR, ...]
+    diagnostics: tuple[str, ...]
+    consumed: int
 
 
 @dataclass(frozen=True)
@@ -140,6 +151,8 @@ class CMakeCommandIR:
     body: str
     tokens: tuple[str, ...]
     line: int
+    start: int
+    end: int
 
 
 @dataclass(frozen=True)
@@ -148,6 +161,8 @@ class CMakeIR:
 
     text: str
     commands: tuple[CMakeCommandIR, ...]
+    diagnostics: tuple[str, ...]
+    consumed: int
 
 
 class Audit:
@@ -158,16 +173,18 @@ class Audit:
         self.manifest_sources: set[str] = set()
         self.audited_make_variables: set[str] = set()
         self.audited_cmake_variables: set[str] = set()
+        self.expected_version: str | None = None
+        self.expected_abi_major: int | None = None
         self.parse_counts = {"make": 0, "cmake": 0}
         self.make_ir: MakeIR | None = None
         self.cmake_ir: CMakeIR | None = None
         self._configured_cmake_cache: dict[
-            tuple[str, str, int],
+            tuple[Any, ...],
             list[tuple[str, str, list[str], bool | None]],
         ] = {}
-        self._active_make_text_cache: dict[tuple[str, int], str] = {}
+        self._active_make_text_cache: dict[tuple[Any, ...], str] = {}
         self._make_projection_cache: dict[
-            tuple[str, int],
+            tuple[Any, ...],
             MakeProjection,
         ] = {}
 
@@ -195,16 +212,37 @@ class Audit:
         if self.make_ir is None:
             self.make_ir = parse_make_ir(make_text)
             self.parse_counts["make"] += 1
+            for diagnostic in self.make_ir.diagnostics:
+                self.error(diagnostic)
         if self.cmake_ir is None:
             self.cmake_ir = parse_cmake_ir(cmake_text)
             self.parse_counts["cmake"] += 1
+            for diagnostic in self.cmake_ir.diagnostics:
+                self.error(diagnostic)
+
+    @staticmethod
+    def configuration_key(
+        source_identity: int,
+        config: dict[str, Any],
+    ) -> tuple[Any, ...]:
+        return (
+            source_identity,
+            str(config["label"]),
+            str(config["platform"]),
+            str(config["processor"]),
+            bool(config["msvc"]),
+            int(config["research"]),
+        )
 
     def active_make_text(
         self,
         text: str,
         config: dict[str, Any],
     ) -> str:
-        key = (str(config["label"]), int(config["research"]))
+        key = self.configuration_key(
+            id(self.make_ir) if self.make_ir is not None else hash(text),
+            config,
+        )
         if key not in self._active_make_text_cache:
             self._active_make_text_cache[key] = (
                 "\n".join(active_make_lines(text, config, self)) + "\n"
@@ -216,7 +254,10 @@ class Audit:
         text: str,
         config: dict[str, Any],
     ) -> "MakeProjection":
-        key = (str(config["label"]), int(config["research"]))
+        key = self.configuration_key(
+            id(self.make_ir) if self.make_ir is not None else hash(text),
+            config,
+        )
         if key not in self._make_projection_cache:
             self._make_projection_cache[key] = MakeProjection(
                 self.root,
@@ -586,17 +627,40 @@ class Audit:
 
         make = self.read_text("Makefile")
         if make is not None:
+            logical_make = [
+                strip_unquoted_comment(line).strip()
+                for line in logical_make_lines(make)
+            ]
             version_assignments = [
                 line
-                for line in logical_make_lines(make)
+                for line in logical_make
                 if re.match(
-                    r"^LLAM_VERSION\s*(?:\+=|:=|\?=|=)",
-                    strip_unquoted_comment(line).strip(),
+                    (
+                        r"^(?:(?:override|export|private)\s+)?"
+                        r"LLAM_VERSION\s*(?:\+=|:=|\?=|!=|=)"
+                    ),
+                    line,
                 )
             ]
             if version_assignments != [f"LLAM_VERSION ?= {version}"]:
                 self.error(
                     "Make LLAM_VERSION must have exactly one canonical "
+                    "assignment"
+                )
+            abi_assignments = [
+                line
+                for line in logical_make
+                if re.match(
+                    (
+                        r"^(?:(?:override|export|private)\s+)?"
+                        r"LLAM_ABI_MAJOR\s*(?:\+=|:=|\?=|!=|=)"
+                    ),
+                    line,
+                )
+            ]
+            if abi_assignments != [f"LLAM_ABI_MAJOR ?= {abi_major}"]:
+                self.error(
+                    "Make LLAM_ABI_MAJOR must have exactly one canonical "
                     "assignment"
                 )
             checks.extend(
@@ -653,6 +717,12 @@ class Audit:
 
         header = self.read_text("include/llam/runtime.h")
         if header is not None:
+            check_runtime_header_version(
+                header,
+                components,
+                abi_major,
+                self,
+            )
             for name, wanted in zip(
                 ("MAJOR", "MINOR", "PATCH"),
                 components,
@@ -764,7 +834,7 @@ class Audit:
         cmake_text = self.read_text("CMakeLists.txt")
         if make_text is None or cmake_text is None:
             return
-        self.parse_build_inputs(make_text, uncomment_text(cmake_text))
+        self.parse_build_inputs(make_text, cmake_text)
         self.manifest_targets = {
             target["name"]
             for targets in manifest["test_targets"].values()
@@ -1110,11 +1180,7 @@ class Audit:
         if not compile_recipes:
             self.error("Make compile recipes are missing")
         for category, recipe in compile_recipes:
-            shell_segments = [
-                segment.strip()
-                for segment in re.split(r"\s*;\s*", recipe)
-                if segment.strip()
-            ]
+            shell_segments = split_shell_commands(recipe)
             compiler_commands = [
                 segment
                 for segment in shell_segments
@@ -1200,6 +1266,11 @@ class Audit:
         )
         for config in runtime_configurations(cmake=False):
             projection = self.make_projection(make_text, config)
+            for target, count in projection.recipe_rule_counts.items():
+                if count > 1:
+                    self.error(
+                        f"Make {target} has {count} recipe-bearing rules"
+                    )
             for target in ("test", "check"):
                 if not make_target_reaches(
                     projection.rules,
@@ -1751,6 +1822,7 @@ class Audit:
             else None
         )
         if version is not None:
+            self.expected_version, self.expected_abi_major = version
             self.check_versions(*version)
         if sources is not None:
             self.check_sources(sources)
@@ -1921,11 +1993,67 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
         'mv "$$tmp" "$@.llam-build-provenance"',
         "endef",
     )
+    logical_entries = (
+        audit.make_ir.logical_lines
+        if audit.make_ir is not None
+        else parse_make_ir(text).logical_lines
+    )
+    for entry in logical_entries:
+        clean = strip_unquoted_comment(entry.text).strip()
+        if not clean or entry.recipe:
+            continue
+        define = re.match(
+            (
+                r"^(?:override\s+)?define\s+"
+                r"([A-Za-z_][A-Za-z0-9_]*)"
+                r"(?:\s*(?:\+=|:=|\?=|=))?\s*$"
+            ),
+            clean,
+        )
+        if define and clean != "define WRITE_BUILD_PROVENANCE":
+            audit.error(
+                f"Makefile:{entry.line}: unsupported global Make "
+                "construct: define"
+            )
+        modifier = re.match(
+            r"^(override|export|private)\s+(.+)$",
+            clean,
+        )
+        if modifier and (
+            modifier.group(1) != "override"
+            or clean not in allowed_overrides
+        ):
+            audit.error(
+                f"Makefile:{entry.line}: unsupported global Make "
+                f"construct: {modifier.group(1)}"
+            )
+        if re.match(
+            (
+                r"^.+?:\s*(?:(?:private|override|export)\s+)?"
+                r"[A-Za-z_][A-Za-z0-9_]*\s*(?:\+=|:=|\?=|!=|=)"
+            ),
+            clean,
+        ):
+            audit.error(
+                f"Makefile:{entry.line}: target-specific assignment "
+                "is unsupported"
+            )
+        if clean.startswith(".SECONDEXPANSION"):
+            audit.error(
+                f"Makefile:{entry.line}: unsupported global Make "
+                "construct: .SECONDEXPANSION"
+            )
+        if re.search(r"\$(?:\(value\s+|\{value\s+)", clean):
+            audit.error(
+                f"Makefile:{entry.line}: unsupported global Make "
+                "function value"
+            )
     lines = text.splitlines()
     include_count = 0
     override_counts: dict[str, int] = {}
     provenance_definitions = 0
     provenance_invocations = 0
+    provenance_locations: list[str] = []
     allowed_computed_rule_variables = {
         "WINDOWS_CMAKE_TARGETS",
         "BUILD_SIGNATURE",
@@ -1945,6 +2073,7 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
         "TESTHOOK_OBJDIR",
     }
     index = 0
+    current_rule_targets: list[str] = []
     while index < len(lines):
         physical = lines[index]
         clean = strip_unquoted_comment(physical).strip()
@@ -1992,8 +2121,13 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
                     )
                 else:
                     provenance_invocations += 1
+                    provenance_locations.extend(current_rule_targets)
             index += 1
             continue
+        current_rule_targets = []
+        owner_rule = re.match(r"^([^:=\s][^:]*)\s*:", clean)
+        if owner_rule:
+            current_rule_targets = owner_rule.group(1).split()
         if re.match(r"^(?:-?include|sinclude)(?:\s|$)", clean):
             if clean != "-include $(ALL_DEPFILES)":
                 audit.error(
@@ -2057,17 +2191,38 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
             "Make dependency include must be exactly "
             "-include $(ALL_DEPFILES)"
         )
-    if override_counts and (
+    if (
         set(override_counts) != allowed_overrides
         or any(count != 1 for count in override_counts.values())
     ):
         audit.error("Make override allowlist is not exact")
-    if provenance_definitions:
-        if provenance_definitions != 1 or provenance_invocations != 9:
-            audit.error(
-                "Make WRITE_BUILD_PROVENANCE definition/invocations are "
-                "not exact"
-            )
+    expected_locations = [
+        "libllam_runtime.a",
+        "$(SHLIB_REAL)",
+        "$(SHLIB_REAL)",
+        "demo",
+        "stress",
+        "bench",
+        "server",
+        "server_lossless",
+        "server_flood",
+    ]
+    if (
+        provenance_definitions != 1
+        or provenance_invocations != 9
+        or sorted(provenance_locations) != sorted(expected_locations)
+    ):
+        audit.error(
+            "Make WRITE_BUILD_PROVENANCE definition/invocations are "
+            "not exact"
+        )
+    origin_lines = [
+        strip_unquoted_comment(entry.text).strip()
+        for entry in logical_entries
+        if "origin SHARED_CPPFLAGS" in entry.text
+    ]
+    if origin_lines != ["ifeq ($(origin SHARED_CPPFLAGS),undefined)"]:
+        audit.error("Make origin allowlist is not exact")
 
 
 def cmake_block_hash(block: Iterable[CMakeCommandIR]) -> str:
@@ -2097,6 +2252,7 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
     block_stack: list[tuple[str, int]] = []
     includes: list[str] = []
     function_hashes: list[str] = []
+    foreach_hashes: list[str] = []
     provenance_calls: list[tuple[str, str]] = []
     for index, entry in enumerate(commands):
         command = entry.command
@@ -2130,6 +2286,8 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
                 block_hash = cmake_block_hash(commands[start : index + 1])
                 if wanted == "function":
                     function_hashes.append(block_hash)
+                elif wanted == "foreach":
+                    foreach_hashes.append(block_hash)
                 if block_hash not in ALLOWED_CMAKE_BLOCK_HASHES:
                     audit.error(
                         f"CMakeLists.txt:{commands[start].line}: unsupported "
@@ -2213,7 +2371,7 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
                 provenance_calls.append((command, tokens[0]))
     if block_stack:
         audit.error("CMakeLists.txt: unterminated global CMake block")
-    if includes and includes != [
+    if includes != [
         "GNUInstallDirs",
         "CMakePackageConfigHelpers",
         "CheckSymbolExists",
@@ -2223,7 +2381,7 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
         "22264e4a8d124c967b3d97b9432e12881be5e3c8429a5096ea657cbcfe67a57c",
         "02b0159a7ee10e82cbc2e0d9d620591caa10f4c75bb6cde2b8da3222dde43110",
     ]
-    if function_hashes and function_hashes != expected_function_hashes:
+    if function_hashes != expected_function_hashes:
         audit.error("CMake provenance function definitions are not exact")
     expected_calls = [
         ("llam_attach_build_provenance", "llam_runtime"),
@@ -2231,8 +2389,81 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
         ("llam_attach_linker_build_provenance", "llam_runtime_shared"),
         ("llam_attach_build_provenance", "bench"),
     ]
-    if function_hashes and provenance_calls != expected_calls:
+    if provenance_calls != expected_calls:
         audit.error("CMake provenance function invocations are not exact")
+    expected_foreach_hashes = [
+        "63a95de07095916a0f2023f8775f86e2976b4bcd0ab0607539645b62c7f3ff08",
+        "7e93d487270c9f91a8bb1b72e712979bae26f382c4c3ac76903ac0c57620e68e",
+        "227103ba7b4aacdb766bab4b1ae5e2dd7c68287d81bab3a8c08067dfd1d9fa03",
+        "ac38a919288ba04738ea3bd17421987f9b24bcc4e5b4c890e808f6ee76817c77",
+        "a6c8e9dbfd5ed8143138df908699c1adccb9f2749ab9d67fb20759eafc6f1f7a",
+        "edaec5fca5613245de63d07a08d44ca638a3c7de260d53ac815f90370dfb58c3",
+        "ac815719cfd63cb68fe11733fd0063a75a0ddd4204917f6ef0c45fbffdec3fa2",
+    ]
+    if foreach_hashes != expected_foreach_hashes:
+        audit.error("CMake foreach block multiset is not exact")
+
+    expected_version = audit.expected_version
+    expected_abi = audit.expected_abi_major
+    projects = [
+        list(entry.tokens)
+        for entry in commands
+        if entry.command == "project"
+    ]
+    project_valid = (
+        len(projects) == 1
+        and len(projects[0]) >= 3
+        and projects[0][0] == "llam"
+        and "VERSION" in projects[0]
+        and projects[0][projects[0].index("VERSION") + 1]
+        == expected_version
+    )
+    if not project_valid:
+        audit.error("CMake project version projection is not exact")
+
+    def set_writers(name: str) -> list[list[str]]:
+        return [
+            list(entry.tokens)
+            for entry in commands
+            if entry.command == "set"
+            and entry.tokens
+            and entry.tokens[0] == name
+        ]
+
+    expected_sets = {
+        "LLAM_ABI_VERSION_MAJOR": [str(expected_abi)],
+        "LLAM_ABI_VERSION_MINOR": ["0"],
+        "LLAM_LIBRARY_VERSION": ["${PROJECT_VERSION}"],
+    }
+    for name, expected_value in expected_sets.items():
+        writers = set_writers(name)
+        if len(writers) != 1 or writers[0][1:] != expected_value:
+            audit.error(f"CMake {name} projection is not exact")
+
+    version_properties: list[tuple[str, str]] = []
+    for entry in commands:
+        if (
+            entry.command != "set_target_properties"
+            or not entry.tokens
+            or entry.tokens[0] != "llam_runtime_shared"
+            or "PROPERTIES" not in entry.tokens
+        ):
+            continue
+        properties = list(entry.tokens)[
+            list(entry.tokens).index("PROPERTIES") + 1 :
+        ]
+        version_properties.extend(
+            (properties[index], properties[index + 1])
+            for index in range(0, len(properties) - 1, 2)
+            if properties[index] in {"VERSION", "SOVERSION"}
+        )
+    if version_properties != [
+        ("VERSION", "${LLAM_LIBRARY_VERSION}"),
+        ("SOVERSION", "${LLAM_ABI_VERSION_MAJOR}"),
+    ]:
+        audit.error(
+            "CMake runtime shared VERSION/SOVERSION projection is not exact"
+        )
 
 
 def check_make_declarative_subset(text: str, audit: Audit) -> None:
@@ -2476,6 +2707,7 @@ class MakeProjection:
         self.variables: dict[str, list[str]] = {}
         self.rules: dict[str, list[str]] = {}
         self.recipes: dict[str, list[str]] = {}
+        self.recipe_rule_counts: dict[str, int] = {}
         for line in logical_make_lines(text):
             assignment = re.match(
                 r"^([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|:=|\?=|=)\s*(.*)$",
@@ -2499,12 +2731,20 @@ class MakeProjection:
                         prerequisites.split()
                     )
         active_targets: list[str] = []
+        counted_recipe_rule = False
         for physical in text.splitlines():
             if physical.startswith("\t"):
+                if active_targets and not counted_recipe_rule:
+                    for target in active_targets:
+                        self.recipe_rule_counts[target] = (
+                            self.recipe_rule_counts.get(target, 0) + 1
+                        )
+                    counted_recipe_rule = True
                 for target in active_targets:
                     self.recipes.setdefault(target, []).append(physical[1:])
                 continue
             active_targets = []
+            counted_recipe_rule = False
             stripped = physical.strip()
             rule = re.match(r"^([^:=\s][^:]*)\s*:\s*(.*)$", stripped)
             if rule:
@@ -2826,6 +3066,53 @@ def find_required(
     return matches[0]
 
 
+def check_runtime_header_version(
+    text: str,
+    components: tuple[int, ...],
+    abi_major: int,
+    audit: Audit,
+) -> None:
+    without_blocks = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    logical: list[str] = []
+    current = ""
+    for physical in without_blocks.splitlines():
+        line = re.sub(r"//.*$", "", physical).rstrip()
+        if line.endswith("\\"):
+            current += line[:-1] + " "
+            continue
+        logical.append((current + line).strip())
+        current = ""
+    if current:
+        logical.append(current.strip())
+    expected = {
+        "LLAM_VERSION_MAJOR": f"#define LLAM_VERSION_MAJOR {components[0]}U",
+        "LLAM_VERSION_MINOR": f"#define LLAM_VERSION_MINOR {components[1]}U",
+        "LLAM_VERSION_PATCH": f"#define LLAM_VERSION_PATCH {components[2]}U",
+        "LLAM_ABI_VERSION_MAJOR": (
+            f"#define LLAM_ABI_VERSION_MAJOR {abi_major}U"
+        ),
+        "LLAM_ABI_VERSION_MINOR": "#define LLAM_ABI_VERSION_MINOR 0U",
+        "LLAM_ABI_VERSION": (
+            "#define LLAM_ABI_VERSION "
+            "((LLAM_ABI_VERSION_MAJOR << 16U) | LLAM_ABI_VERSION_MINOR)"
+        ),
+    }
+    for name, canonical in expected.items():
+        directives = [
+            line
+            for line in logical
+            if re.match(
+                rf"^#\s*(?:define|undef)\s+{re.escape(name)}\b",
+                line,
+            )
+        ]
+        if directives != [canonical]:
+            audit.error(
+                f"runtime.h {name}: expected exactly one canonical "
+                "definition"
+            )
+
+
 def package_version_fallback(text: str, audit: Audit) -> str:
     assignment_pattern = re.compile(
         (
@@ -2881,46 +3168,65 @@ def package_version_fallback(text: str, audit: Audit) -> str:
     return fallback
 
 
-def check_package_version_state(text: str, audit: Audit) -> None:
-    """Require a literal preamble and immutable package version state."""
+def fold_shell_logical_lines(text: str) -> list[str]:
+    logical: list[str] = []
+    current = ""
+    for physical in text.splitlines():
+        clean = strip_unquoted_comment(physical).strip()
+        if clean.endswith("\\"):
+            current += clean[:-1]
+            continue
+        logical.append(current + clean)
+        current = ""
+    if current:
+        logical.append(current)
+    return logical
 
-    accepted_preambles = (
-        (
-            'version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"',
-            'version="${version#v}"',
-            'abi_major="${LLAM_ABI_MAJOR:-2}"',
-            'library_version="${LLAM_VERSION:-2.2.0}"',
-        ),
-        (
-            'abi_major="${LLAM_ABI_MAJOR:-2}"',
-            'library_version="${LLAM_VERSION:-2.2.0}"',
-            'version="${GITHUB_REF_NAME:-v2.2.0}"',
-        ),
+
+def check_package_version_state(text: str, audit: Audit) -> None:
+    expected_preamble = (
+        'version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"',
+        'version="${version#v}"',
+        'abi_major="${LLAM_ABI_MAJOR:-2}"',
+        'library_version="${LLAM_VERSION:-2.2.0}"',
     )
-    lines = [
-        strip_unquoted_comment(line).strip()
-        for line in text.splitlines()
-    ]
+    lines = fold_shell_logical_lines(text)
     starts = [
-        (index, preamble)
-        for preamble in accepted_preambles
-        for index in range(max(0, len(lines) - len(preamble) + 1))
-        if tuple(lines[index : index + len(preamble)]) == preamble
+        index
+        for index in range(
+            max(0, len(lines) - len(expected_preamble) + 1)
+        )
+        if tuple(lines[index : index + len(expected_preamble)])
+        == expected_preamble
     ]
     if len(starts) != 1:
         audit.error("package version preamble is not exact")
-        return
-    start, preamble = starts[0]
+    start = starts[0] if len(starts) == 1 else -1
     protected = {"version", "abi_major", "library_version"}
+    assignments: list[str] = []
     for index, line in enumerate(lines):
-        if not line or start <= index < start + len(preamble):
+        if not line:
             continue
-        assignment = re.search(
-            r"(?:^|[;{]\s*)(version|abi_major|library_version)\s*=",
-            line,
+        assignment_matches = list(
+            re.finditer(
+                (
+                    r"(?:^|[;{]\s*)"
+                    r"(version|abi_major|library_version)\s*="
+                ),
+                line,
+            )
         )
+        if assignment_matches:
+            assignments.append(line)
         command = re.match(r"^(?:unset|export|read|eval)\b(.*)$", line)
-        if assignment or (command and line.startswith("eval")) or (
+        in_preamble = (
+            start >= 0
+            and start <= index < start + len(expected_preamble)
+            and line == expected_preamble[index - start]
+        )
+        if (assignment_matches and not in_preamble) or (
+            command and line.startswith("eval")
+        ) or (
             command
             and any(
                 re.search(rf"\b{re.escape(name)}\b", command.group(1))
@@ -2930,6 +3236,28 @@ def check_package_version_state(text: str, audit: Audit) -> None:
             audit.error(
                 "package version state uses unsupported mutation "
                 f"at line {index + 1}"
+            )
+    if assignments != list(expected_preamble):
+        audit.error("package version assignment multiset is not exact")
+    expected_writers = {
+        "VERSION": 'printf \'%s\\n\' "$version" > "$stage/VERSION"',
+        "LIBRARY_VERSION": (
+            'printf \'%s\\n\' "$library_version" '
+            '> "$stage/LIBRARY_VERSION"'
+        ),
+    }
+    for filename, canonical in expected_writers.items():
+        writers = [
+            line
+            for line in lines
+            if re.search(
+                rf">\s*['\"]?\$stage/{filename}['\"]?(?:\s|$)",
+                line,
+            )
+        ]
+        if writers != [canonical]:
+            audit.error(
+                f"package {filename} writer projection is not exact"
             )
 
 
@@ -2958,23 +3286,147 @@ def logical_make_lines(text: str) -> list[str]:
 
 
 def parse_make_ir(text: str) -> MakeIR:
-    logical: list[tuple[int, str]] = []
-    current = ""
-    start_line = 1
-    for line_number, physical in enumerate(text.splitlines(), 1):
-        if not current:
-            start_line = line_number
-        stripped = physical.strip()
-        if stripped.endswith("\\"):
-            current += stripped[:-1] + " "
+    logical: list[MakeLogicalIR] = []
+    diagnostics: list[str] = []
+    physical_lines = text.splitlines(keepends=True)
+    offset = 0
+    index = 0
+    while index < len(physical_lines):
+        first = physical_lines[index]
+        start = offset
+        line_number = index + 1
+        recipe = first.startswith("\t")
+        pieces: list[str] = []
+        while True:
+            physical = physical_lines[index]
+            content = physical.rstrip("\r\n")
+            continued = content.endswith("\\")
+            pieces.append(content[:-1] if continued else content)
+            offset += len(physical)
+            index += 1
+            if continued and index >= len(physical_lines):
+                diagnostics.append(
+                    f"Makefile:{line_number}: unterminated continuation"
+                )
+                break
+            if not continued:
+                break
+            pieces.append(" ")
+        folded = "".join(pieces)
+        logical.append(
+            MakeLogicalIR(
+                text=folded,
+                line=line_number,
+                start=start,
+                end=offset,
+                recipe=recipe,
+            )
+        )
+
+    condition_stack: list[tuple[str, int, bool]] = []
+    define_line: int | None = None
+    current_rule = False
+    for entry in logical:
+        clean = strip_unquoted_comment(entry.text).strip()
+        if not clean:
             continue
-        current += stripped
-        if current:
-            logical.append((start_line, current.strip()))
-        current = ""
-    if current:
-        logical.append((start_line, current.strip()))
-    return MakeIR(text=text, logical_lines=tuple(logical))
+        if define_line is not None:
+            if re.fullmatch(r"endef", clean):
+                define_line = None
+            continue
+        if re.match(r"^(?:override\s+)?define(?:\s|$)", clean):
+            define_line = entry.line
+            current_rule = False
+            continue
+        if clean == "endef":
+            diagnostics.append(
+                f"Makefile:{entry.line}: orphan endef"
+            )
+            continue
+        if entry.recipe:
+            if not current_rule:
+                diagnostics.append(
+                    f"Makefile:{entry.line}: recipe has no owning rule"
+                )
+            continue
+        conditional = re.match(
+            r"^(ifeq|ifneq|ifdef|ifndef)(?:\s|$)",
+            clean,
+        )
+        if conditional:
+            condition_stack.append(
+                (conditional.group(1), entry.line, False)
+            )
+            current_rule = False
+            continue
+        if re.match(r"^else(?:\s|$)", clean):
+            if not condition_stack:
+                diagnostics.append(
+                    f"Makefile:{entry.line}: orphan else"
+                )
+            else:
+                name, line, seen_else = condition_stack[-1]
+                bare_else = clean == "else"
+                if seen_else and bare_else:
+                    diagnostics.append(
+                        f"Makefile:{entry.line}: duplicate else"
+                    )
+                condition_stack[-1] = (
+                    name,
+                    line,
+                    seen_else or bare_else,
+                )
+            current_rule = False
+            continue
+        if clean == "endif":
+            if not condition_stack:
+                diagnostics.append(
+                    f"Makefile:{entry.line}: orphan endif"
+                )
+            else:
+                condition_stack.pop()
+            current_rule = False
+            continue
+        assignment = re.match(
+            (
+                r"^(?:(?:override|export|private)\s+)?"
+                r"[A-Za-z_.][A-Za-z0-9_.-]*\s*"
+                r"(?:\+=|:=|\?=|!=|=)"
+            ),
+            clean,
+        )
+        rule = re.match(r"^[^:=\s][^:]*:(?!=)", clean)
+        directive = re.match(
+            r"^(?:-?include|sinclude|export|unexport|undefine)(?:\s|$)",
+            clean,
+        )
+        standalone_function = re.fullmatch(
+            r"\$\((?:error|warning|info)\b.*\)",
+            clean,
+        )
+        if rule:
+            current_rule = True
+        else:
+            current_rule = False
+            if not assignment and not directive and not standalone_function:
+                diagnostics.append(
+                    f"Makefile:{entry.line}: unknown structural syntax: "
+                    f"{clean}"
+                )
+    if define_line is not None:
+        diagnostics.append(
+            f"Makefile:{define_line}: unterminated define"
+        )
+    for name, line, _ in condition_stack:
+        diagnostics.append(
+            f"Makefile:{line}: unterminated {name}"
+        )
+    return MakeIR(
+        text=text,
+        logical_lines=tuple(logical),
+        diagnostics=tuple(diagnostics),
+        consumed=len(text),
+    )
 
 
 def runtime_configurations(*, cmake: bool) -> list[dict[str, Any]]:
@@ -3296,7 +3748,7 @@ def make_target_reaches(
 
 
 def check_linux_workflow_audit_step(text: str, audit: Audit) -> None:
-    lines = text.splitlines()
+    lines = [strip_yaml_comment(line).rstrip() for line in text.splitlines()]
     if any(
         re.search(r"(?:^|\s)[&*][A-Za-z_][A-Za-z0-9_-]*", line)
         for line in lines
@@ -3304,48 +3756,75 @@ def check_linux_workflow_audit_step(text: str, audit: Audit) -> None:
         audit.error(
             "Linux CI build-manifest gate uses unsupported YAML indirection"
         )
-    matching_step = False
-    exact_run = False
-    disabled = False
+    matching_steps = 0
+    valid_steps = 0
     index = 0
     while index < len(lines):
         match = re.match(
-            r"^(\s*)-\s+name:\s+Audit build manifests\s*$",
+            r"^(\s*)-\s+name\s*:\s*Audit build manifests\s*$",
             lines[index],
         )
         if match is None:
             index += 1
             continue
-        matching_step = True
+        matching_steps += 1
         base_indent = len(match.group(1))
         job_start: int | None = None
         for candidate in range(index - 1, -1, -1):
-            job = re.match(r"^(\s{2})([A-Za-z0-9_-]+):\s*$", lines[candidate])
+            job = re.match(
+                r"^(\s{2})([A-Za-z0-9_-]+)\s*:\s*$",
+                lines[candidate],
+            )
             if job:
                 job_start = candidate
                 break
+        job_enabled = job_start is not None
         if job_start is None:
             audit.error(
                 "Linux CI build-manifest audit step has no literal job"
             )
         else:
-            for job_line in lines[job_start + 1 : index]:
-                field = re.match(r"^\s{4}(if):\s*(.*?)\s*$", job_line)
+            job_end = len(lines)
+            for candidate in range(job_start + 1, len(lines)):
+                if re.match(
+                    r"^\s{2}[A-Za-z0-9_-]+\s*:\s*$",
+                    lines[candidate],
+                ):
+                    job_end = candidate
+                    break
+            for job_line in lines[job_start + 1 : job_end]:
+                field = re.match(
+                    r"^\s{4}(if)\s*:\s*(.*?)\s*$",
+                    job_line,
+                )
                 if field and not yaml_gate_is_true(field.group(2)):
-                    disabled = True
+                    job_enabled = False
                     audit.error(
                         "Linux CI build-manifest job is disabled or uses "
                         "an unsupported condition"
                     )
+        step_enabled = True
+        exact_run = False
+        continue_safe = True
         index += 1
         while index < len(lines):
             line = lines[index]
-            next_step = re.match(r"^(\s*)-\s+name:", line)
+            next_step = re.match(r"^(\s*)-\s+name\s*:", line)
             if next_step and len(next_step.group(1)) == base_indent:
                 break
-            field = re.match(
-                r"^\s+(run|if|continue-on-error):\s*(.*?)\s*$",
-                line,
+            if line.strip() and len(line) - len(line.lstrip()) < base_indent:
+                break
+            indentation = len(line) - len(line.lstrip())
+            field = (
+                re.match(
+                    (
+                        r"^(run|if|continue-on-error)"
+                        r"\s*:\s*(.*?)\s*$"
+                    ),
+                    line.lstrip(),
+                )
+                if indentation == base_indent + 2
+                else None
             )
             if field:
                 name, value = field.groups()
@@ -3357,7 +3836,7 @@ def check_linux_workflow_audit_step(text: str, audit: Audit) -> None:
                     exact_run = True
                 elif name == "if":
                     if not yaml_gate_is_true(value):
-                        disabled = True
+                        step_enabled = False
                         audit.error(
                             "Linux CI build-manifest audit step has an "
                             "unsupported condition"
@@ -3365,16 +3844,39 @@ def check_linux_workflow_audit_step(text: str, audit: Audit) -> None:
                 elif name == "continue-on-error" and not yaml_gate_is_false(
                     value
                 ):
-                    disabled = True
+                    continue_safe = False
                     audit.error(
                         "Linux CI build-manifest audit step uses "
                         "continue-on-error"
                     )
             index += 1
-    if disabled:
+        if job_enabled and step_enabled and continue_safe and exact_run:
+            valid_steps += 1
+    if matching_steps != 1 or valid_steps != 1:
         audit.error("Linux CI build-manifest audit step is disabled")
-    if not matching_step or not exact_run:
         audit.error("Linux CI build-manifest audit step is missing")
+
+
+def strip_yaml_comment(line: str) -> str:
+    quote = ""
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "#":
+            return line[:index]
+    return line
 
 
 def yaml_gate_is_true(value: str) -> bool:
@@ -3453,10 +3955,9 @@ def configured_cmake_commands(
     config: dict[str, Any],
     audit: Audit,
 ) -> list[tuple[str, str, list[str], bool | None]]:
-    cache_key = (
-        str(config["label"]),
-        str(config["processor"]),
-        int(config["research"]),
+    cache_key = audit.configuration_key(
+        id(audit.cmake_ir) if audit.cmake_ir is not None else hash(text),
+        config,
     )
     cached = audit._configured_cmake_cache.get(cache_key)
     if cached is not None:
@@ -3992,6 +4493,50 @@ def make_recipe_object_variables(recipe: str) -> list[str]:
     ]
 
 
+def split_shell_commands(recipe: str) -> list[str]:
+    commands: list[str] = []
+    start = 0
+    index = 0
+    quote = ""
+    escaped = False
+    while index < len(recipe):
+        char = recipe[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        boundary = 0
+        if recipe.startswith("&&", index) or recipe.startswith("||", index):
+            boundary = 2
+        elif char in {";", "|"}:
+            boundary = 1
+        if boundary:
+            command = recipe[start:index].strip()
+            if command:
+                commands.append(command)
+            index += boundary
+            start = index
+            continue
+        index += 1
+    command = recipe[start:].strip()
+    if command:
+        commands.append(command)
+    return commands
+
+
 def validate_make_link_recipe_inputs(
     recipe: str,
     target: str,
@@ -4020,6 +4565,11 @@ def validate_make_link_recipe_inputs(
                 f"{target}: Make link recipe has unknown expansion "
                 f"$({variable})"
             )
+    for automatic in re.findall(r"\$[\^+?*<|%]", recipe):
+        audit.error(
+            f"{target}: Make link recipe has noncanonical automatic "
+            f"input {automatic}"
+        )
     literal_objects = re.findall(
         (
             r"\$\((?:OBJDIR|SHARED_OBJDIR|TESTHOOK_OBJDIR)\)/"
@@ -4109,17 +4659,61 @@ def signature_recipe_has_later_writer(recipe: str) -> bool:
 
 def parse_cmake_ir(text: str) -> CMakeIR:
     commands: list[CMakeCommandIR] = []
+    diagnostics: list[str] = []
     index = 0
-    pattern = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-    while True:
-        match = pattern.search(text, index)
-        if match is None:
-            break
+    length = len(text)
+    while index < length:
+        if text[index].isspace():
+            index += 1
+            continue
+        if text[index] == "#":
+            bracket = cmake_bracket_delimiter(text, index + 1)
+            if bracket is not None:
+                opener_end, closer = bracket
+                close = text.find(closer, opener_end)
+                if close < 0:
+                    diagnostics.append(
+                        f"CMakeLists.txt:{text.count(chr(10), 0, index) + 1}: "
+                        "unterminated bracket comment"
+                    )
+                    index = length
+                else:
+                    index = close + len(closer)
+                continue
+            newline = text.find("\n", index)
+            index = length if newline < 0 else newline + 1
+            continue
+        start = index
+        identifier = re.match(
+            r"[A-Za-z_][A-Za-z0-9_]*",
+            text[index:],
+        )
+        if identifier is None:
+            line = text.count("\n", 0, index) + 1
+            diagnostics.append(
+                f"CMakeLists.txt:{line}: unconsumed source byte "
+                f"{text[index]!r}"
+            )
+            index += 1
+            continue
+        name = identifier.group(0)
+        index += len(name)
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length or text[index] != "(":
+            line = text.count("\n", 0, start) + 1
+            diagnostics.append(
+                f"CMakeLists.txt:{line}: command {name} is missing '('"
+            )
+            newline = text.find("\n", index)
+            index = length if newline < 0 else newline + 1
+            continue
+        body_start = index + 1
         depth = 1
-        cursor = match.end()
+        cursor = body_start
         quoted = False
         escaped = False
-        while cursor < len(text) and depth:
+        while cursor < length and depth:
             char = text[cursor]
             if quoted:
                 if escaped:
@@ -4128,26 +4722,121 @@ def parse_cmake_ir(text: str) -> CMakeIR:
                     escaped = True
                 elif char == '"':
                     quoted = False
-            elif char == '"':
+                cursor += 1
+                continue
+            if char == '"':
                 quoted = True
-            elif char == "(":
+                cursor += 1
+                continue
+            if char == "#":
+                bracket = cmake_bracket_delimiter(text, cursor + 1)
+                if bracket is not None:
+                    opener_end, closer = bracket
+                    close = text.find(closer, opener_end)
+                    if close < 0:
+                        cursor = length
+                        break
+                    cursor = close + len(closer)
+                    continue
+                newline = text.find("\n", cursor)
+                cursor = length if newline < 0 else newline + 1
+                continue
+            bracket = cmake_bracket_delimiter(text, cursor)
+            if bracket is not None:
+                opener_end, closer = bracket
+                close = text.find(closer, opener_end)
+                if close < 0:
+                    cursor = length
+                    break
+                cursor = close + len(closer)
+                continue
+            if char == "(":
                 depth += 1
             elif char == ")":
                 depth -= 1
             cursor += 1
         if depth:
-            break
-        body = text[match.end() : cursor - 1]
+            line = text.count("\n", 0, start) + 1
+            diagnostics.append(
+                f"CMakeLists.txt:{line}: unterminated command {name}()"
+            )
+            index = length
+            continue
+        body = text[body_start : cursor - 1]
         commands.append(
             CMakeCommandIR(
-                command=match.group(1).lower(),
+                command=name.lower(),
                 body=body,
                 tokens=tuple(cmake_tokens(body)),
-                line=text.count("\n", 0, match.start()) + 1,
+                line=text.count("\n", 0, start) + 1,
+                start=start,
+                end=cursor,
             )
         )
         index = cursor
-    return CMakeIR(text=text, commands=tuple(commands))
+
+    stack: list[tuple[str, int, bool]] = []
+    openers = {"if", "foreach", "function", "macro"}
+    closers = {
+        "endif": "if",
+        "endforeach": "foreach",
+        "endfunction": "function",
+        "endmacro": "macro",
+    }
+    for entry in commands:
+        if entry.command in openers:
+            stack.append((entry.command, entry.line, False))
+            continue
+        if entry.command in {"else", "elseif"}:
+            if not stack or stack[-1][0] != "if":
+                diagnostics.append(
+                    f"CMakeLists.txt:{entry.line}: orphan {entry.command}()"
+                )
+            elif entry.command == "else":
+                name, line, seen_else = stack[-1]
+                if seen_else:
+                    diagnostics.append(
+                        f"CMakeLists.txt:{entry.line}: duplicate else()"
+                    )
+                stack[-1] = (name, line, True)
+            elif stack[-1][2]:
+                diagnostics.append(
+                    f"CMakeLists.txt:{entry.line}: elseif() after else()"
+                )
+            continue
+        wanted = closers.get(entry.command)
+        if wanted is not None:
+            if not stack or stack[-1][0] != wanted:
+                diagnostics.append(
+                    f"CMakeLists.txt:{entry.line}: orphan {entry.command}()"
+                )
+            else:
+                stack.pop()
+    for command, line, _ in stack:
+        diagnostics.append(
+            f"CMakeLists.txt:{line}: unterminated {command}()"
+        )
+    return CMakeIR(
+        text=text,
+        commands=tuple(commands),
+        diagnostics=tuple(diagnostics),
+        consumed=len(text),
+    )
+
+
+def cmake_bracket_delimiter(
+    text: str,
+    index: int,
+) -> tuple[int, str] | None:
+    if index >= len(text) or text[index] != "[":
+        return None
+    cursor = index + 1
+    while cursor < len(text) and text[cursor] == "=":
+        cursor += 1
+    if cursor >= len(text) or text[cursor] != "[":
+        return None
+    equals = text[index + 1 : cursor]
+    return cursor + 1, f"]{equals}]"
 
 
 def cmake_commands(text: str) -> list[tuple[str, str]]:
@@ -4158,10 +4847,53 @@ def cmake_commands(text: str) -> list[tuple[str, str]]:
 
 
 def cmake_tokens(body: str) -> list[str]:
-    return [
-        token[1:-1] if len(token) >= 2 and token[0] == token[-1] == '"' else token
-        for token in re.findall(r'"(?:\\.|[^"])*"|[^\s]+', body)
-    ]
+    tokens: list[str] = []
+    index = 0
+    while index < len(body):
+        if body[index].isspace():
+            index += 1
+            continue
+        if body[index] == "#":
+            bracket = cmake_bracket_delimiter(body, index + 1)
+            if bracket is not None:
+                opener_end, closer = bracket
+                close = body.find(closer, opener_end)
+                index = len(body) if close < 0 else close + len(closer)
+                continue
+            newline = body.find("\n", index)
+            index = len(body) if newline < 0 else newline + 1
+            continue
+        bracket = cmake_bracket_delimiter(body, index)
+        if bracket is not None:
+            opener_end, closer = bracket
+            close = body.find(closer, opener_end)
+            if close < 0:
+                tokens.append(body[opener_end:])
+                break
+            tokens.append(body[opener_end:close])
+            index = close + len(closer)
+            continue
+        if body[index] == '"':
+            cursor = index + 1
+            escaped = False
+            while cursor < len(body):
+                char = body[cursor]
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    break
+                cursor += 1
+            tokens.append(body[index + 1 : cursor])
+            index = min(cursor + 1, len(body))
+            continue
+        cursor = index
+        while cursor < len(body) and not body[cursor].isspace():
+            cursor += 1
+        tokens.append(body[index:cursor])
+        index = cursor
+    return tokens
 
 
 def compare_members(
