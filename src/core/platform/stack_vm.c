@@ -325,6 +325,13 @@ int llam_stack_vm_sample_resident(void *stack_base,
 #endif
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     return 0;
+#elif LLAM_PLATFORM_OPENBSD
+    /*
+     * OpenBSD does not expose mincore(2). Resident diagnostics are optional,
+     * so preserve the explicit valid=false contract instead of inventing an
+     * estimate or weakening the platform build.
+     */
+    return 0;
 #else
     size_t page_size = (size_t)llam_page_size();
     size_t page_count = stack_size / page_size;
