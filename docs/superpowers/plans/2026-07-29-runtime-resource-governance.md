@@ -238,7 +238,7 @@ git commit -m "feat: resolve immutable runtime resource plans"
 - Produces: runtime-owned copies of the resolved bounds, selected CPUs, and plan estimates
 - Preserves: `active_shards` as configured capacity, `online_shards` as current online target
 
-- [ ] **Step 1: Write initialization integration tests**
+- [x] **Step 1: Write initialization integration tests**
 
 Create runtimes with fixed counts 1 and 2 on machines exposing at least two
 CPUs, and pure injected planner cases for 8 and 64. Assert:
@@ -253,18 +253,18 @@ stats.selected_cpu_count == requested_max;
 Add a failure case proving invalid exact resource options leave no registered
 runtime, threads, descriptors, or changed default-runtime state.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run the focused runtime suites. Expected: current initialization still derives
 `active_shards` from all allowed CPUs and ignores the new plan.
 
-- [ ] **Step 3: Normalize every appended field behind prefix guards**
+- [x] **Step 3: Normalize every appended field behind prefix guards**
 
 Extend the local inbound option copy in `llam_runtime_init_impl()` using
 `LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD`. Never dereference `cpu_ids` unless both
 pointer and `cpu_count` fields are fully present.
 
-- [ ] **Step 4: Resolve and install the plan**
+- [x] **Step 4: Resolve and install the plan**
 
 After CPU discovery and before shard/node/thread allocation:
 
@@ -281,14 +281,14 @@ to `worker_max`, initial online target to `worker_count`, and dynamic floor to
 `worker_min`. Remove the independent SQPOLL CPU mutation so one plan owns the
 decision.
 
-- [ ] **Step 5: Make run startup honor configured capacity safely**
+- [x] **Step 5: Make run startup honor configured capacity safely**
 
 Start scheduler pthreads for the configured capacity and retain online/offline
 state inside the existing dynamic-worker protocol. When the range is fixed,
 all configured workers are online. A failure on secondary worker N joins only
 confirmed starts and restores the run token.
 
-- [ ] **Step 6: Run runtime/shutdown tests and verify GREEN**
+- [x] **Step 6: Run runtime/shutdown tests and verify GREEN**
 
 Run:
 
@@ -299,7 +299,7 @@ ctest --test-dir object/resource-plan-red --output-on-failure \
   -R 'runtime_core|multi_runtime_core|runtime_shutdown_internal'
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/core/lifecycle/init.c src/core/lifecycle/run.c \

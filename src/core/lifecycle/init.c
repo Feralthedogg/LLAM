@@ -340,104 +340,6 @@ static bool llam_public_affinity_policy_valid(uint32_t policy) {
 }
 
 /**
- * @brief Find a CPU id inside a discovered CPU list.
- *
- * @param cpus       CPU id array.
- * @param count      Number of entries in @p cpus.
- * @param target_cpu CPU id to locate.
- *
- * @return Zero-based index on success, or -1 when not found.
- */
-static int llam_find_cpu_index(const unsigned *cpus, unsigned count, unsigned target_cpu) {
-    unsigned i;
-
-    if (cpus == NULL) {
-        return -1;
-    }
-    for (i = 0; i < count; ++i) {
-        if (cpus[i] == target_cpu) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-/**
- * @brief Reserve a CPU for io_uring SQPOLL when the runtime is configured for it.
- *
- * SQPOLL runs a kernel submission thread. Keeping scheduler workers off that CPU
- * prevents the kernel SQ thread and a user scheduler worker from fighting over
- * the same core. If the caller does not choose a CPU explicitly, the last
- * discovered allowed CPU is reserved.
- *
- * @param rt             Runtime being initialized.
- * @param cpus_inout     In/out pointer to the allowed CPU list. Replaced with a
- *                       filtered allocation when a CPU is reserved.
- * @param observed_inout In/out count for @p cpus_inout.
- *
- * @return 0 on success.
- * @return -1 with @c errno set on invalid arguments, allocation failure, or an
- *         explicit SQPOLL CPU outside the allowed CPU set.
- */
-static int llam_runtime_reserve_sqpoll_cpu(llam_runtime_t *rt, unsigned **cpus_inout, unsigned *observed_inout) {
-    unsigned *cpus;
-    unsigned observed;
-    unsigned reserved_cpu;
-    int reserved_index;
-    unsigned *filtered;
-    unsigned src;
-    unsigned dst = 0U;
-
-    if (rt == NULL || cpus_inout == NULL || observed_inout == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    if (rt->experimental_sqpoll_requested == 0U || rt->experimental_shard_rings != 0U) {
-        return 0;
-    }
-
-    cpus = *cpus_inout;
-    observed = *observed_inout;
-    if (observed <= 1U) {
-        rt->sqpoll_cpu_reserved = 0U;
-        return 0;
-    }
-
-    if (rt->sqpoll_cpu >= 0) {
-        reserved_cpu = (unsigned)rt->sqpoll_cpu;
-        reserved_index = llam_find_cpu_index(cpus, observed, reserved_cpu);
-        if (reserved_index < 0) {
-            errno = EINVAL;
-            return -1;
-        }
-    } else {
-        reserved_index = (int)(observed - 1U);
-        reserved_cpu = cpus[reserved_index];
-        rt->sqpoll_cpu = (int)reserved_cpu;
-    }
-
-    filtered = calloc(observed - 1U, sizeof(*filtered));
-    if (filtered == NULL) {
-        errno = ENOMEM;
-        return -1;
-    }
-
-    for (src = 0; src < observed; ++src) {
-        if ((int)src == reserved_index) {
-            continue;
-        }
-        filtered[dst++] = cpus[src];
-    }
-
-    free(cpus);
-    *cpus_inout = filtered;
-    *observed_inout = observed - 1U;
-    rt->sqpoll_cpu_reserved = 1U;
-    return 0;
-}
-
-/**
  * @brief Initialize one LLAM runtime instance.
  *
  * Each runtime instance may be initialized only once at a time. This function
@@ -464,6 +366,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
                                             bool heap_allocated) {
     llam_runtime_opts_t raw_opts;
     llam_runtime_opts_t opts_storage;
+    llam_runtime_resource_plan_input_t resource_input;
+    llam_runtime_resource_plan_t resource_plan;
     unsigned i;
     unsigned observed;
     unsigned observed_total;
@@ -478,6 +382,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     const char *task_list_eager_env;
     unsigned cheap_safepoint_default;
     unsigned task_list_eager_default;
+    unsigned *selected_cpus;
     size_t opts_copy_size;
     uint64_t experimental_flags;
     unsigned timer_heap_prewarm;
@@ -643,6 +548,39 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return llam_runtime_init_fail_registered(rt, saved_errno);
     }
     observed_total = observed;
+    memset(&resource_input, 0, sizeof(resource_input));
+    resource_input.opts = opts;
+    resource_input.opts_size = opts != NULL ? opts_size : 0U;
+    resource_input.allowed_cpus = cpus;
+    resource_input.allowed_cpu_count = observed;
+    /*
+     * Hard affinity is enabled only after the platform application/restore
+     * path is installed in the resource-governance sequence. Until then,
+     * REQUIRE fails closed while NONE and PREFER remain valid plans.
+     */
+    resource_input.affinity_supported = false;
+#if LLAM_RUNTIME_BACKEND_LINUX
+    resource_input.sqpoll_supported = true;
+#else
+    resource_input.sqpoll_supported = false;
+#endif
+    if (llam_runtime_resource_plan_resolve(&resource_input, &resource_plan) != 0) {
+        int saved_errno = errno;
+
+        free(cpus);
+        return llam_runtime_init_fail_registered(rt, saved_errno);
+    }
+    selected_cpus = calloc(resource_plan.selected_cpu_count, sizeof(*selected_cpus));
+    if (selected_cpus == NULL) {
+        free(cpus);
+        return llam_runtime_init_fail_registered(rt, ENOMEM);
+    }
+    for (i = 0U; i < resource_plan.selected_cpu_count; ++i) {
+        selected_cpus[i] = resource_plan.selected_cpus[i];
+    }
+    free(cpus);
+    cpus = selected_cpus;
+    rt->resource_plan = resource_plan;
 
     /*
      * From this point on, runtime policy is resolved once and stored on the
@@ -657,7 +595,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->experimental_shard_rings_multishot =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS_MULTISHOT) != 0U ? 1U : 0U;
     rt->experimental_dynamic_shards =
-        (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS) != 0U ? 1U : 0U;
+        resource_plan.worker_min < resource_plan.worker_max ? 1U : 0U;
     rt->experimental_lockfree_normq =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_LOCKFREE_NORMQ) != 0U ? 1U : 0U;
     rt->experimental_huge_alloc_requested =
@@ -666,7 +604,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->idle_spin_max_iters = opts != NULL ? opts->idle_spin_max_iters : 0U;
     rt->experimental_sqpoll_requested =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL) != 0U ? 1U : 0U;
-    rt->sqpoll_cpu = opts != NULL ? opts->sqpoll_cpu : -1;
+    rt->sqpoll_cpu_reserved = resource_plan.sqpoll_reserved ? 1U : 0U;
+    rt->sqpoll_cpu = resource_plan.sqpoll_cpu;
     rt->profile =
         llam_runtime_profile_from_env(opts != NULL ? (llam_runtime_profile_t)opts->profile : LLAM_RUNTIME_PROFILE_BALANCED);
     rt->preempt_mode = llam_runtime_preempt_mode_from_env(opts != NULL ? opts->preempt_mode : LLAM_PREEMPT_AUTO);
@@ -796,17 +735,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     if (rt->experimental_shard_rings != 0U) {
         rt->experimental_sqpoll_requested = 0U;
     }
-    if (rt->deterministic != 0U || observed <= 2U) {
-        rt->experimental_dynamic_shards = 0U;
-    }
-    if (llam_runtime_reserve_sqpoll_cpu(rt, &cpus, &observed) != 0) {
-        int saved_errno = errno;
-
-        free(cpus);
-        return llam_runtime_init_fail_registered(rt, saved_errno);
-    }
     rt->observed_shards = observed_total;
-    rt->active_shards = rt->deterministic != 0U ? 1U : observed;
+    rt->active_shards = resource_plan.worker_max;
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     rt->direct_handoff_live_limit =
         llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT",
@@ -830,25 +760,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         spawn_fanout_env != NULL && spawn_fanout_env[0] != '\0' ? 1U : 0U;
     rt->spawn_fanout_wake_interval =
         llam_runtime_env_u32("LLAM_SPAWN_FANOUT_WAKE_INTERVAL", rt->spawn_fanout_wake_interval, 65535U);
-    initial_online_shards = rt->active_shards;
-    rt->dynamic_online_floor = rt->active_shards;
-    if (rt->experimental_dynamic_shards != 0U) {
-        unsigned floor_basis = (rt->sqpoll_cpu_reserved != 0U && rt->observed_shards > rt->active_shards)
-                                   ? rt->observed_shards
-                                   : rt->active_shards;
-
-        if (floor_basis > 8U) {
-            rt->dynamic_online_floor = llam_max_unsigned(4U, floor_basis / 2U);
-        } else if (floor_basis > 4U) {
-            rt->dynamic_online_floor = 4U;
-        } else {
-            rt->dynamic_online_floor = rt->active_shards;
-        }
-        if (rt->dynamic_online_floor > rt->active_shards) {
-            rt->dynamic_online_floor = rt->active_shards;
-        }
-        initial_online_shards = rt->dynamic_online_floor;
-    }
+    initial_online_shards = resource_plan.worker_count;
+    rt->dynamic_online_floor = resource_plan.worker_min;
     atomic_store(&rt->online_shards, initial_online_shards);
     atomic_store(&rt->online_shards_min, initial_online_shards);
     atomic_store(&rt->online_shards_max, initial_online_shards);
@@ -1249,18 +1162,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->overflow_lock_initialized = true;
     atomic_store(&rt->overflow_depth, 0U);
 
-    rt->block_worker_count = rt->active_shards < 4U ? rt->active_shards : 4U;
-#if !defined(__linux__)
-    rt->block_worker_count = rt->active_shards;
-#endif
-    if (rt->block_worker_count == 0U) {
-        rt->block_worker_count = 1U;
-    }
-#if !defined(__linux__)
-    if (rt->block_worker_count < 2U) {
-        rt->block_worker_count = 2U;
-    }
-#endif
+    /*
+     * Task 5 converts this eager compatibility pool into min-start/lazy-grow.
+     * Until that path exists, start the resolved maximum so a zero minimum
+     * cannot strand the first blocking submission.
+     */
+    rt->block_worker_count = resource_plan.blocking_max;
     rt->block_threads = calloc(rt->block_worker_count, sizeof(*rt->block_threads));
     if (rt->block_threads == NULL) {
         llam_runtime_shutdown_rt(rt);

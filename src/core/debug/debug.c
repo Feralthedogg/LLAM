@@ -195,6 +195,18 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     stats->preempt_mode = rt->preempt_mode;
     stats->preempt_poll_period = rt->preempt_poll_period;
     stats->preempt_quantum_ns = rt->preempt_quantum_ns;
+    stats->configured_worker_min = rt->resource_plan.worker_min;
+    stats->configured_worker_count = rt->resource_plan.worker_count;
+    stats->configured_worker_max = rt->resource_plan.worker_max;
+    stats->configured_blocking_min = rt->resource_plan.blocking_min;
+    stats->configured_blocking_max = rt->resource_plan.blocking_max;
+    stats->selected_cpu_count = rt->resource_plan.selected_cpu_count;
+    stats->affinity_policy = rt->resource_plan.affinity_policy;
+    stats->requested_task_prewarm_total = rt->resource_plan.task_prewarm_total;
+    stats->requested_stack_prewarm_total = rt->resource_plan.stack_prewarm_total;
+    stats->requested_timer_prewarm_total = rt->resource_plan.timer_prewarm_total;
+    stats->estimated_metadata_bytes = rt->resource_plan.estimated_metadata_bytes;
+    stats->estimated_stack_mapping_bytes = rt->resource_plan.estimated_stack_mapping_bytes;
     stats->overflow_depth = llam_runtime_overflow_depth(rt);
 
     /*

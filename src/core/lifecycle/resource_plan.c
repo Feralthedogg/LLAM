@@ -156,6 +156,7 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     bool blocking_max_present = false;
     bool cpu_pair_present = false;
     bool sqpoll_requested;
+    unsigned sqpoll_reserve_index = UINT_MAX;
     int requested_sqpoll_cpu = -1;
     int reserved_cpu = -1;
     uint64_t metadata_bytes = 0U;
@@ -267,34 +268,32 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     sqpoll_requested =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL) != 0U &&
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS) == 0U;
-    if (sqpoll_requested && !input->sqpoll_supported) {
-        errno = ENOTSUP;
-        return -1;
-    }
     if (sqpoll_requested && requested_sqpoll_cpu < -1) {
         errno = EINVAL;
         return -1;
     }
-    if (sqpoll_requested && source_count > 1U) {
-        unsigned reserve_index = source_count - 1U;
-
-        if (requested_sqpoll_cpu >= 0) {
-            bool found = false;
-
-            for (source_index = 0U; source_index < source_count; ++source_index) {
-                if (source_cpu_at(explicit_cpus, source_allowed, source_index) ==
-                    (unsigned)requested_sqpoll_cpu) {
-                    reserve_index = source_index;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                errno = EINVAL;
-                return -1;
+    if (sqpoll_requested && requested_sqpoll_cpu >= 0) {
+        for (source_index = 0U; source_index < source_count; ++source_index) {
+            if (source_cpu_at(explicit_cpus, source_allowed, source_index) ==
+                (unsigned)requested_sqpoll_cpu) {
+                sqpoll_reserve_index = source_index;
+                break;
             }
         }
-        reserved_cpu = (int)source_cpu_at(explicit_cpus, source_allowed, reserve_index);
+        if (sqpoll_reserve_index == UINT_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    if (sqpoll_requested && !input->sqpoll_supported) {
+        errno = ENOTSUP;
+        return -1;
+    }
+    if (sqpoll_requested && source_count > 1U) {
+        if (sqpoll_reserve_index == UINT_MAX) {
+            sqpoll_reserve_index = source_count - 1U;
+        }
+        reserved_cpu = (int)source_cpu_at(explicit_cpus, source_allowed, sqpoll_reserve_index);
         plan.sqpoll_reserved = true;
     } else if (sqpoll_requested && requested_sqpoll_cpu >= 0) {
         if (!cpu_is_allowed((unsigned)requested_sqpoll_cpu,

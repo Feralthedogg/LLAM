@@ -30,6 +30,7 @@
 
 #include "llam_internal.h"
 #include "runtime_platform.h"
+#include "runtime_resource_plan.h"
 
 #define LLAM_WAIT_RESOLVER_CLOSED_BIT (UINT_MAX - (UINT_MAX >> 1U))
 #define LLAM_WAIT_RESOLVER_REF_MASK (UINT_MAX >> 1U)
@@ -1362,6 +1363,7 @@ struct llam_runtime {
     _Atomic size_t active_ops;
     atomic_bool initialized;
     atomic_bool exec_started;
+    llam_runtime_resource_plan_t resource_plan;
     unsigned observed_shards;
     unsigned active_shards;
     atomic_uint online_shards;

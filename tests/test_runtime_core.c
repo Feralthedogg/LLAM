@@ -1160,6 +1160,94 @@ static int test_runtime_resource_plan_resolver(void) {
     return 0;
 }
 
+static int assert_fixed_runtime_resource_stats(unsigned worker_count) {
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("fixed resource opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = worker_count;
+    opts.worker_count = worker_count;
+    opts.worker_max = worker_count;
+    opts.blocking_min = 1U;
+    opts.blocking_max = 1U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("fixed resource runtime create failed");
+    }
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("fixed resource stats collection failed");
+        goto cleanup;
+    }
+    if (stats.configured_worker_min != worker_count ||
+        stats.configured_worker_count != worker_count ||
+        stats.configured_worker_max != worker_count ||
+        stats.active_workers != worker_count ||
+        stats.online_workers != worker_count ||
+        stats.selected_cpu_count != worker_count ||
+        stats.configured_blocking_min != 1U ||
+        stats.configured_blocking_max != 1U ||
+        stats.estimated_metadata_bytes == 0U) {
+        fprintf(stderr,
+                "[test_runtime_core] fixed %u-worker plan resolved as configured=%u/%u/%u active=%u online=%u cpus=%u block=%u/%u metadata=%llu\n",
+                worker_count,
+                stats.configured_worker_min,
+                stats.configured_worker_count,
+                stats.configured_worker_max,
+                stats.active_workers,
+                stats.online_workers,
+                stats.selected_cpu_count,
+                stats.configured_blocking_min,
+                stats.configured_blocking_max,
+                (unsigned long long)stats.estimated_metadata_bytes);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int test_runtime_resource_plan_initialization(void) {
+    llam_runtime_opts_t bad_opts;
+    llam_runtime_t *runtime = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count;
+
+    if (llam_runtime_opts_init(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("invalid resource opts init failed");
+    }
+    bad_opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    bad_opts.worker_min = 2U;
+    bad_opts.worker_count = 1U;
+    bad_opts.worker_max = 2U;
+    bad_opts.blocking_min = 1U;
+    bad_opts.blocking_max = 1U;
+
+    errno = 0;
+    if (llam_runtime_create(&bad_opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != -1 ||
+        errno != EINVAL ||
+        runtime != NULL) {
+        llam_runtime_destroy(runtime);
+        return test_fail("invalid exact resource plan published a runtime");
+    }
+
+    if (assert_fixed_runtime_resource_stats(1U) != 0) {
+        return 1;
+    }
+    allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    free(allowed_cpus);
+    if (allowed_cpu_count >= 2U &&
+        assert_fixed_runtime_resource_stats(2U) != 0) {
+        return 1;
+    }
+    return 0;
+}
+
 static void nested_runtime_create_task(void *arg) {
     nested_runtime_create_state_t *state = arg;
     llam_task_t *self_before = llam_current_task();
@@ -5863,6 +5951,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
     RUN_RUNTIME_CORE_TEST(test_legacy_runtime_init_ignores_resource_tail);
     RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_resolver);
+    RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_initialization);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
 #if LLAM_PLATFORM_POSIX
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);

@@ -89,8 +89,8 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
         rt->ctrl_thread_started = false;
     }
 
-    // Shard zero is driven by llam_run() on the caller thread, so only auxiliary
-    // worker threads are joined here.
+    // Shard zero is driven by llam_run() on the caller thread. Walk the full
+    // configured capacity because offline dynamic workers still own threads.
     if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
         for (i = 1; i < rt->active_shards; ++i) {
             if (rt->shards[i].thread_started) {

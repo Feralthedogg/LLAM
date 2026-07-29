@@ -78,6 +78,7 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
      * run token instead of being blocked for the full scheduler lifetime.
      */
     llam_runtime_end_public_op(pinned_runtime);
+    /* active_shards is the immutable configured capacity from the resource plan. */
     for (i = 1; i < rt->active_shards; ++i) {
         rc = pthread_create(&rt->shards[i].thread, NULL, llam_shard_worker_main, &rt->shards[i]);
         if (rc != 0) {

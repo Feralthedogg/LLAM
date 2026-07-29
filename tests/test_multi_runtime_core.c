@@ -439,6 +439,67 @@ static int test_idle_block_workers_destroy_repeat(void) {
     return 0;
 }
 
+static int test_runtime_resource_plan_isolation(void) {
+    llam_runtime_opts_t opts_a;
+    llam_runtime_opts_t opts_b;
+    llam_runtime_stats_t stats_a;
+    llam_runtime_stats_t stats_b;
+    llam_runtime_t *runtime_a = NULL;
+    llam_runtime_t *runtime_b = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count;
+    unsigned worker_b;
+    int rc = 1;
+
+    allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    free(allowed_cpus);
+    if (allowed_cpu_count == 0U) {
+        return test_fail_errno("CPU discovery for resource-plan isolation failed");
+    }
+    worker_b = allowed_cpu_count >= 2U ? 2U : 1U;
+
+    if (init_runtime_opts(&opts_a) != 0 || init_runtime_opts(&opts_b) != 0) {
+        return test_fail_errno("resource-plan isolation opts init failed");
+    }
+    opts_a.worker_min = 1U;
+    opts_a.worker_count = 1U;
+    opts_a.worker_max = 1U;
+    opts_a.blocking_min = 1U;
+    opts_a.blocking_max = 1U;
+    opts_b.deterministic = worker_b == 1U ? 1U : 0U;
+    opts_b.worker_min = worker_b;
+    opts_b.worker_count = worker_b;
+    opts_b.worker_max = worker_b;
+    opts_b.blocking_min = 1U;
+    opts_b.blocking_max = 1U;
+
+    if (llam_runtime_create(&opts_a, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_a) != 0 ||
+        llam_runtime_create(&opts_b, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime_b) != 0) {
+        rc = test_fail_errno("isolated resource runtimes failed to create");
+        goto cleanup;
+    }
+    if (llam_runtime_collect_stats_ex_handle(runtime_a, &stats_a, sizeof(stats_a)) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime_b, &stats_b, sizeof(stats_b)) != 0) {
+        rc = test_fail_errno("isolated resource stats failed");
+        goto cleanup;
+    }
+    if (stats_a.active_workers != 1U ||
+        stats_a.selected_cpu_count != 1U ||
+        stats_b.active_workers != worker_b ||
+        stats_b.selected_cpu_count != worker_b ||
+        stats_a.configured_worker_max != 1U ||
+        stats_b.configured_worker_max != worker_b) {
+        rc = test_fail("explicit runtimes did not retain isolated resource plans");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime_b);
+    llam_runtime_destroy(runtime_a);
+    return rc;
+}
+
 static int test_fail(const char *message) {
     fprintf(stderr, "[test_multi_runtime_core] %s\n", message);
     return 1;
@@ -4380,6 +4441,7 @@ int main(void) {
         {"sync_handle_family_confusion", test_sync_handle_family_confusion},
         {"runtime_run_handle_rejects_null", test_runtime_run_handle_rejects_null},
         {"idle_block_workers_destroy_repeat", test_idle_block_workers_destroy_repeat},
+        {"runtime_resource_plan_isolation", test_runtime_resource_plan_isolation},
         {"concurrent_spawn_join", test_concurrent_spawn_join},
         {"sequential_runtime_host_join_owner_cleanup", test_sequential_runtime_host_join_owner_cleanup},
         {"cross_runtime_task_owner", test_cross_runtime_task_owner},
