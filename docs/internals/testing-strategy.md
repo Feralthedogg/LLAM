@@ -41,6 +41,42 @@ Broker and public-handle hardening live in `test_security_capability` and
 `llam_broker --self-test`. Transport paths also run local client/server smoke
 coverage.
 
+## C Structure Ratchet
+
+The structure audit scans C sources and headers under `include`, `src`,
+`examples`, `tests`, and `experiments`. Findings are deterministic JSON
+objects in relative-path order:
+
+- `size_budget` identifies a file that exceeds its explicit budget.
+- `split_candidate` identifies a file at or above the generic 800-line limit.
+- `growth` identifies grandfathered debt that grew beyond its exact recorded
+  line count.
+
+`config/c-structure-baseline.json` records visible existing debt with schema
+`llam.c-structure-baseline.v1`. It keeps large security and shutdown tests,
+LEIR tests, `wait_tracking.c`, `issue.c`, and `linux_segment.c` visible without
+allowing new debt or a one-line increase. Reducing or removing an entry's debt
+passes the ratchet.
+
+On POSIX hosts, source and baseline reads retain a root-to-leaf directory
+descriptor chain and use no-follow opens. Hosts without directory-relative
+no-follow support reject symlink components and verify file identity before
+and after each read, but treat the selected checkout as a trusted authority
+that is not concurrently renamed by an attacker.
+
+Run the fixture tests and repository ratchet together with:
+
+```sh
+make audit-c-structure
+```
+
+For local assessment, `--mode report` emits warnings and exits zero when the
+input and structural boundaries are valid. CI uses `--mode ratchet` with the
+checked-in baseline. `--mode strict` promotes every explicit-budget and
+generic split finding to an error and is opt-in until a scope's debt has been
+split. Valid policy failures return 1; invalid roots, CLI arguments, unsafe
+paths, or malformed baselines return 2.
+
 ## Release Rule
 
 A release artifact should be published only after the target's platform-local

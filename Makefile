@@ -810,11 +810,15 @@ ALL_DEPFILES = \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
 -include $(ALL_DEPFILES)
 
-.PHONY: all clean static shared audit-build-manifests audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-build-manifests audit-c-structure audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 audit-build-manifests:
 	python3 scripts/audit_build_manifests.py --root . --check
+
+audit-c-structure:
+	python3 -m unittest scripts/test_audit_c_structure.py -v
+	python3 scripts/audit_c_structure.py --root . --mode ratchet --baseline config/c-structure-baseline.json
 
 require-sanitizer-target:
 	@if [ "$(SANITIZER_TARGETS_ENABLED)" != "1" ]; then \
@@ -871,7 +875,7 @@ static: windows-cmake-configure
 shared: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target llam_runtime_shared
 
-test check: audit-build-manifests windows-cmake-test
+test check: audit-build-manifests audit-c-structure windows-cmake-test
 
 ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: windows-cmake-configure
@@ -1086,7 +1090,7 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: audit-build-manifests test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: audit-build-manifests audit-c-structure test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io

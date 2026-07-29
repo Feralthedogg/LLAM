@@ -582,6 +582,25 @@ if(Python3_Interpreter_FOUND)
         build_manifest
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
+    add_test(
+        NAME c_structure_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_c_structure.py -v
+    )
+    add_test(
+        NAME c_structure_ratchet
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_c_structure.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --mode ratchet
+                --baseline
+                ${CMAKE_CURRENT_SOURCE_DIR}/config/c-structure-baseline.json
+    )
+    set_tests_properties(
+        c_structure_fixtures
+        c_structure_ratchet
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 endif()
 
 if(LLAM_BUILD_RESEARCH)

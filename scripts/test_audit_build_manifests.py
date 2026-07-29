@@ -2855,6 +2855,39 @@ class BuildManifestAuditTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("recipe-bearing rule", result.stderr)
 
+    def test_repository_recipe_inventory_accepts_only_intended_target(
+        self,
+    ) -> None:
+        # Break caught: the Task 7 target is omitted from the sealed inventory,
+        # or an extra recipe-bearing target is admitted with it.
+        spec = importlib.util.spec_from_file_location(
+            "llam_audit_recipe_inventory_test_module",
+            AUDIT,
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            repository = AUDIT.parent.parent
+            makefile = (repository / "Makefile").read_text(encoding="utf-8")
+
+            accepted = module.Audit(repository)
+            accepted.make_ir = module.parse_make_ir(makefile)
+            module.check_make_global_closure(makefile, accepted)
+
+            mutation = makefile + "\nunexpected-audit-bypass:\n\t@true\n"
+            rejected = module.Audit(repository)
+            rejected.make_ir = module.parse_make_ir(mutation)
+            module.check_make_global_closure(mutation, rejected)
+        finally:
+            sys.modules.pop(spec.name, None)
+
+        counter_diagnostic = "Make recipe-bearing rule Counter is not exact"
+        self.assertNotIn(counter_diagnostic, accepted.diagnostics)
+        self.assertIn(counter_diagnostic, rejected.diagnostics)
+
     def test_rejects_continued_and_inline_audit_recipe_overrides(
         self,
     ) -> None:
