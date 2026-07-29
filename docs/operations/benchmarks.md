@@ -70,12 +70,26 @@ python3 scripts/bench_leir_native_pipeline.py \
   --samples 9 \
   --activations 32 \
   --min-mode-ms 20 \
-  --output-dir object/leir-native-pipeline \
-  --tracked-report \
-    object/leir_native_pipeline_tracked_report.md
+  --output-dir object/leir-native-pipeline
 python3 scripts/bench_leir_native_pipeline.py \
   --audit-existing object/leir-native-pipeline
 ```
+
+Collection and ordinary audit are screening operations. A valid bundle exits
+zero even when its portable verdict is `REJECT` or `INCONCLUSIVE`. Promotion is
+a separate, explicit operation:
+
+```sh
+python3 scripts/bench_leir_native_pipeline.py \
+  --audit-existing object/leir-native-pipeline \
+  --require-source "$(git rev-parse HEAD)" \
+  --require-verdict SPECIALIZED
+```
+
+The promotion command exits `1` when the stored `portable_verdict` is not
+exactly `SPECIALIZED`, and exits `2` when the evidence or required source is
+invalid. Pull-request CI performs collection and audit without the promotion
+option. Manual promotion uses the hard gate.
 
 This is explicitly a **Linux/io_uring specialized evidence** run. It covers
 `link_skip` and `fixed_link_skip`, widths 1/2/4/8, concurrency 1/4/16, and
@@ -94,24 +108,40 @@ The output directory contains:
 - `raw.csv`: every accepted process result and structural counter.
 - `summary.csv`: deterministic paired-log bootstrap estimates and 95%
   confidence intervals.
-- `leir_native_pipeline_report.md`: human-readable gates and cell results.
-- `leir_native_pipeline_metadata.json`: invocation, source, environment,
-  verdict, and unavailable-cell metadata.
+- `metadata.json`: invocation, source, environment, frozen matrix, sample
+  schedule, and classifier metadata.
+- `verdict.json`: the exact machine-readable promotion and platform verdicts.
+- `report.md`: human-readable gates and cell results.
+- `MANIFEST.sha256`: the final content seal.
 
-The separate tracked report must byte-match
-`leir_native_pipeline_report.md`. The audit command recomputes the summaries
-and verdict from `raw.csv` and fails if the CSV, report, or metadata was
-altered.
+The audit command recomputes the summaries, verdicts, and report from
+`raw.csv`, checks every manifest member, and never rewrites the bundle.
+`verdict.json` uses `llam.performance-verdict.v2` exact-schema JSON containing
+`portable_verdict`,
+`platform_verdict`, `required_cells`, and `classifier_thresholds` in addition
+to the compatibility `verdict` alias and reasons. Legacy three-field v1
+evidence remains auditable by the shared bundle reader, while scoped fields
+require the complete v2 shape. The alias is required to equal
+`portable_verdict`; unknown or partially extended variants fail closed.
 
 Verdicts have narrow meanings:
 
-- `SPECIALIZED` means the precommitted Linux-only wall, CPU, p99,
-  fixed-resource, batching, and structural gates all passed.
+- `portable_verdict` evaluates the frozen classifier over only explicit
+  non-trivial cells, where `min(batch_width, concurrency) > 1`. Missing cells,
+  insufficient samples, structural errors, supported wall regressions, or
+  CPU/p99 regressions prevent promotion.
+- `platform_verdict` independently adds the full Linux/io_uring fixed-resource
+  and width-4/8 batching comparisons.
+- `SPECIALIZED` means the applicable precommitted wall, CPU, p99, coverage,
+  and structural gates all passed.
 - `INCONCLUSIVE` means coverage or sample evidence was incomplete, a required
   comparative win was absent, or the confidence bounds were insufficient.
 - `REJECT` means a structural/correctness gate failed, a wall regression was
   statistically supported, or the matrix CPU/p99 regression limit was
   exceeded.
+
+The hard gate compares only `portable_verdict`; a Linux/io_uring-specific
+`SPECIALIZED` result cannot override a portable `REJECT` or `INCONCLUSIVE`.
 
 If the kernel, liburing, memlock/resource limits, registered files/buffers, or
 CQE-skip support cannot run `fixed_link_skip`, the benchmark exits with the
@@ -119,9 +149,10 @@ native skip code and the matrix records unavailable fixed cells. It never
 substitutes non-fixed measurements. Such missing coverage cannot produce
 `SPECIALIZED`.
 
-These results isolate one Linux backend mechanism. Even a `SPECIALIZED`
-verdict does not establish a portable LLAM speedup, a general language-runtime
-advantage, or a release by itself.
+These results still come from one Linux backend mechanism. Even a
+`SPECIALIZED` portable promotion verdict does not by itself establish a
+portable LLAM speedup or a general language-runtime advantage; cross-platform
+evidence and the rest of release CI remain separate requirements.
 
 ## Guardrails
 

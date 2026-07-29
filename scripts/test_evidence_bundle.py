@@ -1647,6 +1647,8 @@ class AuditTests(unittest.TestCase):
             )
             self.assertIsInstance(result, AuditResult)
             self.assertEqual(result.verdict, "REJECT")
+            self.assertEqual(result.portable_verdict, "REJECT")
+            self.assertEqual(result.platform_verdict, "REJECT")
             self.assertEqual(result.reasons, ("threshold missed",))
             self.assertEqual(before, _snapshot(final))
 

@@ -33,6 +33,7 @@ from typing import Callable, Mapping
 
 EVIDENCE_SCHEMA = "llam.performance-evidence.v1"
 VERDICT_SCHEMA = "llam.performance-verdict.v1"
+SCOPED_VERDICT_SCHEMA = "llam.performance-verdict.v2"
 CLASSIFIER_SCHEMA = "llam.native-classifier.v1"
 REPORT_NAME = "report.md"
 MANIFEST_NAME = "MANIFEST.sha256"
@@ -64,7 +65,23 @@ _METADATA_FIELDS = frozenset(
     }
 )
 _CLASSIFIER_FIELDS = frozenset({"schema", "thresholds"})
-_VERDICT_FIELDS = frozenset({"schema", "verdict", "reasons"})
+_LEGACY_VERDICT_FIELDS = frozenset(
+    {"schema", "verdict", "reasons"}
+)
+_SCOPED_VERDICT_FIELDS = frozenset(
+    {
+        "schema",
+        "verdict",
+        "reasons",
+        "portable_verdict",
+        "platform_verdict",
+        "required_cells",
+        "classifier_thresholds",
+    }
+)
+_REQUIRED_CELL_FIELDS = frozenset(
+    {"candidate", "batch_width", "concurrency", "payload"}
+)
 _HEX40_RE = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ARCHITECTURE_RE = re.compile(r"[a-z0-9][a-z0-9_.-]*\Z")
@@ -197,6 +214,8 @@ class AuditResult:
     verdict: str
     reasons: tuple[str, ...]
     metadata: Mapping[str, object]
+    portable_verdict: str
+    platform_verdict: str
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -883,11 +902,32 @@ def _validate_metadata(value: object) -> dict[str, object]:
 def _validate_verdict(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise EvidenceError("verdict must be a JSON object")
-    _require_exact_fields(value, _VERDICT_FIELDS, where="verdict")
-    if value["schema"] != VERDICT_SCHEMA:
-        raise EvidenceError(f"verdict schema must be {VERDICT_SCHEMA}")
+    fields = frozenset(value)
+    if fields not in {
+        _LEGACY_VERDICT_FIELDS,
+        _SCOPED_VERDICT_FIELDS,
+    }:
+        expected = (
+            _LEGACY_VERDICT_FIELDS
+            if not fields.intersection(
+                _SCOPED_VERDICT_FIELDS
+                - _LEGACY_VERDICT_FIELDS
+            )
+            else _SCOPED_VERDICT_FIELDS
+        )
+        _require_exact_fields(value, expected, where="verdict")
+    expected_schema = (
+        SCOPED_VERDICT_SCHEMA
+        if fields == _SCOPED_VERDICT_FIELDS
+        else VERDICT_SCHEMA
+    )
+    if value["schema"] != expected_schema:
+        raise EvidenceError(
+            f"verdict schema must be {expected_schema}"
+        )
     verdict = value["verdict"]
-    if verdict not in {"SPECIALIZED", "REJECT", "INCONCLUSIVE"}:
+    recognized = {"SPECIALIZED", "REJECT", "INCONCLUSIVE"}
+    if verdict not in recognized:
         raise EvidenceError("verdict value is not recognized")
     reasons = value["reasons"]
     if (
@@ -901,6 +941,66 @@ def _validate_verdict(value: object) -> dict[str, object]:
         )
     ):
         raise EvidenceError("verdict reasons must be nonempty strings")
+    if fields == _SCOPED_VERDICT_FIELDS:
+        portable_verdict = value["portable_verdict"]
+        platform_verdict = value["platform_verdict"]
+        if (
+            portable_verdict not in recognized
+            or platform_verdict not in recognized
+        ):
+            raise EvidenceError(
+                "scoped verdict value is not recognized"
+            )
+        if verdict != portable_verdict:
+            raise EvidenceError(
+                "verdict must equal portable_verdict"
+            )
+        required_cells = value["required_cells"]
+        if not isinstance(required_cells, list) or not required_cells:
+            raise EvidenceError(
+                "verdict required_cells must be a nonempty list"
+            )
+        observed_cells: set[tuple[object, ...]] = set()
+        for cell in required_cells:
+            if not isinstance(cell, dict):
+                raise EvidenceError(
+                    "verdict required cell must be an object"
+                )
+            _require_exact_fields(
+                cell,
+                _REQUIRED_CELL_FIELDS,
+                where="verdict required cell",
+            )
+            candidate = cell["candidate"]
+            dimensions = (
+                cell["batch_width"],
+                cell["concurrency"],
+                cell["payload"],
+            )
+            if (
+                not isinstance(candidate, str)
+                or not candidate
+                or any(
+                    isinstance(dimension, bool)
+                    or not isinstance(dimension, int)
+                    or dimension <= 0
+                    for dimension in dimensions
+                )
+            ):
+                raise EvidenceError(
+                    "verdict required cell is invalid"
+                )
+            identity = (candidate, *dimensions)
+            if identity in observed_cells:
+                raise EvidenceError(
+                    "verdict required_cells contains a duplicate"
+                )
+            observed_cells.add(identity)
+        thresholds = value["classifier_thresholds"]
+        if not isinstance(thresholds, dict) or not thresholds:
+            raise EvidenceError(
+                "verdict classifier_thresholds must be a nonempty object"
+            )
     _check_json_safe(value, where="verdict")
     return value
 
@@ -4047,6 +4147,14 @@ def _audit_payloads(
         verdict=stored_verdict["verdict"],  # type: ignore[arg-type]
         reasons=tuple(stored_verdict["reasons"]),  # type: ignore[arg-type]
         metadata=metadata,
+        portable_verdict=stored_verdict.get(
+            "portable_verdict",
+            stored_verdict["verdict"],
+        ),  # type: ignore[arg-type]
+        platform_verdict=stored_verdict.get(
+            "platform_verdict",
+            stored_verdict["verdict"],
+        ),  # type: ignore[arg-type]
     )
 
 

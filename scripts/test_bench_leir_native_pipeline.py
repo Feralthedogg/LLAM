@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -38,6 +40,25 @@ from scripts.process_utils import CapturedProcess, ProcessTimeoutError, run_capt
 
 
 SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _reseal_bundle(directory: Path) -> None:
+    names = (
+        "metadata.json",
+        "raw.csv",
+        "report.md",
+        "summary.csv",
+        "verdict.json",
+    )
+    records = [
+        f"{hashlib.sha256((directory / name).read_bytes()).hexdigest()}"
+        f"  {name}\n"
+        for name in names
+    ]
+    (directory / "MANIFEST.sha256").write_text(
+        "".join(records),
+        encoding="ascii",
+    )
 
 
 def _evidence_metadata(samples: int) -> dict[str, object]:
@@ -453,6 +474,39 @@ class SummaryAndClassifierTests(unittest.TestCase):
             "SPECIALIZED",
         )
 
+    def test_only_explicit_nontrivial_cells_count_as_winning_regions(
+        self,
+    ) -> None:
+        rows = [
+            SummaryRow(
+                **{
+                    **row.__dict__,
+                    "wall_ci_high": (
+                        0.94 if row.batch_width == 1 else 0.99
+                    ),
+                }
+            )
+            for row in _specialized()
+        ]
+        self.assertEqual(
+            classify(rows, expected_samples=9)[0],
+            "INCONCLUSIVE",
+        )
+
+    def test_promotion_cell_predicate_is_explicit(self) -> None:
+        cases = (
+            (_cell("link_skip", 1, 16, 64), False),
+            (_cell("fixed_link_skip", 8, 1, 4096), False),
+            (_cell("link_skip", 2, 4, 64), True),
+            (_cell("fixed_link_skip", 8, 16, 4096), True),
+        )
+        for cell, expected in cases:
+            with self.subTest(cell=cell):
+                self.assertEqual(
+                    pipeline._is_nontrivial_promotion_cell(cell),
+                    expected,
+                )
+
     def test_one_region_only_is_inconclusive(self) -> None:
         one_region = [
             row
@@ -463,6 +517,44 @@ class SummaryAndClassifierTests(unittest.TestCase):
             classify(one_region, expected_samples=9)[0],
             "INCONCLUSIVE",
         )
+
+    def test_required_cell_and_sample_coverage_are_inconclusive(
+        self,
+    ) -> None:
+        specialized = _specialized()
+        cases = (
+            (
+                "missing nontrivial cell",
+                specialized,
+                [
+                    *(row.cell for row in specialized),
+                    _cell("link_skip", 2, 4, 512),
+                ],
+            ),
+            (
+                "insufficient sample",
+                [
+                    SummaryRow(
+                        **{
+                            **specialized[0].__dict__,
+                            "sample_count": 8,
+                        }
+                    ),
+                    *specialized[1:],
+                ],
+                [row.cell for row in specialized],
+            ),
+        )
+        for name, rows, required in cases:
+            with self.subTest(case=name):
+                self.assertEqual(
+                    classify(
+                        rows,
+                        expected_samples=9,
+                        expected_cells=required,
+                    )[0],
+                    "INCONCLUSIVE",
+                )
 
     def test_cpu_regression_over_three_percent_is_reject(self) -> None:
         rows = [
@@ -502,6 +594,50 @@ class SummaryAndClassifierTests(unittest.TestCase):
             classify(rows, expected_samples=9)[0],
             "INCONCLUSIVE",
         )
+
+    def test_fixed_resource_and_batch_width_gates_are_independent(
+        self,
+    ) -> None:
+        specialized = _specialized()
+        no_fixed = [
+            SummaryRow(
+                **{
+                    **row.__dict__,
+                    "wall_ratio": (
+                        0.91
+                        if row.candidate == "fixed_link_skip"
+                        else row.wall_ratio
+                    ),
+                }
+            )
+            for row in specialized
+        ]
+        no_batch = [
+            SummaryRow(
+                **{
+                    **row.__dict__,
+                    "wall_ratio": (
+                        0.88
+                        if row.batch_width == 1
+                        else (
+                            0.89
+                            if row.candidate == "fixed_link_skip"
+                            else 0.90
+                        )
+                    ),
+                }
+            )
+            for row in specialized
+        ]
+        for name, rows in (
+            ("fixed resource", no_fixed),
+            ("batch width", no_batch),
+        ):
+            with self.subTest(gate=name):
+                self.assertEqual(
+                    classify(rows, expected_samples=9)[0],
+                    "INCONCLUSIVE",
+                )
 
     def test_supported_wall_regression_is_reject(self) -> None:
         rows = _specialized()
@@ -796,11 +932,84 @@ class EvidenceTests(unittest.TestCase):
                 "INCONCLUSIVE",
             )
 
+    def test_run_mode_finalizes_valid_reject_before_gate_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            screen_output = root / "screen"
+            gate_output = root / "gate"
+            samples = [
+                SampleRow(
+                    1,
+                    "ABBA",
+                    cell,
+                    parse_output(
+                        _output(
+                            cell,
+                            {"candidate_cpu_ns": "1600000"},
+                        ),
+                        cell,
+                        min_mode_ns=1_000_000,
+                    ),
+                )
+                for cell in full_matrix()
+            ]
+            with mock.patch(
+                "scripts.bench_leir_native_pipeline.run_matrix",
+                return_value=(samples, []),
+            ):
+                screen_status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(screen_output),
+                        "--source-commit",
+                        SOURCE_COMMIT,
+                        "--source-dirty-digest",
+                        "clean",
+                        "--samples",
+                        "1",
+                        "--activations",
+                        "8",
+                        "--min-mode-ms",
+                        "1",
+                    ]
+                )
+                gate_status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(gate_output),
+                        "--source-commit",
+                        SOURCE_COMMIT,
+                        "--source-dirty-digest",
+                        "clean",
+                        "--samples",
+                        "1",
+                        "--activations",
+                        "8",
+                        "--min-mode-ms",
+                        "1",
+                        "--require-verdict",
+                        "SPECIALIZED",
+                    ]
+                )
+            self.assertEqual(screen_status, 0)
+            self.assertEqual(audit_existing(screen_output)[0], "REJECT")
+            self.assertEqual(gate_status, 1)
+            self.assertTrue(gate_output.is_dir())
+            self.assertEqual(audit_existing(gate_output)[0], "REJECT")
+
     def test_unavailable_cells_form_auditable_inconclusive_bundle(
         self,
     ) -> None:
         unavailable = [_unavailable(cell) for cell in full_matrix()]
-        verdict, reasons = _classify_evidence(
+        portable, platform_verdict, reasons = _classify_evidence(
             [],
             expected_samples=1,
             unavailable=unavailable,
@@ -814,13 +1023,14 @@ class EvidenceTests(unittest.TestCase):
                 None,
                 [],
                 [],
-                verdict=verdict,
+                portable_verdict=portable,
+                platform_verdict=platform_verdict,
                 reasons=reasons,
                 metadata=metadata,
             )
             self.assertEqual(
                 audit_existing(output),
-                (verdict, reasons),
+                (portable, platform_verdict, reasons),
             )
 
     def test_invalid_unavailable_cell_metadata_is_not_sealed(self) -> None:
@@ -836,7 +1046,7 @@ class EvidenceTests(unittest.TestCase):
         ]
         metadata = _evidence_metadata(1)
         metadata["unavailable_cells"] = unavailable
-        verdict, reasons = _classify_evidence(
+        portable, platform_verdict, reasons = _classify_evidence(
             [],
             expected_samples=1,
             unavailable=unavailable,
@@ -849,7 +1059,8 @@ class EvidenceTests(unittest.TestCase):
                     None,
                     [],
                     [],
-                    verdict=verdict,
+                    portable_verdict=portable,
+                    platform_verdict=platform_verdict,
                     reasons=reasons,
                     metadata=metadata,
                 )
@@ -901,6 +1112,84 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(args.require_source_commit, SOURCE_COMMIT)
         self.assertEqual(args.require_source_dirty_digest, "clean")
 
+    def test_optional_promotion_gate_uses_portable_verdict(self) -> None:
+        cases = (
+            ("SPECIALIZED", "SPECIALIZED", 0),
+            ("REJECT", "SPECIALIZED", 1),
+            ("INCONCLUSIVE", "SPECIALIZED", 1),
+        )
+        for portable, required, expected in cases:
+            with self.subTest(portable=portable, required=required):
+                with mock.patch(
+                    "scripts.bench_leir_native_pipeline.audit_existing",
+                    return_value=(
+                        portable,
+                        "SPECIALIZED",
+                        ["fixture verdict"],
+                    ),
+                ):
+                    status = main(
+                        [
+                            "--audit-existing",
+                            "/tmp/evidence",
+                            "--require-verdict",
+                            required,
+                        ]
+                    )
+                self.assertEqual(status, expected)
+
+    def test_screening_accepts_valid_reject_without_promotion_gate(
+        self,
+    ) -> None:
+        with mock.patch(
+            "scripts.bench_leir_native_pipeline.audit_existing",
+            return_value=(
+                "REJECT",
+                "SPECIALIZED",
+                ["portable regression"],
+            ),
+        ):
+            status = main(["--audit-existing", "/tmp/evidence"])
+        self.assertEqual(status, 0)
+
+    def test_platform_specialized_cannot_override_portable_reject(
+        self,
+    ) -> None:
+        with mock.patch(
+            "scripts.bench_leir_native_pipeline.audit_existing",
+            return_value=(
+                "REJECT",
+                "SPECIALIZED",
+                ["portable regression"],
+            ),
+        ):
+            status = main(
+                [
+                    "--audit-existing",
+                    "/tmp/evidence",
+                    "--require-verdict",
+                    "SPECIALIZED",
+                ]
+            )
+        self.assertEqual(status, 1)
+
+    def test_promotion_gate_keeps_invalid_evidence_at_exit_two(
+        self,
+    ) -> None:
+        with mock.patch(
+            "scripts.bench_leir_native_pipeline.audit_existing",
+            side_effect=pipeline.EvidenceError("invalid fixture"),
+        ):
+            status = main(
+                [
+                    "--audit-existing",
+                    "/tmp/evidence",
+                    "--require-verdict",
+                    "SPECIALIZED",
+                ]
+            )
+        self.assertEqual(status, 2)
+
     def test_writes_exact_bundle_without_tracked_overwrite(self) -> None:
         samples = []
         for cell in full_matrix():
@@ -911,10 +1200,10 @@ class EvidenceTests(unittest.TestCase):
             )
             samples.append(SampleRow(1, "ABBA", cell, result))
         summaries = summarize(samples)
-        verdict, reasons = classify(
+        portable, platform_verdict, reasons = _classify_evidence(
             summaries,
             expected_samples=1,
-            expected_cells=full_matrix(),
+            unavailable=[],
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -925,7 +1214,8 @@ class EvidenceTests(unittest.TestCase):
                 tracked,
                 samples,
                 summaries,
-                verdict=verdict,
+                portable_verdict=portable,
+                platform_verdict=platform_verdict,
                 reasons=reasons,
                 metadata=_evidence_metadata(1),
             )
@@ -945,7 +1235,121 @@ class EvidenceTests(unittest.TestCase):
                 "Linux/io_uring specialized evidence",
                 report,
             )
+            verdict_payload = json.loads(
+                (output / "verdict.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                set(verdict_payload),
+                {
+                    "schema",
+                    "verdict",
+                    "reasons",
+                    "portable_verdict",
+                    "platform_verdict",
+                    "required_cells",
+                    "classifier_thresholds",
+                },
+            )
+            self.assertEqual(
+                verdict_payload["schema"],
+                "llam.performance-verdict.v2",
+            )
+            self.assertEqual(
+                verdict_payload["verdict"],
+                verdict_payload["portable_verdict"],
+            )
+            self.assertEqual(
+                verdict_payload["classifier_thresholds"],
+                pipeline.CLASSIFIER_THRESHOLDS,
+            )
+            self.assertEqual(
+                verdict_payload["required_cells"],
+                [
+                    {
+                        "candidate": cell.candidate,
+                        "batch_width": cell.batch_width,
+                        "concurrency": cell.concurrency,
+                        "payload": cell.payload,
+                    }
+                    for cell in full_matrix()
+                    if pipeline._is_nontrivial_promotion_cell(cell)
+                ],
+            )
             self.assertFalse(tracked.exists())
+
+    def test_scoped_verdict_variants_and_derived_fields_fail_closed(
+        self,
+    ) -> None:
+        unavailable = [_unavailable(cell) for cell in full_matrix()]
+        portable, platform_verdict, reasons = _classify_evidence(
+            [],
+            expected_samples=1,
+            unavailable=unavailable,
+        )
+
+        def mutate(
+            payload: dict[str, object],
+            case: str,
+        ) -> None:
+            if case == "missing scoped field":
+                payload.pop("portable_verdict")
+            elif case == "extra scoped field":
+                payload["unexpected"] = True
+            elif case == "portable alias mismatch":
+                payload["verdict"] = "REJECT"
+            elif case == "malformed required cell":
+                required = payload["required_cells"]
+                assert isinstance(required, list)
+                cell = required[0]
+                assert isinstance(cell, dict)
+                cell["batch_width"] = 0
+            elif case == "tampered required cells":
+                required = payload["required_cells"]
+                assert isinstance(required, list)
+                required.pop()
+            elif case == "tampered thresholds":
+                thresholds = payload["classifier_thresholds"]
+                assert isinstance(thresholds, dict)
+                thresholds["minimum_winning_regions"] = 1
+            else:
+                raise AssertionError(case)
+
+        for case in (
+            "missing scoped field",
+            "extra scoped field",
+            "portable alias mismatch",
+            "malformed required cell",
+            "tampered required cells",
+            "tampered thresholds",
+        ):
+            with self.subTest(case=case):
+                with tempfile.TemporaryDirectory() as temporary:
+                    output = Path(temporary).resolve() / "pipeline"
+                    metadata = _evidence_metadata(1)
+                    metadata["unavailable_cells"] = unavailable
+                    write_evidence(
+                        output,
+                        None,
+                        [],
+                        [],
+                        portable_verdict=portable,
+                        platform_verdict=platform_verdict,
+                        reasons=reasons,
+                        metadata=metadata,
+                    )
+                    verdict_path = output / "verdict.json"
+                    payload = json.loads(
+                        verdict_path.read_text(encoding="utf-8")
+                    )
+                    mutate(payload, case)
+                    verdict_path.write_bytes(
+                        pipeline.canonical_json_bytes(payload)
+                    )
+                    _reseal_bundle(output)
+                    with self.assertRaises(
+                        pipeline.EvidenceError
+                    ):
+                        audit_existing(output)
 
     def test_audit_recomputes_artifacts_and_rejects_tamper(self) -> None:
         samples = []
@@ -957,10 +1361,10 @@ class EvidenceTests(unittest.TestCase):
             )
             samples.append(SampleRow(1, "ABBA", cell, result))
         summaries = summarize(samples)
-        verdict, reasons = classify(
+        portable, platform_verdict, reasons = _classify_evidence(
             summaries,
             expected_samples=1,
-            expected_cells=full_matrix(),
+            unavailable=[],
         )
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary).resolve() / "pipeline"
@@ -969,7 +1373,8 @@ class EvidenceTests(unittest.TestCase):
                 None,
                 samples,
                 summaries,
-                verdict=verdict,
+                portable_verdict=portable,
+                platform_verdict=platform_verdict,
                 reasons=reasons,
                 metadata=_evidence_metadata(1),
             )
@@ -979,7 +1384,7 @@ class EvidenceTests(unittest.TestCase):
                     required_source_commit=SOURCE_COMMIT,
                     required_source_dirty_digest="clean",
                 ),
-                (verdict, reasons),
+                (portable, platform_verdict, reasons),
             )
             summary_path = output / "summary.csv"
             summary_path.write_text(
@@ -1021,13 +1426,23 @@ class LinuxIntegrationContractTests(unittest.TestCase):
             'taskset -c "$benchmark_cpus"',
             "--output-dir \"$OUT_DIR/pipeline\"",
             "--audit-existing \"$OUT_DIR/pipeline\"",
-            "leir_native_pipeline_tracked_report.md",
+            "Audit connected pipeline screen",
+            "Enforce connected pipeline promotion",
+            "github.event_name == 'pull_request'",
+            "github.event_name == 'workflow_dispatch'",
+            '--require-source "$GITHUB_SHA"',
+            "--require-verdict SPECIALIZED",
         )
         for fragment in workflow_fragments:
             with self.subTest(workflow=fragment):
                 self.assertIn(fragment, workflow)
         self.assertNotIn(
             "python3 scripts/bench_leir_native.py",
+            workflow,
+        )
+        self.assertNotIn("--tracked-report", workflow)
+        self.assertNotIn(
+            "leir_native_pipeline_tracked_report.md",
             workflow,
         )
 
@@ -1048,8 +1463,14 @@ class LinuxIntegrationContractTests(unittest.TestCase):
             "REJECT",
             "fixed_link_skip",
             "portable LLAM speedup",
-            "leir_native_pipeline_report.md",
-            "leir_native_pipeline_metadata.json",
+            "portable_verdict",
+            "platform_verdict",
+            "required_cells",
+            "classifier_thresholds",
+            "--require-verdict SPECIALIZED",
+            "report.md",
+            "metadata.json",
+            "verdict.json",
         )
         for fragment in doc_fragments:
             with self.subTest(benchmarks=fragment):

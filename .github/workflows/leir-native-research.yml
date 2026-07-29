@@ -407,16 +407,29 @@ jobs:
               --activations 32 \
               --min-mode-ms 20 \
               --output-dir "$OUT_DIR/pipeline" \
-              --tracked-report \
-                "$OUT_DIR/leir_native_pipeline_tracked_report.md" \
             2> >(tee "$OUT_DIR/pipeline-runner-stderr.log" >&2) |
             tee "$OUT_DIR/pipeline-runner-stdout.log"
-          cmp \
-            "$OUT_DIR/pipeline/leir_native_pipeline_report.md" \
-            "$OUT_DIR/leir_native_pipeline_tracked_report.md"
+
+      - name: Audit connected pipeline screen
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -o pipefail
           python3 scripts/bench_leir_native_pipeline.py \
             --audit-existing "$OUT_DIR/pipeline" \
+            --require-source "$GITHUB_SHA" \
             2>&1 | tee "$OUT_DIR/pipeline-audit.log"
+
+      - name: Enforce connected pipeline promotion
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/bench_leir_native_pipeline.py \
+            --audit-existing "$OUT_DIR/pipeline" \
+            --require-source "$GITHUB_SHA" \
+            --require-verdict SPECIALIZED \
+            2>&1 | tee "$OUT_DIR/pipeline-promotion.log"
 
       - name: Upload LEIR native evidence
         if: always()

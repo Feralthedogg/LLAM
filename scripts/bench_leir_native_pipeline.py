@@ -24,7 +24,7 @@ try:
     from evidence_bundle import (
         CLASSIFIER_SCHEMA,
         EVIDENCE_SCHEMA,
-        VERDICT_SCHEMA,
+        SCOPED_VERDICT_SCHEMA,
         EvidenceBundle,
         EvidenceError,
         RecomputedArtifacts,
@@ -43,7 +43,7 @@ except ModuleNotFoundError:
     from scripts.evidence_bundle import (
         CLASSIFIER_SCHEMA,
         EVIDENCE_SCHEMA,
-        VERDICT_SCHEMA,
+        SCOPED_VERDICT_SCHEMA,
         EvidenceBundle,
         EvidenceError,
         RecomputedArtifacts,
@@ -214,6 +214,29 @@ def full_matrix() -> list[MatrixCell]:
         for width in WIDTHS
         for concurrency in CONCURRENCY
         for payload in PAYLOADS
+    ]
+
+
+def _is_nontrivial_promotion_cell(cell: MatrixCell) -> bool:
+    """Return whether a precommitted cell exercises real batching."""
+
+    return (
+        cell.candidate in CANDIDATES
+        and cell.batch_width in WIDTHS
+        and cell.concurrency in CONCURRENCY
+        and cell.payload in PAYLOADS
+        and min(cell.batch_width, cell.concurrency)
+        >= CLASSIFIER_THRESHOLDS[
+            "nontrivial_effective_batch_width_min"
+        ]
+    )
+
+
+def _required_promotion_cells() -> list[MatrixCell]:
+    return [
+        cell
+        for cell in full_matrix()
+        if _is_nontrivial_promotion_cell(cell)
     ]
 
 
@@ -764,6 +787,7 @@ def classify(
     *,
     expected_samples: int,
     expected_cells: Sequence[MatrixCell] | None = None,
+    require_platform_mechanisms: bool = True,
 ) -> tuple[str, list[str]]:
     if expected_samples <= 0:
         raise ValueError("expected sample count must be positive")
@@ -811,7 +835,10 @@ def classify(
     wall_regressions = [
         key
         for key, row in sorted(by_key.items())
-        if row.wall_ci_low > 1.0
+        if row.wall_ci_low
+        > CLASSIFIER_THRESHOLDS[
+            "supported_wall_regression_lower_max"
+        ]
     ]
     if wall_regressions:
         return (
@@ -829,7 +856,9 @@ def classify(
                 row.cpu_ratio for row in summaries
             )
         )
-        if median_cpu > 1.03:
+        if median_cpu > CLASSIFIER_THRESHOLDS[
+            "matrix_median_cpu_ratio_max"
+        ]:
             return (
                 "REJECT",
                 [
@@ -842,7 +871,9 @@ def classify(
                 row.p99_ratio for row in summaries
             )
         )
-        if median_p99 > 1.10:
+        if median_p99 > CLASSIFIER_THRESHOLDS[
+            "matrix_median_p99_ratio_max"
+        ]:
             return (
                 "REJECT",
                 [
@@ -877,7 +908,13 @@ def classify(
     winning_regions = {
         (row.concurrency, row.payload)
         for row in summaries
-        if row.wall_ci_high <= 0.95
+        if (
+            _is_nontrivial_promotion_cell(row.cell)
+            and row.wall_ci_high
+            <= CLASSIFIER_THRESHOLDS[
+                "supported_wall_ratio_upper_max"
+            ]
+        )
     }
 
     fixed_win = False
@@ -915,33 +952,45 @@ def classify(
                 batch_win = True
 
     misses: list[str] = []
-    if len(winning_regions) < 2:
+    if len(winning_regions) < CLASSIFIER_THRESHOLDS[
+        "minimum_winning_regions"
+    ]:
         misses.append(
             "fewer than two concurrency/payload regions have "
             "a 95% wall-ratio upper bound at or below 0.95"
         )
-    if not fixed_win:
+    if (
+        require_platform_mechanisms
+        and CLASSIFIER_THRESHOLDS["requires_fixed_resource_win"]
+        and not fixed_win
+    ):
         misses.append(
             "no fixed-resource cell improves its comparable "
             "link_skip wall ratio"
         )
-    if not batch_win:
+    if (
+        require_platform_mechanisms
+        and CLASSIFIER_THRESHOLDS["requires_width_4_or_8_win"]
+        and not batch_win
+    ):
         misses.append(
             "no width-4/8 cell improves its comparable width-1 "
             "wall ratio"
         )
     if misses:
         return "INCONCLUSIVE", misses
-    return (
-        "SPECIALIZED",
-        [
-            "two or more Linux/io_uring regions show at least 5% "
-            "supported wall improvement",
-            "fixed-resource and multi-segment batching wins are "
-            "both present",
-            "matrix CPU, p99, structural, and regression gates pass",
-        ],
-    )
+    reasons = [
+        "two or more non-trivial regions show at least 5% "
+        "supported wall improvement",
+        "matrix CPU, p99, structural, and regression gates pass",
+    ]
+    if require_platform_mechanisms:
+        reasons.insert(
+            1,
+            "Linux/io_uring fixed-resource and multi-segment "
+            "batching wins are both present",
+        )
+    return "SPECIALIZED", reasons
 
 
 RAW_FIELD_ORDER = (
@@ -992,13 +1041,15 @@ def _raw_rows(
 def _report_text(
     summaries: Sequence[SummaryRow],
     *,
-    verdict: str,
+    portable_verdict: str,
+    platform_verdict: str,
     reasons: Sequence[str],
 ) -> str:
     lines = [
         "# Linux/io_uring specialized evidence",
         "",
-        f"- Verdict: **{verdict}**",
+        f"- Portable promotion verdict: **{portable_verdict}**",
+        f"- Linux/io_uring platform verdict: **{platform_verdict}**",
         (
             "- Scope: connected Linux `io_uring` RECV→SEND "
             "compiled-effect segments only. A `SPECIALIZED` verdict "
@@ -1066,6 +1117,7 @@ def _report_text(
 
 
 CLASSIFIER_THRESHOLDS = {
+    "nontrivial_effective_batch_width_min": 2,
     "supported_wall_ratio_upper_max": 0.95,
     "minimum_winning_regions": 2,
     "matrix_median_cpu_ratio_max": 1.03,
@@ -1077,12 +1129,23 @@ CLASSIFIER_THRESHOLDS = {
 }
 
 
-def _verdict_bytes(verdict: str, reasons: Sequence[str]) -> bytes:
+def _verdict_bytes(
+    portable_verdict: str,
+    platform_verdict: str,
+    reasons: Sequence[str],
+) -> bytes:
     return canonical_json_bytes(
         {
-            "schema": VERDICT_SCHEMA,
-            "verdict": verdict,
+            "schema": SCOPED_VERDICT_SCHEMA,
+            "verdict": portable_verdict,
             "reasons": list(reasons),
+            "portable_verdict": portable_verdict,
+            "platform_verdict": platform_verdict,
+            "required_cells": [
+                asdict(cell)
+                for cell in _required_promotion_cells()
+            ],
+            "classifier_thresholds": CLASSIFIER_THRESHOLDS,
         }
     )
 
@@ -1143,7 +1206,8 @@ def write_evidence(
     samples: Sequence[SampleRow],
     summaries: Sequence[SummaryRow],
     *,
-    verdict: str,
+    portable_verdict: str,
+    platform_verdict: str,
     reasons: Sequence[str],
     metadata: dict[str, object],
 ) -> None:
@@ -1155,10 +1219,15 @@ def write_evidence(
         [asdict(row) for row in summaries],
         SUMMARY_FIELD_ORDER,
     ).encode("utf-8")
-    verdict_json = _verdict_bytes(verdict, reasons)
+    verdict_json = _verdict_bytes(
+        portable_verdict,
+        platform_verdict,
+        reasons,
+    )
     report = _report_text(
         summaries,
-        verdict=verdict,
+        portable_verdict=portable_verdict,
+        platform_verdict=platform_verdict,
         reasons=reasons,
     ).encode("utf-8")
     complete_metadata = _bundle_metadata(metadata)
@@ -1185,20 +1254,36 @@ def _classify_evidence(
     *,
     expected_samples: int,
     unavailable: Sequence[dict[str, object]],
-) -> tuple[str, list[str]]:
-    verdict, reasons = classify(
+) -> tuple[str, str, list[str]]:
+    platform_verdict, platform_reasons = classify(
         summaries,
         expected_samples=expected_samples,
         expected_cells=full_matrix(),
     )
+    promotion_summaries = [
+        summary
+        for summary in summaries
+        if _is_nontrivial_promotion_cell(summary.cell)
+    ]
+    portable_verdict, portable_reasons = classify(
+        promotion_summaries,
+        expected_samples=expected_samples,
+        expected_cells=_required_promotion_cells(),
+        require_platform_mechanisms=False,
+    )
+    reasons = [
+        *(f"portable: {reason}" for reason in portable_reasons),
+        *(
+            f"linux/io_uring: {reason}"
+            for reason in platform_reasons
+        ),
+    ]
     if unavailable:
-        if verdict == "SPECIALIZED":
-            verdict = "INCONCLUSIVE"
         reasons = [
             *reasons,
             f"{len(unavailable)} matrix cells were unavailable",
         ]
-    return verdict, reasons
+    return portable_verdict, platform_verdict, reasons
 
 
 def _read_raw_samples(
@@ -1424,7 +1509,7 @@ def _recompute_artifacts(
                 "pipeline raw activation count disagrees with schedule"
             )
     summaries = summarize(samples)
-    verdict, reasons = _classify_evidence(
+    portable_verdict, platform_verdict, reasons = _classify_evidence(
         summaries,
         expected_samples=expected_samples,
         unavailable=unavailable,
@@ -1435,10 +1520,15 @@ def _recompute_artifacts(
     ).encode("utf-8")
     return RecomputedArtifacts(
         summary_csv=summary_csv,
-        verdict_json=_verdict_bytes(verdict, reasons),
+        verdict_json=_verdict_bytes(
+            portable_verdict,
+            platform_verdict,
+            reasons,
+        ),
         report_md=_report_text(
             summaries,
-            verdict=verdict,
+            portable_verdict=portable_verdict,
+            platform_verdict=platform_verdict,
             reasons=reasons,
         ).encode("utf-8"),
     )
@@ -1449,14 +1539,18 @@ def audit_existing(
     *,
     required_source_commit: str | None = None,
     required_source_dirty_digest: str | None = None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, str, list[str]]:
     result = audit_bundle(
         directory,
         recompute=_recompute_artifacts,
         required_source_commit=required_source_commit,
         required_source_dirty_digest=required_source_dirty_digest,
     )
-    return result.verdict, list(result.reasons)
+    return (
+        result.portable_verdict,
+        result.platform_verdict,
+        list(result.reasons),
+    )
 
 
 def _positive_int(text: str) -> int:
@@ -1482,6 +1576,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-dirty-digest")
     parser.add_argument("--require-source-commit")
     parser.add_argument("--require-source-dirty-digest")
+    parser.add_argument(
+        "--require-source",
+        dest="require_source_commit",
+    )
+    parser.add_argument(
+        "--require-verdict",
+        choices=("SPECIALIZED",),
+    )
     parser.add_argument(
         "--samples",
         type=_positive_int,
@@ -1520,7 +1622,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
         try:
-            verdict, reasons = audit_existing(
+            portable_verdict, platform_verdict, reasons = audit_existing(
                 args.audit_existing,
                 required_source_commit=args.require_source_commit,
                 required_source_dirty_digest=(
@@ -1535,10 +1637,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         print(
             "[bench_leir_native_pipeline.py] "
-            f"audit=OK verdict={verdict}"
+            f"audit=OK portable_verdict={portable_verdict} "
+            f"platform_verdict={platform_verdict}"
         )
         for reason in reasons:
             print(f"[bench_leir_native_pipeline.py] {reason}")
+        if (
+            args.require_verdict is not None
+            and portable_verdict != args.require_verdict
+        ):
+            print(
+                "[bench_leir_native_pipeline.py] promotion gate "
+                f"requires portable verdict {args.require_verdict}; "
+                f"observed {portable_verdict}",
+                file=sys.stderr,
+            )
+            return 1
         return 0
 
     if (
@@ -1604,7 +1718,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_mode_ms=args.min_mode_ms,
         )
         summaries = summarize(samples)
-        verdict, reasons = _classify_evidence(
+        portable_verdict, platform_verdict, reasons = _classify_evidence(
             summaries,
             expected_samples=args.samples,
             unavailable=unavailable,
@@ -1651,7 +1765,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.tracked_report,
             samples,
             summaries,
-            verdict=verdict,
+            portable_verdict=portable_verdict,
+            platform_verdict=platform_verdict,
             reasons=reasons,
             metadata={
                 "source_commit": source_commit,
@@ -1690,11 +1805,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     print(
         "[bench_leir_native_pipeline.py] "
-        f"verdict={verdict} cells={len(cells)} "
+        f"portable_verdict={portable_verdict} "
+        f"platform_verdict={platform_verdict} "
+        f"cells={len(cells)} "
         f"samples={args.samples} unavailable={len(unavailable)}"
     )
     for reason in reasons:
         print(f"[bench_leir_native_pipeline.py] {reason}")
+    if (
+        args.require_verdict is not None
+        and portable_verdict != args.require_verdict
+    ):
+        print(
+            "[bench_leir_native_pipeline.py] promotion gate "
+            f"requires portable verdict {args.require_verdict}; "
+            f"observed {portable_verdict}",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
