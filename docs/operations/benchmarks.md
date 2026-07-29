@@ -89,7 +89,15 @@ python3 scripts/bench_leir_native_pipeline.py \
 The promotion command exits `1` when the stored `portable_verdict` is not
 exactly `SPECIALIZED`, and exits `2` when the evidence or required source is
 invalid. Pull-request CI performs collection and audit without the promotion
-option. Manual promotion uses the hard gate.
+option. Manual and release promotion use the hard gate. Release artifact and
+publication jobs depend on evidence measured and audited at the exact release
+SHA by the local reusable workflow.
+
+`--require-source COMMIT` is the promotion shorthand for the exact provenance
+pair `(COMMIT, clean)`. It cannot be combined with
+`--require-source-commit` or `--require-source-dirty-digest`. Audits that
+intentionally accept a non-clean source must instead supply both granular
+flags with the exact stored commit and dirty digest.
 
 This is explicitly a **Linux/io_uring specialized evidence** run. It covers
 `link_skip` and `fixed_link_skip`, widths 1/2/4/8, concurrency 1/4/16, and

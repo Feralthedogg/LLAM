@@ -7,6 +7,12 @@ env:
   LLAM_BUILD_RESEARCH: "1"
 
 on:
+  workflow_call:
+    inputs:
+      require_promotion:
+        description: Require portable SPECIALIZED promotion evidence
+        required: true
+        type: boolean
   pull_request:
     paths:
       - ".github/workflows/leir-native-research.yml"
@@ -19,6 +25,8 @@ on:
       - "scripts/test_bench_leir_native.py"
       - "scripts/bench_leir_native_pipeline.py"
       - "scripts/test_bench_leir_native_pipeline.py"
+      - "scripts/evidence_bundle.py"
+      - "scripts/test_evidence_bundle.py"
       - "scripts/process_utils.py"
       - "scripts/test_process_utils.py"
       - "scripts/verify_linux.sh"
@@ -38,6 +46,7 @@ jobs:
   evidence:
     name: linux-x86_64-screen
     if: >-
+      inputs.require_promotion ||
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
@@ -45,6 +54,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -111,7 +122,8 @@ jobs:
             2>&1 | tee "$OUT_DIR/make-native-linux-test.log"
           python3 -m unittest \
             scripts/test_bench_leir_native.py \
-            scripts/test_bench_leir_native_pipeline.py -v \
+            scripts/test_bench_leir_native_pipeline.py \
+            scripts/test_evidence_bundle.py -v \
             2>&1 | tee "$OUT_DIR/make-native-python-test.log"
 
       - name: Probe kernel native feature status
@@ -411,7 +423,7 @@ jobs:
             tee "$OUT_DIR/pipeline-runner-stdout.log"
 
       - name: Audit connected pipeline screen
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && !inputs.require_promotion
         shell: bash
         run: |
           set -o pipefail
@@ -421,7 +433,7 @@ jobs:
             2>&1 | tee "$OUT_DIR/pipeline-audit.log"
 
       - name: Enforce connected pipeline promotion
-        if: github.event_name == 'workflow_dispatch'
+        if: inputs.require_promotion || github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -o pipefail

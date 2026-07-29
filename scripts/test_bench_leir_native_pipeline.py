@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import bench_leir_native_pipeline as pipeline
+from scripts.audit_build_manifests import parse_yaml_mapping_ir
 from scripts.evidence_bundle import PublicationUncertainError
 from scripts.bench_leir_native_pipeline import (
     FIELD_ORDER,
@@ -61,10 +62,14 @@ def _reseal_bundle(directory: Path) -> None:
     )
 
 
-def _evidence_metadata(samples: int) -> dict[str, object]:
+def _evidence_metadata(
+    samples: int,
+    *,
+    source_dirty_digest: str = "clean",
+) -> dict[str, object]:
     return {
         "source_commit": SOURCE_COMMIT,
-        "source_dirty_digest": "clean",
+        "source_dirty_digest": source_dirty_digest,
         "architecture": "arm64",
         "kernel": "test-kernel",
         "toolchain": "test-toolchain",
@@ -1112,6 +1117,115 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(args.require_source_commit, SOURCE_COMMIT)
         self.assertEqual(args.require_source_dirty_digest, "clean")
 
+    def test_require_source_shorthand_binds_clean_provenance(
+        self,
+    ) -> None:
+        samples = []
+        for cell in full_matrix():
+            result = parse_output(
+                _output(cell),
+                cell,
+                min_mode_ns=1_000_000,
+            )
+            samples.append(SampleRow(1, "ABBA", cell, result))
+        summaries = summarize(samples)
+        portable, platform_verdict, reasons = _classify_evidence(
+            summaries,
+            expected_samples=1,
+            unavailable=[],
+        )
+        self.assertEqual(portable, "SPECIALIZED")
+
+        cases = (
+            ("clean", [], 0),
+            ("a" * 64, [], 2),
+            (
+                "clean",
+                ["--require-source-commit", SOURCE_COMMIT],
+                2,
+            ),
+            (
+                "clean",
+                ["--require-source-dirty-digest", "clean"],
+                2,
+            ),
+        )
+        for dirty_digest, granular, expected in cases:
+            with self.subTest(
+                dirty_digest=dirty_digest,
+                granular=granular,
+            ):
+                with tempfile.TemporaryDirectory() as temporary:
+                    output = Path(temporary).resolve() / "pipeline"
+                    write_evidence(
+                        output,
+                        None,
+                        samples,
+                        summaries,
+                        portable_verdict=portable,
+                        platform_verdict=platform_verdict,
+                        reasons=reasons,
+                        metadata=_evidence_metadata(
+                            1,
+                            source_dirty_digest=dirty_digest,
+                        ),
+                    )
+                    status = main(
+                        [
+                            "--audit-existing",
+                            str(output),
+                            "--require-source",
+                            SOURCE_COMMIT,
+                            *granular,
+                        ]
+                    )
+                    self.assertEqual(status, expected)
+
+    def test_granular_required_provenance_remains_available(
+        self,
+    ) -> None:
+        dirty_digest = "b" * 64
+        samples = []
+        for cell in full_matrix():
+            result = parse_output(
+                _output(cell),
+                cell,
+                min_mode_ns=1_000_000,
+            )
+            samples.append(SampleRow(1, "ABBA", cell, result))
+        summaries = summarize(samples)
+        portable, platform_verdict, reasons = _classify_evidence(
+            summaries,
+            expected_samples=1,
+            unavailable=[],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve() / "pipeline"
+            write_evidence(
+                output,
+                None,
+                samples,
+                summaries,
+                portable_verdict=portable,
+                platform_verdict=platform_verdict,
+                reasons=reasons,
+                metadata=_evidence_metadata(
+                    1,
+                    source_dirty_digest=dirty_digest,
+                ),
+            )
+            status = main(
+                [
+                    "--audit-existing",
+                    str(output),
+                    "--require-source-commit",
+                    SOURCE_COMMIT,
+                    "--require-source-dirty-digest",
+                    dirty_digest,
+                ]
+            )
+        self.assertEqual(status, 0)
+
     def test_optional_promotion_gate_uses_portable_verdict(self) -> None:
         cases = (
             ("SPECIALIZED", "SPECIALIZED", 0),
@@ -1399,6 +1513,80 @@ class EvidenceTests(unittest.TestCase):
 
 
 class LinuxIntegrationContractTests(unittest.TestCase):
+    def test_release_depends_on_same_commit_promotion_gate(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        research = (
+            root / ".github/workflows/leir-native-research.yml"
+        ).read_text(encoding="utf-8")
+        release = (
+            root / ".github/workflows/release.yml"
+        ).read_text(encoding="utf-8")
+        _, research_entries = parse_yaml_mapping_ir(research)
+        _, release_entries = parse_yaml_mapping_ir(release)
+        research_ir = {
+            (entry.indent, entry.key, entry.value)
+            for entry in research_entries
+        }
+        release_ir = {
+            (entry.indent, entry.key, entry.value)
+            for entry in release_entries
+        }
+        self.assertIn((2, "workflow_call", ""), research_ir)
+        self.assertIn((6, "require_promotion", ""), research_ir)
+        self.assertIn((8, "required", "true"), research_ir)
+        self.assertIn((8, "type", "boolean"), research_ir)
+        self.assertIn((2, "promotion-evidence", ""), release_ir)
+        self.assertIn(
+            (
+                4,
+                "uses",
+                "./.github/workflows/leir-native-research.yml",
+            ),
+            release_ir,
+        )
+        self.assertIn((6, "require_promotion", "true"), release_ir)
+
+        research_fragments = (
+            "workflow_call:",
+            "require_promotion:",
+            "required: true",
+            "type: boolean",
+            "inputs.require_promotion",
+            "if: inputs.require_promotion || "
+            "github.event_name == 'workflow_dispatch'",
+            "ref: ${{ github.sha }}",
+            '"scripts/evidence_bundle.py"',
+            '"scripts/test_evidence_bundle.py"',
+            "scripts/test_evidence_bundle.py -v",
+        )
+        for fragment in research_fragments:
+            with self.subTest(research=fragment):
+                self.assertIn(fragment, research)
+
+        release_fragments = (
+            "promotion-evidence:",
+            "uses: ./.github/workflows/leir-native-research.yml",
+            "require_promotion: true",
+        )
+        for fragment in release_fragments:
+            with self.subTest(release=fragment):
+                self.assertIn(fragment, release)
+
+        build_artifacts = release[
+            release.index("  build-artifacts:"):
+            release.index("  build-bsd-artifacts:")
+        ]
+        build_bsd_artifacts = release[
+            release.index("  build-bsd-artifacts:"):
+            release.index("  publish-release:")
+        ]
+        publish_release = release[release.index("  publish-release:"):]
+        self.assertIn("needs: promotion-evidence", build_artifacts)
+        self.assertIn("needs: promotion-evidence", build_bsd_artifacts)
+        self.assertIn("- promotion-evidence", publish_release)
+        self.assertIn("- build-artifacts", publish_release)
+        self.assertIn("- build-bsd-artifacts", publish_release)
+
     def test_workflow_verify_script_and_docs_cover_pipeline(self) -> None:
         root = Path(__file__).resolve().parents[1]
         workflow = (

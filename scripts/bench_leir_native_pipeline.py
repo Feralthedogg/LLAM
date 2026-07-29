@@ -1576,10 +1576,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-dirty-digest")
     parser.add_argument("--require-source-commit")
     parser.add_argument("--require-source-dirty-digest")
-    parser.add_argument(
-        "--require-source",
-        dest="require_source_commit",
-    )
+    parser.add_argument("--require-source")
     parser.add_argument(
         "--require-verdict",
         choices=("SPECIALIZED",),
@@ -1608,6 +1605,19 @@ def _source_dirty_digest(*, cwd: Path | None = None) -> str:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if (
+        args.require_source is not None
+        and (
+            args.require_source_commit is not None
+            or args.require_source_dirty_digest is not None
+        )
+    ):
+        print(
+            "[bench_leir_native_pipeline.py] --require-source "
+            "cannot be combined with granular require-source flags",
+            file=sys.stderr,
+        )
+        return 2
     if args.audit_existing is not None:
         if (
             args.binary is not None
@@ -1624,9 +1634,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             portable_verdict, platform_verdict, reasons = audit_existing(
                 args.audit_existing,
-                required_source_commit=args.require_source_commit,
+                required_source_commit=(
+                    args.require_source
+                    if args.require_source is not None
+                    else args.require_source_commit
+                ),
                 required_source_dirty_digest=(
-                    args.require_source_dirty_digest
+                    "clean"
+                    if args.require_source is not None
+                    else args.require_source_dirty_digest
                 ),
             )
         except (EvidenceError, OSError, ValueError) as exc:
@@ -1658,6 +1674,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         args.binary is None
         or args.output_dir is None
+        or args.require_source is not None
         or args.require_source_commit is not None
         or args.require_source_dirty_digest is not None
     ):
