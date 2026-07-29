@@ -875,6 +875,10 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     experimental_flags = opts != NULL ? opts->experimental_flags : 0U;
     rt->deterministic = opts != NULL ? (opts->deterministic != 0U) : 0U;
     rt->forced_yield_every = opts != NULL ? opts->forced_yield_every : 0U;
+    rt->on_task_resume = opts != NULL ? opts->on_task_resume : NULL;
+    rt->on_task_suspend = opts != NULL ? opts->on_task_suspend : NULL;
+    rt->switch_hook_context =
+        opts != NULL ? opts->switch_hook_context : NULL;
     rt->experimental_shard_rings =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS) != 0U ? 1U : 0U;
     rt->experimental_shard_rings_multishot =

@@ -77,7 +77,7 @@
     },
     {
       "limit": 1400,
-      "line_count": 1451,
+      "line_count": 1477,
       "path": "include/llam/runtime.h"
     },
     {
@@ -137,7 +137,7 @@
     },
     {
       "limit": 1200,
-      "line_count": 1648,
+      "line_count": 1651,
       "path": "src/internal/runtime_types.h"
     },
     {
@@ -192,7 +192,7 @@
     },
     {
       "limit": 800,
-      "line_count": 6601,
+      "line_count": 6607,
       "path": "tests/test_runtime_core.c"
     },
     {
@@ -207,7 +207,7 @@
     },
     {
       "limit": 800,
-      "line_count": 7970,
+      "line_count": 7978,
       "path": "tests/test_runtime_shutdown_internal.c"
     },
     {

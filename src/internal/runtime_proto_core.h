@@ -96,6 +96,8 @@ int llam_task_claim_detach_public_handle(const llam_task_t *handle,
  */
 void llam_task_save_errno(llam_task_t *task);
 void llam_task_restore_errno(const llam_task_t *task);
+void llam_task_hook_resume(llam_task_t *task);
+void llam_task_hook_suspend(llam_task_t *task);
 void llam_switch_task_to_scheduler(llam_task_t *task, llam_ctx_t *scheduler_ctx);
 void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task);
 void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
@@ -123,25 +125,13 @@ static inline LLAM_NO_SANITIZE_THREAD void llam_thread_errno_store(int value) {
 /**
  * @brief Inline task-to-task switch for validated hot handoff paths.
  *
- * @details
- * Direct channel, wake, and join handoffs have already validated both task
- * pointers. Keeping the errno save/restore sequence inline removes one C
- * wrapper call from every fiber-to-fiber handoff while preserving task-local
- * errno semantics.
+ * @details Direct handoff callers use the same hook, errno, and sanitizer
+ * gateway as every other switch path.
  */
 static inline LLAM_SANITIZER_SWITCH_BOUNDARY void llam_switch_task_to_task_hot(
     llam_task_t *from,
     llam_task_t *to) {
-    from->saved_errno = llam_thread_errno_load();
-    llam_thread_errno_store(to->saved_errno);
-#if LLAM_SANITIZER_FIBER_ENABLED
-    llam_sanitizer_before_task_to_task(from, to);
-#endif
-    llam_ctx_switch(&from->ctx, &to->ctx);
-#if LLAM_SANITIZER_FIBER_ENABLED
-    llam_sanitizer_finish_task_switch(from);
-#endif
-    llam_thread_errno_store(from->saved_errno);
+    llam_switch_task_to_task(from, to);
 }
 
 /*

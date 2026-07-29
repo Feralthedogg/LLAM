@@ -121,6 +121,29 @@ typedef uint32_t llam_task_local_key_t;
 typedef void (*llam_task_fn)(void *arg);
 
 /**
+ * @brief Synchronous notification at a managed task execution boundary.
+ *
+ * @details
+ * Resume hooks run after the task's logical @c errno is restored and
+ * immediately before its stack is entered. Suspend hooks run after logical
+ * @c errno is saved and immediately before its stack is left. LLAM restores
+ * the pre-callback logical @c errno after the hook returns.
+ *
+ * Hooks for one task are serialized, while hooks for different tasks may run
+ * concurrently on different scheduler threads. The callback must remain
+ * bounded and must not call LLAM APIs that park, yield, switch, or destroy the
+ * runtime. Both pointers are caller-owned and must remain valid through
+ * runtime destruction.
+ *
+ * @param hook_context Runtime-wide context from
+ *        ::llam_runtime_opts_t::switch_hook_context.
+ * @param task_user_context Per-task context from
+ *        ::llam_spawn_opts_t::user_context.
+ */
+typedef void (*llam_task_switch_hook_fn)(void *hook_context,
+                                         void *task_user_context);
+
+/**
  * @brief Blocking callback executed by the runtime blocking/offload path.
  * @param arg User pointer passed to llam_call_blocking().
  * @return User-defined result pointer returned to the waiting task.
@@ -317,6 +340,9 @@ typedef struct llam_runtime_opts {
     uint64_t stack_cache_idle_ns;                   /**< Minimum idle age for opportunistic trim; 0 selects the default. */
     uint32_t stack_cache_flags;                     /**< Bitwise OR of LLAM_RUNTIME_STACK_CACHE_F_* values. */
     uint32_t reserved2;                             /**< Reserved ABI padding; initialize to 0. */
+    llam_task_switch_hook_fn on_task_resume;         /**< Optional callback immediately before a task resumes. */
+    llam_task_switch_hook_fn on_task_suspend;        /**< Optional callback immediately before a task suspends or exits. */
+    void *switch_hook_context;                       /**< Caller-owned runtime-wide pointer passed to both switch hooks. */
 } llam_runtime_opts_t;
 
 /** @brief Frozen option prefix consumed by the source-compatible 2.2 wrapper. */

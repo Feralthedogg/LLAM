@@ -58,6 +58,11 @@ static int fail_msg(const char *message) {
     fprintf(stderr, "test_runtime_shutdown_internal: %s\n", message);
     return 1;
 }
+#define SWITCH_HOOK_TEST_FAIL(message) fail_msg(message)
+#define SWITCH_HOOK_TEST_FAIL_ERRNO(message) fail_errno(message)
+#include "test_switch_hook_cases.inc"
+#undef SWITCH_HOOK_TEST_FAIL_ERRNO
+#undef SWITCH_HOOK_TEST_FAIL
 #include "test_stack_vm_cases.inc"
 static void *count_block_callback(void *arg) {
     atomic_uint *calls = arg;
@@ -7756,6 +7761,9 @@ cleanup:
 #endif
 
 int main(void) {
+    if (exercise_switch_hook_cases() != 0) {
+        return 1;
+    }
     if (exercise_stack_cache_vm_cases() != 0) {
         return 1;
     }

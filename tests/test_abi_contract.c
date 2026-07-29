@@ -66,6 +66,15 @@ ASSERT_FIELD_U32(llam_runtime_opts_t, cpu_count);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved1);
 ASSERT_FIELD_U32(llam_runtime_opts_t, stack_cache_flags);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved2);
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->on_task_resume) ==
+                   sizeof(llam_task_switch_hook_fn),
+               "llam_runtime_opts_t.on_task_resume must retain callback type");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->on_task_suspend) ==
+                   sizeof(llam_task_switch_hook_fn),
+               "llam_runtime_opts_t.on_task_suspend must retain callback type");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->switch_hook_context) ==
+                   sizeof(void *),
+               "llam_runtime_opts_t.switch_hook_context must be pointer-sized");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->experimental_flags) == sizeof(uint64_t),
                "llam_runtime_opts_t.experimental_flags must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns) == sizeof(uint64_t),
@@ -333,7 +342,10 @@ static int test_llam_option_initializers(void) {
         runtime_opts.stack_cache_low_watermark_bytes != 0U ||
         runtime_opts.stack_cache_idle_ns != 0U ||
         runtime_opts.stack_cache_flags != 0U ||
-        runtime_opts.reserved2 != 0U) {
+        runtime_opts.reserved2 != 0U ||
+        runtime_opts.on_task_resume != NULL ||
+        runtime_opts.on_task_suspend != NULL ||
+        runtime_opts.switch_hook_context != NULL) {
         return test_fail("llam runtime option defaults are inconsistent");
     }
 

@@ -79,6 +79,9 @@ void llam_runtime_opts_copy_prefix(const llam_runtime_opts_t *raw_opts,
     LLAM_COPY_RUNTIME_OPT(stack_cache_idle_ns);
     LLAM_COPY_RUNTIME_OPT(stack_cache_flags);
     LLAM_COPY_RUNTIME_OPT(reserved2);
+    LLAM_COPY_RUNTIME_OPT(on_task_resume);
+    LLAM_COPY_RUNTIME_OPT(on_task_suspend);
+    LLAM_COPY_RUNTIME_OPT(switch_hook_context);
 }
 #undef LLAM_COPY_RUNTIME_OPT
 

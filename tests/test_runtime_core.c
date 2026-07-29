@@ -6529,11 +6529,17 @@ static int test_wait_resolver_block_job_recycle_drain(void) {
 #endif
 
 #include "test_task_context_cases.inc"
+#define SWITCH_HOOK_TEST_FAIL(message) test_fail(message)
+#define SWITCH_HOOK_TEST_FAIL_ERRNO(message) test_fail_errno(message)
+#include "test_switch_hook_cases.inc"
+#undef SWITCH_HOOK_TEST_FAIL_ERRNO
+#undef SWITCH_HOOK_TEST_FAIL
 
 int main(void) {
     RUN_RUNTIME_CORE_TEST(test_task_context_unmanaged_contract);
     RUN_RUNTIME_CORE_TEST(test_task_context_lifecycle_and_prefix);
     RUN_RUNTIME_CORE_TEST(test_task_context_survives_forced_queue_migration);
+    RUN_RUNTIME_CORE_TEST(exercise_switch_hook_cases);
     RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
     RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
     RUN_RUNTIME_CORE_TEST(test_legacy_runtime_init_ignores_resource_tail);

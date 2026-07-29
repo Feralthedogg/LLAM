@@ -626,6 +626,23 @@ if(Python3_Interpreter_FOUND)
         c_structure_ratchet
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
+    add_test(
+        NAME context_switch_gateway_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_context_switch_gateway.py -v
+    )
+    add_test(
+        NAME context_switch_gateway
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_context_switch_gateway.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --check
+    )
+    set_tests_properties(
+        context_switch_gateway_fixtures
+        context_switch_gateway
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
 endif()
 
 if(LLAM_BUILD_RESEARCH)

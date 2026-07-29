@@ -840,7 +840,7 @@ ALL_DEPFILES = \
 	$(TESTHOOK_RUNTIME_OVERRIDE_OBJS:.o=.d)
 -include $(ALL_DEPFILES)
 
-.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
+.PHONY: all clean static shared audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway audit-shared-exports audit-production-test-hooks test research research-test test-leir-phase0 test-leir-native test-leir-native-plan test-leir-native-segment test-leir-native-linux leir-phase0a-screen leir-native-screen test-lcwe-model lcwe-model-report test-lccf-model lccf-model-report test-srem-model srem-model-screen srem-model-report test-asan test-no-owner test-tsan test-fuzz-heavy test-process-utils test-ci-supply-chain test-runtime-soak test-hardening require-sanitizer-target analyze-cppcheck audit-deps test-quick test-full test-soak check package bench-matrix server-stress server-flood server-lossless-flood server-stress-composite server-stress-composite-quick server-stress-composite-hour verify-darwin verify-linux verify-windows platform-status windows-unsupported FORCE
 .DEFAULT_GOAL := all
 
 audit-build-manifests:
@@ -853,6 +853,10 @@ audit-license-headers:
 audit-c-structure:
 	python3 -m unittest scripts/test_audit_c_structure.py -v
 	python3 scripts/audit_c_structure.py --root . --mode ratchet --baseline config/c-structure-baseline.json
+
+audit-context-switch-gateway:
+	python3 -m unittest scripts/test_audit_context_switch_gateway.py -v
+	python3 scripts/audit_context_switch_gateway.py --root . --check
 
 require-sanitizer-target:
 	@if [ "$(SANITIZER_TARGETS_ENABLED)" != "1" ]; then \
@@ -909,7 +913,7 @@ static: windows-cmake-configure
 shared: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)" --target llam_runtime_shared
 
-test check: audit-build-manifests audit-license-headers audit-c-structure windows-cmake-test
+test check: audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway windows-cmake-test
 
 ifeq ($(LLAM_BUILD_RESEARCH),1)
 research: windows-cmake-configure
@@ -1124,7 +1128,7 @@ audit-production-test-hooks: static
 		fi; \
 	fi
 
-test: audit-build-manifests audit-license-headers audit-c-structure test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+test: audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -2873,7 +2877,7 @@ $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_task_context_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h
+$(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_task_context_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
@@ -2881,7 +2885,7 @@ $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(R
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 

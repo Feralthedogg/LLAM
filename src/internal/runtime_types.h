@@ -1375,6 +1375,9 @@ struct llam_runtime {
     unsigned active_nodes;
     unsigned deterministic;
     unsigned forced_yield_every;
+    llam_task_switch_hook_fn on_task_resume;
+    llam_task_switch_hook_fn on_task_suspend;
+    void *switch_hook_context;
     unsigned experimental_shard_rings;
     unsigned experimental_shard_rings_multishot;
     unsigned experimental_dynamic_shards;

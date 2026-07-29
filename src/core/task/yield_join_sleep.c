@@ -281,12 +281,13 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         next->last_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
-    atomic_store_explicit(&shard->current, next, memory_order_release);
-    g_llam_tls_task = next;
-
     shard->metrics.yields += 1U;
     shard->metrics.ctx_switches += 1U;
     shard->direct_handoff_streak += 1U;
+    /* Record before a migrated task can resume and race this source shard. */
+    llam_yield_direct_record_hit(shard, true);
+    atomic_store_explicit(&shard->current, next, memory_order_release);
+    g_llam_tls_task = next;
     llam_thread_errno_store(caller_errno);
     llam_switch_task_to_task_hot(current, next);
     return true;
@@ -312,7 +313,6 @@ static bool llam_yield_try_direct_handoff(llam_shard_t *shard) {
 
     llam_yield_direct_record_attempt(shard);
     if (llam_yield_to_local_runnable_unlocked(&fail_reason)) {
-        llam_yield_direct_record_hit(shard, true);
         return true;
     }
     if (fail_reason == LLAM_YIELD_DIRECT_FAIL_NONE) {
@@ -390,7 +390,6 @@ bool llam_yield_to_local_runnable(void) {
 
     llam_yield_direct_record_attempt(shard);
     if (llam_yield_to_local_runnable_unlocked(&fail_reason)) {
-        llam_yield_direct_record_hit(shard, true);
         return true;
     }
 #if LLAM_DIRECT_OWNER_HANDOFF

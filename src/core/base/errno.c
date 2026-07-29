@@ -48,6 +48,52 @@ void llam_task_restore_errno(const llam_task_t *task) {
 }
 
 /**
+ * @brief Notify a host that a task is about to resume without leaking errno.
+ *
+ * @param task Task whose caller-owned user context is passed to the hook.
+ */
+void llam_task_hook_resume(llam_task_t *task) {
+    llam_runtime_t *runtime;
+    llam_task_switch_hook_fn hook;
+    int logical_errno;
+
+    if (task == NULL || task->owner_runtime == NULL) {
+        return;
+    }
+    runtime = task->owner_runtime;
+    hook = runtime->on_task_resume;
+    if (hook == NULL) {
+        return;
+    }
+    logical_errno = llam_thread_errno_load();
+    hook(runtime->switch_hook_context, task->user_context);
+    llam_thread_errno_store(logical_errno);
+}
+
+/**
+ * @brief Notify a host that a task is about to suspend without leaking errno.
+ *
+ * @param task Task whose caller-owned user context is passed to the hook.
+ */
+void llam_task_hook_suspend(llam_task_t *task) {
+    llam_runtime_t *runtime;
+    llam_task_switch_hook_fn hook;
+    int logical_errno;
+
+    if (task == NULL || task->owner_runtime == NULL) {
+        return;
+    }
+    runtime = task->owner_runtime;
+    hook = runtime->on_task_suspend;
+    if (hook == NULL) {
+        return;
+    }
+    logical_errno = llam_thread_errno_load();
+    hook(runtime->switch_hook_context, task->user_context);
+    llam_thread_errno_store(logical_errno);
+}
+
+/**
  * @brief Switch from a running task back to its scheduler context.
  *
  * @param task          Running task being parked, yielded, or exited.
@@ -63,6 +109,7 @@ LLAM_SANITIZER_SWITCH_BOUNDARY void llam_switch_task_to_scheduler(
     }
 
     llam_task_save_errno(task);
+    llam_task_hook_suspend(task);
     terminal =
         atomic_load_explicit(&task->state, memory_order_relaxed) ==
         (unsigned)LLAM_TASK_STATE_DEAD;
@@ -95,6 +142,7 @@ LLAM_SANITIZER_SWITCH_BOUNDARY void llam_switch_scheduler_to_task(
 
     scheduler_errno = llam_thread_errno_load();
     llam_task_restore_errno(task);
+    llam_task_hook_resume(task);
 #if LLAM_SANITIZER_FIBER_ENABLED
     llam_sanitizer_before_scheduler_to_task(task);
 #endif
@@ -119,7 +167,9 @@ LLAM_SANITIZER_SWITCH_BOUNDARY void llam_switch_task_to_task(
     }
 
     llam_task_save_errno(from);
+    llam_task_hook_suspend(from);
     llam_task_restore_errno(to);
+    llam_task_hook_resume(to);
 #if LLAM_SANITIZER_FIBER_ENABLED
     llam_sanitizer_before_task_to_task(from, to);
 #endif
