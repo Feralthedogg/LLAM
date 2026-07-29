@@ -2001,10 +2001,36 @@ class _WindowsAPI:
         expected = self._private_dacl_sddl(directory=directory)
         canonical = expected.replace("D:P", "D:", 1)
         if not protected or observed not in {expected, canonical}:
+            expected_user_sids = set(
+                re.findall(r"S-\d+(?:-\d+)+", expected)
+            )
+            observed_debug = observed
+            expected_debug = expected
+            for current_user_sid in sorted(
+                expected_user_sids,
+                key=len,
+                reverse=True,
+            ):
+                observed_debug = observed_debug.replace(
+                    current_user_sid,
+                    "<CURRENT_USER>",
+                )
+                expected_debug = expected_debug.replace(
+                    current_user_sid,
+                    "<CURRENT_USER>",
+                )
+            observed_debug = re.sub(
+                r"S-\d+(?:-\d+)+",
+                "<SID>",
+                observed_debug,
+            )
             raise EvidenceError(
                 "Windows evidence object lacks the exact private DACL: "
                 "expected canonical protected SYSTEM and current-user "
-                "full-control ACEs"
+                "full-control ACEs; "
+                f"observed={observed_debug[:1024]!r}, "
+                f"expected={expected_debug!r}, "
+                f"protected={protected}"
             )
 
     @staticmethod

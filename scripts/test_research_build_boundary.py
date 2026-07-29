@@ -906,6 +906,74 @@ class ResearchBoundaryTests(unittest.TestCase):
             self.raw_research_object_off.stderr,
         )
 
+    def test_linux_verifier_separates_stable_and_research_builds(
+        self,
+    ) -> None:
+        verifier = (
+            self.source / "scripts" / "verify_linux.sh"
+        ).read_text(encoding="utf-8")
+        stable_build = (
+            'make -j"$JOBS" LLAM_BUILD_RESEARCH=0 all test'
+        )
+        stable_probe = 'run(["./demo"], timeout=30)'
+        research_build = (
+            'make -j"$JOBS" LLAM_BUILD_RESEARCH=1 \\\n'
+            "    test_leir_native_linux "
+            "bench_leir_native_segment bench_leir_native_pipeline"
+        )
+        stable_restore = (
+            'make -j"$JOBS" LLAM_BUILD_RESEARCH=0 all'
+        )
+        self.assertIn(stable_build, verifier)
+        self.assertIn(research_build, verifier)
+        self.assertEqual(
+            verifier.splitlines().count(stable_restore),
+            1,
+        )
+        self.assertLess(verifier.index(stable_build), verifier.index(stable_probe))
+        self.assertLess(
+            verifier.index(stable_probe),
+            verifier.index(research_build),
+        )
+        self.assertLess(
+            verifier.index(research_build),
+            verifier.rindex(stable_restore),
+        )
+
+    def test_native_research_workflow_keeps_runtime_regression_stable(
+        self,
+    ) -> None:
+        workflow = (
+            self.source / ".github/workflows/leir-native-research.yml"
+        ).read_text(encoding="utf-8")
+        regression = workflow.split(
+            "      - name: Full runtime regression and export gates\n",
+            1,
+        )[1].split("      - name:", 1)[0]
+        self.assertIn(
+            "env LLAM_BUILD_RESEARCH=0 make -j2 test CC=gcc",
+            regression,
+        )
+        self.assertIn(
+            "env LLAM_BUILD_RESEARCH=0 make -j2 shared "
+            "audit-shared-exports",
+            regression,
+        )
+
+    def test_bsd_packaging_workflows_provision_python3(self) -> None:
+        for relative in (
+            ".github/workflows/bsd.yml",
+            ".github/workflows/release.yml",
+        ):
+            with self.subTest(workflow=relative):
+                workflow = (self.source / relative).read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn("python3", workflow)
+                self.assertIn("python%3.12", workflow)
+                self.assertIn("python312", workflow)
+                self.assertIn("command -v python3", workflow)
+
     def test_native_internals_absent_when_off(self) -> None:
         linux_make_common = [
             "make",

@@ -394,13 +394,15 @@ jobs:
           dragonfly_release_tools_available() {
             command -v gmake >/dev/null 2>&1 &&
               command -v cmake >/dev/null 2>&1 &&
-              command -v xz >/dev/null 2>&1
+              command -v xz >/dev/null 2>&1 &&
+              command -v python3 >/dev/null 2>&1
           }
           case "$(uname -s)" in
             FreeBSD)
               command -v gmake >/dev/null 2>&1 || retry sudo pkg install -y gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkg install -y cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkg install -y xz
+              command -v python3 >/dev/null 2>&1 || retry sudo pkg install -y python3
               ;;
             DragonFly)
               if ! dragonfly_release_tools_available; then
@@ -413,13 +415,20 @@ jobs:
               command -v gmake >/dev/null 2>&1 || retry sudo pkg_add gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkg_add cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkg_add xz
+              command -v python3 >/dev/null 2>&1 || retry sudo pkg_add python%3.12
               ;;
             NetBSD)
               command -v gmake >/dev/null 2>&1 || retry sudo pkgin -y install gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkgin -y install cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkgin -y install xz
+              if ! command -v python3 >/dev/null 2>&1; then
+                command -v python3.12 >/dev/null 2>&1 || retry sudo pkgin -y install python312
+                test -x /usr/pkg/bin/python3.12
+                sudo ln -s /usr/pkg/bin/python3.12 /usr/pkg/bin/python3
+              fi
               ;;
           esac
+          command -v python3
 
       - name: Build, test, and package BSD
         run: |

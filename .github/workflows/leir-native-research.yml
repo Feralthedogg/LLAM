@@ -387,9 +387,9 @@ jobs:
         run: |
           set -o pipefail
           make clean
-          make -j2 test CC=gcc \
+          env LLAM_BUILD_RESEARCH=0 make -j2 test CC=gcc \
             2>&1 | tee "$OUT_DIR/make-test.log"
-          make -j2 shared audit-shared-exports \
+          env LLAM_BUILD_RESEARCH=0 make -j2 shared audit-shared-exports \
             audit-production-test-hooks CC=gcc \
             2>&1 | tee "$OUT_DIR/export-audit.log"
           JOBS=2 scripts/verify_linux.sh \

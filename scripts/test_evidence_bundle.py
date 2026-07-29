@@ -2706,8 +2706,19 @@ class AtomicPrimitiveTests(unittest.TestCase):
             )
         )
         api.require_private_acl("private")
-        with self.assertRaisesRegex(EvidenceError, "private DACL"):
+        with self.assertRaises(EvidenceError) as caught:
             api.require_private_acl("relaxed")
+        self.assertIn("private DACL", str(caught.exception))
+        self.assertIn(
+            "observed='D:P(A;;FA;;;OW)(A;;FR;;;WD)'",
+            str(caught.exception),
+        )
+        self.assertIn(
+            "expected='D:P(A;;FA;;;SY)"
+            "(A;;FA;;;<CURRENT_USER>)'",
+            str(caught.exception),
+        )
+        self.assertIn("protected=True", str(caught.exception))
 
     def test_windows_private_acl_validation_requires_protection(
         self,

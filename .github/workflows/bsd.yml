@@ -117,6 +117,9 @@ jobs:
               if ! command -v xz >/dev/null 2>&1; then
                 packages="$packages xz"
               fi
+              if ! command -v python3 >/dev/null 2>&1; then
+                packages="$packages python3"
+              fi
               if [ -n "$packages" ]; then
                 retry sudo pkg install -y $packages
               fi
@@ -124,7 +127,8 @@ jobs:
             DragonFly)
               if ! command -v gmake >/dev/null 2>&1 ||
                  ! command -v cmake >/dev/null 2>&1 ||
-                 ! command -v xz >/dev/null 2>&1; then
+                 ! command -v xz >/dev/null 2>&1 ||
+                 ! command -v python3 >/dev/null 2>&1; then
                 {
                   echo "DragonFlyBSD release tools are not preinstalled."
                   echo "Skipping the experimental job because unsigned package bootstrap is disabled."
@@ -143,6 +147,9 @@ jobs:
               if ! command -v xz >/dev/null 2>&1; then
                 retry sudo pkg_add xz
               fi
+              if ! command -v python3 >/dev/null 2>&1; then
+                retry sudo pkg_add python%3.12
+              fi
               ;;
             NetBSD)
               if ! command -v gmake >/dev/null 2>&1; then
@@ -154,12 +161,20 @@ jobs:
               if ! command -v xz >/dev/null 2>&1; then
                 retry sudo pkgin -y install xz
               fi
+              if ! command -v python3 >/dev/null 2>&1; then
+                if ! command -v python3.12 >/dev/null 2>&1; then
+                  retry sudo pkgin -y install python312
+                fi
+                test -x /usr/pkg/bin/python3.12
+                sudo ln -s /usr/pkg/bin/python3.12 /usr/pkg/bin/python3
+              fi
               ;;
           esac
           command -v cc
           command -v gmake
           command -v cmake
           command -v xz
+          command -v python3
 
       - name: Build and run core tests
         run: |
