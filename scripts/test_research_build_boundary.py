@@ -11,11 +11,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 class ResearchBoundaryTests(unittest.TestCase):
@@ -308,12 +310,20 @@ class ResearchBoundaryTests(unittest.TestCase):
     def _find_shared_library(cls, build_dir: Path) -> Path:
         if os.uname().sysname == "Darwin":
             pattern = "*llam_runtime*.dylib"
+            name_pattern = None
         else:
-            pattern = "*llam_runtime*.so*"
+            pattern = "libllam_runtime.so*"
+            name_pattern = re.compile(
+                r"libllam_runtime\.so(?:\.\d+)*"
+            )
         matches = [
             path
             for path in build_dir.rglob(pattern)
             if path.is_file() and not path.is_symlink()
+            and (
+                name_pattern is None
+                or name_pattern.fullmatch(path.name) is not None
+            )
         ]
         if len(matches) != 1:
             raise AssertionError(
@@ -721,6 +731,40 @@ class ResearchBoundaryTests(unittest.TestCase):
         self.assertIn(
             "research-enabled builds cannot be packaged", research.stderr
         )
+
+
+class SharedLibraryFinderTests(unittest.TestCase):
+    def test_linux_finder_selects_library_not_provenance_receipts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="linux-shared-library-finder-"
+        ) as directory:
+            finder_dir = Path(directory)
+            actual_library = finder_dir / "libllam_runtime.so.2.2.0"
+            actual_library.write_bytes(b"\x7fELFfixture")
+            for symlink_name in (
+                "libllam_runtime.so",
+                "libllam_runtime.so.2",
+            ):
+                (finder_dir / symlink_name).symlink_to(actual_library.name)
+            for non_library_name in (
+                "libllam_runtime.so.llam-build-provenance",
+                "libllam_runtime.so.2.2.0.llam-build-provenance",
+                "libllam_runtime.so.backup",
+            ):
+                (finder_dir / non_library_name).write_bytes(b"not a library")
+
+            linux_uname = os.uname_result(
+                ("Linux", "fixture", "6.0", "fixture", "x86_64")
+            )
+            with mock.patch.object(
+                os, "uname", return_value=linux_uname
+            ):
+                self.assertEqual(
+                    ResearchBoundaryTests._find_shared_library(finder_dir),
+                    actual_library,
+                )
 
 
 def _parse_args() -> argparse.Namespace:
