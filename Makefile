@@ -2265,6 +2265,10 @@ test-tsan:
 			-Werror=unknown-warning-option -Wno-error=tsan \
 			-x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
 		tsan_cflags="$$tsan_cflags -Wno-error=tsan"; \
+	elif printf 'int main(void){return 0;}\n' | $(CC) $$tsan_cflags \
+			-Wno-error=tsan \
+			-x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
+		tsan_cflags="$$tsan_cflags -Wno-error=tsan"; \
 	fi; \
 	rm -f "$$tsan_probe"; \
 	$(MAKE) $(TSAN_TEST_TARGETS) $(TSAN_POSITIVE_TARGET) \
