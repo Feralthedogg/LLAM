@@ -3,9 +3,6 @@
 
 name: macos
 
-env:
-  LLAM_BUILD_RESEARCH: "0"
-
 on:
   push:
     branches:
@@ -25,6 +22,7 @@ on:
   workflow_dispatch:
 
 env:
+  LLAM_BUILD_RESEARCH: "0"
   LLAM_CI_VERSION: "2.2.0"
 
 concurrency:
