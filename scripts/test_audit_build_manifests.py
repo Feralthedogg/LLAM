@@ -520,6 +520,58 @@ def valid_package_script() -> str:
             'abi_major="${LLAM_ABI_MAJOR:-2}"',
             'library_version="${LLAM_VERSION:-2.2.0}"',
             "readonly version abi_major library_version",
+            "# AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR",
+            "validate_packaged_archive_metadata() (",
+            'archive_path="$1"',
+            'package_root="$2"',
+            'validate_safe_output_path "$archive_path"',
+            (
+                'validate_release_component "archive package root" '
+                '"$package_root"'
+            ),
+            (
+                'if ! archive_version="$(tar -xOf "$archive_path" '
+                '"$package_root/VERSION" 2>/dev/null)"; then'
+            ),
+            (
+                'echo "cannot read packaged VERSION metadata" >&2'
+            ),
+            "exit 1",
+            "fi",
+            (
+                'if ! archive_abi_major="$(tar -xOf "$archive_path" '
+                '"$package_root/ABI_MAJOR" 2>/dev/null)"; then'
+            ),
+            (
+                'echo "cannot read packaged ABI_MAJOR metadata" >&2'
+            ),
+            "exit 1",
+            "fi",
+            (
+                'if ! archive_library_version="$(tar -xOf '
+                '"$archive_path" "$package_root/LIBRARY_VERSION" '
+                '2>/dev/null)"; then'
+            ),
+            (
+                'echo "cannot read packaged LIBRARY_VERSION metadata" '
+                ">&2"
+            ),
+            "exit 1",
+            "fi",
+            (
+                'if [ "$archive_version" != "$version" ] || '
+                '[ "$archive_abi_major" != "$abi_major" ] || '
+                '[ "$archive_library_version" != "$library_version" ]; '
+                "then"
+            ),
+            (
+                'echo "packaged release version metadata mismatch" >&2'
+            ),
+            "exit 1",
+            "fi",
+            ")",
+            "# AUDIT:END PACKAGE ARCHIVE METADATA VALIDATOR",
+            "# AUDIT:BEGIN PACKAGE FINALIZATION",
             (
                 'LLAM_VERSION="$library_version" '
                 'LLAM_ABI_MAJOR="$abi_major" '
@@ -546,8 +598,69 @@ def valid_package_script() -> str:
                 'if ! tar -C "$out_dir" -cJf "$archive" '
                 '"$package_name" 2>/dev/null; then'
             ),
+            'rm -f "$archive"',
+            'if ! command -v xz >/dev/null 2>&1; then',
+            'echo "tar does not support -J and xz is not available" >&2',
             "exit 1",
             "fi",
+            (
+                'tar -C "$out_dir" -cf - "$package_name" | '
+                'xz -z -c > "$archive"'
+            ),
+            "fi",
+            (
+                'validate_packaged_archive_links "$archive" '
+                '"$package_name"'
+            ),
+            (
+                'validate_packaged_archive_metadata "$archive" '
+                '"$package_name"'
+            ),
+            "# AUDIT:END PACKAGE FINALIZATION",
+            "# AUDIT:BEGIN PACKAGE CHECKSUM OUTPUT",
+            "if command -v sha256sum >/dev/null 2>&1; then",
+            (
+                '(cd "$out_dir" && sha256sum "$(basename "$archive")" '
+                '> "$(basename "$archive").sha256")'
+            ),
+            "elif command -v sha256 >/dev/null 2>&1; then",
+            'archive_base="$(basename "$archive")"',
+            'digest="$(cd "$out_dir" && sha256 -q "$archive_base")"',
+            (
+                'printf \'%s  %s\\n\' "$digest" "$archive_base" '
+                '> "$archive.sha256"'
+            ),
+            "elif command -v shasum >/dev/null 2>&1; then",
+            (
+                '(cd "$out_dir" && shasum -a 256 '
+                '"$(basename "$archive")" '
+                '> "$(basename "$archive").sha256")'
+            ),
+            "elif command -v openssl >/dev/null 2>&1; then",
+            (
+                '(cd "$out_dir" && openssl dgst -sha256 -r '
+                '"$(basename "$archive")" '
+                '> "$(basename "$archive").sha256")'
+            ),
+            "elif command -v cksum >/dev/null 2>&1; then",
+            'archive_base="$(basename "$archive")"',
+            (
+                'digest="$(cd "$out_dir" && cksum -a sha256 '
+                '"$archive_base" | awk \'{ print $1 }\')"'
+            ),
+            (
+                'printf \'%s  %s\\n\' "$digest" "$archive_base" '
+                '> "$archive.sha256"'
+            ),
+            "else",
+            (
+                'echo "sha256sum, sha256, shasum, openssl, or cksum '
+                'is required to write release checksums" >&2'
+            ),
+            "exit 1",
+            "fi",
+            'printf \'%s\\n\' "$archive"',
+            "# AUDIT:END PACKAGE CHECKSUM OUTPUT",
             "",
         ]
     )
@@ -2657,6 +2770,35 @@ class BuildManifestAuditTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("exact", result.stderr)
 
+    def test_accepts_continued_provenance_owner_from_make_ir(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files[
+            "Makefile"
+        ].replace(
+            "demo:\n",
+            "demo \\\n:\n",
+            1,
+        )
+        self.fixture.write()
+
+        make = subprocess.run(
+            [
+                "make",
+                "-f",
+                str(self.root / "Makefile"),
+                "--no-print-directory",
+                "-n",
+                "demo",
+            ],
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        result = self.run_audit()
+
+        self.assertEqual(make.returncode, 0, make.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rejects_total_make_assignment_grammar_bypasses(self) -> None:
         mutations = (
             "define EXTRA_HELPER =\n\t@true\nendef\n",
@@ -3066,6 +3208,112 @@ class BuildManifestAuditTests(unittest.TestCase):
             with self.subTest(length=len(mutation)):
                 self.fixture = Fixture(self.root)
                 self.fixture.files["scripts/package_release.sh"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("package", result.stderr)
+
+    def test_requires_exact_package_archive_metadata_validator(
+        self,
+    ) -> None:
+        base = self.fixture.files["scripts/package_release.sh"]
+        begin = "# AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR\n"
+        end = "# AUDIT:END PACKAGE ARCHIVE METADATA VALIDATOR\n"
+        definition = begin + base.split(begin, 1)[1].split(end, 1)[0] + end
+        call = (
+            'validate_packaged_archive_metadata "$archive" '
+            '"$package_name"\n'
+        )
+        mutations = (
+            base.replace(definition, "", 1),
+            base.replace(definition, definition + definition, 1),
+            base.replace(
+                '"$package_root/ABI_MAJOR" 2>/dev/null',
+                '"$package_root/VERSION" 2>/dev/null',
+                1,
+            ),
+            base.replace(call, "", 1),
+            base.replace(call, call + call, 1),
+            base.replace(
+                '[ "$archive_version" != "$version" ]',
+                '[ "$archive_version" != "$library_version" ]',
+                1,
+            ),
+        )
+        for index, mutation in enumerate(mutations):
+            with self.subTest(mutation=index):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["scripts/package_release.sh"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("package", result.stderr)
+
+    def test_rejects_package_finalization_and_checksum_tail_mutations(
+        self,
+    ) -> None:
+        base = self.fixture.files["scripts/package_release.sh"]
+        insertions = (
+            (
+                'if ! tar -C "$out_dir" -cJf "$archive" '
+                '"$package_name" 2>/dev/null; then\n',
+                'printf \'%s\\n\' 9.9.9 | tee "$stage/./VERSION"\n',
+            ),
+            (
+                'rm -f "$archive"\n',
+                'printf \'%s\\n\' 9 | tee "$stage//ABI_MAJOR"\n',
+            ),
+            (
+                'if ! command -v xz >/dev/null 2>&1; then\n',
+                (
+                    'printf \'%s\\n\' 9.9.9 | tee '
+                    '"$out_dir/$package_name/LIBRARY_VERSION"\n'
+                ),
+            ),
+            (
+                'tar -C "$out_dir" -cf - "$package_name" | '
+                'xz -z -c > "$archive"\n',
+                'printf \'%s\\n\' 9.9.9 | tee "${stage}/./VERSION"\n',
+            ),
+            (
+                'fi\nvalidate_packaged_archive_links "$archive" '
+                '"$package_name"\n',
+                'printf \'%s\\n\' 9.9.9 | tee "$stage"/./VERSION\n',
+            ),
+            (
+                'validate_packaged_archive_links "$archive" '
+                '"$package_name"\n',
+                'cp "$stage/LIBRARY_VERSION" "$stage//VERSION"\n',
+            ),
+            (
+                'validate_packaged_archive_metadata "$archive" '
+                '"$package_name"\n',
+                'printf CORRUPT >> "$archive"\n',
+            ),
+            (
+                '# AUDIT:END PACKAGE FINALIZATION\n',
+                'dd if=/dev/null of="$archive"\n',
+            ),
+            (
+                'if command -v sha256sum >/dev/null 2>&1; then\n',
+                'printf CORRUPT | tee "$archive"\n',
+            ),
+            (
+                '# AUDIT:END PACKAGE CHECKSUM OUTPUT\n',
+                'truncate -s 0 "$archive"\n',
+            ),
+        )
+        for anchor, insertion in insertions:
+            with self.subTest(insertion=insertion.strip()):
+                self.assertEqual(base.count(anchor), 1)
+                self.fixture = Fixture(self.root)
+                self.fixture.files["scripts/package_release.sh"] = (
+                    base.replace(anchor, anchor + insertion, 1)
+                )
                 self.fixture.write()
 
                 result = self.run_audit()

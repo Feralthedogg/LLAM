@@ -128,6 +128,17 @@ ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
     # Independently derived mini-repository fixture.
     "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }
+ALLOWED_PACKAGE_BLOCK_HASHES = {
+    "PACKAGE ARCHIVE METADATA VALIDATOR": (
+        "1fa03b8dd45185ec8a0467215da5f22952b640db8c26f92ef88f5e69a0c6f7a4"
+    ),
+    "PACKAGE FINALIZATION": (
+        "124d27b2af5d16090722834621ec5ebdbde4c7a2abf782fb3aa25fe86a7486af"
+    ),
+    "PACKAGE CHECKSUM OUTPUT": (
+        "b2ff442e5af59fb5b75a7893c9802cbbdd4ba28da8f38f2f589659b4eb98de76"
+    ),
+}
 
 
 class DuplicateKeyError(ValueError):
@@ -2122,6 +2133,27 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
     provenance_definitions = 0
     provenance_invocations = 0
     provenance_locations: list[str] = []
+    for rule in make_ir.rules:
+        if (
+            rule.inline_recipe is not None
+            and "WRITE_BUILD_PROVENANCE" in rule.inline_recipe
+        ):
+            audit.error(
+                f"Makefile:{rule.header.line}: unsupported global Make "
+                "construct: provenance invocation"
+            )
+        for recipe in rule.recipes:
+            clean_recipe = strip_unquoted_comment(recipe.text).strip()
+            if "WRITE_BUILD_PROVENANCE" not in clean_recipe:
+                continue
+            if recipe.text != "\t$(WRITE_BUILD_PROVENANCE)":
+                audit.error(
+                    f"Makefile:{recipe.line}: unsupported global Make "
+                    "construct: provenance invocation"
+                )
+                continue
+            provenance_invocations += 1
+            provenance_locations.extend(rule.targets)
     allowed_computed_rule_variables = {
         "WINDOWS_CMAKE_TARGETS",
         "BUILD_SIGNATURE",
@@ -2141,7 +2173,6 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
         "TESTHOOK_OBJDIR",
     }
     index = 0
-    current_rule_targets: list[str] = []
     while index < len(lines):
         physical = lines[index]
         clean = strip_unquoted_comment(physical).strip()
@@ -2181,21 +2212,8 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
                 f"Makefile:{index + 1}: unsupported global Make construct"
             )
         if physical.startswith("\t"):
-            if "WRITE_BUILD_PROVENANCE" in clean:
-                if clean != "$(WRITE_BUILD_PROVENANCE)":
-                    audit.error(
-                        f"Makefile:{index + 1}: unsupported global Make "
-                        "construct: provenance invocation"
-                    )
-                else:
-                    provenance_invocations += 1
-                    provenance_locations.extend(current_rule_targets)
             index += 1
             continue
-        current_rule_targets = []
-        owner_rule = re.match(r"^([^:=\s][^:]*)\s*:", clean)
-        if owner_rule:
-            current_rule_targets = owner_rule.group(1).split()
         if re.match(r"^(?:-?include|sinclude)(?:\s|$)", clean):
             if clean != "-include $(ALL_DEPFILES)":
                 audit.error(
@@ -3246,6 +3264,41 @@ def fold_shell_logical_lines(text: str) -> list[str]:
     return logical
 
 
+def package_marked_block(
+    text: str,
+    label: str,
+    audit: Audit,
+) -> tuple[int, int] | None:
+    physical = text.splitlines()
+    begin_marker = f"# AUDIT:BEGIN {label}"
+    end_marker = f"# AUDIT:END {label}"
+    begins = [
+        index for index, line in enumerate(physical)
+        if line == begin_marker
+    ]
+    ends = [
+        index for index, line in enumerate(physical)
+        if line == end_marker
+    ]
+    if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
+        audit.error(f"package {label.lower()} markers are not exact")
+        return None
+    begin = begins[0]
+    end = ends[0]
+    normalized = tuple(
+        line
+        for line in fold_shell_logical_lines(
+            "\n".join(physical[begin + 1 : end])
+        )
+        if line
+    )
+    projection = json.dumps(normalized, separators=(",", ":"))
+    block_hash = hashlib.sha256(projection.encode("utf-8")).hexdigest()
+    if block_hash != ALLOWED_PACKAGE_BLOCK_HASHES[label]:
+        audit.error(f"package {label.lower()} block is not exact")
+    return begin, end
+
+
 def check_package_version_state(text: str, audit: Audit) -> None:
     expected_preamble = (
         'version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"',
@@ -3256,6 +3309,36 @@ def check_package_version_state(text: str, audit: Audit) -> None:
     lines = [
         line for line in fold_shell_logical_lines(text) if line
     ]
+    marked_blocks = {
+        label: package_marked_block(text, label, audit)
+        for label in ALLOWED_PACKAGE_BLOCK_HASHES
+    }
+    finalization = marked_blocks["PACKAGE FINALIZATION"]
+    checksum_output = marked_blocks["PACKAGE CHECKSUM OUTPUT"]
+    physical = text.splitlines()
+    if (
+        finalization is not None
+        and checksum_output is not None
+        and finalization[1] + 1 != checksum_output[0]
+    ):
+        audit.error(
+            "package finalization and checksum/output tail are not adjacent"
+        )
+    if (
+        checksum_output is not None
+        and any(line.strip() for line in physical[checksum_output[1] + 1 :])
+    ):
+        audit.error("package commands follow the sealed checksum/output tail")
+    validator_definition = "validate_packaged_archive_metadata() ("
+    validator_call = (
+        'validate_packaged_archive_metadata "$archive" "$package_name"'
+    )
+    if lines.count(validator_definition) != 1:
+        audit.error(
+            "package archive metadata validator definition is not exact"
+        )
+    if lines.count(validator_call) != 1:
+        audit.error("package archive metadata validator call is not exact")
     starts = [
         index
         for index in range(
@@ -3341,45 +3424,6 @@ def check_package_version_state(text: str, audit: Audit) -> None:
         '[ "$(cat "$stage/LIBRARY_VERSION")" != '
         '"$library_version" ]; then'
     )
-    expected_archive = (
-        'if ! tar -C "$out_dir" -cJf "$archive" '
-        '"$package_name" 2>/dev/null; then'
-    )
-    expected_metadata_generator = (
-        'LLAM_VERSION="$library_version" '
-        'LLAM_ABI_MAJOR="$abi_major" '
-        '"$root_dir/scripts/generate_sdk_metadata.sh" '
-        '"$stage" "$target"'
-    )
-    expected_sequence = [
-        *expected_writers.values(),
-        'validate_safe_stage_tree "$stage"',
-        expected_readback,
-        'echo "staged release version metadata mismatch" >&2',
-        "exit 1",
-        "fi",
-        expected_archive,
-    ]
-    sequence_starts = [
-        index
-        for index in range(
-            max(0, len(lines) - len(expected_sequence) + 1)
-        )
-        if lines[index : index + len(expected_sequence)]
-        == expected_sequence
-    ]
-    metadata_generator_indices = [
-        index
-        for index, line in enumerate(lines)
-        if line == expected_metadata_generator
-    ]
-    if (
-        len(sequence_starts) != 1
-        or metadata_generator_indices != [sequence_starts[0] - 1]
-    ):
-        audit.error(
-            "package writer/readback/archive sequence is not exact"
-        )
     allowed_metadata_references = {
         *expected_writers.values(),
         expected_readback,
@@ -3415,6 +3459,10 @@ def check_package_version_state(text: str, audit: Audit) -> None:
     expected_fallback_archive = (
         'tar -C "$out_dir" -cf - "$package_name" | '
         'xz -z -c > "$archive"'
+    )
+    expected_archive = (
+        'if ! tar -C "$out_dir" -cJf "$archive" '
+        '"$package_name" 2>/dev/null; then'
     )
     archive_writers = [
         line

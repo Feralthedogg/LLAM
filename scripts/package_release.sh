@@ -237,6 +237,35 @@ validate_packaged_archive_links() (
     esac
 )
 
+# AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR
+validate_packaged_archive_metadata() (
+    archive_path="$1"
+    package_root="$2"
+    validate_safe_output_path "$archive_path"
+    validate_release_component "archive package root" "$package_root"
+
+    if ! archive_version="$(tar -xOf "$archive_path" "$package_root/VERSION" 2>/dev/null)"; then
+        echo "cannot read packaged VERSION metadata" >&2
+        exit 1
+    fi
+    if ! archive_abi_major="$(tar -xOf "$archive_path" "$package_root/ABI_MAJOR" 2>/dev/null)"; then
+        echo "cannot read packaged ABI_MAJOR metadata" >&2
+        exit 1
+    fi
+    if ! archive_library_version="$(tar -xOf "$archive_path" "$package_root/LIBRARY_VERSION" 2>/dev/null)"; then
+        echo "cannot read packaged LIBRARY_VERSION metadata" >&2
+        exit 1
+    fi
+
+    if [ "$archive_version" != "$version" ] || \
+       [ "$archive_abi_major" != "$abi_major" ] || \
+       [ "$archive_library_version" != "$library_version" ]; then
+        echo "packaged release version metadata mismatch" >&2
+        exit 1
+    fi
+)
+# AUDIT:END PACKAGE ARCHIVE METADATA VALIDATOR
+
 validate_release_input_file() {
     path="$1"
 
@@ -439,6 +468,7 @@ case "$host_os" in
         ;;
 esac
 
+# AUDIT:BEGIN PACKAGE FINALIZATION
 LLAM_VERSION="$library_version" LLAM_ABI_MAJOR="$abi_major" \
     "$root_dir/scripts/generate_sdk_metadata.sh" "$stage" "$target"
 
@@ -464,7 +494,9 @@ if ! tar -C "$out_dir" -cJf "$archive" "$package_name" 2>/dev/null; then
 fi
 
 validate_packaged_archive_links "$archive" "$package_name"
-
+validate_packaged_archive_metadata "$archive" "$package_name"
+# AUDIT:END PACKAGE FINALIZATION
+# AUDIT:BEGIN PACKAGE CHECKSUM OUTPUT
 if command -v sha256sum >/dev/null 2>&1; then
     (cd "$out_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 elif command -v sha256 >/dev/null 2>&1; then
@@ -485,3 +517,4 @@ else
 fi
 
 printf '%s\n' "$archive"
+# AUDIT:END PACKAGE CHECKSUM OUTPUT
