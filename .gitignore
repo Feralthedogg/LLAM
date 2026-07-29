@@ -53,6 +53,7 @@ test_windows_policy
 test_windows_runtime_smoke
 *.exe
 *.link-signature
+*.llam-build-provenance
 libllam_runtime.a
 libllam_runtime.dylib
 libllam_runtime.*.dylib

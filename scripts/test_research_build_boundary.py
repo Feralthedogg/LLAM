@@ -115,6 +115,18 @@ class PackageArchivePortabilityTests(unittest.TestCase):
         )
 
 
+class BuildProvenanceSourceHygieneTests(unittest.TestCase):
+    source = Path(__file__).resolve().parents[1]
+
+    def test_build_provenance_receipts_do_not_dirty_source_evidence(
+        self,
+    ) -> None:
+        ignore_patterns = (
+            self.source / ".gitignore"
+        ).read_text(encoding="utf-8").splitlines()
+        self.assertIn("*.llam-build-provenance", ignore_patterns)
+
+
 class ResearchBoundaryTests(unittest.TestCase):
     source = Path(__file__).resolve().parents[1]
     requested_work: Path | None = None
