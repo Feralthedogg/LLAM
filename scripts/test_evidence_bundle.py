@@ -405,6 +405,95 @@ class CreationAndFinalizationTests(unittest.TestCase):
                         _metadata(),
                     )
 
+    def test_publication_state_parent_path_close_failure_is_ambiguous(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            bundle = EvidenceBundle.create(
+                root / "bundle",
+                _metadata(),
+            )
+            path_parent_fd = os.open(root, os.O_RDONLY)
+            real_close = os.close
+
+            def close_with_error(descriptor: int) -> None:
+                real_close(descriptor)
+                if descriptor == path_parent_fd:
+                    raise OSError(
+                        errno.EIO,
+                        "path parent close failed",
+                    )
+
+            try:
+                with mock.patch.object(
+                    evidence_bundle,
+                    "_open_directory_nofollow",
+                    return_value=path_parent_fd,
+                ), mock.patch.object(
+                    evidence_bundle.os,
+                    "close",
+                    side_effect=close_with_error,
+                ):
+                    self.assertEqual(
+                        bundle._publication_state(),
+                        evidence_bundle._AMBIGUOUS,
+                    )
+            finally:
+                bundle._abort()
+
+    def test_publication_state_close_failure_does_not_mask_interrupt(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            bundle = EvidenceBundle.create(
+                root / "bundle",
+                _metadata(),
+            )
+            path_parent_fd = os.open(root, os.O_RDONLY)
+            real_close = os.close
+            real_fstat = os.fstat
+
+            def inspect_with_interrupt(
+                descriptor: int,
+            ) -> os.stat_result:
+                if descriptor == path_parent_fd:
+                    raise KeyboardInterrupt(
+                        "path parent inspection interrupted"
+                    )
+                return real_fstat(descriptor)
+
+            def close_with_error(descriptor: int) -> None:
+                real_close(descriptor)
+                if descriptor == path_parent_fd:
+                    raise OSError(
+                        errno.EIO,
+                        "path parent close failed",
+                    )
+
+            try:
+                with mock.patch.object(
+                    evidence_bundle,
+                    "_open_directory_nofollow",
+                    return_value=path_parent_fd,
+                ), mock.patch.object(
+                    evidence_bundle.os,
+                    "fstat",
+                    side_effect=inspect_with_interrupt,
+                ), mock.patch.object(
+                    evidence_bundle.os,
+                    "close",
+                    side_effect=close_with_error,
+                ):
+                    with self.assertRaisesRegex(
+                        KeyboardInterrupt,
+                        "inspection interrupted",
+                    ):
+                        bundle._publication_state()
+            finally:
+                bundle._abort()
+
     def test_parent_fsync_failure_reports_publication_uncertain_and_auditable(
         self,
     ) -> None:

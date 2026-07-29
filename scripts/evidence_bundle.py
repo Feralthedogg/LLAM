@@ -2126,16 +2126,23 @@ class EvidenceBundle:
                 self._final_path.parent
             )
             try:
-                if (
+                path_parent_matches = (
                     _posix_identity(os.fstat(path_parent_fd))
-                    != self._parent_identity
-                ):
-                    return _AMBIGUOUS
-            finally:
+                    == self._parent_identity
+                )
+            except BaseException:
+                try:
+                    os.close(path_parent_fd)
+                except OSError:
+                    pass
+                raise
+            else:
                 try:
                     os.close(path_parent_fd)
                 except OSError:
                     return _AMBIGUOUS
+            if not path_parent_matches:
+                return _AMBIGUOUS
             source = _named_posix_identity(
                 self._parent_fd,
                 self._stage_path.name,
