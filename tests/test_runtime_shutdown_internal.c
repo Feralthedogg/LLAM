@@ -7759,9 +7759,9 @@ cleanup:
     return rc;
 }
 #endif
-
+#include "test_hard_affinity_cases.inc"
 int main(void) {
-    if (exercise_switch_hook_cases() != 0) {
+    if (exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0) {
         return 1;
     }
     if (exercise_stack_cache_vm_cases() != 0) {

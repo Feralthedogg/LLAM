@@ -1385,7 +1385,7 @@ static bool llam_reinject_single_local_join_waiter(llam_runtime_t *rt, llam_task
     }
     target = &rt->shards[waiter->parked_shard];
     if (g_llam_tls_shard != target ||
-        g_llam_tls_task == NULL ||
+        g_llam_tls_task == NULL || !llam_task_may_run_on_shard(waiter, target) ||
         !llam_shard_accepts_new_work(target) ||
         llam_task_wait_deadline_active(waiter)) {
         return false;

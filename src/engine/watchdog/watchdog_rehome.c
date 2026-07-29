@@ -496,7 +496,6 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
     llam_io_req_t *cur;
     unsigned eligible = 0U;
     unsigned migrated = 0U;
-
     if (migrated_out != NULL) {
         *migrated_out = 0U;
     }
@@ -523,6 +522,7 @@ bool llam_evacuate_rehomed_submit_waiters(llam_node_t *source_node,
             continue;
         }
         if (task == NULL || task->state != LLAM_TASK_STATE_PARKED ||
+            (task->flags & LLAM_TASK_FLAG_PINNED) != 0U ||
             (llam_wait_reason_t)atomic_load_explicit(&task->wait_reason, memory_order_acquire) != LLAM_WAIT_IO ||
             task->parked_shard != target_shard->id || llam_task_active_io_req_load(task) != cur ||
             atomic_load_explicit(&cur->wait_mode, memory_order_acquire) != (unsigned)LLAM_IO_WAIT_MODE_SUBMIT_QUEUE ||

@@ -124,6 +124,8 @@ static bool llam_spawn_try_local_unlocked(llam_runtime_t *rt,
                       g_llam_tls_scheduler_ctx != &target->scheduler_ctx ||
                       rt->trace_events_enabled != 0U ||
                       !llam_shard_accepts_new_work(target) ||
+                      (target->opaque_redirect_active &&
+                       (task->flags & LLAM_TASK_FLAG_PINNED) == 0U) ||
                       !llam_lockfree_normq_enabled(rt))) {
         return false;
     }
@@ -394,7 +396,9 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
                                           atomic_fetch_add_explicit(&rt->online_shards, 1U, memory_order_acq_rel) + 1U);
         }
         task->state = LLAM_TASK_STATE_RUNNABLE;
-        if (target->opaque_redirect_active) {
+        if (target->opaque_redirect_active &&
+            !((task->flags & LLAM_TASK_FLAG_PINNED) != 0U &&
+              llam_task_may_run_on_shard(task, target))) {
             target->metrics.migrations += 1U;
             task->enqueue_hot = 0U;
             if (!llam_enqueue_opaque_redirect_task_locked(target, task, false)) {

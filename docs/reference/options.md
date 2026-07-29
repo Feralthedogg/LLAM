@@ -207,7 +207,7 @@ Spawn flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `LLAM_SPAWN_F_PINNED` | Prefer keeping the task on its home worker. |
+| `LLAM_SPAWN_F_PINNED` | Execute only on the task's logical home shard. This does not promise one stable pthread or CPU; a same-shard opaque helper is allowed. |
 | `LLAM_SPAWN_F_NO_PREEMPT` | Restrict cooperative preemption checks. |
 | `LLAM_SPAWN_F_SYS_TASK` | Mark runtime-owned helper work. |
 | `LLAM_SPAWN_F_LATENCY_CRITICAL` | Promote wakeup and dispatch priority. |

@@ -769,7 +769,7 @@ Spawn options:
 | `LLAM_STACK_CLASS_DEFAULT` | Default stack size class. |
 | `LLAM_STACK_CLASS_LARGE` | Larger stack size class. |
 | `LLAM_STACK_CLASS_HUGE` | Very large stack size class. |
-| `LLAM_SPAWN_F_PINNED` | Hint that the task should stay pinned. |
+| `LLAM_SPAWN_F_PINNED` | Hard logical-shard affinity; same-shard helper threads remain allowed. |
 | `LLAM_SPAWN_F_NO_PREEMPT` | Hint that preemption should be restricted. |
 | `LLAM_SPAWN_F_SYS_TASK` | Runtime/system task hint. |
 | `LLAM_SPAWN_F_LATENCY_CRITICAL` | Latency-critical task hint. |

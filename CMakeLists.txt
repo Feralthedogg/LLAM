@@ -100,6 +100,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/sched/queue_base.c
     src/core/sched/norm_queue_depth.c
     src/core/sched/norm_queue.c
+    src/core/sched/affinity.c
     src/core/sched/core_queue.c
     src/core/memory/alloc.c
     src/core/memory/allocator_quiescent.c

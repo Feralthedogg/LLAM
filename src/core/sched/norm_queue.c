@@ -433,37 +433,54 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
      * its first blocking/I/O operation. Periodically pull from the owner deque
      * to keep direct handoff fair without forcing a scheduler round trip.
      */
-    prefer_owner_deque =
-        shard->direct_handoff_streak >= LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
-        llam_cldeque_has_work(&shard->norm_cldeque);
-    if (!prefer_owner_deque) {
-        next = llam_queue_pop_head(&shard->norm_q);
-    }
-    if (next == NULL) {
-        if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
-            if (out_push_failed != NULL) {
-                *out_push_failed = true;
+    for (;;) {
+        prefer_owner_deque =
+            shard->direct_handoff_streak >=
+                LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
+            llam_cldeque_has_work(&shard->norm_cldeque);
+        if (!prefer_owner_deque) {
+            next = llam_queue_pop_head(&shard->norm_q);
+        }
+        if (next == NULL) {
+            if (shard->norm_q.depth >= LLAM_NORM_QUEUE_CAP) {
+                if (out_push_failed != NULL) {
+                    *out_push_failed = true;
+                }
+                return false;
+            }
+            next = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+            if (next == NULL) {
+                return false;
+            }
+        }
+        if (prefer_owner_deque) {
+            shard->direct_handoff_streak = 0U;
+        }
+        if (next == current) {
+            /*
+             * The running task should never already be present in runnable
+             * queues. Treat that as a failed direct exchange rather than
+             * queueing a second reference and corrupting task ownership.
+             */
+            if (out_next != NULL) {
+                *out_next = current;
             }
             return false;
         }
-        next = llam_cldeque_pop_bottom(&shard->norm_cldeque);
-        if (next == NULL) {
-            return false;
-        }
-    }
-    if (prefer_owner_deque) {
-        shard->direct_handoff_streak = 0U;
-    }
-    if (next == current) {
         /*
-         * The running task should never already be present in runnable queues.
-         * Treat that as a failed direct exchange rather than queueing a second
-         * reference and corrupting task ownership.
+         * Producer paths should prevent a foreign pinned task from entering
+         * this owner lane. Filter defensively before the exchange commits: the
+         * current task is not queued until an eligible peer has been found.
          */
-        if (out_next != NULL) {
-            *out_next = current;
+        if (llam_task_may_run_on_shard(next, shard)) {
+            break;
         }
-        return false;
+        (void)llam_norm_queue_note_dequeue(shard);
+        if (!llam_requeue_task_to_required_shard(
+                shard->runtime, next, next->enqueue_hot != 0U)) {
+            llam_enqueue_overflow_task(shard->runtime, next);
+        }
+        next = NULL;
     }
 
     llam_queue_push_tail(&shard->norm_q, current);

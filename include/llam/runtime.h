@@ -254,7 +254,7 @@ typedef enum llam_runtime_prewarm_source {
 
 /** @brief Bit flags accepted by llam_spawn_opts_t::flags. */
 enum {
-    LLAM_SPAWN_F_PINNED = 1U << 0,           /**< Prefer keeping the task on its home worker. */
+    LLAM_SPAWN_F_PINNED = 1U << 0, /**< Execute only on the logical home shard; same-shard helpers are allowed. */
     LLAM_SPAWN_F_NO_PREEMPT = 1U << 1,       /**< Restrict cooperative preemption checks. */
     LLAM_SPAWN_F_SYS_TASK = 1U << 2,         /**< Mark runtime-owned helper work. */
     LLAM_SPAWN_F_LATENCY_CRITICAL = 1U << 3, /**< Promote wakeup and dispatch priority. */

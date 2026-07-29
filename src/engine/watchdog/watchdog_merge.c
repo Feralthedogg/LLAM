@@ -295,6 +295,10 @@ void llam_merge_rehome_task(llam_shard_t *source, llam_shard_t *target, llam_tas
     if (source == NULL || target == NULL || task == NULL) {
         return;
     }
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
+        (void)llam_task_required_shard(source->runtime, task);
+        return;
+    }
     if (task->home_shard == source->id) {
         task->home_shard = target->id;
     }
@@ -311,6 +315,14 @@ void llam_merge_rehome_task(llam_shard_t *source, llam_shard_t *target, llam_tas
  */
 static bool llam_merge_task_to_target_locked(llam_shard_t *source, llam_shard_t *target, llam_task_t *task) {
     if (source == NULL || target == NULL || task == NULL) {
+        return false;
+    }
+    if (source->runtime == NULL || source->runtime != target->runtime ||
+        task->owner_runtime != source->runtime ||
+        (task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
+        if (source->runtime != NULL) {
+            (void)llam_task_required_shard(source->runtime, task);
+        }
         return false;
     }
 

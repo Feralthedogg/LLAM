@@ -49,6 +49,9 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
                                     llam_wait_reason_t reason,
                                     bool direct_local) {
     llam_task_state_id_t from = task->state;
+    bool may_run_here;
+    bool pinned_home;
+
     if (shard->runtime->experimental_dynamic_shards != 0U &&
         atomic_load_explicit(&shard->online, memory_order_relaxed) == 0U) {
         // Waking work onto an offline dynamic shard brings it back online and
@@ -64,7 +67,18 @@ void llam_mark_runnable_locked(llam_shard_t *shard,
     task->last_runnable_ns =
         llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
-    if (shard->opaque_redirect_active) {
+    may_run_here = llam_task_may_run_on_shard(task, shard);
+    pinned_home =
+        (task->flags & LLAM_TASK_FLAG_PINNED) != 0U && may_run_here;
+    if (!may_run_here) {
+        /*
+         * Producer paths normally select the required home before this point.
+         * Overflow is the lock-order-safe containment path if corrupt or stale
+         * routing reaches a foreign shard while its lock is held.
+         */
+        task->enqueue_hot = 0U;
+        llam_enqueue_overflow_task(shard->runtime, task);
+    } else if (shard->opaque_redirect_active && !pinned_home) {
         // A shard in opaque-block redirect mode should not receive local work;
         // send the task to its redirect target or spill to overflow.
         shard->metrics.migrations += 1U;
@@ -109,6 +123,9 @@ void llam_reinject_task(llam_runtime_t *rt,
                              llam_wait_reason_t reason) {
     unsigned target_id = llam_pick_runnable_shard(rt, task);
 
+    if (target_id == UINT_MAX) {
+        return;
+    }
     llam_reinject_task_on_shard(rt, task, target_id, hot, kind, reason);
 }
 
@@ -132,12 +149,26 @@ void llam_reinject_task_on_shard(llam_runtime_t *rt,
     bool pressure;
     bool effective_hot;
     bool direct_local;
+    unsigned required;
 
     if (rt == NULL || task == NULL || rt->active_shards == 0U) {
         return;
     }
-    if (target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
+    required = llam_task_required_shard(rt, task);
+    if (task->owner_runtime != rt) {
+        return;
+    }
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
+        if (required == UINT_MAX) {
+            return;
+        }
+        target_id = required;
+    } else if (target_id >= rt->active_shards ||
+               !llam_shard_accepts_new_work(&rt->shards[target_id])) {
         target_id = llam_pick_runnable_shard(rt, task);
+        if (target_id == UINT_MAX) {
+            return;
+        }
     }
 
     target = &rt->shards[target_id];
@@ -179,15 +210,32 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_task_t *current = g_llam_tls_task;
     llam_task_state_id_t task_from;
     bool effective_hot;
+    unsigned required;
     int caller_errno = llam_thread_errno_load();
 
-    if (rt == NULL || task == NULL || current == NULL || rt->active_shards == 0U ||
-        target_id >= rt->active_shards || !llam_shard_accepts_new_work(&rt->shards[target_id])) {
+    if (rt == NULL || task == NULL || current == NULL ||
+        rt->active_shards == 0U) {
+        return false;
+    }
+    required = llam_task_required_shard(rt, task);
+    if (task->owner_runtime != rt) {
+        return false;
+    }
+    if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
+        if (required == UINT_MAX) {
+            return false;
+        }
+        target_id = required;
+    }
+    if (target_id >= rt->active_shards ||
+        !llam_shard_accepts_new_work(&rt->shards[target_id])) {
         return false;
     }
 
     target = &rt->shards[target_id];
-    if (g_llam_tls_shard != target || current == task) {
+    if (g_llam_tls_shard != target || current == task ||
+        !llam_task_may_run_on_shard(current, target) ||
+        !llam_task_may_run_on_shard(task, target)) {
         return false;
     }
 

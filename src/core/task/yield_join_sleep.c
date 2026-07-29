@@ -209,7 +209,9 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     bool push_failed = false;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+    if (shard == NULL || current == NULL ||
+        g_llam_tls_scheduler_ctx != &shard->scheduler_ctx ||
+        !llam_task_may_run_on_shard(current, shard)) {
         if (fail_reason != NULL) {
             *fail_reason = LLAM_YIELD_DIRECT_FAIL_CONTEXT;
         }
@@ -408,7 +410,8 @@ bool llam_yield_to_local_runnable(void) {
     llam_task_t *next = NULL;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || shard->runtime == NULL) {
+    if (shard == NULL || current == NULL || shard->runtime == NULL ||
+        !llam_task_may_run_on_shard(current, shard)) {
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_CONTEXT);
         return false;
     }
@@ -431,12 +434,7 @@ bool llam_yield_to_local_runnable(void) {
         llam_yield_direct_record_fail(shard, LLAM_YIELD_DIRECT_FAIL_POLICY);
         return false;
     }
-    if (shard->hot_q.depth > 0U) {
-        next = llam_queue_pop_head(&shard->hot_q);
-    }
-    if (next == NULL) {
-        next = llam_norm_queue_pop_owner_locked(shard);
-    }
+    next = llam_take_handoff_task_locked(shard);
     if (next == NULL || next == current) {
         pthread_mutex_unlock(&shard->lock);
         llam_yield_direct_record_fail(shard, next == current ? LLAM_YIELD_DIRECT_FAIL_SELF : LLAM_YIELD_DIRECT_FAIL_NO_WORK);
@@ -503,7 +501,9 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     llam_runtime_t *rt;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || g_llam_tls_scheduler_ctx != &shard->scheduler_ctx) {
+    if (shard == NULL || current == NULL ||
+        g_llam_tls_scheduler_ctx != &shard->scheduler_ctx ||
+        !llam_task_may_run_on_shard(current, shard)) {
         return false;
     }
     rt = shard->runtime;
@@ -531,7 +531,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         }
     }
 
-    next = llam_norm_queue_pop_owner_unlocked(shard);
+    next = llam_take_handoff_task_unlocked(shard);
     if (next == NULL || next == current) {
         return false;
     }
@@ -557,7 +557,8 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     llam_task_t *next = NULL;
     int caller_errno = llam_thread_errno_load();
 
-    if (shard == NULL || current == NULL || shard->runtime == NULL) {
+    if (shard == NULL || current == NULL || shard->runtime == NULL ||
+        !llam_task_may_run_on_shard(current, shard)) {
         return false;
     }
     if (llam_direct_yield_handoff_mode(shard->runtime) == 0U) {
@@ -576,12 +577,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         pthread_mutex_unlock(&shard->lock);
         return false;
     }
-    if (shard->hot_q.depth > 0U) {
-        next = llam_queue_pop_head(&shard->hot_q);
-    }
-    if (next == NULL) {
-        next = llam_norm_queue_pop_owner_locked(shard);
-    }
+    next = llam_take_handoff_task_locked(shard);
     if (next == NULL || next == current) {
         pthread_mutex_unlock(&shard->lock);
         return false;

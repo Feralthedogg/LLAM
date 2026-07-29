@@ -373,14 +373,14 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         task = llam_take_local_task_with_pressure(shard, pressure);
         if (task == NULL) {
             if (pressure) {
-                task = llam_take_overflow_task(rt);
+                task = llam_take_overflow_task_for_shard(rt, shard);
             }
         }
         if (task == NULL) {
             task = llam_try_steal_task(rt, shard);
         }
         if (task == NULL) {
-            task = llam_take_overflow_task(rt);
+            task = llam_take_overflow_task_for_shard(rt, shard);
         }
 
         if (task == NULL) {
@@ -389,6 +389,9 @@ void llam_scheduler_loop(llam_shard_t *shard) {
                 break;
             }
             llam_idle_wait(shard);
+            continue;
+        }
+        if (!llam_prepare_task_dispatch(shard, task)) {
             continue;
         }
 
@@ -525,7 +528,7 @@ void *llam_opaque_helper_main(void *arg) {
             task = llam_take_local_task_with_pressure(shard, pressure);
             if (task == NULL) {
                 if (pressure) {
-                    task = llam_take_overflow_task(rt);
+                    task = llam_take_overflow_task_for_shard(rt, shard);
                 }
             }
             if (task == NULL) {
@@ -535,7 +538,7 @@ void *llam_opaque_helper_main(void *arg) {
             }
             if (task == NULL) {
                 if (pressure) {
-                    task = llam_take_overflow_task(rt);
+                    task = llam_take_overflow_task_for_shard(rt, shard);
                 }
             }
 
@@ -567,6 +570,9 @@ void *llam_opaque_helper_main(void *arg) {
                     break;
                 }
                 llam_idle_wait(shard);
+                continue;
+            }
+            if (!llam_prepare_task_dispatch(shard, task)) {
                 continue;
             }
 

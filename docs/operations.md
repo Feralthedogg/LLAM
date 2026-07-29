@@ -91,6 +91,15 @@ Operational knobs:
 - `LLAM_SAFEPOINT_CLOCK_PERIOD` controls cheap-safepoint clock sampling and can
   reduce timestamp overhead in very hot loops.
 
+`LLAM_SPAWN_F_PINNED` is a hard logical-shard affinity contract. A pinned task
+executes only on the home shard assigned at spawn; steal, overflow, rehome,
+opaque redirect, and direct handoff paths cannot move its execution elsewhere.
+The contract does not promise one stable pthread or physical CPU: an opaque
+helper may drive the same logical shard, and the runtime's CPU-affinity policy
+remains separately configurable. While a shard's primary worker is inside
+opaque foreign code, pinned work on that shard may wait until the same-shard
+helper takes over or the blocking region returns.
+
 ## 5. Memory and Stack Pressure
 
 Stackful tasks are fast only when task metadata and stacks are reused. For

@@ -99,6 +99,16 @@ void llam_queue_push_tail(llam_queue_t *queue, llam_task_t *task);
 void llam_drain_inject_queue(llam_shard_t *shard);
 void llam_enqueue_overflow_task(llam_runtime_t *rt, llam_task_t *task);
 unsigned llam_hot_streak_cap_locked(llam_shard_t *shard, bool pressure);
+unsigned llam_task_required_shard(const llam_runtime_t *rt,
+                                  const llam_task_t *task);
+bool llam_task_may_run_on_shard(const llam_task_t *task,
+                                const llam_shard_t *shard);
+bool llam_requeue_task_to_required_shard(llam_runtime_t *rt,
+                                         llam_task_t *task,
+                                         bool hot);
+llam_task_t *llam_take_handoff_task_unlocked(llam_shard_t *shard);
+llam_task_t *llam_take_handoff_task_locked(llam_shard_t *shard);
+bool llam_prepare_task_dispatch(llam_shard_t *shard, llam_task_t *task);
 void llam_mark_runnable_locked(llam_shard_t *shard,
                              llam_task_t *task,
                              bool hot,
@@ -113,7 +123,10 @@ bool llam_should_enqueue_hot_locked(llam_shard_t *shard,
                                   bool pressure);
 llam_task_t *llam_take_local_task(llam_shard_t *shard);
 llam_task_t *llam_take_local_task_with_pressure(llam_shard_t *shard, bool pressure);
-llam_task_t *llam_take_overflow_task(llam_runtime_t *rt);
+llam_task_t *llam_take_overflow_task_for_shard(llam_runtime_t *rt,
+                                                llam_shard_t *shard);
+unsigned llam_steal_from_victim(llam_shard_t *thief,
+                                llam_shard_t *victim);
 llam_task_t *llam_try_steal_task(llam_runtime_t *rt, llam_shard_t *shard);
 
 /*
