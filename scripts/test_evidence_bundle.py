@@ -1329,8 +1329,10 @@ class AuditTests(unittest.TestCase):
             real_open_directory = (
                 evidence_bundle._open_directory_nofollow
             )
+            real_open = os.open
             real_close = os.close
             reopened_parent: int | None = None
+            swapped = False
 
             def capture_reopened_parent(path: Path) -> int:
                 nonlocal reopened_parent
@@ -1340,16 +1342,46 @@ class AuditTests(unittest.TestCase):
                 return descriptor
 
             def swap_after_parent_close(descriptor: int) -> None:
+                nonlocal swapped
                 real_close(descriptor)
-                if descriptor == reopened_parent:
+                if descriptor == reopened_parent and not swapped:
+                    swapped = True
                     ancestor.rename(moved)
                     (ancestor / "parent").mkdir(parents=True)
+
+            def reuse_parent_descriptor_for_leaf(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                descriptor = real_open(
+                    path,
+                    flags,
+                    mode,
+                    dir_fd=dir_fd,
+                )
+                if (
+                    path == final.name
+                    and dir_fd == snapshot.parent_fd
+                    and reopened_parent is not None
+                    and descriptor != reopened_parent
+                ):
+                    os.dup2(descriptor, reopened_parent)
+                    real_close(descriptor)
+                    return reopened_parent
+                return descriptor
 
             try:
                 with mock.patch.object(
                     evidence_bundle,
                     "_open_directory_nofollow",
                     side_effect=capture_reopened_parent,
+                ), mock.patch.object(
+                    evidence_bundle.os,
+                    "open",
+                    side_effect=reuse_parent_descriptor_for_leaf,
                 ), mock.patch.object(
                     evidence_bundle.os,
                     "close",
@@ -1359,6 +1391,7 @@ class AuditTests(unittest.TestCase):
                         snapshot.revalidate()
             finally:
                 snapshot.close(suppress=True)
+            self.assertTrue(swapped)
             self.assertFalse(final.exists())
             self.assertTrue((moved / "parent" / "bundle").is_dir())
 
