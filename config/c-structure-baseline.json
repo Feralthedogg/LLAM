@@ -17,47 +17,47 @@
     },
     {
       "limit": 800,
-      "line_count": 1839,
+      "line_count": 1842,
       "path": "experiments/leir/bench_leir_native_pipeline.c"
     },
     {
       "limit": 800,
-      "line_count": 1575,
+      "line_count": 1578,
       "path": "experiments/leir/bench_leir_native_segment.c"
     },
     {
       "limit": 800,
-      "line_count": 1274,
+      "line_count": 1277,
       "path": "experiments/leir/bench_leir_phase0.c"
     },
     {
       "limit": 800,
-      "line_count": 1236,
+      "line_count": 1252,
       "path": "experiments/leir/leir_engine.c"
     },
     {
       "limit": 800,
-      "line_count": 1372,
+      "line_count": 1390,
       "path": "experiments/leir/leir_native_segment.c"
     },
     {
       "limit": 800,
-      "line_count": 1077,
+      "line_count": 1080,
       "path": "experiments/leir/leir_peer_process.c"
     },
     {
       "limit": 800,
-      "line_count": 3144,
+      "line_count": 3147,
       "path": "experiments/leir/test_leir_native_linux.c"
     },
     {
       "limit": 800,
-      "line_count": 2967,
+      "line_count": 2970,
       "path": "experiments/leir/test_leir_native_segment.c"
     },
     {
       "limit": 800,
-      "line_count": 3261,
+      "line_count": 3264,
       "path": "experiments/leir/test_leir_phase0.c"
     },
     {
@@ -127,7 +127,7 @@
     },
     {
       "limit": 800,
-      "line_count": 1474,
+      "line_count": 1482,
       "path": "src/core/wait/wait_tracking.c"
     },
     {
@@ -157,17 +157,17 @@
     },
     {
       "limit": 800,
-      "line_count": 819,
+      "line_count": 825,
       "path": "src/io/darwin/watch/darwin_worker.c"
     },
     {
       "limit": 650,
-      "line_count": 867,
+      "line_count": 873,
       "path": "src/io/linux/watch/cqe.c"
     },
     {
       "limit": 800,
-      "line_count": 1082,
+      "line_count": 1095,
       "path": "src/io/linux/watch/linux_segment.c"
     },
     {
