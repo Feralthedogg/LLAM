@@ -46,6 +46,37 @@ APIs are compatibility wrappers for simple single-runtime programs.
 | `llam_runtime_destroy` | Canonical embedding teardown. Passing `NULL` aliases default shutdown. |
 | `llam_runtime_shutdown` | Stop and release default-runtime resources. |
 
+### Runtime Resource Contract
+
+Resource controls appended after the frozen 2.2 option prefix are honored only
+by size-aware lifecycle calls. `llam_runtime_init()` deliberately consumes
+`LLAM_RUNTIME_OPTS_V2_2_SIZE` and ignores the appended tail;
+`llam_runtime_init_ex()` and `llam_runtime_create()` honor every complete field
+present in the supplied size. Initialize the struct with
+`llam_runtime_opts_init()` before setting fields.
+
+| Option group | Contract |
+| --- | --- |
+| `worker_min`, `worker_count`, `worker_max` | Resolve the minimum online workers, initial online workers, and allocated scheduler capacity. A lone nonzero `worker_count` is a fixed plan. Explicit bounds must satisfy `1 <= min <= count <= max <= selected CPUs`. |
+| `blocking_min`, `blocking_max` | Create exactly `blocking_min` workers during initialization and grow lazily, at most to `blocking_max`. `blocking_min=0` is valid only with a nonzero maximum. |
+| `cpu_count`, `cpu_ids` | Select unique process-allowed CPU IDs in caller order. LLAM copies the array before the lifecycle call returns; the caller retains ownership and may release it afterward. |
+| `affinity_policy` | `NONE` makes no affinity calls. `PREFER` records failures and continues. `REQUIRE` fails closed when support, binding, or host-affinity restoration fails. Exact scheduler affinity is currently a Linux capability. |
+| `*_prewarm_total` | Request exact runtime-total task objects, default stacks, or timer slots. A nonzero public request either completes in full or fails initialization and unwinds partial resources. |
+
+Worker and blocking capacities are capped at 256. Default-stack prewarm is
+capped at 4,096 mappings, and checked task/timer metadata planning is bounded by
+an aggregate 1 GiB ceiling. Duplicate/disallowed CPU IDs or inconsistent bounds
+fail with `EINVAL`; capacity and planning ceilings fail with `E2BIG`; checked
+arithmetic overflow fails with `EOVERFLOW`; required unsupported affinity fails
+with `ENOTSUP`. Allocation and native-thread creation errors are returned
+without publishing an initialized runtime.
+
+Affinity is scoped to each `llam_runtime_run_handle()` call. LLAM snapshots the
+driver thread's mask before scheduler placement and restores it before returning
+on normal drain, cooperative stop, fatal scheduler exit, or secondary-worker
+creation failure. `scheduler_threads` excludes the host thread that drives shard
+0; `native_execution_threads` includes that host loop while it is active.
+
 ## Tasks
 
 | API | Purpose |
@@ -213,6 +244,27 @@ APIs are compatibility wrappers for simple single-runtime programs.
 | `llam_task_state_name` | Return a stable task state string. |
 | `llam_task_class` | Return the scheduler class for a task. |
 | `llam_current_task` | Return the current managed task, or `NULL` outside LLAM. |
+
+Resource diagnostics intentionally separate configured capacity from live
+native threads:
+
+| Statistics fields | Meaning |
+| --- | --- |
+| `configured_worker_min/count/max` | Resolved scheduler range and initial target. These are policy/capacity, not live thread counts. |
+| `configured_blocking_min/max` | Blocking initialization floor and hard capacity. |
+| `selected_cpu_count`, `affinity_policy`, `affinity_failures` | Resolved placement plan and cumulative best-effort/required placement failures. |
+| `scheduler_threads` | Live runtime-owned scheduler threads, excluding the host shard-0 driver. |
+| `blocking_threads`, `io_threads`, `controller_threads`, `opaque_helper_threads` | Live native threads by runtime-owned role. |
+| `runtime_owned_threads` | Saturating sum of all live runtime-owned roles. |
+| `native_execution_threads` | `runtime_owned_threads` plus an active host shard-0 loop. |
+| `requested_*_prewarm_total`, `achieved_*_prewarm_total` | Resolved target and actual startup result for each prewarm class. |
+| `*_prewarm_source` | Whether the target came from exact public options, a `_TOTAL` environment input, a deprecated compatibility input, or profile defaults. |
+| `estimated_metadata_bytes`, `estimated_stack_mapping_bytes` | Checked planning estimates; stack mapping bytes are virtual mapping estimates, not RSS. |
+
+The JSON writer emits the same resource fields. The human dump additionally
+shows confirmed/entered/exited blocking workers, creation failures, pending and
+active jobs, making it the preferred artifact when lazy pool growth does not
+reach its configured maximum.
 
 ## Task Local Storage
 

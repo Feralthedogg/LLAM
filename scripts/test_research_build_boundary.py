@@ -500,6 +500,148 @@ class ResearchBoundaryTests(unittest.TestCase):
     def _normalized_prefix_text(text: str, prefix: Path) -> str:
         return text.replace(str(prefix), "${prefix}").replace("\\", "/")
 
+    @staticmethod
+    def _installed_resource_consumer_source() -> str:
+        return (
+            "#ifndef _GNU_SOURCE\n"
+            "#define _GNU_SOURCE 1\n"
+            "#endif\n"
+            "#include <llam/runtime.h>\n"
+            "#include <stdint.h>\n"
+            "#include <string.h>\n"
+            "#if defined(_WIN32)\n"
+            "#include <windows.h>\n"
+            "#elif defined(__linux__)\n"
+            "#include <sched.h>\n"
+            "#else\n"
+            "#include <unistd.h>\n"
+            "#endif\n"
+            "\n"
+            "static uint32_t discover_consumer_cpus(uint32_t cpus[2]) {\n"
+            "#if defined(_WIN32)\n"
+            "    SYSTEM_INFO info;\n"
+            "    uint32_t count;\n"
+            "    memset(&info, 0, sizeof(info));\n"
+            "    GetNativeSystemInfo(&info);\n"
+            "    count = info.dwNumberOfProcessors > 1U ? 2U : 1U;\n"
+            "    cpus[0] = count > 1U ? 1U : 0U;\n"
+            "    cpus[1] = 0U;\n"
+            "    return count;\n"
+            "#elif defined(__linux__)\n"
+            "    cpu_set_t allowed;\n"
+            "    uint32_t found[2] = {0U, 0U};\n"
+            "    uint32_t count = 0U;\n"
+            "    unsigned cpu;\n"
+            "    CPU_ZERO(&allowed);\n"
+            "    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {\n"
+            "        return 0U;\n"
+            "    }\n"
+            "    for (cpu = 0U; cpu < CPU_SETSIZE && count < 2U; ++cpu) {\n"
+            "        if (CPU_ISSET((int)cpu, &allowed)) {\n"
+            "            found[count++] = cpu;\n"
+            "        }\n"
+            "    }\n"
+            "    if (count == 0U) {\n"
+            "        return 0U;\n"
+            "    }\n"
+            "    cpus[0] = found[count - 1U];\n"
+            "    cpus[1] = found[0];\n"
+            "    return count;\n"
+            "#else\n"
+            "    long available = 1;\n"
+            "#ifdef _SC_NPROCESSORS_ONLN\n"
+            "    available = sysconf(_SC_NPROCESSORS_ONLN);\n"
+            "#endif\n"
+            "    if (available < 1) {\n"
+            "        available = 1;\n"
+            "    }\n"
+            "    cpus[0] = available > 1 ? 1U : 0U;\n"
+            "    cpus[1] = 0U;\n"
+            "    return available > 1 ? 2U : 1U;\n"
+            "#endif\n"
+            "}\n"
+            "\n"
+            "static int exercise_legacy_prefix(void) {\n"
+            "    llam_runtime_opts_t opts;\n"
+            "    unsigned char *bytes = (unsigned char *)(void *)&opts;\n"
+            "    size_t i;\n"
+            "    memset(&opts, 0xA5, sizeof(opts));\n"
+            "    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_V2_2_SIZE) != 0) {\n"
+            "        return 10;\n"
+            "    }\n"
+            "    for (i = LLAM_RUNTIME_OPTS_V2_2_SIZE; i < sizeof(opts); ++i) {\n"
+            "        if (bytes[i] != 0xA5U) {\n"
+            "            return 11;\n"
+            "        }\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n"
+            "\n"
+            "static int exercise_current_resource_contract(void) {\n"
+            "    uint32_t cpus[2] = {0U, 0U};\n"
+            "    uint32_t cpu_count = discover_consumer_cpus(cpus);\n"
+            "    llam_runtime_opts_t opts;\n"
+            "    llam_runtime_stats_t stats;\n"
+            "    llam_runtime_t *runtime = NULL;\n"
+            "    int result = 0;\n"
+            "    if (cpu_count == 0U ||\n"
+            "        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {\n"
+            "        return 20;\n"
+            "    }\n"
+            "    opts.worker_min = cpu_count;\n"
+            "    opts.worker_count = cpu_count;\n"
+            "    opts.worker_max = cpu_count;\n"
+            "    opts.blocking_min = 0U;\n"
+            "    opts.blocking_max = 2U;\n"
+            "    opts.affinity_policy = LLAM_RUNTIME_AFFINITY_NONE;\n"
+            "    opts.cpu_count = cpu_count;\n"
+            "    opts.cpu_ids = cpus;\n"
+            "    opts.task_prewarm_total = 2U;\n"
+            "    opts.stack_prewarm_total = 1U;\n"
+            "    opts.timer_prewarm_total = 2U;\n"
+            "    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {\n"
+            "        return 21;\n"
+            "    }\n"
+            "    if (llam_runtime_collect_stats_ex_handle(\n"
+            "            runtime, &stats, LLAM_RUNTIME_STATS_CURRENT_SIZE) != 0) {\n"
+            "        result = 22;\n"
+            "    } else if (stats.configured_worker_min != cpu_count ||\n"
+            "               stats.configured_worker_count != cpu_count ||\n"
+            "               stats.configured_worker_max != cpu_count ||\n"
+            "               stats.configured_blocking_min != 0U ||\n"
+            "               stats.configured_blocking_max != 2U ||\n"
+            "               stats.selected_cpu_count != cpu_count ||\n"
+            "               stats.requested_task_prewarm_total != 2U ||\n"
+            "               stats.achieved_task_prewarm_total != 2U ||\n"
+            "               stats.requested_stack_prewarm_total != 1U ||\n"
+            "               stats.achieved_stack_prewarm_total != 1U ||\n"
+            "               stats.requested_timer_prewarm_total != 2U ||\n"
+            "               stats.achieved_timer_prewarm_total != 2U) {\n"
+            "        result = 23;\n"
+            "    }\n"
+            "    llam_runtime_destroy(runtime);\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
+            "int main(void) {\n"
+            "    int result;\n"
+            "    if (llam_abi_version() != ((2U << 16) | 0U)) {\n"
+            "        return 1;\n"
+            "    }\n"
+            "    result = exercise_legacy_prefix();\n"
+            "    return result != 0 ? result : exercise_current_resource_contract();\n"
+            "}\n"
+        )
+
+    @staticmethod
+    def _installed_abi_consumer_source() -> str:
+        return (
+            "#include <llam/runtime.h>\n"
+            "int main(void) {\n"
+            "    return llam_abi_version() == ((2U << 16) | 0U) ? 0 : 1;\n"
+            "}\n"
+        )
+
     @classmethod
     def _build_and_install_contract_mode(cls, mode: str) -> Path:
         prefix = cls.work / f"install-contract-{mode}"
@@ -723,10 +865,7 @@ class ResearchBoundaryTests(unittest.TestCase):
         source = cls.work / f"pkg-config-consumer-{prefix.name}.c"
         binary = cls.work / f"pkg-config-consumer-{prefix.name}"
         source.write_text(
-            "#include <llam/runtime.h>\n"
-            "int main(void) {\n"
-            "    return llam_abi_version() == ((2U << 16) | 0U) ? 0 : 1;\n"
-            "}\n",
+            cls._installed_resource_consumer_source(),
             encoding="utf-8",
         )
         compile_result = cls._run(
@@ -767,6 +906,7 @@ class ResearchBoundaryTests(unittest.TestCase):
         *,
         exact_config_dir: Path | None = None,
         fallback_prefix: Path | None = None,
+        consumer_source: str | None = None,
     ) -> str:
         config_matches = list(prefix.rglob("llam-config.cmake"))
         if len(config_matches) != 1:
@@ -869,10 +1009,7 @@ class ResearchBoundaryTests(unittest.TestCase):
             encoding="utf-8",
         )
         (source_dir / "main.c").write_text(
-            "#include <llam/runtime.h>\n"
-            "int main(void) {\n"
-            "    return llam_abi_version() == ((2U << 16) | 0U) ? 0 : 1;\n"
-            "}\n",
+            consumer_source or cls._installed_resource_consumer_source(),
             encoding="utf-8",
         )
         configure_command = [
@@ -1573,6 +1710,7 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                         "fallback",
                         exact_config_dir=root / "missing",
                         fallback_prefix=fallback,
+                        consumer_source=ResearchBoundaryTests._installed_abi_consumer_source(),
                     )
                 with self.assertRaisesRegex(
                     AssertionError, "artifact escaped prefix"
@@ -1580,7 +1718,11 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                     self._write_fake_cmake_package(
                         expected, link_languages="C", implib=outside_implib
                     )
-                    ResearchBoundaryTests._cmake_package_contract(expected, "escape")
+                    ResearchBoundaryTests._cmake_package_contract(
+                        expected,
+                        "escape",
+                        consumer_source=ResearchBoundaryTests._installed_abi_consumer_source(),
+                    )
                 notfound = root / "notfound"
                 self._write_fake_cmake_package(notfound, link_languages="C")
                 config = notfound / "lib" / "cmake" / "llam" / "llam-config.cmake"
@@ -1592,14 +1734,24 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 with self.assertRaisesRegex(AssertionError, "not found"):
-                    ResearchBoundaryTests._cmake_package_contract(notfound, "notfound")
+                    ResearchBoundaryTests._cmake_package_contract(
+                        notfound,
+                        "notfound",
+                        consumer_source=ResearchBoundaryTests._installed_abi_consumer_source(),
+                    )
                 c_only = root / "c-only"
                 asm_and_c = root / "asm-and-c"
                 self._write_fake_cmake_package(c_only, link_languages="C")
                 self._write_fake_cmake_package(asm_and_c, link_languages="ASM;C")
-                c_contract = ResearchBoundaryTests._cmake_package_contract(c_only, "c")
+                c_contract = ResearchBoundaryTests._cmake_package_contract(
+                    c_only,
+                    "c",
+                    consumer_source=ResearchBoundaryTests._installed_abi_consumer_source(),
+                )
                 asm_contract = ResearchBoundaryTests._cmake_package_contract(
-                    asm_and_c, "asm"
+                    asm_and_c,
+                    "asm",
+                    consumer_source=ResearchBoundaryTests._installed_abi_consumer_source(),
                 )
                 self.assertNotEqual(c_contract, asm_contract)
             finally:

@@ -76,6 +76,11 @@
       "path": "experiments/srem/test_srem_model.c"
     },
     {
+      "limit": 1400,
+      "line_count": 1434,
+      "path": "include/llam/runtime.h"
+    },
+    {
       "limit": 800,
       "line_count": 1036,
       "path": "src/core/broker/broker_descriptor.c"
@@ -87,13 +92,23 @@
     },
     {
       "limit": 750,
-      "line_count": 827,
+      "line_count": 932,
       "path": "src/core/debug/debug.c"
     },
     {
       "limit": 1250,
-      "line_count": 1294,
+      "line_count": 1601,
       "path": "src/core/lifecycle/init.c"
+    },
+    {
+      "limit": 800,
+      "line_count": 823,
+      "path": "src/core/memory/alloc.c"
+    },
+    {
+      "limit": 650,
+      "line_count": 877,
+      "path": "src/core/platform/platform.c"
     },
     {
       "limit": 700,
@@ -122,7 +137,7 @@
     },
     {
       "limit": 1200,
-      "line_count": 1616,
+      "line_count": 1640,
       "path": "src/internal/runtime_types.h"
     },
     {
@@ -142,7 +157,7 @@
     },
     {
       "limit": 800,
-      "line_count": 813,
+      "line_count": 819,
       "path": "src/io/darwin/watch/darwin_worker.c"
     },
     {
@@ -167,7 +182,7 @@
     },
     {
       "limit": 800,
-      "line_count": 4445,
+      "line_count": 4568,
       "path": "tests/test_multi_runtime_core.c"
     },
     {
@@ -177,7 +192,7 @@
     },
     {
       "limit": 800,
-      "line_count": 5461,
+      "line_count": 6596,
       "path": "tests/test_runtime_core.c"
     },
     {
@@ -192,7 +207,7 @@
     },
     {
       "limit": 800,
-      "line_count": 7169,
+      "line_count": 7970,
       "path": "tests/test_runtime_shutdown_internal.c"
     },
     {

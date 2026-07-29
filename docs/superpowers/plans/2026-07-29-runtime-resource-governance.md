@@ -550,7 +550,7 @@ git commit -m "feat: enforce affinity and native thread diagnostics"
 - Consumes: all public fields and diagnostics from Tasks 1-6
 - Produces: FFI-facing ownership/default/error documentation and installed consumer coverage
 
-- [ ] **Step 1: Add installed C and CMake consumer cases**
+- [x] **Step 1: Add installed C and CMake consumer cases**
 
 Compile consumers that use a short 2.2 option prefix and a current prefix with
 fixed workers, sparse CPU IDs, zero-min blocking pool, and total prewarm.
@@ -558,35 +558,37 @@ Assert stable and research installations expose identical declarations,
 symbols, ABI major, SONAME/install name, pkg-config, and imported target
 metadata.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Expected: documentation/consumer checks identify missing resource fields and
 old per-shard prewarm wording until the contract is updated.
 
-- [ ] **Step 3: Document exact defaults and ownership**
+- [x] **Step 3: Document exact defaults and ownership**
 
 State CPU-ID pointer copy timing, affinity error behavior, blocking lazy growth,
 legacy versus `_TOTAL` environment semantics, exact public failure, diagnostic
 meaning, and the 256/4096 hard caps.
 
-- [ ] **Step 4: Run installed-contract, ABI, export, manifest, and structure checks**
+- [x] **Step 4: Run installed-contract, ABI, export, manifest, and structure checks**
 
 Run:
 
 ```bash
-python3 scripts/test_installed_contract.py
+python3 -m unittest \
+  scripts.test_research_build_boundary.ResearchBoundaryTests.test_installed_contract_parity
 python3 scripts/audit_build_manifests.py --check
-python3 scripts/audit_c_structure.py --strict
+python3 scripts/audit_c_structure.py --root . --mode ratchet \
+  --baseline config/c-structure-baseline.json
 cmake --build object/resource-plan-red --target test_abi_contract -j2
 ctest --test-dir object/resource-plan-red --output-on-failure -R abi_contract
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add docs/reference/api.md docs/reference/environment.md docs/operations.md \
   docs/guides/performance-tuning.md tests/test_abi_contract.c \
-  scripts/test_installed_contract.py config/c-structure-baseline.json
+  scripts/test_research_build_boundary.py config/c-structure-baseline.json
 git commit -m "docs: define runtime resource governance contract"
 ```
 

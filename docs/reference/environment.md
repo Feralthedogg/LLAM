@@ -28,7 +28,13 @@ diagnostics, benchmarks, and CI.
 | `LLAM_SQPOLL_CPU` | CPU number | Select SQPOLL CPU. |
 | `LLAM_IDLE_SPIN_NS` | nanoseconds | Idle spin time before kernel sleep. |
 | `LLAM_IDLE_SPIN_ITERS` | iteration count | Idle spin iteration limit. |
-| `LLAM_BIND_WORKERS` | `0`, `1` | Bind worker threads to platform CPUs when supported. |
+
+Worker bounds, blocking-pool bounds, ordered CPU selection, and affinity policy
+have no environment-variable authority. Embedders must set them through the
+size-aware `llam_runtime_opts_t` contract so each runtime instance has an
+immutable, inspectable resource plan. This also prevents a process-wide
+environment override from silently multiplying resources across independent
+runtimes.
 
 ## I/O Policy
 
@@ -79,6 +85,19 @@ environment inputs take precedence over deprecated names but remain
 best-effort. Zero public fields select environment/profile compatibility
 policy. All metadata targets share a checked 1 GiB planning ceiling; stack
 prewarm is capped at 4096 mappings.
+
+Without an explicit public or environment target, task metadata defaults to 128
+logical task objects per selected worker. Timer slots default per worker to
+1,024 in `release-fast`, 0 in `debug-safe`, and 512 otherwise. Stack mappings
+are runtime-total and default to 256 in `release-fast` or 128 otherwise.
+Best-effort task and timer totals are clamped in task-then-timer order to the
+remaining metadata budget.
+
+The deprecated task and timer variables retain their historical per-worker
+meaning before conversion to a runtime total. Their per-worker inputs are
+capped at 4,096 tasks and 1,048,576 timer slots respectively. The deprecated
+stack variable was already runtime-total. New deployments should use `_TOTAL`
+names and inspect achieved counts.
 
 `llam_runtime_stats_t` reports the resolved request, achieved total, and
 `llam_runtime_prewarm_source_t` authority independently for each resource.

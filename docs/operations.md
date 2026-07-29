@@ -115,6 +115,75 @@ Use larger stack classes only for known deep C call chains. Enable
 `LLAM_STACK_SAMPLING=1` during staging to catch near-overflow behavior, then
 disable it for release benchmarking unless diagnostics are required.
 
+## 5.1 Runtime Resource Governance
+
+Every explicit runtime owns scheduler capacity, platform I/O/controller
+threads, a blocking pool, and prewarm allocations. Defaults are convenient for
+a single runtime but intentionally scale with the process-allowed CPU set.
+Hosts that create multiple runtimes should therefore budget each instance
+explicitly before initialization.
+
+```c
+uint32_t cpus[] = {6U, 2U}; /* Must be unique and process-allowed. */
+llam_runtime_opts_t opts;
+llam_runtime_t *runtime = NULL;
+
+llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+opts.worker_min = 2U;
+opts.worker_count = 2U;
+opts.worker_max = 2U;
+opts.blocking_min = 0U;
+opts.blocking_max = 8U;
+opts.affinity_policy = LLAM_RUNTIME_AFFINITY_PREFER;
+opts.cpu_count = 2U;
+opts.cpu_ids = cpus;
+opts.task_prewarm_total = 4096U;
+opts.stack_prewarm_total = 256U;
+opts.timer_prewarm_total = 4096U;
+
+if (llam_runtime_create(
+        &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+    /* No initialized runtime was published; errno names the rejected plan. */
+}
+```
+
+The CPU array is copied synchronously, so it need not outlive
+`llam_runtime_create()`. CPU order becomes worker order. A nonzero
+`worker_count` with both bounds left at zero is shorthand for a fixed worker
+count. When all worker fields are zero, static mode uses every selected CPU;
+deterministic mode resolves to one worker; an explicit or experimental dynamic
+range starts at `worker_count`, never drops below `worker_min`, and allocates up
+to `worker_max`.
+
+When both blocking fields are zero, compatibility defaults are fixed:
+Linux uses `min(worker_count, 4)` with a floor of one; other platforms use
+`max(worker_count, 2)`. To avoid startup blocking threads, set
+`blocking_min=0` and a nonzero `blocking_max`. Each enqueue can grow the pool by
+at most one worker when queued pressure exceeds confirmed workers. If the first
+worker cannot be created, the submission is rolled back; after one worker
+exists, later growth failure leaves that worker to drain the queue.
+
+`LLAM_RUNTIME_AFFINITY_NONE` never changes the host. `PREFER` continues after
+unsupported/apply/restore errors and increments `affinity_failures`.
+`REQUIRE` rejects an unsupported platform during initialization or returns the
+exact affinity error from the run call. On Linux, the shard-0 driver mask is
+restored before every run return; affinity failures should still be treated as
+an operational incident because a failed restore can leave the host thread
+with a narrower mask.
+
+Export these fields per runtime:
+
+- configured worker/blocking min, initial count, and maximum;
+- live scheduler, blocking, I/O, controller, and opaque-helper threads;
+- `runtime_owned_threads` and host-inclusive `native_execution_threads`;
+- selected CPU count, affinity policy, and affinity failure count;
+- requested/achieved prewarm totals, source authority, and byte estimates.
+
+Before accepting an embedding budget, test the aggregate of all runtime
+instances, not just `configured_worker_max`. I/O/controller roles exist after
+initialization, blocking workers may grow later, and the host contributes one
+execution thread only while it drives shard 0.
+
 ## 6. Platform Differences
 
 Linux, kqueue platforms, and Windows have different kernel contracts. Linux
@@ -327,8 +396,10 @@ manual reproduction pass.
 
 Minimum production counters to export are `ctx_switches`, `parks`, `wakes`,
 `io_submits`, `io_submit_syscalls`, `io_completions`, `active_workers`,
-`online_workers`, `queue_overflows`, `overflow_depth`, and opaque blocking
-duration counters.
+`online_workers`, `configured_worker_max`, `runtime_owned_threads`,
+`native_execution_threads`, `affinity_failures`, requested/achieved prewarm
+totals, `queue_overflows`, `overflow_depth`, and opaque blocking duration
+counters.
 
 ## 8.1 Bug-Hunter Validation Profile
 
