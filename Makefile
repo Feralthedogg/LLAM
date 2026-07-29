@@ -214,6 +214,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_debug_dump_helpers.h \
 	src/internal/llam_internal.h \
 	src/internal/runtime_internal.h \
+	src/internal/runtime_resource_plan.h \
 	src/internal/runtime_types.h \
 	src/internal/runtime_public_slot.h \
 	src/internal/runtime_public_active_op.h \
@@ -248,6 +249,7 @@ endif
 
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/lifecycle/runtime.o \
+	$(OBJDIR)/src/core/lifecycle/resource_plan.o \
 	$(OBJDIR)/src/core/base/abi.o \
 	$(OBJDIR)/src/core/base/errno.o \
 	$(OBJDIR)/src/core/base/util.o \

@@ -49,6 +49,7 @@ endif()
 
 set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/lifecycle/runtime.c
+    src/core/lifecycle/resource_plan.c
     src/core/base/abi.c
     src/core/base/errno.c
     src/core/base/util.c

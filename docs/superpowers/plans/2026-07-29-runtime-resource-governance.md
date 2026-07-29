@@ -157,7 +157,7 @@ int llam_runtime_resource_plan_resolve(
     llam_runtime_resource_plan_t *out);
 ```
 
-- [ ] **Step 1: Write table-driven planner tests**
+- [x] **Step 1: Write table-driven planner tests**
 
 Use literal cases for 1, 8, and 64 CPUs; sparse caller order; explicit fixed
 count; dynamic ranges; duplicate and disallowed CPUs; 257 CPUs; deterministic
@@ -167,7 +167,7 @@ checked arithmetic overflow. Each case asserts the exact plan or exact errno.
 The break named by the test is accepting an invalid or ambiguous resource
 graph before runtime allocation.
 
-- [ ] **Step 2: Run the planner tests and verify RED**
+- [x] **Step 2: Run the planner tests and verify RED**
 
 Run:
 
@@ -179,7 +179,7 @@ ctest --test-dir object/resource-plan-red --output-on-failure -R runtime_core
 Expected: compile failure because `runtime_resource_plan.h` and the resolver do
 not exist.
 
-- [ ] **Step 3: Implement checked arithmetic and CPU validation**
+- [x] **Step 3: Implement checked arithmetic and CPU validation**
 
 Implement local helpers:
 
@@ -195,14 +195,14 @@ Resolve zero worker fields as legacy automatic defaults. A nonzero
 in caller order and must contain unique process-allowed IDs. Reserve an SQPOLL
 CPU without allowing `worker_max` to exceed the remaining selected CPUs.
 
-- [ ] **Step 4: Register the source through the canonical build manifest**
+- [x] **Step 4: Register the source through the canonical build manifest**
 
 Add `src/core/lifecycle/resource_plan.c` once to
 `config/llam-sources.json::stable.common_sources`, then project it into Make and
 CMake using the repository audit/update workflow rather than maintaining an
 untracked source list.
 
-- [ ] **Step 5: Run planner and manifest tests and verify GREEN**
+- [x] **Step 5: Run planner and manifest tests and verify GREEN**
 
 Run:
 
@@ -214,7 +214,7 @@ python3 scripts/test_audit_build_manifests.py
 
 Expected: planner cases pass and source-set parity is clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/internal/runtime_resource_plan.h src/internal/runtime_internal.h \

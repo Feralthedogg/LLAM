@@ -19,6 +19,7 @@
  */
 
 #include "llam/runtime.h"
+#include "runtime_resource_plan.h"
 #include "runtime_internal.h"
 
 #include <errno.h>
@@ -730,6 +731,432 @@ static int test_legacy_runtime_init_ignores_resource_tail(void) {
         llam_runtime_shutdown();
         return test_fail("size-aware runtime init did not reject invalid affinity policy");
     }
+    return 0;
+}
+
+typedef struct resource_plan_case {
+    const char *name;
+    llam_runtime_opts_t opts;
+    size_t opts_size;
+    const unsigned *allowed_cpus;
+    unsigned allowed_cpu_count;
+    bool affinity_supported;
+    bool sqpoll_supported;
+    int expected_errno;
+    unsigned worker_min;
+    unsigned worker_count;
+    unsigned worker_max;
+    unsigned blocking_min;
+    unsigned blocking_max;
+    unsigned selected_cpu_count;
+    const unsigned *selected_cpus;
+    bool sqpoll_reserved;
+    int sqpoll_cpu;
+} resource_plan_case_t;
+
+#if defined(__linux__)
+#define TEST_LEGACY_BLOCKING_ONE_CPU 1U
+#else
+#define TEST_LEGACY_BLOCKING_ONE_CPU 2U
+#endif
+
+static int test_runtime_resource_plan_resolver(void) {
+    static const unsigned cpus_1[] = {7U};
+    static const unsigned cpus_8[] = {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U};
+    static const unsigned cpus_64[] = {
+        0U,  1U,  2U,  3U,  4U,  5U,  6U,  7U,  8U,  9U,  10U, 11U, 12U,
+        13U, 14U, 15U, 16U, 17U, 18U, 19U, 20U, 21U, 22U, 23U, 24U, 25U,
+        26U, 27U, 28U, 29U, 30U, 31U, 32U, 33U, 34U, 35U, 36U, 37U, 38U,
+        39U, 40U, 41U, 42U, 43U, 44U, 45U, 46U, 47U, 48U, 49U, 50U, 51U,
+        52U, 53U, 54U, 55U, 56U, 57U, 58U, 59U, 60U, 61U, 62U, 63U,
+    };
+    static const unsigned cpus_sparse[] = {11U, 3U, 29U, 7U};
+    static const uint32_t requested_sparse[] = {29U, 7U, 11U};
+    static const unsigned expected_sparse[] = {29U, 7U, 11U};
+    static const uint32_t requested_duplicate[] = {3U, 3U};
+    static const uint32_t requested_disallowed[] = {3U, 99U};
+    static const unsigned cpus_sqpoll[] = {0U, 2U, 4U, 6U};
+    static const unsigned expected_sqpoll[] = {0U, 2U, 4U};
+    static const resource_plan_case_t cases[] = {
+        {
+            .name = "one-cpu automatic",
+            .opts = {.sqpoll_cpu = -1, .blocking_max = 1U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 1U,
+            .worker_count = 1U,
+            .worker_max = 1U,
+            .blocking_min = 0U,
+            .blocking_max = 1U,
+            .selected_cpu_count = 1U,
+            .selected_cpus = cpus_1,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "eight-cpu fixed",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 4U, .blocking_min = 1U, .blocking_max = 4U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 4U,
+            .worker_count = 4U,
+            .worker_max = 4U,
+            .blocking_min = 1U,
+            .blocking_max = 4U,
+            .selected_cpu_count = 4U,
+            .selected_cpus = cpus_8,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "sixty-four-cpu dynamic",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_min = 4U,
+                .worker_count = 16U,
+                .worker_max = 32U,
+                .blocking_min = 2U,
+                .blocking_max = 8U,
+                .affinity_policy = LLAM_RUNTIME_AFFINITY_PREFER,
+                .task_prewarm_total = 64U,
+                .stack_prewarm_total = 32U,
+                .timer_prewarm_total = 128U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_64,
+            .allowed_cpu_count = 64U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 4U,
+            .worker_count = 16U,
+            .worker_max = 32U,
+            .blocking_min = 2U,
+            .blocking_max = 8U,
+            .selected_cpu_count = 32U,
+            .selected_cpus = cpus_64,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "sparse caller order",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 3U,
+                .blocking_max = 2U,
+                .cpu_count = 3U,
+                .cpu_ids = requested_sparse,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sparse,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 3U,
+            .worker_count = 3U,
+            .worker_max = 3U,
+            .blocking_min = 0U,
+            .blocking_max = 2U,
+            .selected_cpu_count = 3U,
+            .selected_cpus = expected_sparse,
+            .sqpoll_cpu = -1,
+        },
+        {
+            .name = "duplicate caller CPUs",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 2U,
+                .blocking_max = 1U,
+                .cpu_count = 2U,
+                .cpu_ids = requested_duplicate,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sparse,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "disallowed caller CPU",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 2U,
+                .blocking_max = 1U,
+                .cpu_count = 2U,
+                .cpu_ids = requested_disallowed,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sparse,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "deterministic worker conflict",
+            .opts = {.deterministic = 1U, .sqpoll_cpu = -1, .worker_count = 2U, .blocking_max = 1U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "reversed blocking bounds",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 2U, .blocking_min = 5U, .blocking_max = 4U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "required affinity unsupported",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = 2U,
+                .blocking_max = 1U,
+                .affinity_policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = false,
+            .sqpoll_supported = true,
+            .expected_errno = ENOTSUP,
+        },
+        {
+            .name = "automatic SQPOLL reservation",
+            .opts = {
+                .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL,
+                .sqpoll_cpu = -1,
+                .worker_count = 3U,
+                .blocking_max = 1U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = expected_sqpoll,
+            .allowed_cpu_count = 3U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "four-CPU SQPOLL reservation",
+            .opts = {
+                .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL,
+                .sqpoll_cpu = -1,
+                .worker_count = 3U,
+                .blocking_max = 1U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_sqpoll,
+            .allowed_cpu_count = 4U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 3U,
+            .worker_count = 3U,
+            .worker_max = 3U,
+            .blocking_min = 0U,
+            .blocking_max = 1U,
+            .selected_cpu_count = 3U,
+            .selected_cpus = expected_sqpoll,
+            .sqpoll_reserved = true,
+            .sqpoll_cpu = 6,
+        },
+        {
+            .name = "SQPOLL unsupported",
+            .opts = {
+                .experimental_flags = LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL,
+                .sqpoll_cpu = -1,
+                .worker_count = 1U,
+                .blocking_max = 1U,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = false,
+            .expected_errno = ENOTSUP,
+        },
+        {
+            .name = "stack prewarm above hard cap",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 1U, .blocking_max = 1U, .stack_prewarm_total = 4097U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = E2BIG,
+        },
+        {
+            .name = "metadata estimate overflow",
+            .opts = {.sqpoll_cpu = -1, .worker_count = 1U, .blocking_max = 1U, .task_prewarm_total = UINT64_MAX},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EOVERFLOW,
+        },
+        {
+            .name = "ambiguous worker bounds",
+            .opts = {.sqpoll_cpu = -1, .worker_min = 1U, .blocking_max = 1U},
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_8,
+            .allowed_cpu_count = 8U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .expected_errno = EINVAL,
+        },
+        {
+            .name = "legacy prefix ignores new tail",
+            .opts = {
+                .sqpoll_cpu = -1,
+                .worker_count = UINT32_MAX,
+                .blocking_max = UINT32_MAX,
+                .affinity_policy = UINT32_MAX,
+            },
+            .opts_size = LLAM_RUNTIME_OPTS_V2_2_SIZE,
+            .allowed_cpus = cpus_1,
+            .allowed_cpu_count = 1U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+            .worker_min = 1U,
+            .worker_count = 1U,
+            .worker_max = 1U,
+            .blocking_min = TEST_LEGACY_BLOCKING_ONE_CPU,
+            .blocking_max = TEST_LEGACY_BLOCKING_ONE_CPU,
+            .selected_cpu_count = 1U,
+            .selected_cpus = cpus_1,
+            .sqpoll_cpu = -1,
+        },
+    };
+    unsigned cpus_257[257];
+    uint32_t requested_257[257];
+    unsigned i;
+    size_t case_index;
+
+    for (i = 0U; i < 257U; ++i) {
+        cpus_257[i] = i;
+        requested_257[i] = i;
+    }
+
+    for (case_index = 0U; case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+        const resource_plan_case_t *test_case = &cases[case_index];
+        llam_runtime_resource_plan_input_t input = {
+            .opts = &test_case->opts,
+            .opts_size = test_case->opts_size,
+            .allowed_cpus = test_case->allowed_cpus,
+            .allowed_cpu_count = test_case->allowed_cpu_count,
+            .affinity_supported = test_case->affinity_supported,
+            .sqpoll_supported = test_case->sqpoll_supported,
+        };
+        llam_runtime_resource_plan_t plan;
+        int rc;
+
+        memset(&plan, 0xA5, sizeof(plan));
+        errno = 0;
+        rc = llam_runtime_resource_plan_resolve(&input, &plan);
+        if (test_case->expected_errno != 0) {
+            if (rc != -1 || errno != test_case->expected_errno) {
+                fprintf(stderr,
+                        "[test_runtime_core] resource plan case '%s' returned rc=%d errno=%d, expected errno=%d\n",
+                        test_case->name,
+                        rc,
+                        errno,
+                        test_case->expected_errno);
+                return 1;
+            }
+            if (plan.worker_max != 0U || plan.selected_cpu_count != 0U ||
+                plan.estimated_metadata_bytes != 0U) {
+                return test_fail("failed resource plan exposed a partial result");
+            }
+            continue;
+        }
+        if (rc != 0) {
+            fprintf(stderr,
+                    "[test_runtime_core] resource plan case '%s' failed: errno=%d (%s)\n",
+                    test_case->name,
+                    errno,
+                    strerror(errno));
+            return 1;
+        }
+        if (plan.worker_min != test_case->worker_min ||
+            plan.worker_count != test_case->worker_count ||
+            plan.worker_max != test_case->worker_max ||
+            plan.blocking_min != test_case->blocking_min ||
+            plan.blocking_max != test_case->blocking_max ||
+            plan.selected_cpu_count != test_case->selected_cpu_count ||
+            plan.sqpoll_reserved != test_case->sqpoll_reserved ||
+            plan.sqpoll_cpu != test_case->sqpoll_cpu) {
+            fprintf(stderr, "[test_runtime_core] resource plan case '%s' resolved wrong bounds\n", test_case->name);
+            return 1;
+        }
+        for (i = 0U; i < plan.selected_cpu_count; ++i) {
+            if (plan.selected_cpus[i] != test_case->selected_cpus[i]) {
+                fprintf(stderr,
+                        "[test_runtime_core] resource plan case '%s' reordered CPU %u\n",
+                        test_case->name,
+                        i);
+                return 1;
+            }
+        }
+        if (plan.estimated_metadata_bytes == 0U ||
+            plan.estimated_stack_mapping_bytes !=
+                plan.stack_prewarm_total * LLAM_RUNTIME_STACK_MAPPING_ESTIMATE_BYTES) {
+            return test_fail("resource plan estimates were not resolved exactly");
+        }
+    }
+
+    {
+        llam_runtime_opts_t opts = {.sqpoll_cpu = -1, .blocking_max = 1U};
+        llam_runtime_resource_plan_input_t input = {
+            .opts = &opts,
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_257,
+            .allowed_cpu_count = 257U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+        };
+        llam_runtime_resource_plan_t plan;
+
+        if (llam_runtime_resource_plan_resolve(&input, &plan) != 0 ||
+            plan.worker_max != LLAM_RUNTIME_MAX_WORKERS ||
+            plan.selected_cpu_count != LLAM_RUNTIME_MAX_WORKERS ||
+            plan.selected_cpus[LLAM_RUNTIME_MAX_WORKERS - 1U] != 255U) {
+            return test_fail_errno("257-CPU automatic resource plan did not cap safely");
+        }
+    }
+
+    {
+        llam_runtime_opts_t opts = {
+            .sqpoll_cpu = -1,
+            .worker_count = 1U,
+            .blocking_max = 1U,
+            .cpu_count = 257U,
+            .cpu_ids = requested_257,
+        };
+        llam_runtime_resource_plan_input_t input = {
+            .opts = &opts,
+            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+            .allowed_cpus = cpus_257,
+            .allowed_cpu_count = 257U,
+            .affinity_supported = true,
+            .sqpoll_supported = true,
+        };
+        llam_runtime_resource_plan_t plan;
+
+        errno = 0;
+        if (llam_runtime_resource_plan_resolve(&input, &plan) != -1 || errno != E2BIG) {
+            return test_fail("257-entry explicit CPU list did not fail with E2BIG");
+        }
+    }
+
     return 0;
 }
 
@@ -5435,6 +5862,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
     RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
     RUN_RUNTIME_CORE_TEST(test_legacy_runtime_init_ignores_resource_tail);
+    RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_resolver);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
 #if LLAM_PLATFORM_POSIX
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
