@@ -242,37 +242,9 @@ typedef struct llam_cldeque {
     _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_task_t *) buffer[LLAM_NORM_QUEUE_CAP];
 } llam_cldeque_t;
 
-/** @brief Compact scheduler trace event stored in a per-shard ring buffer. */
-typedef struct llam_trace_event {
-    atomic_uint_fast64_t ts_ns;
-    atomic_uint_fast64_t task_id;
-    atomic_uint kind;
-    atomic_uint from_state;
-    atomic_uint to_state;
-    atomic_uint reason;
-    atomic_uint shard;
-} llam_trace_event_t;
+#include "runtime_trace_types.h"
 
-/** @brief VM state of a retained stack-cache mapping. */
-typedef enum llam_stack_cache_entry_state {
-    LLAM_STACK_CACHE_ENTRY_READY = 0,
-    LLAM_STACK_CACHE_ENTRY_DISCARDED = 1,
-} llam_stack_cache_entry_state_t;
-
-/** @brief Metadata for a cached stack mapping and its usable stack range. */
-struct llam_stack_cache_entry {
-    llam_runtime_t *owner_runtime;
-    void *mapping;
-    size_t mapping_size;
-    void *stack_base;
-    size_t stack_size;
-    uint64_t committed_bytes;
-    uint64_t last_return_ns;
-    uint32_t stack_class;
-    uint32_t state;
-    llam_stack_cache_entry_t *next;
-    bool heap_allocated;
-};
+#include "runtime_stack_cache_types.h"
 
 /** @brief Backing allocation tracked for allocator teardown. */
 typedef struct llam_alloc_chunk {
@@ -1438,6 +1410,8 @@ struct llam_runtime {
     atomic_uint opaque_helper_threads_live;
     atomic_uint host_threads_live;
     atomic_uint_fast64_t affinity_failures;
+    atomic_uint stack_cache_account_writer;
+    atomic_uint_fast64_t stack_cache_account_seq;
     atomic_uint_fast64_t stack_cache_cached_bytes;
     atomic_uint_fast64_t stack_cache_cached_mappings;
     atomic_uint_fast64_t stack_cache_committed_bytes;
@@ -1448,6 +1422,7 @@ struct llam_runtime {
     atomic_uint_fast64_t stack_cache_secure_return_failures;
     atomic_uint_fast64_t stack_cache_resident_bytes;
     atomic_uint_fast64_t stack_cache_resident_sample_ns;
+    atomic_uint_fast64_t stack_cache_last_idle_scan_ns;
     atomic_uint stack_cache_resident_valid;
     pthread_t driver_thread;
     llam_cpu_set_t driver_affinity;
@@ -1462,15 +1437,18 @@ struct llam_runtime {
     bool ctrl_thread_started;
     bool task_list_lock_initialized;
     bool stack_cache_lock_initialized;
+    bool stack_cache_trim_lock_initialized;
     bool block_lock_initialized;
     bool overflow_lock_initialized;
     pthread_mutex_t task_list_lock;
     pthread_mutex_t stack_cache_lock;
+    pthread_mutex_t stack_cache_trim_lock;
     llam_task_t *all_tasks;
     llam_stack_cache_entry_t *stack_cache_default;
     llam_stack_cache_entry_t *stack_cache_large;
     llam_stack_cache_entry_t *stack_cache_huge;
     llam_stack_cache_entry_t *stack_cache_entry_free;
+    llam_stack_cache_entry_t *stack_cache_release_pending;
     unsigned stack_cache_default_count;
     unsigned stack_cache_large_count;
     unsigned stack_cache_huge_count;

@@ -321,6 +321,7 @@ void *llam_ctrl_worker_main(void *arg) {
             llam_watchdog_check_shard(&rt->shards[i], now_ns);
         }
 
+        llam_stack_cache_maintain(rt, now_ns);
         llam_runtime_nudge_marked_watch_migrations(rt);
         llam_runtime_adjust_online_shards(rt);
         llam_watchdog_autotune_tick(rt, now_ns);

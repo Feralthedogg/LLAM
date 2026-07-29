@@ -31,6 +31,8 @@ static atomic_int
     g_llam_stack_vm_test_errors[LLAM_TEST_STACK_VM_OPERATION_COUNT];
 static atomic_uint
     g_llam_stack_vm_test_calls[LLAM_TEST_STACK_VM_OPERATION_COUNT];
+static llam_test_stack_vm_observer_fn g_llam_stack_vm_test_observer;
+static void *g_llam_stack_vm_test_observer_context;
 
 void llam_runtime_test_reset_stack_vm_hooks(void) {
     for (unsigned operation = 0U;
@@ -43,6 +45,8 @@ void llam_runtime_test_reset_stack_vm_hooks(void) {
                               0U,
                               memory_order_release);
     }
+    g_llam_stack_vm_test_observer = NULL;
+    g_llam_stack_vm_test_observer_context = NULL;
 }
 
 void llam_runtime_test_set_stack_vm_error(
@@ -54,6 +58,13 @@ void llam_runtime_test_set_stack_vm_error(
     atomic_store_explicit(&g_llam_stack_vm_test_errors[operation],
                           error_code,
                           memory_order_release);
+}
+
+void llam_runtime_test_set_stack_vm_observer(
+    llam_test_stack_vm_observer_fn observer,
+    void *context) {
+    g_llam_stack_vm_test_observer_context = context;
+    g_llam_stack_vm_test_observer = observer;
 }
 
 unsigned llam_runtime_test_stack_vm_calls(
@@ -72,6 +83,11 @@ static bool llam_stack_vm_test_should_fail(
     atomic_fetch_add_explicit(&g_llam_stack_vm_test_calls[operation],
                               1U,
                               memory_order_relaxed);
+    if (g_llam_stack_vm_test_observer != NULL) {
+        g_llam_stack_vm_test_observer(
+            operation,
+            g_llam_stack_vm_test_observer_context);
+    }
     error_code =
         atomic_load_explicit(&g_llam_stack_vm_test_errors[operation],
                              memory_order_acquire);
@@ -153,7 +169,9 @@ int llam_stack_vm_map(size_t stack_size,
         int saved_errno =
             llam_windows_system_error_to_errno(GetLastError());
 
-        (void)VirtualFree(mapping, 0U, MEM_RELEASE);
+        llam_stack_mapping_release_or_quarantine(NULL,
+                                                 mapping,
+                                                 mapping_size);
         errno = saved_errno;
         return -1;
     }
@@ -170,7 +188,9 @@ int llam_stack_vm_map(size_t stack_size,
     if (mprotect(mapping, page_size, PROT_NONE) != 0) {
         int saved_errno = errno;
 
-        (void)munmap(mapping, mapping_size);
+        llam_stack_mapping_release_or_quarantine(NULL,
+                                                 mapping,
+                                                 mapping_size);
         errno = saved_errno;
         return -1;
     }
@@ -188,6 +208,11 @@ int llam_stack_vm_release(void *mapping, size_t mapping_size) {
         errno = EINVAL;
         return -1;
     }
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (llam_stack_vm_test_should_fail(LLAM_TEST_STACK_VM_RELEASE)) {
+        return -1;
+    }
+#endif
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     if (!VirtualFree(mapping, 0U, MEM_RELEASE)) {
         errno = llam_windows_system_error_to_errno(GetLastError());

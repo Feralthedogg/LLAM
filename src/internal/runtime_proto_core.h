@@ -201,6 +201,17 @@ void llam_io_buffer_allocator_free(llam_io_buffer_t *buffer);
 llam_timer_node_t *llam_timer_node_alloc(llam_shard_t *shard);
 void llam_shard_drain_stack_cache(llam_shard_t *shard);
 void llam_runtime_drain_stack_cache(llam_runtime_t *rt);
+void llam_stack_cache_account_snapshot(const llam_runtime_t *rt,
+                                       uint64_t *cached_bytes,
+                                       uint64_t *cached_mappings,
+                                       uint64_t *committed_bytes);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef void (*llam_test_stack_cache_account_observer_fn)(void *context);
+void llam_runtime_test_reset_stack_cache_account_hook(void);
+void llam_runtime_test_set_stack_cache_account_observer(
+    llam_test_stack_cache_account_observer_fn observer,
+    void *context);
+#endif
 int llam_runtime_prewarm_stack_cache(llam_runtime_t *rt,
                                      uint64_t total,
                                      bool exact,
@@ -237,9 +248,24 @@ int llam_stack_vm_sample_resident(void *stack_base,
 void llam_stack_cache_account_remove(llam_runtime_t *rt,
                                      size_t mapping_size,
                                      uint64_t committed_bytes);
-void llam_stack_mapping_release(llam_runtime_t *rt,
+bool llam_stack_mapping_release(llam_runtime_t *rt,
                                 void *mapping,
                                 size_t mapping_size);
+void llam_stack_mapping_release_or_quarantine(llam_runtime_t *rt,
+                                              void *mapping,
+                                              size_t mapping_size);
+void llam_stack_cache_quarantine_retry(void);
+void llam_stack_cache_quarantine_snapshot(uint64_t *mapping_bytes,
+                                          uint64_t *mapping_count);
+bool llam_stack_cache_release_detached_entry(
+    llam_runtime_t *rt,
+    llam_stack_cache_entry_t *entry);
+void llam_stack_cache_maintain(llam_runtime_t *rt, uint64_t now_ns);
+int llam_stack_cache_trim_internal(llam_runtime_t *rt,
+                                   uint64_t target_bytes,
+                                   bool idle_only,
+                                   uint64_t idle_cutoff_ns,
+                                   uint64_t *released_bytes);
 bool llam_stack_cache_pop_mapping(llam_runtime_t *rt,
                                   llam_shard_t *preferred_shard,
                                   size_t stack_size,
@@ -262,6 +288,10 @@ bool llam_stack_cache_return_mapping(llam_runtime_t *rt,
                                      size_t mapping_size,
                                      void *stack_base,
                                      size_t stack_size);
+void llam_runtime_collect_stack_cache_stats(
+    const llam_runtime_t *rt,
+    llam_runtime_stats_t *stats);
+void llam_runtime_dump_stack_cache(int fd, const llam_runtime_t *rt);
 void llam_pause_cpu(void);
 uint64_t llam_slice_ns(llam_task_class_t task_class);
 const char *llam_stack_profile_hint(const llam_task_t *task);
@@ -287,12 +317,19 @@ typedef enum llam_test_stack_vm_operation {
     LLAM_TEST_STACK_VM_REACTIVATE = 1,
     LLAM_TEST_STACK_VM_SCRUB = 2,
     LLAM_TEST_STACK_VM_RESIDENT_SAMPLE = 3,
-    LLAM_TEST_STACK_VM_OPERATION_COUNT = 4,
+    LLAM_TEST_STACK_VM_RELEASE = 4,
+    LLAM_TEST_STACK_VM_OPERATION_COUNT = 5,
 } llam_test_stack_vm_operation_t;
+typedef void (*llam_test_stack_vm_observer_fn)(
+    llam_test_stack_vm_operation_t operation,
+    void *context);
 void llam_runtime_test_reset_stack_vm_hooks(void);
 void llam_runtime_test_set_stack_vm_error(
     llam_test_stack_vm_operation_t operation,
     int error_code);
+void llam_runtime_test_set_stack_vm_observer(
+    llam_test_stack_vm_observer_fn observer,
+    void *context);
 unsigned llam_runtime_test_stack_vm_calls(
     llam_test_stack_vm_operation_t operation);
 

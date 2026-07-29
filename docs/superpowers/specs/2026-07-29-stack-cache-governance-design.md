@@ -57,9 +57,11 @@ selected security policy. Unsupported residency sampling is explicit rather
 than reported as zero.
 
 No platform call occurs while a shard cache lock is held. Live trim detaches a
-bounded batch under the lock, updates authority, performs VM work outside the
-lock, and then releases or returns only mappings whose state transition
-succeeded.
+bounded batch under the lock, performs VM work outside the lock, and removes
+the exact byte charge only after release succeeds. A failed release remains
+runtime-owned and charged on a serialized retry list. If shutdown still cannot
+release it, ownership moves with its heap metadata to a process-wide quarantine
+that later runtime initialization retries in bounded batches.
 
 ## Trim policy
 
@@ -83,7 +85,9 @@ of publishing it.
 Append exact counters for cached bytes/mappings, committed bytes, trim
 requests, discarded/released bytes, budget rejections, and secure-return
 failures. Resident bytes include a validity/capability field and sampling
-timestamp; they are never presented as exact authority.
+timestamp; they are never presented as exact authority. Process-quarantine
+bytes and mappings expose shutdown release failures that outlive a runtime
+handle.
 
 ## Verification
 

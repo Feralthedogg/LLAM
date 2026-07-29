@@ -741,13 +741,11 @@ static int test_preinit_contracts(void) {
         int pipe_fds[2];
         char json[8192];
         ssize_t nread;
-
         if (pipe(pipe_fds) != 0) {
             return test_fail_errno("pipe for pre-init stats json failed");
         }
         if (llam_runtime_write_stats_json(pipe_fds[1]) != 0) {
             int saved_errno = errno;
-
             close(pipe_fds[0]);
             close(pipe_fds[1]);
             errno = saved_errno;
@@ -766,7 +764,14 @@ static int test_preinit_contracts(void) {
             strstr(json, "\"scheduler_threads\":0") == NULL ||
             strstr(json, "\"runtime_owned_threads\":0") == NULL ||
             strstr(json, "\"native_execution_threads\":0") == NULL ||
-            strstr(json, "\"affinity_failures\":0") == NULL) {
+            strstr(json, "\"affinity_failures\":0") == NULL ||
+            strstr(json, "\"stack_cache_budget_bytes\":0") == NULL ||
+            strstr(json, "\"stack_cache_cached_bytes\":0") == NULL ||
+            strstr(json, "\"stack_cache_trim_requests\":0") == NULL ||
+            strstr(json, "\"stack_cache_resident_valid\":0") == NULL ||
+            strstr(json, "\"stack_cache_resident_sample_ns\":0") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_bytes\":0") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_mappings\":0") == NULL) {
             return test_fail("pre-init stats json was not an empty snapshot");
         }
     }
@@ -924,6 +929,8 @@ typedef struct resource_plan_case {
     bool sqpoll_reserved;
     int sqpoll_cpu;
 } resource_plan_case_t;
+
+#include "test_runtime_stack_cache_plan.inc"
 
 #if defined(__linux__)
 #define TEST_LEGACY_BLOCKING_ONE_CPU 1U
@@ -1344,174 +1351,8 @@ static int test_runtime_resource_plan_resolver(void) {
         }
     }
 
-    {
-        llam_runtime_opts_t opts = {
-            .sqpoll_cpu = -1,
-            .worker_count = 1U,
-            .blocking_max = 1U,
-            .stack_cache_budget_bytes = UINT64_C(64) * 1024U * 1024U,
-            .stack_cache_high_watermark_bytes = UINT64_C(48) * 1024U * 1024U,
-            .stack_cache_low_watermark_bytes = UINT64_C(32) * 1024U * 1024U,
-            .stack_cache_idle_ns = UINT64_C(123456789),
-            .stack_cache_flags =
-                LLAM_RUNTIME_STACK_CACHE_F_SECURE_SCRUB |
-                LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN,
-        };
-        llam_runtime_resource_plan_input_t input = {
-            .opts = &opts,
-            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
-            .allowed_cpus = cpus_1,
-            .allowed_cpu_count = 1U,
-            .affinity_supported = true,
-            .sqpoll_supported = true,
-            .page_size = 4096U,
-        };
-        llam_runtime_resource_plan_t plan;
-
-        if (llam_runtime_resource_plan_resolve(&input, &plan) != 0 ||
-            plan.stack_cache_budget_bytes != opts.stack_cache_budget_bytes ||
-            plan.stack_cache_high_watermark_bytes !=
-                opts.stack_cache_high_watermark_bytes ||
-            plan.stack_cache_low_watermark_bytes !=
-                opts.stack_cache_low_watermark_bytes ||
-            plan.stack_cache_idle_ns != opts.stack_cache_idle_ns ||
-            plan.stack_cache_flags != opts.stack_cache_flags) {
-            return test_fail_errno("custom stack-cache byte policy did not resolve exactly");
-        }
-    }
-
-    {
-        llam_runtime_opts_t opts = {
-            .sqpoll_cpu = -1,
-            .worker_count = 1U,
-            .blocking_max = 1U,
-            .stack_cache_flags = LLAM_RUNTIME_STACK_CACHE_F_DISABLED,
-        };
-        llam_runtime_resource_plan_input_t input = {
-            .opts = &opts,
-            .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
-            .allowed_cpus = cpus_1,
-            .allowed_cpu_count = 1U,
-            .affinity_supported = true,
-            .sqpoll_supported = true,
-            .page_size = 4096U,
-        };
-        llam_runtime_resource_plan_t plan;
-
-        if (llam_runtime_resource_plan_resolve(&input, &plan) != 0 ||
-            plan.stack_cache_budget_bytes != 0U ||
-            plan.stack_cache_high_watermark_bytes != 0U ||
-            plan.stack_cache_low_watermark_bytes != 0U ||
-            plan.stack_cache_flags != LLAM_RUNTIME_STACK_CACHE_F_DISABLED) {
-            return test_fail_errno("disabled stack-cache policy retained a byte budget");
-        }
-    }
-
-    {
-        typedef struct stack_cache_invalid_case {
-            const char *name;
-            uint64_t budget;
-            uint64_t high;
-            uint64_t low;
-            uint64_t prewarm;
-            uint32_t flags;
-            int expected_errno;
-        } stack_cache_invalid_case_t;
-        static const stack_cache_invalid_case_t invalid_cases[] = {
-            {
-                "low above high",
-                UINT64_C(64) * 1024U * 1024U,
-                UINT64_C(32) * 1024U * 1024U,
-                UINT64_C(48) * 1024U * 1024U,
-                0U,
-                0U,
-                EINVAL,
-            },
-            {
-                "high above budget",
-                UINT64_C(64) * 1024U * 1024U,
-                UINT64_C(80) * 1024U * 1024U,
-                UINT64_C(32) * 1024U * 1024U,
-                0U,
-                0U,
-                EINVAL,
-            },
-            {
-                "unaligned budget",
-                UINT64_C(64) * 1024U * 1024U + 1U,
-                UINT64_C(48) * 1024U * 1024U,
-                UINT64_C(32) * 1024U * 1024U,
-                0U,
-                0U,
-                EINVAL,
-            },
-            {
-                "unknown flags",
-                UINT64_C(64) * 1024U * 1024U,
-                UINT64_C(48) * 1024U * 1024U,
-                UINT64_C(32) * 1024U * 1024U,
-                0U,
-                UINT32_C(0x80000000),
-                EINVAL,
-            },
-            {
-                "exact prewarm above budget",
-                UINT64_C(64) * 1024U,
-                UINT64_C(64) * 1024U,
-                UINT64_C(64) * 1024U,
-                1U,
-                0U,
-                E2BIG,
-            },
-            {
-                "disabled exact prewarm",
-                0U,
-                0U,
-                0U,
-                1U,
-                LLAM_RUNTIME_STACK_CACHE_F_DISABLED,
-                EINVAL,
-            },
-        };
-
-        for (size_t case_index = 0U;
-             case_index < sizeof(invalid_cases) / sizeof(invalid_cases[0]);
-             ++case_index) {
-            const stack_cache_invalid_case_t *test_case =
-                &invalid_cases[case_index];
-            llam_runtime_opts_t opts = {
-                .sqpoll_cpu = -1,
-                .worker_count = 1U,
-                .blocking_max = 1U,
-                .stack_prewarm_total = test_case->prewarm,
-                .stack_cache_budget_bytes = test_case->budget,
-                .stack_cache_high_watermark_bytes = test_case->high,
-                .stack_cache_low_watermark_bytes = test_case->low,
-                .stack_cache_flags = test_case->flags,
-            };
-            llam_runtime_resource_plan_input_t input = {
-                .opts = &opts,
-                .opts_size = LLAM_RUNTIME_OPTS_CURRENT_SIZE,
-                .allowed_cpus = cpus_1,
-                .allowed_cpu_count = 1U,
-                .affinity_supported = true,
-                .sqpoll_supported = true,
-                .page_size = 4096U,
-            };
-            llam_runtime_resource_plan_t plan;
-
-            errno = 0;
-            if (llam_runtime_resource_plan_resolve(&input, &plan) != -1 ||
-                errno != test_case->expected_errno) {
-                fprintf(stderr,
-                        "[test_runtime_core] stack-cache plan case '%s' "
-                        "returned errno=%d, expected=%d\n",
-                        test_case->name,
-                        errno,
-                        test_case->expected_errno);
-                return 1;
-            }
-        }
+    if (test_stack_cache_resource_plan(cpus_1) != 0) {
+        return 1;
     }
 
     return 0;
@@ -1568,71 +1409,6 @@ static int test_runtime_total_prewarm_distribution(void) {
         return test_fail("task prewarm slab rounding was not checked exactly");
     }
     return 0;
-}
-
-static int assert_fixed_runtime_resource_stats(unsigned worker_count) {
-    llam_runtime_opts_t opts;
-    llam_runtime_stats_t stats;
-    llam_runtime_t *runtime = NULL;
-    int rc = 1;
-
-    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        return test_fail_errno("fixed resource opts init failed");
-    }
-    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    opts.worker_min = worker_count;
-    opts.worker_count = worker_count;
-    opts.worker_max = worker_count;
-    opts.blocking_min = 1U;
-    opts.blocking_max = 1U;
-    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
-        return test_fail_errno("fixed resource runtime create failed");
-    }
-    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
-        rc = test_fail_errno("fixed resource stats collection failed");
-        goto cleanup;
-    }
-    if (stats.configured_worker_min != worker_count ||
-        stats.configured_worker_count != worker_count ||
-        stats.configured_worker_max != worker_count ||
-        stats.active_workers != worker_count ||
-        stats.online_workers != worker_count ||
-        stats.selected_cpu_count != worker_count ||
-        stats.configured_blocking_min != 1U ||
-        stats.configured_blocking_max != 1U ||
-        stats.stack_cache_budget_bytes !=
-            LLAM_RUNTIME_STACK_CACHE_DEFAULT_BUDGET_BYTES ||
-        stats.stack_cache_high_watermark_bytes !=
-            LLAM_RUNTIME_STACK_CACHE_DEFAULT_HIGH_WATERMARK_BYTES ||
-        stats.stack_cache_low_watermark_bytes !=
-            LLAM_RUNTIME_STACK_CACHE_DEFAULT_LOW_WATERMARK_BYTES ||
-        stats.stack_cache_idle_ns != LLAM_RUNTIME_STACK_CACHE_DEFAULT_IDLE_NS ||
-        stats.stack_cache_flags != 0U ||
-        stats.estimated_metadata_bytes == 0U) {
-        fprintf(stderr,
-                "[test_runtime_core] fixed %u-worker plan resolved as configured=%u/%u/%u active=%u online=%u cpus=%u block=%u/%u cache=%llu/%llu/%llu idle=%llu flags=%u metadata=%llu\n",
-                worker_count,
-                stats.configured_worker_min,
-                stats.configured_worker_count,
-                stats.configured_worker_max,
-                stats.active_workers,
-                stats.online_workers,
-                stats.selected_cpu_count,
-                stats.configured_blocking_min,
-                stats.configured_blocking_max,
-                (unsigned long long)stats.stack_cache_budget_bytes,
-                (unsigned long long)stats.stack_cache_high_watermark_bytes,
-                (unsigned long long)stats.stack_cache_low_watermark_bytes,
-                (unsigned long long)stats.stack_cache_idle_ns,
-                stats.stack_cache_flags,
-                (unsigned long long)stats.estimated_metadata_bytes);
-        goto cleanup;
-    }
-    rc = 0;
-
-cleanup:
-    llam_runtime_destroy(runtime);
-    return rc;
 }
 
 static int test_runtime_resource_plan_initialization(void) {
@@ -2221,6 +1997,24 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
             strstr(json, "\"runtime_owned_threads\":") == NULL ||
             strstr(json, "\"native_execution_threads\":") == NULL ||
             strstr(json, "\"affinity_failures\":") == NULL ||
+            strstr(json, "\"stack_cache_budget_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_high_watermark_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_low_watermark_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_idle_ns\":") == NULL ||
+            strstr(json, "\"stack_cache_flags\":") == NULL ||
+            strstr(json, "\"stack_cache_cached_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_cached_mappings\":") == NULL ||
+            strstr(json, "\"stack_cache_committed_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_trim_requests\":") == NULL ||
+            strstr(json, "\"stack_cache_discarded_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_released_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_budget_rejections\":") == NULL ||
+            strstr(json, "\"stack_cache_secure_return_failures\":") == NULL ||
+            strstr(json, "\"stack_cache_resident_valid\":") == NULL ||
+            strstr(json, "\"stack_cache_resident_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_resident_sample_ns\":") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_bytes\":") == NULL ||
+            strstr(json, "\"stack_cache_process_quarantine_mappings\":") == NULL ||
             strstr(json, "\"io_submit_syscalls\":") == NULL ||
             strstr(json, "\"yield_direct_attempts\":") == NULL ||
             strstr(json, "\"yield_direct_fail_push\":") == NULL ||
@@ -2288,7 +2082,11 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
             strstr(dump, "inflight_io_waiters=") == NULL ||
             strstr(dump, "wait_owner=") == NULL ||
             strstr(dump, "io_req=") == NULL ||
-            strstr(dump, "block_job=") == NULL) {
+            strstr(dump, "block_job=") == NULL ||
+            strstr(dump, "stack_cache:") == NULL ||
+            strstr(dump, "cached_bytes=") == NULL ||
+            strstr(dump, "resident_valid=") == NULL ||
+            strstr(dump, "process_quarantine_mappings=") == NULL) {
             free(dump);
             llam_runtime_shutdown();
             return test_fail("runtime dump did not contain ownership diagnostics");
@@ -3399,293 +3197,7 @@ static void test_restore_env_value(const char *name, char *value) {
     }
 }
 
-typedef struct stack_cache_test_snapshot {
-    uint64_t cached_bytes;
-    uint64_t committed_bytes;
-    uint64_t mappings;
-    unsigned class_mask;
-    bool invalid;
-} stack_cache_test_snapshot_t;
-
-static unsigned stack_cache_test_snapshot_list(
-    llam_stack_cache_entry_t *entry,
-    llam_runtime_t *runtime,
-    stack_cache_test_snapshot_t *snapshot) {
-    unsigned count = 0U;
-
-    while (entry != NULL) {
-        size_t expected_stack_size;
-
-        if (entry->stack_class > (uint32_t)LLAM_STACK_CLASS_HUGE) {
-            snapshot->invalid = true;
-            break;
-        }
-        expected_stack_size =
-            llam_stack_bytes((llam_stack_class_t)entry->stack_class);
-        if (entry->owner_runtime != runtime ||
-            entry->mapping == NULL ||
-            entry->mapping_size !=
-                expected_stack_size + (size_t)llam_page_size() ||
-            entry->stack_base !=
-                (unsigned char *)entry->mapping + llam_page_size() ||
-            entry->stack_size != expected_stack_size ||
-            entry->last_return_ns == 0U ||
-            (entry->state != LLAM_STACK_CACHE_ENTRY_READY &&
-             entry->state != LLAM_STACK_CACHE_ENTRY_DISCARDED) ||
-            (entry->state == LLAM_STACK_CACHE_ENTRY_READY &&
-             entry->committed_bytes != entry->stack_size) ||
-            (entry->state == LLAM_STACK_CACHE_ENTRY_DISCARDED &&
-             entry->committed_bytes != 0U)) {
-            snapshot->invalid = true;
-            break;
-        }
-        snapshot->cached_bytes += entry->mapping_size;
-        snapshot->committed_bytes += entry->committed_bytes;
-        snapshot->mappings += 1U;
-        snapshot->class_mask |= 1U << entry->stack_class;
-        count += 1U;
-        entry = entry->next;
-    }
-    return count;
-}
-
-static stack_cache_test_snapshot_t stack_cache_test_snapshot_runtime(
-    llam_runtime_t *runtime) {
-    stack_cache_test_snapshot_t snapshot;
-
-    memset(&snapshot, 0, sizeof(snapshot));
-    for (unsigned shard_id = 0U;
-         shard_id < runtime->active_shards;
-         ++shard_id) {
-        llam_shard_t *shard = &runtime->shards[shard_id];
-        unsigned default_count;
-        unsigned large_count;
-        unsigned huge_count;
-
-        pthread_mutex_lock(&shard->stack_cache_lock);
-        default_count = stack_cache_test_snapshot_list(
-            shard->stack_cache_default, runtime, &snapshot);
-        large_count = stack_cache_test_snapshot_list(
-            shard->stack_cache_large, runtime, &snapshot);
-        huge_count = stack_cache_test_snapshot_list(
-            shard->stack_cache_huge, runtime, &snapshot);
-        if (default_count != shard->stack_cache_default_count ||
-            large_count != shard->stack_cache_large_count ||
-            huge_count != shard->stack_cache_huge_count) {
-            snapshot.invalid = true;
-        }
-        pthread_mutex_unlock(&shard->stack_cache_lock);
-    }
-
-    pthread_mutex_lock(&runtime->stack_cache_lock);
-    {
-        unsigned default_count = stack_cache_test_snapshot_list(
-            runtime->stack_cache_default, runtime, &snapshot);
-        unsigned large_count = stack_cache_test_snapshot_list(
-            runtime->stack_cache_large, runtime, &snapshot);
-        unsigned huge_count = stack_cache_test_snapshot_list(
-            runtime->stack_cache_huge, runtime, &snapshot);
-
-        if (default_count != runtime->stack_cache_default_count ||
-            large_count != runtime->stack_cache_large_count ||
-            huge_count != runtime->stack_cache_huge_count) {
-            snapshot.invalid = true;
-        }
-    }
-    pthread_mutex_unlock(&runtime->stack_cache_lock);
-    return snapshot;
-}
-
-static void stack_cache_test_noop(void *arg) {
-    (void)arg;
-}
-
-static int test_stack_cache_runtime_byte_authority(void) {
-    enum {
-        STACK_CACHE_INITIAL_TASKS = 3,
-        STACK_CACHE_BURST_TASKS = 96,
-    };
-    char *saved_prewarm_total =
-        test_dup_env_value("LLAM_STACK_CACHE_PREWARM_TOTAL");
-    llam_runtime_opts_t opts;
-    llam_runtime_stats_t stats;
-    llam_spawn_opts_t spawn_opts;
-    llam_task_t *tasks[STACK_CACHE_BURST_TASKS];
-    stack_cache_test_snapshot_t snapshot;
-    unsigned *cpus = NULL;
-    unsigned worker_count;
-    size_t page_size = (size_t)llam_page_size();
-    uint64_t default_mapping =
-        (uint64_t)llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT) + page_size;
-    uint64_t large_mapping =
-        (uint64_t)llam_stack_bytes(LLAM_STACK_CLASS_LARGE) + page_size;
-    uint64_t huge_mapping =
-        (uint64_t)llam_stack_bytes(LLAM_STACK_CLASS_HUGE) + page_size;
-    uint64_t budget = default_mapping + large_mapping + huge_mapping;
-    bool initialized = false;
-    int rc = 1;
-
-    memset(tasks, 0, sizeof(tasks));
-    if (setenv("LLAM_STACK_CACHE_PREWARM_TOTAL", "0", 1) != 0) {
-        rc = test_fail_errno("disabling stack prewarm for byte authority failed");
-        goto cleanup;
-    }
-    worker_count = llam_count_allowed_cpus(&cpus);
-    free(cpus);
-    cpus = NULL;
-    if (worker_count > 4U) {
-        worker_count = 4U;
-    }
-    if (worker_count == 0U) {
-        rc = test_fail("stack-cache byte authority observed no CPUs");
-        goto cleanup;
-    }
-    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        rc = test_fail_errno("stack-cache byte authority opts init failed");
-        goto cleanup;
-    }
-    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    opts.worker_min = worker_count;
-    opts.worker_count = worker_count;
-    opts.worker_max = worker_count;
-    opts.blocking_min = 1U;
-    opts.blocking_max = 1U;
-    opts.stack_cache_budget_bytes = budget;
-    opts.stack_cache_high_watermark_bytes = budget;
-    opts.stack_cache_low_watermark_bytes = page_size;
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        rc = test_fail_errno("stack-cache byte authority runtime init failed");
-        goto cleanup;
-    }
-    initialized = true;
-    if (llam_spawn_opts_init(&spawn_opts, sizeof(spawn_opts)) != 0) {
-        rc = test_fail_errno("stack-cache byte authority spawn opts init failed");
-        goto cleanup;
-    }
-
-    for (unsigned index = 0U; index < STACK_CACHE_INITIAL_TASKS; ++index) {
-        spawn_opts.stack_class = index;
-        tasks[index] = llam_spawn_ex(stack_cache_test_noop,
-                                     NULL,
-                                     &spawn_opts,
-                                     sizeof(spawn_opts));
-        if (tasks[index] == NULL) {
-            rc = test_fail_errno("mixed-class stack-cache spawn failed");
-            goto cleanup;
-        }
-    }
-    if (llam_run() != 0) {
-        rc = test_fail_errno("mixed-class stack-cache run failed");
-        goto cleanup;
-    }
-    for (unsigned index = 0U; index < STACK_CACHE_INITIAL_TASKS; ++index) {
-        if (llam_join(tasks[index]) != 0) {
-            rc = test_fail_errno("mixed-class stack-cache join failed");
-            goto cleanup;
-        }
-        tasks[index] = NULL;
-    }
-    if (llam_runtime_collect_stats_ex(&stats, sizeof(stats)) != 0) {
-        rc = test_fail_errno("mixed-class stack-cache stats failed");
-        goto cleanup;
-    }
-    snapshot = stack_cache_test_snapshot_runtime(&g_llam_runtime);
-    if (snapshot.invalid ||
-        snapshot.class_mask !=
-            ((1U << LLAM_STACK_CLASS_DEFAULT) |
-             (1U << LLAM_STACK_CLASS_LARGE) |
-             (1U << LLAM_STACK_CLASS_HUGE)) ||
-        snapshot.cached_bytes != budget ||
-        snapshot.committed_bytes !=
-            budget - UINT64_C(3) * page_size ||
-        snapshot.mappings != STACK_CACHE_INITIAL_TASKS ||
-        stats.stack_cache_cached_bytes != snapshot.cached_bytes ||
-        stats.stack_cache_committed_bytes != snapshot.committed_bytes ||
-        stats.stack_cache_cached_mappings != snapshot.mappings) {
-        rc = test_fail("mixed-class stack-cache authority was not exact");
-        goto cleanup;
-    }
-
-    for (unsigned index = 0U; index < STACK_CACHE_BURST_TASKS; ++index) {
-        spawn_opts.stack_class = index % 3U;
-        tasks[index] = llam_spawn_ex(stack_cache_test_noop,
-                                     NULL,
-                                     &spawn_opts,
-                                     sizeof(spawn_opts));
-        if (tasks[index] == NULL) {
-            rc = test_fail_errno("concurrent stack-cache burst spawn failed");
-            goto cleanup;
-        }
-    }
-    if (llam_run() != 0) {
-        rc = test_fail_errno("concurrent stack-cache burst run failed");
-        goto cleanup;
-    }
-    for (unsigned index = 0U; index < STACK_CACHE_BURST_TASKS; ++index) {
-        if (llam_join(tasks[index]) != 0) {
-            rc = test_fail_errno("concurrent stack-cache burst join failed");
-            goto cleanup;
-        }
-        tasks[index] = NULL;
-    }
-    if (llam_runtime_collect_stats_ex(&stats, sizeof(stats)) != 0) {
-        rc = test_fail_errno("concurrent stack-cache burst stats failed");
-        goto cleanup;
-    }
-    snapshot = stack_cache_test_snapshot_runtime(&g_llam_runtime);
-    if (snapshot.invalid || snapshot.cached_bytes > budget ||
-        stats.stack_cache_cached_bytes != snapshot.cached_bytes ||
-        stats.stack_cache_committed_bytes != snapshot.committed_bytes ||
-        stats.stack_cache_cached_mappings != snapshot.mappings ||
-        stats.stack_cache_budget_rejections == 0U ||
-        stats.stack_cache_released_bytes == 0U) {
-        rc = test_fail("concurrent stack-cache byte authority diverged from lists");
-        goto cleanup;
-    }
-    llam_runtime_shutdown();
-    initialized = false;
-
-    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        rc = test_fail_errno("disabled stack-cache opts init failed");
-        goto cleanup;
-    }
-    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
-    opts.worker_min = 1U;
-    opts.worker_count = 1U;
-    opts.worker_max = 1U;
-    opts.blocking_min = 1U;
-    opts.blocking_max = 1U;
-    opts.stack_cache_flags = LLAM_RUNTIME_STACK_CACHE_F_DISABLED;
-    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
-        rc = test_fail_errno("disabled stack-cache runtime init failed");
-        goto cleanup;
-    }
-    initialized = true;
-    tasks[0] = llam_spawn(stack_cache_test_noop, NULL, NULL);
-    if (tasks[0] == NULL || llam_run() != 0 || llam_join(tasks[0]) != 0 ||
-        llam_runtime_collect_stats_ex(&stats, sizeof(stats)) != 0) {
-        rc = test_fail_errno("disabled stack-cache lifecycle failed");
-        goto cleanup;
-    }
-    tasks[0] = NULL;
-    if (stats.stack_cache_cached_bytes != 0U ||
-        stats.stack_cache_committed_bytes != 0U ||
-        stats.stack_cache_cached_mappings != 0U ||
-        stats.stack_cache_budget_rejections != 0U) {
-        rc = test_fail("disabled stack-cache retained runtime mappings");
-        goto cleanup;
-    }
-    rc = 0;
-
-cleanup:
-    if (initialized) {
-        llam_runtime_shutdown();
-    }
-    free(cpus);
-    test_restore_env_value("LLAM_STACK_CACHE_PREWARM_TOTAL",
-                           saved_prewarm_total);
-    return rc;
-}
+#include "test_runtime_stack_cache_authority.inc"
 
 static int test_runtime_total_prewarm_authority(void) {
     static const char *const names[] = {

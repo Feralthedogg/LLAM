@@ -43,6 +43,8 @@ APIs are compatibility wrappers for simple single-runtime programs.
 | `llam_runtime_run_handle` | Canonical embedding scheduler driver for one runtime handle. |
 | `llam_run` | Drive the process-default compatibility runtime. |
 | `llam_runtime_request_stop` | Request cooperative stop and wake workers. |
+| `llam_runtime_stack_cache_trim_ex` | Best-effort live trim to a runtime-wide retained-byte target. |
+| `llam_runtime_notify_memory_pressure` | Release all currently retained stack mappings for one runtime. |
 | `llam_runtime_destroy` | Canonical embedding teardown. Passing `NULL` aliases default shutdown. |
 | `llam_runtime_shutdown` | Stop and release default-runtime resources. |
 
@@ -62,6 +64,7 @@ present in the supplied size. Initialize the struct with
 | `cpu_count`, `cpu_ids` | Select unique process-allowed CPU IDs in caller order. LLAM copies the array before the lifecycle call returns; the caller retains ownership and may release it afterward. |
 | `affinity_policy` | `NONE` makes no affinity calls. `PREFER` records failures and continues. `REQUIRE` fails closed when support, binding, or host-affinity restoration fails. Exact scheduler affinity is currently a Linux capability. |
 | `*_prewarm_total` | Request exact runtime-total task objects, default stacks, or timer slots. A nonzero public request either completes in full or fails initialization and unwinds partial resources. |
+| `stack_cache_*` | Bound retained stack mappings in bytes, define high/low automatic trim and idle age, and select scrub/discard/disabled policy. |
 
 Worker and blocking capacities are capped at 256. Default-stack prewarm is
 capped at 4,096 mappings, and checked task/timer metadata planning is bounded by
@@ -70,6 +73,23 @@ fail with `EINVAL`; capacity and planning ceilings fail with `E2BIG`; checked
 arithmetic overflow fails with `EOVERFLOW`; required unsupported affinity fails
 with `ENOTSUP`. Allocation and native-thread creation errors are returned
 without publishing an initialized runtime.
+
+Stack cache ownership follows the task's runtime, never whichever runtime a
+host or managed thread most recently drove. `llam_runtime_stack_cache_trim_ex`
+serializes trim requests per runtime, detaches only bounded batches under one
+cache lock, and performs platform VM release after that lock is dropped.
+Concurrent stack returns make the byte target best effort. A target above the
+resolved budget is invalid. `llam_runtime_notify_memory_pressure()` is the
+same operation with a zero target. A platform release failure returns its
+error, keeps the detached mapping charged to the runtime, and retries that
+mapping before later trim work.
+
+The cache byte/mapping/committed counters in `llam_runtime_stats_t` are exact
+authority snapshots. Resident bytes are optional sampled diagnostics: consume
+them only when `stack_cache_resident_valid` is nonzero and associate them with
+`stack_cache_resident_sample_ns`. Shutdown VM-release failures transfer to
+process authority rather than disappearing with the runtime handle; the
+`stack_cache_process_quarantine_*` fields expose pending retry ownership.
 
 Affinity is scoped to each `llam_runtime_run_handle()` call. LLAM snapshots the
 driver thread's mask before scheduler placement and restores it before returning

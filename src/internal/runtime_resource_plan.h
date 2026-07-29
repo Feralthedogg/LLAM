@@ -90,6 +90,9 @@ typedef struct llam_runtime_resource_plan {
 bool llam_runtime_task_prewarm_storage_objects(uint64_t logical_total,
                                                unsigned worker_count,
                                                uint64_t *out_objects);
+void llam_runtime_opts_copy_prefix(const llam_runtime_opts_t *raw_opts,
+                                   size_t opts_size,
+                                   llam_runtime_opts_t *opts_out);
 
 /**
  * @brief Resolve a complete immutable resource plan without side effects.

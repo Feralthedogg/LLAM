@@ -412,6 +412,10 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
         pthread_mutex_destroy(&rt->stack_cache_lock);
         rt->stack_cache_lock_initialized = false;
     }
+    if (rt->stack_cache_trim_lock_initialized) {
+        pthread_mutex_destroy(&rt->stack_cache_trim_lock);
+        rt->stack_cache_trim_lock_initialized = false;
+    }
     if (rt->overflow_lock_initialized) {
         pthread_mutex_destroy(&rt->overflow_lock);
         rt->overflow_lock_initialized = false;

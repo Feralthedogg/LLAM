@@ -32,6 +32,55 @@
 
 #define LLAM_RESOURCE_OPTS_HAS_FIELD(prefix_size, field) \
     ((prefix_size) >= offsetof(llam_runtime_opts_t, field) + sizeof(((llam_runtime_opts_t *)0)->field))
+#define LLAM_COPY_RUNTIME_OPT(field) \
+    do { \
+        if (LLAM_RESOURCE_OPTS_HAS_FIELD(opts_size, field)) { \
+            opts_out->field = raw_opts->field; \
+        } \
+    } while (0)
+
+void llam_runtime_opts_copy_prefix(const llam_runtime_opts_t *raw_opts,
+                                   size_t opts_size,
+                                   llam_runtime_opts_t *opts_out) {
+    if (raw_opts == NULL || opts_out == NULL) {
+        return;
+    }
+    memset(opts_out, 0, sizeof(*opts_out));
+    opts_out->sqpoll_cpu = -1;
+    opts_out->profile = LLAM_RUNTIME_PROFILE_BALANCED;
+    opts_out->preempt_mode = LLAM_PREEMPT_AUTO;
+    opts_out->affinity_policy = LLAM_RUNTIME_AFFINITY_NONE;
+    LLAM_COPY_RUNTIME_OPT(deterministic);
+    LLAM_COPY_RUNTIME_OPT(forced_yield_every);
+    LLAM_COPY_RUNTIME_OPT(experimental_flags);
+    LLAM_COPY_RUNTIME_OPT(idle_spin_ns);
+    LLAM_COPY_RUNTIME_OPT(idle_spin_max_iters);
+    LLAM_COPY_RUNTIME_OPT(sqpoll_cpu);
+    LLAM_COPY_RUNTIME_OPT(profile);
+    LLAM_COPY_RUNTIME_OPT(reserved0);
+    LLAM_COPY_RUNTIME_OPT(preempt_mode);
+    LLAM_COPY_RUNTIME_OPT(preempt_poll_period);
+    LLAM_COPY_RUNTIME_OPT(preempt_quantum_ns);
+    LLAM_COPY_RUNTIME_OPT(worker_min);
+    LLAM_COPY_RUNTIME_OPT(worker_count);
+    LLAM_COPY_RUNTIME_OPT(worker_max);
+    LLAM_COPY_RUNTIME_OPT(blocking_min);
+    LLAM_COPY_RUNTIME_OPT(blocking_max);
+    LLAM_COPY_RUNTIME_OPT(affinity_policy);
+    LLAM_COPY_RUNTIME_OPT(cpu_count);
+    LLAM_COPY_RUNTIME_OPT(reserved1);
+    LLAM_COPY_RUNTIME_OPT(cpu_ids);
+    LLAM_COPY_RUNTIME_OPT(task_prewarm_total);
+    LLAM_COPY_RUNTIME_OPT(stack_prewarm_total);
+    LLAM_COPY_RUNTIME_OPT(timer_prewarm_total);
+    LLAM_COPY_RUNTIME_OPT(stack_cache_budget_bytes);
+    LLAM_COPY_RUNTIME_OPT(stack_cache_high_watermark_bytes);
+    LLAM_COPY_RUNTIME_OPT(stack_cache_low_watermark_bytes);
+    LLAM_COPY_RUNTIME_OPT(stack_cache_idle_ns);
+    LLAM_COPY_RUNTIME_OPT(stack_cache_flags);
+    LLAM_COPY_RUNTIME_OPT(reserved2);
+}
+#undef LLAM_COPY_RUNTIME_OPT
 
 /** @brief Return false rather than wrapping an unsigned 64-bit addition. */
 static bool add_u64(uint64_t a, uint64_t b, uint64_t *out) {
@@ -201,6 +250,8 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     int requested_sqpoll_cpu = -1;
     int reserved_cpu = -1;
     uint64_t metadata_bytes = 0U;
+    uint64_t exact_stack_cache_bytes;
+    uint64_t default_stack_mapping_bytes;
     uint64_t stack_mapping_bytes;
     uint64_t task_storage_objects;
     size_t copy_size;
@@ -525,6 +576,12 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         !add_metadata_component(plan.blocking_max, sizeof(pthread_t), &metadata_bytes) ||
         !add_metadata_component(task_storage_objects, sizeof(llam_task_t), &metadata_bytes) ||
         !add_metadata_component(plan.timer_prewarm_total, sizeof(llam_timer_node_t), &metadata_bytes) ||
+        !add_u64((uint64_t)llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT),
+                 (uint64_t)input->page_size,
+                 &default_stack_mapping_bytes) ||
+        !mul_u64(plan.stack_prewarm_total,
+                 default_stack_mapping_bytes,
+                 &exact_stack_cache_bytes) ||
         !mul_u64(plan.stack_prewarm_total,
                  LLAM_RUNTIME_STACK_MAPPING_ESTIMATE_BYTES,
                  &stack_mapping_bytes)) {
@@ -541,7 +598,9 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         errno = EINVAL;
         return -1;
     }
-    if (stack_mapping_bytes > plan.stack_cache_budget_bytes) {
+    if (exact_stack_cache_bytes > plan.stack_cache_budget_bytes ||
+        exact_stack_cache_bytes >
+            plan.stack_cache_high_watermark_bytes) {
         errno = E2BIG;
         return -1;
     }

@@ -184,6 +184,37 @@ instances, not just `configured_worker_max`. I/O/controller roles exist after
 initialization, blocking workers may grow later, and the host contributes one
 execution thread only while it drives shard 0.
 
+## 5.2 Stack Cache Memory Governance
+
+Retained fiber stacks are charged to their owning runtime in mapping bytes,
+including guard pages. The defaults are a 512 MiB budget, 384 MiB automatic
+trim trigger, 256 MiB post-trigger target, and 30-second idle age. Multi-runtime
+hosts should set smaller per-instance values explicitly.
+
+```c
+opts.stack_cache_budget_bytes = 128ULL * 1024ULL * 1024ULL;
+opts.stack_cache_high_watermark_bytes = 96ULL * 1024ULL * 1024ULL;
+opts.stack_cache_low_watermark_bytes = 64ULL * 1024ULL * 1024ULL;
+opts.stack_cache_idle_ns = 10ULL * 1000ULL * 1000ULL * 1000ULL;
+opts.stack_cache_flags = LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN;
+```
+
+Call `llam_runtime_stack_cache_trim_ex(runtime, target, &released)` for an
+operator-requested ceiling. Forward a host/container memory-pressure event to
+`llam_runtime_notify_memory_pressure(runtime)` to trim currently retained
+mappings toward zero. Neither call cancels tasks or releases task-owned stacks.
+A platform release error leaves the detached mapping charged to the runtime;
+retry the trim after addressing the platform failure.
+
+Alert on sustained budget rejections or secure-return failures. Compare exact
+`stack_cache_cached_bytes`, `stack_cache_cached_mappings`, and
+`stack_cache_committed_bytes` with cumulative trim/discard/release counters.
+Resident bytes are sampled only when `stack_cache_resident_valid` is set; a
+zero value with validity unset means “not sampled,” not “zero RSS.”
+If shutdown cannot release a retained mapping, ownership moves to the
+process-wide quarantine and is retried at the next runtime initialization.
+Alert while `stack_cache_process_quarantine_mappings` remains nonzero.
+
 ## 6. Platform Differences
 
 Linux, kqueue platforms, and Windows have different kernel contracts. Linux

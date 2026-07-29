@@ -105,12 +105,32 @@ opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
 | `task_prewarm_total` | Exact runtime-total logical task-object target; `0` selects compatibility policy. |
 | `stack_prewarm_total` | Exact runtime-total default-stack target, capped at 4096; `0` selects compatibility policy. |
 | `timer_prewarm_total` | Exact runtime-total timer-slot target; `0` selects compatibility policy. |
+| `stack_cache_budget_bytes` | Runtime-wide retained mapping-byte ceiling, including guard pages; `0` selects 512 MiB. |
+| `stack_cache_high_watermark_bytes` | Automatic-trim trigger; `0` selects 384 MiB. |
+| `stack_cache_low_watermark_bytes` | Target after crossing the high watermark; `0` selects 256 MiB. |
+| `stack_cache_idle_ns` | Minimum idle age for opportunistic release; `0` selects 30 seconds. |
+| `stack_cache_flags` | Bitwise OR of `LLAM_RUNTIME_STACK_CACHE_F_*`. |
 
 Explicit worker bounds must satisfy
 `1 <= worker_min <= worker_count <= worker_max <= cpu_count`. Prewarm fields
 are exact only through size-aware lifecycle APIs: an allocation shortfall
 fails initialization and unwinds the partial runtime. Environment compatibility
 controls remain best-effort.
+
+Stack-cache byte values must be page aligned and satisfy
+`low <= high <= budget`. An exact stack prewarm must fit both the budget and
+the high watermark, so initialization cannot immediately trim away its own
+prewarm contract. The disabled flag requires zero explicit thresholds and
+cannot be combined with a nonzero exact stack prewarm.
+
+| Stack-cache flag | Effect |
+| --- | --- |
+| `LLAM_RUNTIME_STACK_CACHE_F_SECURE_SCRUB` | Zero usable stack bytes before reuse. |
+| `LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN` | Discard/decommit usable pages before retention and reactivate them after pop. |
+| `LLAM_RUNTIME_STACK_CACHE_F_DISABLED` | Release every returned stack mapping instead of caching it. |
+
+`SECURE_SCRUB` and `DISCARD_ON_RETURN` may be combined. A required scrub,
+discard, or reactivation failure fails closed by releasing that mapping.
 
 Affinity policies:
 

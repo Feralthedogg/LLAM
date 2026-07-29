@@ -118,6 +118,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/task/task_reclaim.c
     src/core/task/stack_cache.c
     src/core/task/stack_cache_lists.c
+    src/core/task/stack_cache_trim.c
     src/core/task/task_stack.c
     src/core/sched/reinject.c
     src/core/wait/wait_accounting.c
@@ -180,6 +181,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/io/windows/watch/iocp.c
     src/core/debug/debug_dump_helpers.c
     src/core/debug/debug_stats_json.c
+    src/core/debug/debug_stack_cache.c
     src/core/debug/debug.c
     src/io/watch/watch.c
     src/io/watch/close.c

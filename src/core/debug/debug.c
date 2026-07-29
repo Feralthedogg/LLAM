@@ -41,14 +41,12 @@ typedef struct llam_debug_io_wait_snapshot {
     short poll_events;
     void *owned_buffer;
 } llam_debug_io_wait_snapshot_t;
-
 typedef struct llam_debug_block_wait_snapshot {
     void *address;
     unsigned state;
     int error_code;
     void *result;
 } llam_debug_block_wait_snapshot_t;
-
 /** @brief Copy recyclable wait-owner fields while a short resolver claim pins them. */
 static const char *llam_debug_snapshot_wait_owners(
     llam_task_t *task,
@@ -244,48 +242,7 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     stats->task_prewarm_source = rt->task_prewarm_source;
     stats->stack_prewarm_source = rt->stack_prewarm_source;
     stats->timer_prewarm_source = rt->timer_prewarm_source;
-    stats->stack_cache_budget_bytes =
-        rt->resource_plan.stack_cache_budget_bytes;
-    stats->stack_cache_high_watermark_bytes =
-        rt->resource_plan.stack_cache_high_watermark_bytes;
-    stats->stack_cache_low_watermark_bytes =
-        rt->resource_plan.stack_cache_low_watermark_bytes;
-    stats->stack_cache_idle_ns =
-        rt->resource_plan.stack_cache_idle_ns;
-    stats->stack_cache_flags = rt->resource_plan.stack_cache_flags;
-    stats->stack_cache_resident_valid =
-        atomic_load_explicit(&rt->stack_cache_resident_valid,
-                             memory_order_acquire);
-    stats->stack_cache_cached_bytes =
-        atomic_load_explicit(&rt->stack_cache_cached_bytes,
-                             memory_order_acquire);
-    stats->stack_cache_cached_mappings =
-        atomic_load_explicit(&rt->stack_cache_cached_mappings,
-                             memory_order_acquire);
-    stats->stack_cache_committed_bytes =
-        atomic_load_explicit(&rt->stack_cache_committed_bytes,
-                             memory_order_acquire);
-    stats->stack_cache_trim_requests =
-        atomic_load_explicit(&rt->stack_cache_trim_requests,
-                             memory_order_acquire);
-    stats->stack_cache_discarded_bytes =
-        atomic_load_explicit(&rt->stack_cache_discarded_bytes,
-                             memory_order_acquire);
-    stats->stack_cache_released_bytes =
-        atomic_load_explicit(&rt->stack_cache_released_bytes,
-                             memory_order_acquire);
-    stats->stack_cache_budget_rejections =
-        atomic_load_explicit(&rt->stack_cache_budget_rejections,
-                             memory_order_acquire);
-    stats->stack_cache_secure_return_failures =
-        atomic_load_explicit(&rt->stack_cache_secure_return_failures,
-                             memory_order_acquire);
-    stats->stack_cache_resident_bytes =
-        atomic_load_explicit(&rt->stack_cache_resident_bytes,
-                             memory_order_acquire);
-    stats->stack_cache_resident_sample_ns =
-        atomic_load_explicit(&rt->stack_cache_resident_sample_ns,
-                             memory_order_acquire);
+    llam_runtime_collect_stack_cache_stats(rt, stats);
     stats->overflow_depth = llam_runtime_overflow_depth(rt);
 
     /*
@@ -576,6 +533,7 @@ void llam_dump_runtime_state(int fd) {
             rt->resource_plan.affinity_policy,
             (unsigned long long)atomic_load_explicit(&rt->affinity_failures,
                                                      memory_order_acquire));
+    llam_runtime_dump_stack_cache(fd, rt);
 
     // The dump format is intentionally text-first for bug reports and benchmark
     // logs; machine consumers should use llam_runtime_collect_stats().

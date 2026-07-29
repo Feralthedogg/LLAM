@@ -205,7 +205,8 @@ endif
 LLAM_PUBLIC_HDRS = \
 	include/llam/io.h \
 	include/llam/platform.h \
-	include/llam/runtime.h
+	include/llam/runtime.h \
+	include/llam/runtime_stats.h
 
 RUNTIME_PRIV_HDRS = \
 	$(LLAM_PUBLIC_HDRS) \
@@ -320,6 +321,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/task/task_reclaim.o \
 	$(OBJDIR)/src/core/task/stack_cache.o \
 	$(OBJDIR)/src/core/task/stack_cache_lists.o \
+	$(OBJDIR)/src/core/task/stack_cache_trim.o \
 	$(OBJDIR)/src/core/task/task_stack.o \
 	$(OBJDIR)/src/core/sched/reinject.o \
 	$(OBJDIR)/src/core/wait/wait_accounting.o \
@@ -382,6 +384,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/windows/watch/iocp.o \
 	$(OBJDIR)/src/core/debug/debug_dump_helpers.o \
 	$(OBJDIR)/src/core/debug/debug_stats_json.o \
+	$(OBJDIR)/src/core/debug/debug_stack_cache.o \
 	$(OBJDIR)/src/core/debug/debug.o \
 	$(OBJDIR)/src/io/watch/watch.o \
 	$(OBJDIR)/src/io/watch/close.o \
@@ -2869,7 +2872,7 @@ $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(R
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 

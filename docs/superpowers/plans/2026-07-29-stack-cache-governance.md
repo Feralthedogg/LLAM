@@ -106,14 +106,18 @@ prefix.
 - Modify: `tests/test_runtime_core.c`
 - Modify: `tests/test_runtime_shutdown_internal.c`
 
-- [ ] Add `llam_runtime_stack_cache_trim_ex(runtime, target_bytes,
+- [x] Add `llam_runtime_stack_cache_trim_ex(runtime, target_bytes,
   released_bytes)` and `llam_runtime_notify_memory_pressure(runtime)`.
-- [ ] Serialize trim per runtime. Detach a bounded batch while holding only one
-  cache lock, update authority before unlock, then perform VM release outside
-  the lock.
-- [ ] Crossing high trims toward low; pressure trims to zero; opportunistic
+- [x] Serialize trim per runtime. Detach a bounded batch while holding only one
+  cache lock, preserve byte authority while detached, then perform VM release
+  outside the lock. Remove authority only after success; retain failed releases
+  for a later serialized retry.
+- [x] Transfer shutdown release failures to a process-owned metadata quarantine,
+  expose pending bytes/mappings, and retry a bounded fair batch on later
+  runtime initialization.
+- [x] Crossing high trims toward low; pressure trims to zero; opportunistic
   idle trim selects only entries older than the configured age.
-- [ ] Prove manual target, high/low hysteresis, idle age, pressure, concurrent
+- [x] Prove manual target, high/low hysteresis, idle age, pressure, concurrent
   pop/push/trim/stats, shutdown, and VM-outside-lock behavior.
 
 ### Task 6: Export diagnostics and documentation
@@ -128,20 +132,24 @@ prefix.
 - Modify: `docs/guides/performance-tuning.md`
 - Modify: `scripts/test_research_build_boundary.py`
 
-- [ ] Project every authoritative counter to public stats, text, and JSON.
+- [x] Project every authoritative counter to public stats, text, and JSON.
   Resident bytes always carry validity and sample timestamp.
-- [ ] Document defaults, flag combinations, trim semantics, exact versus
+- [x] Document defaults, flag combinations, trim semantics, exact versus
   sampled counters, and cross-runtime ownership.
-- [ ] Prove stable/research installed declarations, symbols, ABI major,
+- [x] Prove stable/research installed declarations, symbols, ABI major,
   SONAME/install name, pkg-config, and CMake imported-target parity.
 
 ### Task 7: Stack-cache stage verification gate
 
-- [ ] Run focused tests after every RED/GREEN step.
-- [ ] Run clean stable and research Make and CMake graphs.
-- [ ] Run ASan/UBSan and TSan including positive controls.
-- [ ] Run manifest, strict structure, supply-chain, dependency, installed
-  parity, export, whitespace, and full Python governance gates.
-- [ ] Run Linux io_uring integration and long-burst RSS/trim evidence.
+- [x] Run focused tests after every RED/GREEN step.
+- [x] Run clean stable and research Make and CMake graphs.
+- [x] Run ASan/UBSan and TSan including positive controls.
+- [x] Run manifest, ratchet structure, supply-chain, installed parity, export,
+  whitespace, process-utility, and full Python governance gates.
+- [x] Run Linux io_uring integration and long-burst RSS/trim evidence. The
+  native segment ran on Linux io_uring; the connected pipeline explicitly
+  skipped at its exact-result semantic barrier. A one-million-iteration
+  churn/trim/stats burst peaked at 4,988 KiB RSS and ended with zero cached and
+  committed bytes.
 - [ ] Run the Windows native lifecycle matrix and BSD/macOS compatibility jobs.
 - [ ] Record requirement-to-evidence closure and commit only evidenced boxes.

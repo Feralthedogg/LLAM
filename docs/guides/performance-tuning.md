@@ -69,6 +69,26 @@ Also compare `estimated_metadata_bytes` and
 `estimated_stack_mapping_bytes` before raising totals. The latter is a virtual
 mapping estimate, so measure RSS separately after touching stacks.
 
+## Bound Retained Stack Memory
+
+Treat stack prewarm and stack caching as one budget. An exact prewarm must fit
+below the cache high watermark; otherwise runtime creation fails instead of
+silently trimming the requested warm set.
+
+```c
+opts.stack_prewarm_total = 512U;
+opts.stack_cache_budget_bytes = 128ULL * 1024ULL * 1024ULL;
+opts.stack_cache_high_watermark_bytes = 96ULL * 1024ULL * 1024ULL;
+opts.stack_cache_low_watermark_bytes = 64ULL * 1024ULL * 1024ULL;
+```
+
+For throughput baselines, compare cache hits indirectly through allocation
+latency while watching `stack_cache_cached_bytes` and
+`stack_cache_budget_rejections`. For memory-constrained services, benchmark
+`DISCARD_ON_RETURN` separately: it reduces committed pages but adds VM work
+when a stack is returned and reused. Use manual trim between benchmark phases
+instead of mixing a pressure event into the measured interval.
+
 Enable stack sampling in staging when validating stack class choices:
 
 ```sh

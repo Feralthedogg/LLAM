@@ -333,45 +333,46 @@ static bool llam_stack_cache_entry_valid(
 static bool llam_stack_cache_finish_pop(
     llam_runtime_t *rt,
     size_t requested_stack_size,
-    llam_runtime_t *owner_runtime,
-    void *mapping,
-    size_t mapping_size,
-    void *stack_base,
-    size_t stack_size,
-    uint64_t committed_bytes,
-    uint64_t last_return_ns,
-    uint32_t stack_class,
-    uint32_t state,
+    llam_stack_cache_entry_t *entry,
     void **mapping_out,
     size_t *mapping_size_out,
     void **stack_base_out) {
-    if (!llam_stack_cache_entry_valid(rt,
-                                      requested_stack_size,
-                                      owner_runtime,
-                                      mapping,
-                                      mapping_size,
-                                      stack_base,
-                                      stack_size,
-                                      committed_bytes,
-                                      last_return_ns,
-                                      stack_class,
-                                      state)) {
-        llam_record_fatal_deferred(rt, EINVAL);
-        llam_stack_mapping_release(rt, mapping, mapping_size);
+    int saved_errno;
+
+    if (entry == NULL) {
         return false;
     }
-    if (state == LLAM_STACK_CACHE_ENTRY_DISCARDED &&
-        llam_stack_vm_reactivate(stack_base, stack_size) != 0) {
+    if (!llam_stack_cache_entry_valid(rt,
+                                      requested_stack_size,
+                                      entry->owner_runtime,
+                                      entry->mapping,
+                                      entry->mapping_size,
+                                      entry->stack_base,
+                                      entry->stack_size,
+                                      entry->committed_bytes,
+                                      entry->last_return_ns,
+                                      entry->stack_class,
+                                      entry->state)) {
+        llam_record_fatal_deferred(rt, EINVAL);
+        (void)llam_stack_cache_release_detached_entry(rt, entry);
+        errno = EINVAL;
+        return false;
+    }
+    if (entry->state == LLAM_STACK_CACHE_ENTRY_DISCARDED &&
+        llam_stack_vm_reactivate(entry->stack_base,
+                                 entry->stack_size) != 0) {
+        saved_errno = errno != 0 ? errno : EIO;
         atomic_fetch_add_explicit(
             &rt->stack_cache_secure_return_failures,
             1U,
             memory_order_relaxed);
-        llam_stack_mapping_release(rt, mapping, mapping_size);
+        (void)llam_stack_cache_release_detached_entry(rt, entry);
+        errno = saved_errno;
         return false;
     }
-    *mapping_out = mapping;
-    *mapping_size_out = mapping_size;
-    *stack_base_out = stack_base;
+    *mapping_out = entry->mapping;
+    *mapping_size_out = entry->mapping_size;
+    *stack_base_out = entry->stack_base;
     return true;
 }
 
@@ -393,15 +394,7 @@ static bool llam_runtime_stack_cache_pop(llam_runtime_t *rt,
     llam_stack_cache_entry_t **head;
     unsigned *count;
     llam_stack_cache_entry_t *entry;
-    llam_runtime_t *owner_runtime = NULL;
-    void *mapping = NULL;
-    size_t mapping_size = 0U;
-    void *stack_base = NULL;
-    size_t retained_stack_size = 0U;
-    uint64_t committed_bytes = 0U;
-    uint64_t last_return_ns = 0U;
-    uint32_t stack_class = UINT32_MAX;
-    uint32_t state = UINT32_MAX;
+    bool popped;
 
     if (mapping_out == NULL || mapping_size_out == NULL ||
         stack_base_out == NULL) {
@@ -423,45 +416,33 @@ static bool llam_runtime_stack_cache_pop(llam_runtime_t *rt,
     pthread_mutex_lock(&rt->stack_cache_lock);
     entry = *head;
     if (entry != NULL) {
-        // Metadata is recycled while the stack mapping is transferred to the
-        // caller; the mapping itself remains live and protected.
         *head = entry->next;
+        entry->next = NULL;
         if (*count > 0U) {
             *count -= 1U;
         }
-        mapping = entry->mapping;
-        mapping_size = entry->mapping_size;
-        stack_base = entry->stack_base;
-        retained_stack_size = entry->stack_size;
-        committed_bytes = entry->committed_bytes;
-        last_return_ns = entry->last_return_ns;
-        stack_class = entry->stack_class;
-        state = entry->state;
-        owner_runtime = entry->owner_runtime;
-        llam_stack_cache_account_remove(rt,
-                                        mapping_size,
-                                        committed_bytes);
-        llam_runtime_stack_cache_entry_free_locked(rt, entry);
     }
     pthread_mutex_unlock(&rt->stack_cache_lock);
     if (entry == NULL) {
         return false;
     }
 
-    return llam_stack_cache_finish_pop(rt,
-                                       stack_size,
-                                       owner_runtime,
-                                       mapping,
-                                       mapping_size,
-                                       stack_base,
-                                       retained_stack_size,
-                                       committed_bytes,
-                                       last_return_ns,
-                                       stack_class,
-                                       state,
-                                       mapping_out,
-                                       mapping_size_out,
-                                       stack_base_out);
+    popped = llam_stack_cache_finish_pop(rt,
+                                         stack_size,
+                                         entry,
+                                         mapping_out,
+                                         mapping_size_out,
+                                         stack_base_out);
+    if (!popped) {
+        return false;
+    }
+    llam_stack_cache_account_remove(rt,
+                                    entry->mapping_size,
+                                    entry->committed_bytes);
+    pthread_mutex_lock(&rt->stack_cache_lock);
+    llam_runtime_stack_cache_entry_free_locked(rt, entry);
+    pthread_mutex_unlock(&rt->stack_cache_lock);
+    return true;
 }
 
 /**
@@ -483,15 +464,7 @@ static bool llam_shard_stack_cache_pop(llam_shard_t *shard,
     unsigned *count;
     llam_stack_cache_entry_t *entry;
     llam_runtime_t *rt;
-    llam_runtime_t *owner_runtime;
-    void *mapping;
-    size_t mapping_size;
-    void *stack_base;
-    size_t retained_stack_size;
-    uint64_t committed_bytes;
-    uint64_t last_return_ns;
-    uint32_t stack_class;
-    uint32_t state;
+    bool popped;
 
     if (mapping_out == NULL || mapping_size_out == NULL ||
         stack_base_out == NULL) {
@@ -518,38 +491,28 @@ static bool llam_shard_stack_cache_pop(llam_shard_t *shard,
     }
 
     *head = entry->next;
+    entry->next = NULL;
     if (*count > 0U) {
         *count -= 1U;
     }
-    mapping = entry->mapping;
-    mapping_size = entry->mapping_size;
-    stack_base = entry->stack_base;
-    retained_stack_size = entry->stack_size;
-    committed_bytes = entry->committed_bytes;
-    last_return_ns = entry->last_return_ns;
-    stack_class = entry->stack_class;
-    state = entry->state;
-    owner_runtime = entry->owner_runtime;
-    llam_stack_cache_account_remove(rt,
-                                    mapping_size,
-                                    committed_bytes);
-    llam_shard_stack_cache_entry_free(shard, entry);
     pthread_mutex_unlock(&shard->stack_cache_lock);
 
-    return llam_stack_cache_finish_pop(rt,
-                                       stack_size,
-                                       owner_runtime,
-                                       mapping,
-                                       mapping_size,
-                                       stack_base,
-                                       retained_stack_size,
-                                       committed_bytes,
-                                       last_return_ns,
-                                       stack_class,
-                                       state,
-                                       mapping_out,
-                                       mapping_size_out,
-                                       stack_base_out);
+    popped = llam_stack_cache_finish_pop(rt,
+                                         stack_size,
+                                         entry,
+                                         mapping_out,
+                                         mapping_size_out,
+                                         stack_base_out);
+    if (!popped) {
+        return false;
+    }
+    llam_stack_cache_account_remove(rt,
+                                    entry->mapping_size,
+                                    entry->committed_bytes);
+    pthread_mutex_lock(&shard->stack_cache_lock);
+    llam_shard_stack_cache_entry_free(shard, entry);
+    pthread_mutex_unlock(&shard->stack_cache_lock);
+    return true;
 }
 
 /**

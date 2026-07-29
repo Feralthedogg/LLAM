@@ -743,6 +743,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return -1;
     }
 
+    /*
+     * Shutdown release failures outlive their former runtime handle. A later
+     * lifecycle opportunity retries one bounded process-quarantine batch.
+     */
+    llam_stack_cache_quarantine_retry();
+
     if (opts != NULL) {
         /*
          * Inbound options are ABI-prefix structs.  Copy only the caller's known
@@ -757,108 +763,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         opts_copy_size = opts_size < sizeof(raw_opts) ? opts_size : sizeof(raw_opts);
         memcpy(&raw_opts, opts, opts_copy_size);
 
-        memset(&opts_storage, 0, sizeof(opts_storage));
-        opts_storage.deterministic = 0U;
-        opts_storage.sqpoll_cpu = -1;
-        opts_storage.profile = LLAM_RUNTIME_PROFILE_BALANCED;
-        opts_storage.preempt_mode = LLAM_PREEMPT_AUTO;
-        opts_storage.affinity_policy = LLAM_RUNTIME_AFFINITY_NONE;
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, deterministic)) {
-            opts_storage.deterministic = raw_opts.deterministic;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, forced_yield_every)) {
-            opts_storage.forced_yield_every = raw_opts.forced_yield_every;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, experimental_flags)) {
-            opts_storage.experimental_flags = raw_opts.experimental_flags;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, idle_spin_ns)) {
-            opts_storage.idle_spin_ns = raw_opts.idle_spin_ns;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, idle_spin_max_iters)) {
-            opts_storage.idle_spin_max_iters = raw_opts.idle_spin_max_iters;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, sqpoll_cpu)) {
-            opts_storage.sqpoll_cpu = raw_opts.sqpoll_cpu;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, profile)) {
-            opts_storage.profile = raw_opts.profile;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, reserved0)) {
-            opts_storage.reserved0 = raw_opts.reserved0;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, preempt_mode)) {
-            opts_storage.preempt_mode = raw_opts.preempt_mode;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, preempt_poll_period)) {
-            opts_storage.preempt_poll_period = raw_opts.preempt_poll_period;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, preempt_quantum_ns)) {
-            opts_storage.preempt_quantum_ns = raw_opts.preempt_quantum_ns;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, worker_min)) {
-            opts_storage.worker_min = raw_opts.worker_min;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, worker_count)) {
-            opts_storage.worker_count = raw_opts.worker_count;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, worker_max)) {
-            opts_storage.worker_max = raw_opts.worker_max;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, blocking_min)) {
-            opts_storage.blocking_min = raw_opts.blocking_min;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, blocking_max)) {
-            opts_storage.blocking_max = raw_opts.blocking_max;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, affinity_policy)) {
-            opts_storage.affinity_policy = raw_opts.affinity_policy;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, cpu_count)) {
-            opts_storage.cpu_count = raw_opts.cpu_count;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, reserved1)) {
-            opts_storage.reserved1 = raw_opts.reserved1;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, cpu_ids)) {
-            opts_storage.cpu_ids = raw_opts.cpu_ids;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, task_prewarm_total)) {
-            opts_storage.task_prewarm_total = raw_opts.task_prewarm_total;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, stack_prewarm_total)) {
-            opts_storage.stack_prewarm_total = raw_opts.stack_prewarm_total;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, timer_prewarm_total)) {
-            opts_storage.timer_prewarm_total = raw_opts.timer_prewarm_total;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size,
-                                               stack_cache_budget_bytes)) {
-            opts_storage.stack_cache_budget_bytes =
-                raw_opts.stack_cache_budget_bytes;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(
-                opts_size, stack_cache_high_watermark_bytes)) {
-            opts_storage.stack_cache_high_watermark_bytes =
-                raw_opts.stack_cache_high_watermark_bytes;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(
-                opts_size, stack_cache_low_watermark_bytes)) {
-            opts_storage.stack_cache_low_watermark_bytes =
-                raw_opts.stack_cache_low_watermark_bytes;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size,
-                                               stack_cache_idle_ns)) {
-            opts_storage.stack_cache_idle_ns =
-                raw_opts.stack_cache_idle_ns;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size,
-                                               stack_cache_flags)) {
-            opts_storage.stack_cache_flags = raw_opts.stack_cache_flags;
-        }
-        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, reserved2)) {
-            opts_storage.reserved2 = raw_opts.reserved2;
-        }
+        llam_runtime_opts_copy_prefix(&raw_opts, opts_size, &opts_storage);
         opts = &opts_storage;
         if (!llam_public_runtime_profile_valid(opts->profile)) {
             errno = EINVAL;
@@ -947,6 +852,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_init(&rt->opaque_helper_threads_live, 0U);
     atomic_init(&rt->host_threads_live, 0U);
     atomic_init(&rt->affinity_failures, 0U);
+    atomic_init(&rt->stack_cache_account_writer, 0U);
+    atomic_init(&rt->stack_cache_account_seq, 0U);
     atomic_init(&rt->stack_cache_cached_bytes, 0U);
     atomic_init(&rt->stack_cache_cached_mappings, 0U);
     atomic_init(&rt->stack_cache_committed_bytes, 0U);
@@ -957,6 +864,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_init(&rt->stack_cache_secure_return_failures, 0U);
     atomic_init(&rt->stack_cache_resident_bytes, 0U);
     atomic_init(&rt->stack_cache_resident_sample_ns, 0U);
+    atomic_init(&rt->stack_cache_last_idle_scan_ns, llam_now_ns());
     atomic_init(&rt->stack_cache_resident_valid, 0U);
 
     /*
@@ -1519,6 +1427,13 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return -1;
     }
     rt->stack_cache_lock_initialized = true;
+    rc = pthread_mutex_init(&rt->stack_cache_trim_lock, NULL);
+    if (rc != 0) {
+        errno = rc;
+        llam_runtime_shutdown_rt(rt);
+        return -1;
+    }
+    rt->stack_cache_trim_lock_initialized = true;
     if (llam_runtime_prewarm_stack_cache(
             rt,
             rt->requested_stack_prewarm_total,

@@ -79,9 +79,9 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     if (llam_ctx_init_fp_state(&task->ctx, task->owner_runtime) != 0) {
         int saved_errno = errno;
 
-        llam_stack_mapping_release(rt,
-                                   task->stack_mapping,
-                                   task->mapping_size);
+        llam_stack_mapping_release_or_quarantine(rt,
+                                                 task->stack_mapping,
+                                                 task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -135,9 +135,9 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         int saved_errno = errno;
 
         llam_ctx_destroy_fp_state(&task->ctx);
-        llam_stack_mapping_release(rt,
-                                   task->stack_mapping,
-                                   task->mapping_size);
+        llam_stack_mapping_release_or_quarantine(rt,
+                                                 task->stack_mapping,
+                                                 task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -150,9 +150,9 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         int saved_errno = errno;
 
         llam_ctx_destroy_fp_state(&task->ctx);
-        llam_stack_mapping_release(rt,
-                                   task->stack_mapping,
-                                   task->mapping_size);
+        llam_stack_mapping_release_or_quarantine(rt,
+                                                 task->stack_mapping,
+                                                 task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;

@@ -136,6 +136,10 @@ _Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_cached_mappings) 
                "stack cache mapping authority must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_resident_sample_ns) == sizeof(uint64_t),
                "stack cache resident sample timestamp must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_process_quarantine_bytes) == sizeof(uint64_t),
+               "stack cache process quarantine bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_process_quarantine_mappings) == sizeof(uint64_t),
+               "stack cache process quarantine mappings must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_class((const llam_task_t *)0), uint32_t,
                  "llam_task_class result must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_flags((const llam_task_t *)0), uint32_t,
@@ -235,6 +239,8 @@ static int test_llam_prefix_info(void) {
 }
 
 static int test_invalid_arguments(void) {
+    uint64_t released_bytes = UINT64_MAX;
+
     errno = 0;
     if (llam_abi_get_info(NULL, LLAM_ABI_INFO_CURRENT_SIZE) != -1 || errno != EINVAL) {
         return test_fail("llam_abi_get_info(NULL) did not fail with EINVAL");
@@ -254,6 +260,15 @@ static int test_invalid_arguments(void) {
     errno = 0;
     if (llam_io_buffer_opts_init(NULL, LLAM_IO_BUFFER_OPTS_CURRENT_SIZE) != -1 || errno != EINVAL) {
         return test_fail("llam_io_buffer_opts_init(NULL) did not fail with EINVAL");
+    }
+    errno = 0;
+    if (llam_runtime_stack_cache_trim_ex(NULL, 0U, &released_bytes) != -1 ||
+        errno != EINVAL || released_bytes != 0U) {
+        return test_fail("llam_runtime_stack_cache_trim_ex(NULL) contract failed");
+    }
+    errno = 0;
+    if (llam_runtime_notify_memory_pressure(NULL) != -1 || errno != EINVAL) {
+        return test_fail("llam_runtime_notify_memory_pressure(NULL) contract failed");
     }
     return 0;
 }
