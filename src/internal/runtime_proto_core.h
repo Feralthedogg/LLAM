@@ -234,6 +234,34 @@ int llam_stack_vm_sample_resident(void *stack_base,
                                   size_t stack_size,
                                   uint64_t *resident_bytes_out,
                                   bool *valid_out);
+void llam_stack_cache_account_remove(llam_runtime_t *rt,
+                                     size_t mapping_size,
+                                     uint64_t committed_bytes);
+void llam_stack_mapping_release(llam_runtime_t *rt,
+                                void *mapping,
+                                size_t mapping_size);
+bool llam_stack_cache_pop_mapping(llam_runtime_t *rt,
+                                  llam_shard_t *preferred_shard,
+                                  size_t stack_size,
+                                  void **mapping_out,
+                                  size_t *mapping_size_out,
+                                  void **stack_base_out);
+bool llam_stack_cache_publish_mapping(llam_runtime_t *rt,
+                                      llam_shard_t *preferred_shard,
+                                      void *mapping,
+                                      size_t mapping_size,
+                                      void *stack_base,
+                                      size_t stack_size,
+                                      uint64_t committed_bytes,
+                                      uint64_t last_return_ns,
+                                      uint32_t stack_class,
+                                      uint32_t state);
+bool llam_stack_cache_return_mapping(llam_runtime_t *rt,
+                                     llam_shard_t *preferred_shard,
+                                     void *mapping,
+                                     size_t mapping_size,
+                                     void *stack_base,
+                                     size_t stack_size);
 void llam_pause_cpu(void);
 uint64_t llam_slice_ns(llam_task_class_t task_class);
 const char *llam_stack_profile_hint(const llam_task_t *task);

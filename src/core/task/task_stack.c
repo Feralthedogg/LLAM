@@ -1,13 +1,11 @@
 /**
  * @file src/core/task/task_stack.c
- * @brief Fiber stack allocation, guard handling, and stack class sizing.
+ * @brief Fiber stack attachment, context setup, and task-side release.
  *
  * @details
- * This translation unit owns stack mapping lifetime. Fiber stacks are allocated
- * with a guard page, cached first in the task's home shard, and then in a
- * runtime-wide fallback cache. Keeping stacks warm avoids repeated platform
- * VM map/protect cost in spawn-heavy workloads while preserving guard-page
- * protection for overflow diagnostics.
+ * Mapping policy and cache-list mechanics live behind the stack-cache
+ * boundary. This unit only attaches an owned mapping to a task, constructs
+ * its execution context, and detaches the mapping during task reclamation.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -26,668 +24,6 @@
  */
 
 #include "runtime_internal.h"
-
-/** Runtime-wide cached default stack limit. */
-#define LLAM_STACK_CACHE_DEFAULT_LIMIT 4096U
-/** Runtime-wide cached large stack limit. */
-#define LLAM_STACK_CACHE_LARGE_LIMIT 512U
-/** Runtime-wide cached huge stack limit. */
-#define LLAM_STACK_CACHE_HUGE_LIMIT 128U
-/** Per-shard cached default stack limit in normal profiles. */
-#define LLAM_STACK_CACHE_LOCAL_DEFAULT_LIMIT 256U
-/** Per-shard cached default stack limit in release-fast profile. */
-#define LLAM_STACK_CACHE_LOCAL_DEFAULT_RELEASE_FAST_LIMIT 512U
-/** Per-shard cached large stack limit. */
-#define LLAM_STACK_CACHE_LOCAL_LARGE_LIMIT 64U
-/** Per-shard cached huge stack limit. */
-#define LLAM_STACK_CACHE_LOCAL_HUGE_LIMIT 16U
-/**
- * @brief Select the runtime-wide cache head for a stack size.
- *
- * @param rt         Runtime cache owner.
- * @param stack_size Exact stack payload size.
- * @return Address of the matching list head, or NULL for unsupported sizes.
- */
-static llam_stack_cache_entry_t **llam_runtime_stack_cache_head(llam_runtime_t *rt, size_t stack_size) {
-    if (rt == NULL) {
-        return NULL;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT)) {
-        return &rt->stack_cache_default;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_LARGE)) {
-        return &rt->stack_cache_large;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_HUGE)) {
-        return &rt->stack_cache_huge;
-    }
-    return NULL;
-}
-
-/**
- * @brief Select the runtime-wide cache count field for a stack size.
- *
- * @param rt         Runtime cache owner.
- * @param stack_size Exact stack payload size.
- * @return Address of the matching count field, or NULL for unsupported sizes.
- */
-static unsigned *llam_runtime_stack_cache_count(llam_runtime_t *rt, size_t stack_size) {
-    if (rt == NULL) {
-        return NULL;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT)) {
-        return &rt->stack_cache_default_count;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_LARGE)) {
-        return &rt->stack_cache_large_count;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_HUGE)) {
-        return &rt->stack_cache_huge_count;
-    }
-    return NULL;
-}
-
-/**
- * @brief Return the runtime-wide cache limit for a stack size.
- *
- * @param stack_size Exact stack payload size.
- * @return Maximum cached mappings for the class, or 0 for unsupported sizes.
- */
-static unsigned llam_runtime_stack_cache_limit(size_t stack_size) {
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT)) {
-        return LLAM_STACK_CACHE_DEFAULT_LIMIT;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_LARGE)) {
-        return LLAM_STACK_CACHE_LARGE_LIMIT;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_HUGE)) {
-        return LLAM_STACK_CACHE_HUGE_LIMIT;
-    }
-    return 0U;
-}
-
-/**
- * @brief Select the per-shard cache head for a stack size.
- *
- * @param shard      Shard cache owner.
- * @param stack_size Exact stack payload size.
- * @return Address of the matching list head, or NULL for unsupported sizes.
- */
-static llam_stack_cache_entry_t **llam_shard_stack_cache_head(llam_shard_t *shard, size_t stack_size) {
-    if (shard == NULL) {
-        return NULL;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT)) {
-        return &shard->stack_cache_default;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_LARGE)) {
-        return &shard->stack_cache_large;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_HUGE)) {
-        return &shard->stack_cache_huge;
-    }
-    return NULL;
-}
-
-/**
- * @brief Select the per-shard cache count field for a stack size.
- *
- * @param shard      Shard cache owner.
- * @param stack_size Exact stack payload size.
- * @return Address of the matching count field, or NULL for unsupported sizes.
- */
-static unsigned *llam_shard_stack_cache_count(llam_shard_t *shard, size_t stack_size) {
-    if (shard == NULL) {
-        return NULL;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT)) {
-        return &shard->stack_cache_default_count;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_LARGE)) {
-        return &shard->stack_cache_large_count;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_HUGE)) {
-        return &shard->stack_cache_huge_count;
-    }
-    return NULL;
-}
-
-/**
- * @brief Return the per-shard stack-cache limit for a stack size.
- *
- * @param shard      Shard cache owner.
- * @param stack_size Exact stack payload size.
- * @return Maximum cached mappings for the class, or 0 for unsupported sizes.
- */
-static unsigned llam_shard_stack_cache_limit(const llam_shard_t *shard, size_t stack_size) {
-    const llam_runtime_t *rt = shard != NULL ? shard->runtime : NULL;
-
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT)) {
-        return rt != NULL && rt->profile == LLAM_RUNTIME_PROFILE_RELEASE_FAST
-                   ? LLAM_STACK_CACHE_LOCAL_DEFAULT_RELEASE_FAST_LIMIT
-                   : LLAM_STACK_CACHE_LOCAL_DEFAULT_LIMIT;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_LARGE)) {
-        return LLAM_STACK_CACHE_LOCAL_LARGE_LIMIT;
-    }
-    if (stack_size == llam_stack_bytes(LLAM_STACK_CLASS_HUGE)) {
-        return LLAM_STACK_CACHE_LOCAL_HUGE_LIMIT;
-    }
-    return 0U;
-}
-
-/**
- * @brief Allocate or reuse a runtime-wide stack-cache entry.
- *
- * @param rt Runtime cache owner; its stack cache lock must already be held.
- * @return Cleared entry object on success, or NULL on allocation failure.
- */
-static llam_stack_cache_entry_t *llam_runtime_stack_cache_entry_alloc_locked(llam_runtime_t *rt) {
-    llam_stack_cache_entry_t *entry;
-
-    if (rt == NULL) {
-        return NULL;
-    }
-    entry = rt->stack_cache_entry_free;
-    if (entry != NULL) {
-        // Entry metadata is cached separately from stack mappings so pushing a
-        // stack back into the cache does not require a fresh malloc.
-        rt->stack_cache_entry_free = entry->next;
-        memset(entry, 0, sizeof(*entry));
-        entry->heap_allocated = true;
-        return entry;
-    }
-    entry = calloc(1, sizeof(*entry));
-    if (entry != NULL) {
-        entry->heap_allocated = true;
-    }
-    return entry;
-}
-
-/**
- * @brief Return a metadata entry to the runtime-wide entry cache.
- *
- * @param rt    Runtime cache owner; its stack cache lock must already be held.
- * @param entry Entry metadata object to recycle.
- */
-static void llam_runtime_stack_cache_entry_free_locked(llam_runtime_t *rt, llam_stack_cache_entry_t *entry) {
-    if (rt == NULL || entry == NULL) {
-        return;
-    }
-    memset(entry, 0, sizeof(*entry));
-    entry->heap_allocated = true;
-    entry->next = rt->stack_cache_entry_free;
-    rt->stack_cache_entry_free = entry;
-}
-
-/**
- * @brief Allocate or reuse a shard-local stack-cache entry.
- *
- * @param shard Shard cache owner; its stack cache lock must already be held.
- * @return Cleared entry object on success, or NULL on allocation failure.
- */
-static llam_stack_cache_entry_t *llam_shard_stack_cache_entry_alloc(llam_shard_t *shard) {
-    llam_stack_cache_entry_t *entry;
-
-    if (shard == NULL) {
-        return NULL;
-    }
-    entry = shard->stack_cache_entry_free;
-    if (entry != NULL) {
-        shard->stack_cache_entry_free = entry->next;
-        memset(entry, 0, sizeof(*entry));
-        entry->heap_allocated = true;
-        return entry;
-    }
-    entry = calloc(1, sizeof(*entry));
-    if (entry != NULL) {
-        entry->heap_allocated = true;
-    }
-    return entry;
-}
-
-/**
- * @brief Return a metadata entry to the shard-local entry cache.
- *
- * @param shard Shard cache owner; its stack cache lock must already be held.
- * @param entry Entry metadata object to recycle.
- */
-static void llam_shard_stack_cache_entry_free(llam_shard_t *shard, llam_stack_cache_entry_t *entry) {
-    if (shard == NULL || entry == NULL) {
-        return;
-    }
-    memset(entry, 0, sizeof(*entry));
-    entry->heap_allocated = true;
-    entry->next = shard->stack_cache_entry_free;
-    shard->stack_cache_entry_free = entry;
-}
-
-/**
- * @brief Pop a cached stack mapping from the runtime-wide cache.
- *
- * @param rt               Runtime cache owner.
- * @param stack_size       Exact stack payload size.
- * @param mapping_out      Receives mapping base pointer.
- * @param mapping_size_out Receives mapping size including guard page.
- * @param stack_base_out   Receives usable stack base after guard page.
- * @return true when a cached mapping was returned, false on cache miss.
- */
-static bool llam_runtime_stack_cache_pop(llam_runtime_t *rt,
-                                       size_t stack_size,
-                                       void **mapping_out,
-                                       size_t *mapping_size_out,
-                                       void **stack_base_out) {
-    llam_stack_cache_entry_t **head;
-    unsigned *count;
-    llam_stack_cache_entry_t *entry;
-    void *mapping = NULL;
-    size_t mapping_size = 0U;
-    void *stack_base = NULL;
-
-    if (mapping_out != NULL) {
-        *mapping_out = NULL;
-    }
-    if (stack_base_out != NULL) {
-        *stack_base_out = NULL;
-    }
-    if (rt == NULL || !rt->stack_cache_lock_initialized) {
-        return false;
-    }
-
-    head = llam_runtime_stack_cache_head(rt, stack_size);
-    count = llam_runtime_stack_cache_count(rt, stack_size);
-    if (head == NULL || count == NULL) {
-        return false;
-    }
-
-    pthread_mutex_lock(&rt->stack_cache_lock);
-    entry = *head;
-    if (entry != NULL) {
-        // Metadata is recycled while the stack mapping is transferred to the
-        // caller; the mapping itself remains live and protected.
-        *head = entry->next;
-        if (*count > 0U) {
-            *count -= 1U;
-        }
-        mapping = entry->mapping;
-        mapping_size = entry->mapping_size;
-        stack_base = entry->stack_base;
-        llam_runtime_stack_cache_entry_free_locked(rt, entry);
-    }
-    pthread_mutex_unlock(&rt->stack_cache_lock);
-    if (entry == NULL) {
-        return false;
-    }
-
-    if (mapping_out != NULL) {
-        *mapping_out = mapping;
-    }
-    if (mapping_size_out != NULL) {
-        *mapping_size_out = mapping_size;
-    }
-    if (stack_base_out != NULL) {
-        *stack_base_out = stack_base;
-    }
-    return true;
-}
-
-/**
- * @brief Pop a cached stack mapping from a shard-local cache.
- *
- * @param shard            Shard cache owner.
- * @param stack_size       Exact stack payload size.
- * @param mapping_out      Receives mapping base pointer.
- * @param mapping_size_out Receives mapping size including guard page.
- * @param stack_base_out   Receives usable stack base after guard page.
- * @return true when a cached mapping was returned, false on cache miss.
- */
-static bool llam_shard_stack_cache_pop(llam_shard_t *shard,
-                                     size_t stack_size,
-                                     void **mapping_out,
-                                     size_t *mapping_size_out,
-                                     void **stack_base_out) {
-    llam_stack_cache_entry_t **head;
-    unsigned *count;
-    llam_stack_cache_entry_t *entry;
-    void *mapping;
-    size_t mapping_size;
-    void *stack_base;
-
-    if (mapping_out != NULL) {
-        *mapping_out = NULL;
-    }
-    if (stack_base_out != NULL) {
-        *stack_base_out = NULL;
-    }
-    if (shard == NULL) {
-        return false;
-    }
-    head = llam_shard_stack_cache_head(shard, stack_size);
-    count = llam_shard_stack_cache_count(shard, stack_size);
-    if (head == NULL || count == NULL) {
-        return false;
-    }
-
-    pthread_mutex_lock(&shard->stack_cache_lock);
-    entry = *head;
-    if (entry == NULL) {
-        pthread_mutex_unlock(&shard->stack_cache_lock);
-        return false;
-    }
-
-    *head = entry->next;
-    if (*count > 0U) {
-        *count -= 1U;
-    }
-    mapping = entry->mapping;
-    mapping_size = entry->mapping_size;
-    stack_base = entry->stack_base;
-    llam_shard_stack_cache_entry_free(shard, entry);
-    pthread_mutex_unlock(&shard->stack_cache_lock);
-
-    if (mapping_out != NULL) {
-        *mapping_out = mapping;
-    }
-    if (mapping_size_out != NULL) {
-        *mapping_size_out = mapping_size;
-    }
-    if (stack_base_out != NULL) {
-        *stack_base_out = stack_base;
-    }
-    return true;
-}
-
-/**
- * @brief Push a stack mapping into the runtime-wide fallback cache.
- *
- * @param rt            Runtime cache owner.
- * @param mapping       Mapping base pointer.
- * @param mapping_size  Mapping size including guard page.
- * @param stack_base    Usable stack base after guard page.
- * @param stack_size    Usable stack size.
- * @param entry_storage Optional caller-owned metadata entry to reuse.
- */
-static bool llam_runtime_stack_cache_push(llam_runtime_t *rt,
-                                          void *mapping,
-                                          size_t mapping_size,
-                                          void *stack_base,
-                                          size_t stack_size,
-                                          llam_stack_cache_entry_t *entry_storage) {
-    llam_stack_cache_entry_t **head;
-    unsigned *count;
-    unsigned limit;
-    llam_stack_cache_entry_t *entry;
-
-    if (mapping == NULL || mapping_size == 0U || stack_base == NULL || stack_size == 0U ||
-        rt == NULL || !rt->stack_cache_lock_initialized) {
-        if (mapping != NULL && mapping_size != 0U) {
-            // Invalid/unavailable cache owner: release the mapping rather than
-            // leaking a stack after task teardown.
-            (void)llam_stack_vm_release(mapping, mapping_size);
-        }
-        return false;
-    }
-
-    head = llam_runtime_stack_cache_head(rt, stack_size);
-    count = llam_runtime_stack_cache_count(rt, stack_size);
-    limit = llam_runtime_stack_cache_limit(stack_size);
-    if (head == NULL || count == NULL || limit == 0U) {
-        (void)llam_stack_vm_release(mapping, mapping_size);
-        return false;
-    }
-
-    pthread_mutex_lock(&rt->stack_cache_lock);
-    if (*count >= limit) {
-        pthread_mutex_unlock(&rt->stack_cache_lock);
-        if (entry_storage != NULL) {
-            memset(entry_storage, 0, sizeof(*entry_storage));
-        }
-        // Cache is full. Returning to the OS bounds memory usage for bursty
-        // workloads that temporarily allocate many stacks.
-        (void)llam_stack_vm_release(mapping, mapping_size);
-        return false;
-    }
-
-    entry = entry_storage;
-    if (entry != NULL) {
-        memset(entry, 0, sizeof(*entry));
-    } else {
-        entry = llam_runtime_stack_cache_entry_alloc_locked(rt);
-        if (entry == NULL) {
-            pthread_mutex_unlock(&rt->stack_cache_lock);
-            (void)llam_stack_vm_release(mapping, mapping_size);
-            return false;
-        }
-    }
-    entry->mapping = mapping;
-    entry->mapping_size = mapping_size;
-    entry->stack_base = stack_base;
-    entry->stack_size = stack_size;
-    entry->next = *head;
-    *head = entry;
-    *count += 1U;
-    pthread_mutex_unlock(&rt->stack_cache_lock);
-    return true;
-}
-
-/**
- * @brief Push a stack mapping into a shard-local cache.
- *
- * @param shard        Shard cache owner.
- * @param mapping      Mapping base pointer.
- * @param mapping_size Mapping size including guard page.
- * @param stack_base   Usable stack base after guard page.
- * @param stack_size   Usable stack size.
- * @return true if the mapping was cached, false if the caller must fall back.
- */
-static bool llam_shard_stack_cache_push(llam_shard_t *shard,
-                                      void *mapping,
-                                      size_t mapping_size,
-                                      void *stack_base,
-                                      size_t stack_size) {
-    llam_stack_cache_entry_t **head;
-    unsigned *count;
-    unsigned limit;
-    llam_stack_cache_entry_t *entry;
-
-    if (shard == NULL || mapping == NULL || mapping_size == 0U || stack_base == NULL || stack_size == 0U) {
-        return false;
-    }
-    head = llam_shard_stack_cache_head(shard, stack_size);
-    count = llam_shard_stack_cache_count(shard, stack_size);
-    limit = llam_shard_stack_cache_limit(shard, stack_size);
-    if (head == NULL || count == NULL || limit == 0U) {
-        return false;
-    }
-    pthread_mutex_lock(&shard->stack_cache_lock);
-    if (*count >= limit) {
-        pthread_mutex_unlock(&shard->stack_cache_lock);
-        return false;
-    }
-    entry = llam_shard_stack_cache_entry_alloc(shard);
-    if (entry == NULL) {
-        pthread_mutex_unlock(&shard->stack_cache_lock);
-        return false;
-    }
-    entry->mapping = mapping;
-    entry->mapping_size = mapping_size;
-    entry->stack_base = stack_base;
-    entry->stack_size = stack_size;
-    entry->next = *head;
-    *head = entry;
-    *count += 1U;
-    pthread_mutex_unlock(&shard->stack_cache_lock);
-    return true;
-}
-
-/**
- * @brief Drain and release a list of cached stack mappings or metadata entries.
- *
- * @param entry List head.
- */
-static void llam_stack_cache_drain_list(llam_stack_cache_entry_t *entry) {
-    while (entry != NULL) {
-        llam_stack_cache_entry_t *next = entry->next;
-        bool heap_allocated = entry->heap_allocated;
-
-        if (entry->mapping != NULL && entry->mapping_size != 0U) {
-            (void)llam_stack_vm_release(entry->mapping,
-                                        entry->mapping_size);
-        }
-        if (heap_allocated) {
-            free(entry);
-        } else {
-            // Stack entries embedded in other objects are only cleared; heap
-            // entries are owned by the cache and freed above.
-            memset(entry, 0, sizeof(*entry));
-        }
-        entry = next;
-    }
-}
-
-/**
- * @brief Drain all stack-cache lists owned by a shard.
- *
- * @param shard Shard whose stack caches should be emptied.
- */
-void llam_shard_drain_stack_cache(llam_shard_t *shard) {
-    llam_stack_cache_entry_t *lists[4];
-
-    if (shard == NULL) {
-        return;
-    }
-    lists[0] = shard->stack_cache_default;
-    lists[1] = shard->stack_cache_large;
-    lists[2] = shard->stack_cache_huge;
-    lists[3] = shard->stack_cache_entry_free;
-    shard->stack_cache_default = NULL;
-    shard->stack_cache_large = NULL;
-    shard->stack_cache_huge = NULL;
-    shard->stack_cache_entry_free = NULL;
-    shard->stack_cache_default_count = 0U;
-    shard->stack_cache_large_count = 0U;
-    shard->stack_cache_huge_count = 0U;
-    for (unsigned i = 0U; i < (unsigned)(sizeof(lists) / sizeof(lists[0])); ++i) {
-        llam_stack_cache_drain_list(lists[i]);
-    }
-}
-
-/**
- * @brief Drain all runtime-wide stack-cache lists.
- *
- * @param rt Runtime whose fallback stack caches should be emptied.
- */
-void llam_runtime_drain_stack_cache(llam_runtime_t *rt) {
-    llam_stack_cache_entry_t *lists[4];
-
-    if (rt == NULL) {
-        return;
-    }
-    lists[0] = rt->stack_cache_default;
-    lists[1] = rt->stack_cache_large;
-    lists[2] = rt->stack_cache_huge;
-    lists[3] = rt->stack_cache_entry_free;
-    rt->stack_cache_default = NULL;
-    rt->stack_cache_large = NULL;
-    rt->stack_cache_huge = NULL;
-    rt->stack_cache_entry_free = NULL;
-    rt->stack_cache_default_count = 0U;
-    rt->stack_cache_large_count = 0U;
-    rt->stack_cache_huge_count = 0U;
-    for (unsigned i = 0U; i < (unsigned)(sizeof(lists) / sizeof(lists[0])); ++i) {
-        llam_stack_cache_drain_list(lists[i]);
-    }
-}
-
-/**
- * @brief Preallocate a runtime-total target of default-class stacks.
- *
- * @param rt       Runtime whose stack caches should be warmed.
- * @param total    Runtime-total stack mapping target.
- * @param exact    Fail instead of accepting a partial result.
- * @param achieved Receives the number of retained stack mappings.
- * @return 0 on success or best-effort exhaustion, -1 for invalid input, an
- *         over-limit target, or an unsatisfied exact request.
- */
-int llam_runtime_prewarm_stack_cache(llam_runtime_t *rt,
-                                     uint64_t total,
-                                     bool exact,
-                                     uint64_t *achieved) {
-    uint64_t completed = 0U;
-    size_t stack_size;
-    int saved_errno = errno;
-
-    if (achieved != NULL) {
-        *achieved = 0U;
-    }
-    if (rt == NULL || !rt->stack_cache_lock_initialized ||
-        rt->shards == NULL || rt->active_shards == 0U || achieved == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (total > LLAM_RUNTIME_MAX_STACK_PREWARM) {
-        errno = E2BIG;
-        return -1;
-    }
-
-    stack_size = llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT);
-    for (unsigned shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
-        uint64_t share =
-            llam_runtime_prewarm_share(total, rt->active_shards, shard_id);
-
-        for (uint64_t i = 0U; i < share; ++i) {
-            void *mapping;
-            void *stack_base;
-            size_t mapping_size;
-            bool cached;
-
-#if defined(LLAM_ENABLE_TEST_HOOKS)
-            if (!llam_runtime_test_prewarm_allocation_permitted(
-                    LLAM_TEST_PREWARM_STACK,
-                    1U)) {
-                errno = ENOMEM;
-                goto exhausted;
-            }
-#endif
-            if (llam_stack_vm_map(stack_size,
-                                  &mapping,
-                                  &mapping_size,
-                                  &stack_base) != 0) {
-                goto exhausted;
-            }
-            cached = llam_shard_stack_cache_push(&rt->shards[shard_id],
-                                                 mapping,
-                                                 mapping_size,
-                                                 stack_base,
-                                                 stack_size);
-            if (!cached) {
-                cached = llam_runtime_stack_cache_push(rt,
-                                                       mapping,
-                                                       mapping_size,
-                                                       stack_base,
-                                                       stack_size,
-                                                       NULL);
-            }
-            if (!cached) {
-                errno = ENOMEM;
-                goto exhausted;
-            }
-            completed += 1U;
-        }
-    }
-
-    *achieved = completed;
-    errno = saved_errno;
-    return 0;
-
-exhausted:
-    *achieved = completed;
-    if (exact) {
-        return -1;
-    }
-    errno = saved_errno;
-    return 0;
-}
 
 /**
  * @brief Allocate and initialize a fiber stack for a task.
@@ -724,8 +60,12 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     // Lookup order is local shard cache, then runtime fallback cache, then a
     // fresh guarded platform mapping. This preserves locality without failing
     // if the owner shard has no warm stack available.
-    if (!llam_shard_stack_cache_pop(cache_shard, stack_size, &mapping, &mapping_size, &task->stack_base) &&
-        !llam_runtime_stack_cache_pop(rt, stack_size, &mapping, &mapping_size, &task->stack_base)) {
+    if (!llam_stack_cache_pop_mapping(rt,
+                                      cache_shard,
+                                      stack_size,
+                                      &mapping,
+                                      &mapping_size,
+                                      &task->stack_base)) {
         if (llam_stack_vm_map(stack_size,
                               &mapping,
                               &mapping_size,
@@ -739,8 +79,9 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     if (llam_ctx_init_fp_state(&task->ctx, task->owner_runtime) != 0) {
         int saved_errno = errno;
 
-        (void)llam_stack_vm_release(task->stack_mapping,
-                                    task->mapping_size);
+        llam_stack_mapping_release(rt,
+                                   task->stack_mapping,
+                                   task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -755,7 +96,8 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
          * managed tasks do not depend on ABI-preserved XMM6-XMM15 state across
          * cooperative switches.
          */
-        task->ctx.simd_flags = LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
+        task->ctx.simd_flags =
+            LLAM_CTX_SIMD_F_SKIP_SAVE | LLAM_CTX_SIMD_F_SKIP_RESTORE;
     }
 #endif
 #if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) && LLAM_ARCH_X86_64) || \
@@ -786,12 +128,16 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
 #else
     // Non-x86 ports delegate initial context construction to the platform
     // context implementation.
-    if (llam_ctx_make_task(&task->ctx, task->stack_base, task->stack_size, task) != 0) {
+    if (llam_ctx_make_task(&task->ctx,
+                           task->stack_base,
+                           task->stack_size,
+                           task) != 0) {
         int saved_errno = errno;
 
         llam_ctx_destroy_fp_state(&task->ctx);
-        (void)llam_stack_vm_release(task->stack_mapping,
-                                    task->mapping_size);
+        llam_stack_mapping_release(rt,
+                                   task->stack_mapping,
+                                   task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -804,8 +150,9 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         int saved_errno = errno;
 
         llam_ctx_destroy_fp_state(&task->ctx);
-        (void)llam_stack_vm_release(task->stack_mapping,
-                                    task->mapping_size);
+        llam_stack_mapping_release(rt,
+                                   task->stack_mapping,
+                                   task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -846,7 +193,10 @@ void llam_task_release_stack(llam_task_t *task) {
         diagnostic_lock = &rt->shards[task->alloc_owner_shard].lock;
         pthread_mutex_lock(diagnostic_lock);
     }
-    if (task->stack_mapping == NULL || task->mapping_size == 0U || task->stack_base == NULL || task->stack_size == 0U) {
+    if (task->stack_mapping == NULL ||
+        task->mapping_size == 0U ||
+        task->stack_base == NULL ||
+        task->stack_size == 0U) {
         if (diagnostic_lock != NULL) {
             pthread_mutex_unlock(diagnostic_lock);
         }
@@ -870,11 +220,14 @@ void llam_task_release_stack(llam_task_t *task) {
                g_llam_tls_shard->id < rt->active_shards) {
         cache_shard = g_llam_tls_shard;
     }
-    // Try to preserve home-shard locality first; overflow falls back to the
-    // runtime cache, which may finally release if all limits are reached.
-    if (!llam_shard_stack_cache_push(cache_shard, mapping, mapping_size, stack_base, stack_size)) {
-        llam_runtime_stack_cache_push(rt, mapping, mapping_size, stack_base, stack_size, NULL);
-    }
+    // Preserve home-shard locality when possible. The centralized return path
+    // enforces the runtime byte budget before either cache publishes an entry.
+    (void)llam_stack_cache_return_mapping(rt,
+                                          cache_shard,
+                                          mapping,
+                                          mapping_size,
+                                          stack_base,
+                                          stack_size);
 }
 
 /**
@@ -900,7 +253,9 @@ unsigned llam_pick_spawn_shard(llam_runtime_t *rt) {
      * ticket is only a placement hint, but it still must be atomic to avoid
      * corrupting runtime-local placement state under multi-threaded embedders.
      */
-    ticket = atomic_fetch_add_explicit(&rt->next_spawn_shard, 1U, memory_order_relaxed);
+    ticket = atomic_fetch_add_explicit(&rt->next_spawn_shard,
+                                       1U,
+                                       memory_order_relaxed);
     start_id = ticket % rt->active_shards;
     shard_id = start_id;
     // Round-robin across shards that currently accept work; this avoids pushing

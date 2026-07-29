@@ -65,7 +65,7 @@ prefix.
 
 - [x] Add focused map/release, discard/reactivate, secure-zero, and optional
   resident-sampling helpers.
-- [ ] Linux uses `MADV_DONTNEED`; Darwin securely zeros when the selected
+- [x] Linux uses `MADV_DONTNEED`; Darwin securely zeros when the selected
   policy cannot rely on discard zeroing; Windows decommits/recommits usable
   pages while retaining reservation and guard protection.
 - [x] Add test-only typed failure hooks for discard, reactivate, scrub, and
@@ -77,20 +77,22 @@ prefix.
 **Files:**
 
 - Modify: `src/internal/runtime_types.h`
+- Add: `src/core/task/stack_cache.c`
+- Add: `src/core/task/stack_cache_lists.c`
 - Modify: `src/core/task/task_stack.c`
 - Modify: `tests/test_runtime_core.c`
 - Modify: `tests/test_multi_runtime_core.c`
 
-- [ ] Give every entry an owner runtime, class, state, committed-byte count,
+- [x] Give every entry an owner runtime, class, state, committed-byte count,
   and last-return timestamp.
-- [ ] Add overflow-safe atomic byte reservation before cache publication.
+- [x] Add overflow-safe atomic byte reservation before cache publication.
   Class-list counts remain reuse hints; the runtime budget is authoritative
   across all shard and fallback lists.
-- [ ] Pop list ownership and byte/committed/mapping accounting as one logical
+- [x] Pop list ownership and byte/committed/mapping accounting as one logical
   operation under the owning cache lock.
-- [ ] Perform secure zero/discard before publication and reactivate after
+- [x] Perform secure zero/discard before publication and reactivate after
   detach. On any required state failure, release rather than publish/reuse.
-- [ ] Add mixed-class and concurrent-shard exact-budget tests.
+- [x] Add mixed-class and concurrent-shard exact-budget tests.
 
 ### Task 5: Implement bounded live trim
 

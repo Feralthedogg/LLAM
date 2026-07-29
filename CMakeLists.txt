@@ -116,6 +116,8 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/sched/safepoint.c
     src/core/wait/wait.c
     src/core/task/task_reclaim.c
+    src/core/task/stack_cache.c
+    src/core/task/stack_cache_lists.c
     src/core/task/task_stack.c
     src/core/sched/reinject.c
     src/core/wait/wait_accounting.c

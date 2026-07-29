@@ -318,6 +318,8 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/sched/safepoint.o \
 	$(OBJDIR)/src/core/wait/wait.o \
 	$(OBJDIR)/src/core/task/task_reclaim.o \
+	$(OBJDIR)/src/core/task/stack_cache.o \
+	$(OBJDIR)/src/core/task/stack_cache_lists.o \
 	$(OBJDIR)/src/core/task/task_stack.o \
 	$(OBJDIR)/src/core/sched/reinject.o \
 	$(OBJDIR)/src/core/wait/wait_accounting.o \
@@ -506,7 +508,7 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/memory/alloc.o \
 	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
 	$(TESTHOOK_OBJDIR)/src/core/platform/stack_vm.o \
-	$(TESTHOOK_OBJDIR)/src/core/task/task_stack.o \
+	$(TESTHOOK_OBJDIR)/src/core/task/stack_cache.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/norm_queue.o \
 	$(TESTHOOK_OBJDIR)/src/engine/scheduler/block.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
@@ -528,7 +530,7 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/core/memory/alloc.o \
 		$(OBJDIR)/src/core/platform/platform.o \
 		$(OBJDIR)/src/core/platform/stack_vm.o \
-		$(OBJDIR)/src/core/task/task_stack.o \
+		$(OBJDIR)/src/core/task/stack_cache.o \
 		$(OBJDIR)/src/core/sched/norm_queue.o \
 		$(OBJDIR)/src/engine/scheduler/block.o \
 		$(OBJDIR)/src/core/registry/capability.o \

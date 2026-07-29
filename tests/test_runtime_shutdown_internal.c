@@ -210,6 +210,193 @@ cleanup:
     return rc;
 }
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static void stack_cache_failure_noop(void *arg) {
+    (void)arg;
+}
+
+static int init_stack_cache_failure_runtime(unsigned stack_cache_flags,
+                                            llam_runtime_t **runtime_out) {
+    llam_runtime_opts_t opts;
+
+    if (runtime_out == NULL ||
+        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    *runtime_out = NULL;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 0U;
+    opts.blocking_max = 1U;
+    opts.stack_prewarm_total = 1U;
+    opts.stack_cache_flags = stack_cache_flags;
+    return llam_runtime_create(&opts,
+                               LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+                               runtime_out);
+}
+
+static int exercise_stack_cache_return_failure(
+    unsigned stack_cache_flags,
+    llam_test_stack_vm_operation_t failing_operation,
+    const char *failure_name) {
+    const uint64_t mapping_size =
+        (uint64_t)llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT) +
+        (uint64_t)llam_page_size();
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    int rc = 1;
+
+    llam_runtime_test_reset_stack_vm_hooks();
+    if (init_stack_cache_failure_runtime(stack_cache_flags, &runtime) != 0) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: %s runtime init failed: "
+                "errno=%d (%s)\n",
+                failure_name,
+                errno,
+                strerror(errno));
+        goto cleanup;
+    }
+    /*
+     * Creation prewarms one known mapping. Spawn transfers it out before the
+     * failure hook is armed, so only the task's secure-return path can fail.
+     */
+    task = llam_runtime_spawn_ex(runtime,
+                                 stack_cache_failure_noop,
+                                 NULL,
+                                 NULL,
+                                 0U);
+    if (task == NULL) {
+        rc = fail_errno("stack-cache return-failure spawn failed");
+        goto cleanup;
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+    llam_runtime_test_set_stack_vm_error(failing_operation, EIO);
+    if (llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(task) != 0) {
+        task = NULL;
+        rc = fail_errno("stack-cache return-failure workload failed");
+        goto cleanup;
+    }
+    task = NULL;
+    if (llam_runtime_collect_stats_ex_handle(runtime,
+                                             &stats,
+                                             sizeof(stats)) != 0) {
+        rc = fail_errno("stack-cache return-failure stats failed");
+        goto cleanup;
+    }
+    if (llam_runtime_test_stack_vm_calls(failing_operation) != 1U ||
+        stats.stack_cache_cached_bytes != 0U ||
+        stats.stack_cache_cached_mappings != 0U ||
+        stats.stack_cache_committed_bytes != 0U ||
+        stats.stack_cache_secure_return_failures != 1U ||
+        stats.stack_cache_released_bytes != mapping_size ||
+        stats.stack_cache_budget_rejections != 0U) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: %s did not fail closed: "
+                "calls=%u cached=%llu/%llu committed=%llu "
+                "secure_failures=%llu released=%llu rejections=%llu\n",
+                failure_name,
+                llam_runtime_test_stack_vm_calls(failing_operation),
+                (unsigned long long)stats.stack_cache_cached_bytes,
+                (unsigned long long)stats.stack_cache_cached_mappings,
+                (unsigned long long)stats.stack_cache_committed_bytes,
+                (unsigned long long)
+                    stats.stack_cache_secure_return_failures,
+                (unsigned long long)stats.stack_cache_released_bytes,
+                (unsigned long long)stats.stack_cache_budget_rejections);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int exercise_stack_cache_reactivate_failure_falls_back(void) {
+    const uint64_t mapping_size =
+        (uint64_t)llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT) +
+        (uint64_t)llam_page_size();
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    int rc = 1;
+
+    llam_runtime_test_reset_stack_vm_hooks();
+    if (init_stack_cache_failure_runtime(
+            LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN,
+            &runtime) != 0) {
+        rc = fail_errno("stack-cache reactivate runtime init failed");
+        goto cleanup;
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+    llam_runtime_test_set_stack_vm_error(LLAM_TEST_STACK_VM_REACTIVATE,
+                                         EIO);
+    task = llam_runtime_spawn_ex(runtime,
+                                 stack_cache_failure_noop,
+                                 NULL,
+                                 NULL,
+                                 0U);
+    if (task == NULL ||
+        llam_runtime_test_stack_vm_calls(
+            LLAM_TEST_STACK_VM_REACTIVATE) != 1U) {
+        rc = fail_msg("stack-cache reactivate failure did not reach fallback");
+        goto cleanup;
+    }
+    /*
+     * A failed recommit must release the retained reservation. The fresh-map
+     * fallback remains task-owned until normal completion.
+     */
+    if (llam_runtime_collect_stats_ex_handle(runtime,
+                                             &stats,
+                                             sizeof(stats)) != 0 ||
+        stats.stack_cache_cached_bytes != 0U ||
+        stats.stack_cache_cached_mappings != 0U ||
+        stats.stack_cache_committed_bytes != 0U ||
+        stats.stack_cache_secure_return_failures != 1U ||
+        stats.stack_cache_released_bytes != mapping_size) {
+        rc = fail_msg("stack-cache reactivate failure stranded authority");
+        goto cleanup;
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+    if (llam_runtime_run_handle(runtime) != 0 ||
+        llam_join(task) != 0) {
+        task = NULL;
+        rc = fail_errno("stack-cache reactivate fallback workload failed");
+        goto cleanup;
+    }
+    task = NULL;
+    if (llam_runtime_collect_stats_ex_handle(runtime,
+                                             &stats,
+                                             sizeof(stats)) != 0 ||
+        stats.stack_cache_cached_bytes != mapping_size ||
+        stats.stack_cache_cached_mappings != 1U ||
+        stats.stack_cache_committed_bytes != 0U ||
+        stats.stack_cache_secure_return_failures != 1U ||
+        stats.stack_cache_released_bytes != mapping_size) {
+        rc = fail_msg("stack-cache reactivate fallback did not recache safely");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+#endif
+
 static void *count_block_callback(void *arg) {
     atomic_uint *calls = arg;
 
@@ -7911,6 +8098,21 @@ int main(void) {
         return 1;
     }
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (exercise_stack_cache_return_failure(
+            LLAM_RUNTIME_STACK_CACHE_F_SECURE_SCRUB,
+            LLAM_TEST_STACK_VM_SCRUB,
+            "stack scrub failure") != 0) {
+        return 1;
+    }
+    if (exercise_stack_cache_return_failure(
+            LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN,
+            LLAM_TEST_STACK_VM_DISCARD,
+            "stack discard failure") != 0) {
+        return 1;
+    }
+    if (exercise_stack_cache_reactivate_failure_falls_back() != 0) {
+        return 1;
+    }
     if (exercise_first_block_worker_create_failure_rolls_back_submission() != 0) {
         return 1;
     }
