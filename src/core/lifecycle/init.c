@@ -517,9 +517,9 @@ static int llam_runtime_resolve_prewarm_authority(llam_runtime_t *rt) {
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 /** Internal-only deterministic allocation budgets for exact rollback tests. */
 static atomic_uint_fast64_t g_llam_test_prewarm_limits[LLAM_TEST_PREWARM_KIND_COUNT] = {
-    ATOMIC_VAR_INIT(UINT64_MAX),
-    ATOMIC_VAR_INIT(UINT64_MAX),
-    ATOMIC_VAR_INIT(UINT64_MAX),
+    UINT64_MAX,
+    UINT64_MAX,
+    UINT64_MAX,
 };
 
 void llam_runtime_test_set_prewarm_allocation_limit(

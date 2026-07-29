@@ -45,7 +45,7 @@ static struct sigaction g_llam_process_previous_segv_action;
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 static atomic_bool g_llam_affinity_test_enabled;
-static atomic_int g_llam_affinity_test_supported = ATOMIC_VAR_INIT(-1);
+static atomic_int g_llam_affinity_test_supported = -1;
 static atomic_int
     g_llam_affinity_test_errors[LLAM_TEST_AFFINITY_OPERATION_COUNT];
 static atomic_uint
@@ -145,7 +145,7 @@ static void llam_runtime_note_affinity_failure(llam_runtime_t *rt) {
                                                   &failures,
                                                   failures + 1U,
                                                   memory_order_relaxed,
-                                                  memory_order_acquire)) {
+                                                  memory_order_relaxed)) {
     }
 }
 
@@ -154,10 +154,10 @@ static int llam_runtime_handle_affinity_failure(llam_runtime_t *rt,
                                                 int saved_errno) {
     llam_runtime_note_affinity_failure(rt);
     if (rt->resource_plan.affinity_policy == LLAM_RUNTIME_AFFINITY_REQUIRE) {
-        errno = error_code;
+        llam_thread_errno_store(error_code);
         return -1;
     }
-    errno = saved_errno;
+    llam_thread_errno_store(saved_errno);
     return 0;
 }
 
@@ -225,11 +225,11 @@ static int llam_runtime_restore_driver_affinity_raw(llam_runtime_t *rt) {
 
 int llam_runtime_capture_driver_affinity(llam_runtime_t *rt) {
     unsigned policy;
-    int saved_errno = errno;
+    int saved_errno = llam_thread_errno_load();
     int rc;
 
     if (rt == NULL) {
-        errno = EINVAL;
+        llam_thread_errno_store(EINVAL);
         return -1;
     }
     policy = rt->resource_plan.affinity_policy;
@@ -248,17 +248,17 @@ int llam_runtime_capture_driver_affinity(llam_runtime_t *rt) {
         return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
     }
     rt->driver_affinity_valid = true;
-    errno = saved_errno;
+    llam_thread_errno_store(saved_errno);
     return 0;
 }
 
 int llam_runtime_apply_worker_affinity(llam_runtime_t *rt, unsigned cpu_id) {
     unsigned policy;
-    int saved_errno = errno;
+    int saved_errno = llam_thread_errno_load();
     int rc;
 
     if (rt == NULL) {
-        errno = EINVAL;
+        llam_thread_errno_store(EINVAL);
         return -1;
     }
     policy = rt->resource_plan.affinity_policy;
@@ -277,17 +277,17 @@ int llam_runtime_apply_worker_affinity(llam_runtime_t *rt, unsigned cpu_id) {
     if (rc != 0) {
         return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
     }
-    errno = saved_errno;
+    llam_thread_errno_store(saved_errno);
     return 0;
 }
 
 int llam_runtime_restore_driver_affinity(llam_runtime_t *rt) {
     unsigned policy;
-    int saved_errno = errno;
+    int saved_errno = llam_thread_errno_load();
     int rc;
 
     if (rt == NULL) {
-        errno = EINVAL;
+        llam_thread_errno_store(EINVAL);
         return -1;
     }
     policy = rt->resource_plan.affinity_policy;
@@ -304,7 +304,7 @@ int llam_runtime_restore_driver_affinity(llam_runtime_t *rt) {
     }
     rt->driver_affinity_valid = false;
     rt->driver_affinity_capture_attempted = false;
-    errno = saved_errno;
+    llam_thread_errno_store(saved_errno);
     return 0;
 }
 
@@ -322,7 +322,7 @@ bool llam_runtime_native_thread_enter(llam_runtime_t *rt,
                                                   &live,
                                                   live + 1U,
                                                   memory_order_release,
-                                                  memory_order_acquire)) {
+                                                  memory_order_relaxed)) {
             return true;
         }
     }
@@ -344,7 +344,7 @@ void llam_runtime_native_thread_exit(llam_runtime_t *rt,
                                                   &live,
                                                   live - 1U,
                                                   memory_order_release,
-                                                  memory_order_acquire)) {
+                                                  memory_order_relaxed)) {
             return;
         }
     }
