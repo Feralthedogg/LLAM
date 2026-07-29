@@ -26,6 +26,152 @@
 
 #include "runtime_internal.h"
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static atomic_uint g_llam_block_pool_test_create_calls;
+static atomic_uint g_llam_block_pool_test_fail_create_on;
+
+void llam_block_pool_test_fail_create_on(unsigned call_index) {
+    atomic_store_explicit(&g_llam_block_pool_test_fail_create_on,
+                          call_index,
+                          memory_order_release);
+}
+
+void llam_block_pool_test_reset_create_hook(void) {
+    atomic_store_explicit(&g_llam_block_pool_test_create_calls, 0U, memory_order_release);
+    atomic_store_explicit(&g_llam_block_pool_test_fail_create_on, 0U, memory_order_release);
+}
+
+unsigned llam_block_pool_test_create_calls(void) {
+    return atomic_load_explicit(&g_llam_block_pool_test_create_calls,
+                                memory_order_acquire);
+}
+#endif
+
+/**
+ * @brief Create one blocking worker without publishing a failed thread handle.
+ *
+ * @details
+ * The caller holds @c rt->block_lock. The temporary handle is copied into the
+ * confirmed prefix only after @c pthread_create succeeds, so partial
+ * initialization and shutdown never join an indeterminate output value.
+ */
+static int llam_block_pool_create_one_locked(llam_runtime_t *rt) {
+    pthread_t thread;
+    unsigned started;
+    int rc;
+
+    if (rt == NULL || rt->block_threads == NULL || rt->block_worker_count == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    started = atomic_load_explicit(&rt->block_threads_started, memory_order_acquire);
+    if (started >= rt->block_worker_count) {
+        errno = EAGAIN;
+        return -1;
+    }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    {
+        unsigned call_index =
+            atomic_fetch_add_explicit(&g_llam_block_pool_test_create_calls,
+                                      1U,
+                                      memory_order_acq_rel) +
+            1U;
+        unsigned fail_on =
+            atomic_load_explicit(&g_llam_block_pool_test_fail_create_on,
+                                 memory_order_acquire);
+
+        if (fail_on != 0U && call_index == fail_on) {
+            atomic_fetch_add_explicit(&rt->block_thread_create_failures,
+                                      1U,
+                                      memory_order_relaxed);
+            errno = EAGAIN;
+            return -1;
+        }
+    }
+#endif
+
+    rc = pthread_create(&thread, NULL, llam_block_worker_main, rt);
+    if (rc != 0) {
+        atomic_fetch_add_explicit(&rt->block_thread_create_failures,
+                                  1U,
+                                  memory_order_relaxed);
+        errno = rc;
+        return -1;
+    }
+    rt->block_threads[started] = thread;
+    atomic_store_explicit(&rt->block_threads_started,
+                          started + 1U,
+                          memory_order_release);
+    return 0;
+}
+
+/**
+ * @brief Start exactly the resolved initialization floor for the blocking pool.
+ */
+int llam_block_pool_start_min(llam_runtime_t *rt) {
+    unsigned target;
+    int rc = 0;
+
+    if (rt == NULL || !rt->block_lock_initialized) {
+        errno = EINVAL;
+        return -1;
+    }
+    target = rt->resource_plan.blocking_min;
+    if (target > rt->block_worker_count) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    pthread_mutex_lock(&rt->block_lock);
+    while (atomic_load_explicit(&rt->block_threads_started, memory_order_acquire) <
+           target) {
+        if (llam_block_pool_create_one_locked(rt) != 0) {
+            rc = -1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&rt->block_lock);
+    return rc;
+}
+
+/**
+ * @brief Grow the blocking pool by at most one worker for newly published load.
+ *
+ * @details
+ * The caller holds @c rt->block_lock and has already reserved one pending-job
+ * credit, but has not linked the job into the worker-visible queue. A failed
+ * first worker creation is fatal to that submission because no executor can
+ * drain it. Once at least one worker is confirmed, later growth failures are
+ * best-effort: the existing worker can still drain the queue.
+ */
+int llam_block_pool_ensure_capacity_locked(llam_runtime_t *rt,
+                                           unsigned pending_after_enqueue) {
+    unsigned started;
+    int saved_errno;
+
+    if (rt == NULL || !rt->block_lock_initialized ||
+        rt->block_threads == NULL || rt->block_worker_count == 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    started = atomic_load_explicit(&rt->block_threads_started, memory_order_acquire);
+    if (pending_after_enqueue <= started || started >= rt->block_worker_count) {
+        return 0;
+    }
+    if (llam_block_pool_create_one_locked(rt) == 0) {
+        return 0;
+    }
+
+    saved_errno = errno != 0 ? errno : EAGAIN;
+    started = atomic_load_explicit(&rt->block_threads_started, memory_order_acquire);
+    if (started == 0U) {
+        errno = saved_errno;
+        return -1;
+    }
+    return 0;
+}
+
 bool llam_runtime_note_block_pending(llam_runtime_t *rt, unsigned amount) {
     unsigned pending;
 
@@ -171,6 +317,8 @@ bool llam_runtime_complete_block_active(llam_runtime_t *rt, unsigned amount) {
 void *llam_block_worker_main(void *arg) {
     llam_runtime_t *rt = arg;
 
+    atomic_fetch_add_explicit(&rt->block_threads_entered, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&rt->block_threads_live, 1U, memory_order_release);
     llam_tune_block_worker_thread();
 
     for (;;) {
@@ -314,5 +462,7 @@ void *llam_block_worker_main(void *arg) {
         llam_block_job_release(rt, job);
     }
 
+    atomic_fetch_sub_explicit(&rt->block_threads_live, 1U, memory_order_release);
+    atomic_fetch_add_explicit(&rt->block_threads_exited, 1U, memory_order_release);
     return NULL;
 }

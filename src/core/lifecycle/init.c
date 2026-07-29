@@ -1523,12 +1523,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->overflow_lock_initialized = true;
     atomic_store(&rt->overflow_depth, 0U);
 
-    /*
-     * Task 5 converts this eager compatibility pool into min-start/lazy-grow.
-     * Until that path exists, start the resolved maximum so a zero minimum
-     * cannot strand the first blocking submission.
-     */
     rt->block_worker_count = resource_plan.blocking_max;
+    atomic_init(&rt->block_threads_started, 0U);
+    atomic_init(&rt->block_threads_entered, 0U);
+    atomic_init(&rt->block_threads_exited, 0U);
+    atomic_init(&rt->block_threads_live, 0U);
+    atomic_init(&rt->block_thread_create_failures, 0U);
     rt->block_threads = calloc(rt->block_worker_count, sizeof(*rt->block_threads));
     if (rt->block_threads == NULL) {
         llam_runtime_shutdown_rt(rt);
@@ -1536,16 +1536,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         return -1;
     }
 
-    for (i = 0; i < rt->block_worker_count; ++i) {
-        rc = pthread_create(&rt->block_threads[i], NULL, llam_block_worker_main, rt);
-        if (rc != 0) {
-            errno = rc;
-            llam_runtime_shutdown_rt(rt);
-            return -1;
-        }
-        // pthread_create does not promise to leave the output slot untouched on
-        // failure, so shutdown must only join threads after confirmed starts.
-        rt->block_threads_started = i + 1U;
+    if (llam_block_pool_start_min(rt) != 0) {
+        int saved_errno = errno;
+
+        llam_runtime_shutdown_rt(rt);
+        errno = saved_errno;
+        return -1;
     }
 
     if (llam_install_process_signal_handlers(rt) != 0) {

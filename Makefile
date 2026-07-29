@@ -501,6 +501,7 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/memory/alloc.o \
 	$(TESTHOOK_OBJDIR)/src/core/task/task_stack.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/norm_queue.o \
+	$(TESTHOOK_OBJDIR)/src/engine/scheduler/block.o \
 	$(TESTHOOK_OBJDIR)/src/core/registry/capability.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/broker_buffer.o \
 	$(TESTHOOK_OBJDIR)/src/core/broker/transport/broker_transport.o \
@@ -519,6 +520,7 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/core/memory/alloc.o \
 		$(OBJDIR)/src/core/task/task_stack.o \
 		$(OBJDIR)/src/core/sched/norm_queue.o \
+		$(OBJDIR)/src/engine/scheduler/block.o \
 		$(OBJDIR)/src/core/registry/capability.o \
 		$(OBJDIR)/src/core/broker/broker_buffer.o \
 		$(OBJDIR)/src/core/broker/transport/broker_transport.o \

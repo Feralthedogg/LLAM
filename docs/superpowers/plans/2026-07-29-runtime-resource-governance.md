@@ -413,7 +413,7 @@ int llam_block_pool_ensure_capacity_locked(llam_runtime_t *rt,
                                            unsigned pending_after_enqueue);
 ```
 
-- [ ] **Step 1: Write blocking lifecycle tests**
+- [x] **Step 1: Write blocking lifecycle tests**
 
 Cover `min=0,max=2`: zero threads after init, one confirmed worker before the
 first managed submission may park, growth to two under two concurrently held
@@ -421,18 +421,18 @@ callbacks, no growth past two, and exact started/entered/exited counters.
 Inject failure on the first and second create and assert the job remains owned
 by the caller and no task parks forever.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Expected: current init eagerly creates the full platform default and exposes no
 zero-min path.
 
-- [ ] **Step 3: Allocate capacity but start only the minimum**
+- [x] **Step 3: Allocate capacity but start only the minimum**
 
 Allocate `block_threads` for `blocking_max`; set configured min/max separately
 from confirmed starts. `llam_block_pool_start_min()` creates exactly the
 minimum and uses the existing confirmed-start cleanup rule.
 
-- [ ] **Step 4: Grow before publishing a job that needs another worker**
+- [x] **Step 4: Grow before publishing a job that needs another worker**
 
 While holding `block_lock`, compare queued pressure with confirmed/idle
 workers. Create at most one worker per enqueue and update the confirmed slot
@@ -440,13 +440,13 @@ only after `pthread_create` succeeds. If no worker exists and creation fails,
 roll back pending accounting and return the unqueued job through the existing
 failure path.
 
-- [ ] **Step 5: Count worker entry and exit**
+- [x] **Step 5: Count worker entry and exit**
 
 Increment/decrement atomic actual-thread counters in
 `llam_block_worker_main()`. Shutdown wakes and joins exactly confirmed slots,
 including partially grown pools.
 
-- [ ] **Step 6: Run blocking and shutdown suites and verify GREEN**
+- [x] **Step 6: Run blocking and shutdown suites and verify GREEN**
 
 Run:
 
@@ -457,7 +457,7 @@ ctest --test-dir object/resource-plan-red --output-on-failure \
   -R 'runtime_core|runtime_shutdown_internal'
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/internal/runtime_types.h src/internal/runtime_proto_sched.h \

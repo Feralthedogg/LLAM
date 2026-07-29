@@ -42,10 +42,18 @@ void *llam_opaque_helper_main(void *arg);
  * Worker loops and idle handling.
  */
 void *llam_block_worker_main(void *arg);
+int llam_block_pool_start_min(llam_runtime_t *rt);
+int llam_block_pool_ensure_capacity_locked(llam_runtime_t *rt,
+                                           unsigned pending_after_enqueue);
 bool llam_runtime_note_block_pending(llam_runtime_t *rt, unsigned amount);
 bool llam_runtime_complete_block_pending(llam_runtime_t *rt, unsigned amount);
 bool llam_runtime_note_block_active(llam_runtime_t *rt, unsigned amount);
 bool llam_runtime_complete_block_active(llam_runtime_t *rt, unsigned amount);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+void llam_block_pool_test_fail_create_on(unsigned call_index);
+void llam_block_pool_test_reset_create_hook(void);
+unsigned llam_block_pool_test_create_calls(void);
+#endif
 void llam_autotune_init(llam_runtime_t *rt);
 void *llam_ctrl_worker_main(void *arg);
 void llam_idle_wait(llam_shard_t *shard);

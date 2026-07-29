@@ -127,6 +127,7 @@ bool llam_runtime_pressure_signal(llam_runtime_t *rt) {
     unsigned overflow_threshold;
     unsigned online_shards;
     unsigned block_pending = 0U;
+    unsigned block_workers = 0U;
 
     if (rt == NULL) {
         return false;
@@ -135,6 +136,8 @@ bool llam_runtime_pressure_signal(llam_runtime_t *rt) {
     overflow_depth = llam_runtime_overflow_depth(rt);
     if (rt->block_worker_count > 0U) {
         block_pending = atomic_load(&rt->block_pending);
+        block_workers =
+            atomic_load_explicit(&rt->block_threads_started, memory_order_acquire);
     }
     if (overflow_depth == 0U && block_pending == 0U) {
         return false;
@@ -146,7 +149,7 @@ bool llam_runtime_pressure_signal(llam_runtime_t *rt) {
         return true;
     }
 
-    if (block_pending > rt->block_worker_count * 2U) {
+    if (block_pending > llam_max_unsigned(1U, block_workers) * 2U) {
         return true;
     }
 

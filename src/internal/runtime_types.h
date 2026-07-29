@@ -1410,7 +1410,11 @@ struct llam_runtime {
     unsigned idle_spin_max_iters;
     atomic_uint next_spawn_shard;
     unsigned block_worker_count;
-    unsigned block_threads_started;
+    atomic_uint block_threads_started;
+    atomic_uint block_threads_entered;
+    atomic_uint block_threads_exited;
+    atomic_uint block_threads_live;
+    atomic_uint block_thread_create_failures;
     pthread_t init_thread;
     llam_cpu_set_t init_thread_affinity;
     bool init_thread_affinity_valid;

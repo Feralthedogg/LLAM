@@ -86,6 +86,22 @@ typedef struct nested_runtime_create_state {
     llam_runtime_t *created_runtime;
 } nested_runtime_create_state_t;
 
+#define BLOCK_POOL_GROWTH_TASKS 3U
+
+typedef struct block_pool_growth_state {
+    core_state_t core;
+    llam_runtime_t *runtime;
+    llam_task_t *tasks[BLOCK_POOL_GROWTH_TASKS];
+    atomic_uint callbacks_started;
+    atomic_uint callbacks_active;
+    atomic_uint callbacks_active_peak;
+    atomic_uint callbacks_completed;
+    atomic_uint release_callbacks;
+    unsigned confirmed_before_release;
+    unsigned entered_before_release;
+    unsigned live_before_release;
+} block_pool_growth_state_t;
+
 typedef struct signal_wait_state {
     core_state_t core;
     llam_signal_set_t *set;
@@ -191,6 +207,89 @@ static void *blocking_callback(void *arg) {
 static void *blocking_null_callback(void *arg) {
     (void)arg;
     return NULL;
+}
+
+static void test_atomic_update_peak(atomic_uint *peak, unsigned value) {
+    unsigned observed = atomic_load_explicit(peak, memory_order_relaxed);
+
+    while (observed < value &&
+           !atomic_compare_exchange_weak_explicit(peak,
+                                                  &observed,
+                                                  value,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed)) {
+    }
+}
+
+static void *block_pool_growth_callback(void *arg) {
+    block_pool_growth_state_t *state = arg;
+    struct timespec interval = {0, 1000000L};
+    unsigned active;
+
+    active = atomic_fetch_add_explicit(&state->callbacks_active,
+                                       1U,
+                                       memory_order_acq_rel) +
+             1U;
+    test_atomic_update_peak(&state->callbacks_active_peak, active);
+    atomic_fetch_add_explicit(&state->callbacks_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_callbacks, memory_order_acquire) == 0U) {
+        (void)nanosleep(&interval, NULL);
+    }
+    atomic_fetch_sub_explicit(&state->callbacks_active, 1U, memory_order_acq_rel);
+    atomic_fetch_add_explicit(&state->callbacks_completed, 1U, memory_order_release);
+    return state;
+}
+
+static void block_pool_growth_child(void *arg) {
+    block_pool_growth_state_t *state = arg;
+    void *result = NULL;
+
+    if (llam_call_blocking_result(block_pool_growth_callback, state, &result) != 0 ||
+        result != state) {
+        task_fail(&state->core, "lazy blocking worker callback failed", errno);
+    }
+}
+
+static void block_pool_growth_parent(void *arg) {
+    block_pool_growth_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+    unsigned i;
+
+    for (i = 0U; i < BLOCK_POOL_GROWTH_TASKS; ++i) {
+        state->tasks[i] = llam_runtime_spawn_ex(
+            state->runtime, block_pool_growth_child, state, NULL, 0U);
+        if (state->tasks[i] == NULL) {
+            task_fail(&state->core, "lazy blocking worker child spawn failed", errno);
+            break;
+        }
+    }
+
+    while (i == BLOCK_POOL_GROWTH_TASKS &&
+           (atomic_load_explicit(&state->runtime->block_pending, memory_order_acquire) <
+                BLOCK_POOL_GROWTH_TASKS ||
+            atomic_load_explicit(&state->callbacks_started, memory_order_acquire) < 2U)) {
+        if (llam_now_ns() >= deadline_ns) {
+            task_fail(&state->core, "lazy blocking pool did not reach two workers", ETIMEDOUT);
+            break;
+        }
+        llam_yield();
+    }
+
+    state->confirmed_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_started, memory_order_acquire);
+    state->entered_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_entered, memory_order_acquire);
+    state->live_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_live, memory_order_acquire);
+    atomic_store_explicit(&state->release_callbacks, 1U, memory_order_release);
+
+    for (i = 0U; i < BLOCK_POOL_GROWTH_TASKS; ++i) {
+        if (state->tasks[i] != NULL && llam_join(state->tasks[i]) != 0) {
+            task_fail(&state->core, "lazy blocking worker child join failed", errno);
+        }
+        state->tasks[i] = NULL;
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
 }
 
 #if LLAM_PLATFORM_POSIX
@@ -1299,6 +1398,115 @@ static int test_runtime_resource_plan_initialization(void) {
         return 1;
     }
     return 0;
+}
+
+static int test_blocking_pool_grows_lazily_within_bounds(void) {
+    block_pool_growth_state_t state;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *parent = NULL;
+    int rc = 1;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    atomic_init(&state.callbacks_started, 0U);
+    atomic_init(&state.callbacks_active, 0U);
+    atomic_init(&state.callbacks_active_peak, 0U);
+    atomic_init(&state.callbacks_completed, 0U);
+    atomic_init(&state.release_callbacks, 0U);
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("lazy blocking pool opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 0U;
+    opts.blocking_max = 2U;
+    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
+        return test_fail_errno("lazy blocking pool runtime create failed");
+    }
+    state.runtime = runtime;
+
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("lazy blocking pool initial stats failed");
+        goto cleanup;
+    }
+    if (stats.configured_blocking_min != 0U ||
+        stats.configured_blocking_max != 2U ||
+        stats.blocking_threads != 0U ||
+        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 0U) {
+        rc = test_fail("zero-min blocking pool eagerly created workers");
+        goto cleanup;
+    }
+
+    parent = llam_runtime_spawn_ex(runtime, block_pool_growth_parent, &state, NULL, 0U);
+    if (parent == NULL) {
+        rc = test_fail_errno("lazy blocking pool parent spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(parent) != 0) {
+        parent = NULL;
+        rc = test_fail_errno("lazy blocking pool run/join failed");
+        goto cleanup;
+    }
+    parent = NULL;
+
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("lazy blocking pool final stats failed");
+        goto cleanup;
+    }
+    if (atomic_load_explicit(&state.core.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.core.ran, memory_order_acquire) != 1U ||
+        state.confirmed_before_release != 2U ||
+        state.entered_before_release != 2U ||
+        state.live_before_release != 2U ||
+        atomic_load_explicit(&state.callbacks_started, memory_order_acquire) !=
+            BLOCK_POOL_GROWTH_TASKS ||
+        atomic_load_explicit(&state.callbacks_completed, memory_order_acquire) !=
+            BLOCK_POOL_GROWTH_TASKS ||
+        atomic_load_explicit(&state.callbacks_active, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.callbacks_active_peak, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&runtime->block_threads_entered, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&runtime->block_threads_exited, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime->block_threads_live, memory_order_acquire) != 2U ||
+        stats.blocking_threads != 2U) {
+        fprintf(stderr,
+                "[test_runtime_core] lazy blocking pool mismatch: failures=%u ran=%u "
+                "confirmed=%u/%u entered=%u/%u live=%u/%u exited=%u "
+                "callbacks=%u/%u active=%u peak=%u stats_live=%u\n",
+                atomic_load_explicit(&state.core.failures, memory_order_acquire),
+                atomic_load_explicit(&state.core.ran, memory_order_acquire),
+                state.confirmed_before_release,
+                atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire),
+                state.entered_before_release,
+                atomic_load_explicit(&runtime->block_threads_entered, memory_order_acquire),
+                state.live_before_release,
+                atomic_load_explicit(&runtime->block_threads_live, memory_order_acquire),
+                atomic_load_explicit(&runtime->block_threads_exited, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_started, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_completed, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_active, memory_order_acquire),
+                atomic_load_explicit(&state.callbacks_active_peak, memory_order_acquire),
+                stats.blocking_threads);
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&state.release_callbacks, 1U, memory_order_release);
+    if (parent != NULL) {
+        (void)llam_detach(parent);
+    }
+    llam_runtime_destroy(runtime);
+    return rc;
 }
 
 static void nested_runtime_create_task(void *arg) {
@@ -6143,6 +6351,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_resolver);
     RUN_RUNTIME_CORE_TEST(test_runtime_total_prewarm_distribution);
     RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_initialization);
+    RUN_RUNTIME_CORE_TEST(test_blocking_pool_grows_lazily_within_bounds);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
 #if LLAM_PLATFORM_POSIX
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);

@@ -102,13 +102,16 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     }
 
     if (rt->block_threads != NULL) {
+        unsigned confirmed =
+            atomic_load_explicit(&rt->block_threads_started, memory_order_acquire);
+
         // Only join block workers whose pthread_create call completed
         // successfully; failed creates may leave an arbitrary pthread_t value.
-        for (i = 0; i < rt->block_threads_started; ++i) {
+        for (i = 0; i < confirmed; ++i) {
             pthread_join(rt->block_threads[i], NULL);
             rt->block_threads[i] = 0;
         }
-        rt->block_threads_started = 0U;
+        atomic_store_explicit(&rt->block_threads_started, 0U, memory_order_release);
     }
 
     // Drain any channel cache entries retained by the shutdown caller and the

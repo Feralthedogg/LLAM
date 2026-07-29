@@ -224,6 +224,7 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     llam_cancel_token_t *token;
     llam_block_job_t *job;
     llam_wait_node_t *node;
+    bool pending_reserved;
     int wake_error;
 
     llam_task_safepoint();
@@ -340,9 +341,16 @@ int llam_call_blocking_result(llam_blocking_fn fn, void *arg, void **out) {
     }
 
     pthread_mutex_lock(&rt->block_lock);
-    if (!llam_runtime_note_block_pending(rt, 1U)) {
+    pending_reserved = llam_runtime_note_block_pending(rt, 1U);
+    if (!pending_reserved ||
+        llam_block_pool_ensure_capacity_locked(
+            rt,
+            atomic_load_explicit(&rt->block_pending, memory_order_acquire)) != 0) {
         int saved_errno = errno;
 
+        if (pending_reserved) {
+            (void)llam_runtime_complete_block_pending(rt, 1U);
+        }
         pthread_mutex_unlock(&rt->block_lock);
         if (token != NULL) {
             if (task->cancel_registered) {

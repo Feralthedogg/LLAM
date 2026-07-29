@@ -71,6 +71,273 @@ static void *count_block_callback(void *arg) {
     return arg;
 }
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef struct block_pool_failure_state {
+    llam_runtime_t *runtime;
+    llam_task_t *tasks[2];
+    atomic_uint callback_calls;
+    atomic_uint callback_started;
+    atomic_uint release_callback;
+    atomic_uint task_returns;
+    atomic_uint failures;
+    unsigned confirmed_before_release;
+    int first_rc;
+    int first_errno;
+} block_pool_failure_state_t;
+
+static void *block_pool_failure_callback(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    struct timespec interval = {0, 1000000L};
+
+    atomic_fetch_add_explicit(&state->callback_calls, 1U, memory_order_relaxed);
+    atomic_fetch_add_explicit(&state->callback_started, 1U, memory_order_release);
+    while (atomic_load_explicit(&state->release_callback, memory_order_acquire) == 0U) {
+        (void)nanosleep(&interval, NULL);
+    }
+    return state;
+}
+
+static void block_pool_first_create_failure_task(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    void *result = (void *)(uintptr_t)1U;
+
+    errno = 0;
+    state->first_rc =
+        llam_call_blocking_result(block_pool_failure_callback, state, &result);
+    state->first_errno = errno;
+    if (state->first_rc != -1 || state->first_errno != EAGAIN || result != NULL) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&state->task_returns, 1U, memory_order_release);
+}
+
+static void block_pool_second_create_failure_child(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    void *result = NULL;
+
+    if (llam_call_blocking_result(block_pool_failure_callback, state, &result) != 0 ||
+        result != state) {
+        atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&state->task_returns, 1U, memory_order_release);
+}
+
+static void block_pool_second_create_failure_parent(void *arg) {
+    block_pool_failure_state_t *state = arg;
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+    unsigned i;
+
+    for (i = 0U; i < 2U; ++i) {
+        state->tasks[i] = llam_runtime_spawn_ex(
+            state->runtime,
+            block_pool_second_create_failure_child,
+            state,
+            NULL,
+            0U);
+        if (state->tasks[i] == NULL) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            break;
+        }
+    }
+
+    while (i == 2U &&
+           (atomic_load_explicit(&state->runtime->block_pending, memory_order_acquire) < 2U ||
+            atomic_load_explicit(&state->callback_started, memory_order_acquire) < 1U)) {
+        if (llam_now_ns() >= deadline_ns) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+            break;
+        }
+        llam_yield();
+    }
+    state->confirmed_before_release =
+        atomic_load_explicit(&state->runtime->block_threads_started, memory_order_acquire);
+    atomic_store_explicit(&state->release_callback, 1U, memory_order_release);
+    for (i = 0U; i < 2U; ++i) {
+        if (state->tasks[i] != NULL && llam_join(state->tasks[i]) != 0) {
+            atomic_fetch_add_explicit(&state->failures, 1U, memory_order_relaxed);
+        }
+        state->tasks[i] = NULL;
+    }
+}
+
+static void init_block_pool_failure_state(block_pool_failure_state_t *state) {
+    memset(state, 0, sizeof(*state));
+    atomic_init(&state->callback_calls, 0U);
+    atomic_init(&state->callback_started, 0U);
+    atomic_init(&state->release_callback, 0U);
+    atomic_init(&state->task_returns, 0U);
+    atomic_init(&state->failures, 0U);
+}
+
+static int init_zero_min_block_pool_runtime(llam_runtime_t **runtime) {
+    llam_runtime_opts_t opts;
+
+    if (runtime == NULL ||
+        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 0U;
+    opts.blocking_max = 2U;
+    return llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, runtime);
+}
+
+static int exercise_first_block_worker_create_failure_rolls_back_submission(void) {
+    block_pool_failure_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    int rc = 1;
+
+    init_block_pool_failure_state(&state);
+    llam_block_pool_test_reset_create_hook();
+    llam_block_pool_test_fail_create_on(1U);
+    if (init_zero_min_block_pool_runtime(&runtime) != 0) {
+        rc = fail_errno("first-create failure runtime init failed");
+        goto cleanup;
+    }
+    state.runtime = runtime;
+    task = llam_runtime_spawn_ex(
+        runtime, block_pool_first_create_failure_task, &state, NULL, 0U);
+    if (task == NULL) {
+        rc = fail_errno("first-create failure task spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(task) != 0) {
+        task = NULL;
+        rc = fail_errno("first-create failure task did not return");
+        goto cleanup;
+    }
+    task = NULL;
+
+    if (atomic_load_explicit(&state.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.task_returns, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&state.callback_calls, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime->block_pending, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 0U ||
+        runtime->block_head != NULL || runtime->block_tail != NULL ||
+        llam_block_pool_test_create_calls() != 1U) {
+        rc = fail_msg("first block-worker create failure published or stranded a job");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&state.release_callback, 1U, memory_order_release);
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    llam_block_pool_test_reset_create_hook();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int exercise_second_block_worker_create_failure_uses_existing_worker(void) {
+    block_pool_failure_state_t state;
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *parent = NULL;
+    int rc = 1;
+
+    init_block_pool_failure_state(&state);
+    llam_block_pool_test_reset_create_hook();
+    llam_block_pool_test_fail_create_on(2U);
+    if (init_zero_min_block_pool_runtime(&runtime) != 0) {
+        rc = fail_errno("second-create failure runtime init failed");
+        goto cleanup;
+    }
+    state.runtime = runtime;
+    parent = llam_runtime_spawn_ex(
+        runtime, block_pool_second_create_failure_parent, &state, NULL, 0U);
+    if (parent == NULL) {
+        rc = fail_errno("second-create failure parent spawn failed");
+        goto cleanup;
+    }
+    if (llam_runtime_run_handle(runtime) != 0 || llam_join(parent) != 0) {
+        parent = NULL;
+        rc = fail_errno("second-create failure workload did not drain");
+        goto cleanup;
+    }
+    parent = NULL;
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = fail_errno("second-create failure stats failed");
+        goto cleanup;
+    }
+
+    if (atomic_load_explicit(&state.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.task_returns, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&state.callback_calls, memory_order_acquire) != 2U ||
+        state.confirmed_before_release != 1U ||
+        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime->block_threads_entered, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime->block_threads_live, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime->block_pending, memory_order_acquire) != 0U ||
+        stats.blocking_threads != 1U ||
+        llam_block_pool_test_create_calls() != 2U) {
+        rc = fail_msg("second block-worker create failure did not drain on the confirmed worker");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&state.release_callback, 1U, memory_order_release);
+    if (parent != NULL) {
+        (void)llam_detach(parent);
+    }
+    llam_block_pool_test_reset_create_hook();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int exercise_block_pool_min_partial_failure_unwinds(void) {
+    llam_runtime_opts_t opts;
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return fail_errno("partial blocking-min opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = 1U;
+    opts.worker_count = 1U;
+    opts.worker_max = 1U;
+    opts.blocking_min = 2U;
+    opts.blocking_max = 2U;
+
+    llam_block_pool_test_reset_create_hook();
+    llam_block_pool_test_fail_create_on(2U);
+    errno = 0;
+    if (llam_runtime_create(&opts,
+                            LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+                            &runtime) != -1 ||
+        errno != EAGAIN || runtime != NULL ||
+        llam_block_pool_test_create_calls() != 2U) {
+        rc = fail_msg("partial blocking-min create failure did not unwind confirmed threads");
+        goto cleanup;
+    }
+
+    /*
+     * A clean retry proves that the successful first thread from the failed
+     * attempt was joined and its partial runtime handle was unregistered.
+     */
+    llam_block_pool_test_reset_create_hook();
+    if (llam_runtime_create(&opts,
+                            LLAM_RUNTIME_OPTS_CURRENT_SIZE,
+                            &runtime) != 0) {
+        rc = fail_errno("runtime create after partial blocking-min unwind failed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_block_pool_test_reset_create_hook();
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+#endif
+
 static int init_runtime(void) {
     llam_runtime_opts_t opts;
 
@@ -4385,6 +4652,9 @@ static int exercise_block_worker_rejects_pending_counter_underflow(void) {
     atomic_init(&runtime.block_pending, 0U);
     atomic_init(&runtime.block_active, 0U);
     atomic_init(&runtime.block_active_peak, 0U);
+    atomic_init(&runtime.block_threads_entered, 0U);
+    atomic_init(&runtime.block_threads_exited, 0U);
+    atomic_init(&runtime.block_threads_live, 0U);
     atomic_init(&runtime.block_job_free, NULL);
     atomic_init(&runtime.shutdown_requested, true);
     atomic_init(&runtime.fatal_errno, 0);
@@ -4400,7 +4670,10 @@ static int exercise_block_worker_rejects_pending_counter_underflow(void) {
 
     (void)llam_block_worker_main(&runtime);
     if (atomic_load_explicit(&runtime.block_pending, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL) {
+        atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EINVAL ||
+        atomic_load_explicit(&runtime.block_threads_entered, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_exited, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_live, memory_order_acquire) != 0U) {
         (void)pthread_mutex_destroy(&runtime.block_lock);
         return fail_msg("block worker pending counter underflow was not rejected");
     }
@@ -4431,6 +4704,9 @@ static int exercise_block_worker_rejects_active_counter_overflow(void) {
     atomic_init(&runtime.block_pending, 1U);
     atomic_init(&runtime.block_active, UINT_MAX);
     atomic_init(&runtime.block_active_peak, UINT_MAX);
+    atomic_init(&runtime.block_threads_entered, 0U);
+    atomic_init(&runtime.block_threads_exited, 0U);
+    atomic_init(&runtime.block_threads_live, 0U);
     atomic_init(&runtime.block_job_free, NULL);
     atomic_init(&runtime.shutdown_requested, true);
     atomic_init(&runtime.fatal_errno, 0);
@@ -4462,7 +4738,10 @@ static int exercise_block_worker_rejects_active_counter_overflow(void) {
         atomic_load_explicit(&runtime.block_pending, memory_order_acquire) != 0U ||
         atomic_load_explicit(&runtime.fatal_errno, memory_order_acquire) != EOVERFLOW ||
         atomic_load_explicit(&task.wake_error_code, memory_order_acquire) != EOVERFLOW ||
-        atomic_load_explicit(&job.state, memory_order_acquire) != LLAM_BLOCK_JOB_ABORTED) {
+        atomic_load_explicit(&job.state, memory_order_acquire) != LLAM_BLOCK_JOB_ABORTED ||
+        atomic_load_explicit(&runtime.block_threads_entered, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_exited, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&runtime.block_threads_live, memory_order_acquire) != 0U) {
         (void)pthread_mutex_destroy(&runtime.block_lock);
         return fail_msg("block worker active counter overflow was not rejected");
     }
@@ -7088,6 +7367,17 @@ cleanup:
 #endif
 
 int main(void) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (exercise_first_block_worker_create_failure_rolls_back_submission() != 0) {
+        return 1;
+    }
+    if (exercise_second_block_worker_create_failure_uses_existing_worker() != 0) {
+        return 1;
+    }
+    if (exercise_block_pool_min_partial_failure_unwinds() != 0) {
+        return 1;
+    }
+#endif
 #if defined(LLAM_ENABLE_TEST_HOOKS) && !LLAM_PLATFORM_WINDOWS
     const char *fr08_mode = getenv("LLAM_VALIDATE_FR08_002_ONLY");
 

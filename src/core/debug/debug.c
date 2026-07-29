@@ -202,6 +202,8 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     stats->configured_blocking_max = rt->resource_plan.blocking_max;
     stats->selected_cpu_count = rt->resource_plan.selected_cpu_count;
     stats->affinity_policy = rt->resource_plan.affinity_policy;
+    stats->blocking_threads =
+        atomic_load_explicit(&rt->block_threads_live, memory_order_acquire);
     stats->requested_task_prewarm_total = rt->requested_task_prewarm_total;
     stats->achieved_task_prewarm_total = rt->achieved_task_prewarm_total;
     stats->requested_stack_prewarm_total = rt->requested_stack_prewarm_total;
@@ -369,6 +371,10 @@ void llam_dump_runtime_state(int fd) {
     unsigned active_nodes;
     unsigned block_pending;
     unsigned block_active;
+    unsigned block_confirmed;
+    unsigned block_entered;
+    unsigned block_exited;
+    unsigned block_live;
     unsigned overflow_depth;
     unsigned online_shards;
     unsigned online_floor;
@@ -397,6 +403,14 @@ void llam_dump_runtime_state(int fd) {
     active_nodes = rt->active_nodes;
     block_pending = atomic_load(&rt->block_pending);
     block_active = atomic_load(&rt->block_active);
+    block_confirmed =
+        atomic_load_explicit(&rt->block_threads_started, memory_order_acquire);
+    block_entered =
+        atomic_load_explicit(&rt->block_threads_entered, memory_order_acquire);
+    block_exited =
+        atomic_load_explicit(&rt->block_threads_exited, memory_order_acquire);
+    block_live =
+        atomic_load_explicit(&rt->block_threads_live, memory_order_acquire);
     overflow_depth = llam_runtime_overflow_depth(rt);
     online_shards = llam_max_unsigned(1U, llam_runtime_online_shards(rt));
     online_floor = llam_runtime_online_shards_floor(rt);
@@ -460,8 +474,16 @@ void llam_dump_runtime_state(int fd) {
     // logs; machine consumers should use llam_runtime_collect_stats().
     dprintf(fd,
             "block:\n"
-            "  workers=%u pending=%u active=%u queued=%u peak_active=%u wake_seq=%u\n",
+            "  capacity=%u confirmed=%u entered=%u exited=%u live=%u "
+            "create_failures=%u pending=%u active=%u queued=%u "
+            "peak_active=%u wake_seq=%u\n",
             rt->block_worker_count,
+            block_confirmed,
+            block_entered,
+            block_exited,
+            block_live,
+            atomic_load_explicit(&rt->block_thread_create_failures,
+                                 memory_order_relaxed),
             block_pending,
             block_active,
             block_pending > block_active ? block_pending - block_active : 0U,
