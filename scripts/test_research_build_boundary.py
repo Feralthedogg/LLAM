@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import subprocess
 import tempfile
 import time
@@ -394,15 +395,30 @@ class ResearchBoundaryTests(unittest.TestCase):
         return text.replace(str(prefix), "${prefix}").replace("\\", "/")
 
     @classmethod
-    def _install_cmake_mode(cls, build_dir: Path, mode: str) -> Path:
+    def _build_and_install_contract_mode(cls, mode: str) -> Path:
+        prefix = cls.work / f"install-contract-{mode}"
+        build_dir = cls.work / f"cmake-contract-{mode}"
+        configure_result = cls._run(
+            [
+                "cmake",
+                "-S",
+                str(cls.source),
+                "-B",
+                str(build_dir),
+                f"-DLLAM_BUILD_RESEARCH={'ON' if mode == 'on' else 'OFF'}",
+                f"-DCMAKE_INSTALL_PREFIX={prefix}",
+            ]
+        )
+        cls.assert_command_succeeded(
+            configure_result, f"{mode} CMake contract configure"
+        )
+        cls._build_cmake_mode(build_dir, f"research-{mode}")
         prefix = cls.work / f"install-contract-{mode}"
         result = cls._run(
             [
                 "cmake",
                 "--install",
                 str(build_dir),
-                "--prefix",
-                str(prefix),
             ]
         )
         cls.assert_command_succeeded(result, f"{mode} CMake contract install")
@@ -412,20 +428,113 @@ class ResearchBoundaryTests(unittest.TestCase):
     def _installed_library_dir(cls, prefix: Path) -> Path:
         return cls._find_shared_library(prefix).parent
 
+    @staticmethod
+    def _parse_abi_probe_record(output: str) -> dict[str, str]:
+        record = {}
+        for line in output.splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not key or key in record:
+                raise AssertionError(f"invalid installed ABI probe line: {line}")
+            record[key] = value
+        return record
+
+    @staticmethod
+    def _validate_abi_probe_record(
+        record: dict[str, str], prefix: Path
+    ) -> dict[str, str]:
+        required = {
+            "abi_version",
+            "abi_major",
+            "abi_minor",
+            "version_major",
+            "version_minor",
+            "version_patch",
+            "reserved0",
+            "struct_size",
+            "runtime_opts_size",
+            "spawn_opts_size",
+            "runtime_stats_size",
+            "runtime_name",
+            "version_string",
+            "platform_name",
+        }
+        expected = required | ({"loaded_image"} if os.name != "nt" else set())
+        if set(record) != expected:
+            raise AssertionError(f"unexpected installed ABI record: {record}")
+        for field in required - {"runtime_name", "version_string", "platform_name"}:
+            if not record[field].isdigit():
+                raise AssertionError(f"non-numeric ABI probe field {field}")
+        expected_values = {
+            "abi_version": str(2 << 16),
+            "abi_major": "2",
+            "abi_minor": "0",
+            "version_major": "2",
+            "version_minor": "2",
+            "version_patch": "0",
+            "reserved0": "0",
+            "runtime_name": "LLAM",
+            "version_string": "2.2.0",
+        }
+        for field, value in expected_values.items():
+            if record[field] != value:
+                raise AssertionError(
+                    f"unexpected installed ABI field {field}: {record[field]}"
+                )
+        for field in (
+            "struct_size",
+            "runtime_opts_size",
+            "spawn_opts_size",
+            "runtime_stats_size",
+        ):
+            if int(record[field]) <= 0:
+                raise AssertionError(f"non-positive installed ABI field {field}")
+        normalized = record.copy()
+        if "loaded_image" in record:
+            loaded_image = Path(record["loaded_image"]).resolve()
+            if not loaded_image.is_relative_to(prefix.resolve()):
+                raise AssertionError(
+                    f"ABI probe loaded outside installed prefix: {loaded_image}"
+                )
+            normalized["loaded_image"] = "${prefix}/" + str(
+                loaded_image.relative_to(prefix.resolve())
+            )
+        return normalized
+
     @classmethod
-    def _abi_probe(cls, prefix: Path, mode: str) -> str:
+    def _abi_probe(cls, prefix: Path, mode: str) -> dict[str, str]:
         probe = cls.work / f"installed-abi-probe-{mode}.c"
         binary = cls.work / f"installed-abi-probe-{mode}"
         probe.write_text(
             '#include <llam/runtime.h>\n'
+            "#include <dlfcn.h>\n"
             "#include <stdio.h>\n"
             "int main(void) {\n"
             "    llam_abi_info_t info = {0};\n"
             "    if (llam_abi_get_info(&info, sizeof(info)) != 0) {\n"
             "        return 1;\n"
             "    }\n"
-            '    printf("%u:%u:%s\\n", llam_abi_version(), '
-            "info.abi_major, llam_version_string());\n"
+            '    printf("abi_version=%u\\n", llam_abi_version());\n'
+            '    printf("abi_major=%u\\n", info.abi_major);\n'
+            '    printf("abi_minor=%u\\n", info.abi_minor);\n'
+            '    printf("version_major=%u\\n", info.version_major);\n'
+            '    printf("version_minor=%u\\n", info.version_minor);\n'
+            '    printf("version_patch=%u\\n", info.version_patch);\n'
+            '    printf("reserved0=%u\\n", info.reserved0);\n'
+            '    printf("struct_size=%zu\\n", info.struct_size);\n'
+            '    printf("runtime_opts_size=%zu\\n", info.runtime_opts_size);\n'
+            '    printf("spawn_opts_size=%zu\\n", info.spawn_opts_size);\n'
+            '    printf("runtime_stats_size=%zu\\n", info.runtime_stats_size);\n'
+            '    printf("runtime_name=%s\\n", info.runtime_name);\n'
+            '    printf("version_string=%s\\n", info.version_string);\n'
+            '    printf("platform_name=%s\\n", info.platform_name);\n'
+            "#ifndef _WIN32\n"
+            "    Dl_info loaded = {0};\n"
+            "    if (dladdr((const void *)&llam_abi_version, &loaded) == 0 "
+            "|| loaded.dli_fname == NULL) {\n"
+            "        return 2;\n"
+            "    }\n"
+            '    printf("loaded_image=%s\\n", loaded.dli_fname);\n'
+            "#endif\n"
             "    return 0;\n"
             "}\n",
             encoding="utf-8",
@@ -434,6 +543,7 @@ class ResearchBoundaryTests(unittest.TestCase):
             [
                 os.environ.get("CC", "cc"),
                 "-std=c11",
+                "-D_GNU_SOURCE",
                 str(probe),
                 "-I",
                 str(prefix / "include"),
@@ -442,6 +552,7 @@ class ResearchBoundaryTests(unittest.TestCase):
                 "-lllam_runtime",
                 "-o",
                 str(binary),
+                *([] if os.uname().sysname == "Darwin" else ["-ldl"]),
             ]
         )
         cls.assert_command_succeeded(
@@ -457,10 +568,12 @@ class ResearchBoundaryTests(unittest.TestCase):
         cls.assert_command_succeeded(
             run_result, f"{mode} installed ABI probe run"
         )
-        return run_result.stdout.strip()
+        return cls._validate_abi_probe_record(
+            cls._parse_abi_probe_record(run_result.stdout), prefix
+        )
 
     @classmethod
-    def _pkg_config_contract(cls, prefix: Path) -> str:
+    def _pkg_config_contract(cls, prefix: Path) -> dict[str, str]:
         metadata = [
             path
             for path in prefix.rglob("llam.pc")
@@ -470,38 +583,173 @@ class ResearchBoundaryTests(unittest.TestCase):
             raise AssertionError(
                 f"expected one installed pkg-config file, got: {metadata}"
             )
-        return cls._normalized_prefix_text(
-            metadata[0].read_text(encoding="utf-8"), prefix
+        tool = shutil.which("pkg-config") or shutil.which("pkgconf")
+        if tool is None:
+            raise AssertionError("pkg-config or pkgconf is required")
+        environment = os.environ.copy()
+        environment["PKG_CONFIG_PATH"] = str(metadata[0].parent)
+        environment["PKG_CONFIG_LIBDIR"] = str(metadata[0].parent)
+        environment.pop("PKG_CONFIG_SYSROOT_DIR", None)
+
+        def query(*arguments: str) -> str:
+            result = cls._run([tool, *arguments, "llam"], env=environment)
+            cls.assert_command_succeeded(result, f"pkg-config {' '.join(arguments)}")
+            return result.stdout.strip()
+
+        resolved_path = Path(query("--path")).resolve()
+        if resolved_path != metadata[0].resolve():
+            raise AssertionError(
+                f"pkg-config resolved unexpected metadata: {resolved_path}"
+            )
+        version = query("--modversion")
+        cflags = query("--cflags")
+        libs = query("--libs")
+        library_dir = cls._installed_library_dir(prefix)
+        expected_cflag = f"-I{prefix / 'include'}"
+        expected_libflag = f"-L{library_dir}"
+        if expected_cflag not in shlex.split(cflags):
+            raise AssertionError(f"pkg-config cflags escaped prefix: {cflags}")
+        if expected_libflag not in shlex.split(libs):
+            raise AssertionError(f"pkg-config libs escaped prefix: {libs}")
+        if "-lllam_runtime" not in shlex.split(libs) or version != "2.2.0":
+            raise AssertionError(f"unexpected pkg-config contract: {version} {libs}")
+
+        source = cls.work / f"pkg-config-consumer-{prefix.name}.c"
+        binary = cls.work / f"pkg-config-consumer-{prefix.name}"
+        source.write_text(
+            "#include <llam/runtime.h>\n"
+            "int main(void) {\n"
+            "    return llam_abi_version() == ((2U << 16) | 0U) ? 0 : 1;\n"
+            "}\n",
+            encoding="utf-8",
         )
+        compile_result = cls._run(
+            [
+                os.environ.get("CC", "cc"),
+                str(source),
+                *shlex.split(cflags),
+                *shlex.split(libs),
+                "-o",
+                str(binary),
+            ]
+        )
+        cls.assert_command_succeeded(
+            compile_result, "pkg-config installed consumer compile"
+        )
+        run_environment = os.environ.copy()
+        library_dir_text = str(library_dir)
+        if os.uname().sysname == "Darwin":
+            run_environment["DYLD_LIBRARY_PATH"] = library_dir_text
+        else:
+            run_environment["LD_LIBRARY_PATH"] = library_dir_text
+        run_result = cls._run([str(binary)], env=run_environment)
+        cls.assert_command_succeeded(
+            run_result, "pkg-config installed consumer run"
+        )
+        return {
+            "path": cls._normalized_prefix_text(str(resolved_path), prefix),
+            "version": version,
+            "cflags": cls._normalized_prefix_text(cflags, prefix),
+            "libs": cls._normalized_prefix_text(libs, prefix),
+        }
 
     @classmethod
-    def _cmake_package_contract(cls, prefix: Path, mode: str) -> str:
+    def _cmake_package_contract(
+        cls,
+        prefix: Path,
+        mode: str,
+        *,
+        exact_config_dir: Path | None = None,
+        fallback_prefix: Path | None = None,
+    ) -> str:
+        config_matches = list(prefix.rglob("llam-config.cmake"))
+        if len(config_matches) != 1:
+            raise AssertionError(
+                f"expected one installed CMake config, got: {config_matches}"
+            )
         source_dir = cls.work / f"cmake-consumer-{mode}"
         build_dir = cls.work / f"cmake-consumer-build-{mode}"
+        config_dir = exact_config_dir or config_matches[0].parent
         source_dir.mkdir(parents=True, exist_ok=True)
         (source_dir / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.20)\n"
             "project(llam_installed_consumer C)\n"
-            "find_package(llam 2.2 CONFIG REQUIRED)\n"
-            "get_target_property(include_dirs llam::runtime "
-            "INTERFACE_INCLUDE_DIRECTORIES)\n"
-            "get_target_property(link_libraries llam::runtime "
-            "INTERFACE_LINK_LIBRARIES)\n"
-            "get_target_property(configurations llam::runtime "
-            "IMPORTED_CONFIGURATIONS)\n"
+            "find_package(llam 2.2 CONFIG REQUIRED PATHS "
+            "\"${LLAM_EXACT_CONFIG_DIR}\" NO_DEFAULT_PATH)\n"
+            "file(REAL_PATH \"${llam_DIR}\" resolved_llam_dir)\n"
+            "file(REAL_PATH \"${LLAM_EXACT_PREFIX}\" expected_prefix)\n"
+            "string(FIND \"${resolved_llam_dir}/\" \"${expected_prefix}/\" "
+            "prefix_index)\n"
+            "if(NOT prefix_index EQUAL 0)\n"
+            "  message(FATAL_ERROR \"llam_DIR escaped prefix: ${resolved_llam_dir}\")\n"
+            "endif()\n"
             "file(WRITE \"${CMAKE_BINARY_DIR}/contract.txt\" "
-            "\"INTERFACE_INCLUDE_DIRECTORIES=${include_dirs}\\n\")\n"
-            "file(APPEND \"${CMAKE_BINARY_DIR}/contract.txt\" "
-            "\"INTERFACE_LINK_LIBRARIES=${link_libraries}\\n\")\n"
-            "foreach(configuration IN LISTS configurations)\n"
-            "  get_target_property(location llam::runtime "
-            "IMPORTED_LOCATION_${configuration})\n"
+            "\"llam_DIR=${resolved_llam_dir}\\n\")\n"
+            "function(record_property target property required)\n"
+            "  get_property(is_set TARGET ${target} PROPERTY ${property} SET)\n"
+            "  if(NOT is_set)\n"
+            "    if(required)\n"
+            "      message(FATAL_ERROR \"missing ${target} ${property}\")\n"
+            "    endif()\n"
+            "    return()\n"
+            "  endif()\n"
+            "  get_target_property(value ${target} ${property})\n"
+            "  if(\"${value}\" MATCHES \"-NOTFOUND$\")\n"
+            "    message(FATAL_ERROR \"not found ${target} ${property}\")\n"
+            "  endif()\n"
             "  file(APPEND \"${CMAKE_BINARY_DIR}/contract.txt\" "
-            "\"IMPORTED_LOCATION_${configuration}=${location}\\n\")\n"
+            "\"${target}.${property}=${value}\\n\")\n"
+            "endfunction()\n"
+            "function(assert_artifact_prefix artifact)\n"
+            "  if(IS_ABSOLUTE \"${artifact}\")\n"
+            "    file(REAL_PATH \"${artifact}\" resolved_artifact)\n"
+            "    string(FIND \"${resolved_artifact}\" \"${expected_prefix}/\" "
+            "artifact_index)\n"
+            "    if(NOT artifact_index EQUAL 0)\n"
+            "      message(FATAL_ERROR \"artifact escaped prefix: ${resolved_artifact}\")\n"
+            "    endif()\n"
+            "  endif()\n"
+            "endfunction()\n"
+            "foreach(target IN ITEMS llam::runtime llam::runtime_shared)\n"
+            "  if(NOT TARGET ${target})\n"
+            "    message(FATAL_ERROR \"missing exported target ${target}\")\n"
+            "  endif()\n"
+            "  record_property(${target} IMPORTED_CONFIGURATIONS TRUE)\n"
+            "  get_target_property(configurations ${target} IMPORTED_CONFIGURATIONS)\n"
+            "  foreach(configuration IN LISTS configurations)\n"
+            "    foreach(property IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB "
+            "IMPORTED_SONAME IMPORTED_NO_SONAME IMPORTED_LINK_INTERFACE_LIBRARIES "
+            "IMPORTED_LINK_DEPENDENT_LIBRARIES)\n"
+            "      set(full_property ${property}_${configuration})\n"
+            "      if(property STREQUAL IMPORTED_LOCATION)\n"
+            "        record_property(${target} ${full_property} TRUE)\n"
+            "        get_target_property(artifact ${target} ${full_property})\n"
+            "        assert_artifact_prefix(\"${artifact}\")\n"
+            "      else()\n"
+            "        record_property(${target} ${full_property} FALSE)\n"
+            "      endif()\n"
+            "    endforeach()\n"
+            "  endforeach()\n"
+            "  foreach(property IN ITEMS INTERFACE_INCLUDE_DIRECTORIES "
+            "INTERFACE_LINK_LIBRARIES INTERFACE_COMPILE_DEFINITIONS "
+            "INTERFACE_COMPILE_OPTIONS INTERFACE_LINK_OPTIONS "
+            "INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)\n"
+            "    record_property(${target} ${property} FALSE)\n"
+            "  endforeach()\n"
+            "  get_target_property(include_dirs ${target} INTERFACE_INCLUDE_DIRECTORIES)\n"
+            "  if(\"${include_dirs}\" MATCHES \"-NOTFOUND$\")\n"
+            "    message(FATAL_ERROR \"missing public include directories for ${target}\")\n"
+            "  endif()\n"
+            "  foreach(include_dir IN LISTS include_dirs)\n"
+            "    assert_artifact_prefix(\"${include_dir}\")\n"
+            "  endforeach()\n"
             "endforeach()\n"
-            "add_executable(llam_installed_consumer main.c)\n"
-            "target_link_libraries(llam_installed_consumer PRIVATE "
-            "llam::runtime)\n",
+            "add_executable(llam_installed_consumer_runtime main.c)\n"
+            "target_link_libraries(llam_installed_consumer_runtime PRIVATE "
+            "llam::runtime)\n"
+            "add_executable(llam_installed_consumer_shared main.c)\n"
+            "target_link_libraries(llam_installed_consumer_shared PRIVATE "
+            "llam::runtime_shared)\n",
             encoding="utf-8",
         )
         (source_dir / "main.c").write_text(
@@ -511,16 +759,18 @@ class ResearchBoundaryTests(unittest.TestCase):
             "}\n",
             encoding="utf-8",
         )
-        configure_result = cls._run(
-            [
-                "cmake",
-                "-S",
-                str(source_dir),
-                "-B",
-                str(build_dir),
-                f"-DCMAKE_PREFIX_PATH={prefix}",
-            ]
-        )
+        configure_command = [
+            "cmake",
+            "-S",
+            str(source_dir),
+            "-B",
+            str(build_dir),
+            f"-DLLAM_EXACT_PREFIX={prefix}",
+            f"-DLLAM_EXACT_CONFIG_DIR={config_dir}",
+        ]
+        if fallback_prefix is not None:
+            configure_command.append(f"-DCMAKE_PREFIX_PATH={fallback_prefix}")
+        configure_result = cls._run(configure_command)
         cls.assert_command_succeeded(
             configure_result, f"{mode} installed CMake consumer configure"
         )
@@ -528,9 +778,25 @@ class ResearchBoundaryTests(unittest.TestCase):
         cls.assert_command_succeeded(
             build_result, f"{mode} installed CMake consumer build"
         )
+        environment = os.environ.copy()
+        library_dir = str(cls._installed_library_dir(prefix))
+        if os.uname().sysname == "Darwin":
+            environment["DYLD_LIBRARY_PATH"] = library_dir
+        else:
+            environment["LD_LIBRARY_PATH"] = library_dir
+        for consumer in (
+            "llam_installed_consumer_runtime",
+            "llam_installed_consumer_shared",
+        ):
+            executable = build_dir / consumer
+            if os.name == "nt":
+                executable = executable.with_suffix(".exe")
+            run_result = cls._run([str(executable)], env=environment)
+            cls.assert_command_succeeded(
+                run_result, f"{mode} installed CMake {consumer} run"
+            )
         return cls._normalized_prefix_text(
-            (build_dir / "contract.txt").read_text(encoding="utf-8"),
-            prefix,
+            (build_dir / "contract.txt").read_text(encoding="utf-8"), prefix
         )
 
     @classmethod
@@ -778,10 +1044,8 @@ class ResearchBoundaryTests(unittest.TestCase):
         self.assertEqual(on_exports, off_exports)
 
     def test_installed_contract_parity(self) -> None:
-        self._build_cmake_mode(self.default_cmake_dir, "research-off")
-        self._build_cmake_mode(self.research_cmake_dir, "research-on")
-        off = self._install_cmake_mode(self.default_cmake_dir, "off")
-        on = self._install_cmake_mode(self.research_cmake_dir, "on")
+        off = self._build_and_install_contract_mode("off")
+        on = self._build_and_install_contract_mode("on")
         off_library = self._find_shared_library(off)
         on_library = self._find_shared_library(on)
 
@@ -994,6 +1258,133 @@ class SharedLibraryFinderTests(unittest.TestCase):
                     ResearchBoundaryTests._find_shared_library(finder_dir),
                     actual_library,
                 )
+
+
+class InstalledContractReceiptMutationTests(unittest.TestCase):
+    def test_pkg_config_contract_rejects_stale_install_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="stale-llam-pc-") as directory:
+            prefix = Path(directory)
+            metadata_dir = prefix / "lib" / "pkgconfig"
+            metadata_dir.mkdir(parents=True)
+            (metadata_dir / "llam.pc").write_text(
+                "prefix=/usr/local\n"
+                "libdir=${prefix}/lib\n"
+                "includedir=${prefix}/include\n"
+                "Name: LLAM\n"
+                "Description: stale fixture\n"
+                "Version: 2.2.0\n"
+                "Libs: -L${libdir} -lllam_runtime\n"
+                "Cflags: -I${includedir}\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(AssertionError):
+                ResearchBoundaryTests._pkg_config_contract(prefix)
+
+    @staticmethod
+    def _write_fake_cmake_package(prefix: Path, artifact: Path) -> Path:
+        config_dir = prefix / "lib" / "cmake" / "llam"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        include_dir = prefix / "include"
+        include_dir.mkdir(parents=True, exist_ok=True)
+        config_dir.joinpath("llam-config-version.cmake").write_text(
+            "set(PACKAGE_VERSION \"2.2.0\")\n"
+            "set(PACKAGE_VERSION_COMPATIBLE TRUE)\n",
+            encoding="utf-8",
+        )
+        config_dir.joinpath("llam-config.cmake").write_text(
+            "foreach(target IN ITEMS runtime runtime_shared)\n"
+            "  add_library(llam::${target} STATIC IMPORTED)\n"
+            "  set_target_properties(llam::${target} PROPERTIES\n"
+            "    IMPORTED_CONFIGURATIONS RELEASE\n"
+            f"    IMPORTED_LOCATION_RELEASE \"{artifact}\"\n"
+            f"    INTERFACE_INCLUDE_DIRECTORIES \"{include_dir}\")\n"
+            "endforeach()\n",
+            encoding="utf-8",
+        )
+        return config_dir
+
+    def test_cmake_consumer_rejects_fallback_notfound_and_escaped_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="cmake-contract-mutation-") as directory:
+            root = Path(directory)
+            expected = root / "expected"
+            fallback = root / "fallback"
+            outside_artifact = root / "outside.a"
+            outside_artifact.write_bytes(b"outside")
+            self._write_fake_cmake_package(expected, outside_artifact)
+            self._write_fake_cmake_package(fallback, outside_artifact)
+            previous_work = getattr(ResearchBoundaryTests, "work", None)
+            ResearchBoundaryTests.work = root / "work"
+            try:
+                with self.assertRaisesRegex(
+                    AssertionError, "Could not find a package configuration file"
+                ):
+                    ResearchBoundaryTests._cmake_package_contract(
+                        expected,
+                        "fallback",
+                        exact_config_dir=root / "missing",
+                        fallback_prefix=fallback,
+                    )
+                with self.assertRaisesRegex(
+                    AssertionError, "artifact escaped prefix"
+                ):
+                    ResearchBoundaryTests._cmake_package_contract(expected, "escape")
+                missing = root / "missing-NOTFOUND"
+                self._write_fake_cmake_package(expected, missing)
+                with self.assertRaisesRegex(AssertionError, "not found"):
+                    ResearchBoundaryTests._cmake_package_contract(expected, "notfound")
+            finally:
+                if previous_work is None:
+                    del ResearchBoundaryTests.work
+                else:
+                    ResearchBoundaryTests.work = previous_work
+
+    def test_abi_probe_record_rejects_missing_wrong_and_escaped_fields(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="abi-probe-mutation-") as directory:
+            prefix = Path(directory)
+            library = prefix / "lib" / "libllam_runtime.fixture"
+            library.parent.mkdir(parents=True)
+            library.write_bytes(b"fixture")
+            record = {
+                "abi_version": str(2 << 16),
+                "abi_major": "2",
+                "abi_minor": "0",
+                "version_major": "2",
+                "version_minor": "2",
+                "version_patch": "0",
+                "reserved0": "0",
+                "struct_size": "104",
+                "runtime_opts_size": "64",
+                "spawn_opts_size": "48",
+                "runtime_stats_size": "128",
+                "runtime_name": "LLAM",
+                "version_string": "2.2.0",
+                "platform_name": "fixture",
+            }
+            if os.name != "nt":
+                record["loaded_image"] = str(library)
+            self.assertEqual(
+                ResearchBoundaryTests._validate_abi_probe_record(record, prefix)[
+                    "version_string"
+                ],
+                "2.2.0",
+            )
+            missing = record.copy()
+            missing.pop("runtime_stats_size")
+            with self.assertRaises(AssertionError):
+                ResearchBoundaryTests._validate_abi_probe_record(missing, prefix)
+            wrong = record.copy()
+            wrong["version_minor"] = "3"
+            with self.assertRaises(AssertionError):
+                ResearchBoundaryTests._validate_abi_probe_record(wrong, prefix)
+            if os.name != "nt":
+                escaped = record.copy()
+                escaped["loaded_image"] = str(
+                    Path(directory).parent / "outside.dylib"
+                )
+                with self.assertRaises(AssertionError):
+                    ResearchBoundaryTests._validate_abi_probe_record(escaped, prefix)
 
 
 def _parse_args() -> argparse.Namespace:
