@@ -2077,7 +2077,8 @@ class AtomicPrimitiveTests(unittest.TestCase):
             size,
             evidence_bundle.ctypes.sizeof(
                 evidence_bundle._WinFileRenameInfoEx
-            ),
+            )
+            + len(encoded_name),
         )
         name_offset = evidence_bundle._WinFileRenameInfoEx.file_name.offset
         self.assertEqual(
@@ -2086,7 +2087,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
         )
         self.assertEqual(
             payload[name_offset + len(encoded_name) :],
-            b"\0\0",
+            b"\0" * (size - name_offset - len(encoded_name)),
         )
 
     def test_windows_handle_rename_uses_only_handle_bound_legacy_fallback(
@@ -2140,7 +2141,8 @@ class AtomicPrimitiveTests(unittest.TestCase):
             with self.subTest(information_class=information_class):
                 self.assertEqual(
                     size,
-                    evidence_bundle.ctypes.sizeof(header_type),
+                    evidence_bundle.ctypes.sizeof(header_type)
+                    + len(encoded_name),
                 )
                 header = header_type.from_buffer_copy(payload)
                 self.assertEqual(header.root_directory, 0x5678)
@@ -2164,7 +2166,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     payload[name_offset + len(encoded_name) :],
-                    b"\0\0",
+                    b"\0" * (size - name_offset - len(encoded_name)),
                 )
 
     def test_windows_path_based_rename_has_no_unsafe_fallback(self) -> None:

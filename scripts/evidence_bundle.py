@@ -2083,10 +2083,7 @@ class _WindowsAPI:
         encoded_name = final_name.encode("utf-16-le")
         name_offset = header_type.file_name.offset
         buffer = ctypes.create_string_buffer(
-            max(
-                name_offset + len(encoded_name),
-                ctypes.sizeof(header_type),
-            )
+            ctypes.sizeof(header_type) + len(encoded_name)
         )
         header = header_type.from_buffer(buffer)
         if isinstance(header, _WinFileRenameInfoEx):
