@@ -832,6 +832,33 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, timer_prewarm_total)) {
             opts_storage.timer_prewarm_total = raw_opts.timer_prewarm_total;
         }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size,
+                                               stack_cache_budget_bytes)) {
+            opts_storage.stack_cache_budget_bytes =
+                raw_opts.stack_cache_budget_bytes;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(
+                opts_size, stack_cache_high_watermark_bytes)) {
+            opts_storage.stack_cache_high_watermark_bytes =
+                raw_opts.stack_cache_high_watermark_bytes;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(
+                opts_size, stack_cache_low_watermark_bytes)) {
+            opts_storage.stack_cache_low_watermark_bytes =
+                raw_opts.stack_cache_low_watermark_bytes;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size,
+                                               stack_cache_idle_ns)) {
+            opts_storage.stack_cache_idle_ns =
+                raw_opts.stack_cache_idle_ns;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size,
+                                               stack_cache_flags)) {
+            opts_storage.stack_cache_flags = raw_opts.stack_cache_flags;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, reserved2)) {
+            opts_storage.reserved2 = raw_opts.reserved2;
+        }
         opts = &opts_storage;
         if (!llam_public_runtime_profile_valid(opts->profile)) {
             errno = EINVAL;
@@ -896,6 +923,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 #else
     resource_input.sqpoll_supported = false;
 #endif
+    resource_input.page_size = (size_t)llam_page_size();
     if (llam_runtime_resource_plan_resolve(&resource_input, &resource_plan) != 0) {
         int saved_errno = errno;
 
@@ -919,6 +947,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_init(&rt->opaque_helper_threads_live, 0U);
     atomic_init(&rt->host_threads_live, 0U);
     atomic_init(&rt->affinity_failures, 0U);
+    atomic_init(&rt->stack_cache_cached_bytes, 0U);
+    atomic_init(&rt->stack_cache_cached_mappings, 0U);
+    atomic_init(&rt->stack_cache_committed_bytes, 0U);
+    atomic_init(&rt->stack_cache_trim_requests, 0U);
+    atomic_init(&rt->stack_cache_discarded_bytes, 0U);
+    atomic_init(&rt->stack_cache_released_bytes, 0U);
+    atomic_init(&rt->stack_cache_budget_rejections, 0U);
+    atomic_init(&rt->stack_cache_secure_return_failures, 0U);
+    atomic_init(&rt->stack_cache_resident_bytes, 0U);
+    atomic_init(&rt->stack_cache_resident_sample_ns, 0U);
+    atomic_init(&rt->stack_cache_resident_valid, 0U);
 
     /*
      * From this point on, runtime policy is resolved once and stored on the

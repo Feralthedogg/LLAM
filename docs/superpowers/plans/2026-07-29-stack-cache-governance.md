@@ -39,17 +39,17 @@ prefix.
 - Modify: `tests/test_abi_compat.c`
 - Modify: `tests/test_runtime_core.c`
 
-- [ ] Add current-prefix fields for budget, high/low watermarks, idle age, and
+- [x] Add current-prefix fields for budget, high/low watermarks, idle age, and
   secure/discard/disabled flags after the existing resource-governance tail.
-- [ ] Use documented zero defaults: 512 MiB budget, 384 MiB high, 256 MiB low,
+- [x] Use documented zero defaults: 512 MiB budget, 384 MiB high, 256 MiB low,
   and 30 seconds idle. The explicit disabled flag resolves all three byte
   thresholds to zero.
-- [ ] Validate page alignment, `low <= high <= budget`, known flags, and checked
+- [x] Validate page alignment, `low <= high <= budget`, known flags, and checked
   exact-prewarm compatibility before runtime publication.
-- [ ] Append size-prefixed stats for cached mappings/bytes, committed bytes,
+- [x] Append size-prefixed stats for cached mappings/bytes, committed bytes,
   trim requests, discarded/released bytes, budget rejections,
   secure-return failures, and resident-sample validity/timestamp.
-- [ ] Add RED/GREEN resolver, prefix, overflow, ABI-layout, and default tests.
+- [x] Add RED/GREEN resolver, prefix, overflow, ABI-layout, and default tests.
 
 ### Task 3: Introduce the platform stack-VM boundary
 

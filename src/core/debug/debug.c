@@ -244,6 +244,48 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     stats->task_prewarm_source = rt->task_prewarm_source;
     stats->stack_prewarm_source = rt->stack_prewarm_source;
     stats->timer_prewarm_source = rt->timer_prewarm_source;
+    stats->stack_cache_budget_bytes =
+        rt->resource_plan.stack_cache_budget_bytes;
+    stats->stack_cache_high_watermark_bytes =
+        rt->resource_plan.stack_cache_high_watermark_bytes;
+    stats->stack_cache_low_watermark_bytes =
+        rt->resource_plan.stack_cache_low_watermark_bytes;
+    stats->stack_cache_idle_ns =
+        rt->resource_plan.stack_cache_idle_ns;
+    stats->stack_cache_flags = rt->resource_plan.stack_cache_flags;
+    stats->stack_cache_resident_valid =
+        atomic_load_explicit(&rt->stack_cache_resident_valid,
+                             memory_order_acquire);
+    stats->stack_cache_cached_bytes =
+        atomic_load_explicit(&rt->stack_cache_cached_bytes,
+                             memory_order_acquire);
+    stats->stack_cache_cached_mappings =
+        atomic_load_explicit(&rt->stack_cache_cached_mappings,
+                             memory_order_acquire);
+    stats->stack_cache_committed_bytes =
+        atomic_load_explicit(&rt->stack_cache_committed_bytes,
+                             memory_order_acquire);
+    stats->stack_cache_trim_requests =
+        atomic_load_explicit(&rt->stack_cache_trim_requests,
+                             memory_order_acquire);
+    stats->stack_cache_discarded_bytes =
+        atomic_load_explicit(&rt->stack_cache_discarded_bytes,
+                             memory_order_acquire);
+    stats->stack_cache_released_bytes =
+        atomic_load_explicit(&rt->stack_cache_released_bytes,
+                             memory_order_acquire);
+    stats->stack_cache_budget_rejections =
+        atomic_load_explicit(&rt->stack_cache_budget_rejections,
+                             memory_order_acquire);
+    stats->stack_cache_secure_return_failures =
+        atomic_load_explicit(&rt->stack_cache_secure_return_failures,
+                             memory_order_acquire);
+    stats->stack_cache_resident_bytes =
+        atomic_load_explicit(&rt->stack_cache_resident_bytes,
+                             memory_order_acquire);
+    stats->stack_cache_resident_sample_ns =
+        atomic_load_explicit(&rt->stack_cache_resident_sample_ns,
+                             memory_order_acquire);
     stats->overflow_depth = llam_runtime_overflow_depth(rt);
 
     /*

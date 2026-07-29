@@ -244,6 +244,28 @@ enum {
 /** @brief Linux io_uring SQPOLL experiment for node-owned rings. */
 #define LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL (UINT64_C(1) << 5)
 
+/** @brief Default runtime-wide retained stack-mapping budget: 512 MiB. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_BUDGET_BYTES \
+    (UINT64_C(512) * UINT64_C(1024) * UINT64_C(1024))
+/** @brief Default automatic-trim high watermark: 384 MiB. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_HIGH_WATERMARK_BYTES \
+    (UINT64_C(384) * UINT64_C(1024) * UINT64_C(1024))
+/** @brief Default automatic-trim target: 256 MiB. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_LOW_WATERMARK_BYTES \
+    (UINT64_C(256) * UINT64_C(1024) * UINT64_C(1024))
+/** @brief Default idle age before opportunistic stack-cache trim: 30 seconds. */
+#define LLAM_RUNTIME_STACK_CACHE_DEFAULT_IDLE_NS UINT64_C(30000000000)
+
+/** @brief Stack-cache policy flags accepted by llam_runtime_opts_t. */
+enum {
+    /** Securely clear usable stack bytes before a mapping becomes reusable. */
+    LLAM_RUNTIME_STACK_CACHE_F_SECURE_SCRUB = 1U << 0,
+    /** Discard/decommit usable pages before retaining a mapping. */
+    LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN = 1U << 1,
+    /** Disable stack caching and release every returned mapping directly. */
+    LLAM_RUNTIME_STACK_CACHE_F_DISABLED = 1U << 2,
+};
+
 /** @brief Optional per-task spawn policy. */
 typedef struct llam_spawn_opts {
     uint32_t task_class;                /**< Scheduler class; one of ::llam_task_class_t. */
@@ -282,6 +304,12 @@ typedef struct llam_runtime_opts {
     uint64_t task_prewarm_total;                    /**< Exact runtime-total task-object prewarm target; 0 uses legacy policy. */
     uint64_t stack_prewarm_total;                   /**< Exact runtime-total stack prewarm target; 0 uses legacy policy. */
     uint64_t timer_prewarm_total;                   /**< Exact runtime-total timer-slot prewarm target; 0 uses legacy policy. */
+    uint64_t stack_cache_budget_bytes;              /**< Runtime-wide retained mapping-byte budget; 0 selects the default. */
+    uint64_t stack_cache_high_watermark_bytes;      /**< Automatic-trim trigger; 0 selects the default. */
+    uint64_t stack_cache_low_watermark_bytes;       /**< Automatic-trim target; 0 selects the default. */
+    uint64_t stack_cache_idle_ns;                   /**< Minimum idle age for opportunistic trim; 0 selects the default. */
+    uint32_t stack_cache_flags;                     /**< Bitwise OR of LLAM_RUNTIME_STACK_CACHE_F_* values. */
+    uint32_t reserved2;                             /**< Reserved ABI padding; initialize to 0. */
 } llam_runtime_opts_t;
 
 /** @brief Frozen option prefix consumed by the source-compatible 2.2 wrapper. */
@@ -383,6 +411,22 @@ typedef struct llam_runtime_stats {
     uint32_t stack_prewarm_source;           /**< Authority for stack prewarm; one of ::llam_runtime_prewarm_source_t. */
     uint32_t timer_prewarm_source;           /**< Authority for timer prewarm; one of ::llam_runtime_prewarm_source_t. */
     uint32_t prewarm_reserved0;              /**< Reserved ABI padding; currently 0. */
+    uint64_t stack_cache_budget_bytes;         /**< Resolved runtime-wide retained mapping-byte budget. */
+    uint64_t stack_cache_high_watermark_bytes; /**< Resolved automatic-trim trigger. */
+    uint64_t stack_cache_low_watermark_bytes;  /**< Resolved automatic-trim target. */
+    uint64_t stack_cache_idle_ns;              /**< Resolved idle age for opportunistic trim. */
+    uint32_t stack_cache_flags;                /**< Active LLAM_RUNTIME_STACK_CACHE_F_* policy. */
+    uint32_t stack_cache_resident_valid;       /**< Whether resident-byte sampling is supported and current. */
+    uint64_t stack_cache_cached_bytes;         /**< Exact retained mapping bytes across all runtime caches. */
+    uint64_t stack_cache_cached_mappings;      /**< Exact retained mapping count across all runtime caches. */
+    uint64_t stack_cache_committed_bytes;      /**< Exact known committed usable bytes retained in caches. */
+    uint64_t stack_cache_trim_requests;        /**< Manual, pressure, high-water, and idle trim requests. */
+    uint64_t stack_cache_discarded_bytes;      /**< Usable bytes successfully discarded or decommitted. */
+    uint64_t stack_cache_released_bytes;       /**< Mapping bytes returned to the platform. */
+    uint64_t stack_cache_budget_rejections;    /**< Mappings rejected by runtime byte authority. */
+    uint64_t stack_cache_secure_return_failures; /**< Required scrub/discard/reactivation failures. */
+    uint64_t stack_cache_resident_bytes;       /**< Last optional resident-byte sample. */
+    uint64_t stack_cache_resident_sample_ns;   /**< Timestamp of the resident-byte sample. */
 } llam_runtime_stats_t;
 
 /** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */

@@ -1427,6 +1427,17 @@ struct llam_runtime {
     atomic_uint opaque_helper_threads_live;
     atomic_uint host_threads_live;
     atomic_uint_fast64_t affinity_failures;
+    atomic_uint_fast64_t stack_cache_cached_bytes;
+    atomic_uint_fast64_t stack_cache_cached_mappings;
+    atomic_uint_fast64_t stack_cache_committed_bytes;
+    atomic_uint_fast64_t stack_cache_trim_requests;
+    atomic_uint_fast64_t stack_cache_discarded_bytes;
+    atomic_uint_fast64_t stack_cache_released_bytes;
+    atomic_uint_fast64_t stack_cache_budget_rejections;
+    atomic_uint_fast64_t stack_cache_secure_return_failures;
+    atomic_uint_fast64_t stack_cache_resident_bytes;
+    atomic_uint_fast64_t stack_cache_resident_sample_ns;
+    atomic_uint stack_cache_resident_valid;
     pthread_t driver_thread;
     llam_cpu_set_t driver_affinity;
     bool driver_affinity_valid;

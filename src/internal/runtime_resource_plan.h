@@ -52,6 +52,7 @@ typedef struct llam_runtime_resource_plan_input {
     unsigned allowed_cpu_count;      /**< Number of entries in @c allowed_cpus. */
     bool affinity_supported;         /**< Whether native thread affinity can be applied. */
     bool sqpoll_supported;           /**< Whether the platform can create an SQPOLL ring. */
+    size_t page_size;                /**< Platform VM page size for byte-policy alignment. */
 } llam_runtime_resource_plan_input_t;
 
 /** @brief Fully resolved runtime resource authority. */
@@ -71,6 +72,11 @@ typedef struct llam_runtime_resource_plan {
     uint64_t timer_prewarm_total; /**< Exact runtime-total timer-slot target. */
     uint64_t estimated_metadata_bytes;      /**< Checked aggregate metadata estimate. */
     uint64_t estimated_stack_mapping_bytes; /**< Checked stack mapping estimate. */
+    uint64_t stack_cache_budget_bytes;      /**< Runtime-wide retained mapping budget. */
+    uint64_t stack_cache_high_watermark_bytes; /**< Automatic trim trigger. */
+    uint64_t stack_cache_low_watermark_bytes;  /**< Automatic trim target. */
+    uint64_t stack_cache_idle_ns;              /**< Opportunistic idle-trim age. */
+    unsigned stack_cache_flags;                /**< LLAM_RUNTIME_STACK_CACHE_F_* policy. */
 } llam_runtime_resource_plan_t;
 
 /**

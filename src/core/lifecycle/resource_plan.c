@@ -179,7 +179,16 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     unsigned worker_max = 0U;
     unsigned blocking_min = 0U;
     unsigned blocking_max = 0U;
+    unsigned stack_cache_flags = 0U;
     uint64_t experimental_flags = 0U;
+    uint64_t stack_cache_budget_bytes =
+        LLAM_RUNTIME_STACK_CACHE_DEFAULT_BUDGET_BYTES;
+    uint64_t stack_cache_high_watermark_bytes =
+        LLAM_RUNTIME_STACK_CACHE_DEFAULT_HIGH_WATERMARK_BYTES;
+    uint64_t stack_cache_low_watermark_bytes =
+        LLAM_RUNTIME_STACK_CACHE_DEFAULT_LOW_WATERMARK_BYTES;
+    uint64_t stack_cache_idle_ns =
+        LLAM_RUNTIME_STACK_CACHE_DEFAULT_IDLE_NS;
     bool deterministic = false;
     bool worker_min_present = false;
     bool worker_count_present = false;
@@ -200,7 +209,8 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         memset(out, 0, sizeof(*out));
     }
     if (input == NULL || out == NULL ||
-        input->allowed_cpus == NULL || input->allowed_cpu_count == 0U) {
+        input->allowed_cpus == NULL || input->allowed_cpu_count == 0U ||
+        input->page_size == 0U) {
         errno = EINVAL;
         return -1;
     }
@@ -248,6 +258,32 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size, affinity_policy)) {
             affinity_policy = raw_opts.affinity_policy;
         }
+        if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size,
+                                         stack_cache_budget_bytes) &&
+            raw_opts.stack_cache_budget_bytes != 0U) {
+            stack_cache_budget_bytes = raw_opts.stack_cache_budget_bytes;
+        }
+        if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size,
+                                         stack_cache_high_watermark_bytes) &&
+            raw_opts.stack_cache_high_watermark_bytes != 0U) {
+            stack_cache_high_watermark_bytes =
+                raw_opts.stack_cache_high_watermark_bytes;
+        }
+        if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size,
+                                         stack_cache_low_watermark_bytes) &&
+            raw_opts.stack_cache_low_watermark_bytes != 0U) {
+            stack_cache_low_watermark_bytes =
+                raw_opts.stack_cache_low_watermark_bytes;
+        }
+        if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size,
+                                         stack_cache_idle_ns) &&
+            raw_opts.stack_cache_idle_ns != 0U) {
+            stack_cache_idle_ns = raw_opts.stack_cache_idle_ns;
+        }
+        if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size,
+                                         stack_cache_flags)) {
+            stack_cache_flags = raw_opts.stack_cache_flags;
+        }
         cpu_pair_present =
             LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size, cpu_count) &&
             LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size, cpu_ids);
@@ -279,6 +315,44 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         !input->affinity_supported) {
         errno = ENOTSUP;
         return -1;
+    }
+    if ((stack_cache_flags &
+         ~(LLAM_RUNTIME_STACK_CACHE_F_SECURE_SCRUB |
+           LLAM_RUNTIME_STACK_CACHE_F_DISCARD_ON_RETURN |
+           LLAM_RUNTIME_STACK_CACHE_F_DISABLED)) != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    if ((stack_cache_flags & LLAM_RUNTIME_STACK_CACHE_F_DISABLED) != 0U) {
+        if (input->opts != NULL &&
+            ((LLAM_RESOURCE_OPTS_HAS_FIELD(
+                  input->opts_size, stack_cache_budget_bytes) &&
+              raw_opts.stack_cache_budget_bytes != 0U) ||
+             (LLAM_RESOURCE_OPTS_HAS_FIELD(
+                  input->opts_size, stack_cache_high_watermark_bytes) &&
+              raw_opts.stack_cache_high_watermark_bytes != 0U) ||
+             (LLAM_RESOURCE_OPTS_HAS_FIELD(
+                  input->opts_size, stack_cache_low_watermark_bytes) &&
+              raw_opts.stack_cache_low_watermark_bytes != 0U))) {
+            errno = EINVAL;
+            return -1;
+        }
+        stack_cache_budget_bytes = 0U;
+        stack_cache_high_watermark_bytes = 0U;
+        stack_cache_low_watermark_bytes = 0U;
+    } else {
+        uint64_t page_size = (uint64_t)input->page_size;
+
+        if (stack_cache_budget_bytes % page_size != 0U ||
+            stack_cache_high_watermark_bytes % page_size != 0U ||
+            stack_cache_low_watermark_bytes % page_size != 0U ||
+            stack_cache_low_watermark_bytes >
+                stack_cache_high_watermark_bytes ||
+            stack_cache_high_watermark_bytes >
+                stack_cache_budget_bytes) {
+            errno = EINVAL;
+            return -1;
+        }
     }
 
     source_allowed = input->allowed_cpus;
@@ -420,6 +494,13 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     plan.blocking_min = blocking_min;
     plan.blocking_max = blocking_max;
     plan.affinity_policy = affinity_policy;
+    plan.stack_cache_budget_bytes = stack_cache_budget_bytes;
+    plan.stack_cache_high_watermark_bytes =
+        stack_cache_high_watermark_bytes;
+    plan.stack_cache_low_watermark_bytes =
+        stack_cache_low_watermark_bytes;
+    plan.stack_cache_idle_ns = stack_cache_idle_ns;
+    plan.stack_cache_flags = stack_cache_flags;
     plan.sqpoll_cpu = reserved_cpu;
     if (!sqpoll_requested) {
         plan.sqpoll_cpu = -1;
@@ -452,6 +533,15 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     }
     if (plan.stack_prewarm_total > LLAM_RUNTIME_MAX_STACK_PREWARM ||
         metadata_bytes > LLAM_RUNTIME_METADATA_BUDGET_BYTES) {
+        errno = E2BIG;
+        return -1;
+    }
+    if ((plan.stack_cache_flags & LLAM_RUNTIME_STACK_CACHE_F_DISABLED) != 0U &&
+        plan.stack_prewarm_total != 0U) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (stack_mapping_bytes > plan.stack_cache_budget_bytes) {
         errno = E2BIG;
         return -1;
     }

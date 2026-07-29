@@ -60,6 +60,8 @@ ASSERT_FIELD_U32(llam_runtime_opts_t, blocking_max);
 ASSERT_FIELD_U32(llam_runtime_opts_t, affinity_policy);
 ASSERT_FIELD_U32(llam_runtime_opts_t, cpu_count);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved1);
+ASSERT_FIELD_U32(llam_runtime_opts_t, stack_cache_flags);
+ASSERT_FIELD_U32(llam_runtime_opts_t, reserved2);
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->experimental_flags) == sizeof(uint64_t),
                "llam_runtime_opts_t.experimental_flags must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns) == sizeof(uint64_t),
@@ -70,6 +72,14 @@ _Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_prewarm_total) == sizeof
                "llam_runtime_opts_t.stack_prewarm_total must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->timer_prewarm_total) == sizeof(uint64_t),
                "llam_runtime_opts_t.timer_prewarm_total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_budget_bytes) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_budget_bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_high_watermark_bytes) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_high_watermark_bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_low_watermark_bytes) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_low_watermark_bytes must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_cache_idle_ns) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_cache_idle_ns must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->sqpoll_cpu) == sizeof(int32_t),
                "llam_runtime_opts_t.sqpoll_cpu must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->cpu_ids) == sizeof(const uint32_t *),
@@ -110,6 +120,8 @@ ASSERT_FIELD_U32(llam_runtime_stats_t, task_prewarm_source);
 ASSERT_FIELD_U32(llam_runtime_stats_t, stack_prewarm_source);
 ASSERT_FIELD_U32(llam_runtime_stats_t, timer_prewarm_source);
 ASSERT_FIELD_U32(llam_runtime_stats_t, prewarm_reserved0);
+ASSERT_FIELD_U32(llam_runtime_stats_t, stack_cache_flags);
+ASSERT_FIELD_U32(llam_runtime_stats_t, stack_cache_resident_valid);
 _Static_assert(sizeof(((llam_runtime_stats_t *)0)->affinity_failures) == sizeof(uint64_t),
                "llam_runtime_stats_t.affinity_failures must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_stats_t *)0)->requested_task_prewarm_total) == sizeof(uint64_t),
@@ -118,6 +130,12 @@ _Static_assert(sizeof(((llam_runtime_stats_t *)0)->achieved_stack_prewarm_total)
                "achieved stack prewarm total must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_stats_t *)0)->estimated_metadata_bytes) == sizeof(uint64_t),
                "resource metadata estimate must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_cached_bytes) == sizeof(uint64_t),
+               "stack cache byte authority must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_cached_mappings) == sizeof(uint64_t),
+               "stack cache mapping authority must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->stack_cache_resident_sample_ns) == sizeof(uint64_t),
+               "stack cache resident sample timestamp must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_class((const llam_task_t *)0), uint32_t,
                  "llam_task_class result must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_flags((const llam_task_t *)0), uint32_t,
@@ -286,7 +304,13 @@ static int test_llam_option_initializers(void) {
         runtime_opts.cpu_ids != NULL ||
         runtime_opts.task_prewarm_total != 0U ||
         runtime_opts.stack_prewarm_total != 0U ||
-        runtime_opts.timer_prewarm_total != 0U) {
+        runtime_opts.timer_prewarm_total != 0U ||
+        runtime_opts.stack_cache_budget_bytes != 0U ||
+        runtime_opts.stack_cache_high_watermark_bytes != 0U ||
+        runtime_opts.stack_cache_low_watermark_bytes != 0U ||
+        runtime_opts.stack_cache_idle_ns != 0U ||
+        runtime_opts.stack_cache_flags != 0U ||
+        runtime_opts.reserved2 != 0U) {
         return test_fail("llam runtime option defaults are inconsistent");
     }
 
