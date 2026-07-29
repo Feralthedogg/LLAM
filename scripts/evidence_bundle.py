@@ -1917,7 +1917,10 @@ class _WindowsAPI:
         encoded_name = final_name.encode("utf-16-le")
         name_offset = header_type.file_name.offset
         buffer = ctypes.create_string_buffer(
-            name_offset + len(encoded_name)
+            max(
+                name_offset + len(encoded_name),
+                ctypes.sizeof(header_type),
+            )
         )
         header = header_type.from_buffer(buffer)
         if isinstance(header, _WinFileRenameInfoEx):
@@ -2899,21 +2902,23 @@ class _WindowsEvidenceBundle:
             final_path.parent,
             api=api,
             writable_leaf=True,
-        )
-        parent_identity = api.identity(parent_handles[-1])
-        if api.directory_identity(final_path.parent) != parent_identity:
-            _win_close_handles(api, parent_handles)
-            raise EvidenceError(
-                "Windows parent path does not match held parent"
-            )
-        stage_path = final_path.parent / (
-            f".{final_path.name}.staging-{os.getpid()}-"
-            f"{secrets.token_hex(16)}"
+            deny_delete=True,
         )
         stage_handle: object | None = None
-        stage_identity: tuple[int, bytes] | None = None
         writer_owns_resources = False
         try:
+            parent_identity = api.identity(parent_handles[-1])
+            if (
+                api.directory_identity(final_path.parent)
+                != parent_identity
+            ):
+                raise EvidenceError(
+                    "Windows parent path does not match held parent"
+                )
+            stage_path = final_path.parent / (
+                f".{final_path.name}.staging-{os.getpid()}-"
+                f"{secrets.token_hex(16)}"
+            )
             try:
                 existing = api.create_file(
                     final_path,
@@ -3132,7 +3137,6 @@ class _WindowsEvidenceBundle:
         if self._finalize_called:
             raise RuntimeError("finalize is single-use")
         self._finalize_called = True
-        rename_error: BaseException | None = None
         publication_handle: object | None = None
         try:
             self._validate_before_finalize()
@@ -3162,6 +3166,17 @@ class _WindowsEvidenceBundle:
                 raise EvidenceError(
                     "Windows publication handle identity changed"
                 )
+        except BaseException:
+            if publication_handle is not None:
+                try:
+                    self._api.close(publication_handle)
+                except BaseException:
+                    pass
+            self._abort()
+            raise
+
+        rename_error: BaseException | None = None
+        try:
             self._api.rename_handle_noreplace(
                 publication_handle,
                 self._parent_handles[-1],

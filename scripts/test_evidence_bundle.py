@@ -2046,7 +2046,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
 
         api = object.__new__(evidence_bundle._WindowsAPI)
         api._kernel32 = Kernel32()  # type: ignore[attr-defined]
-        api.rename_handle_noreplace(0x1234, 0x5678, "final")
+        api.rename_handle_noreplace(0x1234, 0x5678, "x")
 
         self.assertEqual(len(calls), 1)
         handle, information_class, buffer, size = calls[0]
@@ -2066,16 +2066,31 @@ class AtomicPrimitiveTests(unittest.TestCase):
             ),
             0x5678,
         )
+        encoded_name = "x".encode("utf-16-le")
         self.assertEqual(
             int.from_bytes(payload[16:20], "little"),
-            len("final".encode("utf-16-le")),
+            len(encoded_name),
         )
-        self.assertEqual(payload[20:], "final".encode("utf-16-le"))
+        self.assertEqual(
+            size,
+            evidence_bundle.ctypes.sizeof(
+                evidence_bundle._WinFileRenameInfoEx
+            ),
+        )
+        name_offset = evidence_bundle._WinFileRenameInfoEx.file_name.offset
+        self.assertEqual(
+            payload[name_offset : name_offset + len(encoded_name)],
+            encoded_name,
+        )
+        self.assertEqual(
+            payload[name_offset + len(encoded_name) :],
+            b"\0\0",
+        )
 
     def test_windows_handle_rename_uses_only_handle_bound_legacy_fallback(
         self,
     ) -> None:
-        classes: list[int] = []
+        calls: list[tuple[int, bytes, int]] = []
 
         class Kernel32:
             @staticmethod
@@ -2085,22 +2100,70 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 buffer: object,
                 size: int,
             ) -> int:
-                classes.append(information_class)
-                return int(len(classes) == 2)
+                calls.append(
+                    (
+                        information_class,
+                        evidence_bundle.ctypes.string_at(buffer, size),
+                        size,
+                    )
+                )
+                return int(len(calls) == 2)
 
         api = object.__new__(evidence_bundle._WindowsAPI)
         api._kernel32 = Kernel32()  # type: ignore[attr-defined]
         api._last_error = mock.Mock(  # type: ignore[method-assign]
             return_value=evidence_bundle._WIN_ERROR_INVALID_PARAMETER
         )
-        api.rename_handle_noreplace(0x1234, 0x5678, "final")
+        api.rename_handle_noreplace(0x1234, 0x5678, "x")
         self.assertEqual(
-            classes,
+            [information_class for information_class, _, _ in calls],
             [
                 evidence_bundle._WIN_FILE_RENAME_INFO_EX,
                 evidence_bundle._WIN_FILE_RENAME_INFO,
             ],
         )
+        encoded_name = "x".encode("utf-16-le")
+        for (
+            information_class,
+            payload,
+            size,
+        ), header_type in zip(
+            calls,
+            (
+                evidence_bundle._WinFileRenameInfoEx,
+                evidence_bundle._WinFileRenameInfo,
+            ),
+            strict=True,
+        ):
+            with self.subTest(information_class=information_class):
+                self.assertEqual(
+                    size,
+                    evidence_bundle.ctypes.sizeof(header_type),
+                )
+                header = header_type.from_buffer_copy(payload)
+                self.assertEqual(header.root_directory, 0x5678)
+                self.assertEqual(
+                    header.file_name_length,
+                    len(encoded_name),
+                )
+                if isinstance(
+                    header,
+                    evidence_bundle._WinFileRenameInfoEx,
+                ):
+                    self.assertEqual(header.flags, 0)
+                else:
+                    self.assertEqual(header.replace_if_exists, 0)
+                name_offset = header_type.file_name.offset
+                self.assertEqual(
+                    payload[
+                        name_offset : name_offset + len(encoded_name)
+                    ],
+                    encoded_name,
+                )
+                self.assertEqual(
+                    payload[name_offset + len(encoded_name) :],
+                    b"\0\0",
+                )
 
     def test_windows_path_based_rename_has_no_unsafe_fallback(self) -> None:
         with mock.patch.object(
@@ -2115,6 +2178,130 @@ class AtomicPrimitiveTests(unittest.TestCase):
                     None,
                     None,
                 )
+
+    def test_windows_manifest_failures_are_not_publication_uncertain(
+        self,
+    ) -> None:
+        for boundary in ("create", "write", "flush"):
+            with self.subTest(boundary=boundary):
+                failure = OSError(
+                    evidence_bundle._WIN_ERROR_ACCESS_DENIED,
+                    f"manifest {boundary} failed",
+                )
+
+                class FakeWindowsAPI:
+                    def __init__(self) -> None:
+                        self.closed: list[object] = []
+                        self.rename_calls: list[
+                            tuple[object, object, str]
+                        ] = []
+
+                    def create_file(
+                        self,
+                        path: Path,
+                        **kwargs: object,
+                    ) -> object:
+                        if boundary == "create":
+                            raise failure
+                        return "manifest"
+
+                    def require_regular_single_link(
+                        self,
+                        handle: object,
+                    ) -> None:
+                        pass
+
+                    def require_private_acl(
+                        self,
+                        handle: object,
+                    ) -> None:
+                        pass
+
+                    def write_all(
+                        self,
+                        handle: object,
+                        data: bytes,
+                    ) -> None:
+                        if boundary == "write":
+                            raise failure
+
+                    def flush(self, handle: object) -> None:
+                        if boundary == "flush":
+                            raise failure
+
+                    def identity(
+                        self,
+                        handle: object,
+                    ) -> tuple[int, bytes]:
+                        if handle == "stage":
+                            return WIN_STAGE_ID
+                        return WIN_PARENT_ID
+
+                    def directory_identity(self, path: Path) -> object:
+                        if path.name == ".evidence.staging":
+                            return WIN_STAGE_ID
+                        if path.name == "evidence":
+                            return None
+                        return WIN_PARENT_ID
+
+                    def flush_directory(self, handle: object) -> None:
+                        pass
+
+                    def rename_handle_noreplace(
+                        self,
+                        stage_handle: object,
+                        parent_handle: object,
+                        final_name: str,
+                    ) -> None:
+                        self.rename_calls.append(
+                            (stage_handle, parent_handle, final_name)
+                        )
+
+                    def close(self, handle: object) -> None:
+                        self.closed.append(handle)
+                        raise OSError(
+                            errno.EBADF,
+                            "injected close failure",
+                        )
+
+                final = Path("/windows/evidence")
+                api = FakeWindowsAPI()
+                writer = evidence_bundle._WindowsEvidenceBundle(
+                    final,
+                    Path("/windows/.evidence.staging"),
+                    api,  # type: ignore[arg-type]
+                    ["ancestor", "parent"],
+                    "stage",
+                    WIN_PARENT_ID,
+                    WIN_STAGE_ID,
+                    _metadata(),
+                )
+                with mock.patch.object(
+                    writer,
+                    "_validate_before_finalize",
+                ), mock.patch.object(
+                    writer,
+                    "_build_manifest",
+                    return_value=b"manifest",
+                ), mock.patch.object(
+                    evidence_bundle,
+                    "_win_open_directory",
+                ) as open_publication:
+                    with self.assertRaises(OSError) as caught:
+                        writer.finalize()
+
+                self.assertIs(caught.exception, failure)
+                self.assertNotIn("audit", str(caught.exception))
+                self.assertEqual(api.rename_calls, [])
+                open_publication.assert_not_called()
+                self.assertIsNone(api.directory_identity(final))
+                self.assertFalse(writer._active)
+                self.assertIsNone(writer._stage_handle)
+                self.assertEqual(writer._parent_handles, [])
+                expected_closed = ["stage", "parent", "ancestor"]
+                if boundary != "create":
+                    expected_closed.append("manifest")
+                self.assertCountEqual(api.closed, expected_closed)
 
     def test_windows_parent_flush_failure_reports_publication_uncertain(
         self,
@@ -2692,6 +2879,87 @@ class AtomicPrimitiveTests(unittest.TestCase):
             snapshot.close(suppress=False)
         self.assertIn("bundle", api.closed)
 
+    def test_windows_parent_identity_failure_closes_ancestor_chain(
+        self,
+    ) -> None:
+        failure = OSError(
+            evidence_bundle._WIN_ERROR_ACCESS_DENIED,
+            "FileIdInfo parent failure",
+        )
+
+        class FakeWindowsAPI:
+            def __init__(self) -> None:
+                self.closed: list[object] = []
+
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                raise failure
+
+            def close(self, handle: object) -> None:
+                self.closed.append(handle)
+                raise OSError(errno.EBADF, "injected close failure")
+
+        api = FakeWindowsAPI()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            evidence_bundle,
+            "_WindowsAPI",
+            return_value=api,
+        ), mock.patch.object(
+            evidence_bundle,
+            "_win_open_directory_chain",
+            return_value=(Path(temporary), ["root", "parent"]),
+        ) as open_chain:
+            with self.assertRaises(OSError) as caught:
+                evidence_bundle._WindowsEvidenceBundle.create(
+                    Path(temporary) / "bundle",
+                    _metadata(),
+                )
+
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(api.closed, ["parent", "root"])
+        self.assertTrue(open_chain.call_args.kwargs["deny_delete"])
+
+    def test_windows_parent_path_identity_failure_closes_ancestor_chain(
+        self,
+    ) -> None:
+        failure = OSError(
+            evidence_bundle._WIN_ERROR_ACCESS_DENIED,
+            "absolute parent identity failure",
+        )
+
+        class FakeWindowsAPI:
+            def __init__(self) -> None:
+                self.closed: list[object] = []
+
+            def identity(self, handle: object) -> tuple[int, bytes]:
+                return WIN_PARENT_ID
+
+            def directory_identity(self, path: Path) -> object:
+                raise failure
+
+            def close(self, handle: object) -> None:
+                self.closed.append(handle)
+                raise OSError(errno.EBADF, "injected close failure")
+
+        api = FakeWindowsAPI()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            evidence_bundle,
+            "_WindowsAPI",
+            return_value=api,
+        ), mock.patch.object(
+            evidence_bundle,
+            "_win_open_directory_chain",
+            return_value=(Path(temporary), ["root", "parent"]),
+        ) as open_chain:
+            with self.assertRaises(OSError) as caught:
+                evidence_bundle._WindowsEvidenceBundle.create(
+                    Path(temporary) / "bundle",
+                    _metadata(),
+                )
+
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(api.closed, ["parent", "root"])
+        self.assertTrue(open_chain.call_args.kwargs["deny_delete"])
+
     def test_windows_stage_acl_failure_closes_parent_without_cleanup_guessing(
         self,
     ) -> None:
@@ -2852,10 +3120,10 @@ class AtomicPrimitiveTests(unittest.TestCase):
         self.assertEqual(api.remove_calls, [])
         self.assertEqual(api.closed, ["parent"])
 
-    def test_windows_ancestor_chain_holds_nofollow_handles(self) -> None:
+    def test_windows_writer_ancestor_chain_denies_delete_share(self) -> None:
         class FakeWindowsAPI:
             def __init__(self) -> None:
-                self.opens: list[tuple[Path, int, int]] = []
+                self.opens: list[tuple[Path, int, int, int]] = []
                 self.checked: list[object] = []
 
             def create_file(
@@ -2867,7 +3135,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 access: int,
                 share: int,
             ) -> object:
-                self.opens.append((path, flags, share))
+                self.opens.append((path, flags, access, share))
                 return f"handle-{len(self.opens)}"
 
             def require_directory_no_reparse(self, handle: object) -> None:
@@ -2885,13 +3153,15 @@ class AtomicPrimitiveTests(unittest.TestCase):
             root,
             api=api,  # type: ignore[arg-type]
             require_private_leaf=True,
+            writable_leaf=True,
+            deny_delete=True,
         )
         self.assertEqual(len(handles), len(api.opens))
         self.assertEqual(
             api.checked[-1],
             ("private", handles[-1]),
         )
-        for _, flags, share in api.opens:
+        for index, (_, flags, access, share) in enumerate(api.opens):
             self.assertTrue(
                 flags
                 & evidence_bundle._WIN_FILE_FLAG_OPEN_REPARSE_POINT
@@ -2901,9 +3171,14 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 (
                     evidence_bundle._WIN_FILE_SHARE_READ
                     | evidence_bundle._WIN_FILE_SHARE_WRITE
-                    | evidence_bundle._WIN_FILE_SHARE_DELETE
                 ),
             )
+            if index == len(api.opens) - 1:
+                self.assertTrue(access & evidence_bundle._WIN_GENERIC_WRITE)
+            else:
+                self.assertFalse(
+                    access & evidence_bundle._WIN_GENERIC_WRITE
+                )
 
     def test_windows_retained_directory_handle_denies_delete_access(
         self,

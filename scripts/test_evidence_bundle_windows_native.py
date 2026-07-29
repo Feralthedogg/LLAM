@@ -111,10 +111,37 @@ class NativeWindowsEvidenceTests(unittest.TestCase):
                 r"^\.incomplete\.staging-\d+-[0-9a-f]{32}$",
             )
 
-            final = root / "evidence"
-            writer = EvidenceBundle.create(final, _metadata())
+            retained_parent = root / "retained-parent"
+            nested_parent = retained_parent / "nested"
+            nested_parent.mkdir(parents=True)
+            moved_parent = root / "retained-parent-moved"
+            original_final = nested_parent / "x"
+            writer = EvidenceBundle.create(original_final, _metadata())
+
+            def assert_retained_parent_rename_blocked(
+                boundary: str,
+            ) -> None:
+                with self.subTest(boundary=boundary):
+                    with self.assertRaises(OSError) as caught:
+                        retained_parent.rename(moved_parent)
+                    self.assertIn(
+                        getattr(caught.exception, "winerror", None),
+                        {
+                            evidence_bundle._WIN_ERROR_ACCESS_DENIED,
+                            32,
+                        },
+                    )
+                    self.assertTrue(retained_parent.is_dir())
+                    self.assertFalse(moved_parent.exists())
+
+            assert_retained_parent_rename_blocked("after-create")
             _populate(writer)
-            self.assertEqual(writer.finalize(), final)
+            assert_retained_parent_rename_blocked("after-populate")
+            self.assertEqual(writer.finalize(), original_final)
+            retained_parent.rename(moved_parent)
+            self.assertFalse(retained_parent.exists())
+            final = moved_parent / "nested" / "x"
+            self.assertTrue(final.is_dir())
             result = audit_bundle(final, recompute=_recompute)
             self.assertEqual(result.verdict, "REJECT")
             self.assertIn(

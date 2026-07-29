@@ -50,6 +50,19 @@ native gate prints `NATIVE_WINDOWS_EVIDENCE_FILESYSTEM=<name>` from the actual
 test volume and accepts only an observed `NTFS` or `ReFS` name, so an NTFS run
 is not reported as ReFS coverage.
 
+For the complete writer transaction, retained root-to-output-parent handles
+deny delete sharing. Each pathname component is protected from rename or
+replacement while its retained handle remains open, through final publication
+classification; the handles are then released during cleanup. This is not a
+persistent lock or an ACL authorization check: after the handles close, an
+actor that holds `DELETE` on an ancestor or `DELETE_CHILD` on its parent can
+rename or replace that component. Such post-transaction authority is outside
+the supported threat model. Put evidence beneath a trusted output parent whose
+ACL withholds that authority from untrusted principals. Before consuming
+evidence, audit the exact final path with `audit_bundle()` or
+`--audit-existing` and consume the validated result rather than reopening
+artifacts later under an assumed-immutable pathname.
+
 On a Windows writer error, automatic abort is deliberately close-only. The
 library never enumerates or deletes through the mutable staging pathname and
 may therefore leave its private, high-entropy `.staging-<pid>-<random>`
