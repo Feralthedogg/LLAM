@@ -17,14 +17,14 @@ prefix.
 - Modify: `tests/test_multi_runtime_core.c`
 - Modify: `src/core/task/task_stack.c`
 
-- [ ] Add a two-runtime regression in which a task running on runtime A spawns
+- [x] Add a two-runtime regression in which a task running on runtime A spawns
   onto runtime B while A's shard is in TLS. Prewarm A, snapshot both caches,
   and prove B neither pops from nor returns through A's cache.
-- [ ] Run the focused test and verify RED against the current TLS-first lookup.
-- [ ] Resolve the task owner first and accept the TLS shard only when
+- [x] Run the focused test and verify RED against the current TLS-first lookup.
+- [x] Resolve the task owner first and accept the TLS shard only when
   `g_llam_tls_shard->runtime == task->owner_runtime`; otherwise use the owner's
   home shard/runtime cache.
-- [ ] Run the focused multi-runtime test and verify GREEN.
+- [x] Run the focused multi-runtime test and verify GREEN.
 
 ### Task 2: Append the public byte-policy and diagnostics contract
 
@@ -143,4 +143,3 @@ prefix.
 - [ ] Run Linux io_uring integration and long-burst RSS/trim evidence.
 - [ ] Run the Windows native lifecycle matrix and BSD/macOS compatibility jobs.
 - [ ] Record requirement-to-evidence closure and commit only evidenced boxes.
-

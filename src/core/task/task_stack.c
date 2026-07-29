@@ -709,7 +709,7 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     size_t stack_size = llam_stack_bytes(stack_class);
     size_t mapping_size = stack_size + (size_t)page_size;
     void *mapping;
-    llam_shard_t *cache_shard = g_llam_tls_shard;
+    llam_shard_t *cache_shard = NULL;
     llam_runtime_t *rt;
 
     if (task == NULL) {
@@ -722,7 +722,11 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         return -1;
     }
 
-    if (cache_shard == NULL && task->home_shard < rt->active_shards) {
+    if (g_llam_tls_shard != NULL &&
+        g_llam_tls_shard->runtime == rt &&
+        g_llam_tls_shard->id < rt->active_shards) {
+        cache_shard = g_llam_tls_shard;
+    } else if (task->home_shard < rt->active_shards) {
         cache_shard = &rt->shards[task->home_shard];
     }
 
@@ -878,7 +882,9 @@ void llam_task_release_stack(llam_task_t *task) {
     }
     if (rt != NULL && task->home_shard < rt->active_shards) {
         cache_shard = &rt->shards[task->home_shard];
-    } else {
+    } else if (g_llam_tls_shard != NULL &&
+               g_llam_tls_shard->runtime == rt &&
+               g_llam_tls_shard->id < rt->active_shards) {
         cache_shard = g_llam_tls_shard;
     }
     // Try to preserve home-shard locality first; overflow falls back to the
