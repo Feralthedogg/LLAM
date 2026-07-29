@@ -85,6 +85,9 @@ typedef struct llam_abi_info {
     const char *runtime_name;          /**< Stable runtime name string, currently "LLAM". */
     const char *version_string;        /**< Static version string owned by the library. */
     const char *platform_name;         /**< Static platform name string owned by the library. */
+    uint32_t task_context_slot_count;  /**< Number of inline O(1) task context slots. */
+    uint32_t reserved1;                /**< Reserved ABI padding; currently 0. */
+    size_t runtime_readiness_size;     /**< Size of the external-driver readiness struct, or 0 if unavailable. */
 } llam_abi_info_t;
 
 /** @brief Current size to pass to ::llam_abi_get_info. */
@@ -107,6 +110,9 @@ typedef uint32_t llam_task_local_key_t;
 
 /** @brief Invalid task-local storage key value. */
 #define LLAM_TASK_LOCAL_INVALID_KEY UINT32_MAX
+
+/** @brief Number of caller-owned O(1) pointer slots stored directly on each task. */
+#define LLAM_TASK_CONTEXT_SLOT_COUNT 4U
 
 /**
  * @brief Task entry point executed on a LLAM-managed stackful user thread.
@@ -274,6 +280,7 @@ typedef struct llam_spawn_opts {
     uint32_t reserved0;                 /**< Reserved ABI padding; initialize to 0, ignored by this version. */
     uint64_t deadline_ns;               /**< Optional absolute deadline in llam_now_ns() units; 0 disables it. */
     llam_cancel_token_t *cancel_token;  /**< Optional cancellation token observed by waits and I/O. */
+    void *user_context;                 /**< Optional caller-owned pointer exposed to the spawned task. */
 } llam_spawn_opts_t;
 
 /** @brief Current size to pass to ::llam_spawn_ex and ::llam_spawn_opts_init. */
@@ -999,6 +1006,42 @@ LLAM_API void llam_dump_runtime_state(int fd);
  * foreign-runtime, or NULL handles.
  */
 LLAM_API uint32_t llam_task_flags(const llam_task_t *task);
+
+/**
+ * @brief Return the caller-owned context pointer for the current task.
+ *
+ * @details The runtime never dereferences or frees this pointer. Successful
+ * calls preserve @c errno, including when the stored value is NULL.
+ *
+ * @return The pointer supplied through ::llam_spawn_opts_t, or NULL with
+ *         @c errno set to @c ENOTSUP outside a managed task.
+ */
+LLAM_API void *llam_task_user_context(void);
+
+/**
+ * @brief Return one inline caller-owned context pointer for the current task.
+ *
+ * @details Successful calls preserve @c errno, including when the stored value
+ * is NULL. The runtime never dereferences or frees the pointer.
+ *
+ * @param slot Slot in the range [0, ::LLAM_TASK_CONTEXT_SLOT_COUNT).
+ * @return Stored pointer on success, or NULL with @c errno set to @c ENOTSUP
+ *         outside a managed task or @c EINVAL for an invalid slot.
+ */
+LLAM_API void *llam_task_context_slot_get(uint32_t slot);
+
+/**
+ * @brief Store one inline caller-owned context pointer on the current task.
+ *
+ * @details Successful calls preserve @c errno. The runtime never dereferences
+ * or frees @p value.
+ *
+ * @param slot Slot in the range [0, ::LLAM_TASK_CONTEXT_SLOT_COUNT).
+ * @param value Caller-owned pointer; NULL clears the slot.
+ * @return 0 on success, or -1 with @c errno set to @c ENOTSUP outside a
+ *         managed task or @c EINVAL for an invalid slot.
+ */
+LLAM_API int llam_task_context_slot_set(uint32_t slot, void *value);
 
 /**
  * @brief Allocate a task-local storage key.

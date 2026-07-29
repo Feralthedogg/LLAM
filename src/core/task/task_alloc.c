@@ -64,6 +64,8 @@ static void llam_task_reset_reused(llam_task_t *task, llam_runtime_t *owner_runt
     memset((char *)task + offsetof(llam_task_t, deadline_ns),
            0,
            offsetof(llam_task_t, ctx) - offsetof(llam_task_t, deadline_ns));
+    task->user_context = NULL;
+    memset(task->context_slots, 0, sizeof(task->context_slots));
     memset((char *)task + offsetof(llam_task_t, stack_mapping),
            0,
            offsetof(llam_task_t, lock) - offsetof(llam_task_t, stack_mapping));
@@ -274,6 +276,8 @@ void llam_task_allocator_free(llam_task_t *task) {
     }
 
     llam_task_local_clear(task);
+    task->user_context = NULL;
+    memset(task->context_slots, 0, sizeof(task->context_slots));
     owner = &rt->shards[task->alloc_owner_shard];
     task->alloc_next = NULL;
     if (task->alloc_external_pool) {

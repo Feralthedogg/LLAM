@@ -282,6 +282,9 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
         if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, cancel_token)) {
             opts_storage.cancel_token = raw_opts.cancel_token;
         }
+        if (LLAM_SPAWN_OPTS_PREFIX_HAS_FIELD(opts_size, user_context)) {
+            opts_storage.user_context = raw_opts.user_context;
+        }
         opts = &opts_storage;
         if (LLAM_UNLIKELY(!llam_public_task_class_valid(opts->task_class) ||
                           !llam_public_stack_class_valid(opts->stack_class))) {
@@ -321,6 +324,7 @@ static llam_task_t *llam_spawn_on_runtime_owned(llam_runtime_t *rt,
     atomic_store_explicit(&task->base_task_class, (unsigned)task_class, memory_order_release);
     task->deadline_ns = opts != NULL ? opts->deadline_ns : 0U;
     task->cancel_token = opts != NULL ? opts->cancel_token : NULL;
+    task->user_context = opts != NULL ? opts->user_context : NULL;
     /*
      * Group-owned tasks must be marked before publication.  Marking after the
      * runnable enqueue lets a concurrently running child consume its borrowed

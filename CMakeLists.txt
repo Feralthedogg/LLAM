@@ -164,6 +164,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/task/task_group.c
     src/core/task/task_group_registry.c
     src/core/task/task_local.c
+    src/core/task/task_context.c
     src/io/api/io_api.c
     src/io/api/direct.c
     src/io/api/direct_tuning.c

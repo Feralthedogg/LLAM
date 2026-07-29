@@ -973,6 +973,8 @@ struct llam_task {
     llam_task_group_t *owning_group;
     llam_task_fn entry;
     void *arg;
+    void *user_context;
+    void *context_slots[LLAM_TASK_CONTEXT_SLOT_COUNT];
     _Alignas(16) llam_ctx_t ctx;
     void *stack_mapping;
     size_t mapping_size;

@@ -367,6 +367,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/task/task_group.o \
 	$(OBJDIR)/src/core/task/task_group_registry.o \
 	$(OBJDIR)/src/core/task/task_local.o \
+	$(OBJDIR)/src/core/task/task_context.o \
 	$(OBJDIR)/src/io/api/io_api.o \
 	$(OBJDIR)/src/io/api/direct.o \
 	$(OBJDIR)/src/io/api/direct_tuning.o \
@@ -2869,6 +2870,10 @@ $(OBJDIR)/examples/server_flood_stats_open.o: examples/server_flood_stats_open.c
 # ownership, and backend invariants. Rebuild all test objects on private layout
 # changes so internal tests cannot link against a stale object view of structs.
 $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+$(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_task_context_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 

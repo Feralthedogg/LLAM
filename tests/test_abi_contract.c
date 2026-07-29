@@ -45,6 +45,10 @@ _Static_assert(offsetof(llam_spawn_opts_t, reserved0) == offsetof(llam_spawn_opt
                "llam_spawn_opts_t.reserved0 must occupy the post-flags ABI padding");
 _Static_assert(offsetof(llam_spawn_opts_t, deadline_ns) == offsetof(llam_spawn_opts_t, reserved0) + sizeof(uint32_t),
                "llam_spawn_opts_t.deadline_ns offset must not move after reserved0");
+_Static_assert(sizeof(((llam_spawn_opts_t *)0)->user_context) == sizeof(void *),
+               "llam_spawn_opts_t.user_context must be pointer-sized");
+_Static_assert(LLAM_TASK_CONTEXT_SLOT_COUNT == 4U,
+               "the public inline task context slot count must remain four");
 ASSERT_FIELD_U32(llam_runtime_opts_t, deterministic);
 ASSERT_FIELD_U32(llam_runtime_opts_t, forced_yield_every);
 ASSERT_FIELD_U32(llam_runtime_opts_t, idle_spin_max_iters);
@@ -218,6 +222,10 @@ static int test_llam_full_info(void) {
     if (info.platform_name == NULL || strcmp(info.platform_name, LLAM_PLATFORM_NAME) != 0) {
         return test_fail("llam platform_name does not match platform macro");
     }
+    if (info.task_context_slot_count != LLAM_TASK_CONTEXT_SLOT_COUNT ||
+        info.task_context_slot_count != 4U) {
+        return test_fail("llam ABI metadata did not advertise four task context slots");
+    }
     return 0;
 }
 
@@ -337,7 +345,8 @@ static int test_llam_option_initializers(void) {
         spawn_opts.stack_class != LLAM_STACK_CLASS_DEFAULT ||
         spawn_opts.flags != 0U ||
         spawn_opts.reserved0 != 0U ||
-        spawn_opts.cancel_token != NULL) {
+        spawn_opts.cancel_token != NULL ||
+        spawn_opts.user_context != NULL) {
         return test_fail("llam spawn option defaults are inconsistent");
     }
 

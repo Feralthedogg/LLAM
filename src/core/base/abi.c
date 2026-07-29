@@ -135,6 +135,8 @@ int llam_abi_get_info(llam_abi_info_t *info, size_t info_size) {
     current.runtime_name = "LLAM";
     current.version_string = LLAM_VERSION_STRING_LITERAL;
     current.platform_name = LLAM_PLATFORM_NAME;
+    current.task_context_slot_count = LLAM_TASK_CONTEXT_SLOT_COUNT;
+    current.runtime_readiness_size = 0U;
 
     copy_size = llam_min_size(info_size, sizeof(current));
     memset(info, 0, copy_size);
