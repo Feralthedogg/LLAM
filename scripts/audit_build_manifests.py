@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Feralthedogg
+
 """Audit LLAM's canonical version and source manifests without evaluation."""
 
 from __future__ import annotations

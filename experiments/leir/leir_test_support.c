@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 #include "leir_test_support.h"
 
 #include <errno.h>

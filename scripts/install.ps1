@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Feralthedogg
+
 param(
     [string]$Prefix,
     [string]$Version = $env:LLAM_INSTALL_VERSION,

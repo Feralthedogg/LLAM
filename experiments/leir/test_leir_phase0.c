@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 #include "runtime_internal.h"
 #include "io/runtime_io_api_internal.h"
 #include "leir_peer_process.h"

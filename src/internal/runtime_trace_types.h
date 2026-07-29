@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 /**
  * @file src/internal/runtime_trace_types.h
  * @brief Private scheduler trace-event storage layout.

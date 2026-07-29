@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Feralthedogg
+
 FROM ubuntu:24.04
 
 ARG LIBURING_REF=e3d35ea59d3ba09075ed4d7751e4bb9049cce64a

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 /**
  * @file tests/test_tsan_fiber_positive.c
  * @brief Positive control for ThreadSanitizer's LLAM logical-fiber tracking.

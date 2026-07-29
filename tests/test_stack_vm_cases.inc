@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 /**
  * @file tests/test_stack_vm_cases.inc
  * @brief Guarded stack VM transitions and cache failure-path tests.

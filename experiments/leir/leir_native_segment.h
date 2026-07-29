@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 #ifndef LLAM_EXPERIMENTS_LEIR_NATIVE_SEGMENT_H
 #define LLAM_EXPERIMENTS_LEIR_NATIVE_SEGMENT_H
 

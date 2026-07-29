@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 /**
  * @file tests/test_asan_fiber_positive.c
  * @brief Positive control for AddressSanitizer's LLAM fiber-stack tracking.

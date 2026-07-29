@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 /**
  * @file tests/test_runtime_stack_cache_authority.inc
  * @brief Runtime-wide retained-stack byte-authority tests.

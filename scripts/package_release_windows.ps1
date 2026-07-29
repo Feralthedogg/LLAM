@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Feralthedogg
+
 param(
     [string]$Target = "windows-x86_64",
     [string]$BuildDir = "build\release-windows",

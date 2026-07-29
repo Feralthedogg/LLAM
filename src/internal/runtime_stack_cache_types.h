@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 /**
  * @file src/internal/runtime_stack_cache_types.h
  * @brief Private retained-stack metadata shared by cache modules.

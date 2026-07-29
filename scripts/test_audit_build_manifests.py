@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Feralthedogg
+
 """Fixture tests for the non-evaluating LLAM build-manifest audit."""
 
 from __future__ import annotations

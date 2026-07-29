@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Feralthedogg
+
 /**
  * @file include/llam/runtime_stats.h
  * @brief ABI-stable runtime statistics snapshot layout.

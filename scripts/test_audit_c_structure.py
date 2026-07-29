@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Feralthedogg
+
 """Fixture tests for LLAM's scope-aware C structure audit."""
 
 from __future__ import annotations
