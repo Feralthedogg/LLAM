@@ -590,6 +590,23 @@ if(Python3_Interpreter_FOUND)
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
     add_test(
+        NAME license_header_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_license_headers.py -v
+    )
+    add_test(
+        NAME license_headers
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_license_headers.py
+                --root ${CMAKE_CURRENT_SOURCE_DIR}
+                --check
+    )
+    set_tests_properties(
+        license_header_fixtures
+        license_headers
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
         NAME c_structure_fixtures
         COMMAND ${Python3_EXECUTABLE}
                 -m unittest scripts/test_audit_c_structure.py -v

@@ -40,6 +40,9 @@ jobs:
       - name: Verify C structure ratchet
         run: make audit-c-structure
 
+      - name: Verify license headers
+        run: make audit-license-headers
+
       - name: Audit build manifests
         run: python3 scripts/audit_build_manifests.py --root . --check
 
