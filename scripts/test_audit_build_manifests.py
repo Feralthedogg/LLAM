@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
+import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -1049,21 +1052,30 @@ class BuildManifestAuditTests(unittest.TestCase):
     def test_accepts_unrelated_and_quoted_unsupported_syntax(self) -> None:
         self.fixture.files["Makefile"] += (
             "# override RUNTIME_COMMON_OBJS := hidden\n"
-            "DEMO_OBJS := $(foreach item,demo,$(OBJDIR)/$(item).o)\n"
+            "DEMO_OBJS := $(OBJDIR)/demo.o\n"
         )
         self.fixture.files["CMakeLists.txt"] += (
             "# list(REMOVE_ITEM LLAM_RUNTIME_COMMON_SOURCES src/common.c)\n"
             'message("target_sources(test_public PRIVATE hidden.c)")\n'
             "set(UNRELATED_SOURCES tools/other.c)\n"
             "list(REMOVE_ITEM UNRELATED_SOURCES tools/other.c)\n"
-            "set_source_files_properties(tools/other.c "
-            "PROPERTIES GENERATED TRUE)\n"
         )
         self.fixture.write()
 
         result = self.run_audit()
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.fixture.files["Makefile"] += (
+            "INDIRECT_DEMO_OBJS := "
+            "$(foreach item,demo,$(OBJDIR)/$(item).o)\n"
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unsupported global Make construct", result.stderr)
 
     def test_rejects_make_runtime_drift_in_supported_arch_alias(self) -> None:
         self.fixture.files["src/direct.c"] = ""
@@ -2088,6 +2100,358 @@ class BuildManifestAuditTests(unittest.TestCase):
                 "does not reach audit-build-manifests"
             ),
             result.stderr,
+        )
+
+    def test_rejects_make_include_that_mutates_runtime_graph(self) -> None:
+        self.fixture.files["hidden.mk"] = (
+            "RUNTIME_OBJS += $(OBJDIR)/tests/test_internal.o\n"
+        )
+        self.fixture.files["Makefile"] += "include hidden.mk\n"
+        self.fixture.write()
+        projection = subprocess.run(
+            [
+                "make",
+                "-pn",
+                "-f",
+                str(self.root / "Makefile"),
+                "HOST_PLATFORM=linux",
+                "LLAM_BUILD_RESEARCH=0",
+            ],
+            cwd=self.root,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertIn(
+            "$(OBJDIR)/tests/test_internal.o",
+            projection.stdout,
+        )
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unsupported global Make construct", result.stderr)
+
+    def test_rejects_computed_make_audit_rule_replacement(self) -> None:
+        self.fixture.files["Makefile"] += (
+            "AUDIT_GATE = audit-build-manifests\n"
+            "define REPLACE_AUDIT_GATE\n"
+            "$$(AUDIT_GATE):\n"
+            "\t@true\n"
+            "endef\n"
+            "$(eval $(call REPLACE_AUDIT_GATE))\n"
+        )
+        self.fixture.write()
+        dry_run = subprocess.run(
+            ["make", "-n", "audit-build-manifests"],
+            cwd=self.root,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertIn("true", dry_run.stdout)
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unsupported global Make construct", result.stderr)
+
+    def test_rejects_extra_make_define_and_include_forms(self) -> None:
+        mutations = (
+            "sinclude hidden.mk\n",
+            "-include hidden.mk\n",
+            (
+                "define EXTRA_HELPER\n"
+                "\t@true\n"
+                "endef\n"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[0]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["hidden.mk"] = ""
+                self.fixture.files["Makefile"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "unsupported global Make construct",
+                    result.stderr,
+                )
+
+    def test_rejects_make_target_specific_assignment(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "test_public: $(RUNTIME_OBJS) $(TEST_PUBLIC_OBJS)",
+            (
+                "test_public: LDLIBS += -lm\n"
+                "test_public: $(RUNTIME_OBJS) $(TEST_PUBLIC_OBJS)"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("target-specific assignment", result.stderr)
+
+    def test_rejects_brace_expansion_and_archive_make_inputs(self) -> None:
+        mutations = (
+            (
+                "HIDDEN_OBJS = $(OBJDIR)/tests/test_internal.o\n",
+                "$(AR) rcs $@ $(RUNTIME_OBJS) ${HIDDEN_OBJS}",
+            ),
+            ("", "$(AR) rcs $@ $(RUNTIME_OBJS) hidden-input.a"),
+        )
+        for preamble, recipe in mutations:
+            with self.subTest(recipe=recipe):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] = (
+                    preamble
+                    + self.fixture.files["Makefile"].replace(
+                        "$(AR) rcs $@ $(RUNTIME_OBJS)",
+                        recipe,
+                    )
+                )
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Make link recipe", result.stderr)
+
+    def test_rejects_depflags_outside_actual_compiler_invocation(
+        self,
+    ) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            (
+                "\t$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) "
+                "-c -o $@ $<"
+            ),
+            (
+                "\t: $(DEPFLAGS) ; $(CC) $(CPPFLAGS) $(CFLAGS) "
+                "-c -o $@ $<"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("actual compiler command", result.stderr)
+
+    def test_rejects_signature_truncation_after_canonical_write(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "\tprintf 'DEPFLAGS=%s\\n' '$(DEPFLAGS)' > $@",
+            (
+                "\tprintf 'DEPFLAGS=%s\\n' '$(DEPFLAGS)' > $@\n"
+                "\t: > $@"
+            ),
+            1,
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("later signature writer", result.stderr)
+
+    def test_rejects_duplicate_effective_make_version_assignments(self) -> None:
+        self.fixture.files["Makefile"] = self.fixture.files["Makefile"].replace(
+            "LLAM_VERSION ?= 2.2.0",
+            "LLAM_VERSION ?= 2.2.0\nLLAM_VERSION := 9.9.9",
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "Make LLAM_VERSION must have exactly one canonical assignment",
+            result.stderr,
+        )
+
+    def test_rejects_package_version_state_mutation_after_preamble(
+        self,
+    ) -> None:
+        mutations = (
+            'library_version="9.9.9"\n',
+            'abi_major="9"\n',
+            "unset version\n",
+            "export library_version\n",
+            "mutate_version() { version=v9.9.9; }\nmutate_version\n",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[0]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["scripts/package_release.sh"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "package version state uses unsupported mutation",
+                    result.stderr,
+                )
+
+    def test_rejects_cmake_include_and_subdirectory_injection(self) -> None:
+        mutations = (
+            (
+                "include(hidden.cmake)\n",
+                "hidden.cmake",
+                "target_sources(llam_runtime PRIVATE tests/test_internal.c)\n",
+            ),
+            (
+                "add_subdirectory(hidden)\n",
+                "hidden/CMakeLists.txt",
+                "target_sources(llam_runtime PRIVATE tests/test_internal.c)\n",
+            ),
+        )
+        for command, path, contents in mutations:
+            with self.subTest(command=command.strip()):
+                self.fixture = Fixture(self.root)
+                self.fixture.files[path] = contents
+                self.fixture.files["CMakeLists.txt"] += command
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "unsupported global CMake command",
+                    result.stderr,
+                )
+
+    def test_rejects_cmake_function_and_macro_target_indirection(
+        self,
+    ) -> None:
+        for construct in ("function", "macro"):
+            with self.subTest(construct=construct):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += (
+                    f"{construct}(inject_runtime target)\n"
+                    "target_sources(${target} PRIVATE "
+                    "tests/test_internal.c)\n"
+                    f"end{construct}()\n"
+                    "inject_runtime(llam_runtime)\n"
+                )
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    "unsupported global CMake command",
+                    result.stderr,
+                )
+
+    def test_rejects_indirect_cmake_state_and_test_mutation(self) -> None:
+        mutations = (
+            (
+                "set(SOURCE_VARIABLE LLAM_RUNTIME_COMMON_SOURCES)\n"
+                "set(${SOURCE_VARIABLE})\n"
+            ),
+            (
+                "set(AUDIT_TEST build_manifest)\n"
+                "set_property(TEST ${AUDIT_TEST} "
+                "PROPERTY DISABLED TRUE)\n"
+            ),
+            (
+                "cmake_language(CALL target_sources "
+                "llam_runtime PRIVATE tests/test_internal.c)\n"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[-1]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("unsupported", result.stderr)
+
+    def test_rejects_disabled_workflow_job_and_continue_on_error(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "  audit:\n"
+                "    steps:\n"
+            ),
+            (
+                "  audit:\n"
+                "    if: false\n"
+                "    steps:\n"
+            ),
+            (
+                "      - name: Audit build manifests\n"
+                "        run: python3 scripts/audit_build_manifests.py "
+                "--root . --check\n"
+            ),
+            (
+                "      - name: Audit build manifests\n"
+                "        continue-on-error: true\n"
+                "        run: python3 scripts/audit_build_manifests.py "
+                "--root . --check\n"
+            ),
+        )
+        for old, new in zip(mutations[::2], mutations[1::2], strict=True):
+            with self.subTest(new=new.splitlines()[1].strip()):
+                self.fixture = Fixture(self.root)
+                self.fixture.files[".github/workflows/linux.yml"] = (
+                    self.fixture.files[".github/workflows/linux.yml"].replace(
+                        old,
+                        new,
+                    )
+                )
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Linux CI build-manifest", result.stderr)
+
+    def test_rejects_workflow_yaml_gate_indirection(self) -> None:
+        workflow = self.fixture.files[".github/workflows/linux.yml"]
+        workflow = "audit_gate: &audit_gate false\n" + workflow
+        workflow = workflow.replace(
+            "  audit:\n",
+            "  audit:\n    if: *audit_gate\n",
+        )
+        self.fixture.files[".github/workflows/linux.yml"] = workflow
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unsupported YAML indirection", result.stderr)
+
+    def test_parses_each_build_language_once(self) -> None:
+        self.fixture.write()
+        spec = importlib.util.spec_from_file_location(
+            "llam_audit_build_manifests_test_module",
+            AUDIT,
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            audit = module.Audit(self.root)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                returncode = audit.run()
+        finally:
+            sys.modules.pop(spec.name, None)
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(
+            getattr(audit, "parse_counts", None),
+            {"make": 1, "cmake": 1},
         )
 
     def test_diagnostics_are_sorted(self) -> None:
