@@ -359,6 +359,72 @@ class CreationAndFinalizationTests(unittest.TestCase):
                 "REJECT",
             )
 
+    def test_post_rename_state_interrupt_closes_writer_and_preserves_bundle(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            final = root / "bundle"
+            bundle = EvidenceBundle.create(final, _metadata())
+            bundle.write_bytes("raw.csv", RAW)
+            bundle.write_bytes("summary.csv", SUMMARY)
+            bundle.write_bytes("verdict.json", VERDICT)
+            bundle.write_bytes("report.md", REPORT)
+            stage_fd = bundle._stage_fd
+            parent_fd = bundle._parent_fd
+            real_publication_state = bundle._publication_state
+
+            def interrupt_after_publication() -> str:
+                if final.exists():
+                    raise KeyboardInterrupt(
+                        "post-rename classification interrupted"
+                    )
+                return real_publication_state()
+
+            with mock.patch.object(
+                bundle,
+                "_publication_state",
+                side_effect=interrupt_after_publication,
+            ):
+                with self.assertRaises(PublicationUncertainError):
+                    bundle.finalize()
+
+            self.assertFalse(bundle._active)
+            for descriptor in (stage_fd, parent_fd):
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+            self.assertEqual(
+                audit_bundle(final, recompute=_recompute).verdict,
+                "REJECT",
+            )
+
+    def test_abort_state_interrupt_does_not_mask_write_error(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            bundle = EvidenceBundle.create(
+                root / "bundle",
+                _metadata(),
+            )
+            with mock.patch.object(
+                bundle,
+                "_write_owned",
+                side_effect=OSError(errno.EIO, "primary write failure"),
+            ), mock.patch.object(
+                bundle,
+                "_publication_state",
+                side_effect=KeyboardInterrupt(
+                    "abort classification interrupted"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "primary write failure",
+                ):
+                    bundle.write_bytes("raw.csv", RAW)
+            self.assertFalse(bundle._active)
+
     def test_rejects_parent_without_trusted_rename_authority(
         self,
     ) -> None:
@@ -1009,6 +1075,56 @@ class MetadataValidationTests(unittest.TestCase):
 
 
 class AuditTests(unittest.TestCase):
+    def test_audit_requires_trusted_immediate_parent_modes(
+        self,
+    ) -> None:
+        for mode, accepted in (
+            (0o700, True),
+            (0o755, True),
+            (0o1770, True),
+            (0o775, False),
+            (0o777, False),
+        ):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory(
+            ) as temporary:
+                root = Path(temporary).resolve()
+                final = _build_bundle(root)
+                root.chmod(mode)
+                if accepted:
+                    self.assertEqual(
+                        audit_bundle(
+                            final,
+                            recompute=_recompute,
+                        ).verdict,
+                        "REJECT",
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        EvidenceError,
+                        "rename authority",
+                    ):
+                        audit_bundle(final, recompute=_recompute)
+
+    def test_audit_revalidates_parent_authority_before_success(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            final = _build_bundle(root)
+
+            def relax_parent(
+                raw_csv: bytes,
+                metadata: dict[str, object],
+            ) -> RecomputedArtifacts:
+                root.chmod(0o777)
+                return _recompute(raw_csv, metadata)
+
+            with self.assertRaisesRegex(
+                EvidenceError,
+                "rename authority",
+            ):
+                audit_bundle(final, recompute=relax_parent)
+
     def test_audit_rejects_artifact_mutation_during_recompute(
         self,
     ) -> None:
@@ -1057,8 +1173,26 @@ class AuditTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             final = _build_bundle(Path(temporary).resolve())
+            parent_fd = os.open(final.parent, os.O_RDONLY)
             directory_fd = os.open(final, os.O_RDONLY)
             real_close = os.close
+            real_open = os.open
+
+            def open_bundle_leaf(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                if path == final.name and dir_fd == parent_fd:
+                    return directory_fd
+                return real_open(
+                    path,
+                    flags,
+                    mode,
+                    dir_fd=dir_fd,
+                )
 
             def close_with_error(descriptor: int) -> None:
                 real_close(descriptor)
@@ -1068,7 +1202,11 @@ class AuditTests(unittest.TestCase):
             with mock.patch.object(
                 evidence_bundle,
                 "_open_directory_nofollow",
-                return_value=directory_fd,
+                return_value=parent_fd,
+            ), mock.patch.object(
+                evidence_bundle.os,
+                "open",
+                side_effect=open_bundle_leaf,
             ), mock.patch.object(
                 evidence_bundle.os,
                 "listdir",
@@ -1474,18 +1612,41 @@ class AtomicPrimitiveTests(unittest.TestCase):
         class FakeWindowsAPI:
             def __init__(self) -> None:
                 self.closed: list[object] = []
+                self.opens: list[dict[str, object]] = []
                 self.source_identity: tuple[int, int, int] | None = (
                     1,
                     2,
                     3,
                 )
                 self.final_identity: tuple[int, int, int] | None = None
-                self.renamed_while_stage_open = False
+                self.renamed_with_publication_handle = False
+
+            def create_file(
+                self,
+                path: Path,
+                **kwargs: object,
+            ) -> object:
+                self.opens.append({"path": path, **kwargs})
+                return "publication"
+
+            def require_directory_no_reparse(
+                self,
+                handle: object,
+            ) -> None:
+                self.assert_publication(handle)
+
+            def require_private_acl(self, handle: object) -> None:
+                self.assert_publication(handle)
+
+            @staticmethod
+            def assert_publication(handle: object) -> None:
+                if handle != "publication":
+                    raise AssertionError("wrong publication handle")
 
             def info(self, handle: object) -> object:
                 identity = (
                     (1, 2, 3)
-                    if handle == "stage"
+                    if handle in {"stage", "publication"}
                     else (4, 5, 6)
                 )
                 return types.SimpleNamespace(identity=identity)
@@ -1503,8 +1664,9 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 parent_handle: object,
                 final_name: str,
             ) -> None:
-                self.renamed_while_stage_open = (
-                    stage_handle == "stage"
+                self.renamed_with_publication_handle = (
+                    stage_handle == "publication"
+                    and "publication" not in self.closed
                     and "stage" not in self.closed
                 )
                 self.source_identity = None
@@ -1544,12 +1706,139 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 PublicationUncertainError
             ) as caught:
                 writer.finalize()
-        self.assertTrue(api.renamed_while_stage_open)
+        self.assertTrue(api.renamed_with_publication_handle)
+        self.assertEqual(len(api.opens), 1)
+        publication_open = api.opens[0]
+        self.assertEqual(
+            publication_open["access"],
+            (
+                evidence_bundle._WIN_FILE_READ_ATTRIBUTES
+                | evidence_bundle._WIN_READ_CONTROL
+                | evidence_bundle._WIN_DELETE
+            ),
+        )
+        self.assertEqual(
+            publication_open["share"],
+            (
+                evidence_bundle._WIN_FILE_SHARE_READ
+                | evidence_bundle._WIN_FILE_SHARE_WRITE
+                | evidence_bundle._WIN_FILE_SHARE_DELETE
+            ),
+        )
+        self.assertIn("publication", api.closed)
         self.assertEqual(caught.exception.final_path, final)
         self.assertIn("audit", str(caught.exception))
         self.assertFalse(writer._active)
         with self.assertRaises(RuntimeError):
             writer.finalize()
+
+    def test_windows_post_rename_state_interrupt_closes_all_handles(
+        self,
+    ) -> None:
+        class FakeWindowsAPI:
+            def __init__(self) -> None:
+                self.closed: list[object] = []
+                self.source_identity: tuple[int, int, int] | None = (
+                    1,
+                    2,
+                    3,
+                )
+                self.final_identity: tuple[int, int, int] | None = None
+
+            def create_file(
+                self,
+                path: Path,
+                **kwargs: object,
+            ) -> object:
+                return "publication"
+
+            def require_directory_no_reparse(
+                self,
+                handle: object,
+            ) -> None:
+                pass
+
+            def require_private_acl(self, handle: object) -> None:
+                pass
+
+            def info(self, handle: object) -> object:
+                identity = (
+                    (1, 2, 3)
+                    if handle in {"stage", "publication"}
+                    else (4, 5, 6)
+                )
+                return types.SimpleNamespace(identity=identity)
+
+            def directory_identity(self, path: Path) -> object:
+                if path.name == ".evidence.staging":
+                    return self.source_identity
+                if path.name == "evidence":
+                    return self.final_identity
+                return (4, 5, 6)
+
+            def rename_handle_noreplace(
+                self,
+                stage_handle: object,
+                parent_handle: object,
+                final_name: str,
+            ) -> None:
+                self.source_identity = None
+                self.final_identity = (1, 2, 3)
+
+            def flush_directory(self, handle: object) -> None:
+                pass
+
+            def close(self, handle: object) -> None:
+                self.closed.append(handle)
+
+        final = Path("/windows/evidence")
+        api = FakeWindowsAPI()
+        writer = evidence_bundle._WindowsEvidenceBundle(
+            final,
+            Path("/windows/.evidence.staging"),
+            api,  # type: ignore[arg-type]
+            ["ancestor", "parent"],
+            "stage",
+            (4, 5, 6),
+            (1, 2, 3),
+            _metadata(),
+        )
+        real_state = writer._publication_state
+
+        def interrupt_after_publication() -> str:
+            state = real_state()
+            if state == evidence_bundle._PUBLISHED:
+                raise KeyboardInterrupt(
+                    "post-rename classification interrupted"
+                )
+            return state
+
+        with mock.patch.object(
+            writer,
+            "_validate_before_finalize",
+        ), mock.patch.object(
+            writer,
+            "_build_manifest",
+            return_value=b"manifest",
+        ), mock.patch.object(
+            writer,
+            "_write_owned",
+        ), mock.patch.object(
+            writer,
+            "_publication_state",
+            side_effect=interrupt_after_publication,
+        ):
+            with self.assertRaises(PublicationUncertainError):
+                writer.finalize()
+
+        self.assertFalse(writer._active)
+        self.assertIsNone(writer._stage_handle)
+        self.assertEqual(writer._parent_handles, [])
+        self.assertCountEqual(
+            api.closed,
+            ["publication", "stage", "parent", "ancestor"],
+        )
+        self.assertEqual(api.final_identity, (1, 2, 3))
 
     def test_public_create_and_audit_route_to_windows_backend(
         self,
@@ -1708,15 +1997,65 @@ class AtomicPrimitiveTests(unittest.TestCase):
         self,
     ) -> None:
         api = object.__new__(evidence_bundle._WindowsAPI)
-        api.private_dacl_sddl = mock.Mock(  # type: ignore[method-assign]
+        private_sddl = (
+            "D:P(A;;FA;;;SY)(A;;FA;;;S-1-5-21-1000)"
+        )
+        api._private_dacl_sddl = mock.Mock(  # type: ignore[method-assign]
+            return_value=private_sddl
+        )
+        api.info = mock.Mock(  # type: ignore[method-assign]
+            return_value=types.SimpleNamespace(file_attributes=0)
+        )
+        api._private_dacl_details = mock.Mock(  # type: ignore[method-assign]
             side_effect=(
-                evidence_bundle._WIN_PRIVATE_DACL_SDDL,
-                "D:P(A;;FA;;;OW)(A;;FR;;;WD)",
+                (private_sddl, True),
+                ("D:P(A;;FA;;;OW)(A;;FR;;;WD)", True),
             )
         )
         api.require_private_acl("private")
         with self.assertRaisesRegex(EvidenceError, "private DACL"):
             api.require_private_acl("relaxed")
+
+    def test_windows_private_acl_validation_requires_protection(
+        self,
+    ) -> None:
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        private_sddl = (
+            "D:(A;;FA;;;SY)(A;;FA;;;S-1-5-21-1000)"
+        )
+        api._private_dacl_sddl = mock.Mock(  # type: ignore[method-assign]
+            return_value=private_sddl.replace("D:", "D:P", 1)
+        )
+        api.info = mock.Mock(  # type: ignore[method-assign]
+            return_value=types.SimpleNamespace(file_attributes=0)
+        )
+        api._private_dacl_details = mock.Mock(  # type: ignore[method-assign]
+            return_value=(private_sddl, False)
+        )
+        with self.assertRaisesRegex(EvidenceError, "private DACL"):
+            api.require_private_acl("unprotected")
+
+    def test_windows_private_dacl_names_current_token_user_sid(
+        self,
+    ) -> None:
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        api._current_user_sid = mock.Mock(  # type: ignore[method-assign]
+            return_value="S-1-5-21-1000"
+        )
+        self.assertEqual(
+            api._private_dacl_sddl(),
+            (
+                "D:P(A;;FA;;;SY)"
+                "(A;;FA;;;S-1-5-21-1000)"
+            ),
+        )
+        self.assertEqual(
+            api._private_dacl_sddl(directory=True),
+            (
+                "D:P(A;OICI;FA;;;SY)"
+                "(A;OICI;FA;;;S-1-5-21-1000)"
+            ),
+        )
 
     def test_windows_audit_rejects_relaxed_bundle_acl_before_hashes(
         self,
@@ -1934,7 +2273,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
             evidence_bundle,
             "_win_open_directory",
             return_value="stage",
-        ):
+        ) as open_directory:
             with self.assertRaisesRegex(
                 OSError,
                 "stage identity failed",
@@ -1943,8 +2282,64 @@ class AtomicPrimitiveTests(unittest.TestCase):
                     Path(temporary) / "bundle",
                     _metadata(),
                 )
+        self.assertFalse(
+            open_directory.call_args.kwargs["rename_source"]
+        )
         self.assertEqual(api.closed, ["stage", "parent"])
         self.assertEqual(api.remove_calls, [])
+
+    def test_windows_directory_error_after_side_effect_is_not_claimed(
+        self,
+    ) -> None:
+        class FakeWindowsAPI:
+            def __init__(self) -> None:
+                self.closed: list[object] = []
+                self.foreign_stage: Path | None = None
+                self.remove_calls: list[Path] = []
+
+            def create_file(self, path: Path, **kwargs: object) -> object:
+                raise FileNotFoundError(path)
+
+            def info(self, handle: object) -> object:
+                return types.SimpleNamespace(identity=(1, 2, 3))
+
+            def directory_identity(self, path: Path) -> object:
+                return (1, 2, 3)
+
+            def create_directory(self, path: Path) -> None:
+                self.foreign_stage = path
+                raise OSError(
+                    errno.EACCES,
+                    "CreateDirectory failed after side effect",
+                )
+
+            def close(self, handle: object) -> None:
+                self.closed.append(handle)
+
+            def remove_directory(self, path: Path) -> None:
+                self.remove_calls.append(path)
+
+        api = FakeWindowsAPI()
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            evidence_bundle,
+            "_WindowsAPI",
+            return_value=api,
+        ), mock.patch.object(
+            evidence_bundle,
+            "_win_open_directory_chain",
+            return_value=(Path(temporary), ["parent"]),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "after side effect",
+            ):
+                evidence_bundle._WindowsEvidenceBundle.create(
+                    Path(temporary) / "bundle",
+                    _metadata(),
+                )
+        self.assertIsNotNone(api.foreign_stage)
+        self.assertEqual(api.remove_calls, [])
+        self.assertEqual(api.closed, ["parent"])
 
     def test_windows_ancestor_chain_holds_nofollow_handles(self) -> None:
         class FakeWindowsAPI:
@@ -1995,8 +2390,139 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 (
                     evidence_bundle._WIN_FILE_SHARE_READ
                     | evidence_bundle._WIN_FILE_SHARE_WRITE
+                    | evidence_bundle._WIN_FILE_SHARE_DELETE
                 ),
             )
+
+    def test_windows_retained_directory_handle_denies_delete_access(
+        self,
+    ) -> None:
+        class FakeWindowsAPI:
+            def __init__(self) -> None:
+                self.open_kwargs: dict[str, object] = {}
+
+            def create_file(
+                self,
+                path: Path,
+                **kwargs: object,
+            ) -> object:
+                self.open_kwargs = kwargs
+                return "stage"
+
+            def require_directory_no_reparse(
+                self,
+                handle: object,
+            ) -> None:
+                pass
+
+            def require_private_acl(self, handle: object) -> None:
+                pass
+
+            def close(self, handle: object) -> None:
+                pass
+
+        api = FakeWindowsAPI()
+        handle = evidence_bundle._win_open_directory(
+            Path("C:\\stage"),
+            api=api,  # type: ignore[arg-type]
+            require_private=True,
+            writable=True,
+            rename_source=False,
+        )
+        self.assertEqual(handle, "stage")
+        access = int(api.open_kwargs["access"])
+        self.assertFalse(access & evidence_bundle._WIN_DELETE)
+        self.assertEqual(
+            api.open_kwargs["share"],
+            (
+                evidence_bundle._WIN_FILE_SHARE_READ
+                | evidence_bundle._WIN_FILE_SHARE_WRITE
+                | evidence_bundle._WIN_FILE_SHARE_DELETE
+            ),
+        )
+
+    def test_windows_audit_directory_chain_denies_only_delete_share(
+        self,
+    ) -> None:
+        class FakeWindowsAPI:
+            def __init__(self) -> None:
+                self.shares: list[int] = []
+
+            def create_file(
+                self,
+                path: Path,
+                **kwargs: object,
+            ) -> object:
+                self.shares.append(int(kwargs["share"]))
+                return f"handle-{len(self.shares)}"
+
+            def require_directory_no_reparse(
+                self,
+                handle: object,
+            ) -> None:
+                pass
+
+            def require_private_acl(self, handle: object) -> None:
+                pass
+
+            def close(self, handle: object) -> None:
+                pass
+
+        api = FakeWindowsAPI()
+        _, handles = evidence_bundle._win_open_directory_chain(
+            Path(tempfile.gettempdir()).resolve(),
+            api=api,  # type: ignore[arg-type]
+            require_private_leaf=True,
+            deny_delete=True,
+        )
+        self.assertTrue(handles)
+        self.assertEqual(
+            set(api.shares),
+            {
+                evidence_bundle._WIN_FILE_SHARE_READ
+                | evidence_bundle._WIN_FILE_SHARE_WRITE
+            },
+        )
+
+    def test_windows_abort_state_interrupt_preserves_write_error(
+        self,
+    ) -> None:
+        class FakeWindowsAPI:
+            def __init__(self) -> None:
+                self.closed: list[object] = []
+
+            def close(self, handle: object) -> None:
+                self.closed.append(handle)
+
+        api = FakeWindowsAPI()
+        writer = evidence_bundle._WindowsEvidenceBundle(
+            Path("/windows/evidence"),
+            Path("/windows/.evidence.staging"),
+            api,  # type: ignore[arg-type]
+            ["parent"],
+            "stage",
+            (4, 5, 6),
+            (1, 2, 3),
+            _metadata(),
+        )
+        with mock.patch.object(
+            evidence_bundle,
+            "_win_create_and_write_file",
+            side_effect=OSError(errno.EIO, "primary Windows write error"),
+        ), mock.patch.object(
+            writer,
+            "_publication_state",
+            side_effect=KeyboardInterrupt(
+                "Windows abort classification interrupted"
+            ),
+        ):
+            with self.assertRaisesRegex(
+                OSError,
+                "primary Windows write error",
+            ):
+                writer.write_bytes("raw.csv", RAW)
+        self.assertFalse(writer._active)
+        self.assertCountEqual(api.closed, ["stage", "parent"])
 
     def test_windows_reparse_ancestor_rejection_closes_handles(
         self,

@@ -34,6 +34,16 @@ Windows:
 .\scripts\verify_windows.ps1 -Native
 ```
 
+The native mode also runs the Windows evidence-bundle integration gate for
+protected SYSTEM-plus-current-token DACLs, compatible directory sharing,
+handle-bound no-replace publication, identity/cleanup, reparse and hardlink
+rejection, and concurrent finalization. The same test is a required step in
+the pull-request `windows-runtime-stress` job. This security boundary requires
+native Windows:
+Wine currently neither preserves `SE_DACL_PROTECTED` on these filesystem
+objects nor implements the required handle-relative directory rename, so Wine
+is useful for diagnostics but is not an acceptance environment for the gate.
+
 BSD is covered by the VM workflow in `.github/workflows/bsd.yml`.
 
 ## Stress And Soak

@@ -373,6 +373,16 @@ jobs:
         with:
           submodules: recursive
 
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+
+      - name: Native Windows evidence security contract
+        shell: pwsh
+        env:
+          LLAM_NATIVE_WINDOWS_EVIDENCE: "1"
+        run: python -W error -m unittest -v scripts.test_evidence_bundle_windows_native
+
       - name: Configure
         shell: pwsh
         run: cmake -S . -B build/windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DLLAM_BUILD_RESEARCH=OFF

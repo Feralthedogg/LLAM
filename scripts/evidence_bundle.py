@@ -1026,6 +1026,7 @@ _WIN_READ_CONTROL = 0x00020000
 _WIN_FILE_READ_ATTRIBUTES = 0x00000080
 _WIN_FILE_SHARE_READ = 0x00000001
 _WIN_FILE_SHARE_WRITE = 0x00000002
+_WIN_FILE_SHARE_DELETE = 0x00000004
 _WIN_CREATE_NEW = 1
 _WIN_OPEN_EXISTING = 3
 _WIN_FILE_ATTRIBUTE_DIRECTORY = 0x00000010
@@ -1039,12 +1040,15 @@ _WIN_ERROR_ACCESS_DENIED = 5
 _WIN_ERROR_INVALID_FUNCTION = 1
 _WIN_ERROR_NOT_SUPPORTED = 50
 _WIN_ERROR_INVALID_PARAMETER = 87
+_WIN_ERROR_INSUFFICIENT_BUFFER = 122
 _WIN_ERROR_FILE_EXISTS = 80
 _WIN_ERROR_ALREADY_EXISTS = 183
 _WIN_SE_FILE_OBJECT = 1
 _WIN_DACL_SECURITY_INFORMATION = 0x00000004
 _WIN_SDDL_REVISION_1 = 1
-_WIN_PRIVATE_DACL_SDDL = "D:P(A;;FA;;;OW)"
+_WIN_SE_DACL_PROTECTED = 0x1000
+_WIN_TOKEN_QUERY = 0x0008
+_WIN_TOKEN_USER = 1
 _WIN_FILE_RENAME_INFO = 3
 _WIN_FILE_RENAME_INFO_EX = 22
 
@@ -1055,6 +1059,17 @@ class _WinSecurityAttributes(ctypes.Structure):
         ("security_descriptor", ctypes.c_void_p),
         ("inherit_handle", ctypes.c_int),
     ]
+
+
+class _WinSidAndAttributes(ctypes.Structure):
+    _fields_ = [
+        ("sid", ctypes.c_void_p),
+        ("attributes", ctypes.c_uint32),
+    ]
+
+
+class _WinTokenUser(ctypes.Structure):
+    _fields_ = [("user", _WinSidAndAttributes)]
 
 
 class _WinFileRenameInfoEx(ctypes.Structure):
@@ -1122,6 +1137,7 @@ class _WindowsAPI:
             raise UnsupportedPlatformError("ctypes WinDLL is unavailable")
         self._kernel32 = win_dll("kernel32", use_last_error=True)
         self._advapi32 = win_dll("advapi32", use_last_error=True)
+        self._cached_current_user_sid: str | None = None
         self._configure()
 
     def _configure(self) -> None:
@@ -1171,6 +1187,8 @@ class _WindowsAPI:
         self._kernel32.FlushFileBuffers.restype = ctypes.c_int
         self._kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         self._kernel32.CloseHandle.restype = ctypes.c_int
+        self._kernel32.GetCurrentProcess.argtypes = []
+        self._kernel32.GetCurrentProcess.restype = ctypes.c_void_p
         self._kernel32.SetFileInformationByHandle.argtypes = [
             ctypes.c_void_p,
             ctypes.c_int,
@@ -1210,6 +1228,31 @@ class _WindowsAPI:
         self._advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = (
             ctypes.c_int
         )
+        self._advapi32.GetSecurityDescriptorControl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint16),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self._advapi32.GetSecurityDescriptorControl.restype = ctypes.c_int
+        self._advapi32.OpenProcessToken.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self._advapi32.OpenProcessToken.restype = ctypes.c_int
+        self._advapi32.GetTokenInformation.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        self._advapi32.GetTokenInformation.restype = ctypes.c_int
+        self._advapi32.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_wchar_p),
+        ]
+        self._advapi32.ConvertSidToStringSidW.restype = ctypes.c_int
 
     @staticmethod
     def _last_error() -> int:
@@ -1244,7 +1287,8 @@ class _WindowsAPI:
         private: bool = False,
     ) -> object:
         with self._private_security_attributes(
-            enabled=private
+            enabled=private,
+            directory=False,
         ) as security_attributes:
             handle = self._kernel32.CreateFileW(
                 os.fspath(path),
@@ -1265,13 +1309,14 @@ class _WindowsAPI:
         self,
         *,
         enabled: bool = True,
+        directory: bool = False,
     ) -> object:
         if not enabled:
             yield None
             return
         descriptor = ctypes.c_void_p()
         if not self._advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            _WIN_PRIVATE_DACL_SDDL,
+            self._private_dacl_sddl(directory=directory),
             _WIN_SDDL_REVISION_1,
             ctypes.byref(descriptor),
             None,
@@ -1290,8 +1335,103 @@ class _WindowsAPI:
         finally:
             self._kernel32.LocalFree(descriptor)
 
+    def _current_user_sid(self) -> str:
+        cached = getattr(self, "_cached_current_user_sid", None)
+        if cached is not None:
+            return cached
+        token = ctypes.c_void_p()
+        if not self._advapi32.OpenProcessToken(
+            self._kernel32.GetCurrentProcess(),
+            _WIN_TOKEN_QUERY,
+            ctypes.byref(token),
+        ):
+            raise OSError(
+                self._last_error(),
+                "OpenProcessToken failed",
+            )
+        primary_error: BaseException | None = None
+        try:
+            required = ctypes.c_uint32()
+            if self._advapi32.GetTokenInformation(
+                token,
+                _WIN_TOKEN_USER,
+                None,
+                0,
+                ctypes.byref(required),
+            ):
+                raise OSError(
+                    errno.EIO,
+                    "GetTokenInformation returned no token buffer",
+                )
+            error_number = self._last_error()
+            if (
+                error_number != _WIN_ERROR_INSUFFICIENT_BUFFER
+                or required.value < ctypes.sizeof(_WinTokenUser)
+            ):
+                raise OSError(
+                    error_number,
+                    "cannot size current Windows token user",
+                )
+            buffer = ctypes.create_string_buffer(required.value)
+            if not self._advapi32.GetTokenInformation(
+                token,
+                _WIN_TOKEN_USER,
+                buffer,
+                required.value,
+                ctypes.byref(required),
+            ):
+                raise OSError(
+                    self._last_error(),
+                    "cannot read current Windows token user",
+                )
+            token_user = ctypes.cast(
+                buffer,
+                ctypes.POINTER(_WinTokenUser),
+            ).contents
+            text = ctypes.c_wchar_p()
+            if not self._advapi32.ConvertSidToStringSidW(
+                token_user.user.sid,
+                ctypes.byref(text),
+            ):
+                raise OSError(
+                    self._last_error(),
+                    "cannot stringify current Windows token user SID",
+                )
+            try:
+                sid = text.value
+                if not sid:
+                    raise OSError(
+                        errno.EIO,
+                        "current Windows token user SID is empty",
+                    )
+            finally:
+                if text:
+                    self._kernel32.LocalFree(
+                        ctypes.cast(text, ctypes.c_void_p)
+                    )
+            self._cached_current_user_sid = sid
+            return sid
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            try:
+                self.close(token)
+            except OSError:
+                if primary_error is None:
+                    raise
+
+    def _private_dacl_sddl(self, *, directory: bool = False) -> str:
+        ace_flags = "OICI" if directory else ""
+        return (
+            f"D:P(A;{ace_flags};FA;;;SY)"
+            f"(A;{ace_flags};FA;;;{self._current_user_sid()})"
+        )
+
     def create_directory(self, path: Path) -> None:
-        with self._private_security_attributes() as security_attributes:
+        with self._private_security_attributes(
+            directory=True
+        ) as security_attributes:
             if not self._kernel32.CreateDirectoryW(
                 os.fspath(path),
                 security_attributes,
@@ -1353,7 +1493,10 @@ class _WindowsAPI:
                 "Windows artifact is not one bounded regular file"
             )
 
-    def private_dacl_sddl(self, handle: object) -> str:
+    def _private_dacl_details(
+        self,
+        handle: object,
+    ) -> tuple[str, bool]:
         descriptor = ctypes.c_void_p()
         error_number = int(
             self._advapi32.GetSecurityInfo(
@@ -1374,6 +1517,17 @@ class _WindowsAPI:
             )
         text = ctypes.c_wchar_p()
         try:
+            control = ctypes.c_uint16()
+            revision = ctypes.c_uint32()
+            if not self._advapi32.GetSecurityDescriptorControl(
+                descriptor,
+                ctypes.byref(control),
+                ctypes.byref(revision),
+            ):
+                raise OSError(
+                    self._last_error(),
+                    "cannot inspect evidence DACL protection",
+                )
             if not self._advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 descriptor,
                 _WIN_SDDL_REVISION_1,
@@ -1385,7 +1539,10 @@ class _WindowsAPI:
                     self._last_error(),
                     "cannot inspect evidence object DACL",
                 )
-            return text.value or ""
+            return (
+                text.value or "",
+                bool(control.value & _WIN_SE_DACL_PROTECTED),
+            )
         finally:
             if text:
                 self._kernel32.LocalFree(
@@ -1393,10 +1550,22 @@ class _WindowsAPI:
                 )
             self._kernel32.LocalFree(descriptor)
 
+    def private_dacl_sddl(self, handle: object) -> str:
+        return self._private_dacl_details(handle)[0]
+
     def require_private_acl(self, handle: object) -> None:
-        if self.private_dacl_sddl(handle) != _WIN_PRIVATE_DACL_SDDL:
+        observed, protected = self._private_dacl_details(handle)
+        directory = bool(
+            self.info(handle).file_attributes
+            & _WIN_FILE_ATTRIBUTE_DIRECTORY
+        )
+        expected = self._private_dacl_sddl(directory=directory)
+        canonical = expected.replace("D:P", "D:", 1)
+        if not protected or observed not in {expected, canonical}:
             raise EvidenceError(
-                "Windows evidence object lacks the exact private DACL"
+                "Windows evidence object lacks the exact private DACL: "
+                "expected canonical protected SYSTEM and current-user "
+                "full-control ACEs"
             )
 
     @staticmethod
@@ -1483,7 +1652,11 @@ class _WindowsAPI:
                     | _WIN_FILE_FLAG_OPEN_REPARSE_POINT
                 ),
                 access=_WIN_FILE_READ_ATTRIBUTES,
-                share=_WIN_FILE_SHARE_READ | _WIN_FILE_SHARE_WRITE,
+                share=(
+                    _WIN_FILE_SHARE_READ
+                    | _WIN_FILE_SHARE_WRITE
+                    | _WIN_FILE_SHARE_DELETE
+                ),
             )
         except FileNotFoundError:
             return None
@@ -1619,6 +1792,7 @@ def _win_open_directory_chain(
     api: _WindowsAPI,
     require_private_leaf: bool = False,
     writable_leaf: bool = False,
+    deny_delete: bool = False,
 ) -> tuple[Path, list[object]]:
     absolute = _safe_absolute(path)
     parts = absolute.parts
@@ -1651,7 +1825,18 @@ def _win_open_directory_chain(
                         else 0
                     )
                 ),
-                share=_WIN_FILE_SHARE_READ | _WIN_FILE_SHARE_WRITE,
+                share=(
+                    (
+                        _WIN_FILE_SHARE_READ
+                        | _WIN_FILE_SHARE_WRITE
+                    )
+                    if deny_delete
+                    else (
+                        _WIN_FILE_SHARE_READ
+                        | _WIN_FILE_SHARE_WRITE
+                        | _WIN_FILE_SHARE_DELETE
+                    )
+                ),
             )
             try:
                 api.require_directory_no_reparse(handle)
@@ -1691,7 +1876,11 @@ def _win_open_directory(
             | (_WIN_DELETE if rename_source else 0)
             | (_WIN_READ_CONTROL if require_private else 0)
         ),
-        share=_WIN_FILE_SHARE_READ | _WIN_FILE_SHARE_WRITE,
+        share=(
+            _WIN_FILE_SHARE_READ
+            | _WIN_FILE_SHARE_WRITE
+            | _WIN_FILE_SHARE_DELETE
+        ),
     )
     try:
         api.require_directory_no_reparse(handle)
@@ -2165,17 +2354,18 @@ class EvidenceBundle:
             return _PUBLISHED
         return _AMBIGUOUS
 
-    def _close_without_cleanup(self) -> OSError | None:
-        close_error: OSError | None = None
+    def _close_without_cleanup(self) -> BaseException | None:
+        close_error: BaseException | None = None
         for attribute in ("_stage_fd", "_parent_fd"):
             descriptor = getattr(self, attribute)
             if descriptor >= 0:
                 try:
                     os.close(descriptor)
-                except OSError as exc:
+                except BaseException as exc:
                     if close_error is None:
                         close_error = exc
-                setattr(self, attribute, -1)
+                finally:
+                    setattr(self, attribute, -1)
         self._active = False
         return close_error
 
@@ -2215,7 +2405,15 @@ class EvidenceBundle:
             )
         except BaseException as exc:
             rename_error = exc
-        publication_state = self._publication_state()
+        try:
+            publication_state = self._publication_state()
+        except BaseException as exc:
+            self._close_without_cleanup()
+            cause = rename_error or exc
+            raise PublicationUncertainError(
+                self._final_path,
+                cause,
+            ) from cause
         if publication_state == _NOT_PUBLISHED:
             self._abort()
             if rename_error is not None:
@@ -2230,31 +2428,23 @@ class EvidenceBundle:
                 self._final_path,
                 cause,
             ) from cause
-        self._active = False
         publication_error: BaseException | None = rename_error
         try:
             _fsync_directory(self._parent_fd)
-        except OSError as exc:
+        except BaseException as exc:
             if publication_error is None:
                 publication_error = exc
-        if self._publication_state() != _PUBLISHED:
-            if publication_error is None:
-                publication_error = EvidenceError(
+        try:
+            if self._publication_state() != _PUBLISHED:
+                raise EvidenceError(
                     "published final identity changed before success"
                 )
-        try:
-            os.close(self._stage_fd)
-        except OSError as exc:
+        except BaseException as exc:
             if publication_error is None:
                 publication_error = exc
-        self._stage_fd = -1
-        try:
-            os.close(self._parent_fd)
-        except OSError as exc:
-            if publication_error is None:
-                publication_error = exc
-        finally:
-            self._parent_fd = -1
+        close_error = self._close_without_cleanup()
+        if publication_error is None:
+            publication_error = close_error
         if publication_error is not None:
             raise PublicationUncertainError(
                 self._final_path,
@@ -2265,14 +2455,16 @@ class EvidenceBundle:
     def _abort(self) -> None:
         if not self._active:
             return
-        publication_state = self._publication_state()
-        if publication_state != _NOT_PUBLISHED:
-            self._close_without_cleanup()
-            return
         try:
             try:
+                publication_state = self._publication_state()
+            except BaseException:
+                return
+            if publication_state != _NOT_PUBLISHED:
+                return
+            try:
                 names = os.listdir(self._stage_fd)
-            except OSError:
+            except BaseException:
                 names = []
             for name in names:
                 try:
@@ -2285,14 +2477,20 @@ class EvidenceBundle:
                         os.rmdir(name, dir_fd=self._stage_fd)
                     else:
                         os.unlink(name, dir_fd=self._stage_fd)
-                except OSError:
+                except BaseException:
                     pass
-            if self._publication_state() == _NOT_PUBLISHED:
+            try:
+                still_not_published = (
+                    self._publication_state() == _NOT_PUBLISHED
+                )
+            except BaseException:
+                still_not_published = False
+            if still_not_published:
                 os.rmdir(
                     self._stage_path.name,
                     dir_fd=self._parent_fd,
                 )
-        except OSError:
+        except BaseException:
             pass
         finally:
             self._close_without_cleanup()
@@ -2369,6 +2567,7 @@ class _WindowsEvidenceBundle:
                     share=(
                         _WIN_FILE_SHARE_READ
                         | _WIN_FILE_SHARE_WRITE
+                        | _WIN_FILE_SHARE_DELETE
                     ),
                 )
             except FileNotFoundError:
@@ -2390,7 +2589,7 @@ class _WindowsEvidenceBundle:
                 api=api,
                 require_private=True,
                 writable=True,
-                rename_source=True,
+                rename_source=False,
             )
             stage_identity = api.info(stage_handle).identity
             if api.directory_identity(stage_path) != stage_identity:
@@ -2426,7 +2625,7 @@ class _WindowsEvidenceBundle:
                         and api.directory_identity(final_path)
                         != stage_identity
                     )
-                except OSError:
+                except BaseException:
                     pass
                 try:
                     api.close(stage_handle)
@@ -2570,19 +2769,20 @@ class _WindowsEvidenceBundle:
             return _PUBLISHED
         return _AMBIGUOUS
 
-    def _close_without_cleanup(self) -> OSError | None:
-        close_error: OSError | None = None
+    def _close_without_cleanup(self) -> BaseException | None:
+        close_error: BaseException | None = None
         if self._stage_handle is not None:
             try:
                 self._api.close(self._stage_handle)
-            except OSError as exc:
+            except BaseException as exc:
                 close_error = exc
-            self._stage_handle = None
+            finally:
+                self._stage_handle = None
         while self._parent_handles:
             handle = self._parent_handles.pop()
             try:
                 self._api.close(handle)
-            except OSError as exc:
+            except BaseException as exc:
                 if close_error is None:
                     close_error = exc
         self._active = False
@@ -2594,6 +2794,7 @@ class _WindowsEvidenceBundle:
             raise RuntimeError("finalize is single-use")
         self._finalize_called = True
         rename_error: BaseException | None = None
+        publication_handle: object | None = None
         try:
             self._validate_before_finalize()
             if self._stage_handle is None:
@@ -2609,15 +2810,43 @@ class _WindowsEvidenceBundle:
                 raise EvidenceError(
                     "Windows staging publication identity changed"
                 )
+            publication_handle = _win_open_directory(
+                self._stage_path,
+                api=self._api,
+                require_private=True,
+                rename_source=True,
+            )
+            if (
+                self._api.info(publication_handle).identity
+                != self._stage_identity
+            ):
+                raise EvidenceError(
+                    "Windows publication handle identity changed"
+                )
             self._api.rename_handle_noreplace(
-                self._stage_handle,
+                publication_handle,
                 self._parent_handles[-1],
                 self._final_path.name,
             )
         except BaseException as exc:
             rename_error = exc
+        finally:
+            if publication_handle is not None:
+                try:
+                    self._api.close(publication_handle)
+                except BaseException as exc:
+                    if rename_error is None:
+                        rename_error = exc
 
-        state = self._publication_state()
+        try:
+            state = self._publication_state()
+        except BaseException as exc:
+            self._close_without_cleanup()
+            cause = rename_error or exc
+            raise PublicationUncertainError(
+                self._final_path,
+                cause,
+            ) from cause
         if state == _NOT_PUBLISHED:
             self._abort()
             if rename_error is not None:
@@ -2657,23 +2886,34 @@ class _WindowsEvidenceBundle:
         if not self._active:
             return
         try:
-            if self._publication_state() == _NOT_PUBLISHED:
+            try:
+                state = self._publication_state()
+            except BaseException:
+                return
+            if state != _NOT_PUBLISHED:
+                return
+            try:
+                names = os.listdir(self._stage_path)
+            except BaseException:
+                names = []
+            for name in names:
+                entry = self._stage_path / name
                 try:
-                    names = os.listdir(self._stage_path)
-                except OSError:
-                    names = []
-                for name in names:
-                    entry = self._stage_path / name
-                    try:
-                        if self._api.path_is_directory(entry):
-                            self._api.remove_directory(entry)
-                        else:
-                            self._api.delete_file(entry)
-                    except OSError:
-                        pass
-                if self._publication_state() == _NOT_PUBLISHED:
-                    self._api.remove_directory(self._stage_path)
-        except OSError:
+                    if self._api.path_is_directory(entry):
+                        self._api.remove_directory(entry)
+                    else:
+                        self._api.delete_file(entry)
+                except BaseException:
+                    pass
+            try:
+                still_not_published = (
+                    self._publication_state() == _NOT_PUBLISHED
+                )
+            except BaseException:
+                still_not_published = False
+            if still_not_published:
+                self._api.remove_directory(self._stage_path)
+        except BaseException:
             pass
         finally:
             self._close_without_cleanup()
@@ -2861,6 +3101,7 @@ def _open_windows_audit_snapshot(
         _safe_absolute(path),
         api=api,
         require_private_leaf=True,
+        deny_delete=True,
     )
     files: dict[str, _WindowsAuditFile] = {}
     try:
@@ -3033,11 +3274,15 @@ class _PosixAuditSnapshot:
     def __init__(
         self,
         path: Path,
+        parent_fd: int,
+        parent_identity: tuple[int, int],
         directory_fd: int,
         directory_metadata: os.stat_result,
         files: dict[str, _PosixAuditFile],
     ) -> None:
         self.path = path
+        self.parent_fd = parent_fd
+        self.parent_identity = parent_identity
         self.directory_fd = directory_fd
         self.directory_metadata = directory_metadata
         self.files = files
@@ -3101,23 +3346,65 @@ class _PosixAuditSnapshot:
                 raise EvidenceError(
                     f"{name} bytes changed during POSIX audit"
                 )
-        reopened = _open_directory_nofollow(self.path)
+
+        parent_metadata = os.fstat(self.parent_fd)
+        if (
+            _posix_identity(parent_metadata)
+            != self.parent_identity
+        ):
+            raise EvidenceError(
+                "bundle parent identity changed during POSIX audit"
+            )
+        _require_posix_rename_authority(
+            self.parent_fd,
+            expected_stage_uid=self.directory_metadata.st_uid,
+        )
+        reopened_parent = _open_directory_nofollow(self.path.parent)
         try:
             if (
-                _posix_identity(os.fstat(reopened))
-                != _posix_identity(self.directory_metadata)
+                _posix_identity(os.fstat(reopened_parent))
+                != self.parent_identity
             ):
                 raise EvidenceError(
-                    "bundle path identity changed during POSIX audit"
+                    "bundle parent path identity changed during POSIX "
+                    "audit"
                 )
         except BaseException:
             try:
-                os.close(reopened)
+                os.close(reopened_parent)
             except OSError:
                 pass
             raise
         else:
-            os.close(reopened)
+            os.close(reopened_parent)
+        reopened_directory = os.open(
+            self.path.name,
+            os.O_RDONLY
+            | _require_no_follow()
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=self.parent_fd,
+        )
+        try:
+            if (
+                _posix_audit_stat_signature(
+                    os.fstat(reopened_directory)
+                )
+                != _posix_audit_stat_signature(
+                    self.directory_metadata
+                )
+            ):
+                raise EvidenceError(
+                    "bundle leaf identity changed during POSIX audit"
+                )
+        except BaseException:
+            try:
+                os.close(reopened_directory)
+            except OSError:
+                pass
+            raise
+        else:
+            os.close(reopened_directory)
 
     def close(self, *, suppress: bool) -> None:
         if self._closed:
@@ -3135,6 +3422,11 @@ class _PosixAuditSnapshot:
         except OSError as exc:
             if close_error is None:
                 close_error = exc
+        try:
+            os.close(self.parent_fd)
+        except OSError as exc:
+            if close_error is None:
+                close_error = exc
         if close_error is not None and not suppress:
             raise close_error
 
@@ -3143,10 +3435,40 @@ def _open_posix_audit_snapshot(
     path: Path | str,
 ) -> _PosixAuditSnapshot:
     bundle_path = _safe_absolute(path)
-    directory_fd = _open_directory_nofollow(bundle_path)
+    if bundle_path.parent == bundle_path:
+        raise EvidenceError("filesystem root cannot be a bundle")
+    _validate_bundle_leaf(bundle_path.name)
+    parent_fd = _open_directory_nofollow(bundle_path.parent)
+    directory_fd = -1
     files: dict[str, _PosixAuditFile] = {}
     try:
+        parent_identity = _require_posix_rename_authority(parent_fd)
+        try:
+            directory_fd = os.open(
+                bundle_path.name,
+                os.O_RDONLY
+                | _require_no_follow()
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise EvidenceError(
+                f"unsafe or unavailable bundle directory "
+                f"{bundle_path}: {exc}"
+            ) from exc
         directory_metadata = os.fstat(directory_fd)
+        _require_posix_rename_authority(
+            parent_fd,
+            expected_stage_uid=directory_metadata.st_uid,
+        )
+        if (
+            _named_posix_identity(parent_fd, bundle_path.name)
+            != _posix_identity(directory_metadata)
+        ):
+            raise EvidenceError(
+                "bundle leaf does not match held directory"
+            )
         if stat.S_IMODE(directory_metadata.st_mode) != 0o700:
             raise EvidenceError(
                 "bundle directory mode must be exactly 0700"
@@ -3227,6 +3549,8 @@ def _open_posix_audit_snapshot(
             )
         return _PosixAuditSnapshot(
             bundle_path,
+            parent_fd,
+            parent_identity,
             directory_fd,
             directory_metadata,
             files,
@@ -3237,8 +3561,13 @@ def _open_posix_audit_snapshot(
                 os.close(record.descriptor)
             except OSError:
                 pass
+        if directory_fd >= 0:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
         try:
-            os.close(directory_fd)
+            os.close(parent_fd)
         except OSError:
             pass
         raise

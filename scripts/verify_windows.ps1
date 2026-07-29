@@ -55,6 +55,28 @@ if ($Native) {
     Write-Host "native I/O backend: IOCP request path for WSARecv/WSASend/AcceptEx/ConnectEx, TCP POLLOUT readiness, UDP POLLIN readiness, and opt-in TCP POLLIN readiness; AF_UNIX poll remains fallback."
 
     $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+    $pythonLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $pythonLauncher -and -not $python) {
+        Write-Error "Native Windows evidence verification requires Python 3."
+        exit 1
+    }
+    Write-Host "native evidence contract: protected SYSTEM-plus-current-user DACL, compatible sharing, handle-bound no-replace publication, identity, cleanup, hardlink/reparse rejection, and race behavior"
+    $env:LLAM_NATIVE_WINDOWS_EVIDENCE = "1"
+    Push-Location $repoRoot.Path
+    try {
+        if ($pythonLauncher) {
+            & $pythonLauncher.Source -3 -m unittest -v scripts.test_evidence_bundle_windows_native
+        } else {
+            & $python.Source -m unittest -v scripts.test_evidence_bundle_windows_native
+        }
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    } finally {
+        Pop-Location
+        Remove-Item Env:\LLAM_NATIVE_WINDOWS_EVIDENCE -ErrorAction SilentlyContinue
+    }
     $buildDir = Join-Path $repoRoot.Path "build-windows-native"
     $cmakeArgs = @("-S", $repoRoot.Path, "-B", $buildDir, "-DCMAKE_BUILD_TYPE=Release")
     if (Get-Command ninja.exe -ErrorAction SilentlyContinue) {
