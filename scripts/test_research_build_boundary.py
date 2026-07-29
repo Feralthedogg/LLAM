@@ -970,7 +970,8 @@ class ResearchBoundaryTests(unittest.TestCase):
                     encoding="utf-8"
                 )
                 self.assertIn("python3", workflow)
-                self.assertIn("python%3.12", workflow)
+                self.assertIn("pkg_add python%3\n", workflow)
+                self.assertNotIn("python%3.12", workflow)
                 self.assertIn("python312", workflow)
                 self.assertIn("command -v python3", workflow)
 

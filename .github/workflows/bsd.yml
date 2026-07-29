@@ -148,7 +148,7 @@ jobs:
                 retry sudo pkg_add xz
               fi
               if ! command -v python3 >/dev/null 2>&1; then
-                retry sudo pkg_add python%3.12
+                retry sudo pkg_add python%3
               fi
               ;;
             NetBSD)

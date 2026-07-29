@@ -415,7 +415,7 @@ jobs:
               command -v gmake >/dev/null 2>&1 || retry sudo pkg_add gmake
               command -v cmake >/dev/null 2>&1 || retry sudo pkg_add cmake
               command -v xz >/dev/null 2>&1 || retry sudo pkg_add xz
-              command -v python3 >/dev/null 2>&1 || retry sudo pkg_add python%3.12
+              command -v python3 >/dev/null 2>&1 || retry sudo pkg_add python%3
               ;;
             NetBSD)
               command -v gmake >/dev/null 2>&1 || retry sudo pkgin -y install gmake

@@ -1992,6 +1992,40 @@ class _WindowsAPI:
     def private_dacl_sddl(self, handle: object) -> str:
         return self._private_dacl_details(handle)[0]
 
+    def _canonical_dacl_sddl(self, sddl: str) -> str:
+        descriptor = ctypes.c_void_p()
+        text = ctypes.c_wchar_p()
+        try:
+            if not self._advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl,
+                _WIN_SDDL_REVISION_1,
+                ctypes.byref(descriptor),
+                None,
+            ):
+                raise OSError(
+                    self._last_error(),
+                    "cannot parse expected private Windows DACL",
+                )
+            if not self._advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                _WIN_SDDL_REVISION_1,
+                _WIN_DACL_SECURITY_INFORMATION,
+                ctypes.byref(text),
+                None,
+            ):
+                raise OSError(
+                    self._last_error(),
+                    "cannot canonicalize expected private Windows DACL",
+                )
+            return text.value or ""
+        finally:
+            if text:
+                self._kernel32.LocalFree(
+                    ctypes.cast(text, ctypes.c_void_p)
+                )
+            if descriptor:
+                self._kernel32.LocalFree(descriptor)
+
     def require_private_acl(self, handle: object) -> None:
         observed, protected = self._private_dacl_details(handle)
         directory = bool(
@@ -1999,8 +2033,14 @@ class _WindowsAPI:
             & _WIN_FILE_ATTRIBUTE_DIRECTORY
         )
         expected = self._private_dacl_sddl(directory=directory)
-        canonical = expected.replace("D:P", "D:", 1)
-        if not protected or observed not in {expected, canonical}:
+        canonical_expected = self._canonical_dacl_sddl(expected)
+        accepted = {
+            expected,
+            expected.replace("D:P", "D:", 1),
+            canonical_expected,
+            canonical_expected.replace("D:P", "D:", 1),
+        }
+        if not protected or observed not in accepted:
             expected_user_sids = set(
                 re.findall(r"S-\d+(?:-\d+)+", expected)
             )

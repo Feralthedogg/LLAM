@@ -2696,6 +2696,9 @@ class AtomicPrimitiveTests(unittest.TestCase):
         api._private_dacl_sddl = mock.Mock(  # type: ignore[method-assign]
             return_value=private_sddl
         )
+        api._canonical_dacl_sddl = mock.Mock(  # type: ignore[attr-defined]
+            return_value=private_sddl
+        )
         api.info = mock.Mock(  # type: ignore[method-assign]
             return_value=types.SimpleNamespace(file_attributes=0)
         )
@@ -2720,6 +2723,34 @@ class AtomicPrimitiveTests(unittest.TestCase):
         )
         self.assertIn("protected=True", str(caught.exception))
 
+    def test_windows_private_acl_accepts_canonical_current_user_alias(
+        self,
+    ) -> None:
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        numeric = (
+            "D:P(A;OICI;FA;;;SY)"
+            "(A;OICI;FA;;;S-1-5-21-1000-500)"
+        )
+        canonical = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)"
+        api._private_dacl_sddl = mock.Mock(  # type: ignore[method-assign]
+            return_value=numeric
+        )
+        api._canonical_dacl_sddl = mock.Mock(  # type: ignore[attr-defined]
+            return_value=canonical
+        )
+        api.info = mock.Mock(  # type: ignore[method-assign]
+            return_value=types.SimpleNamespace(
+                file_attributes=evidence_bundle._WIN_FILE_ATTRIBUTE_DIRECTORY
+            )
+        )
+        api._private_dacl_details = mock.Mock(  # type: ignore[method-assign]
+            return_value=(canonical, True)
+        )
+
+        api.require_private_acl("private-directory")
+
+        api._canonical_dacl_sddl.assert_called_once_with(numeric)
+
     def test_windows_private_acl_validation_requires_protection(
         self,
     ) -> None:
@@ -2730,6 +2761,9 @@ class AtomicPrimitiveTests(unittest.TestCase):
         api._private_dacl_sddl = mock.Mock(  # type: ignore[method-assign]
             return_value=private_sddl.replace("D:", "D:P", 1)
         )
+        api._canonical_dacl_sddl = mock.Mock(  # type: ignore[attr-defined]
+            return_value=private_sddl.replace("D:", "D:P", 1)
+        )
         api.info = mock.Mock(  # type: ignore[method-assign]
             return_value=types.SimpleNamespace(file_attributes=0)
         )
@@ -2738,6 +2772,48 @@ class AtomicPrimitiveTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(EvidenceError, "private DACL"):
             api.require_private_acl("unprotected")
+
+    def test_windows_canonical_dacl_round_trips_sid_aliases(self) -> None:
+        api = object.__new__(evidence_bundle._WindowsAPI)
+        canonical = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)"
+
+        def parse_sddl(
+            _sddl: str,
+            _revision: int,
+            descriptor_out: object,
+            _size_out: object,
+        ) -> int:
+            descriptor_out._obj.value = 1234  # type: ignore[attr-defined]
+            return 1
+
+        def stringify_sddl(
+            _descriptor: object,
+            _revision: int,
+            _information: int,
+            text_out: object,
+            _size_out: object,
+        ) -> int:
+            text_out._obj.value = canonical  # type: ignore[attr-defined]
+            return 1
+
+        api._advapi32 = types.SimpleNamespace(
+            ConvertStringSecurityDescriptorToSecurityDescriptorW=mock.Mock(
+                side_effect=parse_sddl
+            ),
+            ConvertSecurityDescriptorToStringSecurityDescriptorW=mock.Mock(
+                side_effect=stringify_sddl
+            ),
+        )
+        api._kernel32 = types.SimpleNamespace(LocalFree=mock.Mock())
+
+        self.assertEqual(
+            api._canonical_dacl_sddl(
+                "D:P(A;OICI;FA;;;SY)"
+                "(A;OICI;FA;;;S-1-5-21-1000-500)"
+            ),
+            canonical,
+        )
+        self.assertEqual(api._kernel32.LocalFree.call_count, 2)
 
     def test_windows_private_dacl_names_current_token_user_sid(
         self,
