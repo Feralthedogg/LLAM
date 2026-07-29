@@ -319,6 +319,26 @@ class StructureAuditFixture(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(diagnostic, result.stderr)
 
+    def test_deep_baseline_json_returns_controlled_invalid_input(self) -> None:
+        # Break caught: decoder recursion escapes as exit 1 plus traceback.
+        self.baseline.write_text(
+            "[" * 10_000 + "0" + "]" * 10_000,
+            encoding="utf-8",
+        )
+
+        result = self.audit(
+            "--mode",
+            "ratchet",
+            baseline=self.baseline,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue(
+            result.stderr.startswith("audit-c-structure: invalid input:"),
+            result.stderr,
+        )
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_baseline_is_rejected_outside_ratchet_mode(self) -> None:
         # Break caught: a supplied policy file is silently ignored.
         for mode in ("report", "strict"):

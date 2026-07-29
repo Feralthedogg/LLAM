@@ -548,6 +548,10 @@ def load_baseline(
         raise AuditInputError(
             f"baseline contains non-finite JSON constant {exc.args[0]!r}"
         ) from exc
+    except (RecursionError, OverflowError) as exc:
+        raise AuditInputError(
+            "baseline JSON exceeds the supported nesting depth"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise AuditInputError("baseline must contain valid JSON") from exc
     except UnicodeError as exc:
