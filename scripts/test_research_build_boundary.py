@@ -15,10 +15,88 @@ import re
 import shutil
 import shlex
 import subprocess
+import tarfile
 import tempfile
 import time
 import unittest
 from unittest import mock
+
+
+class PackageArchivePortabilityTests(unittest.TestCase):
+    source = Path(__file__).resolve().parents[1]
+
+    def test_metadata_validator_falls_back_for_tar_without_xz(self) -> None:
+        package_script = (
+            self.source / "scripts" / "package_release.sh"
+        ).read_text(encoding="utf-8")
+        begin = "# AUDIT:BEGIN PACKAGE ARCHIVE METADATA VALIDATOR\n"
+        end = "# AUDIT:END PACKAGE ARCHIVE METADATA VALIDATOR\n"
+        validator = package_script.split(begin, 1)[1].split(end, 1)[0]
+
+        with tempfile.TemporaryDirectory(
+            prefix="llam-package-archive-portability-"
+        ) as temporary:
+            work = Path(temporary)
+            package = work / "package"
+            package.mkdir()
+            (package / "VERSION").write_text("ci\n", encoding="ascii")
+            (package / "ABI_MAJOR").write_text("2\n", encoding="ascii")
+            (package / "LIBRARY_VERSION").write_text(
+                "2.2.0\n",
+                encoding="ascii",
+            )
+            archive = work / "package.tar.xz"
+            with tarfile.open(archive, "w:xz") as output:
+                output.add(package, arcname="package")
+
+            real_tar = shutil.which("tar")
+            self.assertIsNotNone(real_tar)
+            wrapper_dir = work / "bin"
+            wrapper_dir.mkdir()
+            tar_wrapper = wrapper_dir / "tar"
+            tar_wrapper.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "-xOf" ] && [ "$2" != "-" ]; then\n'
+                "    exit 2\n"
+                "fi\n"
+                'exec "$REAL_TAR" "$@"\n',
+                encoding="ascii",
+            )
+            tar_wrapper.chmod(0o700)
+
+            harness = work / "validate.sh"
+            harness.write_text(
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "validate_safe_output_path() { :; }\n"
+                "validate_release_component() { :; }\n"
+                'version="ci"\n'
+                'abi_major="2"\n'
+                'library_version="2.2.0"\n'
+                f"{validator}\n"
+                'validate_packaged_archive_metadata "$1" package\n',
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                ["/bin/sh", str(harness), str(archive)],
+                check=False,
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "PATH": (
+                        f"{wrapper_dir}{os.pathsep}"
+                        f"{os.environ.get('PATH', '')}"
+                    ),
+                    "REAL_TAR": real_tar or "",
+                },
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
 
 
 class ResearchBoundaryTests(unittest.TestCase):

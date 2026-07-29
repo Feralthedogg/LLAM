@@ -3257,6 +3257,9 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 flags
                 & evidence_bundle._WIN_FILE_FLAG_OPEN_REPARSE_POINT
             )
+            self.assertTrue(
+                access & evidence_bundle._WIN_FILE_TRAVERSE
+            )
             self.assertEqual(
                 share,
                 (

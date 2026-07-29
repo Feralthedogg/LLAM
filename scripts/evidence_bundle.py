@@ -1425,6 +1425,7 @@ _WIN_GENERIC_READ = 0x80000000
 _WIN_GENERIC_WRITE = 0x40000000
 _WIN_DELETE = 0x00010000
 _WIN_READ_CONTROL = 0x00020000
+_WIN_FILE_TRAVERSE = 0x00000020
 _WIN_FILE_READ_ATTRIBUTES = 0x00000080
 _WIN_FILE_SHARE_READ = 0x00000001
 _WIN_FILE_SHARE_WRITE = 0x00000002
@@ -2318,7 +2319,8 @@ def _win_open_directory_chain(
                     | _WIN_FILE_FLAG_OPEN_REPARSE_POINT
                 ),
                 access=(
-                    _WIN_FILE_READ_ATTRIBUTES
+                    _WIN_FILE_TRAVERSE
+                    | _WIN_FILE_READ_ATTRIBUTES
                     | (
                         _WIN_GENERIC_WRITE
                         if writable_leaf and is_leaf
