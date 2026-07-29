@@ -206,6 +206,7 @@ LLAM_PUBLIC_HDRS = \
 	include/llam/io.h \
 	include/llam/platform.h \
 	include/llam/runtime.h \
+	include/llam/runtime_driver.h \
 	include/llam/runtime_stats.h
 
 RUNTIME_PRIV_HDRS = \
@@ -217,6 +218,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_debug_dump_helpers.h \
 	src/internal/llam_internal.h \
 	src/internal/runtime_internal.h \
+	src/internal/runtime_external_driver.h \
 	src/internal/runtime_resource_plan.h \
 	src/internal/runtime_types.h \
 	src/internal/runtime_public_slot.h \
@@ -304,6 +306,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/sched/norm_queue_depth.o \
 	$(OBJDIR)/src/core/sched/norm_queue.o \
 	$(OBJDIR)/src/core/sched/affinity.o \
+	$(OBJDIR)/src/core/sched/external_doorbell.o \
 	$(OBJDIR)/src/core/sched/core_queue.o \
 	$(OBJDIR)/src/core/memory/alloc.o \
 	$(OBJDIR)/src/core/memory/allocator_quiescent.o \
@@ -2886,7 +2889,7 @@ $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(R
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_hard_affinity_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_hard_affinity_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 

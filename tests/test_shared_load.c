@@ -270,6 +270,8 @@ int main(int argc, char **argv) {
     }
     if (info.abi_major != LLAM_ABI_VERSION_MAJOR ||
         info.abi_minor != LLAM_ABI_VERSION_MINOR ||
+        info.runtime_readiness_size !=
+            LLAM_RUNTIME_READINESS_CURRENT_SIZE ||
         info.runtime_name == NULL ||
         strcmp(info.runtime_name, "LLAM") != 0) {
         (void)dlclose(handle);

@@ -361,6 +361,11 @@ void llam_restore_process_signal_handlers(llam_runtime_t *rt);
 /*
  * Wake handles and low-level Linux futex/eventfd wrappers.
  */
+void llam_external_doorbell_destroy(llam_external_doorbell_t *doorbell);
+void llam_external_doorbell_drain(llam_external_doorbell_t *doorbell);
+int llam_external_doorbell_init(llam_external_doorbell_t *doorbell);
+void llam_external_doorbell_rearm(llam_runtime_t *rt);
+int llam_external_doorbell_signal(llam_external_doorbell_t *doorbell);
 void llam_drain_node_wake(llam_node_t *node);
 void llam_drain_shard_wake(llam_shard_t *shard);
 unsigned llam_eventfd_try_claim(atomic_uint *pending);

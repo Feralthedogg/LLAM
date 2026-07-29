@@ -23,7 +23,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #include "runtime_internal.h"
 #include "engine/runtime_watchdog_internal.h"
 #include "io/runtime_io_api_internal.h"
@@ -7760,8 +7759,9 @@ cleanup:
 }
 #endif
 #include "test_hard_affinity_cases.inc"
+#include "test_external_doorbell_cases.inc"
 int main(void) {
-    if (exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0) {
+    if (exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0) {
         return 1;
     }
     if (exercise_stack_cache_vm_cases() != 0) {

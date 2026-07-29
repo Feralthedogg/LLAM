@@ -27,11 +27,10 @@
 
 #ifndef LLAM_RUNTIME_TYPES_H
 #define LLAM_RUNTIME_TYPES_H
-
 #include "llam_internal.h"
+#include "runtime_external_driver.h"
 #include "runtime_platform.h"
 #include "runtime_resource_plan.h"
-
 #define LLAM_WAIT_RESOLVER_CLOSED_BIT (UINT_MAX - (UINT_MAX >> 1U))
 #define LLAM_WAIT_RESOLVER_REF_MASK (UINT_MAX >> 1U)
 
@@ -1354,6 +1353,7 @@ struct llam_runtime {
     _Atomic size_t active_ops;
     atomic_bool initialized;
     atomic_bool exec_started;
+    llam_external_driver_state_t external_driver;
     llam_runtime_resource_plan_t resource_plan;
     uint64_t requested_task_prewarm_total;
     uint64_t achieved_task_prewarm_total;

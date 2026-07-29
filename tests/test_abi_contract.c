@@ -235,6 +235,13 @@ static int test_llam_full_info(void) {
         info.task_context_slot_count != 4U) {
         return test_fail("llam ABI metadata did not advertise four task context slots");
     }
+    if (info.runtime_readiness_size !=
+            LLAM_RUNTIME_READINESS_CURRENT_SIZE ||
+        info.runtime_readiness_size !=
+            sizeof(llam_runtime_readiness_t)) {
+        return test_fail(
+            "llam ABI metadata did not advertise readiness projection size");
+    }
     return 0;
 }
 

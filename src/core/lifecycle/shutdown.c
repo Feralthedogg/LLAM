@@ -59,7 +59,8 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 
     if (!atomic_load_explicit(&rt->initialized, memory_order_acquire) &&
         !atomic_load_explicit(&rt->exec_started, memory_order_acquire) &&
-        rt->allowed_cpus == NULL && rt->shards == NULL && rt->nodes == NULL
+        rt->allowed_cpus == NULL && rt->shards == NULL && rt->nodes == NULL &&
+        !rt->external_driver.doorbell.initialized
 #if LLAM_RUNTIME_BACKEND_WINDOWS
         && !rt->winsock_started
 #endif
@@ -426,6 +427,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     free(rt->nodes);
     free(rt->shards);
     free(rt->allowed_cpus);
+    llam_external_doorbell_destroy(&rt->external_driver.doorbell);
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     if (rt->winsock_started) {
         WSACleanup();

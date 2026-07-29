@@ -45,6 +45,7 @@
 #define LLAM_RUNTIME_H
 
 #include "llam/platform.h"
+#include "llam/runtime_driver.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -100,7 +101,6 @@ typedef struct llam_cond llam_cond_t;
 typedef struct llam_channel llam_channel_t;
 typedef struct llam_cancel_token llam_cancel_token_t;
 typedef struct llam_io_buffer llam_io_buffer_t;
-typedef struct llam_runtime llam_runtime_t;
 typedef struct llam_task_group llam_task_group_t;
 typedef struct llam_timer llam_timer_t;
 typedef struct llam_signal_set llam_signal_set_t;

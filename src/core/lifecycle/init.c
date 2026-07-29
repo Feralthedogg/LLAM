@@ -805,6 +805,11 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->winsock_started = true;
     }
 #endif
+    if (llam_external_doorbell_init(&rt->external_driver.doorbell) != 0) {
+        int saved_errno = errno != 0 ? errno : EIO;
+
+        return llam_runtime_init_fail_registered(rt, saved_errno);
+    }
 
     errno = 0;
     observed = llam_count_allowed_cpus(&cpus);
