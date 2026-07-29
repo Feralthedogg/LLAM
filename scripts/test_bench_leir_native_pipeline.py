@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest import mock
 
+from scripts.evidence_bundle import PublicationUncertainError
 from scripts.bench_leir_native_pipeline import (
     FIELD_ORDER,
     MatrixCell,
@@ -16,16 +20,39 @@ from scripts.bench_leir_native_pipeline import (
     ResultRow,
     SampleRow,
     SummaryRow,
+    _build_parser,
+    _classify_evidence,
+    _source_dirty_digest,
     audit_existing,
     benchmark_command,
     classify,
     full_matrix,
+    main,
     parse_output,
     run_one,
     summarize,
     write_evidence,
 )
-from scripts.process_utils import CapturedProcess, ProcessTimeoutError
+from scripts.process_utils import CapturedProcess, ProcessTimeoutError, run_capture
+
+
+SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _evidence_metadata(samples: int) -> dict[str, object]:
+    return {
+        "source_commit": SOURCE_COMMIT,
+        "source_dirty_digest": "clean",
+        "architecture": "arm64",
+        "kernel": "test-kernel",
+        "toolchain": "test-toolchain",
+        "commands": [["bench", "--samples", str(samples)]],
+        "cpu_policy": {"scope": "server"},
+        "samples": samples,
+        "activations": 32,
+        "min_mode_ms": 1,
+        "unavailable_cells": [],
+    }
 
 
 def _cell(
@@ -332,6 +359,29 @@ class RunnerContractTests(unittest.TestCase):
                 runner=runner,
             )
 
+    def test_malformed_return_77_is_not_unavailable(self) -> None:
+        cell = _cell("fixed_link_skip")
+
+        def runner(command: list[str], **_: object) -> CapturedProcess:
+            return CapturedProcess(
+                command,
+                77,
+                "",
+                "LEIR_PIPELINE_SKIP candidate=fixed_link_skip "
+                "reason=exact_result_semantic_barrier\n",
+            )
+
+        with self.assertRaises(MatrixRunError) as caught:
+            run_one(
+                Path("bench"),
+                cell,
+                process_sample=1,
+                activations=8,
+                min_mode_ms=1,
+                runner=runner,
+            )
+        self.assertNotIsInstance(caught.exception, NativeUnavailable)
+
     def test_truncated_output_is_rejected(self) -> None:
         cell = _cell()
 
@@ -459,30 +509,256 @@ class SummaryAndClassifierTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_writes_separate_linux_pipeline_artifacts(self) -> None:
-        summaries = _specialized()
+    def test_cli_reports_audit_recovery_for_uncertain_publication(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "pipeline"
-            tracked = Path(temporary) / "tracked.md"
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            output = root / "pipeline"
+            error = PublicationUncertainError(
+                output,
+                OSError("parent flush failed"),
+            )
+            stderr = io.StringIO()
+            with mock.patch(
+                "scripts.bench_leir_native_pipeline.run_matrix",
+                return_value=([], []),
+            ), mock.patch(
+                "scripts.bench_leir_native_pipeline.write_evidence",
+                side_effect=error,
+            ), redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(output),
+                        "--source-commit",
+                        SOURCE_COMMIT,
+                        "--source-dirty-digest",
+                        "clean",
+                        "--samples",
+                        "1",
+                    ]
+                )
+            self.assertEqual(status, 2)
+            self.assertIn(str(output), stderr.getvalue())
+            self.assertIn("--audit-existing", stderr.getvalue())
+
+    def test_source_dirty_digest_includes_untracked_content_and_ignores_ignored(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for command in (
+                ["git", "init", "--quiet"],
+                ["git", "config", "user.email", "test@example.invalid"],
+                ["git", "config", "user.name", "LLAM Test"],
+            ):
+                self.assertEqual(
+                    run_capture(command, cwd=root).returncode,
+                    0,
+                )
+            (root / ".gitignore").write_text(
+                "ignored.bin\n",
+                encoding="utf-8",
+            )
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            self.assertEqual(
+                run_capture(
+                    ["git", "add", ".gitignore", "tracked.txt"],
+                    cwd=root,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                run_capture(
+                    ["git", "commit", "--quiet", "-m", "fixture"],
+                    cwd=root,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(_source_dirty_digest(cwd=root), "clean")
+
+            untracked = root / "untracked.txt"
+            untracked.write_bytes(b"first")
+            first = _source_dirty_digest(cwd=root)
+            self.assertRegex(first, r"[0-9a-f]{64}")
+            untracked.write_bytes(b"second")
+            second = _source_dirty_digest(cwd=root)
+            self.assertRegex(second, r"[0-9a-f]{64}")
+            self.assertNotEqual(first, second)
+
+            (root / "ignored.bin").write_bytes(b"ignored")
+            self.assertEqual(_source_dirty_digest(cwd=root), second)
+
+    def test_unavailable_cells_form_auditable_inconclusive_bundle(
+        self,
+    ) -> None:
+        unavailable = [
+            {
+                "candidate": "link_skip",
+                "batch_width": 1,
+                "concurrency": 1,
+                "payload": 64,
+                "reason": (
+                    "native pipeline unavailable for "
+                    "('link_skip', 1, 1, 64): backend_unavailable"
+                ),
+                "stderr": (
+                    "LEIR_PIPELINE_SKIP candidate=link_skip "
+                    "reason=backend_unavailable\n"
+                ),
+            }
+        ]
+        verdict, reasons = _classify_evidence(
+            [],
+            expected_samples=1,
+            unavailable=unavailable,
+        )
+        metadata = _evidence_metadata(1)
+        metadata["unavailable_cells"] = unavailable
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve() / "pipeline"
+            write_evidence(
+                output,
+                None,
+                [],
+                [],
+                verdict=verdict,
+                reasons=reasons,
+                metadata=metadata,
+            )
+            self.assertEqual(
+                audit_existing(output),
+                (verdict, reasons),
+            )
+
+    def test_invalid_unavailable_cell_metadata_is_not_sealed(self) -> None:
+        unavailable = [
+            {
+                "candidate": "unknown",
+                "batch_width": 1,
+                "concurrency": 1,
+                "payload": 64,
+                "reason": "invented",
+                "stderr": "invented\n",
+            }
+        ]
+        metadata = _evidence_metadata(1)
+        metadata["unavailable_cells"] = unavailable
+        verdict, reasons = _classify_evidence(
+            [],
+            expected_samples=1,
+            unavailable=unavailable,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary).resolve() / "pipeline"
+            with self.assertRaises(ValueError):
+                write_evidence(
+                    output,
+                    None,
+                    [],
+                    [],
+                    verdict=verdict,
+                    reasons=reasons,
+                    metadata=metadata,
+                )
+            self.assertFalse(output.exists())
+
+    def test_matrix_failure_does_not_finalize_partial_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            output = root / "pipeline"
+            failure = MatrixRunError("malformed result", rows=[])
+            with mock.patch(
+                "scripts.bench_leir_native_pipeline.run_matrix",
+                side_effect=failure,
+            ):
+                status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(output),
+                        "--source-commit",
+                        SOURCE_COMMIT,
+                        "--source-dirty-digest",
+                        "clean",
+                    ]
+                )
+            self.assertEqual(status, 2)
+            self.assertFalse(output.exists())
+            self.assertEqual(
+                list(root.glob(".pipeline.staging-*")),
+                [],
+            )
+
+    def test_audit_cli_accepts_required_provenance(self) -> None:
+        args = _build_parser().parse_args(
+            [
+                "--audit-existing",
+                "/tmp/evidence",
+                "--require-source-commit",
+                SOURCE_COMMIT,
+                "--require-source-dirty-digest",
+                "clean",
+            ]
+        )
+        self.assertEqual(args.require_source_commit, SOURCE_COMMIT)
+        self.assertEqual(args.require_source_dirty_digest, "clean")
+
+    def test_writes_exact_bundle_without_tracked_overwrite(self) -> None:
+        samples = []
+        for cell in full_matrix():
+            result = parse_output(
+                _output(cell),
+                cell,
+                min_mode_ns=1_000_000,
+            )
+            samples.append(SampleRow(1, "ABBA", cell, result))
+        summaries = summarize(samples)
+        verdict, reasons = classify(
+            summaries,
+            expected_samples=1,
+            expected_cells=full_matrix(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            output = root / "pipeline"
+            tracked = root / "tracked.md"
             write_evidence(
                 output,
                 tracked,
-                [],
+                samples,
                 summaries,
-                verdict="SPECIALIZED",
-                reasons=["synthetic"],
-                metadata={"source_commit": "abc"},
+                verdict=verdict,
+                reasons=reasons,
+                metadata=_evidence_metadata(1),
             )
-            self.assertTrue((output / "raw.csv").is_file())
-            self.assertTrue((output / "summary.csv").is_file())
-            report = (
-                output / "leir_native_pipeline_report.md"
-            ).read_text()
+            self.assertEqual(
+                {entry.name for entry in output.iterdir()},
+                {
+                    "raw.csv",
+                    "summary.csv",
+                    "metadata.json",
+                    "verdict.json",
+                    "report.md",
+                    "MANIFEST.sha256",
+                },
+            )
+            report = (output / "report.md").read_text()
             self.assertIn(
                 "Linux/io_uring specialized evidence",
                 report,
             )
-            self.assertEqual(report, tracked.read_text())
+            self.assertFalse(tracked.exists())
 
     def test_audit_recomputes_artifacts_and_rejects_tamper(self) -> None:
         samples = []
@@ -500,7 +776,7 @@ class EvidenceTests(unittest.TestCase):
             expected_cells=full_matrix(),
         )
         with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "pipeline"
+            output = Path(temporary).resolve() / "pipeline"
             write_evidence(
                 output,
                 None,
@@ -508,14 +784,14 @@ class EvidenceTests(unittest.TestCase):
                 summaries,
                 verdict=verdict,
                 reasons=reasons,
-                metadata={
-                    "samples": 1,
-                    "min_mode_ms": 1,
-                    "unavailable_cells": [],
-                },
+                metadata=_evidence_metadata(1),
             )
             self.assertEqual(
-                audit_existing(output),
+                audit_existing(
+                    output,
+                    required_source_commit=SOURCE_COMMIT,
+                    required_source_dirty_digest="clean",
+                ),
                 (verdict, reasons),
             )
             summary_path = output / "summary.csv"

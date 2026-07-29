@@ -9,32 +9,51 @@ from __future__ import annotations
 import argparse
 import csv
 import io
-import json
 import math
 import platform
 import re
-import shlex
 import statistics
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
 try:
+    from evidence_bundle import (
+        CLASSIFIER_SCHEMA,
+        EVIDENCE_SCHEMA,
+        VERDICT_SCHEMA,
+        EvidenceBundle,
+        EvidenceError,
+        RecomputedArtifacts,
+        audit_bundle,
+        canonical_json_bytes,
+        git_source_dirty_digest,
+        normalize_architecture,
+    )
     from process_utils import (
         CapturedProcess,
         ProcessTimeoutError,
         run_capture,
     )
-    from safe_output import write_text_safely
 except ModuleNotFoundError:
+    from scripts.evidence_bundle import (
+        CLASSIFIER_SCHEMA,
+        EVIDENCE_SCHEMA,
+        VERDICT_SCHEMA,
+        EvidenceBundle,
+        EvidenceError,
+        RecomputedArtifacts,
+        audit_bundle,
+        canonical_json_bytes,
+        git_source_dirty_digest,
+        normalize_architecture,
+    )
     from scripts.process_utils import (
         CapturedProcess,
         ProcessTimeoutError,
         run_capture,
     )
-    from scripts.safe_output import write_text_safely
 
 
 RESULT_PREFIX = "LEIR_NATIVE_PAIR "
@@ -948,17 +967,132 @@ def classify(
     )
 
 
-def _csv_text(rows: Sequence[dict[str, object]]) -> str:
-    if not rows:
-        return ""
+RAW_FIELD_ORDER = (
+    "process_sample",
+    *PairRow.__dataclass_fields__.keys(),
+)
+SUMMARY_FIELD_ORDER = tuple(SummaryRow.__dataclass_fields__.keys())
+CLASSIFIER_THRESHOLDS = {
+    "core_wall_speedup_min": 1.50,
+    "core_cpu_ratio_max": 0.70,
+    "core_terminal_p99_ratio_max": 1.10,
+    "control_wall_speedup_min": 0.95,
+    "control_cpu_ratio_max": 1.05,
+    "control_service_gap_p99_ratio_max": 1.10,
+    "paired_ratio_spread_max": 1.10,
+}
+
+
+def _csv_text(
+    rows: Sequence[dict[str, object]],
+    fieldnames: Sequence[str],
+) -> str:
     output = io.StringIO(newline="")
     writer = csv.DictWriter(
         output,
-        fieldnames=list(rows[0]),
+        fieldnames=list(fieldnames),
+        extrasaction="raise",
+        lineterminator="\n",
     )
     writer.writeheader()
     writer.writerows(rows)
     return output.getvalue()
+
+
+def _raw_rows(
+    samples: Sequence[SampleRow],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "process_sample": sample.process_sample,
+            **asdict(sample.row),
+        }
+        for sample in samples
+    ]
+
+
+def _pair_from_csv(fields: dict[str, str]) -> PairRow:
+    values: dict[str, object] = {}
+    text_fields = {
+        "candidate",
+        "baseline_checksum",
+        "candidate_checksum",
+        "peer",
+        "cpu_scope",
+        "platform",
+        "order",
+    }
+    ratio_fields = {"wall_speedup", "cpu_ratio"}
+    for name in PairRow.__dataclass_fields__:
+        text = fields[name]
+        if name in text_fields:
+            values[name] = text
+        elif name in ratio_fields:
+            values[name] = _parse_ratio(name, f"{float(text):.9f}")
+        else:
+            values[name] = _parse_integer(name, text)
+    candidate = PairRow(**values)  # type: ignore[arg-type]
+    serialized: dict[str, str] = {"version": "1"}
+    for name in FIELD_ORDER[1:]:
+        value = getattr(candidate, name)
+        serialized[name] = (
+            f"{value:.9f}" if name in ratio_fields else str(value)
+        )
+    output = RESULT_PREFIX + " ".join(
+        f"{name}={serialized[name]}" for name in FIELD_ORDER
+    )
+    return parse_output(output)
+
+
+def _samples_from_raw_bytes(
+    raw_csv: bytes,
+    *,
+    min_mode_ms: int,
+) -> list[SampleRow]:
+    try:
+        text = raw_csv.decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError("raw.csv is not UTF-8") from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if tuple(reader.fieldnames or ()) != RAW_FIELD_ORDER:
+        raise ValueError("raw.csv header/schema mismatch")
+    samples: list[SampleRow] = []
+    observed: set[tuple[object, ...]] = set()
+    for line_number, fields in enumerate(reader, start=2):
+        if (
+            None in fields
+            or any(value is None for value in fields.values())
+        ):
+            raise ValueError(
+                f"malformed raw.csv row at line {line_number}"
+            )
+        process_sample = _parse_integer(
+            "process_sample",
+            fields["process_sample"] or "",
+        )
+        if process_sample <= 0:
+            raise ValueError("process sample index must be positive")
+        row = _pair_from_csv(
+            {
+                name: fields[name] or ""
+                for name in PairRow.__dataclass_fields__
+            }
+        )
+        if row.min_mode_ns != min_mode_ms * 1_000_000:
+            raise ValueError(
+                "raw sample minimum duration disagrees with metadata"
+            )
+        expected_order = "ABBA" if process_sample % 2 else "BAAB"
+        if row.order != expected_order:
+            raise ValueError(
+                "raw sample order disagrees with sample index"
+            )
+        key = (process_sample, *_cell_key(row.cell))
+        if key in observed:
+            raise ValueError("duplicate raw sample key")
+        observed.add(key)
+        samples.append(SampleRow(process_sample, row))
+    return samples
 
 
 def _report_text(
@@ -1034,6 +1168,154 @@ def _report_text(
     return "\n".join(lines)
 
 
+def _verdict_bytes(verdict: str, reasons: Sequence[str]) -> bytes:
+    return canonical_json_bytes(
+        {
+            "schema": VERDICT_SCHEMA,
+            "verdict": verdict,
+            "reasons": list(reasons),
+        }
+    )
+
+
+def _bundle_metadata(
+    phase: str,
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    required = {
+        "source_commit",
+        "source_dirty_digest",
+        "architecture",
+        "kernel",
+        "toolchain",
+        "commands",
+        "cpu_policy",
+        "samples",
+        "activations",
+        "min_mode_ms",
+        "unavailable_reason",
+    }
+    if set(metadata) != required:
+        raise ValueError(
+            "native evidence metadata fields mismatch: "
+            f"missing={sorted(required - set(metadata))} "
+            f"unknown={sorted(set(metadata) - required)}"
+        )
+    return {
+        "schema": EVIDENCE_SCHEMA,
+        "source_commit": metadata["source_commit"],
+        "source_dirty_digest": metadata["source_dirty_digest"],
+        "architecture": metadata["architecture"],
+        "kernel": metadata["kernel"],
+        "toolchain": metadata["toolchain"],
+        "commands": metadata["commands"],
+        "cpu_policy": metadata["cpu_policy"],
+        "matrix": {
+            "benchmark": "leir_native_segment",
+            "phase": phase,
+            "cells": [asdict(cell) for cell in screen_matrix()],
+        },
+        "sample_schedule": {
+            "samples": metadata["samples"],
+            "activations": metadata["activations"],
+            "min_mode_ms": metadata["min_mode_ms"],
+            "orders": ["ABBA", "BAAB"],
+            "unavailable_reason": metadata["unavailable_reason"],
+        },
+        "classifier": {
+            "schema": CLASSIFIER_SCHEMA,
+            "thresholds": CLASSIFIER_THRESHOLDS,
+        },
+    }
+
+
+def _recompute_artifacts(
+    raw_csv: bytes,
+    metadata: dict[str, object],
+) -> RecomputedArtifacts:
+    matrix = metadata["matrix"]
+    schedule = metadata["sample_schedule"]
+    classifier = metadata["classifier"]
+    if (
+        not isinstance(matrix, dict)
+        or matrix
+        != {
+            "benchmark": "leir_native_segment",
+            "phase": matrix.get("phase"),
+            "cells": [asdict(cell) for cell in screen_matrix()],
+        }
+        or matrix.get("phase") not in {"screen", "gate"}
+    ):
+        raise ValueError("native matrix metadata mismatch")
+    if not isinstance(schedule, dict) or set(schedule) != {
+        "samples",
+        "activations",
+        "min_mode_ms",
+        "orders",
+        "unavailable_reason",
+    }:
+        raise ValueError("native sample schedule metadata mismatch")
+    samples_count = schedule["samples"]
+    activations = schedule["activations"]
+    min_mode_ms = schedule["min_mode_ms"]
+    if (
+        not isinstance(samples_count, int)
+        or isinstance(samples_count, bool)
+        or samples_count <= 0
+        or samples_count % 2 == 0
+        or not isinstance(activations, int)
+        or isinstance(activations, bool)
+        or activations <= 0
+        or not isinstance(min_mode_ms, int)
+        or isinstance(min_mode_ms, bool)
+        or min_mode_ms <= 0
+        or schedule["orders"] != ["ABBA", "BAAB"]
+        or (
+            schedule["unavailable_reason"] is not None
+            and (
+                not isinstance(schedule["unavailable_reason"], str)
+                or not schedule["unavailable_reason"]
+            )
+        )
+    ):
+        raise ValueError("invalid native sample schedule")
+    if classifier != {
+        "schema": CLASSIFIER_SCHEMA,
+        "thresholds": CLASSIFIER_THRESHOLDS,
+    }:
+        raise ValueError("native classifier metadata mismatch")
+    samples = _samples_from_raw_bytes(
+        raw_csv,
+        min_mode_ms=min_mode_ms,
+    )
+    summaries = summarize(samples)
+    unavailable_reason = schedule["unavailable_reason"]
+    if unavailable_reason is None:
+        verdict, reasons = classify(
+            summaries,
+            expected_samples=samples_count,
+            min_mode_ns=min_mode_ms * 1_000_000,
+            expected_cells=screen_matrix(),
+        )
+    else:
+        verdict = "INCONCLUSIVE"
+        reasons = [unavailable_reason]
+    summary_csv = _csv_text(
+        [asdict(row) for row in summaries],
+        SUMMARY_FIELD_ORDER,
+    ).encode("utf-8")
+    return RecomputedArtifacts(
+        summary_csv=summary_csv,
+        verdict_json=_verdict_bytes(verdict, reasons),
+        report_md=_report_text(
+            summaries,
+            phase=matrix["phase"],  # type: ignore[arg-type]
+            verdict=verdict,
+            reasons=reasons,
+        ).encode("utf-8"),
+    )
+
+
 def write_evidence(
     output_dir: Path,
     tracked_report: Path | None,
@@ -1045,48 +1327,52 @@ def write_evidence(
     reasons: Sequence[str],
     metadata: dict[str, object],
 ) -> None:
-    raw_rows = [
-        {
-            "process_sample": sample.process_sample,
-            **asdict(sample.row),
-        }
-        for sample in samples
-    ]
-    summary_rows = [asdict(row) for row in summaries]
+    raw_csv = _csv_text(
+        _raw_rows(samples),
+        RAW_FIELD_ORDER,
+    ).encode("utf-8")
+    summary_csv = _csv_text(
+        [asdict(row) for row in summaries],
+        SUMMARY_FIELD_ORDER,
+    ).encode("utf-8")
+    verdict_json = _verdict_bytes(verdict, reasons)
     report = _report_text(
         summaries,
         phase=phase,
         verdict=verdict,
         reasons=reasons,
+    ).encode("utf-8")
+    complete_metadata = _bundle_metadata(phase, metadata)
+    recomputed = _recompute_artifacts(raw_csv, complete_metadata)
+    if (
+        recomputed.summary_csv != summary_csv
+        or recomputed.verdict_json != verdict_json
+        or recomputed.report_md != report
+    ):
+        raise ValueError(
+            "native evidence inputs do not match deterministic recomputation"
+        )
+    bundle = EvidenceBundle.create(output_dir, complete_metadata)
+    bundle.write_bytes("raw.csv", raw_csv)
+    bundle.write_bytes("summary.csv", summary_csv)
+    bundle.write_bytes("verdict.json", verdict_json)
+    bundle.write_bytes("report.md", report)
+    bundle.finalize()
+
+
+def audit_existing(
+    directory: Path,
+    *,
+    required_source_commit: str | None = None,
+    required_source_dirty_digest: str | None = None,
+) -> tuple[str, list[str]]:
+    result = audit_bundle(
+        directory,
+        recompute=_recompute_artifacts,
+        required_source_commit=required_source_commit,
+        required_source_dirty_digest=required_source_dirty_digest,
     )
-    complete_metadata = {
-        **metadata,
-        "phase": phase,
-        "verdict": verdict,
-        "reasons": list(reasons),
-        "sample_rows": len(samples),
-        "summary_rows": len(summaries),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "python": sys.version.split()[0],
-        "platform": platform.platform(),
-    }
-    payloads = {
-        output_dir / "raw.csv": _csv_text(raw_rows),
-        output_dir / "summary.csv": _csv_text(summary_rows),
-        output_dir / "leir_native_metadata.json": (
-            json.dumps(
-                complete_metadata,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        ),
-        output_dir / "leir_native_report.md": report,
-    }
-    for path, text in payloads.items():
-        write_text_safely(path, text)
-    if tracked_report is not None:
-        write_text_safely(tracked_report, report)
+    return result.verdict, list(result.reasons)
 
 
 def _positive_int(text: str) -> int:
@@ -1107,7 +1393,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--binary",
         type=Path,
-        required=True,
     )
     parser.add_argument(
         "--phase",
@@ -1130,12 +1415,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        required=True,
     )
     parser.add_argument(
         "--tracked-report",
         type=Path,
     )
+    parser.add_argument("--audit-existing", type=Path)
+    parser.add_argument("--source-commit")
+    parser.add_argument("--source-dirty-digest")
+    parser.add_argument("--require-source-commit")
+    parser.add_argument("--require-source-dirty-digest")
     return parser
 
 
@@ -1150,13 +1439,67 @@ def _source_commit() -> str:
         return "unavailable"
     return (
         result.stdout.strip()
-        if result.returncode == 0 and not result.stderr
+        if (
+            result.returncode == 0
+            and not result.stderr
+            and not result.stdout_truncated
+            and not result.stderr_truncated
+        )
         else "unavailable"
     )
 
 
+def _source_dirty_digest(*, cwd: Path | None = None) -> str:
+    return git_source_dirty_digest(run_capture, cwd=cwd)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.audit_existing is not None:
+        if (
+            args.binary is not None
+            or args.output_dir is not None
+            or args.source_commit is not None
+            or args.source_dirty_digest is not None
+        ):
+            print(
+                "[bench_leir_native.py] audit mode cannot also run "
+                "a binary",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            verdict, reasons = audit_existing(
+                args.audit_existing,
+                required_source_commit=args.require_source_commit,
+                required_source_dirty_digest=(
+                    args.require_source_dirty_digest
+                ),
+            )
+        except (EvidenceError, OSError, ValueError) as exc:
+            print(
+                f"[bench_leir_native.py] audit failed: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            f"[bench_leir_native.py] audit=OK verdict={verdict}"
+        )
+        for reason in reasons:
+            print(f"[bench_leir_native.py] {reason}")
+        return 0
+    if (
+        args.binary is None
+        or args.output_dir is None
+        or args.require_source_commit is not None
+        or args.require_source_dirty_digest is not None
+    ):
+        print(
+            "[bench_leir_native.py] --binary and --output-dir are "
+            "required in run mode; require-source flags are audit-only",
+            file=sys.stderr,
+        )
+        return 2
     if not args.binary.is_file():
         print(
             "[bench_leir_native.py] binary does not exist",
@@ -1213,26 +1556,58 @@ def main(argv: Sequence[str] | None = None) -> int:
         str(Path(__file__)),
         *(argv or sys.argv[1:]),
     ]
-    write_evidence(
-        args.output_dir,
-        args.tracked_report,
-        raw,
-        summaries,
-        phase=args.phase,
-        verdict=verdict,
-        reasons=reasons,
-        metadata={
-            "command": shlex.join(invocation),
-            "binary": str(args.binary),
-            "source_commit": _source_commit(),
-            "matrix_cells": len(cells),
-            "samples": samples,
-            "activations": args.activations,
-            "min_mode_ms": min_mode_ms,
-            "cpu_gate": "server-only",
-            "platform_gate": "linux_io_uring-only",
-        },
+    source_commit = args.source_commit or _source_commit()
+    dirty_digest = (
+        args.source_dirty_digest or _source_dirty_digest()
     )
+    unavailable_reason = (
+        reasons[0] if verdict == "INCONCLUSIVE" and len(reasons) == 1
+        and reasons[0].startswith("cell ")
+        else None
+    )
+    try:
+        write_evidence(
+            args.output_dir,
+            args.tracked_report,
+            raw,
+            summaries,
+            phase=args.phase,
+            verdict=verdict,
+            reasons=reasons,
+            metadata={
+                "source_commit": source_commit,
+                "source_dirty_digest": dirty_digest,
+                "architecture": normalize_architecture(
+                    platform.machine()
+                ),
+                "kernel": platform.release(),
+                "toolchain": (
+                    platform.python_compiler()
+                    or "unknown-python-compiler"
+                ),
+                "commands": [invocation],
+                "cpu_policy": {
+                    "scope": "server",
+                    "affinity": "caller-controlled",
+                },
+                "samples": samples,
+                "activations": args.activations,
+                "min_mode_ms": min_mode_ms,
+                "unavailable_reason": unavailable_reason,
+            },
+        )
+    except (EvidenceError, OSError, RuntimeError, ValueError) as exc:
+        print(
+            f"[bench_leir_native.py] evidence write failed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.tracked_report is not None:
+        print(
+            "[bench_leir_native.py] --tracked-report is deprecated; "
+            "use output bundle report.md",
+            file=sys.stderr,
+        )
     print(
         f"[bench_leir_native.py] phase={args.phase} "
         f"verdict={verdict} cells={len(cells)} samples={samples}"

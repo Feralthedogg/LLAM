@@ -4,12 +4,16 @@
 
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
+from scripts.evidence_bundle import PublicationUncertainError
 from scripts.bench_leir_native import (
     MAX_OUTPUT_BYTES,
     MatrixCell,
@@ -18,9 +22,12 @@ from scripts.bench_leir_native import (
     PairRow,
     SampleRow,
     _build_parser,
+    _source_dirty_digest,
+    audit_existing,
     benchmark_command,
     classify,
     parse_output,
+    main,
     run_one,
     screen_matrix,
     summarize,
@@ -115,7 +122,10 @@ def _pair_for_cell(
     )
 
 
-def _specialized_summaries(samples: int = 5) -> list[object]:
+SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _specialized_samples(samples: int = 5) -> list[SampleRow]:
     raw: list[SampleRow] = []
     for cell in screen_matrix():
         core = (
@@ -139,7 +149,27 @@ def _specialized_summaries(samples: int = 5) -> list[object]:
                     ),
                 )
             )
-    return summarize(raw)
+    return raw
+
+
+def _specialized_summaries(samples: int = 5) -> list[object]:
+    return summarize(_specialized_samples(samples))
+
+
+def _evidence_metadata(samples: int = 5) -> dict[str, object]:
+    return {
+        "source_commit": SOURCE_COMMIT,
+        "source_dirty_digest": "clean",
+        "architecture": "arm64",
+        "kernel": "test-kernel",
+        "toolchain": "test-toolchain",
+        "commands": [["bench", "--samples", str(samples)]],
+        "cpu_policy": {"scope": "server"},
+        "samples": samples,
+        "activations": 128,
+        "min_mode_ms": 100,
+        "unavailable_reason": None,
+    }
 
 
 class ParserContractTests(unittest.TestCase):
@@ -417,32 +447,200 @@ class RunnerContractTests(unittest.TestCase):
                 )
             )
 
+    def test_malformed_exit_77_is_not_unavailable(self) -> None:
+        with self.assertRaises(MatrixRunError) as caught:
+            self._run_with(
+                CapturedProcess(
+                    ["bench"],
+                    77,
+                    "",
+                    "LEIR_NATIVE_SKIP candidate=link_skip "
+                    "reason=unexpected\n",
+                )
+            )
+        self.assertNotIsInstance(caught.exception, NativeUnavailable)
+
 
 class EvidenceAndCliTests(unittest.TestCase):
-    def test_evidence_names_and_tracked_report(self) -> None:
-        summaries = _specialized_summaries()
+    def test_cli_reports_audit_recovery_for_uncertain_publication(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            output = root / "evidence"
+            error = PublicationUncertainError(
+                output,
+                OSError("parent fsync failed"),
+            )
+            stderr = io.StringIO()
+            with mock.patch(
+                "scripts.bench_leir_native.run_matrix",
+                side_effect=NativeUnavailable(
+                    "cell 1/72: native backend unavailable",
+                    (),
+                ),
+            ), mock.patch(
+                "scripts.bench_leir_native.write_evidence",
+                side_effect=error,
+            ), redirect_stderr(stderr):
+                status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(output),
+                        "--source-commit",
+                        SOURCE_COMMIT,
+                        "--source-dirty-digest",
+                        "clean",
+                    ]
+                )
+            self.assertEqual(status, 2)
+            self.assertIn(str(output), stderr.getvalue())
+            self.assertIn("--audit-existing", stderr.getvalue())
+
+    def test_source_dirty_digest_includes_untracked_content_and_ignores_ignored(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for command in (
+                ["git", "init", "--quiet"],
+                ["git", "config", "user.email", "test@example.invalid"],
+                ["git", "config", "user.name", "LLAM Test"],
+            ):
+                self.assertEqual(
+                    run_capture(command, cwd=root).returncode,
+                    0,
+                )
+            (root / ".gitignore").write_text(
+                "ignored.bin\n",
+                encoding="utf-8",
+            )
+            (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            self.assertEqual(
+                run_capture(
+                    ["git", "add", ".gitignore", "tracked.txt"],
+                    cwd=root,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(
+                run_capture(
+                    ["git", "commit", "--quiet", "-m", "fixture"],
+                    cwd=root,
+                ).returncode,
+                0,
+            )
+            self.assertEqual(_source_dirty_digest(cwd=root), "clean")
+
+            untracked = root / "untracked.txt"
+            untracked.write_bytes(b"first")
+            first = _source_dirty_digest(cwd=root)
+            self.assertRegex(first, r"[0-9a-f]{64}")
+            untracked.write_bytes(b"second")
+            second = _source_dirty_digest(cwd=root)
+            self.assertRegex(second, r"[0-9a-f]{64}")
+            self.assertNotEqual(first, second)
+
+            (root / "ignored.bin").write_bytes(b"ignored")
+            self.assertEqual(_source_dirty_digest(cwd=root), second)
+
+    def test_cli_unavailable_contract_finalizes_inconclusive_bundle(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            binary = root / "bench"
+            binary.write_bytes(b"fixture")
+            output = root / "evidence"
+            unavailable = NativeUnavailable(
+                "cell 1/72: native backend unavailable",
+                (),
+            )
+            with mock.patch(
+                "scripts.bench_leir_native.run_matrix",
+                side_effect=unavailable,
+            ):
+                status = main(
+                    [
+                        "--binary",
+                        str(binary),
+                        "--output-dir",
+                        str(output),
+                        "--source-commit",
+                        SOURCE_COMMIT,
+                        "--source-dirty-digest",
+                        "clean",
+                    ]
+                )
+            self.assertEqual(status, 0)
+            verdict, reasons = audit_existing(output)
+            self.assertEqual(verdict, "INCONCLUSIVE")
+            self.assertEqual(
+                reasons,
+                ["cell 1/72: native backend unavailable"],
+            )
+
+    def test_evidence_bundle_names_audit_and_no_tracked_overwrite(
+        self,
+    ) -> None:
+        samples = _specialized_samples()
+        summaries = summarize(samples)
+        verdict, reasons = classify(
+            summaries,
+            expected_samples=5,
+            min_mode_ns=100_000_000,
+            expected_cells=screen_matrix(),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
             tracked = root / "tracked.md"
             write_evidence(
                 root / "evidence",
                 tracked,
-                [],
+                samples,
                 summaries,
                 phase="screen",
-                verdict="SPECIALIZED",
-                reasons=["all precommitted gates passed"],
-                metadata={"command": "test"},
+                verdict=verdict,
+                reasons=reasons,
+                metadata=_evidence_metadata(),
             )
-            report = root / "evidence" / "leir_native_report.md"
-            self.assertEqual(report.read_bytes(), tracked.read_bytes())
-            self.assertTrue((root / "evidence" / "raw.csv").is_file())
-            self.assertTrue((root / "evidence" / "summary.csv").is_file())
+            evidence = root / "evidence"
+            self.assertEqual(
+                {entry.name for entry in evidence.iterdir()},
+                {
+                    "raw.csv",
+                    "summary.csv",
+                    "metadata.json",
+                    "verdict.json",
+                    "report.md",
+                    "MANIFEST.sha256",
+                },
+            )
+            report = evidence / "report.md"
+            self.assertFalse(tracked.exists())
             text = report.read_text(encoding="utf-8")
             self.assertIn("SPECIALIZED", text)
             self.assertIn("not `CATEGORY`", text)
             self.assertIn("1.50x", text)
             self.assertIn("0.70x", text)
+            self.assertEqual(
+                audit_existing(
+                    evidence,
+                    required_source_commit=SOURCE_COMMIT,
+                    required_source_dirty_digest="clean",
+                ),
+                (verdict, reasons),
+            )
+            before = report.stat().st_mtime_ns
+            self.assertEqual(
+                audit_existing(evidence),
+                (verdict, reasons),
+            )
+            self.assertEqual(before, report.stat().st_mtime_ns)
 
     def test_cli_and_command_use_argument_arrays(self) -> None:
         args = _build_parser().parse_args(
@@ -458,6 +656,20 @@ class EvidenceAndCliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.phase, "gate")
+        audit_args = _build_parser().parse_args(
+            [
+                "--audit-existing",
+                "/tmp/evidence",
+                "--require-source-commit",
+                SOURCE_COMMIT,
+                "--require-source-dirty-digest",
+                "clean",
+            ]
+        )
+        self.assertEqual(
+            audit_args.require_source_commit,
+            SOURCE_COMMIT,
+        )
         command = benchmark_command(
             Path("/tmp/bench"),
             MatrixCell("link_skip", 8, 512, 1024),
