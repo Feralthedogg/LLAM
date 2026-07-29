@@ -719,12 +719,22 @@ class ResearchBoundaryTests(unittest.TestCase):
             "  foreach(configuration IN LISTS configurations)\n"
             "    foreach(property IN ITEMS IMPORTED_LOCATION IMPORTED_IMPLIB "
             "IMPORTED_SONAME IMPORTED_NO_SONAME IMPORTED_LINK_INTERFACE_LIBRARIES "
-            "IMPORTED_LINK_DEPENDENT_LIBRARIES)\n"
+            "IMPORTED_LINK_DEPENDENT_LIBRARIES "
+            "IMPORTED_LINK_INTERFACE_LANGUAGES)\n"
             "      set(full_property ${property}_${configuration})\n"
-            "      if(property STREQUAL IMPORTED_LOCATION)\n"
-            "        record_property(${target} ${full_property} TRUE)\n"
-            "        get_target_property(artifact ${target} ${full_property})\n"
-            "        assert_artifact_prefix(\"${artifact}\")\n"
+            "      if(property STREQUAL IMPORTED_LOCATION OR "
+            "property STREQUAL IMPORTED_IMPLIB)\n"
+            "        if(property STREQUAL IMPORTED_LOCATION)\n"
+            "          record_property(${target} ${full_property} TRUE)\n"
+            "        else()\n"
+            "          record_property(${target} ${full_property} FALSE)\n"
+            "        endif()\n"
+            "        get_property(artifact_is_set TARGET ${target} "
+            "PROPERTY ${full_property} SET)\n"
+            "        if(artifact_is_set)\n"
+            "          get_target_property(artifact ${target} ${full_property})\n"
+            "          assert_artifact_prefix(\"${artifact}\")\n"
+            "        endif()\n"
             "      else()\n"
             "        record_property(${target} ${full_property} FALSE)\n"
             "      endif()\n"
@@ -1281,11 +1291,72 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                 ResearchBoundaryTests._pkg_config_contract(prefix)
 
     @staticmethod
-    def _write_fake_cmake_package(prefix: Path, artifact: Path) -> Path:
+    def _write_fake_cmake_package(
+        prefix: Path,
+        *,
+        link_languages: str,
+        implib: Path | None = None,
+    ) -> Path:
         config_dir = prefix / "lib" / "cmake" / "llam"
         config_dir.mkdir(parents=True, exist_ok=True)
         include_dir = prefix / "include"
         include_dir.mkdir(parents=True, exist_ok=True)
+        header_dir = include_dir / "llam"
+        header_dir.mkdir(exist_ok=True)
+        header_dir.joinpath("runtime.h").write_text(
+            "unsigned llam_abi_version(void);\n", encoding="utf-8"
+        )
+        source = prefix / "fake_runtime.c"
+        object_file = prefix / "fake_runtime.o"
+        artifact = prefix / "lib" / "libfake_runtime.a"
+        artifact.parent.mkdir(exist_ok=True)
+        source.write_text(
+            "unsigned llam_abi_version(void) { return 2U << 16; }\n",
+            encoding="utf-8",
+        )
+        compile_result = subprocess.run(
+            [os.environ.get("CC", "cc"), "-c", str(source), "-o", str(object_file)],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if compile_result.returncode != 0:
+            raise AssertionError(compile_result.stderr)
+        archive_result = subprocess.run(
+            ["ar", "rcs", str(artifact), str(object_file)],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if archive_result.returncode != 0:
+            raise AssertionError(archive_result.stderr)
+        if os.uname().sysname == "Darwin":
+            shared_artifact = prefix / "lib" / "libllam_runtime.2.dylib"
+            shared_command = [
+                os.environ.get("CC", "cc"),
+                "-dynamiclib",
+                str(source),
+                "-o",
+                str(shared_artifact),
+            ]
+        else:
+            shared_artifact = prefix / "lib" / "libllam_runtime.so.2.2.0"
+            shared_command = [
+                os.environ.get("CC", "cc"),
+                "-shared",
+                "-fPIC",
+                str(source),
+                "-o",
+                str(shared_artifact),
+            ]
+        shared_result = subprocess.run(
+            shared_command, check=False, text=True, capture_output=True
+        )
+        if shared_result.returncode != 0:
+            raise AssertionError(shared_result.stderr)
+        implib_property = ""
+        if implib is not None:
+            implib_property = f"    IMPORTED_IMPLIB_RELEASE \"{implib}\"\n"
         config_dir.joinpath("llam-config-version.cmake").write_text(
             "set(PACKAGE_VERSION \"2.2.0\")\n"
             "set(PACKAGE_VERSION_COMPATIBLE TRUE)\n",
@@ -1297,6 +1368,8 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
             "  set_target_properties(llam::${target} PROPERTIES\n"
             "    IMPORTED_CONFIGURATIONS RELEASE\n"
             f"    IMPORTED_LOCATION_RELEASE \"{artifact}\"\n"
+            f"    IMPORTED_LINK_INTERFACE_LANGUAGES_RELEASE \"{link_languages}\"\n"
+            f"{implib_property}"
             f"    INTERFACE_INCLUDE_DIRECTORIES \"{include_dir}\")\n"
             "endforeach()\n",
             encoding="utf-8",
@@ -1310,10 +1383,10 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
             root = Path(directory)
             expected = root / "expected"
             fallback = root / "fallback"
-            outside_artifact = root / "outside.a"
-            outside_artifact.write_bytes(b"outside")
-            self._write_fake_cmake_package(expected, outside_artifact)
-            self._write_fake_cmake_package(fallback, outside_artifact)
+            outside_implib = root / "outside.lib"
+            outside_implib.write_bytes(b"outside")
+            self._write_fake_cmake_package(expected, link_languages="C")
+            self._write_fake_cmake_package(fallback, link_languages="C")
             previous_work = getattr(ResearchBoundaryTests, "work", None)
             ResearchBoundaryTests.work = root / "work"
             try:
@@ -1329,11 +1402,31 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     AssertionError, "artifact escaped prefix"
                 ):
+                    self._write_fake_cmake_package(
+                        expected, link_languages="C", implib=outside_implib
+                    )
                     ResearchBoundaryTests._cmake_package_contract(expected, "escape")
-                missing = root / "missing-NOTFOUND"
-                self._write_fake_cmake_package(expected, missing)
+                notfound = root / "notfound"
+                self._write_fake_cmake_package(notfound, link_languages="C")
+                config = notfound / "lib" / "cmake" / "llam" / "llam-config.cmake"
+                config.write_text(
+                    config.read_text(encoding="utf-8").replace(
+                        str(notfound / "lib" / "libfake_runtime.a"),
+                        "missing-NOTFOUND",
+                    ),
+                    encoding="utf-8",
+                )
                 with self.assertRaisesRegex(AssertionError, "not found"):
-                    ResearchBoundaryTests._cmake_package_contract(expected, "notfound")
+                    ResearchBoundaryTests._cmake_package_contract(notfound, "notfound")
+                c_only = root / "c-only"
+                asm_and_c = root / "asm-and-c"
+                self._write_fake_cmake_package(c_only, link_languages="C")
+                self._write_fake_cmake_package(asm_and_c, link_languages="ASM;C")
+                c_contract = ResearchBoundaryTests._cmake_package_contract(c_only, "c")
+                asm_contract = ResearchBoundaryTests._cmake_package_contract(
+                    asm_and_c, "asm"
+                )
+                self.assertNotEqual(c_contract, asm_contract)
             finally:
                 if previous_work is None:
                     del ResearchBoundaryTests.work
