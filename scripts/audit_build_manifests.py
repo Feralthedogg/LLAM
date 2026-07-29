@@ -127,7 +127,7 @@ ALLOWED_SIGNATURE_RECIPE_HASHES = {
 }
 ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
     # Canonical repository Makefile, including sanitizer positive controls.
-    "8494ff11a87a2d350dccbd1a19d0b9c05cd1545c68e804e12367846a6911c6b2",
+    "c727e131116acd03ab90a4f932170f96dc2b9be4c26bc137e6af659fecd3b074",
     # Independently derived mini-repository fixture.
     "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }
