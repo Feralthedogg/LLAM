@@ -492,7 +492,7 @@ int llam_runtime_apply_worker_affinity(llam_runtime_t *rt, unsigned cpu_id);
 int llam_runtime_restore_driver_affinity(llam_runtime_t *rt);
 ```
 
-- [ ] **Step 1: Write preferred/required affinity tests**
+- [x] **Step 1: Write preferred/required affinity tests**
 
 Use internal seams to inject unsupported, apply-failure, and restore-failure
 results. Assert `NONE` makes no platform call, `PREFER` continues and increments
@@ -500,30 +500,30 @@ the appropriate counter, and `REQUIRE` fails init/run with the exact errno.
 Assert shard 0 restores the host driver's original affinity on normal drain,
 worker-start failure, fatal worker error, and cooperative stop.
 
-- [ ] **Step 2: Write native-thread counter tests**
+- [x] **Step 2: Write native-thread counter tests**
 
 While a runtime is initialized and while it is running, assert configured
 capacity separately from scheduler loops, blocking, I/O, controller,
 opaque-helper, total runtime-owned, and host-inclusive execution threads. After
 shutdown all actual runtime-owned counters must return to zero.
 
-- [ ] **Step 3: Run and verify RED**
+- [x] **Step 3: Run and verify RED**
 
 Expected: affinity helpers ignore failures, restoration occurs only during
 shutdown, and stats lack the new counters.
 
-- [ ] **Step 4: Implement policy-aware affinity and entry/exit accounting**
+- [x] **Step 4: Implement policy-aware affinity and entry/exit accounting**
 
 No platform call is made under a scheduler queue lock. Each OS thread main
 publishes entry after TLS/runtime ownership is installed and exit before the
 last runtime pointer can be released. Use saturating diagnostics on impossible
 underflow and record a fatal invariant error in debug builds.
 
-- [ ] **Step 5: Run focused and JSON/text diagnostics tests and verify GREEN**
+- [x] **Step 5: Run focused and JSON/text diagnostics tests and verify GREEN**
 
 Run runtime core, multi-runtime, API edge, debug JSON, and shutdown suites.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/core/platform/platform.c src/core/lifecycle/run.c \

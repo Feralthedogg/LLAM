@@ -859,12 +859,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     g_llam_tls_shard = NULL;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
-    rt->init_thread = pthread_self();
-#if defined(__linux__)
-    if (pthread_getaffinity_np(rt->init_thread, sizeof(rt->init_thread_affinity), &rt->init_thread_affinity) == 0) {
-        rt->init_thread_affinity_valid = true;
-    }
-#endif
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     {
         WSADATA wsa_data;
@@ -896,12 +890,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     resource_input.opts_size = opts != NULL ? opts_size : 0U;
     resource_input.allowed_cpus = cpus;
     resource_input.allowed_cpu_count = observed;
-    /*
-     * Hard affinity is enabled only after the platform application/restore
-     * path is installed in the resource-governance sequence. Until then,
-     * REQUIRE fails closed while NONE and PREFER remain valid plans.
-     */
-    resource_input.affinity_supported = false;
+    resource_input.affinity_supported = llam_runtime_affinity_supported();
 #if LLAM_RUNTIME_BACKEND_LINUX
     resource_input.sqpoll_supported = true;
 #else
@@ -924,6 +913,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     free(cpus);
     cpus = selected_cpus;
     rt->resource_plan = resource_plan;
+    atomic_init(&rt->scheduler_threads_live, 0U);
+    atomic_init(&rt->io_threads_live, 0U);
+    atomic_init(&rt->controller_threads_live, 0U);
+    atomic_init(&rt->opaque_helper_threads_live, 0U);
+    atomic_init(&rt->host_threads_live, 0U);
+    atomic_init(&rt->affinity_failures, 0U);
 
     /*
      * From this point on, runtime policy is resolved once and stored on the

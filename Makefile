@@ -498,7 +498,9 @@ endif
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/lifecycle/init.o \
+	$(TESTHOOK_OBJDIR)/src/core/lifecycle/run.o \
 	$(TESTHOOK_OBJDIR)/src/core/memory/alloc.o \
+	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
 	$(TESTHOOK_OBJDIR)/src/core/task/task_stack.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/norm_queue.o \
 	$(TESTHOOK_OBJDIR)/src/engine/scheduler/block.o \
@@ -517,7 +519,9 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 RUNTIME_TESTHOOK_OBJS = \
 	$(filter-out \
 		$(OBJDIR)/src/core/lifecycle/init.o \
+		$(OBJDIR)/src/core/lifecycle/run.o \
 		$(OBJDIR)/src/core/memory/alloc.o \
+		$(OBJDIR)/src/core/platform/platform.o \
 		$(OBJDIR)/src/core/task/task_stack.o \
 		$(OBJDIR)/src/core/sched/norm_queue.o \
 		$(OBJDIR)/src/engine/scheduler/block.o \

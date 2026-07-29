@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if LLAM_PLATFORM_POSIX
 #include <pthread.h>
@@ -439,6 +440,39 @@ static int test_idle_block_workers_destroy_repeat(void) {
     return 0;
 }
 
+static unsigned runtime_started_io_threads(const llam_runtime_t *runtime) {
+    unsigned count = 0U;
+
+    if (runtime == NULL || runtime->nodes == NULL) {
+        return 0U;
+    }
+    for (unsigned i = 0U; i < runtime->active_nodes; ++i) {
+        if (runtime->nodes[i].thread_started) {
+            count += 1U;
+        }
+    }
+    return count;
+}
+
+static bool wait_for_initialized_native_threads(llam_runtime_t *runtime,
+                                                unsigned expected_io_threads) {
+    struct timespec interval = {0, 1000000L};
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+
+    while (atomic_load_explicit(&runtime->block_threads_live,
+                                memory_order_acquire) != 1U ||
+           atomic_load_explicit(&runtime->io_threads_live,
+                                memory_order_acquire) != expected_io_threads ||
+           atomic_load_explicit(&runtime->controller_threads_live,
+                                memory_order_acquire) != 1U) {
+        if (llam_now_ns() >= deadline_ns) {
+            return false;
+        }
+        (void)nanosleep(&interval, NULL);
+    }
+    return true;
+}
+
 static int test_runtime_resource_plan_isolation(void) {
     llam_runtime_opts_t opts_a;
     llam_runtime_opts_t opts_b;
@@ -449,6 +483,10 @@ static int test_runtime_resource_plan_isolation(void) {
     unsigned *allowed_cpus = NULL;
     unsigned allowed_cpu_count;
     unsigned worker_b;
+    unsigned io_a;
+    unsigned io_b;
+    unsigned owned_a;
+    unsigned owned_b;
     int rc = 1;
 
     allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
@@ -478,17 +516,40 @@ static int test_runtime_resource_plan_isolation(void) {
         rc = test_fail_errno("isolated resource runtimes failed to create");
         goto cleanup;
     }
+    io_a = runtime_started_io_threads(runtime_a);
+    io_b = runtime_started_io_threads(runtime_b);
+    if (!wait_for_initialized_native_threads(runtime_a, io_a) ||
+        !wait_for_initialized_native_threads(runtime_b, io_b)) {
+        rc = test_fail("isolated runtime native thread counters did not converge");
+        goto cleanup;
+    }
     if (llam_runtime_collect_stats_ex_handle(runtime_a, &stats_a, sizeof(stats_a)) != 0 ||
         llam_runtime_collect_stats_ex_handle(runtime_b, &stats_b, sizeof(stats_b)) != 0) {
         rc = test_fail_errno("isolated resource stats failed");
         goto cleanup;
     }
+    owned_a = io_a + 2U;
+    owned_b = io_b + 2U;
     if (stats_a.active_workers != 1U ||
         stats_a.selected_cpu_count != 1U ||
         stats_b.active_workers != worker_b ||
         stats_b.selected_cpu_count != worker_b ||
         stats_a.configured_worker_max != 1U ||
-        stats_b.configured_worker_max != worker_b) {
+        stats_b.configured_worker_max != worker_b ||
+        stats_a.scheduler_threads != 0U ||
+        stats_b.scheduler_threads != 0U ||
+        stats_a.blocking_threads != 1U ||
+        stats_b.blocking_threads != 1U ||
+        stats_a.io_threads != io_a ||
+        stats_b.io_threads != io_b ||
+        stats_a.controller_threads != 1U ||
+        stats_b.controller_threads != 1U ||
+        stats_a.opaque_helper_threads != 0U ||
+        stats_b.opaque_helper_threads != 0U ||
+        stats_a.runtime_owned_threads != owned_a ||
+        stats_b.runtime_owned_threads != owned_b ||
+        stats_a.native_execution_threads != owned_a ||
+        stats_b.native_execution_threads != owned_b) {
         rc = test_fail("explicit runtimes did not retain isolated resource plans");
         goto cleanup;
     }

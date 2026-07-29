@@ -280,7 +280,12 @@ static bool llam_runtime_has_external_sync_waiters(llam_runtime_t *rt) {
  */
 void *llam_ctrl_worker_main(void *arg) {
     llam_runtime_t *rt = arg;
+    bool thread_counted =
+        llam_runtime_native_thread_enter(rt, &rt->controller_threads_live);
 
+    if (!thread_counted) {
+        return NULL;
+    }
     llam_tune_ctrl_thread();
 
     for (;;) {
@@ -363,5 +368,6 @@ void *llam_ctrl_worker_main(void *arg) {
         }
     }
 
+    llam_runtime_native_thread_exit(rt, &rt->controller_threads_live);
     return NULL;
 }

@@ -43,36 +43,312 @@ static bool g_llam_process_segv_installed;
 static struct sigaction g_llam_process_previous_preempt_action;
 static struct sigaction g_llam_process_previous_segv_action;
 
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+static atomic_bool g_llam_affinity_test_enabled;
+static atomic_int g_llam_affinity_test_supported = ATOMIC_VAR_INIT(-1);
+static atomic_int
+    g_llam_affinity_test_errors[LLAM_TEST_AFFINITY_OPERATION_COUNT];
+static atomic_uint
+    g_llam_affinity_test_calls[LLAM_TEST_AFFINITY_OPERATION_COUNT];
+
+void llam_runtime_test_reset_affinity_hooks(void) {
+    unsigned operation;
+
+    atomic_store_explicit(&g_llam_affinity_test_enabled, false, memory_order_release);
+    atomic_store_explicit(&g_llam_affinity_test_supported, -1, memory_order_release);
+    for (operation = 0U;
+         operation < LLAM_TEST_AFFINITY_OPERATION_COUNT;
+         ++operation) {
+        atomic_store_explicit(&g_llam_affinity_test_errors[operation],
+                              0,
+                              memory_order_release);
+        atomic_store_explicit(&g_llam_affinity_test_calls[operation],
+                              0U,
+                              memory_order_release);
+    }
+}
+
+void llam_runtime_test_set_affinity_supported(int supported) {
+    atomic_store_explicit(&g_llam_affinity_test_supported,
+                          supported != 0 ? 1 : 0,
+                          memory_order_release);
+    atomic_store_explicit(&g_llam_affinity_test_enabled, true, memory_order_release);
+}
+
+void llam_runtime_test_set_affinity_error(llam_test_affinity_operation_t operation,
+                                          int error_code) {
+    if ((unsigned)operation >= LLAM_TEST_AFFINITY_OPERATION_COUNT) {
+        return;
+    }
+    atomic_store_explicit(&g_llam_affinity_test_errors[operation],
+                          error_code,
+                          memory_order_release);
+    atomic_store_explicit(&g_llam_affinity_test_enabled, true, memory_order_release);
+}
+
+unsigned llam_runtime_test_affinity_calls(
+    llam_test_affinity_operation_t operation) {
+    if ((unsigned)operation >= LLAM_TEST_AFFINITY_OPERATION_COUNT) {
+        return 0U;
+    }
+    return atomic_load_explicit(&g_llam_affinity_test_calls[operation],
+                                memory_order_acquire);
+}
+
+static bool llam_runtime_test_affinity_result(
+    llam_test_affinity_operation_t operation,
+    int *error_code) {
+    if (!atomic_load_explicit(&g_llam_affinity_test_enabled,
+                              memory_order_acquire)) {
+        return false;
+    }
+    atomic_fetch_add_explicit(&g_llam_affinity_test_calls[operation],
+                              1U,
+                              memory_order_relaxed);
+    *error_code =
+        atomic_load_explicit(&g_llam_affinity_test_errors[operation],
+                             memory_order_acquire);
+    return true;
+}
+#endif
+
 /**
- * @brief Optionally bind the current thread to a CPU.
- *
- * Linux binding is opt-in through @c LLAM_BIND_WORKERS because pinning can hurt
- * short blocking wakeups on some kernels and container schedulers.
- *
- * @param cpu_id CPU id from the runtime's allowed CPU list.
+ * @brief Return whether this platform has exact scheduler CPU affinity.
  */
-void llam_bind_current_thread_to_cpu(unsigned cpu_id) {
+bool llam_runtime_affinity_supported(void) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    if (atomic_load_explicit(&g_llam_affinity_test_enabled,
+                             memory_order_acquire)) {
+        int supported =
+            atomic_load_explicit(&g_llam_affinity_test_supported,
+                                 memory_order_acquire);
+
+        if (supported >= 0) {
+            return supported != 0;
+        }
+    }
+#endif
 #if defined(__linux__)
-    static atomic_int bind_enabled = -1;
-    int enabled = atomic_load_explicit(&bind_enabled, memory_order_acquire);
+    return true;
+#else
+    return false;
+#endif
+}
+
+static void llam_runtime_note_affinity_failure(llam_runtime_t *rt) {
+    uint_fast64_t failures;
+
+    failures =
+        atomic_load_explicit(&rt->affinity_failures, memory_order_acquire);
+    while (failures != UINT_FAST64_MAX &&
+           !atomic_compare_exchange_weak_explicit(&rt->affinity_failures,
+                                                  &failures,
+                                                  failures + 1U,
+                                                  memory_order_relaxed,
+                                                  memory_order_acquire)) {
+    }
+}
+
+static int llam_runtime_handle_affinity_failure(llam_runtime_t *rt,
+                                                int error_code,
+                                                int saved_errno) {
+    llam_runtime_note_affinity_failure(rt);
+    if (rt->resource_plan.affinity_policy == LLAM_RUNTIME_AFFINITY_REQUIRE) {
+        errno = error_code;
+        return -1;
+    }
+    errno = saved_errno;
+    return 0;
+}
+
+static int llam_runtime_capture_driver_affinity_raw(llam_runtime_t *rt) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    int rc;
+
+    if (llam_runtime_test_affinity_result(LLAM_TEST_AFFINITY_CAPTURE, &rc)) {
+        if (rc == 0) {
+            memset(&rt->driver_affinity, 0, sizeof(rt->driver_affinity));
+        }
+        return rc;
+    }
+#endif
+#if defined(__linux__)
+    return pthread_getaffinity_np(pthread_self(),
+                                  sizeof(rt->driver_affinity),
+                                  &rt->driver_affinity);
+#else
+    (void)rt;
+    return ENOTSUP;
+#endif
+}
+
+static int llam_runtime_apply_worker_affinity_raw(unsigned cpu_id) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    int rc;
+
+    if (llam_runtime_test_affinity_result(LLAM_TEST_AFFINITY_APPLY, &rc)) {
+        return rc;
+    }
+#endif
+#if defined(__linux__)
     cpu_set_t set;
 
-    if (enabled < 0) {
-        const char *env = llam_env_get("LLAM_BIND_WORKERS");
-
-        /* Linux CPU pinning can stretch short blocking syscall wakeups; keep it opt-in. */
-        enabled = llam_env_flag_value(env, 0U) != 0U ? 1 : 0;
-        atomic_store_explicit(&bind_enabled, enabled, memory_order_release);
-    }
-    if (enabled == 0) {
-        return;
+    if (cpu_id >= CPU_SETSIZE) {
+        return EINVAL;
     }
     CPU_ZERO(&set);
     CPU_SET(cpu_id, &set);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 #else
     (void)cpu_id;
+    return ENOTSUP;
 #endif
+}
+
+static int llam_runtime_restore_driver_affinity_raw(llam_runtime_t *rt) {
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    int rc;
+
+    if (llam_runtime_test_affinity_result(LLAM_TEST_AFFINITY_RESTORE, &rc)) {
+        return rc;
+    }
+#endif
+#if defined(__linux__)
+    return pthread_setaffinity_np(pthread_self(),
+                                  sizeof(rt->driver_affinity),
+                                  &rt->driver_affinity);
+#else
+    (void)rt;
+    return ENOTSUP;
+#endif
+}
+
+int llam_runtime_capture_driver_affinity(llam_runtime_t *rt) {
+    unsigned policy;
+    int saved_errno = errno;
+    int rc;
+
+    if (rt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    policy = rt->resource_plan.affinity_policy;
+    if (policy == LLAM_RUNTIME_AFFINITY_NONE) {
+        return 0;
+    }
+
+    rt->driver_thread = pthread_self();
+    rt->driver_affinity_capture_attempted = true;
+    rt->driver_affinity_valid = false;
+    if (!llam_runtime_affinity_supported()) {
+        return llam_runtime_handle_affinity_failure(rt, ENOTSUP, saved_errno);
+    }
+    rc = llam_runtime_capture_driver_affinity_raw(rt);
+    if (rc != 0) {
+        return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
+    }
+    rt->driver_affinity_valid = true;
+    errno = saved_errno;
+    return 0;
+}
+
+int llam_runtime_apply_worker_affinity(llam_runtime_t *rt, unsigned cpu_id) {
+    unsigned policy;
+    int saved_errno = errno;
+    int rc;
+
+    if (rt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    policy = rt->resource_plan.affinity_policy;
+    if (policy == LLAM_RUNTIME_AFFINITY_NONE) {
+        return 0;
+    }
+    if (rt->driver_affinity_capture_attempted &&
+        pthread_equal(pthread_self(), rt->driver_thread) &&
+        !rt->driver_affinity_valid) {
+        return 0;
+    }
+    if (!llam_runtime_affinity_supported()) {
+        return llam_runtime_handle_affinity_failure(rt, ENOTSUP, saved_errno);
+    }
+    rc = llam_runtime_apply_worker_affinity_raw(cpu_id);
+    if (rc != 0) {
+        return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
+    }
+    errno = saved_errno;
+    return 0;
+}
+
+int llam_runtime_restore_driver_affinity(llam_runtime_t *rt) {
+    unsigned policy;
+    int saved_errno = errno;
+    int rc;
+
+    if (rt == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    policy = rt->resource_plan.affinity_policy;
+    if (policy == LLAM_RUNTIME_AFFINITY_NONE ||
+        !rt->driver_affinity_valid) {
+        return 0;
+    }
+    if (!pthread_equal(pthread_self(), rt->driver_thread)) {
+        return llam_runtime_handle_affinity_failure(rt, EPERM, saved_errno);
+    }
+    rc = llam_runtime_restore_driver_affinity_raw(rt);
+    if (rc != 0) {
+        return llam_runtime_handle_affinity_failure(rt, rc, saved_errno);
+    }
+    rt->driver_affinity_valid = false;
+    rt->driver_affinity_capture_attempted = false;
+    errno = saved_errno;
+    return 0;
+}
+
+bool llam_runtime_native_thread_enter(llam_runtime_t *rt,
+                                      atomic_uint *counter) {
+    unsigned live;
+
+    if (rt == NULL || counter == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+    live = atomic_load_explicit(counter, memory_order_acquire);
+    while (live != UINT_MAX) {
+        if (atomic_compare_exchange_weak_explicit(counter,
+                                                  &live,
+                                                  live + 1U,
+                                                  memory_order_release,
+                                                  memory_order_acquire)) {
+            return true;
+        }
+    }
+    llam_record_fatal(rt, EOVERFLOW);
+    errno = EOVERFLOW;
+    return false;
+}
+
+void llam_runtime_native_thread_exit(llam_runtime_t *rt,
+                                     atomic_uint *counter) {
+    unsigned live;
+
+    if (rt == NULL || counter == NULL) {
+        return;
+    }
+    live = atomic_load_explicit(counter, memory_order_acquire);
+    while (live != 0U) {
+        if (atomic_compare_exchange_weak_explicit(counter,
+                                                  &live,
+                                                  live - 1U,
+                                                  memory_order_release,
+                                                  memory_order_acquire)) {
+            return;
+        }
+    }
+    llam_record_fatal(rt, EINVAL);
 }
 
 #if defined(__APPLE__)
@@ -217,25 +493,6 @@ void llam_tune_block_worker_thread(void) {
 void llam_tune_ctrl_thread(void) {
 #if defined(__APPLE__)
     llam_darwin_tune_current_thread(QOS_CLASS_UTILITY, -1, -3, THREAD_AFFINITY_TAG_NULL);
-#endif
-}
-
-/**
- * @brief Restore the init thread affinity captured during runtime initialization.
- *
- * @param rt Runtime whose init-thread affinity snapshot should be restored.
- */
-void llam_restore_init_thread_affinity(llam_runtime_t *rt) {
-#if defined(__linux__)
-    if (rt == NULL || !rt->init_thread_affinity_valid) {
-        return;
-    }
-    if (!pthread_equal(pthread_self(), rt->init_thread)) {
-        return;
-    }
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(rt->init_thread_affinity), &rt->init_thread_affinity);
-#else
-    (void)rt;
 #endif
 }
 

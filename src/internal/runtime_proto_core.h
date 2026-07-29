@@ -243,14 +243,35 @@ const char *llam_stack_profile_hint(const llam_task_t *task);
 /*
  * CPU/NUMA discovery and thread/platform tuning.
  */
-void llam_bind_current_thread_to_cpu(unsigned cpu_id);
 unsigned llam_count_allowed_cpus(unsigned **out_cpus);
 unsigned llam_detect_cpu_node(unsigned cpu_id);
 unsigned llam_find_or_add_node_id(unsigned *node_ids,
                                 unsigned *node_count,
                                 unsigned limit,
                                 unsigned kernel_node_id);
-void llam_restore_init_thread_affinity(llam_runtime_t *rt);
+bool llam_runtime_affinity_supported(void);
+int llam_runtime_capture_driver_affinity(llam_runtime_t *rt);
+int llam_runtime_apply_worker_affinity(llam_runtime_t *rt, unsigned cpu_id);
+int llam_runtime_restore_driver_affinity(llam_runtime_t *rt);
+bool llam_runtime_native_thread_enter(llam_runtime_t *rt, atomic_uint *counter);
+void llam_runtime_native_thread_exit(llam_runtime_t *rt, atomic_uint *counter);
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef enum llam_test_affinity_operation {
+    LLAM_TEST_AFFINITY_CAPTURE = 0,
+    LLAM_TEST_AFFINITY_APPLY = 1,
+    LLAM_TEST_AFFINITY_RESTORE = 2,
+    LLAM_TEST_AFFINITY_OPERATION_COUNT = 3,
+} llam_test_affinity_operation_t;
+void llam_runtime_test_reset_affinity_hooks(void);
+void llam_runtime_test_set_affinity_supported(int supported);
+void llam_runtime_test_set_affinity_error(llam_test_affinity_operation_t operation,
+                                          int error_code);
+unsigned llam_runtime_test_affinity_calls(
+    llam_test_affinity_operation_t operation);
+void llam_runtime_test_fail_shard_create_on(unsigned call_index);
+void llam_runtime_test_reset_shard_create_hook(void);
+unsigned llam_runtime_test_shard_create_calls(void);
+#endif
 void llam_tune_block_worker_thread(void);
 void llam_tune_ctrl_thread(void);
 void llam_tune_io_worker_thread(llam_node_t *node);

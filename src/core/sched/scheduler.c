@@ -303,23 +303,32 @@ static void llam_opaque_helper_wait_for_signal_locked(llam_shard_t *shard) {
  */
 void llam_scheduler_loop(llam_shard_t *shard) {
     llam_runtime_t *rt = shard->runtime;
+    atomic_uint *thread_counter =
+        shard->id == 0U ? &rt->host_threads_live : &rt->scheduler_threads_live;
+    bool thread_counted;
+    bool signal_stack_installed = false;
 
     g_llam_tls_shard = shard;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = &shard->scheduler_ctx;
+    thread_counted = llam_runtime_native_thread_enter(rt, thread_counter);
+    if (!thread_counted) {
+        goto out;
+    }
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
     llam_shard_publish_preempt_thread(shard, pthread_self());
 #endif
     shard->primary_thread = pthread_self();
-    llam_bind_current_thread_to_cpu(shard->cpu_id);
+    if (llam_runtime_apply_worker_affinity(rt, shard->cpu_id) != 0) {
+        llam_record_fatal(rt, errno);
+        goto out;
+    }
     llam_tune_scheduler_thread(shard, false);
     if (llam_scheduler_try_install_signal_stack(shard) != 0) {
         llam_record_fatal(rt, errno);
-        g_llam_tls_shard = NULL;
-        g_llam_tls_task = NULL;
-        g_llam_tls_scheduler_ctx = NULL;
-        return;
+        goto out;
     }
+    signal_stack_installed = true;
 
     while (!atomic_load(&rt->stop_requested) || llam_runtime_has_live_tasks(rt)) {
         llam_task_t *task;
@@ -395,7 +404,10 @@ void llam_scheduler_loop(llam_shard_t *shard) {
         }
     }
 
-    llam_uninstall_thread_signal_stack(shard);
+out:
+    if (signal_stack_installed) {
+        llam_uninstall_thread_signal_stack(shard);
+    }
     llam_channel_tls_cache_drain();
     /*
      * The caller returns to unmanaged host code after driving shard 0. Leaving
@@ -406,6 +418,9 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     g_llam_tls_shard = NULL;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = NULL;
+    if (thread_counted) {
+        llam_runtime_native_thread_exit(rt, thread_counter);
+    }
 }
 
 /**
@@ -422,22 +437,29 @@ void llam_scheduler_loop(llam_shard_t *shard) {
 void *llam_opaque_helper_main(void *arg) {
     llam_shard_t *shard = arg;
     llam_runtime_t *rt = shard->runtime;
+    bool thread_counted;
+    bool signal_stack_installed = false;
+    int setup_error = 0;
 
     g_llam_tls_shard = shard;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = &shard->opaque_scheduler_ctx;
-    llam_bind_current_thread_to_cpu(shard->cpu_id);
+    thread_counted =
+        llam_runtime_native_thread_enter(rt, &rt->opaque_helper_threads_live);
+    if (!thread_counted) {
+        setup_error = errno != 0 ? errno : EOVERFLOW;
+        goto setup_failed;
+    }
+    if (llam_runtime_apply_worker_affinity(rt, shard->cpu_id) != 0) {
+        setup_error = errno;
+        goto setup_failed;
+    }
     llam_tune_scheduler_thread(shard, true);
     if (llam_scheduler_try_install_signal_stack(shard) != 0) {
-        pthread_mutex_lock(&shard->opaque_lock);
-        shard->opaque_helper_failed = true;
-        shard->opaque_helper_ready = false;
-        atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
-        llam_opaque_wake_signal(shard);
-        pthread_mutex_unlock(&shard->opaque_lock);
-        llam_record_fatal(rt, errno);
-        return NULL;
+        setup_error = errno;
+        goto setup_failed;
     }
+    signal_stack_installed = true;
 
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_failed = false;
@@ -580,9 +602,10 @@ void *llam_opaque_helper_main(void *arg) {
     }
 
 out:
-    llam_uninstall_thread_signal_stack(shard);
+    if (signal_stack_installed) {
+        llam_uninstall_thread_signal_stack(shard);
+    }
     llam_channel_tls_cache_drain();
-    g_llam_tls_scheduler_ctx = NULL;
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_ready = false;
     shard->opaque_helper_active = false;
@@ -592,6 +615,24 @@ out:
 #endif
     llam_opaque_wake_signal(shard);
     pthread_mutex_unlock(&shard->opaque_lock);
+    goto exit_thread;
+
+setup_failed:
+    pthread_mutex_lock(&shard->opaque_lock);
+    shard->opaque_helper_failed = true;
+    shard->opaque_helper_ready = false;
+    atomic_store_explicit(&shard->opaque_helper_active_hint, 0U, memory_order_release);
+    llam_opaque_wake_signal(shard);
+    pthread_mutex_unlock(&shard->opaque_lock);
+    llam_record_fatal(rt, setup_error != 0 ? setup_error : EIO);
+
+exit_thread:
+    g_llam_tls_shard = NULL;
+    g_llam_tls_task = NULL;
+    g_llam_tls_scheduler_ctx = NULL;
+    if (thread_counted) {
+        llam_runtime_native_thread_exit(rt, &rt->opaque_helper_threads_live);
+    }
     return NULL;
 }
 

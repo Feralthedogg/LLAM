@@ -380,7 +380,6 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
     }
 
     llam_restore_process_signal_handlers(rt);
-    llam_restore_init_thread_affinity(rt);
 
     if (rt->block_lock_initialized) {
         llam_alloc_chunk_t *chunk = rt->block_job_chunks;

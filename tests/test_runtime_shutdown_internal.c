@@ -336,6 +336,398 @@ cleanup:
     llam_runtime_destroy(runtime);
     return rc;
 }
+
+typedef struct affinity_policy_case {
+    const char *name;
+    unsigned policy;
+    int capture_error;
+    int apply_error;
+    int restore_error;
+    int expected_run_rc;
+    int expected_errno;
+    uint64_t expected_failures;
+    unsigned expected_capture_calls;
+    unsigned expected_apply_calls;
+    unsigned expected_restore_calls;
+} affinity_policy_case_t;
+
+static int init_affinity_test_runtime(unsigned policy,
+                                      unsigned worker_count,
+                                      llam_runtime_t **runtime) {
+    llam_runtime_opts_t opts;
+
+    if (runtime == NULL ||
+        llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return -1;
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = worker_count;
+    opts.worker_count = worker_count;
+    opts.worker_max = worker_count;
+    opts.blocking_min = 0U;
+    opts.blocking_max = 1U;
+    opts.affinity_policy = policy;
+    return llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, runtime);
+}
+
+static int run_affinity_policy_case(const affinity_policy_case_t *test_case) {
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    int run_rc;
+    int run_errno;
+    int rc = 1;
+
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_set_affinity_supported(1);
+    llam_runtime_test_set_affinity_error(
+        LLAM_TEST_AFFINITY_CAPTURE, test_case->capture_error);
+    llam_runtime_test_set_affinity_error(
+        LLAM_TEST_AFFINITY_APPLY, test_case->apply_error);
+    llam_runtime_test_set_affinity_error(
+        LLAM_TEST_AFFINITY_RESTORE, test_case->restore_error);
+
+    if (init_affinity_test_runtime(test_case->policy, 1U, &runtime) != 0) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: affinity case '%s' init failed: "
+                "errno=%d (%s)\n",
+                test_case->name,
+                errno,
+                strerror(errno));
+        goto cleanup;
+    }
+    errno = 0;
+    run_rc = llam_runtime_run_handle(runtime);
+    run_errno = errno;
+    if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: affinity case '%s' stats failed\n",
+                test_case->name);
+        goto cleanup;
+    }
+
+    if (run_rc != test_case->expected_run_rc ||
+        (run_rc != 0 && run_errno != test_case->expected_errno) ||
+        stats.affinity_failures != test_case->expected_failures ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) !=
+            test_case->expected_capture_calls ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) !=
+            test_case->expected_apply_calls ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) !=
+            test_case->expected_restore_calls) {
+        fprintf(stderr,
+                "test_runtime_shutdown_internal: affinity case '%s' mismatch: "
+                "run=%d/%d failures=%llu calls=%u/%u/%u\n",
+                test_case->name,
+                run_rc,
+                run_errno,
+                (unsigned long long)stats.affinity_failures,
+                llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE),
+                llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY),
+                llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE));
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+static int exercise_affinity_policy_matrix(void) {
+    static const affinity_policy_case_t cases[] = {
+        {
+            .name = "none skips platform",
+            .policy = LLAM_RUNTIME_AFFINITY_NONE,
+            .capture_error = EIO,
+            .apply_error = EIO,
+            .restore_error = EIO,
+        },
+        {
+            .name = "prefer tolerates capture",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .capture_error = EACCES,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+        },
+        {
+            .name = "require rejects capture",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .capture_error = EACCES,
+            .expected_run_rc = -1,
+            .expected_errno = EACCES,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+        },
+        {
+            .name = "prefer tolerates apply",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .apply_error = EPERM,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "require rejects apply",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .apply_error = EPERM,
+            .expected_run_rc = -1,
+            .expected_errno = EPERM,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "prefer tolerates restore",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .restore_error = EBUSY,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "require rejects restore",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .restore_error = EBUSY,
+            .expected_run_rc = -1,
+            .expected_errno = EBUSY,
+            .expected_failures = 1U,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "prefer success",
+            .policy = LLAM_RUNTIME_AFFINITY_PREFER,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+        {
+            .name = "require success",
+            .policy = LLAM_RUNTIME_AFFINITY_REQUIRE,
+            .expected_capture_calls = 1U,
+            .expected_apply_calls = 1U,
+            .expected_restore_calls = 1U,
+        },
+    };
+
+    for (size_t i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        if (run_affinity_policy_case(&cases[i]) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int exercise_affinity_unsupported_policy(void) {
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_set_affinity_supported(0);
+    errno = 0;
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_REQUIRE, 1U, &runtime) != -1 ||
+        errno != ENOTSUP || runtime != NULL) {
+        rc = fail_msg("required affinity did not fail init when unsupported");
+        goto cleanup;
+    }
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_PREFER, 1U, &runtime) != 0 ||
+        llam_runtime_run_handle(runtime) != 0 ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
+        rc = fail_errno("preferred unsupported affinity did not continue");
+        goto cleanup;
+    }
+    if (stats.affinity_failures != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) != 0U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) != 0U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) != 0U) {
+        rc = fail_msg("unsupported preferred affinity diagnostics were not exact");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+typedef struct affinity_run_exit_state {
+    llam_runtime_t *runtime;
+    bool fatal;
+} affinity_run_exit_state_t;
+
+static void affinity_run_exit_task(void *arg) {
+    affinity_run_exit_state_t *state = arg;
+
+    if (state->fatal) {
+        llam_record_fatal(state->runtime, EIO);
+    } else {
+        (void)llam_runtime_request_stop();
+    }
+}
+
+static int exercise_affinity_restore_on_task_exit(bool fatal) {
+    affinity_run_exit_state_t state;
+    llam_runtime_t *runtime = NULL;
+    llam_task_t *task = NULL;
+    int join_rc;
+    int join_errno;
+    int run_rc;
+    int run_errno;
+    int rc = 1;
+
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_set_affinity_supported(1);
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_PREFER, 1U, &runtime) != 0) {
+        rc = fail_errno("affinity task-exit runtime init failed");
+        goto cleanup;
+    }
+    state.runtime = runtime;
+    state.fatal = fatal;
+    task = llam_runtime_spawn_ex(runtime, affinity_run_exit_task, &state, NULL, 0U);
+    if (task == NULL) {
+        rc = fail_errno("affinity task-exit spawn failed");
+        goto cleanup;
+    }
+    errno = 0;
+    run_rc = llam_runtime_run_handle(runtime);
+    run_errno = errno;
+    errno = 0;
+    join_rc = llam_join(task);
+    join_errno = errno;
+    if ((fatal && (join_rc != -1 || join_errno != EIO)) ||
+        (!fatal && join_rc != 0)) {
+        rc = fail_errno("affinity task-exit join result was unexpected");
+        goto cleanup;
+    }
+    if (!fatal) {
+        task = NULL;
+    }
+    if ((fatal && (run_rc != -1 || run_errno != EIO)) ||
+        (!fatal && run_rc != 0) ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) != 1U) {
+        rc = fail_msg(fatal
+                          ? "fatal worker exit did not restore driver affinity"
+                          : "cooperative stop did not restore driver affinity");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+static int exercise_affinity_restore_on_worker_create_failure(void) {
+    llam_runtime_stats_t stats;
+    llam_runtime_t *runtime = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    int rc = 1;
+
+    free(allowed_cpus);
+    if (allowed_cpu_count < 2U) {
+        return 0;
+    }
+    llam_runtime_test_reset_affinity_hooks();
+    llam_runtime_test_reset_shard_create_hook();
+    llam_runtime_test_set_affinity_supported(1);
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_PREFER, 2U, &runtime) != 0) {
+        rc = fail_errno("affinity worker-create runtime init failed");
+        goto cleanup;
+    }
+    llam_runtime_test_fail_shard_create_on(1U);
+    errno = 0;
+    if (llam_runtime_run_handle(runtime) != -1 || errno != EAGAIN ||
+        llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0 ||
+        stats.affinity_failures != 0U ||
+        llam_runtime_test_shard_create_calls() != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_CAPTURE) != 1U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_APPLY) != 0U ||
+        llam_runtime_test_affinity_calls(LLAM_TEST_AFFINITY_RESTORE) != 1U) {
+        rc = fail_msg("worker-create failure did not restore driver affinity exactly once");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_test_reset_shard_create_hook();
+    llam_runtime_destroy(runtime);
+    llam_runtime_test_reset_affinity_hooks();
+    return rc;
+}
+
+static int exercise_native_thread_counter_saturates(void) {
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_NONE, 1U, &runtime) != 0) {
+        return fail_errno("native-thread overflow runtime init failed");
+    }
+    atomic_store_explicit(&runtime->scheduler_threads_live,
+                          UINT_MAX,
+                          memory_order_release);
+    errno = 0;
+    if (llam_runtime_native_thread_enter(
+            runtime, &runtime->scheduler_threads_live) ||
+        errno != EOVERFLOW ||
+        atomic_load_explicit(&runtime->scheduler_threads_live,
+                             memory_order_acquire) != UINT_MAX ||
+        atomic_load_explicit(&runtime->fatal_errno,
+                             memory_order_acquire) != EOVERFLOW) {
+        rc = fail_msg("native-thread counter overflow did not saturate");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    atomic_store_explicit(&runtime->scheduler_threads_live,
+                          0U,
+                          memory_order_release);
+    llam_runtime_destroy(runtime);
+    return rc;
+}
+
+static int exercise_native_thread_counter_rejects_underflow(void) {
+    llam_runtime_t *runtime = NULL;
+    int rc = 1;
+
+    if (init_affinity_test_runtime(
+            LLAM_RUNTIME_AFFINITY_NONE, 1U, &runtime) != 0) {
+        return fail_errno("native-thread underflow runtime init failed");
+    }
+    llam_runtime_native_thread_exit(runtime,
+                                    &runtime->scheduler_threads_live);
+    if (atomic_load_explicit(&runtime->scheduler_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&runtime->fatal_errno,
+                             memory_order_acquire) != EINVAL) {
+        rc = fail_msg("native-thread counter underflow did not fail closed");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    llam_runtime_destroy(runtime);
+    return rc;
+}
 #endif
 
 static int init_runtime(void) {
@@ -7375,6 +7767,27 @@ int main(void) {
         return 1;
     }
     if (exercise_block_pool_min_partial_failure_unwinds() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_policy_matrix() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_unsupported_policy() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_restore_on_worker_create_failure() != 0) {
+        return 1;
+    }
+    if (exercise_affinity_restore_on_task_exit(false) != 0) {
+        return 1;
+    }
+    if (exercise_affinity_restore_on_task_exit(true) != 0) {
+        return 1;
+    }
+    if (exercise_native_thread_counter_saturates() != 0) {
+        return 1;
+    }
+    if (exercise_native_thread_counter_rejects_underflow() != 0) {
         return 1;
     }
 #endif

@@ -68,7 +68,12 @@ bool llam_linux_wait_cqe_error_is_fatal(int err) {
 void *llam_io_worker_main(void *arg) {
     llam_node_t *node = arg;
     llam_runtime_t *rt = node->runtime;
+    bool thread_counted =
+        llam_runtime_native_thread_enter(rt, &rt->io_threads_live);
 
+    if (!thread_counted) {
+        return NULL;
+    }
     llam_node_lower_worker_priority(node);
     llam_tune_io_worker_thread(node);
 
@@ -129,5 +134,6 @@ void *llam_io_worker_main(void *arg) {
         }
     }
 
+    llam_runtime_native_thread_exit(rt, &rt->io_threads_live);
     return NULL;
 }

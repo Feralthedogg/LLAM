@@ -177,6 +177,8 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     llam_node_t *nodes = rt->nodes;
     unsigned active_shards = rt->active_shards;
     unsigned active_nodes = rt->active_nodes;
+    uint64_t runtime_owned_threads;
+    uint64_t native_execution_threads;
     unsigned i;
 
     memset(stats, 0, sizeof(*stats));
@@ -202,8 +204,35 @@ static void llam_runtime_collect_stats_full(llam_runtime_t *rt, llam_runtime_sta
     stats->configured_blocking_max = rt->resource_plan.blocking_max;
     stats->selected_cpu_count = rt->resource_plan.selected_cpu_count;
     stats->affinity_policy = rt->resource_plan.affinity_policy;
+    stats->scheduler_threads =
+        atomic_load_explicit(&rt->scheduler_threads_live, memory_order_acquire);
     stats->blocking_threads =
         atomic_load_explicit(&rt->block_threads_live, memory_order_acquire);
+    stats->io_threads =
+        atomic_load_explicit(&rt->io_threads_live, memory_order_acquire);
+    stats->controller_threads =
+        atomic_load_explicit(&rt->controller_threads_live, memory_order_acquire);
+    stats->opaque_helper_threads =
+        atomic_load_explicit(&rt->opaque_helper_threads_live, memory_order_acquire);
+    runtime_owned_threads =
+        (uint64_t)stats->scheduler_threads +
+        (uint64_t)stats->blocking_threads +
+        (uint64_t)stats->io_threads +
+        (uint64_t)stats->controller_threads +
+        (uint64_t)stats->opaque_helper_threads;
+    stats->runtime_owned_threads =
+        runtime_owned_threads > UINT32_MAX
+            ? UINT32_MAX
+            : (uint32_t)runtime_owned_threads;
+    native_execution_threads =
+        runtime_owned_threads +
+        atomic_load_explicit(&rt->host_threads_live, memory_order_acquire);
+    stats->native_execution_threads =
+        native_execution_threads > UINT32_MAX
+            ? UINT32_MAX
+            : (uint32_t)native_execution_threads;
+    stats->affinity_failures =
+        atomic_load_explicit(&rt->affinity_failures, memory_order_acquire);
     stats->requested_task_prewarm_total = rt->requested_task_prewarm_total;
     stats->achieved_task_prewarm_total = rt->achieved_task_prewarm_total;
     stats->requested_stack_prewarm_total = rt->requested_stack_prewarm_total;
@@ -375,6 +404,12 @@ void llam_dump_runtime_state(int fd) {
     unsigned block_entered;
     unsigned block_exited;
     unsigned block_live;
+    unsigned scheduler_threads;
+    unsigned io_threads;
+    unsigned controller_threads;
+    unsigned opaque_helper_threads;
+    unsigned host_threads;
+    unsigned runtime_owned_threads;
     unsigned overflow_depth;
     unsigned online_shards;
     unsigned online_floor;
@@ -411,6 +446,18 @@ void llam_dump_runtime_state(int fd) {
         atomic_load_explicit(&rt->block_threads_exited, memory_order_acquire);
     block_live =
         atomic_load_explicit(&rt->block_threads_live, memory_order_acquire);
+    scheduler_threads =
+        atomic_load_explicit(&rt->scheduler_threads_live, memory_order_acquire);
+    io_threads =
+        atomic_load_explicit(&rt->io_threads_live, memory_order_acquire);
+    controller_threads =
+        atomic_load_explicit(&rt->controller_threads_live, memory_order_acquire);
+    opaque_helper_threads =
+        atomic_load_explicit(&rt->opaque_helper_threads_live, memory_order_acquire);
+    host_threads =
+        atomic_load_explicit(&rt->host_threads_live, memory_order_acquire);
+    runtime_owned_threads = scheduler_threads + block_live + io_threads +
+                            controller_threads + opaque_helper_threads;
     overflow_depth = llam_runtime_overflow_depth(rt);
     online_shards = llam_max_unsigned(1U, llam_runtime_online_shards(rt));
     online_floor = llam_runtime_online_shards_floor(rt);
@@ -469,6 +516,24 @@ void llam_dump_runtime_state(int fd) {
             atomic_load_explicit(&rt->active_io_waiters, memory_order_acquire),
             atomic_load_explicit(&rt->fatal_errno, memory_order_acquire),
             (unsigned long long)atomic_load_explicit(&rt->global_epoch, memory_order_acquire));
+
+    dprintf(fd,
+            "threads:\n"
+            "  configured_scheduler=%u scheduler=%u blocking=%u io=%u "
+            "controller=%u opaque_helper=%u runtime_owned=%u host=%u "
+            "native_execution=%u affinity_policy=%u affinity_failures=%llu\n",
+            rt->resource_plan.worker_max,
+            scheduler_threads,
+            block_live,
+            io_threads,
+            controller_threads,
+            opaque_helper_threads,
+            runtime_owned_threads,
+            host_threads,
+            runtime_owned_threads + host_threads,
+            rt->resource_plan.affinity_policy,
+            (unsigned long long)atomic_load_explicit(&rt->affinity_failures,
+                                                     memory_order_acquire));
 
     // The dump format is intentionally text-first for bug reports and benchmark
     // logs; machine consumers should use llam_runtime_collect_stats().

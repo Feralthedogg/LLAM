@@ -102,6 +102,14 @@ typedef struct block_pool_growth_state {
     unsigned live_before_release;
 } block_pool_growth_state_t;
 
+typedef struct native_thread_stats_state {
+    core_state_t core;
+    llam_runtime_t *runtime;
+    llam_runtime_stats_t running_stats;
+    unsigned expected_scheduler_threads;
+    unsigned expected_io_threads;
+} native_thread_stats_state_t;
+
 typedef struct signal_wait_state {
     core_state_t core;
     llam_signal_set_t *set;
@@ -288,6 +296,66 @@ static void block_pool_growth_parent(void *arg) {
             task_fail(&state->core, "lazy blocking worker child join failed", errno);
         }
         state->tasks[i] = NULL;
+    }
+    atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
+}
+
+static void native_thread_stats_task(void *arg) {
+    native_thread_stats_state_t *state = arg;
+    llam_runtime_t *rt = state->runtime;
+    llam_shard_t *shard = g_llam_tls_shard;
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+    unsigned runtime_owned;
+
+    if (shard == NULL || shard->runtime != rt) {
+        task_fail(&state->core, "native thread stats task lost its runtime", EINVAL);
+        return;
+    }
+
+    pthread_mutex_lock(&shard->opaque_lock);
+    if (llam_ensure_opaque_helper_locked(shard) != 0) {
+        int saved_errno = errno;
+
+        pthread_mutex_unlock(&shard->opaque_lock);
+        task_fail(&state->core, "native thread stats opaque helper failed", saved_errno);
+        return;
+    }
+    pthread_mutex_unlock(&shard->opaque_lock);
+
+    while (atomic_load_explicit(&rt->scheduler_threads_live, memory_order_acquire) !=
+               state->expected_scheduler_threads ||
+           atomic_load_explicit(&rt->block_threads_live, memory_order_acquire) != 1U ||
+           atomic_load_explicit(&rt->io_threads_live, memory_order_acquire) !=
+               state->expected_io_threads ||
+           atomic_load_explicit(&rt->controller_threads_live, memory_order_acquire) != 1U ||
+           atomic_load_explicit(&rt->opaque_helper_threads_live, memory_order_acquire) != 1U ||
+           atomic_load_explicit(&rt->host_threads_live, memory_order_acquire) != 1U) {
+        if (llam_now_ns() >= deadline_ns) {
+            task_fail(&state->core, "native thread counters did not converge", ETIMEDOUT);
+            return;
+        }
+        llam_yield();
+    }
+
+    if (llam_runtime_collect_stats_ex(
+            &state->running_stats, sizeof(state->running_stats)) != 0) {
+        task_fail(&state->core, "native thread running stats failed", errno);
+        return;
+    }
+    runtime_owned = state->expected_scheduler_threads + 1U +
+                    state->expected_io_threads + 1U + 1U;
+    if (state->running_stats.scheduler_threads != state->expected_scheduler_threads ||
+        state->running_stats.blocking_threads != 1U ||
+        state->running_stats.io_threads != state->expected_io_threads ||
+        state->running_stats.controller_threads != 1U ||
+        state->running_stats.opaque_helper_threads != 1U ||
+        state->running_stats.runtime_owned_threads != runtime_owned ||
+        state->running_stats.native_execution_threads != runtime_owned + 1U ||
+        state->running_stats.configured_worker_max != rt->resource_plan.worker_max ||
+        state->running_stats.configured_blocking_max != 2U ||
+        state->running_stats.affinity_failures != 0U) {
+        task_fail(&state->core, "native thread running stats were not truthful", EINVAL);
+        return;
     }
     atomic_fetch_add_explicit(&state->core.ran, 1U, memory_order_relaxed);
 }
@@ -694,7 +762,11 @@ static int test_preinit_contracts(void) {
         json[nread] = '\0';
         if (json[0] != '{' ||
             strstr(json, "\"ctx_switches\":0") == NULL ||
-            strstr(json, "\"active_workers\":0") == NULL) {
+            strstr(json, "\"active_workers\":0") == NULL ||
+            strstr(json, "\"scheduler_threads\":0") == NULL ||
+            strstr(json, "\"runtime_owned_threads\":0") == NULL ||
+            strstr(json, "\"native_execution_threads\":0") == NULL ||
+            strstr(json, "\"affinity_failures\":0") == NULL) {
             return test_fail("pre-init stats json was not an empty snapshot");
         }
     }
@@ -1509,6 +1581,109 @@ cleanup:
     return rc;
 }
 
+static int test_native_thread_diagnostics_are_live_counts(void) {
+    native_thread_stats_state_t state;
+    llam_runtime_opts_t opts;
+    llam_runtime_stats_t stats;
+    llam_task_t *task = NULL;
+    unsigned *allowed_cpus = NULL;
+    unsigned allowed_cpu_count;
+    unsigned worker_count;
+    unsigned runtime_owned_after_run;
+    int rc = 1;
+
+    allowed_cpu_count = llam_count_allowed_cpus(&allowed_cpus);
+    free(allowed_cpus);
+    if (allowed_cpu_count == 0U) {
+        return test_fail_errno("native thread diagnostics CPU discovery failed");
+    }
+    worker_count = allowed_cpu_count >= 2U ? 2U : 1U;
+
+    memset(&state, 0, sizeof(state));
+    atomic_init(&state.core.failures, 0U);
+    atomic_init(&state.core.ran, 0U);
+    atomic_init(&state.core.blocking_calls, 0U);
+    state.runtime = &g_llam_runtime;
+    state.expected_scheduler_threads = worker_count - 1U;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("native thread diagnostics opts init failed");
+    }
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.worker_min = worker_count;
+    opts.worker_count = worker_count;
+    opts.worker_max = worker_count;
+    opts.blocking_min = 1U;
+    opts.blocking_max = 2U;
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("native thread diagnostics runtime init failed");
+    }
+    for (unsigned i = 0U; i < g_llam_runtime.active_nodes; ++i) {
+        if (g_llam_runtime.nodes[i].thread_started) {
+            state.expected_io_threads += 1U;
+        }
+    }
+
+    task = llam_spawn(native_thread_stats_task, &state, NULL);
+    if (task == NULL) {
+        rc = test_fail_errno("native thread diagnostics task spawn failed");
+        goto cleanup;
+    }
+    if (llam_run() != 0 || llam_join(task) != 0) {
+        task = NULL;
+        rc = test_fail_errno("native thread diagnostics run/join failed");
+        goto cleanup;
+    }
+    task = NULL;
+    if (atomic_load_explicit(&state.core.failures, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&state.core.ran, memory_order_acquire) != 1U) {
+        rc = test_fail("native thread diagnostics managed checks failed");
+        goto cleanup;
+    }
+
+    memset(&stats, 0, sizeof(stats));
+    if (llam_runtime_collect_stats_ex(&stats, sizeof(stats)) != 0) {
+        rc = test_fail_errno("native thread post-run stats failed");
+        goto cleanup;
+    }
+    runtime_owned_after_run =
+        1U + state.expected_io_threads + 1U + 1U;
+    if (stats.scheduler_threads != 0U ||
+        stats.blocking_threads != 1U ||
+        stats.io_threads != state.expected_io_threads ||
+        stats.controller_threads != 1U ||
+        stats.opaque_helper_threads != 1U ||
+        stats.runtime_owned_threads != runtime_owned_after_run ||
+        stats.native_execution_threads != runtime_owned_after_run ||
+        atomic_load_explicit(&g_llam_runtime.host_threads_live,
+                             memory_order_acquire) != 0U) {
+        rc = test_fail("native thread post-run stats retained a host scheduler");
+        goto cleanup;
+    }
+    rc = 0;
+
+cleanup:
+    if (task != NULL) {
+        (void)llam_detach(task);
+    }
+    llam_runtime_shutdown();
+    if (atomic_load_explicit(&g_llam_runtime.scheduler_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.block_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.io_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.controller_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.opaque_helper_threads_live,
+                             memory_order_acquire) != 0U ||
+        atomic_load_explicit(&g_llam_runtime.host_threads_live,
+                             memory_order_acquire) != 0U) {
+        return test_fail("native thread counters survived runtime shutdown");
+    }
+    return rc;
+}
+
 static void nested_runtime_create_task(void *arg) {
     nested_runtime_create_state_t *state = arg;
     llam_task_t *self_before = llam_current_task();
@@ -1837,6 +2012,16 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
         if (json[0] != '{' ||
             strstr(json, "\"ctx_switches\":") == NULL ||
             strstr(json, "\"active_workers\":") == NULL ||
+            strstr(json, "\"configured_worker_max\":") == NULL ||
+            strstr(json, "\"configured_blocking_max\":") == NULL ||
+            strstr(json, "\"scheduler_threads\":") == NULL ||
+            strstr(json, "\"blocking_threads\":") == NULL ||
+            strstr(json, "\"io_threads\":") == NULL ||
+            strstr(json, "\"controller_threads\":") == NULL ||
+            strstr(json, "\"opaque_helper_threads\":") == NULL ||
+            strstr(json, "\"runtime_owned_threads\":") == NULL ||
+            strstr(json, "\"native_execution_threads\":") == NULL ||
+            strstr(json, "\"affinity_failures\":") == NULL ||
             strstr(json, "\"io_submit_syscalls\":") == NULL ||
             strstr(json, "\"yield_direct_attempts\":") == NULL ||
             strstr(json, "\"yield_direct_fail_push\":") == NULL ||
@@ -6352,6 +6537,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_runtime_total_prewarm_distribution);
     RUN_RUNTIME_CORE_TEST(test_runtime_resource_plan_initialization);
     RUN_RUNTIME_CORE_TEST(test_blocking_pool_grows_lazily_within_bounds);
+    RUN_RUNTIME_CORE_TEST(test_native_thread_diagnostics_are_live_counts);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
 #if LLAM_PLATFORM_POSIX
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);
