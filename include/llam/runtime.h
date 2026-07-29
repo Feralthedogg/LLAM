@@ -208,6 +208,13 @@ typedef enum llam_preempt_mode {
     LLAM_PREEMPT_STRICT = 3,      /**< Diagnostic mode: preempt over-budget tasks even without pressure. */
 } llam_preempt_mode_t;
 
+/** @brief Native scheduler-thread CPU placement policy. */
+typedef enum llam_runtime_affinity_policy {
+    LLAM_RUNTIME_AFFINITY_NONE = 0,    /**< Do not modify native thread affinity. */
+    LLAM_RUNTIME_AFFINITY_PREFER = 1,  /**< Attempt placement and continue if it fails. */
+    LLAM_RUNTIME_AFFINITY_REQUIRE = 2, /**< Require placement support and successful binding. */
+} llam_runtime_affinity_policy_t;
+
 /** @brief Bit flags accepted by llam_spawn_opts_t::flags. */
 enum {
     LLAM_SPAWN_F_PINNED = 1U << 0,           /**< Prefer keeping the task on its home worker. */
@@ -255,7 +262,24 @@ typedef struct llam_runtime_opts {
     uint32_t preempt_mode;                          /**< Cooperative preemption policy; one of ::llam_preempt_mode_t. */
     uint32_t preempt_poll_period;                   /**< Safepoint flag-poll period; 0 selects a profile default. */
     uint64_t preempt_quantum_ns;                    /**< Global preempt slice override; 0 uses task-class budgets. */
+    uint32_t worker_min;                            /**< Minimum online scheduler workers; 0 selects the legacy default. */
+    uint32_t worker_count;                          /**< Initial online scheduler workers; 0 selects the legacy default. */
+    uint32_t worker_max;                            /**< Maximum scheduler-worker capacity; 0 selects the legacy default. */
+    uint32_t blocking_min;                          /**< Blocking workers created during initialization. */
+    uint32_t blocking_max;                          /**< Maximum blocking workers; 0 selects the legacy default. */
+    uint32_t affinity_policy;                       /**< CPU placement policy; one of ::llam_runtime_affinity_policy_t. */
+    uint32_t cpu_count;                             /**< Number of ordered CPU IDs in @c cpu_ids; 0 discovers allowed CPUs. */
+    uint32_t reserved1;                             /**< Reserved ABI padding; initialize to 0. */
+    const uint32_t *cpu_ids;                        /**< Optional ordered CPU IDs, copied during initialization. */
+    uint64_t task_prewarm_total;                    /**< Exact runtime-total task-object prewarm target; 0 uses legacy policy. */
+    uint64_t stack_prewarm_total;                   /**< Exact runtime-total stack prewarm target; 0 uses legacy policy. */
+    uint64_t timer_prewarm_total;                   /**< Exact runtime-total timer-slot prewarm target; 0 uses legacy policy. */
 } llam_runtime_opts_t;
+
+/** @brief Frozen option prefix consumed by the source-compatible 2.2 wrapper. */
+#define LLAM_RUNTIME_OPTS_V2_2_SIZE \
+    ((size_t)(offsetof(llam_runtime_opts_t, preempt_quantum_ns) + \
+              sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns)))
 
 /** @brief Current size to pass to ::llam_runtime_init_ex and ::llam_runtime_opts_init. */
 #define LLAM_RUNTIME_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_runtime_opts_t))
@@ -322,6 +346,31 @@ typedef struct llam_runtime_stats {
     uint64_t wake_handoff_fail_context; /**< Wake handoffs rejected by caller/task context. */
     uint64_t wake_handoff_fail_policy;  /**< Wake handoffs rejected by runtime policy guards. */
     uint64_t wake_handoff_fail_race;    /**< Wake handoffs that lost a queue/state race and fell back. */
+    uint32_t configured_worker_min;      /**< Resolved minimum online scheduler workers. */
+    uint32_t configured_worker_count;    /**< Resolved initial online scheduler workers. */
+    uint32_t configured_worker_max;      /**< Resolved maximum scheduler-worker capacity. */
+    uint32_t configured_blocking_min;    /**< Resolved initial blocking-worker count. */
+    uint32_t configured_blocking_max;    /**< Resolved maximum blocking-worker count. */
+    uint32_t selected_cpu_count;         /**< Number of process-allowed CPUs selected for this runtime. */
+    uint32_t affinity_policy;            /**< Active ::llam_runtime_affinity_policy_t policy. */
+    uint32_t resource_reserved0;         /**< Reserved ABI padding; currently 0. */
+    uint32_t scheduler_threads;          /**< Live runtime-owned scheduler threads, excluding the host loop. */
+    uint32_t blocking_threads;           /**< Live runtime-owned blocking worker threads. */
+    uint32_t io_threads;                 /**< Live runtime-owned I/O threads. */
+    uint32_t controller_threads;         /**< Live runtime-owned controller threads. */
+    uint32_t opaque_helper_threads;      /**< Live helpers covering opaque blocking regions. */
+    uint32_t runtime_owned_threads;      /**< Total live native threads owned by the runtime. */
+    uint32_t native_execution_threads;   /**< Live native execution threads including an active host loop. */
+    uint32_t resource_reserved1;         /**< Reserved ABI padding; currently 0. */
+    uint64_t affinity_failures;          /**< Preferred or required affinity apply/restore failures. */
+    uint64_t requested_task_prewarm_total;  /**< Resolved runtime-total task-object prewarm target. */
+    uint64_t achieved_task_prewarm_total;   /**< Task objects successfully prewarmed. */
+    uint64_t requested_stack_prewarm_total; /**< Resolved runtime-total stack prewarm target. */
+    uint64_t achieved_stack_prewarm_total;  /**< Stacks successfully prewarmed. */
+    uint64_t requested_timer_prewarm_total; /**< Resolved runtime-total timer-slot prewarm target. */
+    uint64_t achieved_timer_prewarm_total;  /**< Timer slots successfully prewarmed. */
+    uint64_t estimated_metadata_bytes;      /**< Checked metadata-byte estimate for the resource plan. */
+    uint64_t estimated_stack_mapping_bytes; /**< Checked virtual mapping estimate for prewarmed stacks. */
 } llam_runtime_stats_t;
 
 /** @brief Current size to pass to ::llam_runtime_collect_stats_ex. */
@@ -384,8 +433,10 @@ LLAM_API int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_s
 /**
  * @brief Initialize the process-default runtime.
  * @param opts Optional runtime options; pass NULL for defaults.
- * @details Convenience wrapper around ::llam_runtime_init_ex. New embedding
- * code should prefer ::llam_runtime_create and drive the returned handle.
+ * @details Convenience wrapper around ::llam_runtime_init_ex that consumes
+ * only ::LLAM_RUNTIME_OPTS_V2_2_SIZE bytes. Resource-governance fields appended
+ * after the 2.2 prefix are intentionally ignored. New embedding code should
+ * prefer ::llam_runtime_create and drive the returned handle.
  * @return 0 on success, -1 on failure with errno set.
  */
 LLAM_API int llam_runtime_init(const llam_runtime_opts_t *opts);

@@ -37,7 +37,7 @@
 - Produces: appended `worker_min`, `worker_count`, `worker_max`, `blocking_min`, `blocking_max`, `affinity_policy`, `cpu_count`, `cpu_ids`, `task_prewarm_total`, `stack_prewarm_total`, and `timer_prewarm_total`
 - Produces: appended resource-plan/thread/prewarm counters in `llam_runtime_stats_t`
 
-- [ ] **Step 1: Write ABI tests that name the compatibility breaks**
+- [x] **Step 1: Write ABI tests that name the compatibility breaks**
 
 Add literal offset/width assertions and behavior tests proving:
 
@@ -57,7 +57,7 @@ new worker request to `llam_runtime_init()` and prove the convenience wrapper
 ignores the tail, then pass the same struct and current size to
 `llam_runtime_init_ex()` and prove it fails with `EINVAL`.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run:
 
@@ -71,7 +71,7 @@ Expected: compile failures for the missing enum/fields/macro, followed by the
 new runtime behavior assertion failing once declarations exist without legacy
 prefix handling.
 
-- [ ] **Step 3: Append the public declarations and initialize current defaults**
+- [x] **Step 3: Append the public declarations and initialize current defaults**
 
 Use:
 
@@ -93,12 +93,12 @@ defaults) and affinity to `NONE`. Change `llam_runtime_init()` to pass
 `LLAM_RUNTIME_OPTS_V2_2_SIZE`, while `llam_runtime_init_ex()` and
 `llam_runtime_create()` continue honoring their explicit size.
 
-- [ ] **Step 4: Run the focused tests and verify GREEN**
+- [x] **Step 4: Run the focused tests and verify GREEN**
 
 Run the Task 1 command. Expected: both tests pass and older prefix fixtures
 retain their tail bytes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add include/llam/runtime.h src/core/base/abi.c src/core/lifecycle/init.c \

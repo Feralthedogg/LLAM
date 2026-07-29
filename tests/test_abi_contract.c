@@ -52,12 +52,32 @@ ASSERT_FIELD_U32(llam_runtime_opts_t, profile);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved0);
 ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_mode);
 ASSERT_FIELD_U32(llam_runtime_opts_t, preempt_poll_period);
+ASSERT_FIELD_U32(llam_runtime_opts_t, worker_min);
+ASSERT_FIELD_U32(llam_runtime_opts_t, worker_count);
+ASSERT_FIELD_U32(llam_runtime_opts_t, worker_max);
+ASSERT_FIELD_U32(llam_runtime_opts_t, blocking_min);
+ASSERT_FIELD_U32(llam_runtime_opts_t, blocking_max);
+ASSERT_FIELD_U32(llam_runtime_opts_t, affinity_policy);
+ASSERT_FIELD_U32(llam_runtime_opts_t, cpu_count);
+ASSERT_FIELD_U32(llam_runtime_opts_t, reserved1);
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->experimental_flags) == sizeof(uint64_t),
                "llam_runtime_opts_t.experimental_flags must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns) == sizeof(uint64_t),
                "llam_runtime_opts_t.preempt_quantum_ns must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->task_prewarm_total) == sizeof(uint64_t),
+               "llam_runtime_opts_t.task_prewarm_total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->stack_prewarm_total) == sizeof(uint64_t),
+               "llam_runtime_opts_t.stack_prewarm_total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->timer_prewarm_total) == sizeof(uint64_t),
+               "llam_runtime_opts_t.timer_prewarm_total must be fixed-width");
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->sqpoll_cpu) == sizeof(int32_t),
                "llam_runtime_opts_t.sqpoll_cpu must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_opts_t *)0)->cpu_ids) == sizeof(const uint32_t *),
+               "llam_runtime_opts_t.cpu_ids must be pointer-sized");
+_Static_assert(LLAM_RUNTIME_OPTS_V2_2_SIZE ==
+                   offsetof(llam_runtime_opts_t, preempt_quantum_ns) +
+                       sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns),
+               "the legacy runtime option prefix must remain frozen");
 ASSERT_FIELD_U32(llam_runtime_stats_t, active_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers_floor);
@@ -72,6 +92,28 @@ ASSERT_FIELD_U32(llam_runtime_stats_t, huge_alloc);
 ASSERT_FIELD_U32(llam_runtime_stats_t, sqpoll);
 ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_mode);
 ASSERT_FIELD_U32(llam_runtime_stats_t, preempt_poll_period);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_worker_min);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_worker_count);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_worker_max);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_blocking_min);
+ASSERT_FIELD_U32(llam_runtime_stats_t, configured_blocking_max);
+ASSERT_FIELD_U32(llam_runtime_stats_t, selected_cpu_count);
+ASSERT_FIELD_U32(llam_runtime_stats_t, affinity_policy);
+ASSERT_FIELD_U32(llam_runtime_stats_t, scheduler_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, blocking_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, io_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, controller_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, opaque_helper_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, runtime_owned_threads);
+ASSERT_FIELD_U32(llam_runtime_stats_t, native_execution_threads);
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->affinity_failures) == sizeof(uint64_t),
+               "llam_runtime_stats_t.affinity_failures must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->requested_task_prewarm_total) == sizeof(uint64_t),
+               "requested task prewarm total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->achieved_stack_prewarm_total) == sizeof(uint64_t),
+               "achieved stack prewarm total must be fixed-width");
+_Static_assert(sizeof(((llam_runtime_stats_t *)0)->estimated_metadata_bytes) == sizeof(uint64_t),
+               "resource metadata estimate must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_class((const llam_task_t *)0), uint32_t,
                  "llam_task_class result must be fixed-width");
 ASSERT_EXPR_TYPE(llam_task_flags((const llam_task_t *)0), uint32_t,
@@ -228,7 +270,19 @@ static int test_llam_option_initializers(void) {
     if (runtime_opts.deterministic != 0U ||
         runtime_opts.sqpoll_cpu != -1 ||
         runtime_opts.profile != LLAM_RUNTIME_PROFILE_BALANCED ||
-        runtime_opts.experimental_flags != 0U) {
+        runtime_opts.experimental_flags != 0U ||
+        runtime_opts.worker_min != 0U ||
+        runtime_opts.worker_count != 0U ||
+        runtime_opts.worker_max != 0U ||
+        runtime_opts.blocking_min != 0U ||
+        runtime_opts.blocking_max != 0U ||
+        runtime_opts.affinity_policy != LLAM_RUNTIME_AFFINITY_NONE ||
+        runtime_opts.cpu_count != 0U ||
+        runtime_opts.reserved1 != 0U ||
+        runtime_opts.cpu_ids != NULL ||
+        runtime_opts.task_prewarm_total != 0U ||
+        runtime_opts.stack_prewarm_total != 0U ||
+        runtime_opts.timer_prewarm_total != 0U) {
         return test_fail("llam runtime option defaults are inconsistent");
     }
 

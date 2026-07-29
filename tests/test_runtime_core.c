@@ -703,6 +703,36 @@ static int test_runtime_registered_init_failure_rolls_back(void) {
     return 0;
 }
 
+static int test_legacy_runtime_init_ignores_resource_tail(void) {
+    llam_runtime_opts_t opts;
+
+    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {
+        return test_fail_errno("resource-tail opts init failed");
+    }
+    opts.deterministic = 1U;
+    opts.profile = LLAM_RUNTIME_PROFILE_RELEASE_FAST;
+    opts.affinity_policy = UINT32_MAX;
+
+    /*
+     * The source-compatible convenience wrapper is frozen at the 2.2 prefix:
+     * old source that recompiles with a newer header must not silently opt into
+     * newly appended resource policy.  The size-aware entry point is the only
+     * path that may observe and reject this invalid tail.
+     */
+    if (llam_runtime_init(&opts) != 0) {
+        return test_fail_errno("legacy runtime init consumed the resource tail");
+    }
+    llam_runtime_shutdown();
+
+    errno = 0;
+    if (llam_runtime_init_ex(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != -1 ||
+        errno != EINVAL) {
+        llam_runtime_shutdown();
+        return test_fail("size-aware runtime init did not reject invalid affinity policy");
+    }
+    return 0;
+}
+
 static void nested_runtime_create_task(void *arg) {
     nested_runtime_create_state_t *state = arg;
     llam_task_t *self_before = llam_current_task();
@@ -5404,6 +5434,7 @@ static int test_wait_resolver_block_job_recycle_drain(void) {
 int main(void) {
     RUN_RUNTIME_CORE_TEST(test_preinit_contracts);
     RUN_RUNTIME_CORE_TEST(test_runtime_registered_init_failure_rolls_back);
+    RUN_RUNTIME_CORE_TEST(test_legacy_runtime_init_ignores_resource_tail);
     RUN_RUNTIME_CORE_TEST(test_runtime_create_preserves_managed_tls);
 #if LLAM_PLATFORM_POSIX
     RUN_RUNTIME_CORE_TEST(test_direct_yield_auto_policy_is_profile_scoped);

@@ -332,6 +332,13 @@ static bool llam_public_preempt_mode_valid(uint32_t mode) {
            mode == LLAM_PREEMPT_STRICT;
 }
 
+/** @brief Validate a public scheduler-thread CPU affinity policy. */
+static bool llam_public_affinity_policy_valid(uint32_t policy) {
+    return policy == LLAM_RUNTIME_AFFINITY_NONE ||
+           policy == LLAM_RUNTIME_AFFINITY_PREFER ||
+           policy == LLAM_RUNTIME_AFFINITY_REQUIRE;
+}
+
 /**
  * @brief Find a CPU id inside a discovered CPU list.
  *
@@ -507,6 +514,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         opts_storage.sqpoll_cpu = -1;
         opts_storage.profile = LLAM_RUNTIME_PROFILE_BALANCED;
         opts_storage.preempt_mode = LLAM_PREEMPT_AUTO;
+        opts_storage.affinity_policy = LLAM_RUNTIME_AFFINITY_NONE;
         if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, deterministic)) {
             opts_storage.deterministic = raw_opts.deterministic;
         }
@@ -540,12 +548,52 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, preempt_quantum_ns)) {
             opts_storage.preempt_quantum_ns = raw_opts.preempt_quantum_ns;
         }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, worker_min)) {
+            opts_storage.worker_min = raw_opts.worker_min;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, worker_count)) {
+            opts_storage.worker_count = raw_opts.worker_count;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, worker_max)) {
+            opts_storage.worker_max = raw_opts.worker_max;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, blocking_min)) {
+            opts_storage.blocking_min = raw_opts.blocking_min;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, blocking_max)) {
+            opts_storage.blocking_max = raw_opts.blocking_max;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, affinity_policy)) {
+            opts_storage.affinity_policy = raw_opts.affinity_policy;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, cpu_count)) {
+            opts_storage.cpu_count = raw_opts.cpu_count;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, reserved1)) {
+            opts_storage.reserved1 = raw_opts.reserved1;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, cpu_ids)) {
+            opts_storage.cpu_ids = raw_opts.cpu_ids;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, task_prewarm_total)) {
+            opts_storage.task_prewarm_total = raw_opts.task_prewarm_total;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, stack_prewarm_total)) {
+            opts_storage.stack_prewarm_total = raw_opts.stack_prewarm_total;
+        }
+        if (LLAM_RUNTIME_OPTS_PREFIX_HAS_FIELD(opts_size, timer_prewarm_total)) {
+            opts_storage.timer_prewarm_total = raw_opts.timer_prewarm_total;
+        }
         opts = &opts_storage;
         if (!llam_public_runtime_profile_valid(opts->profile)) {
             errno = EINVAL;
             return -1;
         }
         if (!llam_public_preempt_mode_valid(opts->preempt_mode)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (!llam_public_affinity_policy_valid(opts->affinity_policy)) {
             errno = EINVAL;
             return -1;
         }
@@ -1290,5 +1338,5 @@ int llam_runtime_init_ex(const llam_runtime_opts_t *opts, size_t opts_size) {
 }
 
 int llam_runtime_init(const llam_runtime_opts_t *opts) {
-    return llam_runtime_init_ex(opts, opts != NULL ? sizeof(*opts) : 0U);
+    return llam_runtime_init_ex(opts, opts != NULL ? LLAM_RUNTIME_OPTS_V2_2_SIZE : 0U);
 }
