@@ -43,13 +43,16 @@ static void switch_hook_serial_main_task(void *arg) {
     llam_wake_all_shards(state->runtime);
     errno = EDOM;
     llam_yield();
-    if (errno != EDOM ||
-        atomic_load_explicit(&state->suspend_hold_started,
+    /*
+     * A compiler may retain the source worker's C TLS address across this
+     * stackful migration. Switch hooks resolve TLS at each boundary, so avoid
+     * reading or assigning raw errno again in this migrated C frame.
+     */
+    if (atomic_load_explicit(&state->suspend_hold_started,
                              memory_order_acquire) != 1U) {
         switch_hook_case_fail(state);
     }
     switch_hook_case_body(context);
-    errno = ERANGE;
 }
 
 static void switch_hook_serial_peer_task(void *arg) {
