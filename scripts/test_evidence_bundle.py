@@ -2035,7 +2035,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
             (9, b"\xaa" * 16),
         )
 
-    def test_windows_handle_bound_rename_uses_no_replace_and_parent_handle(
+    def test_windows_handle_bound_rename_uses_no_replace_and_absolute_target(
         self,
     ) -> None:
         calls: list[tuple[object, ...]] = []
@@ -2048,7 +2048,8 @@ class AtomicPrimitiveTests(unittest.TestCase):
 
         api = object.__new__(evidence_bundle._WindowsAPI)
         api._kernel32 = Kernel32()  # type: ignore[attr-defined]
-        api.rename_handle_noreplace(0x1234, 0x5678, "x")
+        destination = Path("/trusted/parent/x")
+        api.rename_handle_noreplace(0x1234, 0x5678, destination)
 
         self.assertEqual(len(calls), 1)
         handle, information_class, buffer, size = calls[0]
@@ -2066,9 +2067,9 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 )],
                 "little",
             ),
-            0x5678,
+            0,
         )
-        encoded_name = "x".encode("utf-16-le")
+        encoded_name = str(destination).encode("utf-16-le")
         self.assertEqual(
             int.from_bytes(payload[16:20], "little"),
             len(encoded_name),
@@ -2090,7 +2091,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
             b"\0" * (size - name_offset - len(encoded_name)),
         )
 
-    def test_windows_handle_rename_uses_only_handle_bound_legacy_fallback(
+    def test_windows_handle_rename_uses_absolute_legacy_fallback(
         self,
     ) -> None:
         calls: list[tuple[int, bytes, int]] = []
@@ -2117,7 +2118,8 @@ class AtomicPrimitiveTests(unittest.TestCase):
         api._last_error = mock.Mock(  # type: ignore[method-assign]
             return_value=evidence_bundle._WIN_ERROR_INVALID_PARAMETER
         )
-        api.rename_handle_noreplace(0x1234, 0x5678, "x")
+        destination = Path("/trusted/parent/x")
+        api.rename_handle_noreplace(0x1234, 0x5678, destination)
         self.assertEqual(
             [information_class for information_class, _, _ in calls],
             [
@@ -2125,7 +2127,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 evidence_bundle._WIN_FILE_RENAME_INFO,
             ],
         )
-        encoded_name = "x".encode("utf-16-le")
+        encoded_name = str(destination).encode("utf-16-le")
         for (
             information_class,
             payload,
@@ -2145,7 +2147,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                     + len(encoded_name),
                 )
                 header = header_type.from_buffer_copy(payload)
-                self.assertEqual(header.root_directory, 0x5678)
+                self.assertIsNone(header.root_directory)
                 self.assertEqual(
                     header.file_name_length,
                     len(encoded_name),
@@ -2197,7 +2199,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                     def __init__(self) -> None:
                         self.closed: list[object] = []
                         self.rename_calls: list[
-                            tuple[object, object, str]
+                            tuple[object, object, Path]
                         ] = []
 
                     def create_file(
@@ -2255,10 +2257,10 @@ class AtomicPrimitiveTests(unittest.TestCase):
                         self,
                         stage_handle: object,
                         parent_handle: object,
-                        final_name: str,
+                        final_path: Path,
                     ) -> None:
                         self.rename_calls.append(
-                            (stage_handle, parent_handle, final_name)
+                            (stage_handle, parent_handle, final_path)
                         )
 
                     def close(self, handle: object) -> None:
@@ -2360,7 +2362,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 self,
                 stage_handle: object,
                 parent_handle: object,
-                final_name: str,
+                final_path: Path,
             ) -> None:
                 self.renamed_with_publication_handle = (
                     stage_handle == "publication"
@@ -2475,7 +2477,7 @@ class AtomicPrimitiveTests(unittest.TestCase):
                 self,
                 stage_handle: object,
                 parent_handle: object,
-                final_name: str,
+                final_path: Path,
             ) -> None:
                 self.source_identity = None
                 self.final_identity = WIN_STAGE_ID

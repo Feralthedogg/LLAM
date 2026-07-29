@@ -2078,10 +2078,9 @@ class _WindowsAPI:
     def _rename_information_buffer(
         header_type: type[ctypes.Structure],
         *,
-        parent_handle: object,
-        final_name: str,
+        final_path: Path,
     ) -> ctypes.Array[ctypes.c_char]:
-        encoded_name = final_name.encode("utf-16-le")
+        encoded_name = os.fspath(final_path).encode("utf-16-le")
         name_offset = header_type.file_name.offset
         buffer = ctypes.create_string_buffer(
             ctypes.sizeof(header_type) + len(encoded_name)
@@ -2091,7 +2090,7 @@ class _WindowsAPI:
             header.flags = 0
         else:
             header.replace_if_exists = 0
-        header.root_directory = parent_handle
+        header.root_directory = None
         header.file_name_length = len(encoded_name)
         ctypes.memmove(
             ctypes.addressof(buffer) + name_offset,
@@ -2104,9 +2103,18 @@ class _WindowsAPI:
         self,
         stage_handle: object,
         parent_handle: object,
-        final_name: str,
+        final_path: Path,
     ) -> None:
-        _validate_bundle_leaf(final_name)
+        absolute_final = _safe_absolute(final_path)
+        _validate_bundle_leaf(absolute_final.name)
+        if parent_handle in {None, 0}:
+            raise EvidenceError(
+                "Windows publication parent handle is unavailable"
+            )
+        # SetFileInformationByHandle's user-mode implementation rejects a
+        # non-NULL RootDirectory on supported native runners.  The source
+        # remains handle-bound, while the separately retained ancestor chain
+        # denies delete sharing and pins resolution of this absolute target.
         attempts = (
             (_WIN_FILE_RENAME_INFO_EX, _WinFileRenameInfoEx),
             (_WIN_FILE_RENAME_INFO, _WinFileRenameInfo),
@@ -2116,8 +2124,7 @@ class _WindowsAPI:
         ):
             buffer = self._rename_information_buffer(
                 header_type,
-                parent_handle=parent_handle,
-                final_name=final_name,
+                final_path=absolute_final,
             )
             if self._kernel32.SetFileInformationByHandle(
                 stage_handle,
@@ -2139,7 +2146,7 @@ class _WindowsAPI:
                 continue
             self._raise_windows_error(
                 error_number,
-                Path(final_name),
+                absolute_final,
             )
         raise UnsupportedPlatformError(
             "Windows handle-bound no-replace rename is unavailable"
@@ -3345,7 +3352,7 @@ class _WindowsEvidenceBundle:
             self._api.rename_handle_noreplace(
                 publication_handle,
                 self._parent_handles[-1],
-                self._final_path.name,
+                self._final_path,
             )
         except BaseException as exc:
             rename_error = exc
