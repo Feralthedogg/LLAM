@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Feralthedogg
 
+/**
+ * @file experiments/leir/leir_engine.c
+ * @brief Portable reference engine for the LEIR phase-0 semantic contract.
+ *
+ * @details
+ * An instance moves @c IDLE -> @c BINDING -> @c IDLE for an atomic bind and
+ * @c IDLE -> @c RUNNING -> @c IDLE for one activation; concurrent bind or run
+ * is rejected. Slot records and options are copied at bind time, but pointer
+ * payloads remain caller-owned for the activation. Activation/request
+ * generations reject stale completions, while the terminal and cancel claims
+ * ensure that racing completion, timeout, and cancellation publish one result.
+ */
+
 #include "leir_phase0_internal.h"
 
 #include "io/runtime_io_api_internal.h"

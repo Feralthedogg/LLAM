@@ -8,6 +8,11 @@
  * into request results, manages copied owned-buffer payloads, and wakes parked
  * tasks through the common reinjection path.
  *
+ * Readiness is therefore not itself semantic completion. Event-batch pins keep
+ * every referenced owner alive while the syscall and handler run; the common
+ * completion claim then clears in-flight ownership and any stale queued cancel
+ * before reinjection permits the task to release its request.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

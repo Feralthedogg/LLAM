@@ -8,6 +8,12 @@
  * wake events, and dispatches tagged watch/request events to specialized
  * handlers.
  *
+ * A returned @c kevent batch contains borrowed @c udata pointers. The worker
+ * pins every live watch and every request's parent storage before dispatch, and
+ * releases those pins only after the whole batch has been processed. If a
+ * request pin cannot be acquired, its event is rewritten to an inert control
+ * tag so no handler can dereference partially owned storage.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

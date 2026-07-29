@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Feralthedogg
 
+/**
+ * @file experiments/leir/leir_native_segment.c
+ * @brief Bind and execute backend-native LEIR effect segments.
+ *
+ * @details
+ * The instance activity state serializes bind, run, and destroy. A successful
+ * Linux bind duplicates descriptor authority and, in fixed mode, owns scratch
+ * buffers while caller slot pointers remain borrowed. Batch run claims every
+ * instance before publishing any segment and rolls back partial claims on
+ * failure. It releases requests and returns instances to @c IDLE only after
+ * each segment is @c RETIRED or was never submitted; destroy first detaches
+ * registered-resource leases, then closes and frees owned resources before
+ * publishing @c DESTROYED.
+ */
+
 #include "leir_native_segment.h"
 
 #include "leir_phase0_internal.h"

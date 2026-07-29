@@ -8,6 +8,12 @@
  * then complete/wake tasks outside the lock to avoid running scheduler wake
  * logic while holding backend state locks.
  *
+ * Tagged @c user_data is an identity, not permission to recycle its pointer.
+ * Each handler must validate the tag-specific lifetime or generation and
+ * relinquish backend ownership before common completion can reinject a task.
+ * Watch mutations and lifetime pins remain under @c watch_lock; runnable
+ * publication happens only after that protected state is detached.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

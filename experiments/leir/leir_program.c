@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Feralthedogg
 
+/**
+ * @file experiments/leir/leir_program.c
+ * @brief Validated, immutable ownership boundary for LEIR phase-0 programs.
+ *
+ * @details
+ * Creation copies node and slot descriptors before validation, so a successful
+ * program does not borrow the descriptor arrays. The output stays @c NULL on
+ * every failure and is published only after the owned copy is fully valid.
+ */
+
 #include "leir_phase0_internal.h"
 
 #include <errno.h>

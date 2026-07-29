@@ -2,6 +2,14 @@
  * @file src/io/linux/watch/linux_segment_cancel.c
  * @brief Allocation-free cancellation for native Linux segment batches.
  *
+ * @details
+ * A queued batch can be retired locally because no operation SQE has been
+ * published. An in-flight batch instead submits one cancel request per original
+ * target. A cancel CQE retires that cancel request only: it does not prove that
+ * the target SQE has stopped referring to segment storage. The batch therefore
+ * becomes reusable only after target retirement and all prepared cancel CQEs
+ * have both been observed.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

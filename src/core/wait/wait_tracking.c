@@ -8,6 +8,14 @@
  * centralizes those tracking transitions so timeout, cancellation, completion,
  * and reinjection paths can safely detach a task before making it runnable.
  *
+ * @par Ownership protocol
+ * Publishing a wait establishes both an active owner and a generation. A
+ * timeout, cancel, or completion producer may resolve the wait only while both
+ * still match. The winning path either detaches the owner itself or leaves it
+ * for the common completion handoff; in either case the generation is advanced
+ * before old wait state can be reused, so a delayed producer cannot resolve a
+ * later activation of the same task or request.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

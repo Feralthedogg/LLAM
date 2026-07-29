@@ -2,6 +2,14 @@
  * @file src/io/windows/watch/windows_completion.c
  * @brief Windows IOCP completion handling and request wakeup path.
  *
+ * @details
+ * A dequeued packet owns the overlapped operation, its request, and its pinned
+ * descriptor association until this file retires them. Under the lifecycle
+ * lock, the packet key, owner node, and saved association generation are
+ * checked before any numeric HANDLE or SOCKET is used. Stale generations fail
+ * closed; completion then clears in-flight and queued-cancel ownership before
+ * the common wake path can let the task release request storage.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

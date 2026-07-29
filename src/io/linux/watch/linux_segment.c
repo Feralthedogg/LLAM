@@ -7,6 +7,19 @@
  * state reduction.  Queue ownership and task wakeup are layered on top so the
  * semantic core can be tested without creating a kernel ring.
  *
+ * @par Lifecycle contract
+ * @c IDLE storage is reusable; @c QUEUED belongs to the submit queue; and
+ * @c INFLIGHT may still be referenced by kernel SQEs. @c RETIRING means a
+ * logical result is known but target CQEs can still arrive. A segment reaches
+ * @c RETIRED only after its original targets can no longer reference it.
+ *
+ * @par Completion contract
+ * @c semantic_claimed publishes at most one logical result, while
+ * @c target_retired proves kernel target retirement and @c terminal_claimed
+ * makes segment retirement single-winner. Batch completion is stronger still:
+ * every segment must be retired and every submitted cancel SQE must have a
+ * matching observed CQE before the request can be completed and reused.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

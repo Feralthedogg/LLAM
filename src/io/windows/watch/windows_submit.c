@@ -2,6 +2,15 @@
  * @file src/io/windows/watch/windows_submit.c
  * @brief Windows IOCP request submission path.
  *
+ * @details
+ * Submission pins the descriptor association under the lifecycle lock and
+ * copies its generation into the overlapped operation before the backend can
+ * own it. A helper result of @c -1 means no completion packet owns the request,
+ * @c 0 transfers lifetime to IOCP, and @c 1 reports synchronous success on a
+ * handle configured to suppress that packet. Completion revalidates the saved
+ * generation, so reuse of the same numeric HANDLE or SOCKET cannot redirect an
+ * older operation to a replacement association.
+ *
  * @copyright Copyright 2026 Feralthedogg
  *
  * @par License

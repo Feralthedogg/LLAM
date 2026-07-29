@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Feralthedogg
 
+/**
+ * @file experiments/leir/leir_native_plan.c
+ * @brief Compile a bounded LEIR effect chain into a native backend plan.
+ *
+ * @details
+ * Compilation walks a static, acyclic chain into local scratch state and
+ * commits the caller's output only after a supported terminal shape is proven.
+ * It rejects branches or data dependencies that would require interpreting
+ * per-completion control flow inside the backend segment.
+ */
+
 #include "leir_native_plan.h"
 
 #include "leir_phase0_internal.h"
