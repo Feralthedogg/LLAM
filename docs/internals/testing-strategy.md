@@ -41,6 +41,28 @@ Broker and public-handle hardening live in `test_security_capability` and
 `llam_broker --self-test`. Transport paths also run local client/server smoke
 coverage.
 
+## Stable And Research Build Boundary
+
+`LLAM_BUILD_RESEARCH` is private and defaults to `OFF`. The stable and
+research-on build graphs are tested separately, then their installed public
+contracts are compared: the complete `include` tree, dynamic `llam_*` exports,
+ABI probe result, ABI-major-2 shared-library identity/SONAME, `llam.pc`, and
+the CMake imported-target consumer contract must be identical. The stable
+install contains no experiment files, and a research-enabled package command
+must fail before creating an archive.
+
+Run the local boundary builds with:
+
+```bash
+make -j4 all test
+make -j4 LLAM_BUILD_RESEARCH=1 research-test
+cmake -S . -B build -DLLAM_BUILD_RESEARCH=OFF
+cmake -S . -B build-research -DLLAM_BUILD_RESEARCH=ON
+```
+
+The research suite is experimental coverage, not a release surface. It cannot
+alter the stable `2.2.0` public contract or authorize packaging.
+
 ## C Structure Ratchet
 
 The structure audit scans C sources and headers under `include`, `src`,

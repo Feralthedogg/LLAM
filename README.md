@@ -156,6 +156,29 @@ Install with CMake:
 cmake --install build --prefix "$HOME/.local"
 ```
 
+## Stable And Research Builds
+
+The default build is the stable public contract. `LLAM_BUILD_RESEARCH` is
+private and defaults to `OFF`; enabling it adds internal experiments and their
+test suite, not public headers or APIs. OFF and ON retain the same public
+headers, ABI major `2`, SONAME/shared-library identity, dynamic exports,
+`pkg-config` metadata, and CMake package contract. The version remains
+`2.2.0` in both modes.
+
+Use the two modes explicitly:
+
+```bash
+make -j4 all test
+make -j4 LLAM_BUILD_RESEARCH=1 research-test
+cmake -S . -B build -DLLAM_BUILD_RESEARCH=OFF
+cmake -S . -B build-research -DLLAM_BUILD_RESEARCH=ON
+```
+
+Research-enabled builds cannot be packaged: the command fails before an
+archive is created. Benchmark evidence is create-once and audits are read-only.
+The current native performance verdict is `REJECT`, so this work does not
+permit a version change, tag, package, publication, or release.
+
 Run the included programs:
 
 ```bash

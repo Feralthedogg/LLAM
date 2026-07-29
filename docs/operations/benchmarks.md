@@ -151,6 +151,12 @@ Verdicts have narrow meanings:
 The hard gate compares only `portable_verdict`; a Linux/io_uring-specific
 `SPECIALIZED` result cannot override a portable `REJECT` or `INCONCLUSIVE`.
 
+Evidence is create-once: collection writes a sealed bundle, while every audit
+is read-only and recomputes or verifies without rewriting it. Promotion
+requires the exact stored `portable_verdict` to be `SPECIALIZED`. The current
+native performance verdict is `REJECT`, so this plan does not authorize a
+version change, tag, package, publication, or release.
+
 If the kernel, liburing, memlock/resource limits, registered files/buffers, or
 CQE-skip support cannot run `fixed_link_skip`, the benchmark exits with the
 native skip code and the matrix records unavailable fixed cells. It never

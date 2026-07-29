@@ -32,6 +32,20 @@ ABI rules:
 - Pointers returned as static strings are owned by the library and remain valid
   until process exit.
 
+## Stable And Research Build Boundary
+
+`LLAM_BUILD_RESEARCH` is a private build switch and defaults to `OFF`. It may
+enable internal experiments and their test targets, but it does not create a
+second public ABI. Both modes install the same public headers, documented
+dynamic exports, ABI-major-2 shared-library identity/SONAME, `pkg-config`
+contract, and CMake package contract. The public version remains `2.2.0`.
+
+Consumers must treat only the stable contract above as supported. Research-mode
+symbols, layouts, objects, tests, and experiment sources are internal; they
+must not be added to public headers or used as a reason to change the ABI or
+library version. A research-enabled build cannot be packaged: the package
+command fails before it creates an archive.
+
 ## Public Handle Hardening Model
 
 LLAM public handles are opaque lifetime guards, not cryptographic process

@@ -377,6 +377,184 @@ class ResearchBoundaryTests(unittest.TestCase):
             if path.is_file()
         }
 
+    @staticmethod
+    def _sha256_tree(root: Path) -> dict[str, str]:
+        if not root.is_dir():
+            raise AssertionError(f"expected directory: {root}")
+        return {
+            str(path.relative_to(root)): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    @staticmethod
+    def _normalized_prefix_text(text: str, prefix: Path) -> str:
+        return text.replace(str(prefix), "${prefix}").replace("\\", "/")
+
+    @classmethod
+    def _install_cmake_mode(cls, build_dir: Path, mode: str) -> Path:
+        prefix = cls.work / f"install-contract-{mode}"
+        result = cls._run(
+            [
+                "cmake",
+                "--install",
+                str(build_dir),
+                "--prefix",
+                str(prefix),
+            ]
+        )
+        cls.assert_command_succeeded(result, f"{mode} CMake contract install")
+        return prefix
+
+    @classmethod
+    def _installed_library_dir(cls, prefix: Path) -> Path:
+        return cls._find_shared_library(prefix).parent
+
+    @classmethod
+    def _abi_probe(cls, prefix: Path, mode: str) -> str:
+        probe = cls.work / f"installed-abi-probe-{mode}.c"
+        binary = cls.work / f"installed-abi-probe-{mode}"
+        probe.write_text(
+            '#include <llam/runtime.h>\n'
+            "#include <stdio.h>\n"
+            "int main(void) {\n"
+            "    llam_abi_info_t info = {0};\n"
+            "    if (llam_abi_get_info(&info, sizeof(info)) != 0) {\n"
+            "        return 1;\n"
+            "    }\n"
+            '    printf("%u:%u:%s\\n", llam_abi_version(), '
+            "info.abi_major, llam_version_string());\n"
+            "    return 0;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        compile_result = cls._run(
+            [
+                os.environ.get("CC", "cc"),
+                "-std=c11",
+                str(probe),
+                "-I",
+                str(prefix / "include"),
+                "-L",
+                str(cls._installed_library_dir(prefix)),
+                "-lllam_runtime",
+                "-o",
+                str(binary),
+            ]
+        )
+        cls.assert_command_succeeded(
+            compile_result, f"{mode} installed ABI probe compile"
+        )
+        environment = os.environ.copy()
+        library_dir = str(cls._installed_library_dir(prefix))
+        if os.uname().sysname == "Darwin":
+            environment["DYLD_LIBRARY_PATH"] = library_dir
+        else:
+            environment["LD_LIBRARY_PATH"] = library_dir
+        run_result = cls._run([str(binary)], env=environment)
+        cls.assert_command_succeeded(
+            run_result, f"{mode} installed ABI probe run"
+        )
+        return run_result.stdout.strip()
+
+    @classmethod
+    def _pkg_config_contract(cls, prefix: Path) -> str:
+        metadata = [
+            path
+            for path in prefix.rglob("llam.pc")
+            if path.is_file() and path.parent.name == "pkgconfig"
+        ]
+        if len(metadata) != 1:
+            raise AssertionError(
+                f"expected one installed pkg-config file, got: {metadata}"
+            )
+        return cls._normalized_prefix_text(
+            metadata[0].read_text(encoding="utf-8"), prefix
+        )
+
+    @classmethod
+    def _cmake_package_contract(cls, prefix: Path, mode: str) -> str:
+        source_dir = cls.work / f"cmake-consumer-{mode}"
+        build_dir = cls.work / f"cmake-consumer-build-{mode}"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(llam_installed_consumer C)\n"
+            "find_package(llam 2.2 CONFIG REQUIRED)\n"
+            "get_target_property(include_dirs llam::runtime "
+            "INTERFACE_INCLUDE_DIRECTORIES)\n"
+            "get_target_property(link_libraries llam::runtime "
+            "INTERFACE_LINK_LIBRARIES)\n"
+            "get_target_property(configurations llam::runtime "
+            "IMPORTED_CONFIGURATIONS)\n"
+            "file(WRITE \"${CMAKE_BINARY_DIR}/contract.txt\" "
+            "\"INTERFACE_INCLUDE_DIRECTORIES=${include_dirs}\\n\")\n"
+            "file(APPEND \"${CMAKE_BINARY_DIR}/contract.txt\" "
+            "\"INTERFACE_LINK_LIBRARIES=${link_libraries}\\n\")\n"
+            "foreach(configuration IN LISTS configurations)\n"
+            "  get_target_property(location llam::runtime "
+            "IMPORTED_LOCATION_${configuration})\n"
+            "  file(APPEND \"${CMAKE_BINARY_DIR}/contract.txt\" "
+            "\"IMPORTED_LOCATION_${configuration}=${location}\\n\")\n"
+            "endforeach()\n"
+            "add_executable(llam_installed_consumer main.c)\n"
+            "target_link_libraries(llam_installed_consumer PRIVATE "
+            "llam::runtime)\n",
+            encoding="utf-8",
+        )
+        (source_dir / "main.c").write_text(
+            "#include <llam/runtime.h>\n"
+            "int main(void) {\n"
+            "    return llam_abi_version() == ((2U << 16) | 0U) ? 0 : 1;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        configure_result = cls._run(
+            [
+                "cmake",
+                "-S",
+                str(source_dir),
+                "-B",
+                str(build_dir),
+                f"-DCMAKE_PREFIX_PATH={prefix}",
+            ]
+        )
+        cls.assert_command_succeeded(
+            configure_result, f"{mode} installed CMake consumer configure"
+        )
+        build_result = cls._run(["cmake", "--build", str(build_dir)])
+        cls.assert_command_succeeded(
+            build_result, f"{mode} installed CMake consumer build"
+        )
+        return cls._normalized_prefix_text(
+            (build_dir / "contract.txt").read_text(encoding="utf-8"),
+            prefix,
+        )
+
+    @classmethod
+    def _soname(cls, library: Path) -> str:
+        if os.uname().sysname == "Darwin":
+            result = cls._run(["otool", "-D", str(library)])
+            cls.assert_command_succeeded(result, f"SONAME inspection for {library}")
+            lines = [line.strip() for line in result.stdout.splitlines()]
+            if len(lines) != 2:
+                raise AssertionError(f"unexpected Darwin install name output: {lines}")
+            return lines[1]
+        if shutil.which("readelf"):
+            command = ["readelf", "-d", str(library)]
+        elif shutil.which("objdump"):
+            command = ["objdump", "-p", str(library)]
+        else:
+            raise AssertionError("SONAME inspection requires readelf or objdump")
+        result = cls._run(command)
+        cls.assert_command_succeeded(result, f"SONAME inspection for {library}")
+        match = re.search(r"SONAME.*?\[(.+)\]", result.stdout)
+        if match is None:
+            raise AssertionError(f"no SONAME in {library}: {result.stdout}")
+        return match.group(1)
+
     def test_default_graph_has_no_experiment_objects(self) -> None:
         self.assertNotIn("/experiments/", self.default_make_trace)
         self.assertNotIn("test_leir_", self.default_cmake_targets)
@@ -598,6 +776,57 @@ class ResearchBoundaryTests(unittest.TestCase):
         )
         self.assertTrue(off_exports)
         self.assertEqual(on_exports, off_exports)
+
+    def test_installed_contract_parity(self) -> None:
+        self._build_cmake_mode(self.default_cmake_dir, "research-off")
+        self._build_cmake_mode(self.research_cmake_dir, "research-on")
+        off = self._install_cmake_mode(self.default_cmake_dir, "off")
+        on = self._install_cmake_mode(self.research_cmake_dir, "on")
+        off_library = self._find_shared_library(off)
+        on_library = self._find_shared_library(on)
+
+        self.assertEqual(
+            self._sha256_tree(off / "include"),
+            self._sha256_tree(on / "include"),
+        )
+        self.assertEqual(
+            self._defined_dynamic_exports(off_library),
+            self._defined_dynamic_exports(on_library),
+        )
+        self.assertEqual(
+            self._abi_probe(off, "off"), self._abi_probe(on, "on")
+        )
+        self.assertEqual(
+            self._pkg_config_contract(off), self._pkg_config_contract(on)
+        )
+        self.assertEqual(
+            self._cmake_package_contract(off, "off"),
+            self._cmake_package_contract(on, "on"),
+        )
+        self.assertEqual(self._soname(off_library), self._soname(on_library))
+
+        experiment_files = [
+            path.relative_to(off)
+            for path in off.rglob("*")
+            if path.is_file() and "experiments" in path.relative_to(off).parts
+        ]
+        self.assertEqual(experiment_files, [])
+
+        package_source = self.work / "installed-contract-package"
+        package_script = package_source / "scripts" / "package_release.sh"
+        package_script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            self.source / "scripts" / "package_release.sh", package_script
+        )
+        package_result = self._run(
+            ["/bin/sh", str(package_script)],
+            env={**os.environ, "LLAM_BUILD_RESEARCH": "1"},
+        )
+        self.assertNotEqual(package_result.returncode, 0)
+        self.assertIn(
+            "research-enabled builds cannot be packaged", package_result.stderr
+        )
+        self.assertFalse((package_source / "target" / "dist").exists())
 
     def test_windows_test_objects_rebuild_across_in_place_mode_toggles(
         self,
