@@ -601,7 +601,7 @@ git commit -m "docs: define runtime resource governance contract"
 - Consumes: every deliverable in Tasks 1-7
 - Produces: checked completion boxes backed by fresh command output
 
-- [ ] **Step 1: Run the complete stable and research build gates**
+- [x] **Step 1: Run the complete stable and research build gates**
 
 Run:
 
@@ -618,13 +618,13 @@ cmake --build object/resource-stage-research -j2
 ctest --test-dir object/resource-stage-research --output-on-failure
 ```
 
-- [ ] **Step 2: Run sanitizer, manifest, supply-chain, structure, and whitespace gates**
+- [x] **Step 2: Run sanitizer, manifest, supply-chain, structure, and whitespace gates**
 
 Run the repository ASan/UBSan and TSan targets, build-manifest audit,
 installed-contract parity, dependency policy, strict C-structure audit,
 `actionlint`, `git diff --check`, and the full Python governance suite.
 
-- [ ] **Step 3: Re-read the resource design requirement by requirement**
+- [x] **Step 3: Re-read the resource design requirement by requirement**
 
 For every option, invariant, failure mode, diagnostic counter, platform, and
 test seam in
@@ -632,7 +632,59 @@ test seam in
 record the source/test command that proves it. Any missing or indirect evidence
 keeps the task unchecked.
 
-- [ ] **Step 4: Mark only evidenced boxes complete and commit the gate record**
+#### Gate record
+
+The fresh verification snapshot is implementation commit `af34b8f` on
+2026-07-29. The local macOS build passed the two clean Make graphs, stable
+CTest 25/25, and research CTest 42/42; the research-only Linux cases were
+reported as platform skips. An independent Linux x86-64 run on kernel 7.0.3
+with GCC 16.1.1 and liburing 2.14 passed the clean stable graph, the clean
+research graph, stable CTest 25/25, and research CTest 42/42. The Linux
+research graph had one declared skip for the non-fixed pipeline semantic
+barrier.
+
+The sanitizer and governance evidence was also fresh at that snapshot:
+
+- `make test-asan` and `make test-tsan` passed on macOS, including the managed
+  fiber positive controls. Linux `make test-asan CC=gcc` and
+  `make test-tsan CC=gcc` passed; the only TSan report was the required
+  distinct-fiber positive-control race.
+- `python3 scripts/audit_build_manifests.py --root . --check`, the 127
+  build-manifest unit tests, `make audit-c-structure`, `make
+  test-ci-supply-chain`, `make test-process-utils`, `make analyze-cppcheck`,
+  `make audit-deps`, `actionlint`, and `git diff --check` passed.
+- Installed stable/research parity passed through
+  `python3 -m unittest
+  scripts.test_research_build_boundary.ResearchBoundaryTests.test_installed_contract_parity
+  -v`. All 23 repository Python governance modules passed in their declared
+  package or legacy-script invocation mode.
+- Pull request 4's compatibility matrix passed Linux x86-64 and aarch64 GCC,
+  Linux sanitizer and security gates, macOS x86-64 and arm64, Windows,
+  FreeBSD, OpenBSD, NetBSD, DragonFlyBSD experimental, stress, and docs for
+  `af34b8f`.
+
+Requirement-to-evidence closure:
+
+| Design requirement | Implementing source | Direct proof |
+| --- | --- | --- |
+| Size-prefixed current options, frozen 2.2 wrapper prefix, partial-tail compatibility, zero/default behavior, and stable/research installed parity | `include/llam/runtime.h`, `src/core/lifecycle/init.c` | `test_abi_contract`, `test_abi_compat`, `test_legacy_runtime_init_ignores_resource_tail`, `test_ex_option_prefixes`, and the installed-contract parity command above |
+| Worker min/count/max, blocking min/max, ordered copied CPU selection, NONE/PREFER/REQUIRE affinity, runtime-total task/stack/timer targets, SQPOLL reservation, hard caps, and checked byte arithmetic | `src/core/lifecycle/resource_plan.c`, `src/internal/runtime_resource_plan.h` | `test_runtime_resource_plan_resolver` covers 1/8/64 and 257 CPUs, fixed and dynamic ranges, deterministic 1/1/1, sparse order, duplicate/disallowed CPUs, SQPOLL reservation, unsupported requirements, 256-worker and 4096-stack caps, and `EOVERFLOW`; `test_runtime_total_prewarm_distribution` proves checked aggregate sharing |
+| Immutable plan application before publication and per-runtime isolation | `src/core/lifecycle/init.c`, `src/core/lifecycle/resource_plan.c` | `test_runtime_resource_plan_initialization` and `test_runtime_resource_plan_isolation` |
+| Scheduler start rollback, lazy zero-min blocking growth, create-failure rollback, confirmed-worker joins, and exact native-thread entry/exit counts | `src/core/lifecycle/run.c`, `src/engine/scheduler/block.c`, `src/core/lifecycle/shutdown.c`, `src/core/platform/platform.c` | `test_blocking_pool_grows_lazily_within_bounds`, `test_native_thread_diagnostics_are_live_counts`, the first/second block-worker failure cases, shard failure-on-Nth cases, and `test_runtime_shutdown_internal` |
+| Caller-ordered placement, shard-0 capture/restore on normal and error exits, and preferred versus required failure behavior | `src/core/platform/platform.c`, `src/core/lifecycle/run.c`, scheduler/I/O/controller thread entry points | `exercise_affinity_policy_matrix`, `exercise_affinity_unsupported_policy`, `exercise_affinity_restore_on_worker_create_failure`, and cooperative/fatal task-exit restoration cases in `test_runtime_shutdown_internal` |
+| Exact public prewarm, best-effort `_TOTAL` and legacy environment authority, aggregate bounds, unwind on allocation failure, and requested/achieved/byte diagnostics | `src/core/lifecycle/init.c`, `src/core/memory/alloc.c`, `src/core/task/task_stack.c`, `src/core/time/timer.c`, debug stats projection | `test_runtime_total_prewarm_authority`, `test_runtime_total_prewarm_distribution`, the exact-versus-legacy prewarm rollback matrix in `test_runtime_shutdown_internal`, runtime core JSON/text diagnostics, and installed consumer assertions |
+| Internal-only pure planner and CPU input, typed scheduler/blocking creation failure, affinity failure, and prewarm failure seams | `src/internal/runtime_resource_plan.h`, `src/internal/runtime_proto_core.h`, `src/core/lifecycle/run.c`, `src/engine/scheduler/block.c`, `src/core/platform/platform.c`, `src/core/lifecycle/init.c` | The resolver matrix injects allowed CPUs/capabilities; test hooks inject failure-on-Nth shard/block creation, affinity support/apply/restore errors, and per-kind prewarm exhaustion |
+| Platform behavior does not silently narrow the public ABI or build graph | Build manifests and GitHub Actions workflows | The local macOS and Linux gates above plus the passing Windows and BSD compatibility jobs; exact affinity remains documented as a Linux capability while hooks prove REQUIRE/PREFER behavior portably |
+
+Linux io_uring native-segment evidence is intentionally not used to close a
+portable resource requirement. As a separate platform result, the fixed
+connected pipeline probe completed 1,792 logical operations with 896
+operation CQEs and 896 suppressed success CQEs. The non-fixed `link_skip`
+pipeline returned its declared `exact_result_semantic_barrier` skip; that
+remaining semantic contract is not reclassified as a platform failure or a
+portable performance win.
+
+- [x] **Step 4: Mark only evidenced boxes complete and commit the gate record**
 
 ```bash
 git add docs/superpowers/plans/2026-07-29-runtime-resource-governance.md
