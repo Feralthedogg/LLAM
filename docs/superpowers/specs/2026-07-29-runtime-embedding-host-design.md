@@ -88,9 +88,12 @@ stack bounds. Bootstrap and terminal transitions follow sanitizer API
 requirements.
 
 TSan creates one token per task after context creation and one native scheduler
-token per scheduler OS thread. No-sync switches follow the logical task during
-migration; task tokens are destroyed only after control has safely returned to
-the scheduler.
+token per scheduler OS thread. Fiber switches preserve the physical thread's
+ordering because LLAM scheduler state is thread-local and intentionally shared
+across successive logical fibers; using the no-sync flag makes those TLS
+handoffs appear concurrent. Cross-worker task races remain observable and are
+covered by a two-worker positive control. Task tokens are destroyed only after
+control has safely returned to the scheduler.
 
 Capability wrappers allow deterministic contract-stub tests without requiring
 an instrumented binary. Positive-control ASan and TSan tests prove the

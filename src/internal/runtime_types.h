@@ -995,6 +995,12 @@ struct llam_task {
     size_t mapping_size;
     void *stack_base;
     size_t stack_size;
+#if LLAM_ASAN_FIBER_ENABLED
+    void *asan_fake_stack;
+#endif
+#if LLAM_TSAN_FIBER_ENABLED
+    void *tsan_fiber;
+#endif
     llam_stack_cache_entry_t stack_cache_entry;
     pthread_mutex_t lock;
     bool lock_initialized;

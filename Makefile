@@ -99,12 +99,14 @@ CLEAN_FILES = \
 	asan-test_multi_runtime_core \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability \
+	asan-test_fiber_positive \
 	noowner-test_runtime_select_edges \
 	tsan-test_runtime_core \
 	tsan-test_runtime_shutdown_internal \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability \
+	tsan-test_fiber_positive \
 	libllam_runtime.a \
 	demo.exe \
 	stress.exe \
@@ -295,6 +297,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/time/time.o \
 	$(OBJDIR)/src/core/context/fp.o \
 	$(OBJDIR)/src/core/context/stack_sample.o \
+	$(OBJDIR)/src/core/context/sanitizer_fiber.o \
 	$(OBJDIR)/src/core/context/context_portable.o \
 	$(OBJDIR)/src/core/sched/queue_base.o \
 	$(OBJDIR)/src/core/sched/norm_queue_depth.o \
@@ -618,6 +621,10 @@ TEST_WINDOWS_HANDLE_IO_OBJS = \
 	$(OBJDIR)/tests/test_windows_handle_io.o
 TEST_SECURITY_CAPABILITY_OBJS = \
 	$(OBJDIR)/tests/test_security_capability.o
+TEST_ASAN_FIBER_POSITIVE_OBJS = \
+	$(OBJDIR)/tests/test_asan_fiber_positive.o
+TEST_TSAN_FIBER_POSITIVE_OBJS = \
+	$(OBJDIR)/tests/test_tsan_fiber_positive.o
 TEST_SHARED_LOAD_OBJS = \
 	$(OBJDIR)/tests/test_shared_load.o
 LEIR_PHASE0_CORE_OBJS = \
@@ -2131,6 +2138,8 @@ ASAN_TEST_TARGETS = \
 	asan-test_runtime_fuzz \
 	asan-test_security_capability
 
+ASAN_POSITIVE_TARGET = asan-test_fiber_positive
+
 NOOWNER_TEST_TARGETS = \
 	noowner-test_runtime_select_edges
 
@@ -2140,6 +2149,8 @@ TSAN_TEST_TARGETS = \
 	tsan-test_multi_runtime_core \
 	tsan-test_runtime_fuzz \
 	tsan-test_security_capability
+
+TSAN_POSITIVE_TARGET = tsan-test_fiber_positive
 
 FUZZ_HEAVY_RUNTIME_SCENARIOS ?= 2048
 FUZZ_HEAVY_MULTI_RUNTIME_SCENARIOS ?= 512
@@ -2152,31 +2163,72 @@ RUNTIME_SOAK_MULTI_FUZZ_SCENARIOS ?= 64
 test-asan:
 	@set -e; \
 	if [ -n "$(filter -n n --just-print --dry-run --recon,$(MAKEFLAGS))" ]; then \
-		$(MAKE) $(ASAN_TEST_TARGETS) \
+		$(MAKE) $(ASAN_TEST_TARGETS) $(ASAN_POSITIVE_TARGET) \
 			OBJDIR=object-asan \
 			SANITIZER_TARGETS_ENABLED=1 \
 			CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
 			LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
 		exit 0; \
 	fi; \
-	cleanup() { rm -f $(ASAN_TEST_TARGETS); }; \
+	asan_log="$$(mktemp "$${TMPDIR:-/tmp}/llam-asan-test.XXXXXX.log")"; \
+	cleanup() { rm -f $(ASAN_TEST_TARGETS) $(ASAN_POSITIVE_TARGET) "$$asan_log"; }; \
+	run_asan() { \
+		: >"$$asan_log"; \
+		set +e; \
+		"$$@" >"$$asan_log" 2>&1; \
+		asan_status=$$?; \
+		set -e; \
+		cat "$$asan_log"; \
+		if grep -F 'ASan is ignoring requested __asan_handle_no_return' \
+				"$$asan_log" >/dev/null; then \
+			echo "error: ASan fiber-switch instrumentation is incomplete" >&2; \
+			return 1; \
+		fi; \
+		if grep -F 'ERROR: finishing a fiber switch that has not started' \
+				"$$asan_log" >/dev/null; then \
+			echo "error: ASan observed an unbalanced fiber switch" >&2; \
+			return 1; \
+		fi; \
+		return "$$asan_status"; \
+	}; \
 	trap cleanup EXIT; \
 	cleanup; \
-	$(MAKE) $(ASAN_TEST_TARGETS) \
+	$(MAKE) $(ASAN_TEST_TARGETS) $(ASAN_POSITIVE_TARGET) \
 		OBJDIR=object-asan \
 		SANITIZER_TARGETS_ENABLED=1 \
 		CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
 		LDLIBS="$(LDLIBS) -fsanitize=address,undefined"; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_api_edges; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_core; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_io_buffers; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_shutdown_internal; \
-	ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_multi_runtime_core; \
-	LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
-		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_runtime_fuzz; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_api_edges; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_core; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_io_buffers; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_shutdown_internal; \
+	run_asan env ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_multi_runtime_core; \
+	run_asan env LLAM_RUNTIME_FUZZ_SCENARIOS=16 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=16 \
+		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_runtime_fuzz; \
 	: "Keep the ASan broker task-race probe short; full-strength coverage stays in normal test."; \
-	LLAM_SECURITY_TASK_DETACH_RACE_ROUNDS=16 \
-		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 ./asan-test_security_capability
+	run_asan env LLAM_SECURITY_TASK_DETACH_RACE_ROUNDS=16 \
+		ASAN_OPTIONS=halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+		./asan-test_security_capability; \
+	: >"$$asan_log"; \
+	set +e; \
+	ASAN_OPTIONS=halt_on_error=1 \
+		UBSAN_OPTIONS=halt_on_error=1 \
+		./$(ASAN_POSITIVE_TARGET) >"$$asan_log" 2>&1; \
+	asan_status=$$?; \
+	set -e; \
+	cat "$$asan_log"; \
+	if [ "$$asan_status" -eq 0 ] || \
+			! grep -F 'AddressSanitizer: stack-buffer-overflow' \
+				"$$asan_log" >/dev/null; then \
+		echo "error: ASan fiber positive control did not detect the task-stack overflow" >&2; \
+		exit 1; \
+	fi
 
 test-no-owner:
 	@set -e; \
@@ -2197,23 +2249,25 @@ test-no-owner:
 test-tsan:
 	@set -e; \
 	if [ -n "$(filter -n n --just-print --dry-run --recon,$(MAKEFLAGS))" ]; then \
-		$(MAKE) $(TSAN_TEST_TARGETS) \
+		$(MAKE) $(TSAN_TEST_TARGETS) $(TSAN_POSITIVE_TARGET) \
 			OBJDIR=object-tsan \
 			SANITIZER_TARGETS_ENABLED=1 \
 			CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread" \
 			LDLIBS="$(LDLIBS) -fsanitize=thread"; \
 		exit 0; \
 	fi; \
-	cleanup() { rm -f $(TSAN_TEST_TARGETS); }; \
+	cleanup() { rm -f $(TSAN_TEST_TARGETS) $(TSAN_POSITIVE_TARGET); }; \
 	trap cleanup EXIT; \
 	cleanup; \
 	tsan_cflags="-std=c11 -Wall -Wextra -Wpedantic -Werror -O1 -g -fno-omit-frame-pointer -fsanitize=thread"; \
 	tsan_probe="$$(mktemp "$${TMPDIR:-/tmp}/llam-tsan-probe.XXXXXX.o")"; \
-	if printf 'int main(void){return 0;}\n' | $(CC) $$tsan_cflags -Wno-error=tsan -x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
+	if printf 'int main(void){return 0;}\n' | $(CC) $$tsan_cflags \
+			-Werror=unknown-warning-option -Wno-error=tsan \
+			-x c - -c -o "$$tsan_probe" >/dev/null 2>&1; then \
 		tsan_cflags="$$tsan_cflags -Wno-error=tsan"; \
 	fi; \
 	rm -f "$$tsan_probe"; \
-	$(MAKE) $(TSAN_TEST_TARGETS) \
+	$(MAKE) $(TSAN_TEST_TARGETS) $(TSAN_POSITIVE_TARGET) \
 		OBJDIR=object-tsan \
 		SANITIZER_TARGETS_ENABLED=1 \
 		CFLAGS="$$tsan_cflags" \
@@ -2223,7 +2277,21 @@ test-tsan:
 	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_multi_runtime_core; \
 	LLAM_RUNTIME_FUZZ_SCENARIOS=8 LLAM_MULTI_RUNTIME_FUZZ_SCENARIOS=8 \
 		TSAN_OPTIONS=halt_on_error=1 ./tsan-test_runtime_fuzz; \
-	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability
+	TSAN_OPTIONS=halt_on_error=1 ./tsan-test_security_capability; \
+	tsan_log="$$(mktemp "$${TMPDIR:-/tmp}/llam-tsan-positive.XXXXXX.log")"; \
+	set +e; \
+	TSAN_OPTIONS=halt_on_error=1 ./$(TSAN_POSITIVE_TARGET) >"$$tsan_log" 2>&1; \
+	tsan_status=$$?; \
+	set -e; \
+	cat "$$tsan_log"; \
+	if [ "$$tsan_status" -eq 0 ] || \
+			! grep -F 'WARNING: ThreadSanitizer: data race' "$$tsan_log" >/dev/null || \
+			! grep -F 'race_from_distinct_fiber' "$$tsan_log" >/dev/null; then \
+		rm -f "$$tsan_log"; \
+		echo "error: TSan fiber positive control did not detect the task race" >&2; \
+		exit 1; \
+	fi; \
+	rm -f "$$tsan_log"
 
 analyze-cppcheck:
 	cppcheck --platform=unix64 --std=c11 --enable=warning,performance,portability \
@@ -2542,6 +2610,12 @@ asan-test_runtime_fuzz tsan-test_runtime_fuzz: require-sanitizer-target $(RUNTIM
 
 asan-test_security_capability tsan-test_security_capability: require-sanitizer-target $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
+
+asan-test_fiber_positive: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_ASAN_FIBER_POSITIVE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_ASAN_FIBER_POSITIVE_OBJS) $(LDLIBS)
+
+tsan-test_fiber_positive: require-sanitizer-target $(RUNTIME_OBJS) $(TEST_TSAN_FIBER_POSITIVE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_TSAN_FIBER_POSITIVE_OBJS) $(LDLIBS)
 
 test_windows_policy: $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS)
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_OBJS) $(TEST_WINDOWS_POLICY_OBJS) $(LDLIBS)

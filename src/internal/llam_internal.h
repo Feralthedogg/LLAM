@@ -42,6 +42,71 @@
 #define LLAM_UNLIKELY(expr) (!!(expr))
 #endif
 
+#if defined(__has_feature)
+#define LLAM_HAS_FEATURE(feature) __has_feature(feature)
+#else
+#define LLAM_HAS_FEATURE(feature) 0
+#endif
+
+#if defined(__SANITIZE_ADDRESS__) || LLAM_HAS_FEATURE(address_sanitizer)
+#define LLAM_ASAN_FIBER_ENABLED 1
+#else
+#define LLAM_ASAN_FIBER_ENABLED 0
+#endif
+
+#if defined(__SANITIZE_THREAD__) || LLAM_HAS_FEATURE(thread_sanitizer)
+#define LLAM_TSAN_FIBER_ENABLED 1
+#else
+#define LLAM_TSAN_FIBER_ENABLED 0
+#endif
+
+#if LLAM_ASAN_FIBER_ENABLED || LLAM_TSAN_FIBER_ENABLED
+#define LLAM_SANITIZER_FIBER_ENABLED 1
+#else
+#define LLAM_SANITIZER_FIBER_ENABLED 0
+#endif
+
+#ifndef LLAM_NO_SANITIZE_THREAD
+#if LLAM_TSAN_FIBER_ENABLED && defined(__has_attribute)
+#if __has_attribute(no_sanitize)
+#define LLAM_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
+#elif __has_attribute(no_sanitize_thread)
+#define LLAM_NO_SANITIZE_THREAD __attribute__((no_sanitize_thread))
+#endif
+#endif
+#ifndef LLAM_NO_SANITIZE_THREAD
+#define LLAM_NO_SANITIZE_THREAD
+#endif
+#endif
+
+/*
+ * A fiber-switch boundary must not emit sanitizer function-entry/function-exit
+ * callbacks.  In particular, __tsan_switch_to_fiber() changes the active TSan
+ * shadow stack before the C helper returns; a merely no_sanitize("thread")
+ * function may still emit an exit callback into the destination fiber and
+ * eventually overflow its shadow stack.
+ */
+#ifndef LLAM_SANITIZER_SWITCH_BOUNDARY
+#if LLAM_SANITIZER_FIBER_ENABLED && defined(__has_attribute)
+#if __has_attribute(disable_sanitizer_instrumentation)
+#define LLAM_SANITIZER_SWITCH_BOUNDARY \
+    __attribute__((disable_sanitizer_instrumentation))
+#elif __has_attribute(no_sanitize)
+#define LLAM_SANITIZER_SWITCH_BOUNDARY \
+    __attribute__((no_sanitize("address", "thread")))
+#endif
+#elif LLAM_TSAN_FIBER_ENABLED && defined(__GNUC__)
+#define LLAM_SANITIZER_SWITCH_BOUNDARY \
+    __attribute__((no_sanitize_thread))
+#elif LLAM_ASAN_FIBER_ENABLED && defined(__GNUC__)
+#define LLAM_SANITIZER_SWITCH_BOUNDARY \
+    __attribute__((no_sanitize_address))
+#endif
+#ifndef LLAM_SANITIZER_SWITCH_BOUNDARY
+#define LLAM_SANITIZER_SWITCH_BOUNDARY
+#endif
+#endif
+
 #ifndef LLAM_RUNTIME_DISABLE_OWNER_CHECKS
 /*
  * Keep owner checks enabled by default because EXDEV is part of the public
@@ -284,7 +349,8 @@ typedef struct llam_ctx {
 void llam_ctx_switch(llam_ctx_t *from, const llam_ctx_t *to);
 void llam_fiber_bootstrap(void);
 LLAM_NORETURN void llam_fiber_alignment_violation(uint64_t rsp);
-LLAM_NORETURN void llam_task_bootstrap(struct llam_task *task);
+LLAM_NORETURN LLAM_SANITIZER_SWITCH_BOUNDARY void
+llam_task_bootstrap(struct llam_task *task);
 LLAM_NORETURN void llam_task_exit_internal(void);
 int llam_ctx_make_task(llam_ctx_t *ctx, void *stack_base, size_t stack_size, struct llam_task *task);
 

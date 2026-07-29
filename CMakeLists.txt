@@ -95,6 +95,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/time/time.c
     src/core/context/fp.c
     src/core/context/stack_sample.c
+    src/core/context/sanitizer_fiber.c
     src/core/context/context_portable.c
     src/core/sched/queue_base.c
     src/core/sched/norm_queue_depth.c

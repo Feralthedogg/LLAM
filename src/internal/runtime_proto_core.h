@@ -99,35 +99,13 @@ void llam_task_restore_errno(const llam_task_t *task);
 void llam_switch_task_to_scheduler(llam_task_t *task, llam_ctx_t *scheduler_ctx);
 void llam_switch_scheduler_to_task(llam_ctx_t *scheduler_ctx, llam_task_t *task);
 void llam_switch_task_to_task(llam_task_t *from, llam_task_t *to);
-
-#ifndef LLAM_NO_SANITIZE_THREAD
-#ifndef __has_feature
-#define __has_feature(x) 0
-#define LLAM_UNDEF_HAS_FEATURE 1
-#endif
-#if defined(__SANITIZE_THREAD__)
-#define LLAM_TSAN_BUILD 1
-#elif __has_feature(thread_sanitizer)
-#define LLAM_TSAN_BUILD 1
-#endif
-#if defined(LLAM_UNDEF_HAS_FEATURE)
-#undef __has_feature
-#undef LLAM_UNDEF_HAS_FEATURE
-#endif
-#if defined(LLAM_TSAN_BUILD)
-#if defined(__has_attribute)
-#if __has_attribute(no_sanitize)
-#define LLAM_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
-#elif __has_attribute(no_sanitize_thread)
-#define LLAM_NO_SANITIZE_THREAD __attribute__((no_sanitize_thread))
-#endif
-#endif
-#endif
-#ifndef LLAM_NO_SANITIZE_THREAD
-#define LLAM_NO_SANITIZE_THREAD
-#endif
-#undef LLAM_TSAN_BUILD
-#endif
+int llam_sanitizer_task_fiber_init(llam_task_t *task);
+void llam_sanitizer_task_fiber_destroy(llam_task_t *task);
+void llam_sanitizer_before_scheduler_to_task(llam_task_t *task);
+void llam_sanitizer_finish_scheduler_switch(void);
+void llam_sanitizer_before_task_to_scheduler(llam_task_t *task, bool terminal);
+void llam_sanitizer_before_task_to_task(llam_task_t *from, llam_task_t *to);
+void llam_sanitizer_finish_task_switch(llam_task_t *task);
 
 /*
  * TSan does not model LLAM's stackful fiber switches.  Keep the real shared
@@ -151,10 +129,18 @@ static inline LLAM_NO_SANITIZE_THREAD void llam_thread_errno_store(int value) {
  * wrapper call from every fiber-to-fiber handoff while preserving task-local
  * errno semantics.
  */
-static inline void llam_switch_task_to_task_hot(llam_task_t *from, llam_task_t *to) {
+static inline LLAM_SANITIZER_SWITCH_BOUNDARY void llam_switch_task_to_task_hot(
+    llam_task_t *from,
+    llam_task_t *to) {
     from->saved_errno = llam_thread_errno_load();
     llam_thread_errno_store(to->saved_errno);
+#if LLAM_SANITIZER_FIBER_ENABLED
+    llam_sanitizer_before_task_to_task(from, to);
+#endif
     llam_ctx_switch(&from->ctx, &to->ctx);
+#if LLAM_SANITIZER_FIBER_ENABLED
+    llam_sanitizer_finish_task_switch(from);
+#endif
     llam_thread_errno_store(from->saved_errno);
 }
 

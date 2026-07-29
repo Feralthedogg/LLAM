@@ -137,7 +137,7 @@
     },
     {
       "limit": 1200,
-      "line_count": 1640,
+      "line_count": 1646,
       "path": "src/internal/runtime_types.h"
     },
     {
@@ -147,7 +147,7 @@
     },
     {
       "limit": 950,
-      "line_count": 1288,
+      "line_count": 1296,
       "path": "src/io/api/issue.c"
     },
     {

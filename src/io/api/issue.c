@@ -150,11 +150,15 @@ void llam_task_exit_internal(void) {
  *
  * @note Called from the architecture-specific fiber bootstrap path.
  */
-void llam_task_bootstrap(llam_task_t *task) {
+LLAM_SANITIZER_SWITCH_BOUNDARY void llam_task_bootstrap(llam_task_t *task) {
     llam_runtime_t *rt;
 
-    g_llam_tls_task = task;
-    /* Fail closed before corrupt cursors or NULL entry become arbitrary crashes. */
+    /*
+     * This entry is deliberately free of sanitizer instrumentation: the new
+     * physical stack is active, but ASan has not finished the logical fiber
+     * switch yet. Validate obvious corruption without invoking the sanitizer
+     * API so direct fail-closed probes still terminate as LLAM invariants.
+     */
     if (LLAM_UNLIKELY(task == NULL ||
                       task->entry == NULL ||
                       g_llam_tls_shard == NULL ||
@@ -162,6 +166,10 @@ void llam_task_bootstrap(llam_task_t *task) {
                       g_llam_tls_shard->runtime != task->owner_runtime)) {
         abort();
     }
+#if LLAM_SANITIZER_FIBER_ENABLED
+    llam_sanitizer_finish_task_switch(task);
+#endif
+    g_llam_tls_task = task;
     rt = task->owner_runtime;
     llam_task_restore_errno(task);
     if (rt->run_timing_enabled != 0U || rt->profile == LLAM_RUNTIME_PROFILE_DEBUG_SAFE) {

@@ -814,6 +814,18 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         return -1;
     }
 #endif
+    if (llam_sanitizer_task_fiber_init(task) != 0) {
+        int saved_errno = errno;
+
+        llam_ctx_destroy_fp_state(&task->ctx);
+        munmap(task->stack_mapping, task->mapping_size);
+        task->stack_mapping = NULL;
+        task->mapping_size = 0U;
+        task->stack_base = NULL;
+        task->stack_size = 0U;
+        errno = saved_errno;
+        return -1;
+    }
     return 0;
 }
 
@@ -835,6 +847,7 @@ void llam_task_release_stack(llam_task_t *task) {
         return;
     }
 
+    llam_sanitizer_task_fiber_destroy(task);
     rt = task->owner_runtime;
     if (rt != NULL && task->alloc_owner_shard < rt->active_shards) {
         /*

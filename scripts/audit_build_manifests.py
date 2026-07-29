@@ -123,8 +123,8 @@ ALLOWED_SIGNATURE_RECIPE_HASHES = {
     "a229dd1c9c7d454941cc91c34d9407a12d98c76cfb185988b9db786f29251a5a",
 }
 ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
-    # Canonical repository Makefile, including audit-c-structure.
-    "a16f59f19bb0f4892f5021ed7ab5b77be9995ab0d284399499214bc664d96e63",
+    # Canonical repository Makefile, including sanitizer positive controls.
+    "664d32afcd4fa3285aeba3dbb7b577eeadae7f5ce59d9696b49bec66133508f0",
     # Independently derived mini-repository fixture.
     "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }
