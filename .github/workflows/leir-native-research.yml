@@ -65,6 +65,7 @@ jobs:
         shell: bash
         run: |
           echo "OUT_DIR=$RUNNER_TEMP/leir-native-screen" >> "$GITHUB_ENV"
+          echo "RESEARCH_BIN_DIR=$RUNNER_TEMP/leir-native-bin" >> "$GITHUB_ENV"
 
       - name: Verify exact source
         run: |
@@ -125,6 +126,8 @@ jobs:
             scripts/test_bench_leir_native_pipeline.py \
             scripts/test_evidence_bundle.py -v \
             2>&1 | tee "$OUT_DIR/make-native-python-test.log"
+          mkdir -p "$RESEARCH_BIN_DIR"
+          install -m 0755 ./bench_leir_native_pipeline "$RESEARCH_BIN_DIR/bench_leir_native_pipeline"
 
       - name: Probe kernel native feature status
         shell: bash
@@ -412,9 +415,11 @@ jobs:
             echo "benchmark_cpus=$benchmark_cpus"
             echo "allowed_cpus=$(taskset -pc $$)"
           } | tee "$OUT_DIR/affinity.txt"
+          sha256sum "$RESEARCH_BIN_DIR/bench_leir_native_pipeline" \
+            | tee "$OUT_DIR/pipeline-binary.sha256"
           taskset -c "$benchmark_cpus" \
             python3 scripts/bench_leir_native_pipeline.py \
-              --binary ./bench_leir_native_pipeline \
+              --binary "$RESEARCH_BIN_DIR/bench_leir_native_pipeline" \
               --samples 9 \
               --activations 32 \
               --min-mode-ms 20 \

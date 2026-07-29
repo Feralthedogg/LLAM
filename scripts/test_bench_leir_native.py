@@ -893,6 +893,7 @@ class WorkflowContractTests(unittest.TestCase):
             "runs-on: ubuntu-24.04",
             "permissions:\n  contents: read",
             'echo "OUT_DIR=$RUNNER_TEMP/leir-native-screen" >> "$GITHUB_ENV"',
+            'echo "RESEARCH_BIN_DIR=$RUNNER_TEMP/leir-native-bin" >> "$GITHUB_ENV"',
             "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
             "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
             "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f",
@@ -904,6 +905,7 @@ class WorkflowContractTests(unittest.TestCase):
             "test_leir_native_linux",
             "bench_leir_native_segment",
             "bench_leir_native_pipeline",
+            'install -m 0755 ./bench_leir_native_pipeline "$RESEARCH_BIN_DIR/bench_leir_native_pipeline"',
             "-fsanitize=address,undefined",
             "-fsanitize=thread",
             "asan-native-bench.log",
@@ -914,6 +916,7 @@ class WorkflowContractTests(unittest.TestCase):
             "benchmark_cpus=",
             "expected at least two benchmark CPUs",
             'taskset -c "$benchmark_cpus"',
+            '--binary "$RESEARCH_BIN_DIR/bench_leir_native_pipeline"',
             "--samples 9",
             "--min-mode-ms 20",
             "uname -a",
@@ -935,6 +938,28 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn(
             "python3 scripts/bench_leir_native.py",
             workflow,
+        )
+        self.assertNotIn(
+            "--binary ./bench_leir_native_pipeline",
+            workflow,
+        )
+        staged_binary = (
+            'install -m 0755 ./bench_leir_native_pipeline '
+            '"$RESEARCH_BIN_DIR/bench_leir_native_pipeline"'
+        )
+        stable_regression = (
+            "- name: Full runtime regression and export gates"
+        )
+        evidence_binary = (
+            '--binary "$RESEARCH_BIN_DIR/bench_leir_native_pipeline"'
+        )
+        self.assertLess(
+            workflow.index(staged_binary),
+            workflow.index(stable_regression),
+        )
+        self.assertLess(
+            workflow.index(stable_regression),
+            workflow.index(evidence_binary),
         )
         self.assertNotIn("uses: actions/checkout@v", workflow)
         self.assertNotIn("uses: actions/setup-python@v", workflow)
