@@ -313,6 +313,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/debug/trace.o \
 	$(OBJDIR)/src/core/sched/wake.o \
 	$(OBJDIR)/src/core/platform/platform.o \
+	$(OBJDIR)/src/core/platform/stack_vm.o \
 	$(OBJDIR)/src/core/platform/windows_policy.o \
 	$(OBJDIR)/src/core/sched/safepoint.o \
 	$(OBJDIR)/src/core/wait/wait.o \
@@ -504,6 +505,7 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/lifecycle/run.o \
 	$(TESTHOOK_OBJDIR)/src/core/memory/alloc.o \
 	$(TESTHOOK_OBJDIR)/src/core/platform/platform.o \
+	$(TESTHOOK_OBJDIR)/src/core/platform/stack_vm.o \
 	$(TESTHOOK_OBJDIR)/src/core/task/task_stack.o \
 	$(TESTHOOK_OBJDIR)/src/core/sched/norm_queue.o \
 	$(TESTHOOK_OBJDIR)/src/engine/scheduler/block.o \
@@ -525,6 +527,7 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/core/lifecycle/run.o \
 		$(OBJDIR)/src/core/memory/alloc.o \
 		$(OBJDIR)/src/core/platform/platform.o \
+		$(OBJDIR)/src/core/platform/stack_vm.o \
 		$(OBJDIR)/src/core/task/task_stack.o \
 		$(OBJDIR)/src/core/sched/norm_queue.o \
 		$(OBJDIR)/src/engine/scheduler/block.o \

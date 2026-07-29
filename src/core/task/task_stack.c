@@ -5,8 +5,8 @@
  * @details
  * This translation unit owns stack mapping lifetime. Fiber stacks are allocated
  * with a guard page, cached first in the task's home shard, and then in a
- * runtime-wide fallback cache. Keeping stacks warm avoids repeated @c mmap /
- * @c mprotect cost in spawn-heavy workloads while preserving guard-page
+ * runtime-wide fallback cache. Keeping stacks warm avoids repeated platform
+ * VM map/protect cost in spawn-heavy workloads while preserving guard-page
  * protection for overflow diagnostics.
  *
  * @copyright Copyright 2026 Feralthedogg
@@ -423,7 +423,7 @@ static bool llam_runtime_stack_cache_push(llam_runtime_t *rt,
         if (mapping != NULL && mapping_size != 0U) {
             // Invalid/unavailable cache owner: release the mapping rather than
             // leaking a stack after task teardown.
-            (void)munmap(mapping, mapping_size);
+            (void)llam_stack_vm_release(mapping, mapping_size);
         }
         return false;
     }
@@ -432,7 +432,7 @@ static bool llam_runtime_stack_cache_push(llam_runtime_t *rt,
     count = llam_runtime_stack_cache_count(rt, stack_size);
     limit = llam_runtime_stack_cache_limit(stack_size);
     if (head == NULL || count == NULL || limit == 0U) {
-        (void)munmap(mapping, mapping_size);
+        (void)llam_stack_vm_release(mapping, mapping_size);
         return false;
     }
 
@@ -444,7 +444,7 @@ static bool llam_runtime_stack_cache_push(llam_runtime_t *rt,
         }
         // Cache is full. Returning to the OS bounds memory usage for bursty
         // workloads that temporarily allocate many stacks.
-        (void)munmap(mapping, mapping_size);
+        (void)llam_stack_vm_release(mapping, mapping_size);
         return false;
     }
 
@@ -455,7 +455,7 @@ static bool llam_runtime_stack_cache_push(llam_runtime_t *rt,
         entry = llam_runtime_stack_cache_entry_alloc_locked(rt);
         if (entry == NULL) {
             pthread_mutex_unlock(&rt->stack_cache_lock);
-            (void)munmap(mapping, mapping_size);
+            (void)llam_stack_vm_release(mapping, mapping_size);
             return false;
         }
     }
@@ -531,7 +531,8 @@ static void llam_stack_cache_drain_list(llam_stack_cache_entry_t *entry) {
         bool heap_allocated = entry->heap_allocated;
 
         if (entry->mapping != NULL && entry->mapping_size != 0U) {
-            (void)munmap(entry->mapping, entry->mapping_size);
+            (void)llam_stack_vm_release(entry->mapping,
+                                        entry->mapping_size);
         }
         if (heap_allocated) {
             free(entry);
@@ -613,9 +614,7 @@ int llam_runtime_prewarm_stack_cache(llam_runtime_t *rt,
                                      bool exact,
                                      uint64_t *achieved) {
     uint64_t completed = 0U;
-    long page_size;
     size_t stack_size;
-    size_t mapping_size;
     int saved_errno = errno;
 
     if (achieved != NULL) {
@@ -631,15 +630,15 @@ int llam_runtime_prewarm_stack_cache(llam_runtime_t *rt,
         return -1;
     }
 
-    page_size = llam_page_size();
     stack_size = llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT);
-    mapping_size = stack_size + (size_t)page_size;
     for (unsigned shard_id = 0U; shard_id < rt->active_shards; ++shard_id) {
         uint64_t share =
             llam_runtime_prewarm_share(total, rt->active_shards, shard_id);
 
         for (uint64_t i = 0U; i < share; ++i) {
             void *mapping;
+            void *stack_base;
+            size_t mapping_size;
             bool cached;
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
@@ -650,29 +649,22 @@ int llam_runtime_prewarm_stack_cache(llam_runtime_t *rt,
                 goto exhausted;
             }
 #endif
-            mapping = mmap(NULL,
-                           mapping_size,
-                           PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
-                           -1,
-                           0);
-            if (mapping == MAP_FAILED) {
-                goto exhausted;
-            }
-            if (mprotect(mapping, (size_t)page_size, PROT_NONE) != 0) {
-                (void)munmap(mapping, mapping_size);
+            if (llam_stack_vm_map(stack_size,
+                                  &mapping,
+                                  &mapping_size,
+                                  &stack_base) != 0) {
                 goto exhausted;
             }
             cached = llam_shard_stack_cache_push(&rt->shards[shard_id],
                                                  mapping,
                                                  mapping_size,
-                                                 (char *)mapping + page_size,
+                                                 stack_base,
                                                  stack_size);
             if (!cached) {
                 cached = llam_runtime_stack_cache_push(rt,
                                                        mapping,
                                                        mapping_size,
-                                                       (char *)mapping + page_size,
+                                                       stack_base,
                                                        stack_size,
                                                        NULL);
             }
@@ -705,9 +697,8 @@ exhausted:
  * @return 0 on success, -1 on allocation or context setup failure.
  */
 int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
-    long page_size = llam_page_size();
     size_t stack_size = llam_stack_bytes(stack_class);
-    size_t mapping_size = stack_size + (size_t)page_size;
+    size_t mapping_size = 0U;
     void *mapping;
     llam_shard_t *cache_shard = NULL;
     llam_runtime_t *rt;
@@ -731,27 +722,16 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     }
 
     // Lookup order is local shard cache, then runtime fallback cache, then a
-    // fresh guarded mmap. This preserves locality without failing if the owner
-    // shard has no warm stack available.
+    // fresh guarded platform mapping. This preserves locality without failing
+    // if the owner shard has no warm stack available.
     if (!llam_shard_stack_cache_pop(cache_shard, stack_size, &mapping, &mapping_size, &task->stack_base) &&
         !llam_runtime_stack_cache_pop(rt, stack_size, &mapping, &mapping_size, &task->stack_base)) {
-        mapping = mmap(NULL,
-                       mapping_size,
-                       PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK,
-                       -1,
-                       0);
-        if (mapping == MAP_FAILED) {
+        if (llam_stack_vm_map(stack_size,
+                              &mapping,
+                              &mapping_size,
+                              &task->stack_base) != 0) {
             return -1;
         }
-
-        if (mprotect(mapping, (size_t)page_size, PROT_NONE) != 0) {
-            int saved_errno = errno;
-            munmap(mapping, mapping_size);
-            errno = saved_errno;
-            return -1;
-        }
-        task->stack_base = (char *)mapping + page_size;
     }
     task->stack_mapping = mapping;
     task->mapping_size = mapping_size;
@@ -759,7 +739,8 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
     if (llam_ctx_init_fp_state(&task->ctx, task->owner_runtime) != 0) {
         int saved_errno = errno;
 
-        munmap(task->stack_mapping, task->mapping_size);
+        (void)llam_stack_vm_release(task->stack_mapping,
+                                    task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -809,7 +790,8 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         int saved_errno = errno;
 
         llam_ctx_destroy_fp_state(&task->ctx);
-        munmap(task->stack_mapping, task->mapping_size);
+        (void)llam_stack_vm_release(task->stack_mapping,
+                                    task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -822,7 +804,8 @@ int llam_alloc_task_stack(llam_task_t *task, llam_stack_class_t stack_class) {
         int saved_errno = errno;
 
         llam_ctx_destroy_fp_state(&task->ctx);
-        munmap(task->stack_mapping, task->mapping_size);
+        (void)llam_stack_vm_release(task->stack_mapping,
+                                    task->mapping_size);
         task->stack_mapping = NULL;
         task->mapping_size = 0U;
         task->stack_base = NULL;
@@ -888,7 +871,7 @@ void llam_task_release_stack(llam_task_t *task) {
         cache_shard = g_llam_tls_shard;
     }
     // Try to preserve home-shard locality first; overflow falls back to the
-    // runtime cache, which may finally munmap if all limits are reached.
+    // runtime cache, which may finally release if all limits are reached.
     if (!llam_shard_stack_cache_push(cache_shard, mapping, mapping_size, stack_base, stack_size)) {
         llam_runtime_stack_cache_push(rt, mapping, mapping_size, stack_base, stack_size, NULL);
     }

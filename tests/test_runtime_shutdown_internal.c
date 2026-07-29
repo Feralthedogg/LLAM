@@ -62,6 +62,154 @@ static int fail_msg(const char *message) {
     return 1;
 }
 
+static int exercise_stack_vm_boundary(void) {
+    const size_t stack_size = llam_stack_bytes(LLAM_STACK_CLASS_DEFAULT);
+    const size_t page_size = (size_t)llam_page_size();
+    const size_t overflow_size = SIZE_MAX - (SIZE_MAX % page_size);
+    void *mapping = NULL;
+    void *stack_base = NULL;
+    size_t mapping_size = 0U;
+    uint64_t resident_bytes = UINT64_MAX;
+    bool resident_valid = true;
+    unsigned char *bytes;
+    int rc = 1;
+
+    errno = 0;
+    if (llam_stack_vm_map(0U, &mapping, &mapping_size, &stack_base) != -1 ||
+        errno != EINVAL || mapping != NULL || mapping_size != 0U ||
+        stack_base != NULL) {
+        return fail_msg("stack VM map accepted an empty stack");
+    }
+    errno = 0;
+    if (llam_stack_vm_map(overflow_size,
+                          &mapping,
+                          &mapping_size,
+                          &stack_base) != -1 ||
+        errno != EOVERFLOW || mapping != NULL || mapping_size != 0U ||
+        stack_base != NULL) {
+        return fail_msg("stack VM map did not reject mapping-size overflow");
+    }
+    if (llam_stack_vm_map(stack_size,
+                          &mapping,
+                          &mapping_size,
+                          &stack_base) != 0) {
+        return fail_errno("stack VM map failed");
+    }
+    if (mapping == NULL || mapping == MAP_FAILED ||
+        mapping_size != stack_size + page_size ||
+        stack_base != (unsigned char *)mapping + page_size) {
+        rc = fail_msg("stack VM map returned an invalid guarded layout");
+        goto cleanup;
+    }
+    bytes = stack_base;
+    memset(bytes, 0xA5, stack_size);
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_runtime_test_reset_stack_vm_hooks();
+    llam_runtime_test_set_stack_vm_error(LLAM_TEST_STACK_VM_SCRUB, EIO);
+    errno = 0;
+    if (llam_stack_vm_secure_zero(stack_base, stack_size) != -1 ||
+        errno != EIO ||
+        llam_runtime_test_stack_vm_calls(LLAM_TEST_STACK_VM_SCRUB) != 1U ||
+        bytes[0] != 0xA5U) {
+        rc = fail_msg("stack VM scrub failure hook did not fail closed");
+        goto cleanup;
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+#endif
+
+    if (llam_stack_vm_secure_zero(stack_base, stack_size) != 0) {
+        rc = fail_errno("stack VM secure zero failed");
+        goto cleanup;
+    }
+    for (size_t index = 0U; index < stack_size; ++index) {
+        if (bytes[index] != 0U) {
+            rc = fail_msg("stack VM secure zero left caller data behind");
+            goto cleanup;
+        }
+    }
+    for (size_t offset = 0U; offset < stack_size; offset += page_size) {
+        bytes[offset] = (unsigned char)(offset / page_size + 1U);
+    }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_runtime_test_set_stack_vm_error(LLAM_TEST_STACK_VM_RESIDENT_SAMPLE,
+                                         EIO);
+    errno = 0;
+    if (llam_stack_vm_sample_resident(stack_base,
+                                      stack_size,
+                                      &resident_bytes,
+                                      &resident_valid) != -1 ||
+        errno != EIO || resident_bytes != 0U || resident_valid ||
+        llam_runtime_test_stack_vm_calls(
+            LLAM_TEST_STACK_VM_RESIDENT_SAMPLE) != 1U) {
+        rc = fail_msg("stack VM resident-sample failure hook was ambiguous");
+        goto cleanup;
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+#endif
+
+    if (llam_stack_vm_sample_resident(stack_base,
+                                      stack_size,
+                                      &resident_bytes,
+                                      &resident_valid) != 0 ||
+        (resident_valid &&
+         (resident_bytes > stack_size ||
+          resident_bytes % page_size != 0U)) ||
+        (!resident_valid && resident_bytes != 0U)) {
+        rc = fail_msg("stack VM resident sample violated its validity contract");
+        goto cleanup;
+    }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_runtime_test_set_stack_vm_error(LLAM_TEST_STACK_VM_DISCARD, EIO);
+    errno = 0;
+    if (llam_stack_vm_discard(stack_base, stack_size) != -1 ||
+        errno != EIO ||
+        llam_runtime_test_stack_vm_calls(LLAM_TEST_STACK_VM_DISCARD) != 1U) {
+        rc = fail_msg("stack VM discard failure hook did not propagate");
+        goto cleanup;
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+#endif
+
+    if (llam_stack_vm_discard(stack_base, stack_size) != 0) {
+        rc = fail_errno("stack VM discard failed");
+        goto cleanup;
+    }
+
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_runtime_test_set_stack_vm_error(LLAM_TEST_STACK_VM_REACTIVATE, EIO);
+    errno = 0;
+    if (llam_stack_vm_reactivate(stack_base, stack_size) != -1 ||
+        errno != EIO ||
+        llam_runtime_test_stack_vm_calls(
+            LLAM_TEST_STACK_VM_REACTIVATE) != 1U) {
+        rc = fail_msg("stack VM reactivate failure hook did not propagate");
+        goto cleanup;
+    }
+    llam_runtime_test_reset_stack_vm_hooks();
+#endif
+
+    if (llam_stack_vm_reactivate(stack_base, stack_size) != 0) {
+        rc = fail_errno("stack VM reactivate failed");
+        goto cleanup;
+    }
+    memset(stack_base, 0x5A, stack_size);
+    rc = 0;
+
+cleanup:
+#if defined(LLAM_ENABLE_TEST_HOOKS)
+    llam_runtime_test_reset_stack_vm_hooks();
+#endif
+    if (mapping != NULL &&
+        llam_stack_vm_release(mapping, mapping_size) != 0 &&
+        rc == 0) {
+        rc = fail_errno("stack VM release failed");
+    }
+    return rc;
+}
+
 static void *count_block_callback(void *arg) {
     atomic_uint *calls = arg;
 
@@ -7759,6 +7907,9 @@ cleanup:
 #endif
 
 int main(void) {
+    if (exercise_stack_vm_boundary() != 0) {
+        return 1;
+    }
 #if defined(LLAM_ENABLE_TEST_HOOKS)
     if (exercise_first_block_worker_create_failure_rolls_back_submission() != 0) {
         return 1;

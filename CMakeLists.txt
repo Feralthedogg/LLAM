@@ -111,6 +111,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/debug/trace.c
     src/core/sched/wake.c
     src/core/platform/platform.c
+    src/core/platform/stack_vm.c
     src/core/platform/windows_policy.c
     src/core/sched/safepoint.c
     src/core/wait/wait.c

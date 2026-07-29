@@ -63,12 +63,12 @@ prefix.
   audit
 - Modify: `tests/test_runtime_shutdown_internal.c`
 
-- [ ] Add focused map/release, discard/reactivate, secure-zero, and optional
+- [x] Add focused map/release, discard/reactivate, secure-zero, and optional
   resident-sampling helpers.
 - [ ] Linux uses `MADV_DONTNEED`; Darwin securely zeros when the selected
   policy cannot rely on discard zeroing; Windows decommits/recommits usable
   pages while retaining reservation and guard protection.
-- [ ] Add test-only typed failure hooks for discard, reactivate, scrub, and
+- [x] Add test-only typed failure hooks for discard, reactivate, scrub, and
   resident sampling.
 - [ ] Prove the Windows transition code with native CI and MinGW compile gates.
 

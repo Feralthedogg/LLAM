@@ -222,6 +222,18 @@ unsigned llam_env_flag(const char *name, unsigned default_value);
 unsigned llam_env_flag_value(const char *value, unsigned default_value);
 unsigned llam_max_unsigned(unsigned a, unsigned b);
 long llam_page_size(void);
+int llam_stack_vm_map(size_t stack_size,
+                      void **mapping_out,
+                      size_t *mapping_size_out,
+                      void **stack_base_out);
+int llam_stack_vm_release(void *mapping, size_t mapping_size);
+int llam_stack_vm_discard(void *stack_base, size_t stack_size);
+int llam_stack_vm_reactivate(void *stack_base, size_t stack_size);
+int llam_stack_vm_secure_zero(void *stack_base, size_t stack_size);
+int llam_stack_vm_sample_resident(void *stack_base,
+                                  size_t stack_size,
+                                  uint64_t *resident_bytes_out,
+                                  bool *valid_out);
 void llam_pause_cpu(void);
 uint64_t llam_slice_ns(llam_task_class_t task_class);
 const char *llam_stack_profile_hint(const llam_task_t *task);
@@ -242,6 +254,20 @@ int llam_runtime_restore_driver_affinity(llam_runtime_t *rt);
 bool llam_runtime_native_thread_enter(llam_runtime_t *rt, atomic_uint *counter);
 void llam_runtime_native_thread_exit(llam_runtime_t *rt, atomic_uint *counter);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
+typedef enum llam_test_stack_vm_operation {
+    LLAM_TEST_STACK_VM_DISCARD = 0,
+    LLAM_TEST_STACK_VM_REACTIVATE = 1,
+    LLAM_TEST_STACK_VM_SCRUB = 2,
+    LLAM_TEST_STACK_VM_RESIDENT_SAMPLE = 3,
+    LLAM_TEST_STACK_VM_OPERATION_COUNT = 4,
+} llam_test_stack_vm_operation_t;
+void llam_runtime_test_reset_stack_vm_hooks(void);
+void llam_runtime_test_set_stack_vm_error(
+    llam_test_stack_vm_operation_t operation,
+    int error_code);
+unsigned llam_runtime_test_stack_vm_calls(
+    llam_test_stack_vm_operation_t operation);
+
 typedef enum llam_test_affinity_operation {
     LLAM_TEST_AFFINITY_CAPTURE = 0,
     LLAM_TEST_AFFINITY_APPLY = 1,
