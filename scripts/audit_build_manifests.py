@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 import hashlib
@@ -117,6 +118,15 @@ ALLOWED_SIGNATURE_RECIPE_HASHES = {
     "c990f42521137951b7fe731a1ba3b76b36837ccb5002fd6b85a5f01db34b5795",
     "6516438d7c244e4e8533220d15fa9ffac35e194bc7d82feeb0b01794f021fd8e",
     "819d34e495e4b31aa4884003c614cbe83d24c329a0c9c3bdaf3104849b6268e5",
+    "f0a6256ac0f225058f9bef72bcc29af9a28289c20acef1a18b624139aac66377",
+    "3e039acabe122a955e80ddf8e72828a429c71942efbbfe37d16569909613feb0",
+    "a229dd1c9c7d454941cc91c34d9407a12d98c76cfb185988b9db786f29251a5a",
+}
+ALLOWED_MAKE_RECIPE_COUNTER_HASHES = {
+    # Canonical repository Makefile.
+    "4f46f2b833d180dcbf3910b12c2822479d9637b8c50b4b95ce84dfbe8068c78c",
+    # Independently derived mini-repository fixture.
+    "0cbd49d8804c20bbca8e0cff012aff2977800bd67b3172643ec7dca4f6ac097d",
 }
 
 
@@ -134,11 +144,22 @@ class MakeLogicalIR:
 
 
 @dataclass(frozen=True)
+class MakeRuleIR:
+    targets: tuple[str, ...]
+    prerequisites: str
+    header: MakeLogicalIR
+    recipes: tuple[MakeLogicalIR, ...]
+    inline_recipe: str | None
+
+
+@dataclass(frozen=True)
 class MakeIR:
     """A single, source-located parse of the canonical Makefile."""
 
     text: str
     logical_lines: tuple[MakeLogicalIR, ...]
+    rules: tuple[MakeRuleIR, ...]
+    recipe_rule_counts: tuple[tuple[str, int], ...]
     diagnostics: tuple[str, ...]
     consumed: int
 
@@ -165,6 +186,15 @@ class CMakeIR:
     consumed: int
 
 
+@dataclass(frozen=True)
+class YamlMappingIR:
+    line: int
+    indent: int
+    list_item: bool
+    key: str
+    value: str
+
+
 class Audit:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -183,6 +213,10 @@ class Audit:
             list[tuple[str, str, list[str], bool | None]],
         ] = {}
         self._active_make_text_cache: dict[tuple[Any, ...], str] = {}
+        self._active_make_entries_cache: dict[
+            tuple[Any, ...],
+            tuple[MakeLogicalIR, ...],
+        ] = {}
         self._make_projection_cache: dict[
             tuple[Any, ...],
             MakeProjection,
@@ -249,6 +283,19 @@ class Audit:
             )
         return self._active_make_text_cache[key]
 
+    def active_make_entries(
+        self,
+        config: dict[str, Any],
+    ) -> tuple[MakeLogicalIR, ...]:
+        if self.make_ir is None:
+            return ()
+        key = self.configuration_key(id(self.make_ir), config)
+        if key not in self._active_make_entries_cache:
+            self._active_make_entries_cache[key] = tuple(
+                active_make_ir_entries(self.make_ir, config, self)
+            )
+        return self._active_make_entries_cache[key]
+
     def make_projection(
         self,
         text: str,
@@ -261,7 +308,8 @@ class Audit:
         if key not in self._make_projection_cache:
             self._make_projection_cache[key] = MakeProjection(
                 self.root,
-                self.active_make_text(text, config),
+                self.active_make_entries(config),
+                self.make_ir.rules if self.make_ir is not None else (),
                 self,
             )
         return self._make_projection_cache[key]
@@ -867,7 +915,12 @@ class Audit:
             ),
         }
         check_declarative_subset(make_text, cmake_text, self)
-        make = MakeProjection(self.root, make_text, self)
+        make = MakeProjection(
+            self.root,
+            self.make_ir.logical_lines if self.make_ir is not None else (),
+            self.make_ir.rules if self.make_ir is not None else (),
+            self,
+        )
         cmake = CMakeProjection(cmake_text, self)
 
         self.compare_source_group(
@@ -1266,11 +1319,6 @@ class Audit:
         )
         for config in runtime_configurations(cmake=False):
             projection = self.make_projection(make_text, config)
-            for target, count in projection.recipe_rule_counts.items():
-                if count > 1:
-                    self.error(
-                        f"Make {target} has {count} recipe-bearing rules"
-                    )
             for target in ("test", "check"):
                 if not make_target_reaches(
                     projection.rules,
@@ -1998,10 +2046,30 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
         if audit.make_ir is not None
         else parse_make_ir(text).logical_lines
     )
+    make_ir = audit.make_ir if audit.make_ir is not None else parse_make_ir(text)
+    recipe_counter_projection = json.dumps(
+        make_ir.recipe_rule_counts,
+        separators=(",", ":"),
+    )
+    recipe_counter_hash = hashlib.sha256(
+        recipe_counter_projection.encode("utf-8")
+    ).hexdigest()
+    if recipe_counter_hash not in ALLOWED_MAKE_RECIPE_COUNTER_HASHES:
+        audit.error("Make recipe-bearing rule Counter is not exact")
     for entry in logical_entries:
         clean = strip_unquoted_comment(entry.text).strip()
         if not clean or entry.recipe:
             continue
+        if re.match(
+            (
+                r"^(?:(?:override|export|private)\s+)?"
+                r"[A-Za-z_.][A-Za-z0-9_.-]*\s*!="
+            ),
+            clean,
+        ):
+            audit.error(
+                f"Makefile:{entry.line}: shell assignment is unsupported"
+            )
         define = re.match(
             (
                 r"^(?:override\s+)?define\s+"
@@ -2701,14 +2769,24 @@ def check_declarative_subset(
 
 
 class MakeProjection:
-    def __init__(self, root: Path, text: str, audit: Audit) -> None:
+    def __init__(
+        self,
+        root: Path,
+        entries: Iterable[MakeLogicalIR],
+        rule_irs: Iterable[MakeRuleIR],
+        audit: Audit,
+    ) -> None:
         self.root = root
         self.audit = audit
         self.variables: dict[str, list[str]] = {}
         self.rules: dict[str, list[str]] = {}
         self.recipes: dict[str, list[str]] = {}
-        self.recipe_rule_counts: dict[str, int] = {}
-        for line in logical_make_lines(text):
+        active_entries = tuple(entries)
+        active_starts = {entry.start for entry in active_entries}
+        for entry in active_entries:
+            if entry.recipe:
+                continue
+            line = strip_unquoted_comment(entry.text).strip()
             assignment = re.match(
                 r"^([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|:=|\?=|=)\s*(.*)$",
                 line,
@@ -2722,33 +2800,18 @@ class MakeProjection:
                     continue
                 else:
                     self.variables[name] = tokens
+        for rule in rule_irs:
+            if rule.header.start not in active_starts:
                 continue
-            rule = re.match(r"^([^:=\s][^:]*)\s*:\s*(.*)$", line)
-            if rule:
-                targets, prerequisites = rule.groups()
-                for target in targets.split():
-                    self.rules.setdefault(target, []).extend(
-                        prerequisites.split()
-                    )
-        active_targets: list[str] = []
-        counted_recipe_rule = False
-        for physical in text.splitlines():
-            if physical.startswith("\t"):
-                if active_targets and not counted_recipe_rule:
-                    for target in active_targets:
-                        self.recipe_rule_counts[target] = (
-                            self.recipe_rule_counts.get(target, 0) + 1
-                        )
-                    counted_recipe_rule = True
-                for target in active_targets:
-                    self.recipes.setdefault(target, []).append(physical[1:])
-                continue
-            active_targets = []
-            counted_recipe_rule = False
-            stripped = physical.strip()
-            rule = re.match(r"^([^:=\s][^:]*)\s*:\s*(.*)$", stripped)
-            if rule:
-                active_targets = rule.group(1).split()
+            prerequisites = rule.prerequisites.split()
+            recipes = [
+                entry.text[1:]
+                for entry in rule.recipes
+                if entry.text.startswith("\t")
+            ]
+            for target in rule.targets:
+                self.rules.setdefault(target, []).extend(prerequisites)
+                self.recipes.setdefault(target, []).extend(recipes)
 
     def raw_tokens(self, variable: str) -> list[str]:
         return list(self.variables.get(variable, []))
@@ -3190,7 +3253,9 @@ def check_package_version_state(text: str, audit: Audit) -> None:
         'abi_major="${LLAM_ABI_MAJOR:-2}"',
         'library_version="${LLAM_VERSION:-2.2.0}"',
     )
-    lines = fold_shell_logical_lines(text)
+    lines = [
+        line for line in fold_shell_logical_lines(text) if line
+    ]
     starts = [
         index
         for index in range(
@@ -3239,8 +3304,19 @@ def check_package_version_state(text: str, audit: Audit) -> None:
             )
     if assignments != list(expected_preamble):
         audit.error("package version assignment multiset is not exact")
+    readonly = "readonly version abi_major library_version"
+    readonly_indices = [
+        index for index, line in enumerate(lines) if line == readonly
+    ]
+    if readonly_indices != (
+        [start + len(expected_preamble)] if start >= 0 else []
+    ):
+        audit.error("package version readonly projection is not exact")
     expected_writers = {
         "VERSION": 'printf \'%s\\n\' "$version" > "$stage/VERSION"',
+        "ABI_MAJOR": (
+            'printf \'%s\\n\' "$abi_major" > "$stage/ABI_MAJOR"'
+        ),
         "LIBRARY_VERSION": (
             'printf \'%s\\n\' "$library_version" '
             '> "$stage/LIBRARY_VERSION"'
@@ -3259,6 +3335,103 @@ def check_package_version_state(text: str, audit: Audit) -> None:
             audit.error(
                 f"package {filename} writer projection is not exact"
             )
+    expected_readback = (
+        'if [ "$(cat "$stage/VERSION")" != "$version" ] || '
+        '[ "$(cat "$stage/ABI_MAJOR")" != "$abi_major" ] || '
+        '[ "$(cat "$stage/LIBRARY_VERSION")" != '
+        '"$library_version" ]; then'
+    )
+    expected_archive = (
+        'if ! tar -C "$out_dir" -cJf "$archive" '
+        '"$package_name" 2>/dev/null; then'
+    )
+    expected_metadata_generator = (
+        'LLAM_VERSION="$library_version" '
+        'LLAM_ABI_MAJOR="$abi_major" '
+        '"$root_dir/scripts/generate_sdk_metadata.sh" '
+        '"$stage" "$target"'
+    )
+    expected_sequence = [
+        *expected_writers.values(),
+        'validate_safe_stage_tree "$stage"',
+        expected_readback,
+        'echo "staged release version metadata mismatch" >&2',
+        "exit 1",
+        "fi",
+        expected_archive,
+    ]
+    sequence_starts = [
+        index
+        for index in range(
+            max(0, len(lines) - len(expected_sequence) + 1)
+        )
+        if lines[index : index + len(expected_sequence)]
+        == expected_sequence
+    ]
+    metadata_generator_indices = [
+        index
+        for index, line in enumerate(lines)
+        if line == expected_metadata_generator
+    ]
+    if (
+        len(sequence_starts) != 1
+        or metadata_generator_indices != [sequence_starts[0] - 1]
+    ):
+        audit.error(
+            "package writer/readback/archive sequence is not exact"
+        )
+    allowed_metadata_references = {
+        *expected_writers.values(),
+        expected_readback,
+    }
+    metadata_path = re.compile(
+        (
+            r"\$(?:stage\b|\{stage\})\"?/"
+            r"(?:VERSION|ABI_MAJOR|LIBRARY_VERSION)\b"
+        )
+    )
+    for index, line in enumerate(lines):
+        if (
+            metadata_path.search(line)
+            and line not in allowed_metadata_references
+        ):
+            audit.error(
+                "package version metadata has unsupported executable "
+                f"reference at line {index + 1}"
+            )
+    protected_pattern = r"(?:version|abi_major|library_version)"
+    for index, line in enumerate(lines):
+        if re.search(
+            rf"(?:^|[;]\s*)for\s+{protected_pattern}\s+in\b",
+            line,
+        ) or re.search(
+            rf"(?:^|[;&|]\s*)read(?:\s+\S+)*\s+{protected_pattern}\b",
+            line,
+        ):
+            audit.error(
+                "package version state uses unsupported loop/read "
+                f"mutation at line {index + 1}"
+            )
+    expected_fallback_archive = (
+        'tar -C "$out_dir" -cf - "$package_name" | '
+        'xz -z -c > "$archive"'
+    )
+    archive_writers = [
+        line
+        for line in lines
+        if (
+            re.search(r"\$(?:\{archive\}|archive\b)", line)
+            and (
+                re.match(r"^(?:if ! )?tar\b", line)
+                or re.search(r">\s*\"\$archive\"(?:\s|$)", line)
+            )
+        )
+    ]
+    if archive_writers not in (
+        [expected_archive],
+        [expected_archive, expected_fallback_archive],
+    ):
+        audit.error("package archive writer inventory is not exact")
 
 
 def logical_make_lines(text: str) -> list[str]:
@@ -3283,6 +3456,24 @@ def logical_make_lines(text: str) -> list[str]:
     if current:
         result.append(current.strip())
     return result
+
+
+def parse_make_rule_header(
+    entry: MakeLogicalIR,
+) -> tuple[tuple[str, ...], str, str | None] | None:
+    clean = strip_unquoted_comment(entry.text).strip()
+    match = re.match(r"^([^:=\s][^:]*?)\s*:(?!=)\s*(.*)$", clean)
+    if match is None:
+        return None
+    targets_text, remainder = match.groups()
+    inline_recipe: str | None = None
+    if ";" in remainder:
+        remainder, inline_recipe = remainder.split(";", 1)
+        inline_recipe = inline_recipe.strip()
+    targets = tuple(targets_text.split())
+    if not targets:
+        return None
+    return targets, remainder.strip(), inline_recipe
 
 
 def parse_make_ir(text: str) -> MakeIR:
@@ -3324,30 +3515,34 @@ def parse_make_ir(text: str) -> MakeIR:
         )
 
     condition_stack: list[tuple[str, int, bool]] = []
+    rule_builders: list[dict[str, Any]] = []
+    current_rule: dict[str, Any] | None = None
     define_line: int | None = None
-    current_rule = False
     for entry in logical:
         clean = strip_unquoted_comment(entry.text).strip()
-        if not clean:
-            continue
         if define_line is not None:
             if re.fullmatch(r"endef", clean):
                 define_line = None
             continue
+        if entry.recipe:
+            if current_rule is None:
+                diagnostics.append(
+                    f"Makefile:{entry.line}: recipe has no owning rule"
+                )
+            else:
+                current_rule["recipes"].append(entry)
+            continue
+        if not clean:
+            continue
         if re.match(r"^(?:override\s+)?define(?:\s|$)", clean):
             define_line = entry.line
-            current_rule = False
+            current_rule = None
             continue
         if clean == "endef":
             diagnostics.append(
                 f"Makefile:{entry.line}: orphan endef"
             )
-            continue
-        if entry.recipe:
-            if not current_rule:
-                diagnostics.append(
-                    f"Makefile:{entry.line}: recipe has no owning rule"
-                )
+            current_rule = None
             continue
         conditional = re.match(
             r"^(ifeq|ifneq|ifdef|ifndef)(?:\s|$)",
@@ -3357,7 +3552,7 @@ def parse_make_ir(text: str) -> MakeIR:
             condition_stack.append(
                 (conditional.group(1), entry.line, False)
             )
-            current_rule = False
+            current_rule = None
             continue
         if re.match(r"^else(?:\s|$)", clean):
             if not condition_stack:
@@ -3376,7 +3571,7 @@ def parse_make_ir(text: str) -> MakeIR:
                     line,
                     seen_else or bare_else,
                 )
-            current_rule = False
+            current_rule = None
             continue
         if clean == "endif":
             if not condition_stack:
@@ -3385,7 +3580,7 @@ def parse_make_ir(text: str) -> MakeIR:
                 )
             else:
                 condition_stack.pop()
-            current_rule = False
+            current_rule = None
             continue
         assignment = re.match(
             (
@@ -3395,7 +3590,7 @@ def parse_make_ir(text: str) -> MakeIR:
             ),
             clean,
         )
-        rule = re.match(r"^[^:=\s][^:]*:(?!=)", clean)
+        parsed_rule = parse_make_rule_header(entry)
         directive = re.match(
             r"^(?:-?include|sinclude|export|unexport|undefine)(?:\s|$)",
             clean,
@@ -3404,10 +3599,22 @@ def parse_make_ir(text: str) -> MakeIR:
             r"\$\((?:error|warning|info)\b.*\)",
             clean,
         )
-        if rule:
-            current_rule = True
+        if parsed_rule is not None and assignment is None:
+            targets, prerequisites, inline_recipe = parsed_rule
+            current_rule = {
+                "targets": targets,
+                "prerequisites": prerequisites,
+                "header": entry,
+                "recipes": [],
+                "inline_recipe": inline_recipe,
+            }
+            rule_builders.append(current_rule)
+            if inline_recipe is not None:
+                diagnostics.append(
+                    f"Makefile:{entry.line}: inline recipes are unsupported"
+                )
         else:
-            current_rule = False
+            current_rule = None
             if not assignment and not directive and not standalone_function:
                 diagnostics.append(
                     f"Makefile:{entry.line}: unknown structural syntax: "
@@ -3421,9 +3628,27 @@ def parse_make_ir(text: str) -> MakeIR:
         diagnostics.append(
             f"Makefile:{line}: unterminated {name}"
         )
+    rules = tuple(
+        MakeRuleIR(
+            targets=builder["targets"],
+            prerequisites=builder["prerequisites"],
+            header=builder["header"],
+            recipes=tuple(builder["recipes"]),
+            inline_recipe=builder["inline_recipe"],
+        )
+        for builder in rule_builders
+    )
+    recipe_counts = Counter(
+        target
+        for rule in rules
+        if rule.recipes or rule.inline_recipe is not None
+        for target in rule.targets
+    )
     return MakeIR(
         text=text,
         logical_lines=tuple(logical),
+        rules=rules,
+        recipe_rule_counts=tuple(sorted(recipe_counts.items())),
         diagnostics=tuple(diagnostics),
         consumed=len(text),
     )
@@ -3587,6 +3812,90 @@ def make_environment(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def active_make_ir_entries(
+    make_ir: MakeIR,
+    config: dict[str, Any],
+    audit: Audit,
+) -> list[MakeLogicalIR]:
+    env = make_environment(config)
+    frames: list[dict[str, bool | None]] = []
+    active: bool | None = True
+    output: list[MakeLogicalIR] = []
+    unknown_reported = False
+    define_depth = 0
+    for entry in make_ir.logical_lines:
+        line = strip_unquoted_comment(entry.text).strip()
+        if define_depth:
+            if line == "endef":
+                define_depth -= 1
+            if active is True:
+                output.append(entry)
+            continue
+        if re.match(r"^(?:override\s+)?define(?:\s|$)", line):
+            define_depth += 1
+            if active is True:
+                output.append(entry)
+            continue
+        conditional = re.match(
+            r"^(ifeq|ifneq|ifdef|ifndef)(?:\s+|$)",
+            line,
+        )
+        if conditional:
+            condition = (
+                make_condition(line, env)
+                if conditional.group(1) in {"ifeq", "ifneq"}
+                else None
+            )
+            frames.append({"parent": active, "prior": condition})
+            active = tri_and(active, condition)
+            continue
+        else_conditional = re.match(
+            r"^else\s+(ifeq|ifneq|ifdef|ifndef)(?:\s+|$)",
+            line,
+        )
+        if else_conditional:
+            if frames:
+                frame = frames[-1]
+                condition = (
+                    make_condition(line.removeprefix("else "), env)
+                    if else_conditional.group(1) in {"ifeq", "ifneq"}
+                    else None
+                )
+                active = tri_and(
+                    frame["parent"],
+                    tri_and(tri_not(frame["prior"]), condition),
+                )
+                frame["prior"] = tri_or(frame["prior"], condition)
+            continue
+        if line == "else":
+            if frames:
+                frame = frames[-1]
+                active = tri_and(
+                    frame["parent"],
+                    tri_not(frame["prior"]),
+                )
+                frame["prior"] = True
+            continue
+        if line == "endif":
+            if frames:
+                frame = frames.pop()
+                active = frame["parent"]
+            continue
+        if active is True:
+            output.append(entry)
+        elif (
+            active is None
+            and not unknown_reported
+            and make_line_touches_audited(line, audit)
+        ):
+            audit.error(
+                f"Make {config['label']} research={config['research']} "
+                "audit enforcement is guarded by an unsupported condition"
+            )
+            unknown_reported = True
+    return output
+
+
 def active_make_lines(
     text: str,
     config: dict[str, Any],
@@ -3747,116 +4056,6 @@ def make_target_reaches(
     return False
 
 
-def check_linux_workflow_audit_step(text: str, audit: Audit) -> None:
-    lines = [strip_yaml_comment(line).rstrip() for line in text.splitlines()]
-    if any(
-        re.search(r"(?:^|\s)[&*][A-Za-z_][A-Za-z0-9_-]*", line)
-        for line in lines
-    ):
-        audit.error(
-            "Linux CI build-manifest gate uses unsupported YAML indirection"
-        )
-    matching_steps = 0
-    valid_steps = 0
-    index = 0
-    while index < len(lines):
-        match = re.match(
-            r"^(\s*)-\s+name\s*:\s*Audit build manifests\s*$",
-            lines[index],
-        )
-        if match is None:
-            index += 1
-            continue
-        matching_steps += 1
-        base_indent = len(match.group(1))
-        job_start: int | None = None
-        for candidate in range(index - 1, -1, -1):
-            job = re.match(
-                r"^(\s{2})([A-Za-z0-9_-]+)\s*:\s*$",
-                lines[candidate],
-            )
-            if job:
-                job_start = candidate
-                break
-        job_enabled = job_start is not None
-        if job_start is None:
-            audit.error(
-                "Linux CI build-manifest audit step has no literal job"
-            )
-        else:
-            job_end = len(lines)
-            for candidate in range(job_start + 1, len(lines)):
-                if re.match(
-                    r"^\s{2}[A-Za-z0-9_-]+\s*:\s*$",
-                    lines[candidate],
-                ):
-                    job_end = candidate
-                    break
-            for job_line in lines[job_start + 1 : job_end]:
-                field = re.match(
-                    r"^\s{4}(if)\s*:\s*(.*?)\s*$",
-                    job_line,
-                )
-                if field and not yaml_gate_is_true(field.group(2)):
-                    job_enabled = False
-                    audit.error(
-                        "Linux CI build-manifest job is disabled or uses "
-                        "an unsupported condition"
-                    )
-        step_enabled = True
-        exact_run = False
-        continue_safe = True
-        index += 1
-        while index < len(lines):
-            line = lines[index]
-            next_step = re.match(r"^(\s*)-\s+name\s*:", line)
-            if next_step and len(next_step.group(1)) == base_indent:
-                break
-            if line.strip() and len(line) - len(line.lstrip()) < base_indent:
-                break
-            indentation = len(line) - len(line.lstrip())
-            field = (
-                re.match(
-                    (
-                        r"^(run|if|continue-on-error)"
-                        r"\s*:\s*(.*?)\s*$"
-                    ),
-                    line.lstrip(),
-                )
-                if indentation == base_indent + 2
-                else None
-            )
-            if field:
-                name, value = field.groups()
-                value = value.strip().strip("\"'")
-                if name == "run" and value == (
-                    "python3 scripts/audit_build_manifests.py "
-                    "--root . --check"
-                ):
-                    exact_run = True
-                elif name == "if":
-                    if not yaml_gate_is_true(value):
-                        step_enabled = False
-                        audit.error(
-                            "Linux CI build-manifest audit step has an "
-                            "unsupported condition"
-                        )
-                elif name == "continue-on-error" and not yaml_gate_is_false(
-                    value
-                ):
-                    continue_safe = False
-                    audit.error(
-                        "Linux CI build-manifest audit step uses "
-                        "continue-on-error"
-                    )
-            index += 1
-        if job_enabled and step_enabled and continue_safe and exact_run:
-            valid_steps += 1
-    if matching_steps != 1 or valid_steps != 1:
-        audit.error("Linux CI build-manifest audit step is disabled")
-        audit.error("Linux CI build-manifest audit step is missing")
-
-
 def strip_yaml_comment(line: str) -> str:
     quote = ""
     escaped = False
@@ -3879,14 +4078,213 @@ def strip_yaml_comment(line: str) -> str:
     return line
 
 
-def yaml_gate_is_true(value: str) -> bool:
-    normalized = re.sub(r"\s+", "", value.strip().strip("\"'")).lower()
-    return normalized in {"true", "1", "yes", "on", "${{true}}", "${{1}}"}
+def normalize_yaml_scalar(value: str) -> str | None:
+    value = value.strip()
+    if not value:
+        return ""
+    if value.startswith('"'):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, str) else None
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            return None
+        return value[1:-1].replace("''", "'")
+    return value
 
 
-def yaml_gate_is_false(value: str) -> bool:
-    normalized = re.sub(r"\s+", "", value.strip().strip("\"'")).lower()
-    return normalized in {"false", "0", "no", "off", "${{false}}", "${{0}}"}
+def parse_yaml_mapping_ir(text: str) -> tuple[list[str], list[YamlMappingIR]]:
+    lines = [strip_yaml_comment(line).rstrip() for line in text.splitlines()]
+    entries: list[YamlMappingIR] = []
+    key_pattern = (
+        r'(?:"(?:\\.|[^"])*"|\'(?:\'\'|[^\'])*\'|'
+        r"[A-Za-z0-9_-]+|<<)"
+    )
+    for line_number, line in enumerate(lines, 1):
+        match = re.match(
+            (
+                rf"^(?P<indent> *)(?P<list>-\s+)?"
+                rf"(?P<key>{key_pattern})\s*:\s*"
+                r"(?P<value>.*)$"
+            ),
+            line,
+        )
+        if match is None:
+            continue
+        key = normalize_yaml_scalar(match.group("key"))
+        value = normalize_yaml_scalar(match.group("value"))
+        if key is None or value is None:
+            continue
+        entries.append(
+            YamlMappingIR(
+                line=line_number,
+                indent=len(match.group("indent")),
+                list_item=match.group("list") is not None,
+                key=key,
+                value=value,
+            )
+        )
+    return lines, entries
+
+
+def yaml_mapping_range_end(
+    lines: list[str],
+    start: int,
+    indent: int,
+) -> int:
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        line_indent = len(line) - len(line.lstrip())
+        if line_indent <= indent:
+            return index
+    return len(lines)
+
+
+def check_linux_workflow_audit_step(text: str, audit: Audit) -> None:
+    lines, entries = parse_yaml_mapping_ir(text)
+    entries_by_line = {entry.line - 1: entry for entry in entries}
+    expected_run = (
+        "python3 scripts/audit_build_manifests.py --root . --check"
+    )
+    candidates = [
+        entry
+        for entry in entries
+        if entry.list_item
+        and entry.key == "name"
+        and entry.value == "Audit build manifests"
+    ]
+    valid_steps = 0
+    for candidate in candidates:
+        step_start = candidate.line - 1
+        step_end = yaml_mapping_range_end(
+            lines,
+            step_start,
+            candidate.indent,
+        )
+        job = next(
+            (
+                entry
+                for entry in reversed(entries)
+                if entry.line < candidate.line
+                and not entry.list_item
+                and entry.indent == 2
+                and entry.value == ""
+            ),
+            None,
+        )
+        if job is None:
+            audit.error(
+                "Linux CI build-manifest audit step has no literal job"
+            )
+            continue
+        job_start = job.line - 1
+        job_end = yaml_mapping_range_end(lines, job_start, job.indent)
+        job_fields = [
+            entry
+            for entry in entries
+            if job_start < entry.line - 1 < job_end
+            and not entry.list_item
+            and entry.indent == job.indent + 2
+        ]
+        step_fields = [
+            candidate,
+            *(
+                entry
+                for entry in entries
+                if step_start < entry.line - 1 < step_end
+                and not entry.list_item
+                and entry.indent == candidate.indent + 2
+            ),
+        ]
+        valid = True
+        for label, fields in (
+            ("job", job_fields),
+            ("audit step", step_fields),
+        ):
+            counts = Counter(field.key for field in fields)
+            duplicates = sorted(
+                key for key, count in counts.items() if count != 1
+            )
+            if duplicates:
+                valid = False
+                audit.error(
+                    "Linux CI build-manifest "
+                    f"{label} has duplicate YAML keys: "
+                    + ", ".join(duplicates)
+                )
+            for field in fields:
+                if (
+                    field.key == "<<"
+                    or field.value.startswith(("*", "&"))
+                    or field.value in {"|", "|-", "|+", ">", ">-", ">+"}
+                ):
+                    valid = False
+                    audit.error(
+                        "Linux CI build-manifest "
+                        f"{label} uses unsupported YAML indirection"
+                    )
+        job_keys = Counter(field.key for field in job_fields)
+        step_keys = Counter(field.key for field in step_fields)
+        if job_keys["if"]:
+            valid = False
+            audit.error(
+                "Linux CI build-manifest job is disabled or uses "
+                "an unsupported condition"
+            )
+        if step_keys["if"]:
+            valid = False
+            audit.error(
+                "Linux CI build-manifest audit step has an "
+                "unsupported condition"
+            )
+        if step_keys["continue-on-error"]:
+            valid = False
+            audit.error(
+                "Linux CI build-manifest audit step uses "
+                "continue-on-error"
+            )
+        names = [
+            field.value for field in step_fields if field.key == "name"
+        ]
+        runs = [
+            field.value for field in step_fields if field.key == "run"
+        ]
+        if names != ["Audit build manifests"] or runs != [expected_run]:
+            valid = False
+        for line_index in range(job_start + 1, job_end):
+            line = lines[line_index]
+            indentation = len(line) - len(line.lstrip())
+            if (
+                line.strip()
+                and indentation == job.indent + 2
+                and line_index not in entries_by_line
+            ):
+                valid = False
+                audit.error(
+                    "Linux CI build-manifest job uses unsupported YAML"
+                )
+        for line_index in range(step_start + 1, step_end):
+            line = lines[line_index]
+            indentation = len(line) - len(line.lstrip())
+            if (
+                line.strip()
+                and indentation == candidate.indent + 2
+                and line_index not in entries_by_line
+            ):
+                valid = False
+                audit.error(
+                    "Linux CI build-manifest audit step uses "
+                    "unsupported YAML"
+                )
+        if valid:
+            valid_steps += 1
+    if len(candidates) != 1 or valid_steps != 1:
+        audit.error("Linux CI build-manifest audit step is disabled")
+        audit.error("Linux CI build-manifest audit step is missing")
 
 
 def cmake_condition(
@@ -4713,6 +5111,8 @@ def parse_cmake_ir(text: str) -> CMakeIR:
         cursor = body_start
         quoted = False
         escaped = False
+        argument_boundary = True
+        bracket_argument_ended = False
         while cursor < length and depth:
             char = text[cursor]
             if quoted:
@@ -4725,7 +5125,20 @@ def parse_cmake_ir(text: str) -> CMakeIR:
                 cursor += 1
                 continue
             if char == '"':
+                if bracket_argument_ended:
+                    diagnostics.append(
+                        f"CMakeLists.txt:"
+                        f"{text.count(chr(10), 0, cursor) + 1}: "
+                        "bracket argument has an unseparated trailing token"
+                    )
+                    bracket_argument_ended = False
                 quoted = True
+                argument_boundary = False
+                cursor += 1
+                continue
+            if char.isspace():
+                argument_boundary = True
+                bracket_argument_ended = False
                 cursor += 1
                 continue
             if char == "#":
@@ -4737,23 +5150,47 @@ def parse_cmake_ir(text: str) -> CMakeIR:
                         cursor = length
                         break
                     cursor = close + len(closer)
+                    argument_boundary = True
+                    bracket_argument_ended = False
                     continue
                 newline = text.find("\n", cursor)
                 cursor = length if newline < 0 else newline + 1
+                argument_boundary = True
+                bracket_argument_ended = False
                 continue
             bracket = cmake_bracket_delimiter(text, cursor)
             if bracket is not None:
+                if not argument_boundary:
+                    diagnostics.append(
+                        f"CMakeLists.txt:"
+                        f"{text.count(chr(10), 0, cursor) + 1}: "
+                        "bracket argument opener is not at an argument "
+                        "boundary"
+                    )
                 opener_end, closer = bracket
                 close = text.find(closer, opener_end)
                 if close < 0:
                     cursor = length
                     break
                 cursor = close + len(closer)
+                argument_boundary = False
+                bracket_argument_ended = True
                 continue
+            if bracket_argument_ended and char != ")":
+                diagnostics.append(
+                    f"CMakeLists.txt:"
+                    f"{text.count(chr(10), 0, cursor) + 1}: "
+                    "bracket argument has an unseparated trailing token"
+                )
+                bracket_argument_ended = False
             if char == "(":
                 depth += 1
+                argument_boundary = True
             elif char == ")":
                 depth -= 1
+                argument_boundary = False
+            else:
+                argument_boundary = False
             cursor += 1
         if depth:
             line = text.count("\n", 0, start) + 1

@@ -18,6 +18,7 @@ version="${LLAM_RELEASE_VERSION:-${GITHUB_REF_NAME:-v2.2.0}}"
 version="${version#v}"
 abi_major="${LLAM_ABI_MAJOR:-2}"
 library_version="${LLAM_VERSION:-2.2.0}"
+readonly version abi_major library_version
 out_dir="$root_dir/target/dist"
 host_os="$(uname -s)"
 
@@ -410,9 +411,6 @@ mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/l
 validate_safe_output_path "$stage" 0
 validate_safe_stage_tree "$stage"
 
-printf '%s\n' "$version" > "$stage/VERSION"
-printf '%s\n' "$abi_major" > "$stage/ABI_MAJOR"
-printf '%s\n' "$library_version" > "$stage/LIBRARY_VERSION"
 cp "$root_dir/LICENSE" "$root_dir/README.md" "$root_dir/CHANGELOG.md" "$stage/"
 cp "$root_dir/scripts/install.sh" "$root_dir/scripts/install.ps1" "$stage/"
 cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" "$stage/scripts/"
@@ -444,7 +442,17 @@ esac
 LLAM_VERSION="$library_version" LLAM_ABI_MAJOR="$abi_major" \
     "$root_dir/scripts/generate_sdk_metadata.sh" "$stage" "$target"
 
+printf '%s\n' "$version" > "$stage/VERSION"
+printf '%s\n' "$abi_major" > "$stage/ABI_MAJOR"
+printf '%s\n' "$library_version" > "$stage/LIBRARY_VERSION"
 validate_safe_stage_tree "$stage"
+
+if [ "$(cat "$stage/VERSION")" != "$version" ] || \
+   [ "$(cat "$stage/ABI_MAJOR")" != "$abi_major" ] || \
+   [ "$(cat "$stage/LIBRARY_VERSION")" != "$library_version" ]; then
+    echo "staged release version metadata mismatch" >&2
+    exit 1
+fi
 
 if ! tar -C "$out_dir" -cJf "$archive" "$package_name" 2>/dev/null; then
     rm -f "$archive"

@@ -519,11 +519,35 @@ def valid_package_script() -> str:
             'version="${version#v}"',
             'abi_major="${LLAM_ABI_MAJOR:-2}"',
             'library_version="${LLAM_VERSION:-2.2.0}"',
+            "readonly version abi_major library_version",
+            (
+                'LLAM_VERSION="$library_version" '
+                'LLAM_ABI_MAJOR="$abi_major" '
+                '"$root_dir/scripts/generate_sdk_metadata.sh" '
+                '"$stage" "$target"'
+            ),
             'printf \'%s\\n\' "$version" > "$stage/VERSION"',
+            'printf \'%s\\n\' "$abi_major" > "$stage/ABI_MAJOR"',
             (
                 'printf \'%s\\n\' "$library_version" '
                 '> "$stage/LIBRARY_VERSION"'
             ),
+            'validate_safe_stage_tree "$stage"',
+            (
+                'if [ "$(cat "$stage/VERSION")" != "$version" ] || '
+                '[ "$(cat "$stage/ABI_MAJOR")" != "$abi_major" ] || '
+                '[ "$(cat "$stage/LIBRARY_VERSION")" != '
+                '"$library_version" ]; then'
+            ),
+            'echo "staged release version metadata mismatch" >&2',
+            "exit 1",
+            "fi",
+            (
+                'if ! tar -C "$out_dir" -cJf "$archive" '
+                '"$package_name" 2>/dev/null; then'
+            ),
+            "exit 1",
+            "fi",
             "",
         ]
     )
@@ -2689,6 +2713,58 @@ class BuildManifestAuditTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("recipe-bearing rule", result.stderr)
 
+    def test_rejects_continued_and_inline_audit_recipe_overrides(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "audit-build-manifests \\\n"
+                ":\n"
+                "\t@echo CONTINUED_RECIPE_BYPASS\n"
+            ),
+            (
+                "audit-build-manifests: ; "
+                "@echo INLINE_RECIPE_BYPASS\n"
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[0]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["Makefile"] += mutation
+                self.fixture.write()
+
+                effect = subprocess.run(
+                    [
+                        "make",
+                        "-f",
+                        str(self.root / "Makefile"),
+                        "--no-print-directory",
+                        "audit-build-manifests",
+                    ],
+                    cwd=self.root,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                result = self.run_audit()
+
+                self.assertEqual(effect.returncode, 0, effect.stderr)
+                self.assertIn("RECIPE_BYPASS", effect.stdout)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("recipe", result.stderr.lower())
+
+    def test_rejects_audited_make_shell_assignment(self) -> None:
+        self.fixture.files["Makefile"] += (
+            "RUNTIME_COMMON_OBJS != "
+            "printf '$(OBJDIR)/tests/test_internal.o'\n"
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("shell assignment", result.stderr)
+
     def test_rejects_secondary_and_noncanonical_make_inputs(self) -> None:
         mutations = (
             ".SECONDEXPANSION:\n",
@@ -2808,6 +2884,41 @@ class BuildManifestAuditTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_enforces_cmake_bracket_argument_boundaries(self) -> None:
+        accepted = (
+            "message([=[add_subdirectory(hidden) )]=])\n",
+            "message([==[target_sources(hidden) )]==])\n",
+            (
+                "#[==[\n"
+                "add_subdirectory(hidden)\n"
+                "]==]\n"
+            ),
+        )
+        rejected = (
+            "message(foo[=[bar)]=])\n",
+            "message([=[bar]=]tail)\n",
+            "message(foo [==[bar]==]tail)\n",
+        )
+        for addition in accepted:
+            with self.subTest(accepted=addition.splitlines()[0]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += addition
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for addition in rejected:
+            with self.subTest(rejected=addition.strip()):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["CMakeLists.txt"] += addition
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("CMakeLists.txt", result.stderr)
+
     def test_rejects_case_independent_cmake_version_overrides(self) -> None:
         mutations = (
             "PROJECT(llam VERSION 9.9.9 LANGUAGES C)\n",
@@ -2878,6 +2989,90 @@ class BuildManifestAuditTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("package", result.stderr)
 
+    def test_rejects_package_mutators_and_nonfinal_writers(self) -> None:
+        base = self.fixture.files["scripts/package_release.sh"]
+        readonly = "readonly version abi_major library_version\n"
+        mutations = (
+            base.replace(readonly, ""),
+            base.replace(readonly, readonly + readonly),
+            base + "for version in 9.9.9; do :; done\n",
+            base + 'read version < "$stage/VERSION"\n',
+            base + "unset abi_major\n",
+            base + "export library_version=9.9.9\n",
+            base + 'eval \'version=9.9.9\'\n',
+            base + 'printf \'%s\\n\' 9.9.9 | tee "$stage/VERSION"\n',
+            base + 'cp "$stage/LIBRARY_VERSION" "$stage/VERSION"\n',
+            base + 'mv "$stage/LIBRARY_VERSION" "$stage/VERSION"\n',
+            base + 'install "$stage/LIBRARY_VERSION" "$stage/VERSION"\n',
+            base + 'dd if=/dev/null of="$stage/VERSION"\n',
+            base + 'sed -i.bak s/2/9/ "$stage/VERSION"\n',
+            base + 'awk \'{ print "9.9.9" }\' > "$stage/VERSION"\n',
+            base + 'printf \'%s\\n\' 9.9.9 | tee "${stage}/VERSION"\n',
+            base + 'printf \'%s\\n\' 9.9.9 | tee "$stage"/VERSION\n',
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.splitlines()[-1]):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["scripts/package_release.sh"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("package", result.stderr)
+
+    def test_rejects_package_writer_readback_archive_reordering(
+        self,
+    ) -> None:
+        base = self.fixture.files["scripts/package_release.sh"]
+        metadata = (
+            'LLAM_VERSION="$library_version" '
+            'LLAM_ABI_MAJOR="$abi_major" '
+            '"$root_dir/scripts/generate_sdk_metadata.sh" '
+            '"$stage" "$target"\n'
+        )
+        mutations = (
+            base.replace(
+                'printf \'%s\\n\' "$version" > "$stage/VERSION"\n'
+                'printf \'%s\\n\' "$abi_major" > "$stage/ABI_MAJOR"\n',
+                'printf \'%s\\n\' "$abi_major" > "$stage/ABI_MAJOR"\n'
+                'printf \'%s\\n\' "$version" > "$stage/VERSION"\n',
+            ),
+            base.replace(
+                'validate_safe_stage_tree "$stage"\n'
+                'if [ "$(cat "$stage/VERSION")"',
+                'validate_safe_stage_tree "$stage"\n'
+                ':\n'
+                'if [ "$(cat "$stage/VERSION")"',
+            ),
+            base.replace(
+                'if ! tar -C "$out_dir" -cJf "$archive" '
+                '"$package_name" 2>/dev/null; then',
+                'printf \'%s\\n\' 9.9.9 | tee "$stage/VERSION"\n'
+                'if ! tar -C "$out_dir" -cJf "$archive" '
+                '"$package_name" 2>/dev/null; then',
+            ),
+            base.replace(metadata, "").replace(
+                'if ! tar -C "$out_dir" -cJf "$archive" '
+                '"$package_name" 2>/dev/null; then',
+                (
+                    'if ! tar -C "$out_dir" -cJf "$archive" '
+                    '"$package_name" 2>/dev/null; then\n'
+                    + metadata.rstrip("\n")
+                ),
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(length=len(mutation)):
+                self.fixture = Fixture(self.root)
+                self.fixture.files["scripts/package_release.sh"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("package", result.stderr)
+
     def test_parses_workflow_keys_with_whitespace_and_hierarchy(self) -> None:
         workflow = self.fixture.files[".github/workflows/linux.yml"]
         mutations = (
@@ -2917,6 +3112,83 @@ class BuildManifestAuditTests(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("Linux CI build-manifest", result.stderr)
+
+    def test_rejects_quoted_and_duplicate_workflow_mapping_keys(
+        self,
+    ) -> None:
+        workflow = self.fixture.files[".github/workflows/linux.yml"]
+        exact_run = (
+            "        run: python3 scripts/audit_build_manifests.py "
+            "--root . --check\n"
+        )
+        mutations = (
+            workflow.replace(
+                exact_run,
+                '        "if": false\n' + exact_run,
+            ),
+            workflow.replace(
+                exact_run,
+                exact_run + "        run: echo DUPLICATE_RUN_BYPASS\n",
+            ),
+            workflow.replace(
+                "      - name: Audit build manifests\n",
+                (
+                    "      - name: Audit build manifests\n"
+                    "        name: Replacement step\n"
+                ),
+            ),
+            workflow.replace(
+                "  audit:\n    steps:",
+                '  audit:\n    "if": false\n    steps:',
+            ),
+            workflow.replace(
+                exact_run,
+                "        if: &audit_gate false\n" + exact_run,
+            ),
+            (
+                "env:\n"
+                "  AUDIT_GATE: &audit_gate false\n"
+                + workflow
+                .split("env:\n", 1)[1]
+                .replace(
+                    exact_run,
+                    "        if: *audit_gate\n" + exact_run,
+                )
+            ),
+            workflow.replace(
+                exact_run,
+                "        <<: *audit_defaults\n" + exact_run,
+            ),
+        )
+        for mutation in mutations:
+            with self.subTest(length=len(mutation)):
+                self.fixture = Fixture(self.root)
+                self.fixture.files[".github/workflows/linux.yml"] = mutation
+                self.fixture.write()
+
+                result = self.run_audit()
+
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Linux CI build-manifest", result.stderr)
+
+    def test_accepts_quoted_canonical_workflow_keys(self) -> None:
+        workflow = self.fixture.files[".github/workflows/linux.yml"]
+        self.fixture.files[".github/workflows/linux.yml"] = workflow.replace(
+            "      - name: Audit build manifests\n",
+            '      - "name": "Audit build manifests"\n',
+        ).replace(
+            "        run: python3 scripts/audit_build_manifests.py "
+            "--root . --check\n",
+            (
+                '        "run": python3 scripts/audit_build_manifests.py '
+                "--root . --check\n"
+            ),
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_accepts_harmless_workflow_anchor_comment(self) -> None:
         workflow = self.fixture.files[".github/workflows/linux.yml"]
