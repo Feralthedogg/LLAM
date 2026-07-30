@@ -71,6 +71,11 @@ llam_io_buffer_t *llam_io_buffer_alloc_detached(size_t min_capacity, size_t alig
     }
 
     buffer->detached_wrapper = true;
+    if (g_llam_tls_shard != NULL) {
+        buffer->owner_runtime = g_llam_tls_shard->runtime;
+    } else if (g_llam_tls_task != NULL) {
+        buffer->owner_runtime = g_llam_tls_task->owner_runtime;
+    }
     buffer->data = buffer->inline_data;
     buffer->capacity = LLAM_IO_BUFFER_INLINE_BYTES;
     buffer->alignment = sizeof(void *);
@@ -123,8 +128,13 @@ ssize_t llam_recv_owned(llam_fd_t fd, size_t max_count, int flags, llam_io_buffe
 }
 
 static void llam_io_buffer_release_unregistered(llam_io_buffer_t *buffer) {
+    llam_runtime_t *owner_runtime;
     llam_runtime_t *rt = NULL;
 
+    if (buffer == NULL) {
+        return;
+    }
+    owner_runtime = buffer->owner_runtime;
     if (buffer->provided_storage &&
         buffer->owner_runtime != NULL &&
         llam_runtime_begin_public_op(buffer->owner_runtime, &rt) == 0) {
@@ -148,10 +158,12 @@ static void llam_io_buffer_release_unregistered(llam_io_buffer_t *buffer) {
             llam_io_buffer_external_free(buffer);
         }
         free(buffer);
-        return;
+    } else {
+        llam_io_buffer_allocator_free(buffer);
     }
-
-    llam_io_buffer_allocator_free(buffer);
+    if (owner_runtime != NULL) {
+        llam_runtime_public_owner_release(owner_runtime);
+    }
 }
 
 void llam_io_buffer_release(llam_io_buffer_t *buffer) {

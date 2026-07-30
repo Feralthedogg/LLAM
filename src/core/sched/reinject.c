@@ -209,19 +209,20 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     llam_shard_t *target;
     llam_task_t *current = g_llam_tls_task;
     llam_task_state_id_t task_from;
+    llam_handoff_policy_input_t input;
+    llam_handoff_reject_t reject;
     bool effective_hot;
     unsigned required;
     int caller_errno = llam_thread_errno_load();
 
     if (rt == NULL || task == NULL || current == NULL ||
-        rt->external_driver.enabled ||
-        rt->active_shards == 0U) {
+        rt->active_shards == 0U || rt->shards == NULL) {
         return false;
     }
-    required = llam_task_required_shard(rt, task);
     if (task->owner_runtime != rt) {
         return false;
     }
+    required = llam_task_required_shard(rt, task);
     if ((task->flags & LLAM_TASK_FLAG_PINNED) != 0U) {
         if (required == UINT_MAX) {
             return false;
@@ -240,8 +241,20 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         return false;
     }
 
-    if (rt->run_timing_enabled != 0U || rt->wake_latency_metrics_enabled != 0U ||
-        llam_task_wait_deadline_active(task)) {
+    input.runtime = rt;
+    input.shard = target;
+    input.current = current;
+    input.next = task;
+    input.target_id = target_id;
+    input.target_deadline_active = llam_task_wait_deadline_active(task);
+    input.honor_timer_allowance = true;
+    input.require_lockfree_queue = true;
+    reject = llam_direct_handoff_policy(&input);
+    if (reject != LLAM_HANDOFF_REJECT_NONE) {
+        if (reject == LLAM_HANDOFF_REJECT_LIVE_LIMIT ||
+            reject == LLAM_HANDOFF_REJECT_BUDGET) {
+            target->direct_handoff_streak = 0U;
+        }
         return false;
     }
 
@@ -252,14 +265,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     effective_hot = hot || atomic_load_explicit(&task->task_class, memory_order_acquire) == (unsigned)LLAM_TASK_CLASS_LATENCY;
 
 #if LLAM_REINJECT_DIRECT_OWNER_HANDOFF
-    if (g_llam_tls_scheduler_ctx == &target->scheduler_ctx &&
-        rt->trace_events_enabled == 0U &&
-        rt->run_timing_enabled == 0U &&
-        rt->wake_latency_metrics_enabled == 0U &&
-        llam_lockfree_normq_enabled(rt) &&
-        !target->opaque_redirect_active &&
-        (rt->direct_handoff_allow_timers != 0U ||
-         atomic_load_explicit(&target->timer_count, memory_order_acquire) == 0U)) {
+    if (g_llam_tls_scheduler_ctx == &target->scheduler_ctx) {
         if (llam_norm_queue_push_yield_unlocked(target, current)) {
             uint64_t now_ns = llam_runtime_should_stamp_runnable_latency(target) ? llam_now_ns() : 0U;
 

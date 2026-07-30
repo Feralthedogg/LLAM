@@ -60,7 +60,6 @@ SIZE_BUDGETS = {
     "src/core/sched/scheduler.c": 650,
     "src/core/task/task_stack.c": 950,
     "src/core/time/timer.c": 750,
-    "src/core/wait/wait_tracking.c": 800,
     "src/core/sched/wake.c": 1100,
     "src/core/task/yield_join_sleep.c": 1050,
     "src/engine/scheduler/scheduler_engine.c": 650,
@@ -77,7 +76,6 @@ SIZE_BUDGETS = {
     "src/io/api/blocking_ops.c": 800,
     "src/io/api/direct.c": 850,
     "src/io/api/direct_tuning.c": 850,
-    "src/io/api/issue.c": 950,
     "src/io/api/public.c": 1200,
     "src/io/engine/io_engine.c": 1000,
 }

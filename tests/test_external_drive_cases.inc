@@ -454,6 +454,7 @@ static void external_drive_plain_task(void *arg) {
 static int exercise_external_merge_pause_ack_rearm(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
     llam_task_t *task = NULL;
     external_drive_segment_state_t state;
     uint32_t result = UINT32_MAX;
@@ -477,13 +478,17 @@ static int exercise_external_merge_pause_ack_rearm(void) {
         rc = external_drive_fail_errno("merge-pause task spawn failed");
         goto cleanup;
     }
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
+        rc = external_drive_fail_errno("merge-pause runtime pin failed");
+        goto cleanup;
+    }
 
-    atomic_store_explicit(&runtime->shards[0].merge_pause_requested,
+    atomic_store_explicit(&pinned_runtime->shards[0].merge_pause_requested,
                           1U,
                           memory_order_release);
     if (llam_runtime_drive_once(runtime, &result) != 0 ||
         result != LLAM_RUNTIME_DRIVE_IDLE ||
-        atomic_load_explicit(&runtime->shards[0].merge_pause_ack,
+        atomic_load_explicit(&pinned_runtime->shards[0].merge_pause_ack,
                              memory_order_acquire) != 1U ||
         atomic_load_explicit(&state.segments,
                              memory_order_acquire) != 0U) {
@@ -491,12 +496,12 @@ static int exercise_external_merge_pause_ack_rearm(void) {
         goto cleanup;
     }
 
-    atomic_store_explicit(&runtime->shards[0].merge_pause_requested,
+    atomic_store_explicit(&pinned_runtime->shards[0].merge_pause_requested,
                           0U,
                           memory_order_release);
     if (llam_runtime_drive_once(runtime, &result) != 0 ||
         result != LLAM_RUNTIME_DRIVE_PROGRESS ||
-        atomic_load_explicit(&runtime->shards[0].merge_pause_ack,
+        atomic_load_explicit(&pinned_runtime->shards[0].merge_pause_ack,
                              memory_order_acquire) != 0U ||
         atomic_load_explicit(&state.segments,
                              memory_order_acquire) != 1U) {
@@ -514,6 +519,9 @@ static int exercise_external_merge_pause_ack_rearm(void) {
     rc = 0;
 
 cleanup:
+    if (pinned_runtime != NULL) {
+        llam_runtime_end_public_op(pinned_runtime);
+    }
     if (task != NULL) {
         (void)llam_detach(task);
     }
@@ -573,6 +581,7 @@ static void external_drive_reentrant_hook(void *hook_context,
 static int exercise_external_segment_bound_and_reuse(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *pinned_runtime = NULL;
     llam_task_t *yielding = NULL;
     llam_task_t *plain = NULL;
     llam_task_t *reentrant = NULL;
@@ -597,16 +606,20 @@ static int exercise_external_segment_bound_and_reuse(void) {
         return external_drive_fail_errno("segment-bound runtime create failed");
     }
     state.runtime = runtime;
-    if (!runtime->external_driver.enabled ||
-        runtime->resource_plan.worker_min != 1U ||
-        runtime->resource_plan.worker_count != 1U ||
-        runtime->resource_plan.worker_max != 1U ||
-        runtime->experimental_dynamic_shards != 0U ||
-        runtime->direct_handoff_burst != 0U ||
-        llam_runtime_direct_handoff_budget(runtime) != 0U ||
-        runtime->direct_handoff_allow_timers != 0U ||
-        runtime->wake_handoff_enabled != 0U ||
-        runtime->channel_local_handoff_enabled != 0U) {
+    if (llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0) {
+        rc = external_drive_fail_errno("segment-bound runtime pin failed");
+        goto cleanup;
+    }
+    if (!pinned_runtime->external_driver.enabled ||
+        pinned_runtime->resource_plan.worker_min != 1U ||
+        pinned_runtime->resource_plan.worker_count != 1U ||
+        pinned_runtime->resource_plan.worker_max != 1U ||
+        pinned_runtime->experimental_dynamic_shards != 0U ||
+        pinned_runtime->direct_handoff_burst != 0U ||
+        llam_runtime_direct_handoff_budget(pinned_runtime) != 0U ||
+        pinned_runtime->direct_handoff_allow_timers != 0U ||
+        pinned_runtime->wake_handoff_enabled != 0U ||
+        pinned_runtime->channel_local_handoff_enabled != 0U) {
         rc = external_drive_fail("external runtime retained internal scheduling policy");
         goto cleanup;
     }
@@ -686,6 +699,9 @@ static int exercise_external_segment_bound_and_reuse(void) {
     rc = 0;
 
 cleanup:
+    if (pinned_runtime != NULL) {
+        llam_runtime_end_public_op(pinned_runtime);
+    }
     if (reentrant != NULL) {
         (void)llam_detach(reentrant);
     }

@@ -260,6 +260,9 @@ void llam_task_allocator_free(llam_task_t *task) {
     if (task == NULL || rt == NULL || task->alloc_owner_shard >= rt->active_shards) {
         return;
     }
+    if (task->public_owner_pinned) {
+        llam_task_invalidate_public_handle(task);
+    }
 
     llam_task_local_clear(task);
     task->user_context = NULL;

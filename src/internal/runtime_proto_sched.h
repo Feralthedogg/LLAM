@@ -29,6 +29,55 @@
 
 #include "runtime_state.h"
 
+/** @brief Fine-grained reason that a direct handoff cannot be attempted. */
+typedef enum llam_handoff_reject {
+    LLAM_HANDOFF_REJECT_NONE = 0,
+    LLAM_HANDOFF_REJECT_CONTEXT,
+    LLAM_HANDOFF_REJECT_EXTERNAL_DRIVER,
+    LLAM_HANDOFF_REJECT_INSTRUMENTATION,
+    LLAM_HANDOFF_REJECT_QUEUE_MODE,
+    LLAM_HANDOFF_REJECT_SHARD_STATE,
+    LLAM_HANDOFF_REJECT_OPAQUE_REDIRECT,
+    LLAM_HANDOFF_REJECT_DEADLINE,
+    LLAM_HANDOFF_REJECT_TIMER,
+    LLAM_HANDOFF_REJECT_LIVE_LIMIT,
+    LLAM_HANDOFF_REJECT_BUDGET,
+    LLAM_HANDOFF_REJECT_AFFINITY,
+    LLAM_HANDOFF_REJECT_NO_WORK,
+    LLAM_HANDOFF_REJECT_SELF,
+    LLAM_HANDOFF_REJECT_PUSH,
+    LLAM_HANDOFF_REJECT_RACE,
+} llam_handoff_reject_t;
+
+/** @brief Stable metric class derived from a fine-grained rejection reason. */
+typedef enum llam_handoff_result_class {
+    LLAM_HANDOFF_RESULT_NONE = 0,
+    LLAM_HANDOFF_RESULT_CONTEXT,
+    LLAM_HANDOFF_RESULT_POLICY,
+    LLAM_HANDOFF_RESULT_BUDGET,
+    LLAM_HANDOFF_RESULT_NO_WORK,
+    LLAM_HANDOFF_RESULT_SELF,
+    LLAM_HANDOFF_RESULT_PUSH,
+    LLAM_HANDOFF_RESULT_RACE,
+} llam_handoff_result_class_t;
+
+/** @brief Immutable snapshots consumed by the pure handoff policy guard. */
+typedef struct llam_handoff_policy_input {
+    const llam_runtime_t *runtime;
+    const llam_shard_t *shard;
+    const llam_task_t *current;
+    const llam_task_t *next;
+    unsigned target_id;
+    bool target_deadline_active;
+    bool honor_timer_allowance;
+    bool require_lockfree_queue;
+} llam_handoff_policy_input_t;
+
+llam_handoff_reject_t llam_direct_handoff_policy(
+    const llam_handoff_policy_input_t *input);
+llam_handoff_result_class_t llam_handoff_reject_classify(
+    llam_handoff_reject_t reject);
+
 /*
  * Opaque-block redirect and helper compensation.
  */
@@ -232,6 +281,7 @@ void llam_disarm_task_wait_deadline(llam_task_t *task);
 void llam_fire_expired_timers(llam_shard_t *shard);
 bool llam_task_wait_deadline_active(llam_task_t *task);
 bool llam_join_waiter_remove_locked(llam_task_t *target, llam_task_t *waiter);
+llam_runtime_t *llam_wait_task_runtime(const llam_task_t *task);
 void llam_park_current_task(llam_wait_reason_t reason, llam_trace_kind_t kind);
 bool llam_task_clear_wait_tracking(llam_task_t *task);
 void llam_task_clear_wait_tracking_or_abort(llam_task_t *task);

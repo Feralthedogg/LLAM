@@ -201,6 +201,8 @@ LLAM_INTERNAL_API bool llam_linux_native_batch_enqueue(
     llam_node_t *node,
     llam_linux_native_batch_t *batch,
     llam_io_req_t *req);
+LLAM_INTERNAL_API bool llam_linux_native_batch_count_is_valid(
+    unsigned segment_count);
 LLAM_INTERNAL_API llam_linux_native_batch_t *
 llam_linux_native_batch_take_all(llam_node_t *node);
 LLAM_INTERNAL_API unsigned llam_linux_native_batch_submit_one(

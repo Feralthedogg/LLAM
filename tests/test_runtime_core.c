@@ -1452,6 +1452,7 @@ static int test_blocking_pool_grows_lazily_within_bounds(void) {
     llam_runtime_opts_t opts;
     llam_runtime_stats_t stats;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *parent = NULL;
     int rc = 1;
 
@@ -1477,7 +1478,11 @@ static int test_blocking_pool_grows_lazily_within_bounds(void) {
     if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("lazy blocking pool runtime create failed");
     }
-    state.runtime = runtime;
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = test_fail_errno("lazy blocking pool runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
 
     memset(&stats, 0, sizeof(stats));
     if (llam_runtime_collect_stats_ex_handle(runtime, &stats, sizeof(stats)) != 0) {
@@ -1487,7 +1492,8 @@ static int test_blocking_pool_grows_lazily_within_bounds(void) {
     if (stats.configured_blocking_min != 0U ||
         stats.configured_blocking_max != 2U ||
         stats.blocking_threads != 0U ||
-        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 0U) {
+        atomic_load_explicit(&raw_runtime->block_threads_started,
+                             memory_order_acquire) != 0U) {
         rc = test_fail("zero-min blocking pool eagerly created workers");
         goto cleanup;
     }
@@ -1520,10 +1526,10 @@ static int test_blocking_pool_grows_lazily_within_bounds(void) {
             BLOCK_POOL_GROWTH_TASKS ||
         atomic_load_explicit(&state.callbacks_active, memory_order_acquire) != 0U ||
         atomic_load_explicit(&state.callbacks_active_peak, memory_order_acquire) != 2U ||
-        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 2U ||
-        atomic_load_explicit(&runtime->block_threads_entered, memory_order_acquire) != 2U ||
-        atomic_load_explicit(&runtime->block_threads_exited, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&runtime->block_threads_live, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&raw_runtime->block_threads_entered, memory_order_acquire) != 2U ||
+        atomic_load_explicit(&raw_runtime->block_threads_exited, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&raw_runtime->block_threads_live, memory_order_acquire) != 2U ||
         stats.blocking_threads != 2U) {
         fprintf(stderr,
                 "[test_runtime_core] lazy blocking pool mismatch: failures=%u ran=%u "
@@ -1532,12 +1538,12 @@ static int test_blocking_pool_grows_lazily_within_bounds(void) {
                 atomic_load_explicit(&state.core.failures, memory_order_acquire),
                 atomic_load_explicit(&state.core.ran, memory_order_acquire),
                 state.confirmed_before_release,
-                atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire),
+                atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire),
                 state.entered_before_release,
-                atomic_load_explicit(&runtime->block_threads_entered, memory_order_acquire),
+                atomic_load_explicit(&raw_runtime->block_threads_entered, memory_order_acquire),
                 state.live_before_release,
-                atomic_load_explicit(&runtime->block_threads_live, memory_order_acquire),
-                atomic_load_explicit(&runtime->block_threads_exited, memory_order_acquire),
+                atomic_load_explicit(&raw_runtime->block_threads_live, memory_order_acquire),
+                atomic_load_explicit(&raw_runtime->block_threads_exited, memory_order_acquire),
                 atomic_load_explicit(&state.callbacks_started, memory_order_acquire),
                 atomic_load_explicit(&state.callbacks_completed, memory_order_acquire),
                 atomic_load_explicit(&state.callbacks_active, memory_order_acquire),
@@ -1551,6 +1557,9 @@ cleanup:
     atomic_store_explicit(&state.release_callbacks, 1U, memory_order_release);
     if (parent != NULL) {
         (void)llam_detach(parent);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
     }
     llam_runtime_destroy(runtime);
     return rc;
@@ -2021,6 +2030,11 @@ static int test_runtime_lifecycle_and_task_contracts(void) {
             strstr(json, "\"wake_handoff_attempts\":") == NULL ||
             strstr(json, "\"wake_handoff_fail_race\":") == NULL ||
             strstr(json, "\"autotune\":") == NULL ||
+            strstr(json, "\"recognized_domains\":") == NULL ||
+            strstr(json, "\"observable_domains\":") == NULL ||
+            strstr(json, "\"controllable_domains\":") == NULL ||
+            strstr(json, "\"active_observation_domains\":") == NULL ||
+            strstr(json, "\"active_control_domains\":") == NULL ||
             strstr(json, "\"sample_period\":") == NULL ||
             strstr(json, "\"sampled_yield_handoff_fail_policy\":") == NULL ||
             strstr(json, "\"sampled_wake_handoff_hits\":") == NULL ||
@@ -3654,7 +3668,7 @@ static int test_autotune_handoff_budget_actuates(void) {
     if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1000000", 1) != 0 ||
-        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "0", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0 ||
         setenv("LLAM_YIELD_DIRECT_HANDOFF", "2", 1) != 0 ||
@@ -3718,7 +3732,7 @@ static int test_autotune_handoff_budget_actuates(void) {
         decisions == 0U ||
         commits == 0U ||
         budget <= 1U ||
-        min_hold_ns != LLAM_AUTOTUNE_DEFAULT_MIN_HOLD_NS ||
+        min_hold_ns != 1U ||
         stats.yield_direct_attempts < 32U ||
         stats.yield_direct_fast_hits < 16U) {
         fprintf(stderr,
@@ -3904,7 +3918,7 @@ static int test_autotune_handoff_probe_defers_low_sample(void) {
     if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1", 1) != 0 ||
-        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "0", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0) {
         rc = test_fail_errno("setenv for autotune low-sample probe failed");
@@ -4023,7 +4037,7 @@ static int test_autotune_handoff_wake_guardrail_rolls_back(void) {
     if (setenv("LLAM_AUTOTUNE", "on", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DOMAINS", "handoff", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_DECISION_INTERVAL_NS", "1000000", 1) != 0 ||
-        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "0", 1) != 0 ||
+        setenv("LLAM_AUTOTUNE_MIN_HOLD_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_WAKE_P99_NS", "1", 1) != 0 ||
         setenv("LLAM_AUTOTUNE_SAMPLE_PERIOD", "1", 1) != 0 ||
         setenv("LLAM_YIELD_DIRECT_HANDOFF", "2", 1) != 0 ||
@@ -6533,6 +6547,7 @@ static int test_wait_resolver_block_job_recycle_drain(void) {
 #include "test_switch_hook_cases.inc"
 #undef SWITCH_HOOK_TEST_FAIL_ERRNO
 #undef SWITCH_HOOK_TEST_FAIL
+#include "test_autotune_domain_cases.inc"
 
 int main(void) {
     RUN_RUNTIME_CORE_TEST(test_task_context_unmanaged_contract);
@@ -6555,6 +6570,8 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_freezes_no_work_low_hit);
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_probe_defers_low_sample);
     RUN_RUNTIME_CORE_TEST(test_autotune_handoff_wake_guardrail_rolls_back);
+    RUN_RUNTIME_CORE_TEST(test_autotune_domain_capabilities);
+    RUN_RUNTIME_CORE_TEST(test_autotune_handoff_min_hold);
     RUN_RUNTIME_CORE_TEST(test_runtime_total_prewarm_authority);
     RUN_RUNTIME_CORE_TEST(test_stack_cache_runtime_byte_authority);
     RUN_RUNTIME_CORE_TEST(test_unsigned_runtime_env_rejects_malformed_input);

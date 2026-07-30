@@ -604,10 +604,10 @@ LLAM_API int llam_runtime_run_handle(llam_runtime_t *runtime);
  *
  * @details
  * Canonical embedding teardown. Requests cooperative stop, tears down
- * runtime-owned resources, and invalidates the handle. Heap-backed handle
- * storage returned by
- * ::llam_runtime_create is retired for the process lifetime rather than
- * immediately reused, so stale raw pointers cannot alias a later runtime.
+ * runtime-owned resources, and invalidates the handle. Explicit handles returned
+ * by ::llam_runtime_create are opaque encoded tokens carrying a runtime family,
+ * slot, and generation; they are never storage addresses and must not be
+ * dereferenced or modified. A destroyed token never aliases a later runtime.
  * Passing NULL is a legacy default-runtime shutdown alias. Managed tasks may
  * only stop their owner runtime through this API; foreign runtime handles and
  * unknown handles are ignored because this function has no errno channel.

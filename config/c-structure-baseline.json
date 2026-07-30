@@ -37,7 +37,7 @@
     },
     {
       "limit": 800,
-      "line_count": 1390,
+      "line_count": 878,
       "path": "experiments/leir/leir_native_segment.c"
     },
     {
@@ -52,7 +52,7 @@
     },
     {
       "limit": 800,
-      "line_count": 2970,
+      "line_count": 2886,
       "path": "experiments/leir/test_leir_native_segment.c"
     },
     {
@@ -97,7 +97,7 @@
     },
     {
       "limit": 1250,
-      "line_count": 1601,
+      "line_count": 1594,
       "path": "src/core/lifecycle/init.c"
     },
     {
@@ -107,17 +107,17 @@
     },
     {
       "limit": 650,
-      "line_count": 877,
+      "line_count": 716,
       "path": "src/core/platform/platform.c"
     },
     {
       "limit": 700,
-      "line_count": 813,
+      "line_count": 785,
       "path": "src/core/sync/channel_select.c"
     },
     {
       "limit": 1050,
-      "line_count": 1119,
+      "line_count": 1110,
       "path": "src/core/task/yield_join_sleep.c"
     },
     {
@@ -126,29 +126,19 @@
       "path": "src/core/time/timer.c"
     },
     {
-      "limit": 800,
-      "line_count": 1482,
-      "path": "src/core/wait/wait_tracking.c"
-    },
-    {
       "limit": 900,
       "line_count": 918,
       "path": "src/engine/watchdog/watchdog_rehome.c"
     },
     {
       "limit": 1200,
-      "line_count": 1651,
+      "line_count": 1660,
       "path": "src/internal/runtime_types.h"
     },
     {
       "limit": 850,
       "line_count": 858,
       "path": "src/io/api/direct.c"
-    },
-    {
-      "limit": 950,
-      "line_count": 1296,
-      "path": "src/io/api/issue.c"
     },
     {
       "limit": 1200,
@@ -167,22 +157,17 @@
     },
     {
       "limit": 800,
-      "line_count": 1095,
-      "path": "src/io/linux/watch/linux_segment.c"
-    },
-    {
-      "limit": 800,
       "line_count": 1059,
       "path": "tests/test_connect_io.c"
     },
     {
       "limit": 800,
-      "line_count": 2637,
+      "line_count": 2667,
       "path": "tests/test_io_buffers.c"
     },
     {
       "limit": 800,
-      "line_count": 4568,
+      "line_count": 4685,
       "path": "tests/test_multi_runtime_core.c"
     },
     {
@@ -192,7 +177,7 @@
     },
     {
       "limit": 800,
-      "line_count": 6607,
+      "line_count": 6624,
       "path": "tests/test_runtime_core.c"
     },
     {
@@ -207,7 +192,7 @@
     },
     {
       "limit": 800,
-      "line_count": 7978,
+      "line_count": 8063,
       "path": "tests/test_runtime_shutdown_internal.c"
     },
     {
@@ -217,7 +202,7 @@
     },
     {
       "limit": 800,
-      "line_count": 16410,
+      "line_count": 16422,
       "path": "tests/test_security_capability.c"
     },
     {

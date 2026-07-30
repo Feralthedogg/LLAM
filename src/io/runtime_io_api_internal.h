@@ -58,6 +58,8 @@ ssize_t llam_posix_sendmsg_no_sigpipe(
 /* Request ownership helpers used by public I/O entry points. */
 llam_io_req_t *llam_api_io_req_acquire(llam_shard_t *shard);
 void llam_api_io_req_release(llam_shard_t *shard, llam_io_req_t *req);
+int llam_fail_io_setup_req(llam_io_req_t *req, int error_code);
+llam_runtime_t *llam_io_request_runtime(const llam_io_req_t *req);
 #if defined(LLAM_ENABLE_TEST_HOOKS)
 bool llam_io_test_abort_published_io_setup(llam_io_req_t *req,
                                            llam_io_abort_reason_t reason,

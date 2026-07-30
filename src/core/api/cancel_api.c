@@ -37,7 +37,8 @@ static int llam_cancel_token_reserve_public_slot_locked(llam_cancel_token_t *tok
                                                   64U,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_CANCEL_TOKEN,
                                                   token->owner_runtime != NULL
-                                                      ? token->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            token->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -46,9 +47,13 @@ static int llam_cancel_token_reserve_public_slot_locked(llam_cancel_token_t *tok
 static int llam_cancel_token_register_live(llam_cancel_token_t *token) {
     size_t slot = 0U;
 
+    if (llam_runtime_public_owner_acquire(token->owner_runtime) != 0) {
+        return -1;
+    }
     pthread_mutex_lock(&g_llam_cancel_token_registry_lock);
     if (llam_cancel_token_reserve_public_slot_locked(token, &slot) != 0) {
         pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+        llam_runtime_public_owner_release(token->owner_runtime);
         return -1;
     }
     token->public_handle_slot = slot;
@@ -274,6 +279,7 @@ llam_cancel_token_t *llam_cancel_token_create(void) {
  */
 int llam_cancel_token_destroy(llam_cancel_token_t *token) {
     uintptr_t handle = (uintptr_t)token;
+    llam_runtime_t *owner_runtime;
     size_t slot;
     uint32_t generation;
 
@@ -302,6 +308,7 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
         errno = EBUSY;
         return -1;
     }
+    owner_runtime = token->owner_runtime;
     llam_cancel_token_unregister_live_locked(token);
     /*
      * The token has been removed from the live handle table while the registry
@@ -313,6 +320,7 @@ int llam_cancel_token_destroy(llam_cancel_token_t *token) {
     pthread_mutex_destroy(&token->lock);
     free(token);
     pthread_mutex_unlock(&g_llam_cancel_token_registry_lock);
+    llam_runtime_public_owner_release(owner_runtime);
     return 0;
 }
 

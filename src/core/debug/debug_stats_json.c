@@ -37,6 +37,11 @@ static int llam_stats_json_u64(int fd, const char *name, uint64_t value, unsigne
 typedef struct llam_autotune_json_snapshot {
     unsigned mode;
     unsigned phase;
+    uint64_t recognized_domains;
+    uint64_t observable_domains;
+    uint64_t controllable_domains;
+    uint64_t active_observation_domains;
+    uint64_t active_control_domains;
     uint64_t supported_domains;
     uint64_t active_domains;
     uint64_t suspended_domains;
@@ -131,6 +136,16 @@ static void llam_autotune_json_snapshot_read(llam_runtime_t *rt, llam_autotune_j
 
             snapshot->mode = atomic_load_explicit(&tune->mode, memory_order_acquire);
             snapshot->phase = atomic_load_explicit(&tune->phase, memory_order_acquire);
+            snapshot->recognized_domains = atomic_load_explicit(
+                &tune->recognized_domains, memory_order_acquire);
+            snapshot->observable_domains = atomic_load_explicit(
+                &tune->observable_domains, memory_order_acquire);
+            snapshot->controllable_domains = atomic_load_explicit(
+                &tune->controllable_domains, memory_order_acquire);
+            snapshot->active_observation_domains = atomic_load_explicit(
+                &tune->active_observation_domains, memory_order_acquire);
+            snapshot->active_control_domains = atomic_load_explicit(
+                &tune->active_control_domains, memory_order_acquire);
             snapshot->supported_domains = atomic_load_explicit(&tune->supported_domains, memory_order_acquire);
             snapshot->active_domains = atomic_load_explicit(&tune->active_domains, memory_order_acquire);
             snapshot->suspended_domains = atomic_load_explicit(&tune->suspended_domains, memory_order_acquire);
@@ -206,6 +221,11 @@ static int llam_stats_json_autotune(int fd, llam_runtime_t *rt, unsigned *field_
                  "%s\"autotune\":{"
                  "\"mode\":\"%s\","
                  "\"phase\":\"%s\","
+                 "\"recognized_domains\":%llu,"
+                 "\"observable_domains\":%llu,"
+                 "\"controllable_domains\":%llu,"
+                 "\"active_observation_domains\":%llu,"
+                 "\"active_control_domains\":%llu,"
                  "\"supported_domains\":%llu,"
                  "\"active_domains\":%llu,"
                  "\"suspended_domains\":%llu,"
@@ -248,6 +268,11 @@ static int llam_stats_json_autotune(int fd, llam_runtime_t *rt, unsigned *field_
                  *field_count == 0U ? "" : ",",
                  llam_autotune_mode_name(snapshot.mode),
                  llam_autotune_phase_name(snapshot.phase),
+                 (unsigned long long)snapshot.recognized_domains,
+                 (unsigned long long)snapshot.observable_domains,
+                 (unsigned long long)snapshot.controllable_domains,
+                 (unsigned long long)snapshot.active_observation_domains,
+                 (unsigned long long)snapshot.active_control_domains,
                  (unsigned long long)snapshot.supported_domains,
                  (unsigned long long)snapshot.active_domains,
                  (unsigned long long)snapshot.suspended_domains,

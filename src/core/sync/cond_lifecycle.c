@@ -38,7 +38,8 @@ static int llam_cond_reserve_public_slot_locked(llam_cond_t *cond, size_t *out_s
                                                   64U,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_COND,
                                                   cond->owner_runtime != NULL
-                                                      ? cond->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            cond->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -47,9 +48,13 @@ static int llam_cond_reserve_public_slot_locked(llam_cond_t *cond, size_t *out_s
 static int llam_cond_register_live(llam_cond_t *cond) {
     size_t slot = 0U;
 
+    if (llam_runtime_public_owner_acquire(cond->owner_runtime) != 0) {
+        return -1;
+    }
     pthread_mutex_lock(&g_llam_cond_registry_lock);
     if (llam_cond_reserve_public_slot_locked(cond, &slot) != 0) {
         pthread_mutex_unlock(&g_llam_cond_registry_lock);
+        llam_runtime_public_owner_release(cond->owner_runtime);
         return -1;
     }
     cond->public_handle_slot = slot;
@@ -152,6 +157,7 @@ llam_cond_t *llam_cond_create(void) {
  */
 int llam_cond_destroy(llam_cond_t *cond) {
     uintptr_t handle = (uintptr_t)cond;
+    llam_runtime_t *owner_runtime;
     size_t slot;
     uint32_t generation;
 
@@ -183,10 +189,12 @@ int llam_cond_destroy(llam_cond_t *cond) {
         errno = EBUSY;
         return -1;
     }
+    owner_runtime = cond->owner_runtime;
     llam_cond_unregister_live_locked(cond);
     pthread_mutex_unlock(&cond->lock);
     pthread_mutex_unlock(&g_llam_cond_registry_lock);
     pthread_mutex_destroy(&cond->lock);
     free(cond);
+    llam_runtime_public_owner_release(owner_runtime);
     return 0;
 }

@@ -64,7 +64,14 @@ int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_
         llam_aligned_free(runtime);
         return -1;
     }
-    *out = runtime;
+    *out = llam_runtime_public_handle(runtime);
+    if (*out == NULL) {
+        int saved_errno = errno != 0 ? errno : EOVERFLOW;
+
+        llam_runtime_destroy_rt(runtime);
+        errno = saved_errno;
+        return -1;
+    }
     return 0;
 }
 

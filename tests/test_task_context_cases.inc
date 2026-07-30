@@ -271,6 +271,7 @@ static int test_task_context_survives_forced_queue_migration(void) {
     llam_runtime_opts_t runtime_opts;
     llam_spawn_opts_t spawn_opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *handle = NULL;
     llam_task_t *task = NULL;
     task_context_case_state_t state;
@@ -312,6 +313,10 @@ static int test_task_context_survives_forced_queue_migration(void) {
                             &runtime) != 0) {
         return test_fail_errno("forced migration runtime creation failed");
     }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        (void)test_fail_errno("forced migration runtime pin failed");
+        goto out;
+    }
     handle = llam_runtime_spawn_ex(runtime,
                                    task_context_forced_migration_task,
                                    &state,
@@ -327,29 +332,29 @@ static int test_task_context_survives_forced_queue_migration(void) {
         goto out;
     }
     source_id = task->home_shard;
-    target_id = (source_id + 1U) % runtime->active_shards;
+    target_id = (source_id + 1U) % raw_runtime->active_shards;
     state.expected_shard = target_id;
     for (i = 0U; i < LLAM_TASK_CONTEXT_SLOT_COUNT; ++i) {
         task->context_slots[i] = state.expected_slots[i];
     }
-    pthread_mutex_lock(&runtime->shards[source_id].lock);
-    if (llam_norm_queue_pop_owner_locked(&runtime->shards[source_id]) != task) {
-        pthread_mutex_unlock(&runtime->shards[source_id].lock);
+    pthread_mutex_lock(&raw_runtime->shards[source_id].lock);
+    if (llam_norm_queue_pop_owner_locked(&raw_runtime->shards[source_id]) != task) {
+        pthread_mutex_unlock(&raw_runtime->shards[source_id].lock);
         llam_task_end_public_op(task);
         task = NULL;
         (void)test_fail("forced migration source queue did not contain task");
         goto out;
     }
-    pthread_mutex_unlock(&runtime->shards[source_id].lock);
-    pthread_mutex_lock(&runtime->shards[target_id].lock);
-    if (!llam_norm_queue_push_owner_locked(&runtime->shards[target_id], task)) {
-        pthread_mutex_unlock(&runtime->shards[target_id].lock);
+    pthread_mutex_unlock(&raw_runtime->shards[source_id].lock);
+    pthread_mutex_lock(&raw_runtime->shards[target_id].lock);
+    if (!llam_norm_queue_push_owner_locked(&raw_runtime->shards[target_id], task)) {
+        pthread_mutex_unlock(&raw_runtime->shards[target_id].lock);
         llam_task_end_public_op(task);
         task = NULL;
         (void)test_fail("forced migration target queue rejected task");
         goto out;
     }
-    pthread_mutex_unlock(&runtime->shards[target_id].lock);
+    pthread_mutex_unlock(&raw_runtime->shards[target_id].lock);
     llam_task_end_public_op(task);
     task = NULL;
 
@@ -371,6 +376,9 @@ out:
     }
     if (handle != NULL) {
         (void)llam_detach(handle);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
     }
     llam_runtime_destroy(runtime);
     return rc;

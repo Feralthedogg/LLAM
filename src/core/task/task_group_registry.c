@@ -32,7 +32,8 @@ static int llam_task_group_reserve_public_slot_locked(llam_task_group_t *group, 
                                                   64U,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_TASK_GROUP,
                                                   group->owner_runtime != NULL
-                                                      ? group->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            group->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -41,9 +42,13 @@ static int llam_task_group_reserve_public_slot_locked(llam_task_group_t *group, 
 int llam_task_group_register_live(llam_task_group_t *group) {
     size_t slot = 0U;
 
+    if (llam_runtime_public_owner_acquire(group->owner_runtime) != 0) {
+        return -1;
+    }
     pthread_mutex_lock(&g_llam_task_group_registry_lock);
     if (llam_task_group_reserve_public_slot_locked(group, &slot) != 0) {
         pthread_mutex_unlock(&g_llam_task_group_registry_lock);
+        llam_runtime_public_owner_release(group->owner_runtime);
         return -1;
     }
     group->public_handle_slot = slot;
@@ -126,6 +131,7 @@ static void llam_task_group_unregister_live_locked(llam_task_group_t *group) {
 
 int llam_task_group_destroy(llam_task_group_t *group) {
     uintptr_t raw = (uintptr_t)group;
+    llam_runtime_t *owner_runtime;
     size_t slot;
     uint32_t generation;
 
@@ -162,6 +168,7 @@ int llam_task_group_destroy(llam_task_group_t *group) {
         return -1;
     }
     group->cancel_token = NULL;
+    owner_runtime = group->owner_runtime;
     llam_task_group_unregister_live_locked(group);
     pthread_mutex_unlock(&group->lock);
     pthread_mutex_unlock(&g_llam_task_group_registry_lock);
@@ -171,5 +178,6 @@ int llam_task_group_destroy(llam_task_group_t *group) {
     }
     free(group->tasks);
     free(group);
+    llam_runtime_public_owner_release(owner_runtime);
     return 0;
 }

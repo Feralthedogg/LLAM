@@ -399,6 +399,11 @@ enum {
 typedef struct llam_autotune_control {
     atomic_uint mode;
     atomic_uint phase;
+    atomic_uint_fast64_t recognized_domains;
+    atomic_uint_fast64_t observable_domains;
+    atomic_uint_fast64_t controllable_domains;
+    atomic_uint_fast64_t active_observation_domains;
+    atomic_uint_fast64_t active_control_domains;
     atomic_uint_fast64_t supported_domains;
     atomic_uint_fast64_t active_domains;
     atomic_uint_fast64_t suspended_domains;
@@ -1031,6 +1036,7 @@ struct llam_task {
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
     bool cancel_registered;
+    bool public_owner_pinned;
     bool handoff_sample_current;
     bool alloc_external_pool;
     bool recent_explicit_yield;
@@ -1343,6 +1349,10 @@ struct llam_node {
  */
 struct llam_runtime {
     llam_runtime_t *registry_next;
+    size_t public_handle_slot;
+    size_t public_owner_refs;
+    uint32_t public_handle_generation;
+    bool retired_storage;
     uint64_t runtime_id;
     uint64_t public_handle_secret;
     bool heap_allocated;

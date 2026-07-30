@@ -37,7 +37,8 @@ static int llam_channel_reserve_public_slot_locked(llam_channel_t *channel, size
                                                   64U,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_CHANNEL,
                                                   channel->owner_runtime != NULL
-                                                      ? channel->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            channel->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -50,9 +51,13 @@ int llam_channel_register_live(llam_channel_t *channel) {
         errno = EINVAL;
         return -1;
     }
+    if (llam_runtime_public_owner_acquire(channel->owner_runtime) != 0) {
+        return -1;
+    }
     pthread_mutex_lock(&g_llam_channel_registry_lock);
     if (llam_channel_reserve_public_slot_locked(channel, &slot) != 0) {
         pthread_mutex_unlock(&g_llam_channel_registry_lock);
+        llam_runtime_public_owner_release(channel->owner_runtime);
         return -1;
     }
     channel->public_handle_slot = slot;
@@ -307,6 +312,8 @@ llam_channel_t *llam_channel_create(size_t capacity) {
 
 int llam_channel_destroy(llam_channel_t *channel) {
     uintptr_t handle = (uintptr_t)channel;
+    llam_runtime_t *owner_runtime;
+    bool cached;
     size_t slot;
     uint32_t generation;
 
@@ -341,16 +348,17 @@ int llam_channel_destroy(llam_channel_t *channel) {
         errno = EBUSY;
         return -1;
     }
+    owner_runtime = channel->owner_runtime;
     llam_channel_unregister_live_locked(channel);
     pthread_mutex_unlock(&channel->lock);
     pthread_mutex_unlock(&g_llam_channel_registry_lock);
 
-    if (llam_channel_cache_release(channel)) {
-        return 0;
+    cached = llam_channel_cache_release(channel);
+    if (!cached) {
+        pthread_mutex_destroy(&channel->lock);
+        free(channel->buffer);
+        free(channel);
     }
-
-    pthread_mutex_destroy(&channel->lock);
-    free(channel->buffer);
-    free(channel);
+    llam_runtime_public_owner_release(owner_runtime);
     return 0;
 }

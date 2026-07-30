@@ -18,21 +18,28 @@ typedef struct cross_stack_cache_state {
 } cross_stack_cache_state_t;
 
 static unsigned runtime_default_stack_cache_count(llam_runtime_t *runtime) {
+    llam_runtime_t *pinned_runtime = NULL;
     unsigned total = 0U;
 
-    if (runtime == NULL || !runtime->stack_cache_lock_initialized) {
+    if (runtime == NULL ||
+        llam_runtime_begin_public_op(runtime, &pinned_runtime) != 0 ||
+        !pinned_runtime->stack_cache_lock_initialized) {
+        if (pinned_runtime != NULL) {
+            llam_runtime_end_public_op(pinned_runtime);
+        }
         return 0U;
     }
-    pthread_mutex_lock(&runtime->stack_cache_lock);
-    total = runtime->stack_cache_default_count;
-    pthread_mutex_unlock(&runtime->stack_cache_lock);
-    for (unsigned i = 0U; i < runtime->active_shards; ++i) {
-        llam_shard_t *shard = &runtime->shards[i];
+    pthread_mutex_lock(&pinned_runtime->stack_cache_lock);
+    total = pinned_runtime->stack_cache_default_count;
+    pthread_mutex_unlock(&pinned_runtime->stack_cache_lock);
+    for (unsigned i = 0U; i < pinned_runtime->active_shards; ++i) {
+        llam_shard_t *shard = &pinned_runtime->shards[i];
 
         pthread_mutex_lock(&shard->stack_cache_lock);
         total += shard->stack_cache_default_count;
         pthread_mutex_unlock(&shard->stack_cache_lock);
     }
+    llam_runtime_end_public_op(pinned_runtime);
     return total;
 }
 

@@ -53,7 +53,9 @@ static void llam_runtime_close_ready_fd(llam_fd_t fd) {
  * The function tolerates partial initialization so failed init paths can reuse
  * normal shutdown cleanup.
  */
-static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
+static void llam_runtime_shutdown_unlocked(
+    llam_runtime_t *rt,
+    bool retire_heap_storage) {
     llam_task_t *task;
     unsigned i;
 
@@ -67,7 +69,7 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
         && !rt->winsock_started
 #endif
     ) {
-        llam_runtime_unregister_handle(rt);
+        llam_runtime_finalize_handle(rt, retire_heap_storage);
         return;
     }
 
@@ -437,13 +439,11 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
 #endif
     llam_release_xsave_globals(rt);
     /*
-     * Remove the runtime from the public handle registry before zeroing it.
-     * Otherwise an old pointer can pass handle validation and race into freed
-     * scheduler/backend state.
+     * Finalize the live token and raw-owner tombstone only after all
+     * scheduler/backend resources are gone. The registry performs that
+     * transition atomically with public-owner accounting.
      */
-    llam_runtime_unregister_handle(rt);
-    // Clear the runtime last so accidental post-shutdown reads fail closed.
-    memset(rt, 0, sizeof(*rt));
+    llam_runtime_finalize_handle(rt, retire_heap_storage);
 }
 
 /**
@@ -493,10 +493,15 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
      * exits.
      */
     if (g_llam_tls_task != NULL || g_llam_tls_scheduler_ctx != NULL) {
+        llam_runtime_t *resolved_runtime = NULL;
         int saved_errno = errno;
 
         current_runtime = llam_runtime_current_owner();
-        if (rt != current_runtime) {
+        if (llam_runtime_begin_public_op(rt, &resolved_runtime) != 0 ||
+            resolved_runtime != current_runtime) {
+            if (resolved_runtime != NULL) {
+                llam_runtime_end_public_op(resolved_runtime);
+            }
             /*
              * Runtime handles are host control capabilities.  A task running
              * inside runtime A must not be able to turn a shared runtime B
@@ -505,13 +510,11 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
             errno = saved_errno;
             return;
         }
-        if (llam_runtime_check_handle(rt) != 0) {
-            errno = saved_errno;
-            return;
+        if (atomic_load_explicit(&resolved_runtime->initialized,
+                                 memory_order_acquire)) {
+            llam_request_stop(resolved_runtime);
         }
-        if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
-            llam_request_stop(rt);
-        }
+        llam_runtime_end_public_op(resolved_runtime);
         errno = saved_errno;
         return;
     }
@@ -524,15 +527,18 @@ void llam_runtime_shutdown_rt(llam_runtime_t *rt) {
      */
     llam_runtime_lifecycle_lock();
     {
+        llam_runtime_t *claimed_runtime = NULL;
         bool heap_runtime = false;
 
-        if (llam_runtime_claim_destroy_handle(rt, &heap_runtime) == 0) {
+        if (llam_runtime_claim_destroy_handle(
+                rt, &claimed_runtime, &heap_runtime) == 0) {
             (void)heap_runtime;
+            rt = claimed_runtime;
             if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
                 llam_runtime_request_destroy_stop(rt);
                 llam_runtime_wait_exec_stopped(rt);
             }
-            llam_runtime_shutdown_unlocked(rt);
+            llam_runtime_shutdown_unlocked(rt, false);
         }
     }
     llam_runtime_lifecycle_unlock();
@@ -548,6 +554,7 @@ void llam_runtime_shutdown(void) {
 }
 
 void llam_runtime_destroy_rt(llam_runtime_t *rt) {
+    llam_runtime_t *claimed_runtime = NULL;
     bool heap_runtime = false;
 
     if (rt == NULL) {
@@ -565,16 +572,14 @@ void llam_runtime_destroy_rt(llam_runtime_t *rt) {
     }
 
     llam_runtime_lifecycle_lock();
-    if (llam_runtime_claim_destroy_handle(rt, &heap_runtime) == 0) {
+    if (llam_runtime_claim_destroy_handle(
+            rt, &claimed_runtime, &heap_runtime) == 0) {
+        rt = claimed_runtime;
         if (atomic_load_explicit(&rt->exec_started, memory_order_acquire)) {
             llam_runtime_request_destroy_stop(rt);
             llam_runtime_wait_exec_stopped(rt);
         }
-        llam_runtime_shutdown_unlocked(rt);
+        llam_runtime_shutdown_unlocked(rt, heap_runtime);
     }
     llam_runtime_lifecycle_unlock();
-
-    if (heap_runtime) {
-        llam_runtime_retire_heap_handle(rt);
-    }
 }

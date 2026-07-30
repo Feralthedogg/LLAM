@@ -404,7 +404,19 @@ int llam_wake_handle_wait_ns(int fd, int timeout_ms, uint64_t timeout_ns);
 llam_block_job_t *llam_block_job_alloc(llam_runtime_t *rt);
 void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job);
 int llam_consume_task_wake_error(llam_task_t *task);
+#if UINTPTR_MAX <= UINT32_MAX
+#error "LLAM runtime public handles require uintptr_t wider than 32 bits"
+#define LLAM_RUNTIME_PUBLIC_HANDLE_SHIFT 0U
+#else
+#define LLAM_RUNTIME_PUBLIC_HANDLE_SHIFT 32U
+#endif
 llam_runtime_t *llam_runtime_default_storage(void);
+llam_runtime_t *llam_runtime_public_handle(llam_runtime_t *runtime);
+int llam_runtime_reset_storage_for_init(llam_runtime_t *runtime);
+int llam_runtime_public_owner_acquire(llam_runtime_t *runtime);
+void llam_runtime_public_owner_release(llam_runtime_t *runtime);
+uint64_t llam_runtime_public_owner_secret(
+    const llam_runtime_t *runtime);
 typedef void (*llam_runtime_live_iter_fn)(llam_runtime_t *rt, void *arg);
 int llam_runtime_check_handle(const llam_runtime_t *runtime);
 int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_runtime);
@@ -429,9 +441,12 @@ int llam_runtime_init_rt(llam_runtime_t *rt,
                          size_t opts_size,
                          bool heap_allocated);
 int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated);
-int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated);
+int llam_runtime_claim_destroy_handle(llam_runtime_t *handle,
+                                      llam_runtime_t **out_runtime,
+                                      bool *out_heap_allocated);
 void llam_runtime_unregister_handle(llam_runtime_t *rt);
-void llam_runtime_retire_heap_handle(llam_runtime_t *rt);
+void llam_runtime_finalize_handle(llam_runtime_t *rt,
+                                  bool retire_heap_storage);
 int llam_runtime_collect_stats_ex_rt(llam_runtime_t *rt, llam_runtime_stats_t *stats, size_t stats_size);
 llam_runtime_t *llam_runtime_current_owner(void);
 llam_runtime_t *llam_runtime_owner_for_new_object(void);

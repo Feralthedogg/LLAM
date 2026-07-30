@@ -714,9 +714,9 @@ static bool llam_public_driver_mode_valid(uint32_t mode) {
  * @see llam_run
  */
 static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
-                                            const llam_runtime_opts_t *opts,
-                                            size_t opts_size,
-                                            bool heap_allocated) {
+                                             const llam_runtime_opts_t *opts,
+                                             size_t opts_size,
+                                             bool heap_allocated) {
     llam_runtime_opts_t raw_opts;
     llam_runtime_opts_t opts_storage;
     llam_runtime_resource_plan_input_t resource_input;
@@ -796,12 +796,9 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         }
     }
 
-    if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
-        errno = EBUSY;
+    if (llam_runtime_reset_storage_for_init(rt) != 0) {
         return -1;
     }
-
-    memset(rt, 0, sizeof(*rt));
     if (llam_runtime_register_handle(rt, heap_allocated) != 0) {
         return -1;
     }
@@ -815,8 +812,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 
         if (wsa_rc != 0) {
             errno = llam_windows_wsa_error_to_errno(wsa_rc);
-            llam_runtime_unregister_handle(rt);
-            memset(rt, 0, sizeof(*rt));
+            llam_runtime_finalize_handle(rt, false);
             return -1;
         }
         rt->winsock_started = true;

@@ -29,6 +29,7 @@
 #define fail_errno stack_cache_fail_errno
 
 typedef struct stack_cache_fixture {
+    llam_runtime_t *handle;
     llam_runtime_t *runtime;
     size_t stack_size;
     uint64_t mapping_bytes;
@@ -83,9 +84,15 @@ static int fixture_init(stack_cache_fixture_t *fixture,
     opts.stack_cache_idle_ns = idle_ns;
     if (llam_runtime_create(&opts,
                             LLAM_RUNTIME_OPTS_CURRENT_SIZE,
-                            &fixture->runtime) != 0) {
+                            &fixture->handle) != 0) {
         return fail_errno("runtime creation failed");
     }
+    if (llam_runtime_begin_public_op(fixture->handle, &fixture->runtime) != 0) {
+        llam_runtime_destroy(fixture->handle);
+        fixture->handle = NULL;
+        return fail_errno("runtime pin failed");
+    }
+    llam_runtime_end_public_op(fixture->runtime);
     return 0;
 }
 
@@ -93,13 +100,14 @@ static void fixture_destroy(stack_cache_fixture_t *fixture) {
     if (fixture == NULL) {
         return;
     }
-    llam_runtime_destroy(fixture->runtime);
+    llam_runtime_destroy(fixture->handle);
+    fixture->handle = NULL;
     fixture->runtime = NULL;
 }
 
 static int fixture_stats(const stack_cache_fixture_t *fixture,
                          llam_runtime_stats_t *stats) {
-    if (llam_runtime_collect_stats_ex_handle(fixture->runtime,
+    if (llam_runtime_collect_stats_ex_handle(fixture->handle,
                                              stats,
                                              sizeof(*stats)) != 0) {
         return fail_errno("stack-cache statistics collection failed");
@@ -182,7 +190,7 @@ static int test_manual_trim_and_pressure(void) {
     }
     released = UINT64_MAX;
     if (llam_runtime_stack_cache_trim_ex(
-            fixture.runtime,
+            fixture.handle,
             3U * fixture.mapping_bytes,
             &released) != 0 ||
         fixture_stats(&fixture, &after) != 0) {
@@ -204,7 +212,7 @@ static int test_manual_trim_and_pressure(void) {
     released = UINT64_MAX;
     errno = 0;
     if (llam_runtime_stack_cache_trim_ex(
-            fixture.runtime,
+            fixture.handle,
             fixture.budget_bytes + fixture.mapping_bytes,
             &released) != -1 ||
         errno != EINVAL || released != 0U) {
@@ -212,7 +220,7 @@ static int test_manual_trim_and_pressure(void) {
         goto cleanup;
     }
     before = after;
-    if (llam_runtime_notify_memory_pressure(fixture.runtime) != 0 ||
+    if (llam_runtime_notify_memory_pressure(fixture.handle) != 0 ||
         fixture_stats(&fixture, &after) != 0) {
         rc = fail_errno("memory-pressure trim failed");
         goto cleanup;
@@ -400,7 +408,7 @@ static int test_trim_releases_vm_outside_cache_locks(void) {
     llam_runtime_test_reset_stack_vm_hooks();
     llam_runtime_test_set_stack_vm_observer(observe_stack_vm_release,
                                             &observer);
-    if (llam_runtime_stack_cache_trim_ex(fixture.runtime,
+    if (llam_runtime_stack_cache_trim_ex(fixture.handle,
                                          0U,
                                          &released) != 0) {
         rc = fail_errno("VM-outside-lock trim failed");
@@ -482,7 +490,7 @@ static void *cache_trim_main(void *arg) {
         uint64_t released = 0U;
 
         if (llam_runtime_stack_cache_trim_ex(
-                state->fixture->runtime,
+                state->fixture->handle,
                 2U * state->fixture->mapping_bytes,
                 &released) != 0) {
             atomic_fetch_add_explicit(&state->failures,
@@ -501,7 +509,7 @@ static void *cache_stats_main(void *arg) {
          ++iteration) {
         llam_runtime_stats_t stats;
 
-        if (llam_runtime_collect_stats_ex_handle(state->fixture->runtime,
+        if (llam_runtime_collect_stats_ex_handle(state->fixture->handle,
                                                  &stats,
                                                  sizeof(stats)) != 0 ||
             stats.stack_cache_cached_bytes >
@@ -560,7 +568,7 @@ static int test_concurrent_trim_churn_stats_and_shutdown(void) {
     trim_started = false;
     stats_started = false;
     if (atomic_load_explicit(&state.failures, memory_order_acquire) != 0U ||
-        llam_runtime_notify_memory_pressure(fixture.runtime) != 0 ||
+        llam_runtime_notify_memory_pressure(fixture.handle) != 0 ||
         fixture_stats(&fixture, &stats) != 0 ||
         stats.stack_cache_cached_bytes != 0U ||
         stats.stack_cache_cached_mappings != 0U ||
@@ -677,11 +685,11 @@ static int test_destroy_waits_for_active_trim(void) {
     }
     atomic_init(&observer.claimed, 0U);
     memset(&trim_call, 0, sizeof(trim_call));
-    trim_call.runtime = fixture.runtime;
+    trim_call.runtime = fixture.handle;
     atomic_init(&trim_call.started, 0U);
     atomic_init(&trim_call.done, 0U);
     memset(&destroy_call, 0, sizeof(destroy_call));
-    destroy_call.runtime = fixture.runtime;
+    destroy_call.runtime = fixture.handle;
     atomic_init(&destroy_call.started, 0U);
     atomic_init(&destroy_call.done, 0U);
 
@@ -740,6 +748,7 @@ release_observer:
     if (destroy_started) {
         (void)pthread_join(destroy_thread, NULL);
         destroy_started = false;
+        fixture.handle = NULL;
         fixture.runtime = NULL;
     }
     if (rc == 0 &&

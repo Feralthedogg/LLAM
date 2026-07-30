@@ -541,6 +541,7 @@ static int exercise_hard_affinity_final_dispatch_guard(void) {
     llam_spawn_opts_t spawn_opts;
     hard_affinity_run_state_t state;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *handle = NULL;
     llam_task_t *task = NULL;
     llam_task_t *removed = NULL;
@@ -563,12 +564,16 @@ static int exercise_hard_affinity_final_dispatch_guard(void) {
             &opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return fail_errno("hard-affinity dispatch runtime create failed");
     }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("hard-affinity dispatch runtime pin failed");
+        goto done;
+    }
     atomic_store_explicit(
-        &runtime->next_spawn_shard, 0U, memory_order_relaxed);
-    pthread_mutex_lock(&runtime->shards[0].lock);
-    runtime->shards[0].opaque_redirect_active = true;
-    runtime->shards[0].opaque_redirect_target_id = 1U;
-    pthread_mutex_unlock(&runtime->shards[0].lock);
+        &raw_runtime->next_spawn_shard, 0U, memory_order_relaxed);
+    pthread_mutex_lock(&raw_runtime->shards[0].lock);
+    raw_runtime->shards[0].opaque_redirect_active = true;
+    raw_runtime->shards[0].opaque_redirect_target_id = 1U;
+    pthread_mutex_unlock(&raw_runtime->shards[0].lock);
 
     memset(&spawn_opts, 0, sizeof(spawn_opts));
     spawn_opts.flags = LLAM_SPAWN_F_PINNED;
@@ -583,47 +588,49 @@ static int exercise_hard_affinity_final_dispatch_guard(void) {
     }
     task = llam_task_resolve_public_handle(handle);
     if (task == NULL || task->home_shard != 0U ||
-        task->home_shard >= runtime->active_shards) {
+        task->home_shard >= raw_runtime->active_shards) {
         rc = fail_msg("hard-affinity dispatch task did not resolve");
         goto done;
     }
-    pthread_mutex_lock(&runtime->shards[0].lock);
-    runtime->shards[0].opaque_redirect_active = false;
-    runtime->shards[0].opaque_redirect_target_id = UINT_MAX;
-    pthread_mutex_unlock(&runtime->shards[0].lock);
+    pthread_mutex_lock(&raw_runtime->shards[0].lock);
+    raw_runtime->shards[0].opaque_redirect_active = false;
+    raw_runtime->shards[0].opaque_redirect_target_id = UINT_MAX;
+    pthread_mutex_unlock(&raw_runtime->shards[0].lock);
     state.home_shard = task->home_shard;
-    foreign_id = (task->home_shard + 1U) % runtime->active_shards;
+    foreign_id = (task->home_shard + 1U) % raw_runtime->active_shards;
 
-    pthread_mutex_lock(&runtime->shards[task->home_shard].lock);
-    if (runtime->shards[task->home_shard].inject_q.head == task) {
+    pthread_mutex_lock(&raw_runtime->shards[task->home_shard].lock);
+    if (raw_runtime->shards[task->home_shard].inject_q.head == task) {
         removed = llam_queue_pop_head(
-            &runtime->shards[task->home_shard].inject_q);
+            &raw_runtime->shards[task->home_shard].inject_q);
         atomic_store_explicit(
-            &runtime->shards[task->home_shard].inject_depth,
-            runtime->shards[task->home_shard].inject_q.depth,
+            &raw_runtime->shards[task->home_shard].inject_depth,
+            raw_runtime->shards[task->home_shard].inject_q.depth,
             memory_order_release);
-    } else if (runtime->shards[task->home_shard].hot_q.head == task) {
+    } else if (raw_runtime->shards[task->home_shard].hot_q.head == task) {
         removed = llam_queue_pop_head(
-            &runtime->shards[task->home_shard].hot_q);
+            &raw_runtime->shards[task->home_shard].hot_q);
     } else {
         removed = llam_norm_queue_pop_owner_locked(
-            &runtime->shards[task->home_shard]);
+            &raw_runtime->shards[task->home_shard]);
     }
-    pthread_mutex_unlock(&runtime->shards[task->home_shard].lock);
+    pthread_mutex_unlock(&raw_runtime->shards[task->home_shard].lock);
     if (removed != task) {
         rc = fail_msg("hard-affinity dispatch task was not on its home queue");
         goto done;
     }
 
-    pthread_mutex_lock(&runtime->shards[foreign_id].lock);
+    pthread_mutex_lock(&raw_runtime->shards[foreign_id].lock);
     /*
      * Bypass producer and inject-drain guards so the scheduler's last-chance
      * dispatch boundary is the only component that can contain this entry.
      */
-    llam_queue_push_tail(&runtime->shards[foreign_id].hot_q, task);
-    pthread_mutex_unlock(&runtime->shards[foreign_id].lock);
+    llam_queue_push_tail(&raw_runtime->shards[foreign_id].hot_q, task);
+    pthread_mutex_unlock(&raw_runtime->shards[foreign_id].lock);
     llam_task_end_public_op(task);
     task = NULL;
+    llam_runtime_end_public_op(raw_runtime);
+    raw_runtime = NULL;
 
     if (llam_runtime_run_handle(runtime) != 0 || llam_join(handle) != 0) {
         handle = NULL;
@@ -644,6 +651,9 @@ done:
     }
     if (handle != NULL) {
         (void)llam_detach(handle);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
     }
     llam_runtime_destroy(runtime);
     return rc;

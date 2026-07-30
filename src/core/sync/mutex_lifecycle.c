@@ -43,7 +43,8 @@ static int llam_mutex_reserve_public_slot_locked(llam_mutex_t *mutex, size_t *ou
                                                   64U,
                                                   LLAM_PUBLIC_HANDLE_FAMILY_MUTEX,
                                                   mutex->owner_runtime != NULL
-                                                      ? mutex->owner_runtime->public_handle_secret
+                                                      ? llam_runtime_public_owner_secret(
+                                                            mutex->owner_runtime)
                                                       : 0U,
                                                   out_slot,
                                                   &generation);
@@ -52,9 +53,13 @@ static int llam_mutex_reserve_public_slot_locked(llam_mutex_t *mutex, size_t *ou
 static int llam_mutex_register_live(llam_mutex_t *mutex) {
     size_t slot = 0U;
 
+    if (llam_runtime_public_owner_acquire(mutex->owner_runtime) != 0) {
+        return -1;
+    }
     pthread_mutex_lock(&g_llam_mutex_registry_lock);
     if (llam_mutex_reserve_public_slot_locked(mutex, &slot) != 0) {
         pthread_mutex_unlock(&g_llam_mutex_registry_lock);
+        llam_runtime_public_owner_release(mutex->owner_runtime);
         return -1;
     }
     mutex->public_handle_slot = slot;
@@ -166,6 +171,7 @@ llam_mutex_t *llam_mutex_create(void) {
  */
 int llam_mutex_destroy(llam_mutex_t *mutex) {
     uintptr_t handle = (uintptr_t)mutex;
+    llam_runtime_t *owner_runtime;
     size_t slot;
     uint32_t generation;
 
@@ -197,10 +203,12 @@ int llam_mutex_destroy(llam_mutex_t *mutex) {
         errno = EBUSY;
         return -1;
     }
+    owner_runtime = mutex->owner_runtime;
     llam_mutex_unregister_live_locked(mutex);
     pthread_mutex_unlock(&mutex->lock);
     pthread_mutex_unlock(&g_llam_mutex_registry_lock);
     pthread_mutex_destroy(&mutex->lock);
     free(mutex);
+    llam_runtime_public_owner_release(owner_runtime);
     return 0;
 }

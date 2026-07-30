@@ -215,10 +215,17 @@ static int test_runtime_live_iter_alloc_failure_releases_pins(void) {
         goto cleanup;
     }
     for (size_t i = 0U; i < RUNTIME_COUNT; ++i) {
-        if (llam_public_active_op_count(&runtimes[i]->active_ops) != 0U) {
+        llam_runtime_t *pinned_runtime = NULL;
+
+        if (llam_runtime_begin_public_op(runtimes[i], &pinned_runtime) != 0) {
             leaked += 1U;
-            atomic_store_explicit(&runtimes[i]->active_ops, 0U, memory_order_release);
+            continue;
         }
+        if (llam_public_active_op_count(&pinned_runtime->active_ops) != 1U) {
+            leaked += 1U;
+            atomic_store_explicit(&pinned_runtime->active_ops, 1U, memory_order_release);
+        }
+        llam_runtime_end_public_op(pinned_runtime);
     }
     if (leaked != 0U) {
         (void)fprintf(stderr,
@@ -10219,6 +10226,7 @@ static int test_runtime_destroy_cancels_signal_wait_active_op(void) {
     if (pid == 0) {
         runtime_signal_destroy_state_t state;
         llam_runtime_opts_t opts;
+        llam_runtime_t *raw_runtime = NULL;
         llam_task_t *creator;
         pthread_t waiter;
         bool waiter_started = false;
@@ -10255,14 +10263,18 @@ static int test_runtime_destroy_cancels_signal_wait_active_op(void) {
             _exit(15);
         }
         waiter_started = true;
+        if (llam_runtime_begin_public_op(state.runtime, &raw_runtime) != 0) {
+            _exit(16);
+        }
+        llam_runtime_end_public_op(raw_runtime);
         for (unsigned i = 0U; i < 1000000U; ++i) {
             if (atomic_load_explicit(&state.waiter_started, memory_order_acquire) != 0 &&
-                atomic_load_explicit(&state.runtime->active_ops, memory_order_acquire) != 0U) {
+                atomic_load_explicit(&raw_runtime->active_ops, memory_order_acquire) != 0U) {
                 break;
             }
             sched_yield();
         }
-        if (atomic_load_explicit(&state.runtime->active_ops, memory_order_acquire) == 0U) {
+        if (atomic_load_explicit(&raw_runtime->active_ops, memory_order_acquire) == 0U) {
             _exit(16);
         }
         (void)alarm(2U);

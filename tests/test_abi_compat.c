@@ -124,6 +124,7 @@ static int test_frozen_runtime_opts_prefix_ignores_current_tail(void) {
     llam_runtime_opts_t opts;
     llam_runtime_stats_t stats;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     const size_t frozen_size = LLAM_RUNTIME_OPTS_V2_2_SIZE;
 
     memset(&opts, 0xA5, sizeof(opts));
@@ -154,10 +155,16 @@ static int test_frozen_runtime_opts_prefix_ignores_current_tail(void) {
         llam_runtime_destroy(runtime);
         return fail_msg("frozen-prefix runtime did not resolve stack-cache defaults");
     }
-    if (runtime->external_driver.enabled) {
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return fail_errno("frozen-prefix runtime pin failed");
+    }
+    if (raw_runtime->external_driver.enabled) {
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_msg("frozen-prefix runtime unexpectedly selected external driving");
     }
+    llam_runtime_end_public_op(raw_runtime);
     llam_runtime_destroy(runtime);
     return 0;
 }

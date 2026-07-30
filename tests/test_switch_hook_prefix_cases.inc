@@ -141,6 +141,7 @@ static int test_switch_hook_same_task_serialization(void) {
     llam_runtime_opts_t runtime_opts;
     llam_spawn_opts_t spawn_opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     unsigned *allowed_cpus = NULL;
     unsigned allowed_count;
     unsigned i;
@@ -182,12 +183,17 @@ static int test_switch_hook_same_task_serialization(void) {
         return SWITCH_HOOK_TEST_FAIL_ERRNO(
             "same-task switch-hook runtime creation failed");
     }
-    state.runtime = runtime;
-    atomic_store_explicit(&runtime->steal_pause_active,
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        (void)SWITCH_HOOK_TEST_FAIL_ERRNO(
+            "same-task switch-hook runtime pin failed");
+        goto out;
+    }
+    state.runtime = raw_runtime;
+    atomic_store_explicit(&raw_runtime->steal_pause_active,
                           1U,
                           memory_order_release);
     for (i = 0U; i <= SWITCH_HOOK_SERIAL_PEERS; ++i) {
-        atomic_store_explicit(&runtime->next_spawn_shard,
+        atomic_store_explicit(&raw_runtime->next_spawn_shard,
                               0U,
                               memory_order_relaxed);
         spawn_opts.user_context = &contexts[i];
@@ -249,6 +255,9 @@ out:
         if (handles[i] != NULL) {
             (void)llam_detach(handles[i]);
         }
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
     }
     llam_runtime_destroy(runtime);
     return rc;

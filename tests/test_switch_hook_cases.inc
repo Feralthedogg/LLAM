@@ -2,18 +2,15 @@
  * Copyright 2026 Feralthedogg
  * SPDX-License-Identifier: Apache-2.0
  */
-
 #ifndef SWITCH_HOOK_TEST_FAIL
 #error "define SWITCH_HOOK_TEST_FAIL before including switch-hook cases"
 #endif
 #ifndef SWITCH_HOOK_TEST_FAIL_ERRNO
 #error "define SWITCH_HOOK_TEST_FAIL_ERRNO before including switch-hook cases"
 #endif
-
 #define SWITCH_HOOK_MAX_EVENTS 64U
 #define SWITCH_HOOK_MAX_RESUMES 4U
 #define SWITCH_HOOK_SERIAL_PEERS 8U
-
 typedef enum switch_hook_event_kind {
     SWITCH_HOOK_EVENT_RESUME = 1,
     SWITCH_HOOK_EVENT_BODY = 2,
@@ -489,6 +486,7 @@ static int test_switch_hook_direct_handoff_and_migration(void) {
     llam_runtime_opts_t runtime_opts;
     llam_spawn_opts_t spawn_opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *migration_handle = NULL;
     llam_task_t *mover_handle = NULL;
     llam_task_t *migration_task = NULL;
@@ -532,7 +530,11 @@ static int test_switch_hook_direct_handoff_and_migration(void) {
         return SWITCH_HOOK_TEST_FAIL_ERRNO(
             "switch-hook migration runtime creation failed");
     }
-    state.runtime = runtime;
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        (void)SWITCH_HOOK_TEST_FAIL_ERRNO("switch-hook migration runtime pin failed");
+        goto out;
+    }
+    state.runtime = raw_runtime;
     spawn_opts.user_context = &migration_context;
     migration_handle = llam_runtime_spawn_ex(runtime,
                                              switch_hook_migration_task,
@@ -561,42 +563,42 @@ static int test_switch_hook_direct_handoff_and_migration(void) {
     state.source_shard = migration_task->home_shard;
     state.target_shard = mover_task->home_shard;
     state.migration_task = migration_task;
-    atomic_store_explicit(&runtime->steal_pause_active,
+    atomic_store_explicit(&raw_runtime->steal_pause_active,
                           1U,
                           memory_order_release);
 
-    pthread_mutex_lock(&runtime->shards[state.source_shard].lock);
+    pthread_mutex_lock(&raw_runtime->shards[state.source_shard].lock);
     popped_migration = llam_queue_pop_head(
-        &runtime->shards[state.source_shard].inject_q);
-    atomic_store_explicit(&runtime->shards[state.source_shard].inject_depth,
-                          runtime->shards[state.source_shard].inject_q.depth,
+        &raw_runtime->shards[state.source_shard].inject_q);
+    atomic_store_explicit(&raw_runtime->shards[state.source_shard].inject_depth,
+                          raw_runtime->shards[state.source_shard].inject_q.depth,
                           memory_order_release);
-    pthread_mutex_unlock(&runtime->shards[state.source_shard].lock);
-    pthread_mutex_lock(&runtime->shards[state.target_shard].lock);
+    pthread_mutex_unlock(&raw_runtime->shards[state.source_shard].lock);
+    pthread_mutex_lock(&raw_runtime->shards[state.target_shard].lock);
     popped_mover = llam_queue_pop_head(
-        &runtime->shards[state.target_shard].inject_q);
-    atomic_store_explicit(&runtime->shards[state.target_shard].inject_depth,
-                          runtime->shards[state.target_shard].inject_q.depth,
+        &raw_runtime->shards[state.target_shard].inject_q);
+    atomic_store_explicit(&raw_runtime->shards[state.target_shard].inject_depth,
+                          raw_runtime->shards[state.target_shard].inject_q.depth,
                           memory_order_release);
-    pthread_mutex_unlock(&runtime->shards[state.target_shard].lock);
+    pthread_mutex_unlock(&raw_runtime->shards[state.target_shard].lock);
     if (popped_migration != migration_task || popped_mover != mover_task) {
         (void)SWITCH_HOOK_TEST_FAIL(
             "switch-hook migration setup did not own both inject entries");
         goto out;
     }
-    pthread_mutex_lock(&runtime->shards[state.source_shard].lock);
+    pthread_mutex_lock(&raw_runtime->shards[state.source_shard].lock);
     if (!llam_norm_queue_push_owner_locked(
-            &runtime->shards[state.source_shard],
+            &raw_runtime->shards[state.source_shard],
             mover_task) ||
         !llam_norm_queue_push_owner_locked(
-            &runtime->shards[state.source_shard],
+            &raw_runtime->shards[state.source_shard],
             migration_task)) {
-        pthread_mutex_unlock(&runtime->shards[state.source_shard].lock);
+        pthread_mutex_unlock(&raw_runtime->shards[state.source_shard].lock);
         (void)SWITCH_HOOK_TEST_FAIL(
             "switch-hook migration setup could not stage direct handoff");
         goto out;
     }
-    pthread_mutex_unlock(&runtime->shards[state.source_shard].lock);
+    pthread_mutex_unlock(&raw_runtime->shards[state.source_shard].lock);
     llam_task_end_public_op(migration_task);
     migration_task = NULL;
     llam_task_end_public_op(mover_task);
@@ -664,6 +666,8 @@ out:
     if (mover_handle != NULL) {
         (void)llam_detach(mover_handle);
     }
+    if (raw_runtime != NULL)
+        llam_runtime_end_public_op(raw_runtime);
     llam_runtime_destroy(runtime);
     return rc;
 }
@@ -685,6 +689,7 @@ static int test_switch_hook_concurrent_tasks(void) {
     llam_runtime_opts_t runtime_opts;
     llam_spawn_opts_t spawn_opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *first = NULL;
     llam_task_t *second = NULL;
     unsigned *allowed_cpus = NULL;
@@ -724,7 +729,11 @@ static int test_switch_hook_concurrent_tasks(void) {
         return SWITCH_HOOK_TEST_FAIL_ERRNO(
             "concurrent switch-hook runtime creation failed");
     }
-    atomic_store_explicit(&runtime->steal_pause_active,
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        (void)SWITCH_HOOK_TEST_FAIL_ERRNO("concurrent switch-hook runtime pin failed");
+        goto out;
+    }
+    atomic_store_explicit(&raw_runtime->steal_pause_active,
                           1U,
                           memory_order_release);
     spawn_opts.user_context = &first_context;
@@ -777,6 +786,8 @@ out:
     if (second != NULL) {
         (void)llam_detach(second);
     }
+    if (raw_runtime != NULL)
+        llam_runtime_end_public_op(raw_runtime);
     llam_runtime_destroy(runtime);
     return rc;
 }

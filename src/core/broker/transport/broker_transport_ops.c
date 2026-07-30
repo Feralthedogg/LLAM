@@ -35,7 +35,7 @@ static void llam_broker_response_init_empty(llam_broker_wire_response_t *respons
 }
 
 static void llam_broker_response_bind_broker(llam_broker_t *broker, llam_broker_wire_response_t *response) {
-    response->runtime_id = broker != NULL && broker->runtime != NULL ? broker->runtime->runtime_id : 0U;
+    response->runtime_id = broker != NULL && broker->runtime != NULL ? broker->runtime_id : 0U;
     response->revocation_epoch = broker != NULL ? atomic_load_explicit(&broker->revocation_epoch, memory_order_acquire) : 0U;
 }
 

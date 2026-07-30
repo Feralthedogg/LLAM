@@ -3,10 +3,9 @@
  * @brief Process-local runtime handle registry and active-op pins.
  *
  * @details
- * Explicit runtime handles are raw pointers for source compatibility.  The
- * registry is the only place that validates those pointers before runtime state
- * is dereferenced, and active-op pins keep host-side operations from racing
- * concurrent runtime destruction.
+ * Explicit runtime handles are encoded slot+generation tokens.  The registry
+ * resolves those tokens before runtime state is dereferenced, and active-op
+ * pins keep host-side operations from racing concurrent runtime destruction.
  *
  * @copyright Copyright 2026 Feralthedogg
  *
@@ -29,6 +28,7 @@
 static pthread_mutex_t g_llam_runtime_registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static llam_runtime_t *g_llam_runtime_registry;
 static llam_runtime_t *g_llam_runtime_retired_handles;
+static llam_public_slot_table_t g_llam_runtime_public_slots;
 static atomic_uint_fast64_t g_llam_next_runtime_id = 1U;
 
 #if defined(LLAM_ENABLE_TEST_HOOKS)
@@ -67,7 +67,246 @@ static bool llam_runtime_is_registered_locked(const llam_runtime_t *runtime) {
     return llam_runtime_find_registered_locked(runtime) != NULL;
 }
 
+static bool llam_runtime_remove_retired_locked(llam_runtime_t *runtime) {
+    llam_runtime_t **link;
+
+    for (link = &g_llam_runtime_retired_handles;
+         *link != NULL;
+         link = &(*link)->registry_next) {
+        if (*link == runtime) {
+            *link = runtime->registry_next;
+            runtime->registry_next = NULL;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool llam_runtime_is_retired_locked(
+    const llam_runtime_t *runtime) {
+    const llam_runtime_t *current;
+
+    for (current = g_llam_runtime_retired_handles;
+         current != NULL;
+         current = current->registry_next) {
+        if (current == runtime) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool llam_runtime_unregister_handle_locked(
+    llam_runtime_t *runtime) {
+    llam_runtime_t **link;
+
+    for (link = &g_llam_runtime_registry;
+         *link != NULL;
+         link = &(*link)->registry_next) {
+        if (*link == runtime) {
+            *link = runtime->registry_next;
+            runtime->registry_next = NULL;
+            if (runtime->public_handle_slot != SIZE_MAX &&
+                runtime->public_handle_generation != 0U) {
+                llam_public_slot_release(
+                    &g_llam_runtime_public_slots,
+                    runtime->public_handle_slot,
+                    runtime,
+                    runtime->public_handle_generation);
+                runtime->public_handle_slot = SIZE_MAX;
+                runtime->public_handle_generation = 0U;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static llam_runtime_t *llam_runtime_resolve_handle_locked(
+    const llam_runtime_t *handle) {
+    llam_runtime_t *runtime;
+
+    runtime = llam_runtime_find_registered_locked(handle);
+    if (runtime != NULL) {
+        return runtime;
+    }
+    runtime = llam_public_slot_resolve_encoded(
+        &g_llam_runtime_public_slots,
+        (uintptr_t)handle,
+        LLAM_RUNTIME_PUBLIC_HANDLE_SHIFT,
+        NULL,
+        NULL);
+    if (runtime == NULL ||
+        llam_runtime_find_registered_locked(runtime) != runtime) {
+        return NULL;
+    }
+    return runtime;
+}
+
+llam_runtime_t *llam_runtime_public_handle(llam_runtime_t *runtime) {
+    uintptr_t encoded;
+
+    if (runtime == NULL ||
+        runtime == llam_runtime_default_storage()) {
+        return runtime;
+    }
+    encoded = llam_public_slot_encode_handle(
+        runtime->public_handle_slot,
+        runtime->public_handle_generation,
+        LLAM_RUNTIME_PUBLIC_HANDLE_SHIFT);
+    return encoded != 0U ? (llam_runtime_t *)encoded : NULL;
+}
+
+int llam_runtime_reset_storage_for_init(llam_runtime_t *runtime) {
+    size_t public_owner_refs = 0U;
+    int rc = 0;
+
+    if (runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&g_llam_runtime_registry_lock);
+    if (llam_runtime_is_registered_locked(runtime) ||
+        llam_runtime_is_retired_locked(runtime)) {
+        /* A live or retired heap runtime is not an initialization target. */
+        rc = EBUSY;
+    } else if (runtime == llam_runtime_default_storage() &&
+               runtime->public_owner_refs != 0U &&
+               atomic_load_explicit(&runtime->destroy_claimed,
+                                    memory_order_acquire)) {
+        /*
+         * Surviving cleanup objects from the previous default-runtime
+         * incarnation keep its stable raw storage from aliasing a new
+         * scheduler.
+         */
+        rc = EBUSY;
+    } else {
+        if (runtime == llam_runtime_default_storage()) {
+            public_owner_refs = runtime->public_owner_refs;
+        }
+        /*
+         * Public owner acquire/release also holds the registry lock, so the
+         * preserved count cannot race this storage reset.
+         */
+        memset(runtime, 0, sizeof(*runtime));
+        runtime->public_handle_slot = SIZE_MAX;
+        runtime->public_owner_refs = public_owner_refs;
+    }
+    pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    return 0;
+}
+
+int llam_runtime_public_owner_acquire(llam_runtime_t *runtime) {
+    bool default_preinit;
+    int rc = 0;
+
+    if (runtime == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&g_llam_runtime_registry_lock);
+    /*
+     * Once every object from the previous default-runtime incarnation has
+     * drained, the stable default storage may start a fresh pre-init owner
+     * epoch. Objects created in that epoch belong to the next initialization;
+     * a surviving prior-incarnation object keeps destroy_claimed set and
+     * therefore still prevents stale-owner aliasing.
+     */
+    if (runtime == llam_runtime_default_storage() &&
+        !llam_runtime_is_registered_locked(runtime) &&
+        runtime->runtime_id == 0U &&
+        runtime->public_owner_refs == 0U &&
+        atomic_load_explicit(&runtime->destroy_claimed,
+                             memory_order_acquire)) {
+        atomic_store_explicit(&runtime->destroy_claimed,
+                              false,
+                              memory_order_release);
+    }
+    default_preinit =
+        runtime == llam_runtime_default_storage() &&
+        !llam_runtime_is_registered_locked(runtime) &&
+        runtime->runtime_id == 0U &&
+        !atomic_load_explicit(&runtime->destroy_claimed,
+                              memory_order_acquire);
+    if ((!llam_runtime_is_registered_locked(runtime) && !default_preinit) ||
+        atomic_load_explicit(&runtime->destroy_claimed,
+                             memory_order_acquire)) {
+        rc = EINVAL;
+    } else if (runtime->public_owner_refs == SIZE_MAX) {
+        rc = EOVERFLOW;
+    } else {
+        runtime->public_owner_refs += 1U;
+    }
+    pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    return 0;
+}
+
+void llam_runtime_public_owner_release(llam_runtime_t *runtime) {
+    bool free_runtime = false;
+    bool known_runtime;
+
+    if (runtime == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&g_llam_runtime_registry_lock);
+    known_runtime =
+        runtime == llam_runtime_default_storage() ||
+        llam_runtime_is_registered_locked(runtime) ||
+        llam_runtime_remove_retired_locked(runtime);
+    if (!known_runtime) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        return;
+    }
+    if (runtime->public_owner_refs == 0U) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        abort();
+    }
+    runtime->public_owner_refs -= 1U;
+    if (runtime->public_owner_refs == 0U &&
+        runtime->retired_storage &&
+        runtime->heap_allocated) {
+        runtime->retired_storage = false;
+        free_runtime = true;
+    } else if (runtime->retired_storage &&
+               runtime->heap_allocated) {
+        runtime->registry_next = g_llam_runtime_retired_handles;
+        g_llam_runtime_retired_handles = runtime;
+    }
+    pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    if (free_runtime) {
+        llam_aligned_free(runtime);
+    }
+}
+
+uint64_t llam_runtime_public_owner_secret(
+    const llam_runtime_t *runtime) {
+    uint64_t secret = 0U;
+
+    if (runtime == NULL) {
+        return 0U;
+    }
+    pthread_mutex_lock(&g_llam_runtime_registry_lock);
+    if (runtime == llam_runtime_default_storage() ||
+        llam_runtime_is_registered_locked(runtime) ||
+        llam_runtime_is_retired_locked(runtime)) {
+        secret = runtime->public_handle_secret;
+    }
+    pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    return secret;
+}
+
 int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
+    size_t public_slot = SIZE_MAX;
+    uint32_t public_generation = 0U;
+
     if (rt == NULL) {
         errno = EINVAL;
         return -1;
@@ -101,26 +340,50 @@ int llam_runtime_register_handle(llam_runtime_t *rt, bool heap_allocated) {
         }
     }
     rt->heap_allocated = heap_allocated;
+    rt->retired_storage = false;
     atomic_store_explicit(&rt->destroy_claimed, false, memory_order_release);
     atomic_store_explicit(&rt->active_ops, 0U, memory_order_release);
+    rt->public_handle_slot = SIZE_MAX;
+    rt->public_handle_generation = 0U;
+    if (heap_allocated &&
+        llam_public_slot_reserve_family_secret(
+            &g_llam_runtime_public_slots,
+            rt,
+            64U,
+            LLAM_PUBLIC_HANDLE_FAMILY_RUNTIME,
+            rt->public_handle_secret,
+            &public_slot,
+            &public_generation) != 0) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        return -1;
+    }
+    rt->public_handle_slot = public_slot;
+    rt->public_handle_generation = public_generation;
     rt->registry_next = g_llam_runtime_registry;
     g_llam_runtime_registry = rt;
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
     return 0;
 }
 
-int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocated) {
+int llam_runtime_claim_destroy_handle(llam_runtime_t *handle,
+                                      llam_runtime_t **out_runtime,
+                                      bool *out_heap_allocated) {
+    llam_runtime_t *rt;
     bool already_claimed;
     bool heap_allocated;
     size_t active_ops;
 
-    if (rt == NULL || out_heap_allocated == NULL) {
+    if (handle == NULL ||
+        out_runtime == NULL ||
+        out_heap_allocated == NULL) {
         errno = EINVAL;
         return -1;
     }
+    *out_runtime = NULL;
     *out_heap_allocated = false;
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
-    if (!llam_runtime_is_registered_locked(rt)) {
+    rt = llam_runtime_resolve_handle_locked(handle);
+    if (rt == NULL) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);
         errno = EINVAL;
         return -1;
@@ -168,36 +431,64 @@ int llam_runtime_claim_destroy_handle(llam_runtime_t *rt, bool *out_heap_allocat
             llam_pause_cpu();
         }
     } while (active_ops != 0U);
+    *out_runtime = rt;
     *out_heap_allocated = heap_allocated;
     return 0;
 }
 
 void llam_runtime_unregister_handle(llam_runtime_t *rt) {
-    llam_runtime_t **link;
-
     if (rt == NULL) {
         return;
     }
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
-    for (link = &g_llam_runtime_registry; *link != NULL; link = &(*link)->registry_next) {
-        if (*link == rt) {
-            *link = rt->registry_next;
-            rt->registry_next = NULL;
-            break;
-        }
-    }
+    (void)llam_runtime_unregister_handle_locked(rt);
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
 }
 
-void llam_runtime_retire_heap_handle(llam_runtime_t *rt) {
+void llam_runtime_finalize_handle(
+    llam_runtime_t *rt,
+    bool retire_heap_storage) {
+    bool free_runtime = false;
+    bool heap_allocated;
+    size_t public_owner_refs;
+    uint64_t public_handle_secret;
+
     if (rt == NULL) {
         return;
     }
 
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
-    rt->registry_next = g_llam_runtime_retired_handles;
-    g_llam_runtime_retired_handles = rt;
+    if (!llam_runtime_unregister_handle_locked(rt)) {
+        pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+        return;
+    }
+    heap_allocated = rt->heap_allocated;
+    public_owner_refs = rt->public_owner_refs;
+    public_handle_secret = rt->public_handle_secret;
+    /*
+     * Object releases also serialize on the registry lock. Removing the live
+     * token, preserving the owner count, clearing scheduler/backend state, and
+     * publishing retired storage in one critical section leaves no
+     * unregistered/unretired gap in which a cleanup decrement can be lost.
+     */
+    memset(rt, 0, sizeof(*rt));
+    rt->public_handle_slot = SIZE_MAX;
+    rt->public_owner_refs = public_owner_refs;
+    rt->public_handle_secret = public_handle_secret;
+    rt->heap_allocated = heap_allocated;
+    atomic_init(&rt->destroy_claimed, true);
+    if (retire_heap_storage && heap_allocated &&
+        public_owner_refs != 0U) {
+        rt->retired_storage = true;
+        rt->registry_next = g_llam_runtime_retired_handles;
+        g_llam_runtime_retired_handles = rt;
+    } else if (retire_heap_storage && heap_allocated) {
+        free_runtime = true;
+    }
     pthread_mutex_unlock(&g_llam_runtime_registry_lock);
+    if (free_runtime) {
+        llam_aligned_free(rt);
+    }
 }
 
 int llam_runtime_check_handle(const llam_runtime_t *runtime) {
@@ -208,7 +499,7 @@ int llam_runtime_check_handle(const llam_runtime_t *runtime) {
         runtime = llam_runtime_default_storage();
     }
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
-    registered = llam_runtime_find_registered_locked(runtime);
+    registered = llam_runtime_resolve_handle_locked(runtime);
     ok = registered != NULL;
     if (ok && atomic_load_explicit(&registered->destroy_claimed, memory_order_acquire)) {
         ok = false;
@@ -228,12 +519,13 @@ int llam_runtime_begin_public_op(llam_runtime_t *runtime, llam_runtime_t **out_r
         errno = EINVAL;
         return -1;
     }
+    *out_runtime = NULL;
     if (runtime == NULL) {
         runtime = llam_runtime_default_storage();
     }
 
     pthread_mutex_lock(&g_llam_runtime_registry_lock);
-    registered = llam_runtime_find_registered_locked(runtime);
+    registered = llam_runtime_resolve_handle_locked(runtime);
     if (registered == NULL ||
         atomic_load_explicit(&registered->destroy_claimed, memory_order_acquire)) {
         pthread_mutex_unlock(&g_llam_runtime_registry_lock);

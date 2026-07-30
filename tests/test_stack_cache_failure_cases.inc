@@ -43,7 +43,7 @@ static int test_trim_release_failure_preserves_ownership(void) {
     llam_runtime_test_reset_stack_vm_hooks();
     llam_runtime_test_set_stack_vm_error(LLAM_TEST_STACK_VM_RELEASE, EIO);
     errno = 0;
-    if (llam_runtime_stack_cache_trim_ex(fixture.runtime,
+    if (llam_runtime_stack_cache_trim_ex(fixture.handle,
                                          0U,
                                          &released) != -1 ||
         errno != EIO || released != 0U ||
@@ -64,7 +64,7 @@ static int test_trim_release_failure_preserves_ownership(void) {
 
     llam_runtime_test_reset_stack_vm_hooks();
     released = UINT64_MAX;
-    if (llam_runtime_stack_cache_trim_ex(fixture.runtime,
+    if (llam_runtime_stack_cache_trim_ex(fixture.handle,
                                          0U,
                                          &released) != 0 ||
         fixture_stats(&fixture, &retried) != 0 ||
@@ -142,7 +142,7 @@ static int test_pop_failure_preserves_release_ownership(void) {
     }
 
     llam_runtime_test_reset_stack_vm_hooks();
-    if (llam_runtime_stack_cache_trim_ex(fixture.runtime,
+    if (llam_runtime_stack_cache_trim_ex(fixture.handle,
                                          0U,
                                          &released) != 0 ||
         fixture_stats(&fixture, &retried) != 0 ||
@@ -268,7 +268,8 @@ static int test_shutdown_release_failure_quarantines_mapping(void) {
     }
 
     llam_runtime_test_set_stack_vm_error(LLAM_TEST_STACK_VM_RELEASE, EIO);
-    llam_runtime_destroy(fixture.runtime);
+    llam_runtime_destroy(fixture.handle);
+    fixture.handle = NULL;
     fixture.runtime = NULL;
     llam_stack_cache_quarantine_snapshot(&failed_bytes,
                                          &failed_mappings);

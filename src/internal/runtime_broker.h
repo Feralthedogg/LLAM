@@ -253,6 +253,7 @@ typedef int (*llam_broker_wire_request_fn_t)(void *transport,
 
 typedef struct llam_broker {
     llam_runtime_t *runtime;
+    uint64_t runtime_id;
     pthread_mutex_t lock;
     pthread_cond_t idle_cond;
     llam_capability_key_t capability_key;

@@ -2251,6 +2251,7 @@ static int test_owned_buffer_release_active_op_sentinel_does_not_hang(void) {
 static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_io_buffer_t *buffer = NULL;
     llam_io_buffer_t *handle = NULL;
     unsigned char *backend_storage = NULL;
@@ -2264,6 +2265,10 @@ static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
     if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("provided-buffer detach runtime create failed");
     }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = test_fail_errno("provided-buffer detach runtime pin failed");
+        goto cleanup;
+    }
     backend_storage = malloc(LLAM_IO_BUFFER_INLINE_BYTES);
     buffer = calloc(1U, sizeof(*buffer));
     if (backend_storage == NULL || buffer == NULL) {
@@ -2271,7 +2276,7 @@ static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
         goto cleanup;
     }
     memcpy(backend_storage, payload, payload_len);
-    buffer->owner_runtime = runtime;
+    buffer->owner_runtime = raw_runtime;
     buffer->detached_wrapper = true;
     buffer->provided_storage = true;
     buffer->provided_node_index = 0U;
@@ -2288,6 +2293,8 @@ static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
         rc = test_fail("provided-buffer detach public handle missing");
         goto cleanup;
     }
+    llam_runtime_end_public_op(raw_runtime);
+    raw_runtime = NULL;
 
     /*
      * Reproduces the shutdown edge for Linux provided-buffer rings without
@@ -2309,6 +2316,9 @@ static int test_provided_owned_buffer_detaches_on_runtime_destroy(void) {
     rc = 0;
 
 cleanup:
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
     if (handle != NULL) {
         llam_io_buffer_release(handle);
         handle = NULL;
@@ -2326,6 +2336,7 @@ cleanup:
 static int test_provided_owned_buffer_data_accessor_detaches_storage(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_io_buffer_t *buffer = NULL;
     llam_io_buffer_t *handle = NULL;
     unsigned char *backend_storage = NULL;
@@ -2340,6 +2351,10 @@ static int test_provided_owned_buffer_data_accessor_detaches_storage(void) {
     if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("provided-buffer accessor runtime create failed");
     }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = test_fail_errno("provided-buffer accessor runtime pin failed");
+        goto cleanup;
+    }
     backend_storage = malloc(LLAM_IO_BUFFER_INLINE_BYTES);
     buffer = calloc(1U, sizeof(*buffer));
     if (backend_storage == NULL || buffer == NULL) {
@@ -2347,7 +2362,7 @@ static int test_provided_owned_buffer_data_accessor_detaches_storage(void) {
         goto cleanup;
     }
     memcpy(backend_storage, payload, payload_len);
-    buffer->owner_runtime = runtime;
+    buffer->owner_runtime = raw_runtime;
     buffer->detached_wrapper = true;
     buffer->provided_storage = true;
     buffer->provided_node_index = 0U;
@@ -2364,6 +2379,8 @@ static int test_provided_owned_buffer_data_accessor_detaches_storage(void) {
         rc = test_fail("provided-buffer accessor public handle missing");
         goto cleanup;
     }
+    llam_runtime_end_public_op(raw_runtime);
+    raw_runtime = NULL;
 
     /*
      * A borrowed pointer returned by the public accessor must not point into a
@@ -2397,6 +2414,9 @@ static int test_provided_owned_buffer_data_accessor_detaches_storage(void) {
     rc = 0;
 
 cleanup:
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
     if (handle != NULL) {
         llam_io_buffer_release(handle);
         handle = NULL;
@@ -2414,6 +2434,7 @@ cleanup:
 static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
     llam_runtime_opts_t opts;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_io_buffer_t *buffer = NULL;
     llam_io_buffer_t *handle = NULL;
     unsigned char *backend_storage = NULL;
@@ -2427,6 +2448,10 @@ static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
     if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {
         return test_fail_errno("provided-buffer clamp runtime create failed");
     }
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = test_fail_errno("provided-buffer clamp runtime pin failed");
+        goto cleanup;
+    }
     backend_storage = malloc(payload_len);
     buffer = calloc(1U, sizeof(*buffer));
     if (backend_storage == NULL || buffer == NULL) {
@@ -2434,7 +2459,7 @@ static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
         goto cleanup;
     }
     memcpy(backend_storage, payload, payload_len);
-    buffer->owner_runtime = runtime;
+    buffer->owner_runtime = raw_runtime;
     buffer->detached_wrapper = true;
     buffer->provided_storage = true;
     buffer->provided_node_index = 0U;
@@ -2456,6 +2481,8 @@ static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
         rc = test_fail("provided-buffer clamp public handle missing");
         goto cleanup;
     }
+    llam_runtime_end_public_op(raw_runtime);
+    raw_runtime = NULL;
 
     llam_runtime_destroy(runtime);
     runtime = NULL;
@@ -2471,6 +2498,9 @@ static int test_provided_owned_buffer_detach_clamps_corrupt_size(void) {
     rc = 0;
 
 cleanup:
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
     if (handle != NULL) {
         llam_io_buffer_release(handle);
         handle = NULL;

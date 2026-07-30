@@ -194,6 +194,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/sched/affinity.c
     src/core/sched/external_doorbell.c
     src/core/sched/core_queue.c
+    src/core/sched/handoff_policy.c
     src/core/memory/alloc.c
     src/core/memory/allocator_quiescent.c
     src/core/task/task_alloc.c
@@ -216,6 +217,9 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/task/task_stack.c
     src/core/sched/reinject.c
     src/core/wait/wait_accounting.c
+    src/core/wait/wait_deadline.c
+    src/core/wait/wait_io_abort.c
+    src/core/wait/wait_owner.c
     src/core/wait/wait_tracking.c
     src/core/time/timer_heap.c
     src/core/time/timer.c
@@ -231,6 +235,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/engine/watchdog/watchdog_scale.c
     src/engine/watchdog/watchdog_worker.c
     src/engine/watchdog/watchdog_autotune.c
+    src/engine/watchdog/watchdog_autotune_config.c
     src/core/api/core_api.c
     src/core/task/spawn.c
     src/core/task/yield_join_sleep.c
@@ -264,6 +269,9 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/io/api/direct.c
     src/io/api/direct_tuning.c
     src/io/api/issue.c
+    src/io/api/task_bootstrap.c
+    src/io/api/issue_wait.c
+    src/io/api/issue_watch.c
     src/io/api/blocking_ops.c
     src/io/api/blocking_file_ops.c
     src/io/api/blocking_wrappers.c
@@ -344,7 +352,11 @@ set(LLAM_RUNTIME_WINDOWS_MSVC_X86_64_SOURCES
 set(LLAM_RESEARCH_RUNTIME_LINUX_SOURCES
     src/io/linux/watch/linux_segment.c
     src/io/linux/watch/linux_segment_cancel.c
+    src/io/linux/watch/linux_segment_complete.c
+    src/io/linux/watch/linux_segment_queue.c
+    src/io/linux/watch/linux_segment_reducer.c
     src/io/linux/watch/linux_segment_resources.c
+    src/io/linux/watch/linux_segment_submit.c
 )
 
 set(LLAM_RUNTIME_SOURCES ${LLAM_RUNTIME_COMMON_SOURCES})

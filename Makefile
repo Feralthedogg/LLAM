@@ -370,6 +370,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/sched/affinity.o \
 	$(OBJDIR)/src/core/sched/external_doorbell.o \
 	$(OBJDIR)/src/core/sched/core_queue.o \
+	$(OBJDIR)/src/core/sched/handoff_policy.o \
 	$(OBJDIR)/src/core/memory/alloc.o \
 	$(OBJDIR)/src/core/memory/allocator_quiescent.o \
 	$(OBJDIR)/src/core/task/task_alloc.o \
@@ -392,6 +393,9 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/task/task_stack.o \
 	$(OBJDIR)/src/core/sched/reinject.o \
 	$(OBJDIR)/src/core/wait/wait_accounting.o \
+	$(OBJDIR)/src/core/wait/wait_deadline.o \
+	$(OBJDIR)/src/core/wait/wait_io_abort.o \
+	$(OBJDIR)/src/core/wait/wait_owner.o \
 	$(OBJDIR)/src/core/wait/wait_tracking.o \
 	$(OBJDIR)/src/core/time/timer_heap.o \
 	$(OBJDIR)/src/core/time/timer.o \
@@ -407,6 +411,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/engine/watchdog/watchdog_scale.o \
 	$(OBJDIR)/src/engine/watchdog/watchdog_worker.o \
 	$(OBJDIR)/src/engine/watchdog/watchdog_autotune.o \
+	$(OBJDIR)/src/engine/watchdog/watchdog_autotune_config.o \
 	$(OBJDIR)/src/core/api/core_api.o \
 	$(OBJDIR)/src/core/task/spawn.o \
 	$(OBJDIR)/src/core/task/yield_join_sleep.o \
@@ -440,6 +445,9 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/io/api/direct.o \
 	$(OBJDIR)/src/io/api/direct_tuning.o \
 	$(OBJDIR)/src/io/api/issue.o \
+	$(OBJDIR)/src/io/api/task_bootstrap.o \
+	$(OBJDIR)/src/io/api/issue_wait.o \
+	$(OBJDIR)/src/io/api/issue_watch.o \
 	$(OBJDIR)/src/io/api/blocking_ops.o \
 	$(OBJDIR)/src/io/api/blocking_file_ops.o \
 	$(OBJDIR)/src/io/api/blocking_wrappers.o \
@@ -510,7 +518,11 @@ RUNTIME_WINDOWS_MSVC_X86_64_OBJS = \
 RESEARCH_RUNTIME_LINUX_OBJS = \
 	$(OBJDIR)/src/io/linux/watch/linux_segment.o \
 	$(OBJDIR)/src/io/linux/watch/linux_segment_cancel.o \
-	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o
+	$(OBJDIR)/src/io/linux/watch/linux_segment_complete.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_queue.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_reducer.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_resources.o \
+	$(OBJDIR)/src/io/linux/watch/linux_segment_submit.o
 
 ifeq ($(HOST_PLATFORM),linux)
 LDLIBS += -lm
@@ -594,7 +606,7 @@ TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/blocking_ops.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/blocking_wrappers.o \
-	$(TESTHOOK_OBJDIR)/src/io/api/issue.o \
+	$(TESTHOOK_OBJDIR)/src/io/api/issue_wait.o \
 	$(TESTHOOK_OBJDIR)/src/io/api/public.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/close.o \
 	$(TESTHOOK_OBJDIR)/src/io/watch/watch_queue.o
@@ -616,7 +628,7 @@ RUNTIME_TESTHOOK_OBJS = \
 		$(OBJDIR)/src/engine/watchdog/watchdog_rehome.o \
 		$(OBJDIR)/src/io/api/blocking_ops.o \
 		$(OBJDIR)/src/io/api/blocking_wrappers.o \
-		$(OBJDIR)/src/io/api/issue.o \
+		$(OBJDIR)/src/io/api/issue_wait.o \
 		$(OBJDIR)/src/io/api/public.o \
 		$(OBJDIR)/src/io/watch/close.o \
 		$(OBJDIR)/src/io/watch/watch_queue.o, \
@@ -2954,17 +2966,17 @@ $(OBJDIR)/tests/%.o: tests/%.c $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_task_context_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h
+$(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_autotune_domain_cases.inc tests/test_task_context_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_multi_runtime_core.o: tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_host_process_cases.inc tests/test_signal_policy_cases.inc
+$(OBJDIR)/tests/test_multi_runtime_core.o: tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_host_process_cases.inc tests/test_runtime_handle_generation_cases.inc tests/test_signal_policy_cases.inc
 
 $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_hard_affinity_cases.inc tests/test_signal_stack_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_handoff_policy_cases.inc tests/test_hard_affinity_cases.inc tests/test_signal_stack_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 

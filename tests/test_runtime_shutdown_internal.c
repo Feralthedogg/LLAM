@@ -189,6 +189,7 @@ static int init_zero_min_block_pool_runtime(llam_runtime_t **runtime) {
 static int exercise_first_block_worker_create_failure_rolls_back_submission(void) {
     block_pool_failure_state_t state;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *task = NULL;
     int rc = 1;
 
@@ -199,7 +200,11 @@ static int exercise_first_block_worker_create_failure_rolls_back_submission(void
         rc = fail_errno("first-create failure runtime init failed");
         goto cleanup;
     }
-    state.runtime = runtime;
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("first-create failure runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
     task = llam_runtime_spawn_ex(
         runtime, block_pool_first_create_failure_task, &state, NULL, 0U);
     if (task == NULL) {
@@ -216,9 +221,9 @@ static int exercise_first_block_worker_create_failure_rolls_back_submission(void
     if (atomic_load_explicit(&state.failures, memory_order_acquire) != 0U ||
         atomic_load_explicit(&state.task_returns, memory_order_acquire) != 1U ||
         atomic_load_explicit(&state.callback_calls, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&runtime->block_pending, memory_order_acquire) != 0U ||
-        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 0U ||
-        runtime->block_head != NULL || runtime->block_tail != NULL ||
+        atomic_load_explicit(&raw_runtime->block_pending, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire) != 0U ||
+        raw_runtime->block_head != NULL || raw_runtime->block_tail != NULL ||
         llam_block_pool_test_create_calls() != 1U) {
         rc = fail_msg("first block-worker create failure published or stranded a job");
         goto cleanup;
@@ -229,6 +234,9 @@ cleanup:
     if (task != NULL) {
         (void)llam_detach(task);
     }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
     llam_block_pool_test_reset_create_hook();
     llam_runtime_destroy(runtime);
     return rc;
@@ -238,6 +246,7 @@ static int exercise_second_block_worker_create_failure_uses_existing_worker(void
     block_pool_failure_state_t state;
     llam_runtime_stats_t stats;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *parent = NULL;
     int rc = 1;
 
@@ -248,7 +257,11 @@ static int exercise_second_block_worker_create_failure_uses_existing_worker(void
         rc = fail_errno("second-create failure runtime init failed");
         goto cleanup;
     }
-    state.runtime = runtime;
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("second-create failure runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
     parent = llam_runtime_spawn_ex(
         runtime, block_pool_second_create_failure_parent, &state, NULL, 0U);
     if (parent == NULL) {
@@ -270,10 +283,10 @@ static int exercise_second_block_worker_create_failure_uses_existing_worker(void
         atomic_load_explicit(&state.task_returns, memory_order_acquire) != 2U ||
         atomic_load_explicit(&state.callback_calls, memory_order_acquire) != 2U ||
         state.confirmed_before_release != 1U ||
-        atomic_load_explicit(&runtime->block_threads_started, memory_order_acquire) != 1U ||
-        atomic_load_explicit(&runtime->block_threads_entered, memory_order_acquire) != 1U ||
-        atomic_load_explicit(&runtime->block_threads_live, memory_order_acquire) != 1U ||
-        atomic_load_explicit(&runtime->block_pending, memory_order_acquire) != 0U ||
+        atomic_load_explicit(&raw_runtime->block_threads_started, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&raw_runtime->block_threads_entered, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&raw_runtime->block_threads_live, memory_order_acquire) != 1U ||
+        atomic_load_explicit(&raw_runtime->block_pending, memory_order_acquire) != 0U ||
         stats.blocking_threads != 1U ||
         llam_block_pool_test_create_calls() != 2U) {
         rc = fail_msg("second block-worker create failure did not drain on the confirmed worker");
@@ -285,6 +298,9 @@ cleanup:
     atomic_store_explicit(&state.release_callback, 1U, memory_order_release);
     if (parent != NULL) {
         (void)llam_detach(parent);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
     }
     llam_block_pool_test_reset_create_hook();
     llam_runtime_destroy(runtime);
@@ -577,6 +593,7 @@ static void affinity_run_exit_task(void *arg) {
 static int exercise_affinity_restore_on_task_exit(bool fatal) {
     affinity_run_exit_state_t state;
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_task_t *task = NULL;
     int join_rc;
     int join_errno;
@@ -591,7 +608,11 @@ static int exercise_affinity_restore_on_task_exit(bool fatal) {
         rc = fail_errno("affinity task-exit runtime init failed");
         goto cleanup;
     }
-    state.runtime = runtime;
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("affinity task-exit runtime pin failed");
+        goto cleanup;
+    }
+    state.runtime = raw_runtime;
     state.fatal = fatal;
     task = llam_runtime_spawn_ex(runtime, affinity_run_exit_task, &state, NULL, 0U);
     if (task == NULL) {
@@ -627,6 +648,9 @@ static int exercise_affinity_restore_on_task_exit(bool fatal) {
 cleanup:
     if (task != NULL) {
         (void)llam_detach(task);
+    }
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
     }
     llam_runtime_destroy(runtime);
     llam_runtime_test_reset_affinity_hooks();
@@ -675,22 +699,27 @@ cleanup:
 
 static int exercise_native_thread_counter_saturates(void) {
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     int rc = 1;
 
     if (init_affinity_test_runtime(
             LLAM_RUNTIME_AFFINITY_NONE, 1U, &runtime) != 0) {
         return fail_errno("native-thread overflow runtime init failed");
     }
-    atomic_store_explicit(&runtime->scheduler_threads_live,
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("native-thread overflow runtime pin failed");
+        goto cleanup;
+    }
+    atomic_store_explicit(&raw_runtime->scheduler_threads_live,
                           UINT_MAX,
                           memory_order_release);
     errno = 0;
     if (llam_runtime_native_thread_enter(
-            runtime, &runtime->scheduler_threads_live) ||
+            raw_runtime, &raw_runtime->scheduler_threads_live) ||
         errno != EOVERFLOW ||
-        atomic_load_explicit(&runtime->scheduler_threads_live,
+        atomic_load_explicit(&raw_runtime->scheduler_threads_live,
                              memory_order_acquire) != UINT_MAX ||
-        atomic_load_explicit(&runtime->fatal_errno,
+        atomic_load_explicit(&raw_runtime->fatal_errno,
                              memory_order_acquire) != EOVERFLOW) {
         rc = fail_msg("native-thread counter overflow did not saturate");
         goto cleanup;
@@ -698,26 +727,34 @@ static int exercise_native_thread_counter_saturates(void) {
     rc = 0;
 
 cleanup:
-    atomic_store_explicit(&runtime->scheduler_threads_live,
-                          0U,
-                          memory_order_release);
+    if (raw_runtime != NULL) {
+        atomic_store_explicit(&raw_runtime->scheduler_threads_live,
+                              0U,
+                              memory_order_release);
+        llam_runtime_end_public_op(raw_runtime);
+    }
     llam_runtime_destroy(runtime);
     return rc;
 }
 
 static int exercise_native_thread_counter_rejects_underflow(void) {
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     int rc = 1;
 
     if (init_affinity_test_runtime(
             LLAM_RUNTIME_AFFINITY_NONE, 1U, &runtime) != 0) {
         return fail_errno("native-thread underflow runtime init failed");
     }
-    llam_runtime_native_thread_exit(runtime,
-                                    &runtime->scheduler_threads_live);
-    if (atomic_load_explicit(&runtime->scheduler_threads_live,
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        rc = fail_errno("native-thread underflow runtime pin failed");
+        goto cleanup;
+    }
+    llam_runtime_native_thread_exit(raw_runtime,
+                                    &raw_runtime->scheduler_threads_live);
+    if (atomic_load_explicit(&raw_runtime->scheduler_threads_live,
                              memory_order_acquire) != 0U ||
-        atomic_load_explicit(&runtime->fatal_errno,
+        atomic_load_explicit(&raw_runtime->fatal_errno,
                              memory_order_acquire) != EINVAL) {
         rc = fail_msg("native-thread counter underflow did not fail closed");
         goto cleanup;
@@ -725,6 +762,9 @@ static int exercise_native_thread_counter_rejects_underflow(void) {
     rc = 0;
 
 cleanup:
+    if (raw_runtime != NULL) {
+        llam_runtime_end_public_op(raw_runtime);
+    }
     llam_runtime_destroy(runtime);
     return rc;
 }
@@ -976,9 +1016,7 @@ static int run_blocking_result_disposal_case(
         blocking_result_disposal_listener_init(&state) != 0) {
         goto cleanup;
     }
-    state.token = llam_cancel_token_create();
-    if (state.token == NULL ||
-        llam_runtime_opts_init(
+    if (llam_runtime_opts_init(
             &runtime_options,
             LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0 ||
         llam_spawn_opts_init(
@@ -988,11 +1026,15 @@ static int run_blocking_result_disposal_case(
     }
     runtime_options.deterministic = 1U;
     runtime_options.forced_yield_every = 1U;
-    spawn_options.cancel_token = state.token;
     if (llam_runtime_init(&runtime_options) != 0) {
         goto cleanup;
     }
     runtime_started = true;
+    state.token = llam_cancel_token_create();
+    if (state.token == NULL) {
+        goto cleanup;
+    }
+    spawn_options.cancel_token = state.token;
     llam_io_test_set_blocking_result_hook(
         blocking_result_disposal_hook, &state);
     caller = llam_spawn(
@@ -1789,6 +1831,7 @@ static int exercise_close_purges_accept_watch_ready_fds(void) {
 static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(void) {
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *runtime = NULL;
+    llam_runtime_t *raw_runtime = NULL;
     llam_node_t *node;
     llam_accept_watch_t *watch;
     int listener = -1;
@@ -1799,27 +1842,35 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     if (llam_runtime_create(NULL, 0U, &runtime) != 0) {
         return fail_errno("explicit runtime init failed for host close watch purge");
     }
-    if (runtime == NULL || runtime->nodes == NULL || runtime->active_nodes == 0U) {
+    if (llam_runtime_begin_public_op(runtime, &raw_runtime) != 0) {
+        llam_runtime_destroy(runtime);
+        return fail_errno("explicit runtime pin failed for host close watch purge");
+    }
+    if (raw_runtime->nodes == NULL || raw_runtime->active_nodes == 0U) {
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_msg("explicit runtime initialized without an I/O node for host close watch purge");
     }
     if (make_loopback_listener(&listener) != 0) {
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("listener setup failed for explicit host close watch purge");
     }
     if (pipe(ready_pipe) != 0) {
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("ready fd setup failed for explicit host close watch purge");
     }
 
-    node = &runtime->nodes[0];
+    node = &raw_runtime->nodes[0];
     lock_rc = pthread_mutex_lock(&node->watch_lock);
     if (lock_rc != 0) {
         errno = lock_rc;
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("watch lock failed for explicit host close watch purge");
     }
@@ -1829,6 +1880,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("accept watch ready setup failed for explicit host close watch purge");
     }
@@ -1844,6 +1896,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
         errno = lock_rc;
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("watch unlock failed for explicit host close watch purge");
     }
@@ -1851,6 +1904,7 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     if (llam_close(listener) != 0) {
         close_if_valid(&ready_pipe[1]);
         listener = -1;
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_errno("llam_close failed during explicit host close watch purge");
     }
@@ -1859,11 +1913,13 @@ static int exercise_host_close_purges_explicit_runtime_accept_watch_ready_fds(vo
     if (fcntl(watch_ready_fd, F_GETFD) != -1 || errno != EBADF) {
         close_if_valid(&watch_ready_fd);
         close_if_valid(&ready_pipe[1]);
+        llam_runtime_end_public_op(raw_runtime);
         llam_runtime_destroy(runtime);
         return fail_msg("host llam_close did not purge explicit-runtime accept-watch ready fd");
     }
 
     close_if_valid(&ready_pipe[1]);
+    llam_runtime_end_public_op(raw_runtime);
     llam_runtime_destroy(runtime);
 #endif
     return 0;
@@ -1891,6 +1947,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
 #if LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_LINUX
     llam_runtime_t *closer_runtime = NULL;
     llam_runtime_t *watch_runtime = NULL;
+    llam_runtime_t *raw_watch_runtime = NULL;
     llam_node_t *node;
     llam_accept_watch_t *watch;
     llam_task_t *task = NULL;
@@ -1909,30 +1966,39 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         llam_runtime_destroy(closer_runtime);
         return fail_errno("explicit runtime init failed for managed peer close purge");
     }
-    if (watch_runtime == NULL || watch_runtime->nodes == NULL || watch_runtime->active_nodes == 0U) {
+    if (llam_runtime_begin_public_op(watch_runtime, &raw_watch_runtime) != 0) {
+        llam_runtime_destroy(watch_runtime);
+        llam_runtime_destroy(closer_runtime);
+        return fail_errno("watch runtime pin failed for managed peer close purge");
+    }
+    if (raw_watch_runtime->nodes == NULL || raw_watch_runtime->active_nodes == 0U) {
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_msg("explicit watch runtime initialized without an I/O node for managed peer close purge");
     }
     if (make_loopback_listener(&listener) != 0) {
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("listener setup failed for managed peer close purge");
     }
     if (pipe(ready_pipe) != 0) {
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("ready fd setup failed for managed peer close purge");
     }
 
-    node = &watch_runtime->nodes[0];
+    node = &raw_watch_runtime->nodes[0];
     lock_rc = pthread_mutex_lock(&node->watch_lock);
     if (lock_rc != 0) {
         errno = lock_rc;
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("watch lock failed for managed peer close purge");
@@ -1943,6 +2009,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         close_if_valid(&ready_pipe[0]);
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("accept watch ready setup failed for managed peer close purge");
@@ -1960,6 +2027,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         errno = lock_rc;
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("watch unlock failed for managed peer close purge");
@@ -1972,6 +2040,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
         llam_join(task) != 0) {
         close_if_valid(&ready_pipe[1]);
         close_if_valid(&listener);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("managed close task failed for peer close purge");
@@ -1981,6 +2050,7 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
     if (close_state.rc != 0) {
         errno = close_state.error;
         close_if_valid(&ready_pipe[1]);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_errno("managed llam_close failed for peer close purge");
@@ -1990,12 +2060,14 @@ static int exercise_managed_close_purges_peer_runtime_accept_watch_ready_fds(voi
     if (fcntl(watch_ready_fd, F_GETFD) != -1 || errno != EBADF) {
         close_if_valid(&watch_ready_fd);
         close_if_valid(&ready_pipe[1]);
+        llam_runtime_end_public_op(raw_watch_runtime);
         llam_runtime_destroy(watch_runtime);
         llam_runtime_destroy(closer_runtime);
         return fail_msg("managed llam_close did not purge peer-runtime accept-watch ready fd");
     }
 
     close_if_valid(&ready_pipe[1]);
+    llam_runtime_end_public_op(raw_watch_runtime);
     llam_runtime_destroy(watch_runtime);
     llam_runtime_destroy(closer_runtime);
 #endif
@@ -5912,6 +5984,7 @@ typedef struct submit_rehome_fixture {
     llam_task_t task;
     llam_task_t caller;
     llam_io_req_t req;
+    bool runtime_registered;
 } submit_rehome_fixture_t;
 
 typedef struct public_cancel_call {
@@ -6206,6 +6279,8 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
     atomic_init(&rt->deferred_fatal_pending, 0U);
     atomic_init(&rt->overflow_depth, 0U);
     atomic_init(&rt->active_io_waiters, 0U);
+    atomic_init(&rt->active_ops, 0U);
+    atomic_init(&rt->destroy_claimed, false);
 
     for (unsigned i = 0U; i < 2U; ++i) {
         llam_shard_t *shard = &fixture->shards[i];
@@ -6291,6 +6366,10 @@ static int init_submit_rehome_fixture(submit_rehome_fixture_t *fixture,
 static void destroy_submit_rehome_fixture(submit_rehome_fixture_t *fixture) {
     if (fixture == NULL) {
         return;
+    }
+    if (fixture->runtime_registered) {
+        llam_runtime_unregister_handle(&fixture->runtime);
+        fixture->runtime_registered = false;
     }
     for (unsigned i = 0U; i < 2U; ++i) {
         pthread_mutex_destroy(&fixture->nodes[i].submit_lock);
@@ -7359,6 +7438,11 @@ static int run_public_cancel_submit_case(bool migrate) {
     if (init_submit_rehome_fixture(&fixture, true) != 0) {
         return fail_errno("submit rehome fixture init failed");
     }
+    if (llam_runtime_register_handle(&fixture.runtime, false) != 0) {
+        destroy_submit_rehome_fixture(&fixture);
+        return fail_errno("submit rehome fixture registration failed");
+    }
+    fixture.runtime_registered = true;
     g_llam_tls_task = &fixture.caller;
     g_llam_tls_shard = &fixture.shards[1];
     token = llam_cancel_token_create();
@@ -7761,8 +7845,9 @@ cleanup:
 #include "test_hard_affinity_cases.inc"
 #include "test_external_doorbell_cases.inc"
 #include "test_external_drive_cases.inc"
+#include "test_handoff_policy_cases.inc"
 int main(void) {
-    if (test_external_drive_contract() != 0 || exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0 || exercise_thread_signal_stack_ownership() != 0) {
+    if (exercise_handoff_policy_cases() != 0 || test_external_drive_contract() != 0 || exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0 || exercise_thread_signal_stack_ownership() != 0) {
         return 1;
     }
     if (exercise_stack_cache_vm_cases() != 0) {
