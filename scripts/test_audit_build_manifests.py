@@ -87,7 +87,10 @@ def valid_sources_manifest() -> dict[str, object]:
                     "name": "test_shared_load",
                     "platforms": ["linux", "darwin", "bsd"],
                     "sources": ["tests/test_shared_load.c"],
-                    "link_dependencies": ["system_dynamic_loader"],
+                    "link_dependencies": [
+                        "system_dynamic_loader",
+                        "Threads::Threads",
+                    ],
                 },
             ],
             "internal": [
@@ -189,6 +192,7 @@ def valid_makefile() -> str:
             ),
             "TEST_PUBLIC_OBJS = $(OBJDIR)/tests/test_public.o",
             "TEST_SHARED_LOAD_OBJS = $(OBJDIR)/tests/test_shared_load.o",
+            "SHARED_LOAD_LDLIBS = -pthread",
             "TEST_INTERNAL_OBJS = $(OBJDIR)/tests/test_internal.o",
             (
                 "TEST_WINDOWS_IOCP_IO_OBJS = "
@@ -269,7 +273,8 @@ def valid_makefile() -> str:
             "test_shared_load: $(TEST_SHARED_LOAD_OBJS)",
             (
                 "\t$(CC) $(CFLAGS) -o $@ "
-                "$(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)"
+                "$(TEST_SHARED_LOAD_OBJS) $(DL_LIBS) "
+                "$(SHARED_LOAD_LDLIBS)"
             ),
             (
                 "test_windows_iocp_io: "
@@ -451,7 +456,7 @@ def valid_cmakelists() -> str:
             "add_executable(test_shared_load tests/test_shared_load.c)",
             (
                 "target_link_libraries(test_shared_load "
-                "PRIVATE ${CMAKE_DL_LIBS})"
+                "PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)"
             ),
             (
                 "add_executable(test_windows_iocp_io "

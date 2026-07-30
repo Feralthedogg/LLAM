@@ -46,6 +46,7 @@ MAKE_LINK_VARIABLES = {
     "RUNTIME_OBJS": "llam_runtime",
     "RUNTIME_TESTHOOK_OBJS": "llam_runtime_testhooks",
     "SERVER_FLOOD_LDLIBS": "Threads::Threads",
+    "SHARED_LOAD_LDLIBS": "Threads::Threads",
     "DL_LIBS": "system_dynamic_loader",
 }
 RUNTIME_LIBRARY_TARGETS = (
@@ -2963,6 +2964,7 @@ class MakeProjection:
         known_library_variables = {
             "LDLIBS",
             "SERVER_FLOOD_LDLIBS",
+            "SHARED_LOAD_LDLIBS",
             "DL_LIBS",
         }
         for variable in make_expansion_names(recipe):

@@ -1187,12 +1187,7 @@ endif()
 add_executable(test_shared_load ${LLAM_POSIX_TEST_EXCLUDE}
     tests/test_shared_load.c
 )
-target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS})
-if(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
-    # NetBSD must initialize libpthread at process startup; loading it for the
-    # first time through dlopen() aborts when the loaded runtime creates threads.
-    target_link_libraries(test_shared_load PRIVATE Threads::Threads)
-endif()
+target_link_libraries(test_shared_load PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 add_dependencies(test_shared_load llam_runtime_shared)
 
 foreach(LLAM_TEST_TARGET

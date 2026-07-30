@@ -21,6 +21,9 @@ override LLAM_INTERNAL_CPPFLAGS := -DLLAM_BUILD_RESEARCH=$(LLAM_BUILD_RESEARCH)
 override CPPFLAGS := $(CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)
 LDLIBS ?= -pthread -luring
 SERVER_FLOOD_LDLIBS ?= -pthread
+# Keep the dlopen test host threaded from process startup. NetBSD cannot switch
+# from libc pthread stubs after a loaded runtime first introduces libpthread.
+SHARED_LOAD_LDLIBS ?= -pthread
 OBJDIR ?= object
 SHARED_OBJDIR ?= $(OBJDIR)-pic
 TESTHOOK_OBJDIR ?= $(OBJDIR)-testhooks
@@ -194,11 +197,6 @@ SHLIB_SONAME = libllam_runtime.so.$(LLAM_ABI_MAJOR)
 SHLIB_REAL = libllam_runtime.so.$(LLAM_VERSION)
 SHLIB_LDFLAGS = -shared -Wl,-soname,$(SHLIB_SONAME)
 DL_LIBS =
-ifeq ($(UNAME_S),NetBSD)
-# NetBSD cannot transition a process from the libc pthread stubs to libpthread
-# after dlopen().  Make the loader-test host threaded from process startup.
-DL_LIBS += -pthread
-endif
 else
 SHLIB_LINK = libllam_runtime.so
 SHLIB_SONAME = libllam_runtime.so.$(LLAM_ABI_MAJOR)
@@ -2668,7 +2666,7 @@ test_security_capability: $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OB
 	$(CC) $(CFLAGS) -o $@ $(RUNTIME_TESTHOOK_OBJS) $(TEST_SECURITY_CAPABILITY_OBJS) $(LDLIBS)
 
 test_shared_load: $(TEST_SHARED_LOAD_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS)
+	$(CC) $(CFLAGS) -o $@ $(TEST_SHARED_LOAD_OBJS) $(DL_LIBS) $(SHARED_LOAD_LDLIBS)
 
 $(OBJDIR)/experiments/lcwe/%.o: experiments/lcwe/%.c \
 		experiments/lcwe/lcwe_model.h \

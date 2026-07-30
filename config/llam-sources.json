@@ -284,7 +284,7 @@
         "name": "test_shared_load",
         "platforms": ["linux", "darwin", "bsd"],
         "sources": ["tests/test_shared_load.c"],
-        "link_dependencies": ["system_dynamic_loader"]
+        "link_dependencies": ["system_dynamic_loader", "Threads::Threads"]
       }
     ],
     "internal": [
