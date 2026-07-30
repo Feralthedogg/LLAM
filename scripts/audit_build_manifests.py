@@ -73,7 +73,10 @@ ALLOWED_CMAKE_COMMANDS = {
     "add_dependencies",
     "add_executable",
     "add_library",
+    "add_link_options",
     "add_test",
+    "check_c_compiler_flag",
+    "check_linker_flag",
     "check_symbol_exists",
     "cmake_minimum_required",
     "configure_file",
@@ -2037,6 +2040,9 @@ def make_line_touches_audited(line: str, audit: Audit) -> bool:
 def check_make_global_closure(text: str, audit: Audit) -> None:
     """Reject Make evaluation surfaces before deciding manifest relevance."""
 
+    hardening_declared = bool(
+        re.search(r"(?m)^LLAM_HARDENING\s*\?=", text)
+    )
     allowed_overrides = {
         (
             "override LLAM_INTERNAL_CPPFLAGS := "
@@ -2048,6 +2054,29 @@ def check_make_global_closure(text: str, audit: Audit) -> None:
             "$(SHARED_CPPFLAGS) $(LLAM_INTERNAL_CPPFLAGS)"
         ),
     }
+    if hardening_declared:
+        allowed_overrides.update(
+            {
+                (
+                    "override CFLAGS := "
+                    "$(CFLAGS) $(LLAM_HARDENING_CFLAGS)"
+                ),
+                (
+                    "override LDLIBS := "
+                    "$(LLAM_HARDENING_LINK_FLAGS) $(LDLIBS)"
+                ),
+                (
+                    "override SERVER_FLOOD_LDLIBS := "
+                    "$(LLAM_HARDENING_LINK_FLAGS) "
+                    "$(SERVER_FLOOD_LDLIBS)"
+                ),
+                (
+                    "override SHARED_LOAD_LDLIBS := "
+                    "$(LLAM_HARDENING_LINK_FLAGS) "
+                    "$(SHARED_LOAD_LDLIBS)"
+                ),
+            }
+        )
     expected_provenance_body = (
         "define WRITE_BUILD_PROVENANCE",
         '@tmp="$@.llam-build-provenance.$$$$.tmp"; \\',
@@ -2339,13 +2368,24 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
     allowed_includes = {
         "GNUInstallDirs",
         "CMakePackageConfigHelpers",
+        "CheckCCompilerFlag",
+        "CheckLinkerFlag",
         "CheckSymbolExists",
     }
+    hardening_declared = any(
+        entry.command == "set"
+        and entry.tokens
+        and entry.tokens[0] == "LLAM_HARDENING"
+        for entry in commands
+    )
     block_stack: list[tuple[str, int]] = []
     includes: list[str] = []
     function_hashes: list[str] = []
     foreach_hashes: list[str] = []
     provenance_calls: list[tuple[str, str]] = []
+    hardening_c_checks: list[tuple[str, ...]] = []
+    hardening_link_checks: list[tuple[str, ...]] = []
+    hardening_link_options: list[tuple[str, ...]] = []
     for index, entry in enumerate(commands):
         command = entry.command
         tokens = list(entry.tokens)
@@ -2364,6 +2404,12 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
             )
         elif command == "include":
             includes.append(tokens[0])
+        if command == "check_c_compiler_flag":
+            hardening_c_checks.append(tuple(tokens))
+        elif command == "check_linker_flag":
+            hardening_link_checks.append(tuple(tokens))
+        elif command == "add_link_options":
+            hardening_link_options.append(tuple(tokens))
         if command in {"function", "foreach"}:
             block_stack.append((command, index))
         elif command in {"endfunction", "endforeach"}:
@@ -2463,12 +2509,52 @@ def check_cmake_global_closure(text: str, audit: Audit) -> None:
                 provenance_calls.append((command, tokens[0]))
     if block_stack:
         audit.error("CMakeLists.txt: unterminated global CMake block")
-    if includes != [
+    expected_includes = [
         "GNUInstallDirs",
         "CMakePackageConfigHelpers",
-        "CheckSymbolExists",
-    ]:
+    ]
+    if hardening_declared:
+        expected_includes.extend(
+            ["CheckCCompilerFlag", "CheckLinkerFlag"]
+        )
+    expected_includes.append("CheckSymbolExists")
+    if includes != expected_includes:
         audit.error("CMake global include projection is not exact")
+    expected_c_checks = [
+        ("/GS", "LLAM_HARDENING_STACK_PROTECTOR"),
+        ("/guard:cf", "LLAM_HARDENING_CONTROL_FLOW_GUARD"),
+        (
+            "-fstack-protector-strong",
+            "LLAM_HARDENING_STACK_PROTECTOR",
+        ),
+        ("-D_FORTIFY_SOURCE=2", "LLAM_HARDENING_FORTIFY"),
+        ("-fstack-clash-protection", "LLAM_HARDENING_STACK_CLASH"),
+    ]
+    expected_link_checks = [
+        ("C", "/guard:cf", "LLAM_HARDENING_CONTROL_FLOW_GUARD_LINK"),
+        ("C", "-Wl,-z,relro", "LLAM_HARDENING_RELRO"),
+        ("C", "-Wl,-z,now", "LLAM_HARDENING_NOW"),
+        ("C", "-Wl,-z,noexecstack", "LLAM_HARDENING_NOEXECSTACK"),
+    ]
+    expected_link_options = [
+        ("/guard:cf",),
+        ("-Wl,-z,relro",),
+        ("-Wl,-z,now",),
+        ("-Wl,-z,noexecstack",),
+    ]
+    if hardening_declared:
+        if hardening_c_checks != expected_c_checks:
+            audit.error("CMake hardening compiler checks are not exact")
+        if hardening_link_checks != expected_link_checks:
+            audit.error("CMake hardening linker checks are not exact")
+        if hardening_link_options != expected_link_options:
+            audit.error("CMake hardening link options are not exact")
+    elif (
+        hardening_c_checks
+        or hardening_link_checks
+        or hardening_link_options
+    ):
+        audit.error("CMake hardening projection lacks its profile declaration")
     expected_function_hashes = [
         "22264e4a8d124c967b3d97b9432e12881be5e3c8429a5096ea657cbcfe67a57c",
         "02b0159a7ee10e82cbc2e0d9d620591caa10f4c75bb6cde2b8da3222dde43110",

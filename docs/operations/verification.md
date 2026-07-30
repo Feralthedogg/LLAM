@@ -98,6 +98,14 @@ make test-runtime-soak
 make test-hardening
 ```
 
+Release candidates should also configure a clean
+`LLAM_HARDENING=strict` build. The normal Make and CTest gates run
+`scripts/audit_hardening_artifact.py` against the linked shared library:
+Linux/BSD require GNU_RELRO, immediate binding, a non-executable GNU_STACK,
+and a stack-canary reference; Darwin rejects executable-stack opt-in and
+requires a stack-canary reference; Windows requires ASLR, NX compatibility,
+Control Flow Guard, and a security-cookie reference.
+
 ## Package Smoke
 
 ```sh

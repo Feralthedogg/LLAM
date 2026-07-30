@@ -12,6 +12,8 @@ set(LLAM_LIBRARY_VERSION "${PROJECT_VERSION}")
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+include(CheckCCompilerFlag)
+include(CheckLinkerFlag)
 include(CheckSymbolExists)
 find_package(Python3 COMPONENTS Interpreter)
 
@@ -24,7 +26,94 @@ endif()
 option(LLAM_ENABLE_WINDOWS_BACKEND "Enable the native Windows 10/11 backend when building on Windows" ON)
 option(LLAM_BUILD_RESEARCH
        "Build private LLAM research implementations and experiments" OFF)
+set(LLAM_HARDENING "compatible" CACHE STRING
+    "Build hardening profile: off, compatible, or strict")
+if(NOT LLAM_HARDENING MATCHES "^(off|compatible|strict)$")
+    message(FATAL_ERROR
+        "LLAM_HARDENING must be off, compatible, or strict")
+endif()
 add_compile_options($<$<COMPILE_LANG_AND_ID:C,MSVC>:/experimental:c11atomics>)
+
+if(NOT LLAM_HARDENING STREQUAL "off")
+    set(LLAM_HARDENING_SAVED_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+    if(MSVC)
+        set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} /WX")
+        check_c_compiler_flag("/GS" LLAM_HARDENING_STACK_PROTECTOR)
+        check_c_compiler_flag("/guard:cf" LLAM_HARDENING_CONTROL_FLOW_GUARD)
+        check_linker_flag(C "/guard:cf" LLAM_HARDENING_CONTROL_FLOW_GUARD_LINK)
+        if(LLAM_HARDENING_STACK_PROTECTOR)
+            add_compile_options($<$<COMPILE_LANGUAGE:C>:/GS>)
+        endif()
+        if(LLAM_HARDENING_CONTROL_FLOW_GUARD)
+            add_compile_options($<$<COMPILE_LANGUAGE:C>:/guard:cf>)
+        endif()
+        if(LLAM_HARDENING_CONTROL_FLOW_GUARD_LINK)
+            add_link_options("/guard:cf")
+        endif()
+    else()
+        set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -Werror")
+        check_c_compiler_flag("-fstack-protector-strong"
+                              LLAM_HARDENING_STACK_PROTECTOR)
+        check_c_compiler_flag("-D_FORTIFY_SOURCE=2"
+                              LLAM_HARDENING_FORTIFY)
+        check_c_compiler_flag("-fstack-clash-protection"
+                              LLAM_HARDENING_STACK_CLASH)
+        if(LLAM_HARDENING_STACK_PROTECTOR)
+            add_compile_options(
+                $<$<COMPILE_LANGUAGE:C>:-fstack-protector-strong>)
+        endif()
+        if(LLAM_HARDENING_FORTIFY)
+            add_compile_options(
+                $<$<AND:$<COMPILE_LANGUAGE:C>,$<NOT:$<CONFIG:Debug>>>:-D_FORTIFY_SOURCE=2>)
+        endif()
+        if(LLAM_HARDENING_STACK_CLASH)
+            add_compile_options(
+                $<$<COMPILE_LANGUAGE:C>:-fstack-clash-protection>)
+        endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+           CMAKE_SYSTEM_NAME MATCHES "^(FreeBSD|OpenBSD|NetBSD|DragonFly)$")
+            check_linker_flag(C "-Wl,-z,relro" LLAM_HARDENING_RELRO)
+            check_linker_flag(C "-Wl,-z,now" LLAM_HARDENING_NOW)
+            check_linker_flag(C "-Wl,-z,noexecstack"
+                              LLAM_HARDENING_NOEXECSTACK)
+            if(LLAM_HARDENING_RELRO)
+                add_link_options("-Wl,-z,relro")
+            endif()
+            if(LLAM_HARDENING_NOW)
+                add_link_options("-Wl,-z,now")
+            endif()
+            if(LLAM_HARDENING_NOEXECSTACK)
+                add_link_options("-Wl,-z,noexecstack")
+            endif()
+        endif()
+    endif()
+    set(CMAKE_REQUIRED_FLAGS "${LLAM_HARDENING_SAVED_REQUIRED_FLAGS}")
+
+    if(LLAM_HARDENING STREQUAL "strict")
+        if(NOT LLAM_HARDENING_STACK_PROTECTOR)
+            message(FATAL_ERROR
+                "strict hardening requires stack-protector support")
+        endif()
+        if(MSVC AND
+           (NOT LLAM_HARDENING_CONTROL_FLOW_GUARD OR
+            NOT LLAM_HARDENING_CONTROL_FLOW_GUARD_LINK))
+            message(FATAL_ERROR
+                "strict Windows hardening requires Control Flow Guard compiler and linker support")
+        endif()
+        if(NOT MSVC AND NOT LLAM_HARDENING_FORTIFY)
+            message(FATAL_ERROR
+                "strict hardening requires FORTIFY support")
+        endif()
+        if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+            CMAKE_SYSTEM_NAME MATCHES "^(FreeBSD|OpenBSD|NetBSD|DragonFly)$") AND
+           (NOT LLAM_HARDENING_RELRO OR
+            NOT LLAM_HARDENING_NOW OR
+            NOT LLAM_HARDENING_NOEXECSTACK))
+            message(FATAL_ERROR
+                "strict ELF hardening requires RELRO, NOW, and non-executable-stack linker support")
+        endif()
+    endif()
+endif()
 
 set(LLAM_TARGET_PROCESSOR "${CMAKE_SYSTEM_PROCESSOR}")
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND CMAKE_OSX_ARCHITECTURES)
@@ -114,6 +203,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/debug/trace.c
     src/core/sched/wake.c
     src/core/platform/platform.c
+    src/core/platform/signal.c
     src/core/platform/stack_vm.c
     src/core/platform/windows_policy.c
     src/core/sched/safepoint.c
@@ -645,6 +735,15 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(
         context_switch_gateway_fixtures
         context_switch_gateway
+        PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME hardening_artifact_fixtures
+        COMMAND ${Python3_EXECUTABLE}
+                -m unittest scripts/test_audit_hardening_artifact.py -v
+    )
+    set_tests_properties(
+        hardening_artifact_fixtures
         PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     )
 endif()
@@ -1245,6 +1344,15 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
                          $<TARGET_FILE:llam_runtime_shared>
                          --root ${CMAKE_CURRENT_SOURCE_DIR})
     endif()
+endif()
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME hardening_artifact
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/audit_hardening_artifact.py
+                $<TARGET_FILE:llam_runtime_shared>
+                --profile ${LLAM_HARDENING}
+    )
 endif()
 
 set(LLAM_PC_PRIVATE_LIBS "-pthread")

@@ -174,6 +174,11 @@ cmake -S . -B build -DLLAM_BUILD_RESEARCH=OFF
 cmake -S . -B build-research -DLLAM_BUILD_RESEARCH=ON
 ```
 
+Build hardening defaults to the capability-probed `compatible` profile.
+`LLAM_HARDENING=off` disables LLAM-selected flags, while
+`LLAM_HARDENING=strict` fails when required platform protections are missing.
+See [Build From Source](docs/build.md#build-hardening-profiles).
+
 Research-enabled builds cannot be packaged: the command fails before an
 archive is created. Benchmark evidence is create-once and audits are read-only.
 The current native performance verdict is `REJECT`, so this work does not
@@ -942,6 +947,16 @@ Important fields:
 | `idle_spin_max_iters` | Maximum idle-spin iterations. |
 | `sqpoll_cpu` | CPU reserved for SQPOLL. |
 | `profile` | Runtime policy profile: balanced, release-fast, debug-safe, or io-latency. |
+| `signal_flags` | Process-signal integration flags; `0` fully opts out and preserves host actions. |
+| `preempt_signal` | POSIX preemption signal; `0` selects the platform default. |
+
+`llam_runtime_opts_init()` enables preemption and guard-fault signal
+integration for compatibility. Signal-participating POSIX runtimes must use
+the same flags and resolved preemption signal; an incompatible create fails
+with `EBUSY`. Non-guard faults chain the saved host action, teardown preserves
+a later host replacement, and alternate signal stacks are borrowed or
+allocated per OS thread. See
+[Embedding LLAM](docs/guides/embedding.md#own-the-process-signal-policy).
 
 Experimental flags:
 

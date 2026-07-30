@@ -7757,11 +7757,12 @@ cleanup:
     return rc;
 }
 #endif
+#include "test_signal_stack_cases.inc"
 #include "test_hard_affinity_cases.inc"
 #include "test_external_doorbell_cases.inc"
 #include "test_external_drive_cases.inc"
 int main(void) {
-    if (test_external_drive_contract() != 0 || exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0) {
+    if (test_external_drive_contract() != 0 || exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0 || exercise_thread_signal_stack_ownership() != 0) {
         return 1;
     }
     if (exercise_stack_cache_vm_cases() != 0) {
@@ -7973,6 +7974,5 @@ int main(void) {
     if (exercise_close_unpublishes_detached_watch_waiters() != 0) {
         return 1;
     }
-    printf("test_runtime_shutdown_internal ok\n");
-    return 0;
+    printf("test_runtime_shutdown_internal ok\n"); return 0;
 }

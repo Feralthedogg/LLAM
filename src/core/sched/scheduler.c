@@ -363,11 +363,12 @@ void llam_scheduler_loop(llam_shard_t *shard) {
     llam_runtime_t *rt = shard->runtime;
     atomic_uint *thread_counter =
         shard->id == 0U ? &rt->host_threads_live : &rt->scheduler_threads_live;
-    bool signal_stack_installed = false;
+    llam_thread_signal_stack_t signal_stack;
 
+    memset(&signal_stack, 0, sizeof(signal_stack));
     if (llam_scheduler_thread_enter(shard,
                                     thread_counter,
-                                    &signal_stack_installed) != 0) {
+                                    &signal_stack) != 0) {
         llam_record_fatal(rt, errno);
         return;
     }
@@ -386,7 +387,7 @@ void llam_scheduler_loop(llam_shard_t *shard) {
 
     llam_scheduler_thread_leave(shard,
                                 thread_counter,
-                                signal_stack_installed);
+                                &signal_stack);
 }
 
 /**
@@ -403,10 +404,11 @@ void llam_scheduler_loop(llam_shard_t *shard) {
 void *llam_opaque_helper_main(void *arg) {
     llam_shard_t *shard = arg;
     llam_runtime_t *rt = shard->runtime;
+    llam_thread_signal_stack_t signal_stack;
     bool thread_counted;
-    bool signal_stack_installed = false;
     int setup_error = 0;
 
+    memset(&signal_stack, 0, sizeof(signal_stack));
     g_llam_tls_shard = shard;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = &shard->opaque_scheduler_ctx;
@@ -421,11 +423,11 @@ void *llam_opaque_helper_main(void *arg) {
         goto setup_failed;
     }
     llam_tune_scheduler_thread(shard, true);
-    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
+    if (llam_scheduler_try_install_signal_stack(shard,
+                                                &signal_stack) != 0) {
         setup_error = errno;
         goto setup_failed;
     }
-    signal_stack_installed = true;
 
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_failed = false;
@@ -571,9 +573,7 @@ void *llam_opaque_helper_main(void *arg) {
     }
 
 out:
-    if (signal_stack_installed) {
-        llam_uninstall_thread_signal_stack(shard);
-    }
+    llam_uninstall_thread_signal_stack(&signal_stack);
     llam_channel_tls_cache_drain();
     pthread_mutex_lock(&shard->opaque_lock);
     shard->opaque_helper_ready = false;

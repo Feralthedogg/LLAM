@@ -2631,6 +2631,20 @@ class BuildManifestAuditTests(unittest.TestCase):
                     result.stderr,
                 )
 
+    def test_rejects_unapproved_cmake_link_hardening_option(self) -> None:
+        self.fixture.files["CMakeLists.txt"] += (
+            'add_link_options("-Wl,-rpath,/tmp/untrusted")\n'
+        )
+        self.fixture.write()
+
+        result = self.run_audit()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "CMake hardening projection lacks its profile declaration",
+            result.stderr,
+        )
+
     def test_rejects_cmake_function_and_macro_target_indirection(
         self,
     ) -> None:

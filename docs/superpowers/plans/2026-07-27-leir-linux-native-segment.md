@@ -934,7 +934,7 @@ git commit -m "ci: validate LEIR Linux native segments"
 
 **Interfaces:**
 - Consumes: the complete branch, CI artifacts, and precommitted thresholds.
-- Produces: a reviewed draft PR based on `codex/leir-phase0` and a result report that does not bump or release `2.2.0`.
+- Produces: a reviewed draft PR based on `leir-phase0` and a result report that does not bump or release `2.2.0`.
 
 - [ ] **Step 1: Run local portable verification**
 
@@ -964,17 +964,17 @@ rg -n 'malloc|calloc|realloc|free' src/io/linux/watch/linux_segment.c experiment
 
 Expected: shared export set is unchanged; new symbols are hidden/internal; timed run/submission/completion functions contain no allocation.
 
-- [ ] **Step 3: Run a normal Codex Security diff scan**
+- [ ] **Step 3: Run a normal security diff scan**
 
 Review pointer-tag alignment, user-controlled lengths/pointers, fd type and connectedness checks, generation/stale-CQE handling, queue ownership, counter underflow/overflow, task/request lifetime, shell-free subprocess use, bounded output, and workflow permissions. Fix every validated correctness or security finding in scope with a failing regression test before proceeding; keep stop/cancel ownership explicit if it remains deferred.
 
 - [ ] **Step 4: Push and open a draft PR**
 
 ```bash
-git push -u origin codex/leir-native-segment
+git push -u origin leir-native-segment
 gh pr create \
-  --base codex/leir-phase0 \
-  --head codex/leir-native-segment \
+  --base leir-phase0 \
+  --head leir-native-segment \
   --draft \
   --title "research: compile LEIR effects into io_uring segments" \
   --body-file .artifacts/leir-native-pr-body.md

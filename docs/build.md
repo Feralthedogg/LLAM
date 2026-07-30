@@ -53,6 +53,34 @@ Install to a local prefix:
 cmake --install build --prefix "$HOME/.local"
 ```
 
+## Build Hardening Profiles
+
+`LLAM_HARDENING` accepts `off`, `compatible`, or `strict` in both build
+systems and defaults to `compatible`.
+
+```sh
+make -j4 LLAM_HARDENING=compatible
+cmake -S . -B build-strict \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLAM_HARDENING=strict
+```
+
+- `off` adds no LLAM-selected hardening flags.
+- `compatible` probes and enables the protections supported by the active
+  compiler, linker, and object format.
+- `strict` additionally fails configuration when the platform-required stack
+  protector, FORTIFY, or ELF RELRO/NOW/non-executable-stack controls are
+  unavailable. On MSVC it also requires compiler and linker Control Flow Guard
+  support. Stack-clash protection remains capability-probed because it is not
+  implemented by every supported compiler.
+
+GNU/Clang builds use strong stack protection and FORTIFY when available.
+Linux and BSD linkers additionally receive RELRO, immediate binding, and a
+non-executable stack. Linux arm64 assembly declares the GNU-stack note
+explicitly. MSVC builds probe `/GS` and Control Flow Guard. The linked-artifact
+audit verifies ELF, Mach-O, or PE/COFF platform markers during the normal test
+gate; `off` intentionally skips that artifact check.
+
 ## Native Windows Build
 
 ```powershell

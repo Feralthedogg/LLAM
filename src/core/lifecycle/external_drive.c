@@ -71,11 +71,12 @@ int llam_runtime_drive_once(llam_runtime_t *runtime,
     llam_runtime_t *pinned = NULL;
     llam_scheduler_quantum_result_t quantum =
         LLAM_SCHEDULER_QUANTUM_DONE;
+    llam_thread_signal_stack_t signal_stack;
     bool expected_started = false;
     bool scheduler_entered = false;
-    bool signal_stack_installed = false;
     int result_errno = 0;
 
+    memset(&signal_stack, 0, sizeof(signal_stack));
     if (result == NULL) {
         errno = EINVAL;
         return -1;
@@ -110,7 +111,7 @@ int llam_runtime_drive_once(llam_runtime_t *runtime,
     }
     if (llam_scheduler_thread_enter(&runtime->shards[0],
                                     &runtime->host_threads_live,
-                                    &signal_stack_installed) != 0) {
+                                    &signal_stack) != 0) {
         result_errno = errno != 0 ? errno : EIO;
         goto finish;
     }
@@ -122,7 +123,7 @@ finish:
     if (scheduler_entered) {
         llam_scheduler_thread_leave(&runtime->shards[0],
                                     &runtime->host_threads_live,
-                                    signal_stack_installed);
+                                    &signal_stack);
     }
     if (llam_runtime_restore_driver_affinity(runtime) != 0 &&
         result_errno == 0) {

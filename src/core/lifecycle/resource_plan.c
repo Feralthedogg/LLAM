@@ -51,6 +51,7 @@ void llam_runtime_opts_copy_prefix(const llam_runtime_opts_t *raw_opts,
     opts_out->preempt_mode = LLAM_PREEMPT_AUTO;
     opts_out->affinity_policy = LLAM_RUNTIME_AFFINITY_NONE;
     opts_out->driver_mode = LLAM_RUNTIME_DRIVER_INTERNAL;
+    opts_out->signal_flags = LLAM_RUNTIME_SIGNAL_DEFAULT_FLAGS;
     LLAM_COPY_RUNTIME_OPT(deterministic);
     LLAM_COPY_RUNTIME_OPT(forced_yield_every);
     LLAM_COPY_RUNTIME_OPT(experimental_flags);
@@ -85,6 +86,8 @@ void llam_runtime_opts_copy_prefix(const llam_runtime_opts_t *raw_opts,
     LLAM_COPY_RUNTIME_OPT(switch_hook_context);
     LLAM_COPY_RUNTIME_OPT(driver_mode);
     LLAM_COPY_RUNTIME_OPT(reserved3);
+    LLAM_COPY_RUNTIME_OPT(signal_flags);
+    LLAM_COPY_RUNTIME_OPT(preempt_signal);
 }
 #undef LLAM_COPY_RUNTIME_OPT
 

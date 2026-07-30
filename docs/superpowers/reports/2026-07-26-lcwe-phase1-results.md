@@ -22,7 +22,7 @@ including a deliberately candidate-favorable bound over both noisy runs.
 
 ## Reproduction
 
-- Branch: `codex/lcwe-phase1`
+- Branch: `lcwe-phase1`
 - Harness commit: `e6d5eb72f7672f27990742364d82be87d60fe8eb`
 - Host: Apple M4, `macOS-26.5.1-arm64-arm-64bit`
 - Compiler: `Apple clang version 21.0.0 (clang-2100.1.1.101)`

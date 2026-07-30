@@ -46,14 +46,12 @@
 
 #include "llam/platform.h"
 #include "llam/runtime_driver.h"
-
+#include "llam/runtime_signal.h"
 #include <stddef.h>
 #include <stdint.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
 /* Audited public projection of config/llam-version.json. */
 #define LLAM_VERSION_MAJOR 2U
 #define LLAM_VERSION_MINOR 2U
@@ -345,6 +343,8 @@ typedef struct llam_runtime_opts {
     void *switch_hook_context;                       /**< Caller-owned runtime-wide pointer passed to both switch hooks. */
     uint32_t driver_mode;                            /**< Scheduler authority; one of ::llam_runtime_driver_mode_t. */
     uint32_t reserved3;                              /**< Reserved ABI padding; initialize to 0. */
+    uint32_t signal_flags;                           /**< Bitwise OR of LLAM_RUNTIME_SIGNAL_F_*; 0 fully opts out. */
+    int32_t preempt_signal;                          /**< POSIX preemption signal, or 0 for the platform default. */
 } llam_runtime_opts_t;
 /** @brief Frozen option prefix consumed by the source-compatible 2.2 wrapper. */
 #define LLAM_RUNTIME_OPTS_V2_2_SIZE \

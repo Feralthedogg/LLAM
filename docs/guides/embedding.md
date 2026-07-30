@@ -59,6 +59,58 @@ process-default lifecycle remains a convenience path for simple LLAM-owned
 programs, but hosts should not repeatedly initialize and shut it down from
 concurrent embedding threads.
 
+## Own The Process-Signal Policy
+
+POSIX embedders can choose how LLAM participates in process-wide signals.
+Always initialize the full option struct before changing the policy:
+
+```c
+#include <signal.h>
+
+llam_runtime_opts_t opts;
+llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+
+/* Preserve the host's complete signal policy. */
+opts.signal_flags = 0U;
+```
+
+The initializer enables both `LLAM_RUNTIME_SIGNAL_F_PREEMPT` and
+`LLAM_RUNTIME_SIGNAL_F_GUARD_FAULT` for compatibility with the default
+runtime. `preempt_signal=0` selects the platform default, currently `SIGUSR1`
+on POSIX. A custom preemption signal must be catchable and cannot overlap a
+guard-fault signal. The preemption field is ignored when its flag is clear.
+
+Signal-participating runtimes share one process configuration. Their flags and
+resolved preemption signal must match exactly; an incompatible runtime create
+fails with `EBUSY`. A runtime with `signal_flags=0` takes no process-signal
+reference and can coexist with either configuration. Windows accepts the
+fixed-width fields for ABI portability but does not install POSIX actions.
+
+LLAM chains a non-guard fault to the classic or `SA_SIGINFO` action that
+preceded its installation. It restores an action at final teardown only while
+it still owns that action, so a host or sanitizer that replaces the handler
+remains authoritative. Guard-page hits stay fatal. Darwin and BSD also cover
+`SIGBUS`; Linux uses `SIGSEGV`.
+
+Alternate signal stacks belong to OS threads, not logical shards. A scheduler
+entry borrows a sufficiently large enabled host stack. Otherwise the entering
+thread creates a guarded alternate stack and restores and releases it before
+leaving. Successive external-drive calls may therefore use different host
+threads without sharing saved stack state.
+
+## Fork Before Initialization
+
+Prefer `posix_spawn()` or fork before creating any LLAM runtime. If a
+multithreaded host forks after initialization, the child may perform only
+async-signal-safe preparation followed immediately by `execve()` or `_exit()`.
+It must not call LLAM, use an inherited runtime/task/synchronization handle, or
+attempt runtime teardown. LLAM deliberately installs no partial `pthread_atfork`
+repair for locks and worker state that cannot be made usable in the child.
+
+The parent remains supported after the child execs or exits. The regression
+suite creates a live runtime, forks a child directly into `execve()`, and then
+runs and joins new work on the original parent runtime.
+
 ## Dynamic Loading
 
 Resolve ABI symbols first:

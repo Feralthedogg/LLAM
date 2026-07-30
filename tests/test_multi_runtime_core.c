@@ -2714,7 +2714,6 @@ static int test_process_signal_handler_survives_peer_runtime_destroy(void) {
 #if LLAM_PLATFORM_POSIX
     pid_t pid;
     int status = 0;
-
     pid = fork();
     if (pid < 0) {
         return test_fail_errno("signal handler isolation fork failed");
@@ -2776,7 +2775,7 @@ static int test_process_signal_handler_survives_peer_runtime_destroy(void) {
     return 0;
 #endif
 }
-
+#include "test_signal_policy_cases.inc"
 static int test_process_fp_globals_survive_peer_runtime_destroy(void) {
 #if LLAM_PLATFORM_POSIX && LLAM_ARCH_X86_64
     llam_runtime_opts_t opts;
@@ -4517,6 +4516,8 @@ int main(void) {
         {"destroyed_runtime_io_cancel_does_not_stop_peer_runtime", test_destroyed_runtime_io_cancel_does_not_stop_peer_runtime},
         {"process_signal_handler_survives_peer_runtime_destroy",
          test_process_signal_handler_survives_peer_runtime_destroy},
+        {"signal_policy_embedding_contract", test_signal_policy_embedding_contract},
+        {"host_process_fork_exec_contract", test_host_process_fork_exec_contract},
         {"process_fp_globals_survive_peer_runtime_destroy",
          test_process_fp_globals_survive_peer_runtime_destroy},
         {"host_try_ops_ignore_default_runtime_race", test_host_try_ops_ignore_default_runtime_race},
@@ -4550,7 +4551,6 @@ int main(void) {
         {"explicit_embedding_io_ownership", test_explicit_embedding_io_ownership},
         {"concurrent_blocking_pool_isolation", test_concurrent_blocking_pool_isolation},
     }; size_t i;
-
     /*
      * CI timeout diagnostics depend on seeing the last completed subcase.
      * Keep progress lines visible even when the process is killed externally.

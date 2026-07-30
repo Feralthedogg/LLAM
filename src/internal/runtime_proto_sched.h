@@ -159,17 +159,19 @@ typedef enum llam_scheduler_quantum_result {
     LLAM_SCHEDULER_QUANTUM_DONE = 2,
 } llam_scheduler_quantum_result_t;
 
-int llam_scheduler_try_install_signal_stack(llam_shard_t *shard);
+int llam_scheduler_try_install_signal_stack(
+    llam_shard_t *shard,
+    llam_thread_signal_stack_t *scope);
 #if !LLAM_RUNTIME_BACKEND_WINDOWS
 void llam_shard_publish_preempt_thread(llam_shard_t *shard,
                                        pthread_t thread);
 #endif
 int llam_scheduler_thread_enter(llam_shard_t *shard,
                                 atomic_uint *thread_counter,
-                                bool *signal_stack_installed);
+                                llam_thread_signal_stack_t *signal_stack);
 void llam_scheduler_thread_leave(llam_shard_t *shard,
                                  atomic_uint *thread_counter,
-                                 bool signal_stack_installed);
+                                 llam_thread_signal_stack_t *signal_stack);
 llam_scheduler_quantum_result_t
 llam_scheduler_run_quantum(llam_shard_t *shard);
 

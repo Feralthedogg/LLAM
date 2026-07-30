@@ -29,10 +29,16 @@ static bool llam_scheduler_signal_stack_failure_is_fatal(int err) {
     return err != EAGAIN;
 }
 
-int llam_scheduler_try_install_signal_stack(llam_shard_t *shard) {
+int llam_scheduler_try_install_signal_stack(
+    llam_shard_t *shard,
+    llam_thread_signal_stack_t *scope) {
     int saved_errno;
 
-    if (llam_install_thread_signal_stack(shard) == 0) {
+    if (shard == NULL || shard->runtime == NULL || scope == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (llam_install_thread_signal_stack(shard->runtime, scope) == 0) {
         return 0;
     }
     saved_errno = errno;
@@ -55,18 +61,18 @@ void llam_shard_publish_preempt_thread(llam_shard_t *shard,
 
 int llam_scheduler_thread_enter(llam_shard_t *shard,
                                 atomic_uint *thread_counter,
-                                bool *signal_stack_installed) {
+                                llam_thread_signal_stack_t *signal_stack) {
     llam_runtime_t *rt;
     bool thread_counted = false;
     int saved_errno = 0;
 
     if (shard == NULL || shard->runtime == NULL ||
-        thread_counter == NULL || signal_stack_installed == NULL) {
+        thread_counter == NULL || signal_stack == NULL) {
         errno = EINVAL;
         return -1;
     }
     rt = shard->runtime;
-    *signal_stack_installed = false;
+    memset(signal_stack, 0, sizeof(*signal_stack));
     g_llam_tls_shard = shard;
     g_llam_tls_task = NULL;
     g_llam_tls_scheduler_ctx = &shard->scheduler_ctx;
@@ -86,11 +92,11 @@ int llam_scheduler_thread_enter(llam_shard_t *shard,
     if (!rt->external_driver.enabled) {
         llam_tune_scheduler_thread(shard, false);
     }
-    if (llam_scheduler_try_install_signal_stack(shard) != 0) {
+    if (llam_scheduler_try_install_signal_stack(shard,
+                                                signal_stack) != 0) {
         saved_errno = errno != 0 ? errno : EIO;
         goto fail;
     }
-    *signal_stack_installed = true;
     return 0;
 
 fail:
@@ -107,16 +113,14 @@ fail:
 
 void llam_scheduler_thread_leave(llam_shard_t *shard,
                                  atomic_uint *thread_counter,
-                                 bool signal_stack_installed) {
+                                 llam_thread_signal_stack_t *signal_stack) {
     llam_runtime_t *rt =
         shard != NULL ? shard->runtime : NULL;
 
     if (shard == NULL || rt == NULL || thread_counter == NULL) {
         return;
     }
-    if (signal_stack_installed) {
-        llam_uninstall_thread_signal_stack(shard);
-    }
+    llam_uninstall_thread_signal_stack(signal_stack);
     llam_channel_tls_cache_drain();
     g_llam_tls_shard = NULL;
     g_llam_tls_task = NULL;

@@ -110,6 +110,8 @@ opts.experimental_flags |= LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS;
 | `stack_cache_low_watermark_bytes` | Target after crossing the high watermark; `0` selects 256 MiB. |
 | `stack_cache_idle_ns` | Minimum idle age for opportunistic release; `0` selects 30 seconds. |
 | `stack_cache_flags` | Bitwise OR of `LLAM_RUNTIME_STACK_CACHE_F_*`. |
+| `signal_flags` | Bitwise OR of `LLAM_RUNTIME_SIGNAL_F_*`; `0` leaves all host process actions untouched. |
+| `preempt_signal` | POSIX cooperative-preemption signal; `0` selects the platform default and is ignored when preemption signal integration is disabled. |
 
 Explicit worker bounds must satisfy
 `1 <= worker_min <= worker_count <= worker_max <= cpu_count`. Prewarm fields
@@ -131,6 +133,16 @@ cannot be combined with a nonzero exact stack prewarm.
 
 `SECURE_SCRUB` and `DISCARD_ON_RETURN` may be combined. A required scrub,
 discard, or reactivation failure fails closed by releasing that mapping.
+
+The option initializer selects `LLAM_RUNTIME_SIGNAL_DEFAULT_FLAGS`, which
+enables preemption and guard-fault integration for compatibility. On POSIX,
+all runtimes that install signal actions must use exactly the same flags and
+resolved preemption signal; otherwise initialization fails with `EBUSY`.
+Opted-out runtimes do not participate in that process-wide compatibility
+check. Custom preemption signals must be catchable and must not overlap
+`SIGSEGV` or another platform guard-fault signal. See
+[Embedding LLAM](../guides/embedding.md#own-the-process-signal-policy) for
+handler chaining, replacement, and per-thread alternate-stack ownership.
 
 Affinity policies:
 

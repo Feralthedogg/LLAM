@@ -7,6 +7,13 @@ CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -Werror -O2 -g -fno-omit-frame-point
 DEPFLAGS ?= -MMD -MP
 CPPFLAGS ?= -Iinclude -Isrc/internal -Isrc -D_GNU_SOURCE
 LLAM_BUILD_RESEARCH ?= 0
+LLAM_HARDENING ?= compatible
+ifneq ($(words $(LLAM_HARDENING)),1)
+$(error LLAM_HARDENING must be off, compatible, or strict)
+endif
+ifeq ($(filter $(LLAM_HARDENING),off compatible strict),)
+$(error LLAM_HARDENING must be off, compatible, or strict)
+endif
 ifneq ($(LLAM_BUILD_RESEARCH),0)
 ifneq ($(LLAM_BUILD_RESEARCH),1)
 $(error LLAM_BUILD_RESEARCH must be 0 or 1)
@@ -186,6 +193,54 @@ HOST_PLATFORM := posix
 endif
 endif
 
+LLAM_HARDENING_CFLAGS :=
+LLAM_HARDENING_LINK_FLAGS :=
+ifneq ($(LLAM_HARDENING),off)
+ifneq ($(HOST_PLATFORM),windows)
+LLAM_HAVE_STACK_PROTECTOR := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CPPFLAGS) $(CFLAGS) -Werror -fstack-protector-strong -x c - -c -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+LLAM_FORTIFY_OPTIMIZED := $(if $(filter -O1 -O2 -O3 -Og -Os -Oz -Ofast,$(CFLAGS)),1,0)
+ifeq ($(LLAM_FORTIFY_OPTIMIZED),1)
+LLAM_HAVE_FORTIFY := $(shell printf '\043include <string.h>\nint main(void){char a[8]; return (int)strlen(a);}\n' | $(CC) $(CPPFLAGS) $(CFLAGS) -O2 -Werror -D_FORTIFY_SOURCE=2 -x c - -c -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+else
+LLAM_HAVE_FORTIFY := 0
+endif
+LLAM_HAVE_STACK_CLASH := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CPPFLAGS) $(CFLAGS) -Werror -fstack-clash-protection -x c - -c -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(LLAM_HAVE_STACK_PROTECTOR),1)
+LLAM_HARDENING_CFLAGS += -fstack-protector-strong
+else ifeq ($(LLAM_HARDENING),strict)
+$(error strict hardening requires stack-protector support)
+endif
+ifeq ($(LLAM_HAVE_FORTIFY),1)
+LLAM_HARDENING_CFLAGS += -D_FORTIFY_SOURCE=2
+else ifeq ($(LLAM_HARDENING),strict)
+$(error strict hardening requires FORTIFY support)
+endif
+ifeq ($(LLAM_HAVE_STACK_CLASH),1)
+LLAM_HARDENING_CFLAGS += -fstack-clash-protection
+endif
+ifneq ($(filter $(HOST_PLATFORM),linux bsd),)
+LLAM_HAVE_RELRO := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CFLAGS) -Werror -Wl,-z,relro -x c - -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+LLAM_HAVE_NOW := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CFLAGS) -Werror -Wl,-z,now -x c - -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+LLAM_HAVE_NOEXECSTACK := $(shell printf 'int main(void){return 0;}\n' | $(CC) $(CFLAGS) -Werror -Wl,-z,noexecstack -x c - -o /dev/null >/dev/null 2>&1 && echo 1 || echo 0)
+ifeq ($(LLAM_HAVE_RELRO),1)
+LLAM_HARDENING_LINK_FLAGS += -Wl,-z,relro
+endif
+ifeq ($(LLAM_HAVE_NOW),1)
+LLAM_HARDENING_LINK_FLAGS += -Wl,-z,now
+endif
+ifeq ($(LLAM_HAVE_NOEXECSTACK),1)
+LLAM_HARDENING_LINK_FLAGS += -Wl,-z,noexecstack
+endif
+ifeq ($(LLAM_HARDENING),strict)
+ifneq ($(LLAM_HAVE_RELRO)$(LLAM_HAVE_NOW)$(LLAM_HAVE_NOEXECSTACK),111)
+$(error strict ELF hardening requires RELRO, NOW, and non-executable-stack linker support)
+endif
+endif
+endif
+endif
+endif
+override CFLAGS := $(CFLAGS) $(LLAM_HARDENING_CFLAGS)
+
 ifeq ($(HOST_PLATFORM),darwin)
 SHLIB_LINK = libllam_runtime.dylib
 SHLIB_REAL = libllam_runtime.$(LLAM_ABI_MAJOR).dylib
@@ -210,6 +265,7 @@ LLAM_PUBLIC_HDRS = \
 	include/llam/platform.h \
 	include/llam/runtime.h \
 	include/llam/runtime_driver.h \
+	include/llam/runtime_signal.h \
 	include/llam/runtime_stats.h
 
 RUNTIME_PRIV_HDRS = \
@@ -223,6 +279,7 @@ RUNTIME_PRIV_HDRS = \
 	src/internal/runtime_internal.h \
 	src/internal/runtime_external_driver.h \
 	src/internal/runtime_resource_plan.h \
+	src/internal/runtime_signal.h \
 	src/internal/runtime_types.h \
 	src/internal/runtime_public_slot.h \
 	src/internal/runtime_public_active_op.h \
@@ -322,6 +379,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/debug/trace.o \
 	$(OBJDIR)/src/core/sched/wake.o \
 	$(OBJDIR)/src/core/platform/platform.o \
+	$(OBJDIR)/src/core/platform/signal.o \
 	$(OBJDIR)/src/core/platform/stack_vm.o \
 	$(OBJDIR)/src/core/platform/windows_policy.o \
 	$(OBJDIR)/src/core/sched/safepoint.o \
@@ -514,6 +572,9 @@ RUNTIME_OBJS += $(RUNTIME_LINUX_ARM64_OBJS)
 endif
 endif
 endif
+override LDLIBS := $(LLAM_HARDENING_LINK_FLAGS) $(LDLIBS)
+override SERVER_FLOOD_LDLIBS := $(LLAM_HARDENING_LINK_FLAGS) $(SERVER_FLOOD_LDLIBS)
+override SHARED_LOAD_LDLIBS := $(LLAM_HARDENING_LINK_FLAGS) $(SHARED_LOAD_LDLIBS)
 SHARED_RUNTIME_OBJS = $(patsubst $(OBJDIR)/%,$(SHARED_OBJDIR)/%,$(RUNTIME_OBJS))
 TESTHOOK_RUNTIME_OVERRIDE_OBJS = \
 	$(TESTHOOK_OBJDIR)/src/core/lifecycle/init.o \
@@ -977,7 +1038,7 @@ platform-status:
 	@echo "Makefile Windows targets delegate to CMake. Override WINDOWS_CMAKE_ARGS to select a generator, for example WINDOWS_CMAKE_ARGS='-G Ninja'."
 
 windows-cmake-configure: platform-status
-	cmake -S . -B "$(WINDOWS_CMAKE_BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(WINDOWS_CMAKE_CONFIG)" -DLLAM_ENABLE_WINDOWS_BACKEND=ON -DLLAM_BUILD_RESEARCH=$(if $(filter 1,$(LLAM_BUILD_RESEARCH)),ON,OFF) $(WINDOWS_CMAKE_ARGS)
+	cmake -S . -B "$(WINDOWS_CMAKE_BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(WINDOWS_CMAKE_CONFIG)" -DLLAM_ENABLE_WINDOWS_BACKEND=ON -DLLAM_BUILD_RESEARCH=$(if $(filter 1,$(LLAM_BUILD_RESEARCH)),ON,OFF) -DLLAM_HARDENING="$(LLAM_HARDENING)" $(WINDOWS_CMAKE_ARGS)
 
 windows-cmake-build: windows-cmake-configure
 	cmake --build "$(WINDOWS_CMAKE_BUILD_DIR)" --config "$(WINDOWS_CMAKE_CONFIG)"
@@ -1138,6 +1199,8 @@ audit-production-test-hooks: static
 	fi
 
 test: audit-build-manifests audit-license-headers audit-c-structure audit-context-switch-gateway test_abi_contract test_abi_compat test_connect_io test_runtime_core test_multi_runtime_core test_runtime_api_edges test_runtime_select_edges test_runtime_io_dump test_runtime_group_local_edges test_runtime_unmanaged_join test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_sync_primitives test_io_buffers test_windows_policy test_windows_runtime_smoke test_windows_iocp_io test_windows_iocp_dump test_windows_handle_io test_security_capability test_shared_load llam_broker server stress server_flood shared audit-shared-exports audit-production-test-hooks
+	python3 -m unittest scripts/test_audit_hardening_artifact.py -v
+	python3 scripts/audit_hardening_artifact.py ./$(SHLIB_REAL) --profile $(LLAM_HARDENING)
 	./test_abi_contract
 	./test_abi_compat
 	./test_connect_io
@@ -2890,13 +2953,13 @@ $(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_task_c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_multi_runtime_core.o: tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc
+$(OBJDIR)/tests/test_multi_runtime_core.o: tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_host_process_cases.inc tests/test_signal_policy_cases.inc
 
 $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_hard_affinity_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_hard_affinity_cases.inc tests/test_signal_stack_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 

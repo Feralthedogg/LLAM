@@ -321,9 +321,6 @@ static void llam_runtime_shutdown_unlocked(llam_runtime_t *rt) {
                 llam_wake_handle_close(rt->shards[i].event_fd);
                 rt->shards[i].event_fd = -1;
             }
-            if (rt->shards[i].signal_stack != NULL) {
-                munmap(rt->shards[i].signal_stack, rt->shards[i].signal_stack_size);
-            }
             llam_ctx_destroy_fp_state(&rt->shards[i].scheduler_ctx);
             llam_ctx_destroy_fp_state(&rt->shards[i].opaque_scheduler_ctx);
             free(rt->shards[i].timer_heap);

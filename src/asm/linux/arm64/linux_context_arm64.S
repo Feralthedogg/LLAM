@@ -91,3 +91,5 @@ llam_fiber_bootstrap:
     bl llam_task_bootstrap
     b llam_task_exit_internal
     .size llam_fiber_bootstrap, .-llam_fiber_bootstrap
+
+    .section .note.GNU-stack,"",@progbits

@@ -5,7 +5,7 @@
 > behavior change follows RED → GREEN → focused regression → commit.
 
 **Goal:** Close the correctness blockers in the compiled LEIR native-segment
-path and remediate every validated Codex Security finding without changing
+path and remediate every validated security finding without changing
 LEIR semantics or the supported public ABI.
 
 **Architecture:** LEIR remains the compiler/planner meaning contract. The
@@ -298,7 +298,7 @@ ThreadSanitizer where supported.
 
 **Files:**
 - Add outside repository:
-  `/private/var/folders/vx/23xrg8c53d54db_ypgjnhw8r0000gn/T/codex-security-scans-7oG684/leir-native-segment/ba596579d9777348981021553bdbcf4596ed8a0f_20260727T215134Z_4xvuww_u/artifacts/fix_report.md`
+  `<scan-artifact-directory>/artifacts/fix_report.md`
 
 - [x] Run formatting/static checks and every focused test introduced above.
 - [x] Run the full Make and CMake/CTest suites on the host.
@@ -311,13 +311,13 @@ ThreadSanitizer where supported.
 - [x] Remove the obsolete whole-matrix screen from release evidence and pin
   the connected pipeline to two available CPUs, failing closed when the runner
   cannot provide both.
-- [ ] Re-scan the branch with a normal Codex Security scan or perform a
+- [ ] Re-scan the branch with a normal repository security scan or perform a
   security diff scan against the sealed baseline.
 - [ ] Write one outcome per original rule ID to `fix_report.md`, including
   root cause, changed files, RED/GREEN commands, and any platform validation
   completed by CI.
 - [ ] Review the diff, remove generated binaries, commit any evidence-only
-  changes, push `codex/leir-native-segment`, and wait for every required GitHub
+  changes, push `leir-native-segment`, and wait for every required GitHub
   check.
 - [ ] Fix CI failures within scope and repeat until green.
 - [x] Run the specialized performance decision gate. If it fails or regresses,

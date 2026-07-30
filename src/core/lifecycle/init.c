@@ -726,7 +726,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     unsigned *cpus = NULL;
     unsigned *locality_node_ids;
     unsigned *io_node_ids = NULL;
-    size_t altstack_size;
     const char *light_safepoint_env;
     const char *spawn_fanout_env;
     const char *task_list_eager_env;
@@ -784,6 +783,11 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             return -1;
         }
         if (!llam_public_driver_mode_valid(opts->driver_mode)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (!llam_runtime_signal_options_valid(opts->signal_flags,
+                                               opts->preempt_signal)) {
             errno = EINVAL;
             return -1;
         }
@@ -896,6 +900,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->on_task_suspend = opts != NULL ? opts->on_task_suspend : NULL;
     rt->switch_hook_context =
         opts != NULL ? opts->switch_hook_context : NULL;
+    rt->signal_flags =
+        opts != NULL ? opts->signal_flags : LLAM_RUNTIME_SIGNAL_DEFAULT_FLAGS;
+    rt->preempt_signal =
+        opts != NULL && opts->preempt_signal != 0
+            ? opts->preempt_signal
+            : LLAM_PREEMPT_SIGNAL;
     rt->experimental_shard_rings =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS) != 0U ? 1U : 0U;
     rt->experimental_shard_rings_multishot =
@@ -1092,10 +1102,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     atomic_store_explicit(&rt->next_spawn_shard, 0U, memory_order_relaxed);
     rt->allowed_cpus = cpus;
     (void)llam_detect_xsave_support(rt);
-    altstack_size = LLAM_ALTSTACK_BYTES;
-    if (altstack_size < (size_t)SIGSTKSZ) {
-        altstack_size = (size_t)SIGSTKSZ;
-    }
 
     rt->shards = calloc(rt->active_shards, sizeof(*rt->shards));
     if (rt->shards == NULL) {
@@ -1222,21 +1228,6 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             llam_runtime_shutdown_rt(rt);
             return -1;
         }
-        rt->shards[i].signal_stack = mmap(NULL,
-                                          altstack_size,
-                                          PROT_READ | PROT_WRITE,
-                                          MAP_PRIVATE | MAP_ANONYMOUS,
-                                          -1,
-                                          0);
-        if (rt->shards[i].signal_stack == MAP_FAILED) {
-            rt->shards[i].signal_stack = NULL;
-            free(io_node_ids);
-            free(locality_node_ids);
-            llam_runtime_shutdown_rt(rt);
-            return -1;
-        }
-        rt->shards[i].signal_stack_size = altstack_size;
-        rt->shards[i].previous_sigaltstack.ss_flags = SS_DISABLE;
         if (llam_allocator_init(&rt->shards[i].allocator) != 0) {
             free(io_node_ids);
             free(locality_node_ids);

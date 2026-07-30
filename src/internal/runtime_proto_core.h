@@ -348,13 +348,20 @@ void llam_tune_scheduler_thread(llam_shard_t *shard, bool opaque_helper);
  * Context/FPU and process signal integration.
  */
 void llam_clear_xsave_globals(void);
+void llam_chain_previous_fault_signal(int signo,
+                                      siginfo_t *info,
+                                      void *ucontext);
+bool llam_runtime_preempt_signal_is_owned(const llam_runtime_t *rt);
+bool llam_runtime_signal_options_valid(uint32_t flags, int32_t signo);
 void llam_ctx_destroy_fp_state(llam_ctx_t *ctx);
 int llam_ctx_init_fp_state(llam_ctx_t *ctx, llam_runtime_t *rt);
 int llam_detect_xsave_support(llam_runtime_t *rt);
 void llam_release_xsave_globals(llam_runtime_t *rt);
 void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext);
 int llam_install_process_signal_handlers(llam_runtime_t *rt);
-int llam_install_thread_signal_stack(llam_shard_t *shard);
+int llam_install_thread_signal_stack(
+    llam_runtime_t *rt,
+    llam_thread_signal_stack_t *scope);
 void llam_preempt_signal_handler(int signo);
 void llam_restore_process_signal_handlers(llam_runtime_t *rt);
 
@@ -466,6 +473,7 @@ void llam_trace_shard(llam_shard_t *shard,
                     llam_task_state_id_t from,
                     llam_task_state_id_t to,
                     llam_wait_reason_t reason);
-void llam_uninstall_thread_signal_stack(llam_shard_t *shard);
+void llam_uninstall_thread_signal_stack(
+    llam_thread_signal_stack_t *scope);
 
 #endif

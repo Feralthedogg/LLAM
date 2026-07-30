@@ -70,6 +70,7 @@ int llam_runtime_opts_init(llam_runtime_opts_t *opts, size_t opts_size) {
     defaults.profile = LLAM_RUNTIME_PROFILE_BALANCED;
     defaults.preempt_mode = LLAM_PREEMPT_AUTO;
     defaults.affinity_policy = LLAM_RUNTIME_AFFINITY_NONE;
+    defaults.signal_flags = LLAM_RUNTIME_SIGNAL_DEFAULT_FLAGS;
 
     copy_size = llam_min_size(opts_size, sizeof(defaults));
     memset(opts, 0, copy_size);

@@ -1547,12 +1547,12 @@ rg -n "malloc|calloc|realloc|free" \
   src/io/linux/watch/linux_segment_cancel.c
 rg -n "WRITE_FIXED|SEND_ZC" \
   src/io/linux experiments/leir
-git diff --check origin/codex/leir-native-segment...HEAD
+git diff --check origin/leir-native-segment...HEAD
 ```
 
 Expected: no hot-path allocation and no prohibited fixed send encoding.
 
-- [ ] **Step 2: Run the standard Codex Security repository scan**
+- [ ] **Step 2: Run the standard repository security scan**
 
 Use the normal single-pass security scan, validate every candidate against an
 attacker-controlled lifetime or input path, fix validated/plausible findings,
@@ -1582,7 +1582,7 @@ Expected: every applicable test passes.
 
 ```bash
 git status --short
-git push origin codex/leir-native-segment
+git push origin leir-native-segment
 gh pr checks 3 --watch
 ```
 
@@ -1635,7 +1635,7 @@ git add CMakeLists.txt Makefile include/llam/runtime.h \
   tests/test_shared_load.c README.md docs/abi.md \
   docs/getting-started.md docs/security.md CHANGELOG.md
 git commit -m "release: prepare 2.3.0"
-git push origin codex/leir-native-segment
+git push origin leir-native-segment
 gh pr checks 3 --watch
 ```
 

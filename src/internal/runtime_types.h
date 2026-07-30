@@ -31,6 +31,7 @@
 #include "runtime_external_driver.h"
 #include "runtime_platform.h"
 #include "runtime_resource_plan.h"
+#include "runtime_signal.h"
 #define LLAM_WAIT_RESOLVER_CLOSED_BIT (UINT_MAX - (UINT_MAX >> 1U))
 #define LLAM_WAIT_RESOLVER_REF_MASK (UINT_MAX >> 1U)
 
@@ -207,6 +208,7 @@ typedef struct llam_task_local_entry llam_task_local_entry_t;
 typedef struct llam_channel_select_state llam_channel_select_state_t;
 /** @brief Synchronization wait node shared by wait/wake handshakes. */
 typedef struct llam_wait_node llam_wait_node_t;
+
 /** @brief One recyclable logical I/O operation. */
 struct llam_io_req;
 #if LLAM_RUNTIME_BACKEND_LINUX
@@ -1136,10 +1138,6 @@ struct llam_shard {
 #endif
     pthread_t opaque_helper_thread;
     pthread_t primary_thread;
-    void *signal_stack;
-    size_t signal_stack_size;
-    stack_t previous_sigaltstack;
-    bool sigaltstack_installed;
     bool opaque_helper_thread_started;
     bool opaque_helper_ready;
     bool opaque_helper_active;
@@ -1378,6 +1376,8 @@ struct llam_runtime {
     llam_task_switch_hook_fn on_task_resume;
     llam_task_switch_hook_fn on_task_suspend;
     void *switch_hook_context;
+    unsigned signal_flags;
+    int preempt_signal;
     unsigned experimental_shard_rings;
     unsigned experimental_shard_rings_multishot;
     unsigned experimental_dynamic_shards;
@@ -1466,10 +1466,8 @@ struct llam_runtime {
     llam_alloc_chunk_t *block_job_chunks;
     _Alignas(LLAM_CACHELINE_BYTES) _Atomic(llam_block_job_t *) block_job_free;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_wake_seq;
-    struct sigaction previous_preempt_action;
-    struct sigaction previous_segv_action;
     bool preempt_signal_installed;
-    bool segv_signal_installed;
+    bool fault_signal_installed;
     bool block_cv_initialized;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_pending;
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint block_active;
