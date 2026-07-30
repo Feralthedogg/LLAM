@@ -420,6 +420,7 @@ int llam_install_thread_signal_stack(
     stack_t stack;
     void *mapping;
     void *stack_sp;
+    void *upper_guard;
     size_t page_size;
     size_t guard_bytes;
     size_t stack_size = LLAM_ALTSTACK_BYTES;
@@ -462,7 +463,7 @@ int llam_install_thread_signal_stack(
     mapping_size = stack_size + guard_bytes;
     mapping = mmap(NULL,
                    mapping_size,
-                   PROT_NONE,
+                   PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS,
                    -1,
                    0);
@@ -470,9 +471,15 @@ int llam_install_thread_signal_stack(
         return -1;
     }
     stack_sp = (unsigned char *)mapping + page_size;
-    if (mprotect(stack_sp,
-                 stack_size,
-                 PROT_READ | PROT_WRITE) != 0) {
+    upper_guard = (unsigned char *)stack_sp + stack_size;
+    /*
+     * Establish guards by removing rights from the original mapping.
+     * NetBSD treats mmap() protections as an upper bound for later
+     * mprotect() calls, so mapping as PROT_NONE and upgrading the stack
+     * interior fails with EACCES there.
+     */
+    if (mprotect(mapping, page_size, PROT_NONE) != 0 ||
+        mprotect(upper_guard, page_size, PROT_NONE) != 0) {
         int saved_errno = errno;
 
         (void)munmap(mapping, mapping_size);
