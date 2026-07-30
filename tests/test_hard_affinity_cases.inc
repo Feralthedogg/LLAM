@@ -21,6 +21,7 @@
 typedef struct hard_affinity_fixture {
     llam_runtime_t runtime;
     llam_shard_t shards[2];
+    llam_cldeque_t norm_cldeques[2];
 } hard_affinity_fixture_t;
 
 typedef struct hard_affinity_run_state {
@@ -58,6 +59,7 @@ static int hard_affinity_fixture_init(hard_affinity_fixture_t *fixture) {
 
         shard->runtime = rt;
         shard->id = i;
+        shard->norm_cldeque = &fixture->norm_cldeques[i];
         shard->event_fd = LLAM_INVALID_FD;
         shard->opaque_redirect_target_id = UINT_MAX;
         atomic_init(&shard->online, 1U);
@@ -72,7 +74,7 @@ static int hard_affinity_fixture_init(hard_affinity_fixture_t *fixture) {
         atomic_init(&shard->current, NULL);
         atomic_init(&shard->live_tasks, 0U);
         atomic_init(&shard->norm_depth, 0U);
-        llam_cldeque_init(&shard->norm_cldeque);
+        llam_cldeque_init(shard->norm_cldeque);
         if (pthread_mutex_init(&shard->lock, NULL) != 0) {
             for (unsigned j = 0U; j < initialized_locks; ++j) {
                 pthread_mutex_destroy(&fixture->shards[j].lock);

@@ -448,8 +448,8 @@ void llam_block_job_release(llam_runtime_t *rt, llam_block_job_t *job) {
         /*
          * Stop new cancellation resolvers from discovering this job, then wait
          * for every resolver that already loaded it.  The job's task scan ref is
-         * retained through the drain so both the gate and embedded wait node stay
-         * addressable.  Only after quiescence may this pool slot represent a
+         * retained through the drain so both the gate and pooled wait node stay
+         * addressable. Only after quiescence may either pool slot represent a
          * different blocking operation.
          */
         expected_job = job;

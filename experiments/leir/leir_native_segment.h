@@ -77,5 +77,11 @@ int leir_native_batch_run(
 void leir_native_test_set_bind_before_claim_hook(
     leir_native_test_hook_fn hook,
     void *context);
+size_t leir_native_test_linux_core_size(void);
+size_t leir_native_test_linux_fixed_size(void);
+const void *leir_native_test_linux_state_address(
+    const leir_native_instance_t *instance);
+const void *leir_native_test_linux_fixed_address(
+    const leir_native_instance_t *instance);
 
 #endif

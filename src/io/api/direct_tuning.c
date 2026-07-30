@@ -496,19 +496,15 @@ void llam_maybe_handoff_after_socket_write(llam_fd_t fd, size_t count, bool know
         return;
     }
     recent_yield_ns = llam_write_handoff_recent_yield_ns();
-    if (recent_yield_ns > 0U && g_llam_tls_task->last_yield_ns > 0U) {
-        // llam_yield uses UINT64_MAX to mark the first post-yield write without a
-        // clock read.
-        if (g_llam_tls_task->last_yield_ns == UINT64_MAX) {
-            g_llam_tls_task->last_yield_ns = 0U;
-            return;
-        } else {
-            uint64_t now_ns = llam_now_ns();
-
-            if (now_ns >= g_llam_tls_task->last_yield_ns && now_ns - g_llam_tls_task->last_yield_ns <= recent_yield_ns) {
-                return;
-            }
-        }
+    if (recent_yield_ns > 0U &&
+        g_llam_tls_task->recent_explicit_yield) {
+        /*
+         * An explicit yield suppresses exactly the first post-yield write
+         * handoff. No timestamp is needed because this marker is only ever
+         * published by the yield paths and consumed here.
+         */
+        g_llam_tls_task->recent_explicit_yield = false;
+        return;
     }
     direct_local_handoff = llam_write_direct_local_handoff_enabled();
     if (direct_local_handoff) {

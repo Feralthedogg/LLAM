@@ -139,6 +139,7 @@ endif()
 set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/lifecycle/runtime.c
     src/core/lifecycle/resource_plan.c
+    src/core/lifecycle/runtime_layout.c
     src/core/lifecycle/external_drive.c
     src/core/base/abi.c
     src/core/base/errno.c
@@ -781,7 +782,9 @@ add_executable(test_leir_native_segment
     experiments/leir/leir_program.c
     experiments/leir/leir_native_plan.c
     experiments/leir/leir_native_segment.c
+    experiments/leir/leir_native_linux_state.c
     experiments/leir/leir_test_support.c
+    experiments/leir/test_leir_native_fixture.c
     experiments/leir/test_leir_native_segment.c
 )
 target_include_directories(test_leir_native_segment PRIVATE
@@ -795,6 +798,7 @@ add_executable(bench_leir_native_segment
     experiments/leir/leir_program.c
     experiments/leir/leir_native_plan.c
     experiments/leir/leir_native_segment.c
+    experiments/leir/leir_native_linux_state.c
     experiments/leir/leir_peer_process.c
     experiments/leir/leir_test_support.c
     experiments/leir/bench_leir_native_segment.c
@@ -810,6 +814,7 @@ add_executable(bench_leir_native_pipeline
     experiments/leir/leir_program.c
     experiments/leir/leir_native_plan.c
     experiments/leir/leir_native_segment.c
+    experiments/leir/leir_native_linux_state.c
     experiments/leir/leir_peer_process.c
     experiments/leir/leir_test_support.c
     experiments/leir/bench_leir_native_pipeline.c

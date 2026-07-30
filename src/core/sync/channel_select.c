@@ -260,7 +260,6 @@ static void llam_channel_select_cleanup_nodes(llam_channel_select_state_t *state
 }
 
 static void llam_channel_select_release_nodes(llam_shard_t *shard,
-                                              llam_task_t *task,
                                               llam_wait_node_t **nodes,
                                               size_t op_count) {
     size_t i;
@@ -269,25 +268,8 @@ static void llam_channel_select_release_nodes(llam_shard_t *shard,
         return;
     }
     for (i = 0U; i < op_count; ++i) {
-        size_t embedded_index;
-
         if (nodes[i] == NULL) {
             continue;
-        }
-        if (task != NULL && nodes[i] == &task->embedded_wait_node) {
-            llam_wait_node_reset(nodes[i], task->owner_runtime, UINT_MAX);
-            continue;
-        }
-        if (task != NULL) {
-            for (embedded_index = 0U; embedded_index < LLAM_TASK_EMBEDDED_SELECT_NODES; ++embedded_index) {
-                if (nodes[i] == &task->embedded_select_nodes[embedded_index]) {
-                    llam_wait_node_reset(nodes[i], task->owner_runtime, UINT_MAX);
-                    break;
-                }
-            }
-            if (embedded_index < LLAM_TASK_EMBEDDED_SELECT_NODES) {
-                continue;
-            }
         }
         llam_wait_node_free(shard, nodes[i]);
     }
@@ -301,20 +283,10 @@ static int llam_channel_select_alloc_nodes(llam_shard_t *shard,
     size_t i;
 
     for (i = 0U; i < op_count; ++i) {
-        llam_wait_node_t *node;
-
-        if (task != NULL &&
-            atomic_load_explicit(&task->active_wait_node, memory_order_acquire) == NULL &&
-            atomic_load_explicit(&task->active_select_state, memory_order_acquire) == NULL &&
-            i < LLAM_TASK_EMBEDDED_SELECT_NODES) {
-            node = &task->embedded_select_nodes[i];
-            llam_wait_node_reset(node, task->owner_runtime, UINT_MAX);
-        } else {
-            node = llam_wait_node_alloc(shard);
-        }
+        llam_wait_node_t *node = llam_wait_node_alloc(shard);
 
         if (node == NULL) {
-            llam_channel_select_release_nodes(shard, task, state->nodes, i);
+            llam_channel_select_release_nodes(shard, state->nodes, i);
             return -1;
         }
         node->task = task;
@@ -677,7 +649,7 @@ select_not_ready:
         llam_channel_select_lock_channels(channels, channel_count);
         if (llam_channel_select_any_ready_locked(&state)) {
             llam_channel_select_unlock_channels(channels, channel_count);
-            llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_nodes(shard, nodes, op_count);
             llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
@@ -706,7 +678,7 @@ select_not_ready:
             if (llam_channel_select_completed_state(&state) != LLAM_SELECT_PENDING) {
                 goto select_ready;
             }
-            llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_nodes(shard, nodes, op_count);
             llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
@@ -734,7 +706,7 @@ select_not_ready:
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
             llam_task_clear_wait_tracking_or_abort(task);
-            llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_nodes(shard, nodes, op_count);
             llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
@@ -761,7 +733,7 @@ select_not_ready:
             task->state = LLAM_TASK_STATE_RUNNING;
             task->wait_reason = LLAM_WAIT_NONE;
             llam_task_clear_wait_tracking_or_abort(task);
-            llam_channel_select_release_nodes(shard, task, nodes, op_count);
+            llam_channel_select_release_nodes(shard, nodes, op_count);
             llam_channel_select_release_channels(channels, channel_count);
             if (heap_arrays) {
                 free(nodes);
@@ -801,7 +773,7 @@ select_ready:
         if (state.selected_index != SIZE_MAX && state.selected_index < op_count) {
             llam_channel_waiter_consumed(state.op_channels[state.selected_index]);
         }
-        llam_channel_select_release_nodes(shard, task, nodes, op_count);
+        llam_channel_select_release_nodes(shard, nodes, op_count);
         llam_channel_select_release_channels(channels, channel_count);
         if (heap_arrays) {
             free(nodes);

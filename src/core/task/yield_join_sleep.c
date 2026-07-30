@@ -31,9 +31,6 @@
 
 #include "runtime_internal.h"
 
-/** @brief Sentinel used to mark an explicit user yield without sampling a real timestamp. */
-#define LLAM_RECENT_EXPLICIT_YIELD UINT64_MAX
-
 #if LLAM_RUNTIME_BACKEND_LINUX || LLAM_RUNTIME_BACKEND_KQUEUE || LLAM_RUNTIME_BACKEND_WINDOWS
 #define LLAM_DIRECT_OWNER_HANDOFF 1
 #else
@@ -279,12 +276,13 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
         current->forced_yield_budget = rt->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->recent_explicit_yield =
+            g_llam_tls_io_handoff_yield == 0U;
         current->last_runnable_ns = now_ns;
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;
         atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-        next->last_started_ns = 0U;
+        shard->current_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
     shard->metrics.yields += 1U;
@@ -366,7 +364,8 @@ void llam_yield(void) {
     task->forced_yield_budget = rt->forced_yield_every;
     task->state = LLAM_TASK_STATE_RUNNABLE;
     task->wait_reason = LLAM_WAIT_NONE;
-    task->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+    task->recent_explicit_yield =
+        g_llam_tls_io_handoff_yield == 0U;
     task->last_runnable_ns = llam_runtime_should_stamp_runnable_latency(shard) ? llam_now_ns() : 0U;
 
     pthread_mutex_lock(&shard->lock);
@@ -462,12 +461,13 @@ bool llam_yield_to_local_runnable(void) {
         current->forced_yield_budget = shard->runtime->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = g_llam_tls_io_handoff_yield != 0U ? 0U : LLAM_RECENT_EXPLICIT_YIELD;
+        current->recent_explicit_yield =
+            g_llam_tls_io_handoff_yield == 0U;
         current->last_runnable_ns = now_ns;
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;
         atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-        next->last_started_ns = 0U;
+        shard->current_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
     atomic_store_explicit(&shard->current, next, memory_order_release);
@@ -547,7 +547,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
         next->state = LLAM_TASK_STATE_RUNNING;
         next->wait_reason = LLAM_WAIT_NONE;
         atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-        next->last_started_ns = 0U;
+        shard->current_started_ns = 0U;
         llam_runtime_record_dispatch_latency(shard, next, llam_runtime_dispatch_now_ns(next, now_ns));
     }
     atomic_store_explicit(&shard->current, next, memory_order_release);
@@ -591,7 +591,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     next->state = LLAM_TASK_STATE_RUNNING;
     next->wait_reason = LLAM_WAIT_NONE;
     atomic_store_explicit(&next->last_shard, shard->id, memory_order_relaxed);
-    next->last_started_ns = 0U;
+    shard->current_started_ns = 0U;
     atomic_store_explicit(&shard->current, next, memory_order_release);
     g_llam_tls_task = next;
 

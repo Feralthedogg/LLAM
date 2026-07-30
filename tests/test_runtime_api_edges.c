@@ -5353,7 +5353,7 @@ static int test_align_up_overflow_fails_closed(void) {
     }
     return 0;
 }
-
+#include "test_aligned_alloc_cases.inc"
 #if !LLAM_PLATFORM_WINDOWS
 typedef struct public_op_sentinel_select_state {
     llam_channel_t *poisoned;
@@ -6147,10 +6147,10 @@ int main(void) {
                       test_public_active_op_overflow_fails_closed) != 0) {
         return 1;
     }
-    if (run_edge_case("align_up_overflow_fails_closed",
-                      test_align_up_overflow_fails_closed) != 0) {
+    if (run_edge_case("align_up_overflow_fails_closed", test_align_up_overflow_fails_closed) != 0) {
         return 1;
     }
+    if (run_edge_case("aligned_zalloc_contract", test_aligned_zalloc_contract) != 0) return 1;
 #if LLAM_PLATFORM_WINDOWS
     if (run_edge_case("windows_skip_completion_policy_is_disabled",
                       test_windows_skip_completion_policy_is_disabled) != 0) {

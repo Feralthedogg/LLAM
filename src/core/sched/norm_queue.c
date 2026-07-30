@@ -251,7 +251,7 @@ bool llam_norm_queue_push_owner_locked(llam_shard_t *shard, llam_task_t *task) {
     }
 
     if (llam_lockfree_normq_enabled(shard->runtime)) {
-        pushed = llam_cldeque_push_bottom(&shard->norm_cldeque, task);
+        pushed = llam_cldeque_push_bottom(shard->norm_cldeque, task);
     } else {
         pushed = llam_queue_push_bounded_locked(shard, &shard->norm_q, LLAM_NORM_QUEUE_CAP, task);
     }
@@ -292,7 +292,7 @@ bool llam_norm_queue_push_owner_unlocked(llam_shard_t *shard, llam_task_t *task)
         return false;
     }
 
-    if (llam_cldeque_push_bottom(&shard->norm_cldeque, task)) {
+    if (llam_cldeque_push_bottom(shard->norm_cldeque, task)) {
         shard->metrics.norm_enqueues += 1U;
         return true;
     }
@@ -320,7 +320,7 @@ llam_task_t *llam_norm_queue_pop_owner_unlocked(llam_shard_t *shard) {
         return NULL;
     }
 
-    task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+    task = llam_cldeque_pop_bottom(shard->norm_cldeque);
     if (task == NULL) {
         task = llam_queue_pop_head(&shard->norm_q);
     }
@@ -437,7 +437,7 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
         prefer_owner_deque =
             shard->direct_handoff_streak >=
                 LLAM_DIRECT_YIELD_FIFO_FAIRNESS_BURST &&
-            llam_cldeque_has_work(&shard->norm_cldeque);
+            llam_cldeque_has_work(shard->norm_cldeque);
         if (!prefer_owner_deque) {
             next = llam_queue_pop_head(&shard->norm_q);
         }
@@ -448,7 +448,7 @@ bool llam_norm_queue_exchange_yield_unlocked(llam_shard_t *shard,
                 }
                 return false;
             }
-            next = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+            next = llam_cldeque_pop_bottom(shard->norm_cldeque);
             if (next == NULL) {
                 return false;
             }
@@ -505,7 +505,7 @@ llam_task_t *llam_norm_queue_pop_owner_locked(llam_shard_t *shard) {
     }
 
     if (llam_lockfree_normq_enabled(shard->runtime)) {
-        task = llam_cldeque_pop_bottom(&shard->norm_cldeque);
+        task = llam_cldeque_pop_bottom(shard->norm_cldeque);
         if (task == NULL) {
             task = llam_queue_pop_head(&shard->norm_q);
         }
@@ -532,7 +532,7 @@ llam_task_t *llam_norm_queue_steal(llam_shard_t *victim) {
         return NULL;
     }
 
-    task = llam_cldeque_steal_top(&victim->norm_cldeque);
+    task = llam_cldeque_steal_top(victim->norm_cldeque);
     if (task != NULL) {
         (void)llam_norm_queue_note_dequeue(victim);
     }

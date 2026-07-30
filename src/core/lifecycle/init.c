@@ -160,6 +160,9 @@ static void llam_trace_ring_init(llam_shard_t *shard) {
         return;
     }
     atomic_init(&shard->trace_head, 0U);
+    if (shard->trace_ring == NULL) {
+        return;
+    }
     for (i = 0U; i < LLAM_TRACE_RING_CAP; ++i) {
         atomic_init(&shard->trace_ring[i].ts_ns, 0U);
         atomic_init(&shard->trace_ring[i].task_id, 0U);
@@ -1103,25 +1106,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->allowed_cpus = cpus;
     (void)llam_detect_xsave_support(rt);
 
-    rt->shards = calloc(rt->active_shards, sizeof(*rt->shards));
-    if (rt->shards == NULL) {
-        /*
-         * rt->allowed_cpus was already published for partial-init cleanup.
-         * Let shutdown consume it exactly once; freeing @c cpus directly here
-         * leaves a dangling runtime pointer and makes caller cleanup double-free.
-         */
-        llam_runtime_shutdown_rt(rt);
-        errno = ENOMEM;
+    if (llam_runtime_allocate_layout_storage(rt) != 0) {
         return -1;
-    }
-    /*
-     * Shutdown always walks the full published shard array. Prime every wake
-     * descriptor before any later allocation can fail; otherwise untouched
-     * calloc-backed entries look like fd 0 and partial-init cleanup can close
-     * the caller's stdin.
-     */
-    for (i = 0; i < rt->active_shards; ++i) {
-        rt->shards[i].event_fd = -1;
     }
 
     locality_node_ids = calloc(rt->active_shards, sizeof(*locality_node_ids));
@@ -1154,6 +1140,12 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         rt->shards[i].cpu_id = rt->allowed_cpus[i];
         rt->shards[i].node_index = node_index;
         rt->shards[i].io_node_index = rt->experimental_shard_rings != 0U ? i : node_index;
+        rt->shards[i].norm_cldeque =
+            rt->norm_cldeques != NULL ? &rt->norm_cldeques[i] : NULL;
+        rt->shards[i].trace_ring =
+            rt->trace_events != NULL
+                ? &rt->trace_events[(size_t)i * LLAM_TRACE_RING_CAP]
+                : NULL;
         llam_metrics_init(&rt->shards[i].metrics);
         llam_trace_ring_init(&rt->shards[i]);
         atomic_init(&rt->shards[i].online, i < initial_online_shards ? 1U : 0U);
@@ -1162,7 +1154,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         atomic_init(&rt->shards[i].merge_pause_ack, 0U);
         atomic_init(&rt->shards[i].steal_pause_ack, 0U);
         atomic_init(&rt->shards[i].live_tasks, 0U);
-        llam_cldeque_init(&rt->shards[i].norm_cldeque);
+        llam_cldeque_init(rt->shards[i].norm_cldeque);
         atomic_init(&rt->shards[i].inject_depth, 0U);
         atomic_init(&rt->shards[i].norm_depth, 0U);
         atomic_init(&rt->shards[i].timer_count, 0U);
@@ -1268,6 +1260,7 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
 #endif
         atomic_store_explicit(&rt->shards[i].last_safepoint_ns, llam_now_ns(), memory_order_relaxed);
         atomic_store(&rt->shards[i].last_run_started_ns, 0U);
+        rt->shards[i].current_started_ns = 0U;
     }
     if (llam_runtime_prewarm_timer_heaps(
             rt,
@@ -1299,7 +1292,10 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
         errno = ENOMEM;
         return -1;
     }
-    rt->nodes = calloc(rt->active_nodes, sizeof(*rt->nodes));
+    rt->nodes = llam_aligned_zalloc(
+        _Alignof(llam_node_t),
+        rt->active_nodes,
+        sizeof(*rt->nodes));
     if (rt->nodes == NULL) {
         free(io_node_ids);
         free(locality_node_ids);

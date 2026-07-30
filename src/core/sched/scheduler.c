@@ -65,7 +65,7 @@ static uint64_t llam_set_task_running(llam_shard_t *shard, llam_task_t *task) {
     g_llam_tls_task = task;
     atomic_store_explicit(&task->last_shard, shard->id, memory_order_relaxed);
     task->state = LLAM_TASK_STATE_RUNNING;
-    task->last_started_ns = now_ns;
+    shard->current_started_ns = now_ns;
     if (wake_timing) {
         llam_runtime_record_dispatch_latency(shard, task, now_ns);
     }
@@ -145,8 +145,6 @@ static void llam_clear_current_task(llam_shard_t *shard, uint64_t run_ns) {
     if (task != NULL && run_ns != 0U) {
         uint64_t slice_ns = llam_slice_ns((llam_task_class_t)atomic_load_explicit(&task->task_class, memory_order_acquire));
 
-        task->last_run_ns = run_ns;
-        task->total_run_ns += run_ns;
 #if ((LLAM_PLATFORM_LINUX || LLAM_PLATFORM_DARWIN || LLAM_PLATFORM_BSD) || LLAM_PLATFORM_WINDOWS) && LLAM_ARCH_X86_64
         llam_task_sample_stack_rsp(task, (uintptr_t)task->ctx.rsp);
 #elif LLAM_ARCH_AARCH64

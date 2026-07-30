@@ -272,7 +272,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             current->forced_yield_budget = rt->forced_yield_every;
             current->state = LLAM_TASK_STATE_RUNNABLE;
             current->wait_reason = LLAM_WAIT_NONE;
-            current->last_yield_ns = 0U;
+            current->recent_explicit_yield = false;
             current->last_runnable_ns = now_ns;
             llam_task_clear_wait_tracking_or_abort(task);
             task_from = task->state;
@@ -280,7 +280,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
             task->wait_reason = LLAM_WAIT_NONE;
             task->enqueue_hot = effective_hot ? 1U : 0U;
             atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
-            task->last_started_ns = 0U;
+            target->current_started_ns = 0U;
             if (now_ns != 0U) {
                 llam_runtime_record_autotune_wake_latency(target, 0U);
             }
@@ -326,7 +326,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         current->forced_yield_budget = rt->forced_yield_every;
         current->state = LLAM_TASK_STATE_RUNNABLE;
         current->wait_reason = LLAM_WAIT_NONE;
-        current->last_yield_ns = 0U;
+        current->recent_explicit_yield = false;
         current->last_runnable_ns = now_ns;
         llam_task_clear_wait_tracking_or_abort(task);
         task_from = task->state;
@@ -334,7 +334,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
         task->wait_reason = LLAM_WAIT_NONE;
         task->enqueue_hot = effective_hot ? 1U : 0U;
         atomic_store_explicit(&task->last_shard, target->id, memory_order_relaxed);
-        task->last_started_ns = 0U;
+        target->current_started_ns = 0U;
         if (now_ns != 0U) {
             llam_runtime_record_autotune_wake_latency(target, 0U);
         }

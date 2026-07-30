@@ -53,14 +53,15 @@ int llam_runtime_create(const llam_runtime_opts_t *opts, size_t opts_size, llam_
     }
     *out = NULL;
 
-    runtime = calloc(1U, sizeof(*runtime));
+    runtime = llam_aligned_zalloc(
+        _Alignof(llam_runtime_t), 1U, sizeof(*runtime));
     if (runtime == NULL) {
         errno = ENOMEM;
         return -1;
     }
 
     if (llam_runtime_init_rt(runtime, opts, opts_size, true) != 0) {
-        free(runtime);
+        llam_aligned_free(runtime);
         return -1;
     }
     *out = runtime;

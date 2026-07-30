@@ -4,6 +4,7 @@
     "common_sources": [
       "src/core/lifecycle/runtime.c",
       "src/core/lifecycle/resource_plan.c",
+      "src/core/lifecycle/runtime_layout.c",
       "src/core/lifecycle/external_drive.c",
       "src/core/base/abi.c",
       "src/core/base/errno.c",
@@ -410,7 +411,9 @@
           "experiments/leir/leir_program.c",
           "experiments/leir/leir_native_plan.c",
           "experiments/leir/leir_native_segment.c",
+          "experiments/leir/leir_native_linux_state.c",
           "experiments/leir/leir_test_support.c",
+          "experiments/leir/test_leir_native_fixture.c",
           "experiments/leir/test_leir_native_segment.c"
         ],
         "link_dependencies": ["llam_runtime"]
@@ -430,6 +433,7 @@
           "experiments/leir/leir_program.c",
           "experiments/leir/leir_native_plan.c",
           "experiments/leir/leir_native_segment.c",
+          "experiments/leir/leir_native_linux_state.c",
           "experiments/leir/leir_peer_process.c",
           "experiments/leir/leir_test_support.c",
           "experiments/leir/bench_leir_native_segment.c"
@@ -444,6 +448,7 @@
           "experiments/leir/leir_program.c",
           "experiments/leir/leir_native_plan.c",
           "experiments/leir/leir_native_segment.c",
+          "experiments/leir/leir_native_linux_state.c",
           "experiments/leir/leir_peer_process.c",
           "experiments/leir/leir_test_support.c",
           "experiments/leir/bench_leir_native_pipeline.c"

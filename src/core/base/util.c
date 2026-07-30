@@ -218,3 +218,67 @@ size_t llam_align_up(size_t value, size_t alignment) {
     }
     return aligned;
 }
+
+/**
+ * @brief Allocate zeroed storage with an explicit power-of-two alignment.
+ *
+ * @details
+ * The count multiplication is checked before calling the platform allocator.
+ * Windows aligned allocations must be paired with @c _aligned_free, while
+ * POSIX @c posix_memalign allocations use ordinary @c free; callers use
+ * ::llam_aligned_free so that pairing remains centralized.
+ *
+ * @param alignment    Required power-of-two alignment.
+ * @param count        Number of elements.
+ * @param element_size Bytes per element.
+ *
+ * @return Zeroed aligned storage, or NULL with errno set.
+ */
+void *llam_aligned_zalloc(size_t alignment,
+                          size_t count,
+                          size_t element_size) {
+    void *allocation = NULL;
+    size_t total;
+
+    if (alignment < sizeof(void *) ||
+        (alignment & (alignment - 1U)) != 0U ||
+        count == 0U ||
+        element_size == 0U) {
+        errno = EINVAL;
+        return NULL;
+    }
+    if (count > SIZE_MAX / element_size) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    total = count * element_size;
+#if LLAM_PLATFORM_WINDOWS
+    allocation = _aligned_malloc(total, alignment);
+    if (allocation == NULL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+#else
+    {
+        int rc = posix_memalign(&allocation, alignment, total);
+
+        if (rc != 0) {
+            errno = rc;
+            return NULL;
+        }
+    }
+#endif
+    memset(allocation, 0, total);
+    return allocation;
+}
+
+/**
+ * @brief Release storage returned by ::llam_aligned_zalloc.
+ */
+void llam_aligned_free(void *allocation) {
+#if LLAM_PLATFORM_WINDOWS
+    _aligned_free(allocation);
+#else
+    free(allocation);
+#endif
+}

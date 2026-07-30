@@ -315,6 +315,7 @@ endif
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/lifecycle/runtime.o \
 	$(OBJDIR)/src/core/lifecycle/resource_plan.o \
+	$(OBJDIR)/src/core/lifecycle/runtime_layout.o \
 	$(OBJDIR)/src/core/lifecycle/external_drive.o \
 	$(OBJDIR)/src/core/base/abi.o \
 	$(OBJDIR)/src/core/base/errno.o \
@@ -723,7 +724,9 @@ LEIR_NATIVE_SEGMENT_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_program.o \
 	$(OBJDIR)/experiments/leir/leir_native_plan.o \
 	$(OBJDIR)/experiments/leir/leir_native_segment.o \
+	$(OBJDIR)/experiments/leir/leir_native_linux_state.o \
 	$(OBJDIR)/experiments/leir/leir_test_support.o \
+	$(OBJDIR)/experiments/leir/test_leir_native_fixture.o \
 	$(OBJDIR)/experiments/leir/test_leir_native_segment.o
 LEIR_NATIVE_LINUX_TEST_OBJS = \
 	$(OBJDIR)/experiments/leir/test_leir_native_linux.o
@@ -731,6 +734,7 @@ LEIR_NATIVE_BENCH_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_program.o \
 	$(OBJDIR)/experiments/leir/leir_native_plan.o \
 	$(OBJDIR)/experiments/leir/leir_native_segment.o \
+	$(OBJDIR)/experiments/leir/leir_native_linux_state.o \
 	$(OBJDIR)/experiments/leir/leir_peer_process.o \
 	$(OBJDIR)/experiments/leir/leir_test_support.o \
 	$(OBJDIR)/experiments/leir/bench_leir_native_segment.o
@@ -738,6 +742,7 @@ LEIR_NATIVE_PIPELINE_BENCH_OBJS = \
 	$(OBJDIR)/experiments/leir/leir_program.o \
 	$(OBJDIR)/experiments/leir/leir_native_plan.o \
 	$(OBJDIR)/experiments/leir/leir_native_segment.o \
+	$(OBJDIR)/experiments/leir/leir_native_linux_state.o \
 	$(OBJDIR)/experiments/leir/leir_peer_process.o \
 	$(OBJDIR)/experiments/leir/leir_test_support.o \
 	$(OBJDIR)/experiments/leir/bench_leir_native_pipeline.o

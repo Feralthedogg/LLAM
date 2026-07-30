@@ -4896,7 +4896,7 @@ static int test_concurrent_trace_ring_contract(void) {
     test_restore_env_value("LLAM_TRACE_EVENTS", saved_trace);
     return 0;
 }
-
+#include "test_optional_shard_storage_cases.inc"
 static int test_concurrent_run_contract(void) {
     /*
      * llam_run() is the single scheduler driver for shard zero.  Concurrent
@@ -5314,13 +5314,12 @@ static void timer_ownership_contract_task(void *opaque) {
     } else {
         bool valid;
         bool removed;
-
         pthread_mutex_lock(&shard->lock);
         timer = task->active_timer;
         generation = (uint64_t)atomic_load_explicit(&task->wait_generation,
                                                     memory_order_acquire);
-        valid = timer != NULL && timer != &task->embedded_timer_node &&
-                timer->task == task && timer->wait_generation == generation &&
+        valid = timer != NULL && timer->task == task &&
+                timer->wait_generation == generation &&
                 timer->wait_lifetime_ops == &channel->active_ops &&
                 timer->select_state == NULL && !timer->holds_task_ref &&
                 llam_public_active_op_count(&channel->active_ops) == 2U;
@@ -6587,6 +6586,7 @@ int main(void) {
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_stats_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_dump_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_init_sleep_contract);
+    RUN_RUNTIME_CORE_TEST(test_optional_shard_storage_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_trace_ring_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_run_contract);
     RUN_RUNTIME_CORE_TEST(test_concurrent_spawn_contract);

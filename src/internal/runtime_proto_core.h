@@ -216,6 +216,11 @@ int llam_runtime_prewarm_timer_heaps(llam_runtime_t *rt,
  */
 int llam_align_up_checked(size_t value, size_t alignment, size_t *out_value);
 size_t llam_align_up(size_t value, size_t alignment);
+void *llam_aligned_zalloc(size_t alignment,
+                          size_t count,
+                          size_t element_size);
+void llam_aligned_free(void *allocation);
+int llam_runtime_allocate_layout_storage(llam_runtime_t *rt);
 void llam_atomic_update_peak(atomic_uint *peak, unsigned value);
 const char *llam_env_get(const char *name);
 bool llam_ascii_is_space(int ch);

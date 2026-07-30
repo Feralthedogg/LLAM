@@ -684,7 +684,7 @@ void llam_dump_runtime_state(int fd) {
                     (unsigned long long)atomic_load_explicit(&shard->last_run_started_ns, memory_order_acquire));
             continue;
         }
-        trace_head = atomic_load_explicit(&shard->trace_head, memory_order_acquire);
+        trace_head = shard->trace_ring != NULL ? atomic_load_explicit(&shard->trace_head, memory_order_acquire) : 0U;
         trace_count = trace_head > LLAM_TRACE_RING_CAP ? LLAM_TRACE_RING_CAP : trace_head;
         begin = trace_head > LLAM_TRACE_RING_CAP ? trace_head - LLAM_TRACE_RING_CAP : 0U;
         current = atomic_load_explicit(&shard->current, memory_order_acquire);
@@ -835,7 +835,7 @@ void llam_dump_runtime_state(int fd) {
                 (unsigned long long)shard->allocator.io_buffer_remote_frees,
                 (unsigned long long)shard->allocator.io_buffer_remote_drains);
         dprintf(fd, "    trace:\n");
-        for (j = begin; j < begin + (unsigned)trace_count; ++j) {
+        for (j = begin; shard->trace_ring != NULL && j < begin + (unsigned)trace_count; ++j) {
             const llam_trace_event_t *event = &shard->trace_ring[j % LLAM_TRACE_RING_CAP];
             unsigned kind = atomic_load_explicit(&event->kind, memory_order_acquire);
             unsigned from_state = atomic_load_explicit(&event->from_state, memory_order_relaxed);

@@ -219,7 +219,7 @@ void llam_fault_signal_handler(int signo, siginfo_t *info, void *ucontext) {
                                         off,
                                         (uintptr_t)task->stack_base + (uintptr_t)task->stack_size);
         off = llam_buf_append_str(buf, sizeof(buf), off, ")\n");
-        if (shard != NULL) {
+        if (shard != NULL && shard->trace_ring != NULL) {
             unsigned trace_head = atomic_load_explicit(&shard->trace_head, memory_order_acquire);
 
             if (trace_head > 0U) {

@@ -153,8 +153,6 @@ typedef struct llam_cpu_set {
 #define LLAM_TASK_SLAB_COUNT 16U
 /** Number of wait nodes allocated per wait-node slab. */
 #define LLAM_WAIT_NODE_SLAB_COUNT 64U
-/** Number of multi-channel select wait nodes embedded in each task. */
-#define LLAM_TASK_EMBEDDED_SELECT_NODES 4U
 /** Number of timer nodes allocated per timer-node slab. */
 #define LLAM_TIMER_NODE_SLAB_COUNT 64U
 /** Number of I/O requests allocated per request slab. */
@@ -777,7 +775,7 @@ struct llam_recv_watch {
     llam_recv_watch_t *next;
 };
 
-/** @brief Timer heap node embedded in tasks when possible and allocated otherwise. */
+/** @brief Timer heap node allocated from a shard-owned recyclable pool. */
 typedef struct llam_timer_node {
     llam_runtime_t *owner_runtime;
     llam_task_t *task;
@@ -1004,8 +1002,6 @@ struct llam_task {
     llam_task_t *wait_next;
     llam_task_t *cancel_next;
     llam_task_t *cancel_prev;
-    llam_wait_node_t embedded_wait_node;
-    llam_wait_node_t embedded_select_nodes[LLAM_TASK_EMBEDDED_SELECT_NODES];
     /*
      * Wait ownership is mutated by the scheduler thread that parked the task
      * and can be sampled or cleared by runtime-stop, timeout, cancellation, and
@@ -1032,20 +1028,15 @@ struct llam_task {
     atomic_uint_fast64_t active_io_generation;
     _Atomic(llam_block_job_t *) active_block_job;
     llam_task_local_entry_t *task_locals;
-    bool cancel_registered;
-    bool handoff_sample_current;
     unsigned enqueue_hot;
     unsigned alloc_owner_shard;
+    bool cancel_registered;
+    bool handoff_sample_current;
     bool alloc_external_pool;
+    bool recent_explicit_yield;
+    bool opaque_uses_helper;
+    bool opaque_uses_redirect;
     uint64_t last_runnable_ns;
-    uint64_t last_yield_ns;
-    uint64_t last_started_ns;
-    uint64_t last_run_ns;
-    uint64_t total_run_ns;
-    uint64_t opaque_block_started_ns;
-    uint64_t last_opaque_block_ns;
-    uint64_t max_opaque_block_ns;
-    uint64_t opaque_block_count;
     void *blocking_result;
     int saved_errno;
     int blocking_errno;
@@ -1055,13 +1046,10 @@ struct llam_task {
      */
     atomic_int wake_error_code;
     atomic_uint opaque_blocking_depth;
-    bool opaque_uses_helper;
-    bool opaque_uses_redirect;
     unsigned safepoint_tick;
     unsigned preempt_poll_tick;
     _Atomic size_t last_stack_used;
     _Atomic size_t stack_high_water;
-    llam_timer_node_t embedded_timer_node;
     llam_timer_node_t *active_timer;
     atomic_uint preempt_requested;
     atomic_uint completed;
@@ -1072,6 +1060,11 @@ struct llam_task {
     unsigned join_waiter_count_at_exit;
     unsigned forced_yield_budget;
 };
+
+#define LLAM_TASK_LAYOUT_BUDGET_BYTES \
+    (LLAM_PLATFORM_WINDOWS ? 1280U : 1120U)
+_Static_assert(sizeof(llam_task_t) <= LLAM_TASK_LAYOUT_BUDGET_BYTES,
+               "llam_task_t exceeds its hot-task layout budget");
 
 /** @brief Intrusive task-local storage value linked from its owning task. */
 struct llam_task_local_entry {
@@ -1158,7 +1151,7 @@ struct llam_shard {
     atomic_uint inject_depth;
     llam_queue_t hot_q;
     llam_queue_t norm_q;
-    llam_cldeque_t norm_cldeque;
+    llam_cldeque_t *norm_cldeque;
     llam_task_t *all_tasks;
     llam_timer_node_t *timers;
     llam_timer_node_t **timer_heap;
@@ -1180,6 +1173,7 @@ struct llam_shard {
     _Alignas(LLAM_CACHELINE_BYTES) atomic_uint live_tasks;
     atomic_uint_fast64_t last_safepoint_ns;
     atomic_uint_fast64_t last_run_started_ns;
+    uint64_t current_started_ns;
     uint64_t last_idle_wake_ns;
     uint64_t next_task_seq;
     atomic_uint norm_depth;
@@ -1190,9 +1184,14 @@ struct llam_shard {
     bool autotune_handoff_sample_current;
     llam_allocator_t allocator;
     llam_metrics_t metrics;
-    llam_trace_event_t trace_ring[LLAM_TRACE_RING_CAP];
+    llam_trace_event_t *trace_ring;
     atomic_uint trace_head;
 };
+
+#define LLAM_SHARD_LAYOUT_BUDGET_BYTES \
+    (LLAM_PLATFORM_WINDOWS ? 8192U : 4096U)
+_Static_assert(sizeof(llam_shard_t) <= LLAM_SHARD_LAYOUT_BUDGET_BYTES,
+               "llam_shard_t exceeded its hot-layout budget");
 
 /**
  * @brief I/O node.  Nodes own the platform event backend (io_uring on Linux, kqueue
@@ -1436,6 +1435,8 @@ struct llam_runtime {
     unsigned *allowed_cpus;
     unsigned *kernel_node_ids;
     llam_shard_t *shards;
+    llam_cldeque_t *norm_cldeques;
+    llam_trace_event_t *trace_events;
     llam_node_t *nodes;
     pthread_t *block_threads;
     pthread_t ctrl_thread;

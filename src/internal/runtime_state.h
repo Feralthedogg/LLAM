@@ -67,6 +67,7 @@ static inline llam_runtime_t *llam_runtime_tls_owner_fast(void) {
 // Recursion/fast-path hints used by channel handoff and opaque-block redirect.
 extern _Thread_local unsigned g_llam_tls_io_handoff_yield;
 extern _Thread_local unsigned g_llam_tls_opaque_redirect_hint;
+extern _Thread_local uint64_t g_llam_tls_opaque_block_started_ns;
 
 /**
  * @brief Encoded completion user-data tags for backend I/O events.

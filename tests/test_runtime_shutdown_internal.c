@@ -5264,6 +5264,7 @@ static void *cldeque_delayed_thief_thread_main(void *context) {
 static int exercise_cldeque_delayed_thief_preserves_wrapped_task(void) {
     llam_runtime_t runtime;
     llam_shard_t shard;
+    llam_cldeque_t norm_cldeque;
     cldeque_delayed_thief_state_t state;
     llam_task_t *tasks = NULL;
     pthread_t thief;
@@ -5272,7 +5273,6 @@ static int exercise_cldeque_delayed_thief_preserves_wrapped_task(void) {
     bool thief_started = false;
     const char *failure = NULL;
     size_t i;
-
     memset(&runtime, 0, sizeof(runtime));
     memset(&shard, 0, sizeof(shard));
     memset(&state, 0, sizeof(state));
@@ -5290,13 +5290,13 @@ static int exercise_cldeque_delayed_thief_preserves_wrapped_task(void) {
         goto cleanup;
     }
     cv_initialized = true;
-
     runtime.experimental_lockfree_normq = 1U;
     shard.runtime = &runtime;
+    shard.norm_cldeque = &norm_cldeque;
     state.victim = &shard;
     atomic_init(&runtime.fatal_errno, 0);
     atomic_init(&shard.norm_depth, 0U);
-    llam_cldeque_init(&shard.norm_cldeque);
+    llam_cldeque_init(shard.norm_cldeque);
     llam_sched_test_set_cldeque_steal_claimed_hook(
         cldeque_delayed_thief_hook, &state);
 
@@ -5327,7 +5327,7 @@ static int exercise_cldeque_delayed_thief_preserves_wrapped_task(void) {
         }
     }
     if (atomic_load_explicit(
-            &shard.norm_cldeque.buffer[0],
+            &shard.norm_cldeque->buffer[0],
             memory_order_acquire) != &tasks[LLAM_NORM_QUEUE_CAP]) {
         failure = "cldeque final replacement did not wrap to slot zero";
         goto cleanup;
