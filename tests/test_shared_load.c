@@ -31,10 +31,10 @@ typedef uint32_t (*abi_version_fn)(void);
 typedef const char *(*version_string_fn)(void);
 typedef int (*abi_info_fn)(llam_abi_info_t *info, size_t info_size);
 typedef int (*runtime_opts_init_fn)(llam_runtime_opts_t *opts, size_t opts_size);
-typedef int (*runtime_create_fn)(const llam_runtime_opts_t *opts,
-                                 size_t opts_size,
-                                 llam_runtime_t **out);
-typedef void (*runtime_destroy_fn)(llam_runtime_t *runtime);
+typedef int (*runtime_init_ex_fn)(const llam_runtime_opts_t *opts,
+                                  size_t opts_size);
+typedef llam_runtime_t *(*runtime_default_fn)(void);
+typedef void (*runtime_shutdown_fn)(void);
 typedef int (*runtime_drive_once_fn)(llam_runtime_t *runtime, uint32_t *result);
 typedef int (*runtime_next_deadline_fn)(llam_runtime_t *runtime,
                                         uint64_t *deadline_ns);
@@ -128,6 +128,7 @@ int main(int argc, char **argv) {
         "llam_runtime_opts_init",
         "llam_runtime_create",
         "llam_runtime_destroy",
+        "llam_runtime_default",
         "llam_runtime_drive_once",
         "llam_runtime_next_deadline",
         "llam_runtime_get_readiness",
@@ -246,8 +247,9 @@ int main(int argc, char **argv) {
     version_string_fn llam_version_string_ptr = NULL;
     abi_info_fn llam_abi_get_info_ptr = NULL;
     runtime_opts_init_fn llam_runtime_opts_init_ptr = NULL;
-    runtime_create_fn llam_runtime_create_ptr = NULL;
-    runtime_destroy_fn llam_runtime_destroy_ptr = NULL;
+    runtime_init_ex_fn llam_runtime_init_ex_ptr = NULL;
+    runtime_default_fn llam_runtime_default_ptr = NULL;
+    runtime_shutdown_fn llam_runtime_shutdown_ptr = NULL;
     runtime_drive_once_fn llam_runtime_drive_once_ptr = NULL;
     runtime_next_deadline_fn llam_runtime_next_deadline_ptr = NULL;
     runtime_get_readiness_fn llam_runtime_get_readiness_ptr = NULL;
@@ -271,8 +273,9 @@ int main(int argc, char **argv) {
     LOAD_FN(handle, "llam_version_string", llam_version_string_ptr);
     LOAD_FN(handle, "llam_abi_get_info", llam_abi_get_info_ptr);
     LOAD_FN(handle, "llam_runtime_opts_init", llam_runtime_opts_init_ptr);
-    LOAD_FN(handle, "llam_runtime_create", llam_runtime_create_ptr);
-    LOAD_FN(handle, "llam_runtime_destroy", llam_runtime_destroy_ptr);
+    LOAD_FN(handle, "llam_runtime_init_ex", llam_runtime_init_ex_ptr);
+    LOAD_FN(handle, "llam_runtime_default", llam_runtime_default_ptr);
+    LOAD_FN(handle, "llam_runtime_shutdown", llam_runtime_shutdown_ptr);
     LOAD_FN(handle, "llam_runtime_drive_once", llam_runtime_drive_once_ptr);
     LOAD_FN(handle, "llam_runtime_next_deadline", llam_runtime_next_deadline_ptr);
     LOAD_FN(handle, "llam_runtime_get_readiness", llam_runtime_get_readiness_ptr);
@@ -337,19 +340,24 @@ int main(int argc, char **argv) {
     opts.worker_max = 1U;
     opts.blocking_min = 1U;
     opts.blocking_max = 1U;
-    if (llam_runtime_create_ptr(&opts, info.runtime_opts_size, &runtime) != 0 ||
-        runtime == NULL) {
+    if (llam_runtime_init_ex_ptr(&opts, info.runtime_opts_size) != 0) {
         fprintf(stderr,
-                "[test_shared_load] loaded llam_runtime_create failed: errno=%d (%s)\n",
+                "[test_shared_load] loaded llam_runtime_init_ex failed: errno=%d (%s)\n",
                 errno,
                 strerror(errno));
         (void)dlclose(handle);
         return 1;
     }
+    runtime = llam_runtime_default_ptr();
+    if (runtime == NULL) {
+        llam_runtime_shutdown_ptr();
+        (void)dlclose(handle);
+        return test_fail("loaded default runtime resolved to NULL");
+    }
     memset(&readiness, 0, sizeof(readiness));
     if (llam_runtime_get_readiness_ptr(
             runtime, &readiness, info.runtime_readiness_size) != 0) {
-        llam_runtime_destroy_ptr(runtime);
+        llam_runtime_shutdown_ptr();
         (void)dlclose(handle);
         return test_fail("loaded external readiness contract is inconsistent");
     }
@@ -360,28 +368,28 @@ int main(int argc, char **argv) {
     if (readiness.kind != LLAM_RUNTIME_READINESS_FD ||
         readiness.value > (uintptr_t)INT_MAX) {
 #endif
-        llam_runtime_destroy_ptr(runtime);
+        llam_runtime_shutdown_ptr();
         (void)dlclose(handle);
         return test_fail("loaded external readiness object is invalid");
     }
     if (llam_runtime_next_deadline_ptr(runtime, &deadline_ns) != 0 ||
         deadline_ns != UINT64_MAX) {
-        llam_runtime_destroy_ptr(runtime);
+        llam_runtime_shutdown_ptr();
         (void)dlclose(handle);
         return test_fail("empty loaded runtime reported an unexpected deadline");
     }
     if (llam_runtime_wake_ptr(runtime) != 0) {
-        llam_runtime_destroy_ptr(runtime);
+        llam_runtime_shutdown_ptr();
         (void)dlclose(handle);
         return test_fail("loaded runtime wake failed");
     }
     if (llam_runtime_drive_once_ptr(runtime, &drive_result) != 0 ||
         drive_result != (uint32_t)LLAM_RUNTIME_DRIVE_DONE) {
-        llam_runtime_destroy_ptr(runtime);
+        llam_runtime_shutdown_ptr();
         (void)dlclose(handle);
         return test_fail("empty loaded runtime did not finish in one drive");
     }
-    llam_runtime_destroy_ptr(runtime);
+    llam_runtime_shutdown_ptr();
 
     (void)dlclose(handle);
     printf("[test_shared_load] ok\n");
