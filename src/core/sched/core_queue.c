@@ -602,7 +602,12 @@ void llam_drain_inject_queue(llam_shard_t *shard) {
  * @note Caller must hold @p shard->lock.
  */
 static void llam_flush_queue_to_redirect_locked(llam_shard_t *shard, llam_queue_t *queue, bool force_hot) {
-    unsigned remaining = queue != NULL ? queue->depth : 0U;
+    unsigned remaining;
+
+    if (shard == NULL || queue == NULL) {
+        return;
+    }
+    remaining = queue->depth;
 
     while (remaining-- > 0U) {
         llam_task_t *task = llam_queue_pop_head(queue);
@@ -617,7 +622,9 @@ static void llam_flush_queue_to_redirect_locked(llam_shard_t *shard, llam_queue_
             continue;
         }
         hot = force_hot || task->enqueue_hot != 0U;
-        shard->metrics.migrations += 1U;
+        atomic_fetch_add_explicit(&shard->metrics.migrations,
+                                  1U,
+                                  memory_order_relaxed);
         if (!llam_enqueue_opaque_redirect_task_locked(shard, task, hot)) {
             task->enqueue_hot = 0U;
             llam_enqueue_overflow_task(shard->runtime, task);
