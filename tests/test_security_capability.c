@@ -12660,6 +12660,29 @@ done:
     return rc;
 }
 
+static int broker_windows_wait_pipe_bytes(HANDLE handle,
+                                          DWORD expected_bytes,
+                                          DWORD timeout_ms) {
+    ULONGLONG deadline = GetTickCount64() + timeout_ms;
+
+    for (;;) {
+        DWORD available = 0U;
+
+        if (!PeekNamedPipe(handle, NULL, 0U, NULL, &available, NULL)) {
+            errno = llam_broker_windows_pipe_errno(GetLastError());
+            return -1;
+        }
+        if (available >= expected_bytes) {
+            return 0;
+        }
+        if (GetTickCount64() >= deadline) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        Sleep(1U);
+    }
+}
+
 static int broker_windows_create_overlapped_pipe_pair(HANDLE *out_server, HANDLE *out_client) {
     static volatile LONG serial;
     char name[160];
@@ -14488,6 +14511,8 @@ static int test_broker_pipe_session_request_budget_returns_to_listener(void) {
     HANDLE server_thread = NULL;
     llam_handle_t attacker = LLAM_INVALID_HANDLE;
     llam_handle_t victim = LLAM_INVALID_HANDLE;
+    llam_broker_wire_request_t stop_request;
+    llam_broker_wire_response_t stop_response;
     bool broker_initialized = false;
     bool server_stopped = false;
     int rc = -1;
@@ -14529,10 +14554,45 @@ static int test_broker_pipe_session_request_budget_returns_to_listener(void) {
      * remains parked on it and never makes the exclusive pipe available to the
      * victim. The fixed loop disconnects after the bounded request count. */
     if (llam_broker_connect_pipe(name, &victim) != 0 ||
-        broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_PING) != 0 ||
-        broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_STOP) != 0) {
+        broker_pipe_request_ok(victim, LLAM_BROKER_WIRE_OP_PING) != 0) {
         fprintf(stderr,
                 "[test_security_capability] Windows session budget did not return to listener errno=%d\n",
+                errno);
+        goto done;
+    }
+    /*
+     * Delay the STOP response read so an immediate DisconnectNamedPipe would
+     * deterministically discard it.  The graceful-close handshake must retain
+     * the response without using an unbounded FlushFileBuffers call.
+     */
+    request_init(&stop_request, LLAM_BROKER_WIRE_OP_STOP);
+    memset(&stop_response, 0, sizeof(stop_response));
+    if (broker_windows_overlapped_exact((HANDLE)victim,
+                                        true,
+                                        &stop_request,
+                                        (DWORD)sizeof(stop_request)) != 0) {
+        fprintf(stderr,
+                "[test_security_capability] Windows session budget STOP write failed errno=%d\n",
+                errno);
+        goto done;
+    }
+    if (broker_windows_wait_pipe_bytes((HANDLE)victim,
+                                       (DWORD)sizeof(stop_response),
+                                       2000U) != 0) {
+        fprintf(stderr,
+                "[test_security_capability] Windows session budget STOP response was not buffered errno=%d\n",
+                errno);
+        goto done;
+    }
+    Sleep(50U);
+    if (broker_windows_overlapped_exact((HANDLE)victim,
+                                        false,
+                                        &stop_response,
+                                        (DWORD)sizeof(stop_response)) != 0 ||
+        llam_broker_validate_response_frame_or_clear(&stop_response) != 0 ||
+        stop_response.status != 0) {
+        fprintf(stderr,
+                "[test_security_capability] Windows session budget lost STOP response errno=%d\n",
                 errno);
         goto done;
     }
