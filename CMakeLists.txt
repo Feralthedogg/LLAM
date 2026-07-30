@@ -50,6 +50,7 @@ endif()
 set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/lifecycle/runtime.c
     src/core/lifecycle/resource_plan.c
+    src/core/lifecycle/external_drive.c
     src/core/base/abi.c
     src/core/base/errno.c
     src/core/base/util.c
@@ -145,6 +146,7 @@ set(LLAM_RUNTIME_COMMON_SOURCES
     src/core/api/blocking_api.c
     src/core/api/cancel_api.c
     src/core/lifecycle/lifecycle.c
+    src/core/sched/scheduler_thread.c
     src/core/sched/scheduler.c
     src/core/lifecycle/init.c
     src/core/lifecycle/shutdown.c

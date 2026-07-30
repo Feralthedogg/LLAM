@@ -134,7 +134,7 @@ static llam_wake_handoff_fail_t llam_wake_handoff_precheck(llam_runtime_t *rt,
     if (shard->runtime != rt || shard->id != parked_shard || current == task) {
         return LLAM_WAKE_HANDOFF_FAIL_CONTEXT;
     }
-    if (rt->trace_events_enabled != 0U ||
+    if (rt->external_driver.enabled || rt->trace_events_enabled != 0U ||
         rt->run_timing_enabled != 0U ||
         rt->wake_latency_metrics_enabled != 0U ||
         !llam_lockfree_normq_enabled(rt) ||

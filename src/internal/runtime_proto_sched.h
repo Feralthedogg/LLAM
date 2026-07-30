@@ -152,6 +152,27 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
                                                  llam_wait_reason_t reason);
 bool llam_yield_to_local_runnable(void);
 
+/** @brief Outcome of one non-waiting scheduler iteration. */
+typedef enum llam_scheduler_quantum_result {
+    LLAM_SCHEDULER_QUANTUM_PROGRESS = 0,
+    LLAM_SCHEDULER_QUANTUM_IDLE = 1,
+    LLAM_SCHEDULER_QUANTUM_DONE = 2,
+} llam_scheduler_quantum_result_t;
+
+int llam_scheduler_try_install_signal_stack(llam_shard_t *shard);
+#if !LLAM_RUNTIME_BACKEND_WINDOWS
+void llam_shard_publish_preempt_thread(llam_shard_t *shard,
+                                       pthread_t thread);
+#endif
+int llam_scheduler_thread_enter(llam_shard_t *shard,
+                                atomic_uint *thread_counter,
+                                bool *signal_stack_installed);
+void llam_scheduler_thread_leave(llam_shard_t *shard,
+                                 atomic_uint *thread_counter,
+                                 bool signal_stack_installed);
+llam_scheduler_quantum_result_t
+llam_scheduler_run_quantum(llam_shard_t *shard);
+
 /*
  * Runtime online-shard counters and pressure predicates.
  */

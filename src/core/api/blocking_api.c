@@ -473,7 +473,9 @@ int llam_enter_blocking(void) {
         task->wait_reason = LLAM_WAIT_BLOCKING;
         task->opaque_uses_helper = false;
         task->opaque_uses_redirect = false;
-        from_primary = g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
+        from_primary =
+            !shard->runtime->external_driver.enabled &&
+            g_llam_tls_scheduler_ctx == &shard->scheduler_ctx;
         prefer_redirect = from_primary &&
                           shard->runtime->active_shards > 1U &&
                           (llam_opaque_redirect_fastpath_enabled() || g_llam_tls_opaque_redirect_hint != 0U);

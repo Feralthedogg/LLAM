@@ -4494,13 +4494,14 @@ cleanup:
     llam_runtime_destroy(runtime_a);
     return rc;
 }
-
+#include "test_external_drive_cases.inc"
 int main(void) {
     static const multi_runtime_named_test_t tests[] = {
         {"sync_handle_family_confusion", test_sync_handle_family_confusion},
         {"runtime_run_handle_rejects_null", test_runtime_run_handle_rejects_null},
         {"idle_block_workers_destroy_repeat", test_idle_block_workers_destroy_repeat},
         {"runtime_resource_plan_isolation", test_runtime_resource_plan_isolation},
+        {"external_drive_contract", test_external_drive_contract},
         {"concurrent_spawn_join", test_concurrent_spawn_join},
         {"sequential_runtime_host_join_owner_cleanup", test_sequential_runtime_host_join_owner_cleanup},
         {"cross_runtime_task_owner", test_cross_runtime_task_owner},
@@ -4548,8 +4549,7 @@ int main(void) {
         {"explicit_embedding_blocking_helper", test_explicit_embedding_blocking_helper},
         {"explicit_embedding_io_ownership", test_explicit_embedding_io_ownership},
         {"concurrent_blocking_pool_isolation", test_concurrent_blocking_pool_isolation},
-    };
-    size_t i;
+    }; size_t i;
 
     /*
      * CI timeout diagnostics depend on seeing the last completed subcase.

@@ -28,6 +28,68 @@ static void switch_hook_dump_events(const switch_hook_case_state_t *state) {
     }
 }
 
+static bool switch_hook_task_event_matches(
+    const switch_hook_case_state_t *state,
+    unsigned task_id,
+    unsigned task_event_index,
+    switch_hook_event_kind_t kind,
+    switch_hook_task_context_t *context,
+    int observed_errno) {
+    unsigned event_count =
+        atomic_load_explicit(&state->event_count, memory_order_acquire);
+    unsigned matched = 0U;
+
+    for (unsigned i = 0U;
+         i < event_count && i < SWITCH_HOOK_MAX_EVENTS;
+         ++i) {
+        if (state->events[i].task_id != task_id) {
+            continue;
+        }
+        if (matched == task_event_index) {
+            return switch_hook_event_matches(&state->events[i],
+                                             kind,
+                                             context,
+                                             observed_errno);
+        }
+        matched += 1U;
+    }
+    return false;
+}
+
+static bool switch_hook_migration_tail_matches(
+    const switch_hook_case_state_t *state,
+    switch_hook_task_context_t *migration_context,
+    switch_hook_task_context_t *mover_context) {
+    return switch_hook_task_event_matches(
+               state,
+               migration_context->task_id,
+               3U,
+               SWITCH_HOOK_EVENT_RESUME,
+               migration_context,
+               EDOM) &&
+           switch_hook_task_event_matches(
+               state,
+               migration_context->task_id,
+               4U,
+               SWITCH_HOOK_EVENT_BODY,
+               migration_context,
+               EDOM) &&
+           switch_hook_task_event_matches(
+               state,
+               migration_context->task_id,
+               5U,
+               SWITCH_HOOK_EVENT_SUSPEND,
+               migration_context,
+               EDOM) &&
+           switch_hook_task_event_matches(
+               state,
+               mover_context->task_id,
+               2U,
+               SWITCH_HOOK_EVENT_SUSPEND,
+               mover_context,
+               E2BIG);
+}
+
 static void switch_hook_serial_main_task(void *arg) {
     switch_hook_task_context_t *context = arg;
     switch_hook_case_state_t *state = context->state;

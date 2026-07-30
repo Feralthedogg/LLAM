@@ -154,6 +154,10 @@ static int test_frozen_runtime_opts_prefix_ignores_current_tail(void) {
         llam_runtime_destroy(runtime);
         return fail_msg("frozen-prefix runtime did not resolve stack-cache defaults");
     }
+    if (runtime->external_driver.enabled) {
+        llam_runtime_destroy(runtime);
+        return fail_msg("frozen-prefix runtime unexpectedly selected external driving");
+    }
     llam_runtime_destroy(runtime);
     return 0;
 }

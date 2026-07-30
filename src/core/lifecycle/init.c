@@ -683,6 +683,12 @@ static bool llam_public_affinity_policy_valid(uint32_t policy) {
            policy == LLAM_RUNTIME_AFFINITY_REQUIRE;
 }
 
+/** @brief Validate the public scheduler-driver authority. */
+static bool llam_public_driver_mode_valid(uint32_t mode) {
+    return mode == LLAM_RUNTIME_DRIVER_INTERNAL ||
+           mode == LLAM_RUNTIME_DRIVER_EXTERNAL;
+}
+
 /**
  * @brief Initialize one LLAM runtime instance.
  *
@@ -777,6 +783,10 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
             errno = EINVAL;
             return -1;
         }
+        if (!llam_public_driver_mode_valid(opts->driver_mode)) {
+            errno = EINVAL;
+            return -1;
+        }
     }
 
     if (atomic_load_explicit(&rt->initialized, memory_order_acquire)) {
@@ -851,6 +861,8 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     free(cpus);
     cpus = selected_cpus;
     rt->resource_plan = resource_plan;
+    rt->external_driver.enabled =
+        resource_plan.driver_mode == LLAM_RUNTIME_DRIVER_EXTERNAL;
     atomic_init(&rt->scheduler_threads_live, 0U);
     atomic_init(&rt->io_threads_live, 0U);
     atomic_init(&rt->controller_threads_live, 0U);
@@ -1042,6 +1054,17 @@ static int llam_runtime_init_ex_rt_unlocked(llam_runtime_t *rt,
     rt->direct_handoff_live_limit =
         llam_runtime_env_u32("LLAM_YIELD_DIRECT_HANDOFF_LIVE_LIMIT", 0U, 1048576U);
 #endif
+    if (rt->external_driver.enabled) {
+        rt->experimental_dynamic_shards = 0U;
+        rt->direct_handoff_burst = 0U;
+        atomic_store_explicit(&rt->direct_handoff_budget,
+                              0U,
+                              memory_order_relaxed);
+        rt->direct_handoff_live_limit = 0U;
+        rt->direct_handoff_allow_timers = 0U;
+        rt->wake_handoff_enabled = 0U;
+        rt->channel_local_handoff_enabled = 0U;
+    }
 #if LLAM_RUNTIME_BACKEND_WINDOWS
     /* Windows needs earlier kicks to avoid lock-free fanout starvation. */
     rt->spawn_fanout_wake_interval =

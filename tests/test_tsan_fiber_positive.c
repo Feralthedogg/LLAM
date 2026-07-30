@@ -21,6 +21,16 @@ typedef struct tsan_fiber_positive_arg {
     unsigned value;
 } tsan_fiber_positive_arg_t;
 
+enum {
+    /*
+     * A single conflicting access can finish before the peer worker leaves the
+     * start barrier, which makes this detector positive control timing
+     * sensitive on heavily loaded hosts. Keep both logical fibers active long
+     * enough for TSan to observe the intentionally unsynchronized location.
+     */
+    TSAN_FIBER_POSITIVE_WRITES = 4096U,
+};
+
 static void race_from_distinct_fiber(void *opaque) {
     tsan_fiber_positive_arg_t *arg = opaque;
     tsan_fiber_positive_state_t *state = arg->state;
@@ -32,7 +42,9 @@ static void race_from_distinct_fiber(void *opaque) {
             abort();
         }
     }
-    state->raced_value = arg->value;
+    for (unsigned i = 0U; i < TSAN_FIBER_POSITIVE_WRITES; ++i) {
+        state->raced_value = arg->value + i;
+    }
     atomic_fetch_add_explicit(&state->finished, 1U, memory_order_release);
 }
 

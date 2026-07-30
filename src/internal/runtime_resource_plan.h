@@ -57,6 +57,7 @@ typedef struct llam_runtime_resource_plan_input {
 
 /** @brief Fully resolved runtime resource authority. */
 typedef struct llam_runtime_resource_plan {
+    unsigned driver_mode;     /**< Active ::llam_runtime_driver_mode_t. */
     unsigned worker_min;      /**< Minimum online scheduler workers. */
     unsigned worker_count;    /**< Initial online scheduler workers. */
     unsigned worker_max;      /**< Allocated scheduler capacity. */

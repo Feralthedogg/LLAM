@@ -50,6 +50,7 @@ void llam_runtime_opts_copy_prefix(const llam_runtime_opts_t *raw_opts,
     opts_out->profile = LLAM_RUNTIME_PROFILE_BALANCED;
     opts_out->preempt_mode = LLAM_PREEMPT_AUTO;
     opts_out->affinity_policy = LLAM_RUNTIME_AFFINITY_NONE;
+    opts_out->driver_mode = LLAM_RUNTIME_DRIVER_INTERNAL;
     LLAM_COPY_RUNTIME_OPT(deterministic);
     LLAM_COPY_RUNTIME_OPT(forced_yield_every);
     LLAM_COPY_RUNTIME_OPT(experimental_flags);
@@ -82,6 +83,8 @@ void llam_runtime_opts_copy_prefix(const llam_runtime_opts_t *raw_opts,
     LLAM_COPY_RUNTIME_OPT(on_task_resume);
     LLAM_COPY_RUNTIME_OPT(on_task_suspend);
     LLAM_COPY_RUNTIME_OPT(switch_hook_context);
+    LLAM_COPY_RUNTIME_OPT(driver_mode);
+    LLAM_COPY_RUNTIME_OPT(reserved3);
 }
 #undef LLAM_COPY_RUNTIME_OPT
 
@@ -232,6 +235,7 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     unsigned blocking_min = 0U;
     unsigned blocking_max = 0U;
     unsigned stack_cache_flags = 0U;
+    unsigned driver_mode = LLAM_RUNTIME_DRIVER_INTERNAL;
     uint64_t experimental_flags = 0U;
     uint64_t stack_cache_budget_bytes =
         LLAM_RUNTIME_STACK_CACHE_DEFAULT_BUDGET_BYTES;
@@ -285,6 +289,9 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         }
         if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size, experimental_flags)) {
             experimental_flags = raw_opts.experimental_flags;
+        }
+        if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size, driver_mode)) {
+            driver_mode = raw_opts.driver_mode;
         }
         if (LLAM_RESOURCE_OPTS_HAS_FIELD(input->opts_size, sqpoll_cpu)) {
             requested_sqpoll_cpu = raw_opts.sqpoll_cpu;
@@ -365,6 +372,11 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         errno = EINVAL;
         return -1;
     }
+    if (driver_mode != LLAM_RUNTIME_DRIVER_INTERNAL &&
+        driver_mode != LLAM_RUNTIME_DRIVER_EXTERNAL) {
+        errno = EINVAL;
+        return -1;
+    }
     if (affinity_policy == LLAM_RUNTIME_AFFINITY_REQUIRE &&
         !input->affinity_supported) {
         errno = ENOTSUP;
@@ -429,6 +441,14 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
     sqpoll_requested =
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL) != 0U &&
         (experimental_flags & LLAM_RUNTIME_EXPERIMENTAL_F_WORKER_RINGS) == 0U;
+    if (driver_mode == LLAM_RUNTIME_DRIVER_EXTERNAL &&
+        ((experimental_flags &
+          LLAM_RUNTIME_EXPERIMENTAL_F_DYNAMIC_WORKERS) != 0U ||
+         (experimental_flags &
+          LLAM_RUNTIME_EXPERIMENTAL_F_SQPOLL) != 0U)) {
+        errno = EINVAL;
+        return -1;
+    }
     if (sqpoll_requested && requested_sqpoll_cpu < -1) {
         errno = EINVAL;
         return -1;
@@ -485,7 +505,15 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         return -1;
     }
 
-    if (worker_min == 0U && worker_count == 0U && worker_max == 0U) {
+    if (driver_mode == LLAM_RUNTIME_DRIVER_EXTERNAL) {
+        if (worker_min > 1U || worker_count > 1U || worker_max > 1U) {
+            errno = EINVAL;
+            return -1;
+        }
+        worker_min = 1U;
+        worker_count = 1U;
+        worker_max = 1U;
+    } else if (worker_min == 0U && worker_count == 0U && worker_max == 0U) {
         worker_max = copied_count;
         if (deterministic) {
             worker_min = 1U;
@@ -542,6 +570,7 @@ int llam_runtime_resource_plan_resolve(const llam_runtime_resource_plan_input_t 
         return -1;
     }
 
+    plan.driver_mode = driver_mode;
     plan.worker_min = worker_min;
     plan.worker_count = worker_count;
     plan.worker_max = worker_max;

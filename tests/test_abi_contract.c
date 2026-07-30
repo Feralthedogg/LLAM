@@ -66,6 +66,8 @@ ASSERT_FIELD_U32(llam_runtime_opts_t, cpu_count);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved1);
 ASSERT_FIELD_U32(llam_runtime_opts_t, stack_cache_flags);
 ASSERT_FIELD_U32(llam_runtime_opts_t, reserved2);
+ASSERT_FIELD_U32(llam_runtime_opts_t, driver_mode);
+ASSERT_FIELD_U32(llam_runtime_opts_t, reserved3);
 _Static_assert(sizeof(((llam_runtime_opts_t *)0)->on_task_resume) ==
                    sizeof(llam_task_switch_hook_fn),
                "llam_runtime_opts_t.on_task_resume must retain callback type");
@@ -101,6 +103,13 @@ _Static_assert(LLAM_RUNTIME_OPTS_V2_2_SIZE ==
                    offsetof(llam_runtime_opts_t, preempt_quantum_ns) +
                        sizeof(((llam_runtime_opts_t *)0)->preempt_quantum_ns),
                "the legacy runtime option prefix must remain frozen");
+_Static_assert(LLAM_RUNTIME_DRIVER_INTERNAL == 0 &&
+                   LLAM_RUNTIME_DRIVER_EXTERNAL == 1,
+               "runtime driver mode values are an ABI contract");
+_Static_assert(LLAM_RUNTIME_DRIVE_PROGRESS == 0 &&
+                   LLAM_RUNTIME_DRIVE_IDLE == 1 &&
+                   LLAM_RUNTIME_DRIVE_DONE == 2,
+               "runtime drive result values are an ABI contract");
 ASSERT_FIELD_U32(llam_runtime_stats_t, active_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers);
 ASSERT_FIELD_U32(llam_runtime_stats_t, online_workers_floor);
@@ -352,7 +361,9 @@ static int test_llam_option_initializers(void) {
         runtime_opts.reserved2 != 0U ||
         runtime_opts.on_task_resume != NULL ||
         runtime_opts.on_task_suspend != NULL ||
-        runtime_opts.switch_hook_context != NULL) {
+        runtime_opts.switch_hook_context != NULL ||
+        runtime_opts.driver_mode != LLAM_RUNTIME_DRIVER_INTERNAL ||
+        runtime_opts.reserved3 != 0U) {
         return test_fail("llam runtime option defaults are inconsistent");
     }
 

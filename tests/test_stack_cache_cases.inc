@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define fail_msg stack_cache_fail_msg
 #define fail_errno stack_cache_fail_errno
@@ -286,25 +287,9 @@ cleanup:
     return rc;
 }
 
-static void mark_all_cached_mappings_old(llam_runtime_t *runtime) {
-    llam_stack_cache_entry_t *entry;
-
-    pthread_mutex_lock(&runtime->shards[0].stack_cache_lock);
-    for (entry = runtime->shards[0].stack_cache_default;
-         entry != NULL;
-         entry = entry->next) {
-        entry->last_return_ns = 1U;
-    }
-    pthread_mutex_unlock(&runtime->shards[0].stack_cache_lock);
-
-    pthread_mutex_lock(&runtime->stack_cache_lock);
-    for (entry = runtime->stack_cache_default;
-         entry != NULL;
-         entry = entry->next) {
-        entry->last_return_ns = 1U;
-    }
-    pthread_mutex_unlock(&runtime->stack_cache_lock);
-}
+static void mark_all_cached_mappings_old(llam_runtime_t *runtime);
+static bool wait_for_stack_cache_trim(llam_runtime_t *runtime,
+                                      uint64_t prior_requests);
 
 static int test_idle_trim_selects_only_old_entries(void) {
     stack_cache_fixture_t fixture;
@@ -316,7 +301,7 @@ static int test_idle_trim_selects_only_old_entries(void) {
                      10U,
                      10U,
                      2U,
-                     UINT64_C(1000000000)) != 0) {
+                     UINT64_C(60000000000)) != 0) {
         return 1;
     }
     if (fixture_add_mapping(&fixture, NULL) != 0 ||
@@ -328,8 +313,13 @@ static int test_idle_trim_selects_only_old_entries(void) {
     atomic_store_explicit(&fixture.runtime->stack_cache_last_idle_scan_ns,
                           1U,
                           memory_order_release);
-    if (fixture_add_mapping(&fixture, NULL) != 0 ||
+    if (fixture_add_mapping(&fixture, NULL) != 0) {
+        goto cleanup;
+    }
+    if (!wait_for_stack_cache_trim(fixture.runtime,
+                                   before.stack_cache_trim_requests) ||
         fixture_stats(&fixture, &after) != 0) {
+        rc = fail_msg("idle trim did not complete within the test deadline");
         goto cleanup;
     }
     if (before.stack_cache_cached_mappings != 3U ||

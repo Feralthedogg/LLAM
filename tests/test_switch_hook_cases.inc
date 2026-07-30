@@ -463,6 +463,10 @@ static int switch_hook_validate_task_sequence(
     return matched == expected_count ? 0 : -1;
 }
 
+static bool switch_hook_migration_tail_matches(
+    const switch_hook_case_state_t *state,
+    switch_hook_task_context_t *migration_context,
+    switch_hook_task_context_t *mover_context);
 static void switch_hook_dump_events(const switch_hook_case_state_t *state);
 
 static int test_switch_hook_direct_handoff_and_migration(void) {
@@ -637,18 +641,9 @@ static int test_switch_hook_direct_handoff_and_migration(void) {
         state.events[3].task_id != mover_context.task_id ||
         state.events[4].kind != SWITCH_HOOK_EVENT_BODY ||
         state.events[4].task_id != mover_context.task_id ||
-        !switch_hook_event_matches(&state.events[6],
-                                   SWITCH_HOOK_EVENT_RESUME,
-                                   &migration_context,
-                                   EDOM) ||
-        !switch_hook_event_matches(&state.events[7],
-                                   SWITCH_HOOK_EVENT_BODY,
-                                   &migration_context,
-                                   EDOM) ||
-        !switch_hook_event_matches(&state.events[8],
-                                   SWITCH_HOOK_EVENT_SUSPEND,
-                                   &migration_context,
-                                   EDOM)) {
+        !switch_hook_migration_tail_matches(&state,
+                                            &migration_context,
+                                            &mover_context)) {
         switch_hook_dump_events(&state);
         (void)SWITCH_HOOK_TEST_FAIL(
             "direct handoff hook order or scheduler-thread migration was wrong");

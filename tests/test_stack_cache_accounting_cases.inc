@@ -18,6 +18,47 @@
  * limitations under the License.
  */
 
+static void mark_all_cached_mappings_old(llam_runtime_t *runtime) {
+    llam_stack_cache_entry_t *entry;
+
+    pthread_mutex_lock(&runtime->shards[0].stack_cache_lock);
+    for (entry = runtime->shards[0].stack_cache_default;
+         entry != NULL;
+         entry = entry->next) {
+        entry->last_return_ns = 1U;
+    }
+    pthread_mutex_unlock(&runtime->shards[0].stack_cache_lock);
+
+    pthread_mutex_lock(&runtime->stack_cache_lock);
+    for (entry = runtime->stack_cache_default;
+         entry != NULL;
+         entry = entry->next) {
+        entry->last_return_ns = 1U;
+    }
+    pthread_mutex_unlock(&runtime->stack_cache_lock);
+}
+
+static bool wait_for_stack_cache_trim(llam_runtime_t *runtime,
+                                      uint64_t prior_requests) {
+    struct timespec retry_delay = {0, 1000000L};
+    uint64_t deadline_ns = llam_now_ns() + UINT64_C(5000000000);
+
+    do {
+        bool complete;
+
+        pthread_mutex_lock(&runtime->stack_cache_trim_lock);
+        complete =
+            atomic_load_explicit(&runtime->stack_cache_trim_requests,
+                                 memory_order_acquire) > prior_requests;
+        pthread_mutex_unlock(&runtime->stack_cache_trim_lock);
+        if (complete) {
+            return true;
+        }
+        (void)nanosleep(&retry_delay, NULL);
+    } while (llam_now_ns() < deadline_ns);
+    return false;
+}
+
 static int test_controller_releases_quiescent_idle_entries(void) {
     stack_cache_fixture_t fixture;
     llam_runtime_stats_t stats;

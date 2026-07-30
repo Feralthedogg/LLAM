@@ -111,6 +111,11 @@ int llam_runtime_run_rt(llam_runtime_t *rt) {
         errno = EINVAL;
         return -1;
     }
+    if (rt->external_driver.enabled) {
+        llam_runtime_end_public_op(pinned_runtime);
+        errno = ENOTSUP;
+        return -1;
+    }
     /*
      * Each runtime may have only one active scheduler driver. A load then store
      * admits two unmanaged callers that cross the check at the same time, so

@@ -401,12 +401,19 @@ Windows backend scope, policy split, and acceptance gates are tracked in `docs/o
 
 ## Execution Model
 
-Embedding applications should drive explicit runtime handles:
+Embedding applications should normally drive explicit runtime handles:
 
 1. Create a runtime with `llam_runtime_create()`.
 2. Spawn root tasks with `llam_runtime_spawn_ex()`.
 3. Run the scheduler with `llam_runtime_run_handle()`.
 4. Tear down with `llam_runtime_destroy()`.
+
+Hosts that already own an event loop can instead set
+`opts.driver_mode = LLAM_RUNTIME_DRIVER_EXTERNAL`, wait on the borrowed native
+object returned by `llam_runtime_get_readiness()`, combine it with
+`llam_runtime_next_deadline()`, and call `llam_runtime_drive_once()` to execute
+at most one managed task segment. This keeps event-loop authority in the host
+without creating an opaque scheduler thread for task dispatch.
 
 ```c
 #include "llam/runtime.h"
@@ -724,6 +731,10 @@ Runtime lifecycle:
 | API | Purpose |
 | --- | --- |
 | `llam_runtime_opts_init` | Fill runtime options with ABI-safe library defaults. |
+| `llam_runtime_create` | Create an independent explicit runtime handle. |
+| `llam_runtime_default` | Return the process-default compatibility runtime handle. |
+| `llam_runtime_run_handle` | Drive an internally scheduled explicit runtime to completion or stop. |
+| `llam_runtime_destroy` | Stop and release an explicit runtime handle. |
 | `llam_runtime_init_ex` | Initialize the runtime with an explicit option struct size for FFI. |
 | `llam_runtime_init` | Initialize the runtime. |
 | `llam_runtime_request_stop` | Request cooperative scheduler stop and wake workers. |
@@ -731,6 +742,15 @@ Runtime lifecycle:
 | `llam_runtime_collect_stats_ex` | Collect stats with an explicit output struct size for FFI. |
 | `llam_runtime_collect_stats` | Collect scheduler, I/O, blocking, and queue statistics. |
 | `llam_runtime_write_stats_json` | Write a newline-terminated JSON stats snapshot to an fd. |
+
+Host-driven scheduling:
+
+| API | Purpose |
+| --- | --- |
+| `llam_runtime_drive_once` | Advance without an idle wait and execute at most one cooperative task segment. |
+| `llam_runtime_next_deadline` | Return the next absolute scheduler deadline or `UINT64_MAX`. |
+| `llam_runtime_get_readiness` | Return a caller-sized projection of the borrowed native readiness object. |
+| `llam_runtime_wake` | Notify a host loop that an externally driven runtime should be polled again. |
 
 Task scheduling:
 
@@ -1155,6 +1175,12 @@ current maintained contract rather than future roadmap work:
   the task's owner runtime; spawn-time cancellation tokens and task-group
   children stay in their target owner runtime; and owner-tagged runtime objects
   fail cross-owner managed use with `EXDEV`.
+- External driver mode is the bounded event-loop embedding boundary. It resolves
+  one logical scheduler shard, leaves task-segment authority with the host,
+  reports a borrowed POSIX fd or Windows event plus the next absolute deadline,
+  and executes at most one task segment per successful drive call. Concurrent
+  drive ownership fails with `EBUSY`; managed or scheduler reentry fails with
+  `ENOTSUP`.
 - In-process opaque handles are hardened against stale use, wrong-family casts,
   simple forgery, owner mismatch, and active-operation destroy races. They are
   not a capability boundary against arbitrary same-process memory read/write.

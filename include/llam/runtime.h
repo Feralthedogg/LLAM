@@ -343,8 +343,9 @@ typedef struct llam_runtime_opts {
     llam_task_switch_hook_fn on_task_resume;         /**< Optional callback immediately before a task resumes. */
     llam_task_switch_hook_fn on_task_suspend;        /**< Optional callback immediately before a task suspends or exits. */
     void *switch_hook_context;                       /**< Caller-owned runtime-wide pointer passed to both switch hooks. */
+    uint32_t driver_mode;                            /**< Scheduler authority; one of ::llam_runtime_driver_mode_t. */
+    uint32_t reserved3;                              /**< Reserved ABI padding; initialize to 0. */
 } llam_runtime_opts_t;
-
 /** @brief Frozen option prefix consumed by the source-compatible 2.2 wrapper. */
 #define LLAM_RUNTIME_OPTS_V2_2_SIZE \
     ((size_t)(offsetof(llam_runtime_opts_t, preempt_quantum_ns) + \
@@ -352,7 +353,6 @@ typedef struct llam_runtime_opts {
 
 /** @brief Current size to pass to ::llam_runtime_init_ex and ::llam_runtime_opts_init. */
 #define LLAM_RUNTIME_OPTS_CURRENT_SIZE ((size_t)sizeof(llam_runtime_opts_t))
-
 #include "runtime_stats.h"
 
 /* ============================================================================

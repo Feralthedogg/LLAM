@@ -224,7 +224,6 @@ static int exercise_first_block_worker_create_failure_rolls_back_submission(void
         goto cleanup;
     }
     rc = 0;
-
 cleanup:
     atomic_store_explicit(&state.release_callback, 1U, memory_order_release);
     if (task != NULL) {
@@ -7760,8 +7759,9 @@ cleanup:
 #endif
 #include "test_hard_affinity_cases.inc"
 #include "test_external_doorbell_cases.inc"
+#include "test_external_drive_cases.inc"
 int main(void) {
-    if (exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0) {
+    if (test_external_drive_contract() != 0 || exercise_external_doorbell_cases() != 0 || exercise_hard_affinity_cases() != 0 || exercise_switch_hook_cases() != 0) {
         return 1;
     }
     if (exercise_stack_cache_vm_cases() != 0) {

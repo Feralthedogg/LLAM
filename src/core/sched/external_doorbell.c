@@ -136,7 +136,7 @@ void llam_external_doorbell_destroy(llam_external_doorbell_t *doorbell) {
 }
 
 int llam_external_doorbell_signal(llam_external_doorbell_t *doorbell) {
-    unsigned expected = 0U;
+    unsigned state;
     int saved_errno = errno;
     int error_code = 0;
 
@@ -144,13 +144,25 @@ int llam_external_doorbell_signal(llam_external_doorbell_t *doorbell) {
         errno = EINVAL;
         return -1;
     }
-    if (!atomic_compare_exchange_strong_explicit(&doorbell->pending,
-                                                 &expected,
-                                                 1U,
-                                                 memory_order_acq_rel,
-                                                 memory_order_acquire)) {
-        errno = saved_errno;
-        return 0;
+    state = atomic_load_explicit(&doorbell->pending,
+                                 memory_order_acquire);
+    for (;;) {
+        if (state == 1U) {
+            errno = saved_errno;
+            return 0;
+        }
+        /*
+         * State 2 means a consumer is resetting native readiness. A producer
+         * must claim 2 -> 1 and publish a fresh native token so a reset that
+         * crosses this signal can be detected and repaired by the consumer.
+         */
+        if (atomic_compare_exchange_weak_explicit(&doorbell->pending,
+                                                  &state,
+                                                  1U,
+                                                  memory_order_acq_rel,
+                                                  memory_order_acquire)) {
+            break;
+        }
     }
 
 #if LLAM_PLATFORM_WINDOWS
@@ -197,10 +209,17 @@ int llam_external_doorbell_signal(llam_external_doorbell_t *doorbell) {
 
 void llam_external_doorbell_drain(llam_external_doorbell_t *doorbell) {
     int saved_errno = errno;
+    unsigned reset_state;
 
     if (doorbell == NULL || !doorbell->initialized) {
         return;
     }
+    /*
+     * State 2 closes reset-after-producer races. A producer that overlaps the
+     * native drain changes it to 1 and publishes a token; after draining, the
+     * consumer observes that claim and re-signals from a clean state.
+     */
+    atomic_exchange_explicit(&doorbell->pending, 2U, memory_order_acq_rel);
 #if LLAM_PLATFORM_WINDOWS
     (void)ResetEvent((HANDLE)doorbell->handle);
 #elif LLAM_RUNTIME_BACKEND_LINUX
@@ -230,12 +249,17 @@ void llam_external_doorbell_drain(llam_external_doorbell_t *doorbell) {
         break;
     }
 #endif
-    /*
-     * A producer that observed pending=1 before this exchange may have skipped
-     * its native write. The caller must rearm after it finishes the scheduler
-     * quantum; that readiness re-check closes the reset window.
-     */
-    atomic_exchange_explicit(&doorbell->pending, 0U, memory_order_acq_rel);
+    reset_state =
+        atomic_exchange_explicit(&doorbell->pending,
+                                 0U,
+                                 memory_order_acq_rel);
+    if (reset_state == 1U) {
+        /*
+         * Native signaling failure clears pending again. The runtime-level
+         * readiness recheck remains the scheduler-state recovery path.
+         */
+        (void)llam_external_doorbell_signal(doorbell);
+    }
     errno = saved_errno;
 }
 

@@ -193,7 +193,69 @@ instances, not just `configured_worker_max`. I/O/controller roles exist after
 initialization, blocking workers may grow later, and the host contributes one
 execution thread only while it drives shard 0.
 
-## 5.2 Stack Cache Memory Governance
+## 5.2 External Event-Loop Driving
+
+Set `driver_mode=LLAM_RUNTIME_DRIVER_EXTERNAL` when the host event loop must
+own scheduler progress. This mode resolves exactly one scheduler shard, rejects
+dynamic-worker and SQPOLL CPU-reservation policies, disables every direct
+task-to-task handoff, and makes `llam_runtime_run_handle()` fail with
+`ENOTSUP`. I/O, blocking-pool, and controller helper threads remain
+runtime-owned; only task-segment dispatch is host-driven.
+
+```c
+llam_runtime_opts_t opts;
+llam_runtime_t *runtime = NULL;
+
+llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE);
+opts.driver_mode = LLAM_RUNTIME_DRIVER_EXTERNAL;
+opts.blocking_min = 0U;
+opts.blocking_max = 4U;
+llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime);
+
+for (;;) {
+    uint32_t result;
+    uint64_t deadline;
+    llam_runtime_readiness_t ready;
+
+    if (llam_runtime_drive_once(runtime, &result) != 0) {
+        /* EBUSY means another host thread currently owns the drive token. */
+        break;
+    }
+    if (result == LLAM_RUNTIME_DRIVE_DONE) {
+        break;
+    }
+    llam_runtime_next_deadline(runtime, &deadline);
+    llam_runtime_get_readiness(runtime, &ready, sizeof(ready));
+    host_wait(ready, deadline);
+}
+```
+
+Each successful `drive_once` avoids the scheduler's idle wait and executes at
+most one managed task segment. The bound ends at the task's next cooperative
+boundary, so opaque blocking code or a task that never yields can still occupy
+the host thread; use asynchronous I/O or the blocking-callback API when the
+host loop requires a wall-clock responsiveness bound. `PROGRESS` means
+scheduler state advanced, `IDLE` means live work exists but no task is currently
+runnable, and `DONE` means the live-task set is empty. A cleanly drained runtime
+is reusable: a later
+`llam_runtime_spawn_ex()` can publish work and the host can drive it again.
+
+`next_deadline` returns an absolute `llam_now_ns()` value or `UINT64_MAX`.
+The readiness value is a borrowed nonblocking fd on POSIX and a borrowed
+manual-reset event handle on Windows. The runtime owns and closes it; the host
+must never close, reset, duplicate ownership of, or use it after runtime
+destruction. The host should wait for either native readiness or the reported
+deadline, then call `drive_once` again. `llam_runtime_wake()` provides an
+explicit cross-thread notification.
+
+Only one host thread may drive a runtime at a time, but successive calls may
+come from different unmanaged threads. Tasks may therefore migrate between
+those host threads. `LLAM_SPAWN_F_PINNED` constrains logical-shard placement;
+it does not bind external drive calls to one native thread. Calls from a managed
+task or switch-hook/scheduler callback fail with `ENOTSUP`; concurrent
+unmanaged drive calls fail with `EBUSY`.
+
+## 5.3 Stack Cache Memory Governance
 
 Retained fiber stacks are charged to their owning runtime in mapping bytes,
 including guard pages. The defaults are a 512 MiB budget, 384 MiB automatic

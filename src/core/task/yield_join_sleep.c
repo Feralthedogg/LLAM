@@ -146,6 +146,9 @@ static unsigned llam_direct_yield_handoff_mode(const llam_runtime_t *rt) {
     static atomic_int cached = -1;
     int value = atomic_load_explicit(&cached, memory_order_acquire);
 
+    if (rt != NULL && rt->external_driver.enabled) {
+        return 0U;
+    }
     if (value < 0) {
         const char *env = llam_env_get("LLAM_YIELD_DIRECT_HANDOFF");
 
@@ -219,6 +222,7 @@ static bool llam_yield_to_local_runnable_unlocked(llam_yield_direct_fail_t *fail
     }
     rt = shard->runtime;
     if (rt == NULL ||
+        rt->external_driver.enabled ||
         rt->trace_events_enabled != 0U ||
         rt->run_timing_enabled != 0U ||
         rt->wake_latency_metrics_enabled != 0U ||
@@ -508,6 +512,7 @@ static bool llam_join_try_local_handoff(llam_shard_t *shard, llam_task_t *curren
     }
     rt = shard->runtime;
     if (rt == NULL ||
+        rt->external_driver.enabled ||
         rt->trace_events_enabled != 0U ||
         rt->run_timing_enabled != 0U ||
         rt->wake_latency_metrics_enabled != 0U ||

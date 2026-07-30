@@ -507,6 +507,7 @@ class ResearchBoundaryTests(unittest.TestCase):
             "#define _GNU_SOURCE 1\n"
             "#endif\n"
             "#include <llam/runtime.h>\n"
+            "#include <limits.h>\n"
             "#include <stdint.h>\n"
             "#include <string.h>\n"
             "#if defined(_WIN32)\n"
@@ -623,13 +624,60 @@ class ResearchBoundaryTests(unittest.TestCase):
             "    return result;\n"
             "}\n"
             "\n"
+            "static int exercise_external_driver_contract(void) {\n"
+            "    llam_runtime_opts_t opts;\n"
+            "    llam_runtime_readiness_t readiness;\n"
+            "    llam_runtime_t *runtime = NULL;\n"
+            "    uint64_t deadline_ns = 0U;\n"
+            "    uint32_t drive_result = UINT32_MAX;\n"
+            "    int result = 0;\n"
+            "    if (llam_runtime_opts_init(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE) != 0) {\n"
+            "        return 30;\n"
+            "    }\n"
+            "    opts.driver_mode = LLAM_RUNTIME_DRIVER_EXTERNAL;\n"
+            "    opts.worker_min = 1U;\n"
+            "    opts.worker_count = 1U;\n"
+            "    opts.worker_max = 1U;\n"
+            "    opts.blocking_min = 1U;\n"
+            "    opts.blocking_max = 1U;\n"
+            "    if (llam_runtime_create(&opts, LLAM_RUNTIME_OPTS_CURRENT_SIZE, &runtime) != 0) {\n"
+            "        return 31;\n"
+            "    }\n"
+            "    memset(&readiness, 0, sizeof(readiness));\n"
+            "    if (llam_runtime_get_readiness(runtime, &readiness, sizeof(readiness)) != 0) {\n"
+            "        result = 32;\n"
+            "#if LLAM_PLATFORM_WINDOWS\n"
+            "    } else if (readiness.kind != LLAM_RUNTIME_READINESS_WINDOWS_HANDLE ||\n"
+            "               readiness.value == (uintptr_t)0U) {\n"
+            "        result = 32;\n"
+            "#else\n"
+            "    } else if (readiness.kind != LLAM_RUNTIME_READINESS_FD ||\n"
+            "               readiness.value > (uintptr_t)INT_MAX) {\n"
+            "        result = 32;\n"
+            "#endif\n"
+            "    } else if (llam_runtime_next_deadline(runtime, &deadline_ns) != 0 ||\n"
+            "               deadline_ns != UINT64_MAX) {\n"
+            "        result = 33;\n"
+            "    } else if (llam_runtime_wake(runtime) != 0) {\n"
+            "        result = 34;\n"
+            "    } else if (llam_runtime_drive_once(runtime, &drive_result) != 0 ||\n"
+            "               drive_result != (uint32_t)LLAM_RUNTIME_DRIVE_DONE) {\n"
+            "        result = 35;\n"
+            "    }\n"
+            "    llam_runtime_destroy(runtime);\n"
+            "    return result;\n"
+            "}\n"
+            "\n"
             "int main(void) {\n"
             "    int result;\n"
             "    if (llam_abi_version() != ((2U << 16) | 0U)) {\n"
             "        return 1;\n"
             "    }\n"
             "    result = exercise_legacy_prefix();\n"
-            "    return result != 0 ? result : exercise_current_resource_contract();\n"
+            "    if (result == 0) {\n"
+            "        result = exercise_current_resource_contract();\n"
+            "    }\n"
+            "    return result != 0 ? result : exercise_external_driver_contract();\n"
             "}\n"
         )
 
@@ -705,6 +753,9 @@ class ResearchBoundaryTests(unittest.TestCase):
             "runtime_name",
             "version_string",
             "platform_name",
+            "task_context_slot_count",
+            "reserved1",
+            "runtime_readiness_size",
         }
         expected = required | ({"loaded_image"} if os.name != "nt" else set())
         if set(record) != expected:
@@ -720,6 +771,8 @@ class ResearchBoundaryTests(unittest.TestCase):
             "version_minor": "2",
             "version_patch": "0",
             "reserved0": "0",
+            "task_context_slot_count": "4",
+            "reserved1": "0",
             "runtime_name": "LLAM",
             "version_string": "2.2.0",
         }
@@ -733,6 +786,7 @@ class ResearchBoundaryTests(unittest.TestCase):
             "runtime_opts_size",
             "spawn_opts_size",
             "runtime_stats_size",
+            "runtime_readiness_size",
         ):
             if int(record[field]) <= 0:
                 raise AssertionError(f"non-positive installed ABI field {field}")
@@ -775,6 +829,12 @@ class ResearchBoundaryTests(unittest.TestCase):
             '    printf("runtime_name=%s\\n", info.runtime_name);\n'
             '    printf("version_string=%s\\n", info.version_string);\n'
             '    printf("platform_name=%s\\n", info.platform_name);\n'
+            '    printf("task_context_slot_count=%u\\n", info.task_context_slot_count);\n'
+            '    printf("reserved1=%u\\n", info.reserved1);\n'
+            '    printf("runtime_readiness_size=%zu\\n", info.runtime_readiness_size);\n'
+            "    if (info.runtime_readiness_size != sizeof(llam_runtime_readiness_t)) {\n"
+            "        return 3;\n"
+            "    }\n"
             "#ifndef _WIN32\n"
             "    Dl_info loaded = {0};\n"
             "    if (dladdr((const void *)&llam_abi_version, &loaded) == 0 "
@@ -1781,6 +1841,9 @@ class InstalledContractReceiptMutationTests(unittest.TestCase):
                 "runtime_name": "LLAM",
                 "version_string": "2.2.0",
                 "platform_name": "fixture",
+                "task_context_slot_count": "4",
+                "reserved1": "0",
+                "runtime_readiness_size": "16",
             }
             if os.name != "nt":
                 record["loaded_image"] = str(library)

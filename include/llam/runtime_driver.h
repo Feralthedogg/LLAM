@@ -33,6 +33,19 @@ extern "C" {
 /** @brief Opaque runtime handle accepted by external-driver APIs. */
 typedef struct llam_runtime llam_runtime_t;
 
+/** @brief Authority that advances scheduler work for one runtime. */
+typedef enum llam_runtime_driver_mode {
+    LLAM_RUNTIME_DRIVER_INTERNAL = 0,
+    LLAM_RUNTIME_DRIVER_EXTERNAL = 1,
+} llam_runtime_driver_mode_t;
+
+/** @brief Result of one bounded external scheduler quantum. */
+typedef enum llam_runtime_drive_result {
+    LLAM_RUNTIME_DRIVE_PROGRESS = 0,
+    LLAM_RUNTIME_DRIVE_IDLE = 1,
+    LLAM_RUNTIME_DRIVE_DONE = 2,
+} llam_runtime_drive_result_t;
+
 /** @brief Native object kind returned for external runtime readiness. */
 typedef enum llam_runtime_readiness_kind {
     LLAM_RUNTIME_READINESS_NONE = 0,
@@ -55,6 +68,49 @@ typedef struct llam_runtime_readiness {
 /** @brief Current readiness projection size for ABI-aware callers. */
 #define LLAM_RUNTIME_READINESS_CURRENT_SIZE \
     ((size_t)sizeof(llam_runtime_readiness_t))
+
+/**
+ * @brief Execute at most one task segment on an externally driven runtime.
+ *
+ * @param runtime Runtime created with ::LLAM_RUNTIME_DRIVER_EXTERNAL.
+ * @param result Receives one of ::llam_runtime_drive_result_t.
+ * @return 0 on success, or -1 with @c errno set.
+ */
+LLAM_API int llam_runtime_drive_once(llam_runtime_t *runtime,
+                                     uint32_t *result);
+
+/**
+ * @brief Read the earliest absolute scheduler deadline.
+ *
+ * @param runtime Externally driven runtime.
+ * @param deadline_ns Receives a ::llam_now_ns timestamp or @c UINT64_MAX.
+ * @return 0 on success, or -1 with @c errno set.
+ */
+LLAM_API int llam_runtime_next_deadline(llam_runtime_t *runtime,
+                                        uint64_t *deadline_ns);
+
+/**
+ * @brief Project the runtime-owned readiness object into a caller-sized value.
+ *
+ * The returned native object is borrowed. The host must never close it.
+ *
+ * @param runtime Externally driven runtime.
+ * @param readiness Caller storage receiving the known prefix.
+ * @param readiness_size Bytes available at @p readiness.
+ * @return 0 on success, or -1 with @c errno set.
+ */
+LLAM_API int llam_runtime_get_readiness(
+    llam_runtime_t *runtime,
+    llam_runtime_readiness_t *readiness,
+    size_t readiness_size);
+
+/**
+ * @brief Make an externally driven runtime observable by its host loop.
+ *
+ * @param runtime Externally driven runtime.
+ * @return 0 on success, or -1 with @c errno set.
+ */
+LLAM_API int llam_runtime_wake(llam_runtime_t *runtime);
 
 #ifdef __cplusplus
 }

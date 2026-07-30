@@ -214,6 +214,7 @@ bool llam_reinject_task_on_shard_and_yield_current(llam_runtime_t *rt,
     int caller_errno = llam_thread_errno_load();
 
     if (rt == NULL || task == NULL || current == NULL ||
+        rt->external_driver.enabled ||
         rt->active_shards == 0U) {
         return false;
     }

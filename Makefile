@@ -255,6 +255,7 @@ endif
 RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/lifecycle/runtime.o \
 	$(OBJDIR)/src/core/lifecycle/resource_plan.o \
+	$(OBJDIR)/src/core/lifecycle/external_drive.o \
 	$(OBJDIR)/src/core/base/abi.o \
 	$(OBJDIR)/src/core/base/errno.o \
 	$(OBJDIR)/src/core/base/util.o \
@@ -350,6 +351,7 @@ RUNTIME_COMMON_OBJS = \
 	$(OBJDIR)/src/core/api/blocking_api.o \
 	$(OBJDIR)/src/core/api/cancel_api.o \
 	$(OBJDIR)/src/core/lifecycle/lifecycle.o \
+	$(OBJDIR)/src/core/sched/scheduler_thread.o \
 	$(OBJDIR)/src/core/sched/scheduler.o \
 	$(OBJDIR)/src/core/lifecycle/init.o \
 	$(OBJDIR)/src/core/lifecycle/shutdown.o \
@@ -2885,11 +2887,13 @@ $(OBJDIR)/tests/test_runtime_core.o: tests/test_runtime_core.c tests/test_task_c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
+$(OBJDIR)/tests/test_multi_runtime_core.o: tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc
+
 $(OBJDIR)/tests/test_security_capability.o: tests/test_security_capability.c $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_hard_affinity_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
+$(OBJDIR)/tests/test_runtime_shutdown_internal.o: tests/test_runtime_shutdown_internal.c tests/test_external_doorbell_cases.inc tests/test_external_drive_cases.inc tests/test_external_drive_async_cases.inc tests/test_hard_affinity_cases.inc tests/test_switch_hook_cases.inc tests/test_switch_hook_prefix_cases.inc tests/test_stack_cache_cases.inc tests/test_stack_cache_accounting_cases.inc tests/test_stack_cache_burst_metrics.inc tests/test_stack_cache_failure_cases.inc tests/test_stack_vm_cases.inc $(RUNTIME_PRIV_HDRS) tests/test_env.h $(TESTHOOK_BUILD_SIGNATURE)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) -DLLAM_ENABLE_TEST_HOOKS=1 $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
