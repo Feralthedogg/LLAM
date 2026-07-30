@@ -26,6 +26,22 @@ typedef struct handoff_policy_fixture {
     llam_handoff_policy_input_t input;
 } handoff_policy_fixture_t;
 
+static void set_handoff_fixture_live_tasks(handoff_policy_fixture_t *fixture,
+                                           unsigned live_tasks) {
+    /*
+     * Windows maintains the authoritative live-task count on the runtime,
+     * while the other backends sum the shard-local counters. Keep both
+     * projections synchronized so this policy fixture exercises the same
+     * logical snapshot on every backend.
+     */
+    atomic_store_explicit(&fixture->runtime.live_tasks,
+                          live_tasks,
+                          memory_order_release);
+    atomic_store_explicit(&fixture->shard.live_tasks,
+                          live_tasks,
+                          memory_order_release);
+}
+
 static void init_handoff_policy_fixture(handoff_policy_fixture_t *fixture) {
     memset(fixture, 0, sizeof(*fixture));
     fixture->runtime.active_shards = 1U;
@@ -36,6 +52,8 @@ static void init_handoff_policy_fixture(handoff_policy_fixture_t *fixture) {
     fixture->current.owner_runtime = &fixture->runtime;
     fixture->next.owner_runtime = &fixture->runtime;
     atomic_init(&fixture->runtime.direct_handoff_budget, 0U);
+    atomic_init(&fixture->runtime.live_tasks, 0U);
+    atomic_init(&fixture->runtime.live_task_shards, 0U);
     atomic_init(&fixture->shard.timer_count, 0U);
     atomic_init(&fixture->shard.live_tasks, 0U);
     atomic_init(&fixture->shard.merge_pause_requested, 0U);
@@ -163,13 +181,13 @@ static int exercise_handoff_policy_rejections(void) {
     fixture.shard.opaque_redirect_active = false;
 
     fixture.runtime.direct_handoff_live_limit = 1U;
-    atomic_store_explicit(&fixture.shard.live_tasks, 2U, memory_order_release);
+    set_handoff_fixture_live_tasks(&fixture, 2U);
     if (llam_direct_handoff_policy(&fixture.input) !=
         LLAM_HANDOFF_REJECT_LIVE_LIMIT) {
         return fail_msg("handoff live-task limit was not enforced");
     }
     fixture.runtime.direct_handoff_live_limit = 0U;
-    atomic_store_explicit(&fixture.shard.live_tasks, 0U, memory_order_release);
+    set_handoff_fixture_live_tasks(&fixture, 0U);
 
     atomic_store_explicit(&fixture.runtime.direct_handoff_budget,
                           1U,
