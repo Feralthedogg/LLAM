@@ -113,6 +113,9 @@ creation failure. `scheduler_threads` excludes the host thread that drives shard
 | `LLAM_PREEMPT_POLL` | Public hot-loop safepoint macro. |
 | `LLAM_PREEMPT_POLL_EVERY` | Safepoint macro for counted loops. Arguments are evaluated once. |
 | `llam_task_set_class` | Change the current task scheduler class. |
+| `llam_task_user_context` | Return the caller-owned context pointer attached when the current task was spawned. |
+| `llam_task_context_slot_get` | Read one of the current task's fixed O(1) context slots. |
+| `llam_task_context_slot_set` | Write one of the current task's fixed O(1) context slots. |
 
 ## Task Groups
 
