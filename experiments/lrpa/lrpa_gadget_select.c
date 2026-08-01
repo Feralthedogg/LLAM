@@ -101,11 +101,20 @@ lrpa_select_try_complete(lrpa_context_t *context, lrpa_actor_t *actor,
     cell = &context->cells[target_cell];
     if (atomic_load_explicit(&cell->generation, memory_order_acquire) !=
         generation) {
+#if defined(LRPA_ENABLE_FAULTS)
+        if (context->manifest.fault_id ==
+            LRPA_FAULT_STALE_GENERATION_REUSE) {
+            atomic_store_explicit(&cell->stale_completion, 1U,
+                                  memory_order_release);
+        } else
+#endif
+        {
         lrpa_trace_event(context, actor->lane_id, actor->actor_id,
                          LRPA_TRACE_SELECT_STALE, cell->object_id, generation,
                          LRPA_OUTCOME_NONE, LRPA_OUTCOME_NONE, 0,
                          (uintptr_t)cell);
         return false;
+        }
     }
     if (atomic_compare_exchange_strong_explicit(
             &cell->outcome, &expected, (unsigned int)outcome,
@@ -130,14 +139,67 @@ lrpa_select_try_complete(lrpa_context_t *context, lrpa_actor_t *actor,
     return false;
 }
 
+static bool
+apply_perturbations(lrpa_actor_t *actor, lrpa_outcome_t *outcome)
+{
+    lrpa_context_t *context = actor->context;
+    uint32_t index;
+
+    for (index = 0U; index < context->manifest.perturbation_count; ++index) {
+        const lrpa_perturbation_t *step =
+            &context->manifest.perturbations[index];
+
+        if ((step->lane_mask & (UINT64_C(1) << actor->lane_id)) == 0U) {
+            continue;
+        }
+        switch (step->kind) {
+        case LRPA_STEP_YIELD:
+            lrpa_platform_yield();
+            break;
+        case LRPA_STEP_SPIN:
+            lrpa_platform_spin((uint32_t)step->value);
+            break;
+        case LRPA_STEP_BARRIER:
+            if (!lrpa_platform_barrier_wait(
+                    &context->perturb_barrier,
+                    context->manifest.timeout_ns)) {
+                lrpa_request_abort(context);
+                return false;
+            }
+            break;
+        case LRPA_STEP_TRIGGER:
+            *outcome = LRPA_OUTCOME_SEND;
+            break;
+        case LRPA_STEP_CANCEL:
+            *outcome = LRPA_OUTCOME_CANCEL;
+            break;
+        case LRPA_STEP_CLOSE:
+            *outcome = LRPA_OUTCOME_CLOSE;
+            break;
+        case LRPA_STEP_TIMER_OFFSET:
+            lrpa_platform_spin((uint32_t)((uint64_t)step->value & 127U));
+            *outcome = LRPA_OUTCOME_TIMEOUT;
+            break;
+        case LRPA_STEP_HOST_WAKE:
+        case LRPA_STEP_REQUEST_STOP:
+        case LRPA_STEP_AFFINITY_ROTATE:
+        case LRPA_STEP_KIND_COUNT:
+            lrpa_request_abort(context);
+            return false;
+        }
+    }
+    return true;
+}
+
 void
 lrpa_select_actor_step(lrpa_actor_t *actor, uint32_t round)
 {
     lrpa_context_t *context = actor->context;
     const uint32_t target = select_target_cell(context, actor);
     lrpa_completion_cell_t *cell = &context->cells[target];
-    const lrpa_outcome_t outcome = worker_outcome(actor->worker_id);
-    const bool publish_payload = outcome == LRPA_OUTCOME_SEND;
+    lrpa_outcome_t outcome = worker_outcome(actor->worker_id);
+    uint64_t generation = (uint64_t)round + 1U;
+    bool publish_payload;
     bool won;
 
     if (((context->manifest.seed ^ (uint64_t)round ^ actor->actor_id) & 1U) !=
@@ -146,9 +208,32 @@ lrpa_select_actor_step(lrpa_actor_t *actor, uint32_t round)
     } else {
         lrpa_platform_spin((actor->actor_id + round) & 31U);
     }
+    if (!apply_perturbations(actor, &outcome)) {
+        atomic_fetch_sub_explicit(&cell->live_nodes, 1U,
+                                  memory_order_acq_rel);
+        return;
+    }
+#if defined(LRPA_ENABLE_FAULTS)
+    if (context->manifest.fault_id == LRPA_FAULT_SELECT_SKIP_WINNER_CAS &&
+        actor->actor_id == 0U) {
+        atomic_fetch_add_explicit(&cell->winner_count, 1U,
+                                  memory_order_relaxed);
+        atomic_fetch_add_explicit(&cell->terminal_count, 1U,
+                                  memory_order_relaxed);
+        atomic_fetch_add_explicit(&context->lanes[actor->lane_id].winner_count,
+                                  1U, memory_order_relaxed);
+        atomic_fetch_add_explicit(
+            &context->lanes[actor->lane_id].terminal_count, 1U,
+            memory_order_relaxed);
+    }
+    if (context->manifest.fault_id == LRPA_FAULT_STALE_GENERATION_REUSE &&
+        actor->actor_id == 0U && round != 0U) {
+        generation = (uint64_t)round;
+    }
+#endif
+    publish_payload = outcome == LRPA_OUTCOME_SEND;
     won = lrpa_select_try_complete(context, actor, target,
-                                   (uint64_t)round + 1U, outcome,
-                                   publish_payload);
+                                   generation, outcome, publish_payload);
     atomic_fetch_sub_explicit(&cell->live_nodes, 1U, memory_order_acq_rel);
     lrpa_trace_event(context, actor->lane_id, actor->actor_id,
                      LRPA_TRACE_SELECT_ATTEMPT, cell->object_id,

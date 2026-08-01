@@ -112,6 +112,10 @@ validate_perturbations(const lrpa_manifest_t *manifest)
              (step->value < 0 || step->value > 1000000))) {
             return LRPA_STATUS_MALFORMED_PERTURBATION;
         }
+        if (step->kind == LRPA_STEP_BARRIER &&
+            step->lane_mask != valid_lane_mask) {
+            return LRPA_STATUS_MALFORMED_PERTURBATION;
+        }
     }
     if (lrpa_perturbation_hash(manifest->perturbations,
                                manifest->perturbation_count) !=
@@ -216,7 +220,12 @@ lrpa_manifest_generate_perturbations(lrpa_manifest_t *manifest)
         step->kind = (lrpa_step_kind_t)(value %
                                         ((uint64_t)LRPA_STEP_TIMER_OFFSET +
                                          1U));
-        step->lane_mask = UINT64_C(1) << lane;
+        step->lane_mask = step->kind == LRPA_STEP_BARRIER
+                              ? (manifest->lane_count == 64U
+                                     ? UINT64_MAX
+                                     : (UINT64_C(1) <<
+                                        manifest->lane_count) - 1U)
+                              : UINT64_C(1) << lane;
         step->sequence = index;
         step->value = step->kind == LRPA_STEP_SPIN
                           ? (int64_t)((value >> 16U) % 1024U)
@@ -439,12 +448,19 @@ lrpa_context_init(lrpa_context_t *context, const lrpa_manifest_t *manifest,
         return status;
     }
     context->finish_barrier_initialized = true;
+    status = lrpa_platform_barrier_init(&context->perturb_barrier,
+                                        context->actor_count);
+    if (status != LRPA_STATUS_OK) {
+        lrpa_context_destroy(context);
+        return status;
+    }
+    context->perturb_barrier_initialized = true;
     context->initialized = true;
     return LRPA_STATUS_OK;
 }
 
-static void
-request_abort(lrpa_context_t *context)
+void
+lrpa_request_abort(lrpa_context_t *context)
 {
     atomic_store_explicit(&context->abort_requested, true,
                           memory_order_release);
@@ -453,6 +469,9 @@ request_abort(lrpa_context_t *context)
     }
     if (context->finish_barrier_initialized) {
         lrpa_platform_barrier_break(&context->finish_barrier);
+    }
+    if (context->perturb_barrier_initialized) {
+        lrpa_platform_barrier_break(&context->perturb_barrier);
     }
 }
 
@@ -487,7 +506,7 @@ coordination_actor_main(void *argument)
                          (uintptr_t)actor);
         if (!lrpa_platform_barrier_wait(&context->start_barrier,
                                         context->manifest.timeout_ns)) {
-            request_abort(context);
+            lrpa_request_abort(context);
             return 0;
         }
         lrpa_trace_event(context, actor->lane_id, actor->actor_id,
@@ -500,7 +519,7 @@ coordination_actor_main(void *argument)
         }
         if (!lrpa_platform_barrier_wait(&context->finish_barrier,
                                         context->manifest.timeout_ns)) {
-            request_abort(context);
+            lrpa_request_abort(context);
             return 0;
         }
         lrpa_trace_event(context, actor->lane_id, actor->actor_id,
@@ -712,7 +731,7 @@ run_context(lrpa_context_t *context, lrpa_result_t *result,
     }
 
     if (status != LRPA_STATUS_OK) {
-        request_abort(context);
+        lrpa_request_abort(context);
     }
     result->cleanup_complete = join_all_actors(context);
     if (!result->cleanup_complete && status == LRPA_STATUS_OK) {
@@ -758,6 +777,10 @@ lrpa_context_reset(lrpa_context_t *context)
         lrpa_platform_barrier_destroy(&context->finish_barrier);
         context->finish_barrier_initialized = false;
     }
+    if (context->perturb_barrier_initialized) {
+        lrpa_platform_barrier_destroy(&context->perturb_barrier);
+        context->perturb_barrier_initialized = false;
+    }
     if (context->start_barrier_initialized) {
         lrpa_platform_barrier_destroy(&context->start_barrier);
         context->start_barrier_initialized = false;
@@ -783,6 +806,12 @@ lrpa_context_reset(lrpa_context_t *context)
         return status;
     }
     context->finish_barrier_initialized = true;
+    status = lrpa_platform_barrier_init(&context->perturb_barrier,
+                                        context->actor_count);
+    if (status != LRPA_STATUS_OK) {
+        return status;
+    }
+    context->perturb_barrier_initialized = true;
 
     for (index = 0U; index < context->manifest.lane_count; ++index) {
         lrpa_lane_init(&context->lanes[index], index,
@@ -817,12 +846,16 @@ lrpa_context_destroy(lrpa_context_t *context)
         lrpa_platform_gate_open(&context->launch_gate, true);
     }
     if (context->start_barrier_initialized ||
-        context->finish_barrier_initialized) {
-        request_abort(context);
+        context->finish_barrier_initialized ||
+        context->perturb_barrier_initialized) {
+        lrpa_request_abort(context);
     }
     (void)join_all_actors(context);
     if (context->finish_barrier_initialized) {
         lrpa_platform_barrier_destroy(&context->finish_barrier);
+    }
+    if (context->perturb_barrier_initialized) {
+        lrpa_platform_barrier_destroy(&context->perturb_barrier);
     }
     if (context->start_barrier_initialized) {
         lrpa_platform_barrier_destroy(&context->start_barrier);

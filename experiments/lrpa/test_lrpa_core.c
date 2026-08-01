@@ -479,6 +479,47 @@ test_stale_generation_cannot_complete_rearmed_cell(void)
     return true;
 }
 
+static bool
+test_perturbation_plan_is_fixed_width_and_deterministic(void)
+{
+    lrpa_manifest_t first = valid_manifest();
+    lrpa_manifest_t second = valid_manifest();
+    lrpa_manifest_t different = valid_manifest();
+    lrpa_run_options_t options = {UINT32_MAX, UINT32_MAX};
+    lrpa_context_t context;
+    lrpa_result_t result;
+
+    TEST_CHECK(lrpa_manifest_generate_perturbations(&first) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(lrpa_manifest_generate_perturbations(&second) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(first.perturbation_count == 8U);
+    TEST_CHECK(first.perturbation_hash ==
+               UINT64_C(0xdbf8cb2a94a214e3));
+    TEST_CHECK(first.perturbation_hash == second.perturbation_hash);
+    TEST_CHECK(memcmp(first.perturbations, second.perturbations,
+                      first.perturbation_count *
+                          sizeof(first.perturbations[0])) == 0);
+    TEST_CHECK(first.perturbations[4].kind == LRPA_STEP_BARRIER);
+    TEST_CHECK(first.perturbations[4].lane_mask == 0xfU);
+    TEST_CHECK(lrpa_manifest_validate(&first) == LRPA_STATUS_OK);
+
+    different.seed += 1U;
+    TEST_CHECK(lrpa_manifest_generate_perturbations(&different) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(different.perturbation_hash != first.perturbation_hash);
+
+    first.rounds = 4U;
+    first.queue_capacity = 4096U;
+    TEST_CHECK(lrpa_context_init(&context, &first, &options) ==
+               LRPA_STATUS_OK);
+    TEST_CHECK(lrpa_context_run(&context, &result) == LRPA_STATUS_OK);
+    TEST_CHECK(result.failures == 0U);
+    TEST_CHECK(result.cleanup_complete);
+    lrpa_context_destroy(&context);
+    return true;
+}
+
 typedef bool (*test_fn)(void);
 
 typedef struct test_case {
@@ -512,6 +553,8 @@ main(void)
          test_select_oracle_reads_real_cell_state},
         {"stale_generation_cannot_complete_rearmed_cell",
          test_stale_generation_cannot_complete_rearmed_cell},
+        {"perturbation_plan_is_fixed_width_and_deterministic",
+         test_perturbation_plan_is_fixed_width_and_deterministic},
     };
     size_t index;
 

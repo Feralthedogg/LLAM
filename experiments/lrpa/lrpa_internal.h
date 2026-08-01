@@ -80,6 +80,7 @@ struct lrpa_context {
     lrpa_platform_gate_t launch_gate;
     lrpa_platform_barrier_t start_barrier;
     lrpa_platform_barrier_t finish_barrier;
+    lrpa_platform_barrier_t perturb_barrier;
     atomic_bool abort_requested;
     atomic_uint armed_actors;
     atomic_uint release_observed_armed;
@@ -89,6 +90,7 @@ struct lrpa_context {
     bool launch_gate_initialized;
     bool start_barrier_initialized;
     bool finish_barrier_initialized;
+    bool perturb_barrier_initialized;
     bool execute_gadget;
     lrpa_run_options_t options;
 };
@@ -137,5 +139,6 @@ lrpa_status_t lrpa_select_verify_round(lrpa_context_t *context,
                                        lrpa_failure_t *failure,
                                        lrpa_result_t *result);
 void lrpa_select_drain_round(lrpa_context_t *context);
+void lrpa_request_abort(lrpa_context_t *context);
 
 #endif
