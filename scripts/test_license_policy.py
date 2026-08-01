@@ -34,12 +34,30 @@ CONTRIBUTION_TERMS = """By intentionally submitting a contribution for inclusion
 to license that contribution under the LLAM Commercial Reciprocity License
 1.0, unless the submission is conspicuously marked "Not a Contribution" or a
 separate written agreement applies."""
-APPLICATION_SCOPE = """This License is expressly applied to the LLAM repository snapshot,
-distribution, or copy that contains this LICENSE file, except for materials
-conspicuously identified as governed by another license. LLAM-authored files
-use the following notice in the appropriate comment syntax:"""
 LICENSE_NOTICE = "Licensed under the LLAM Commercial Reciprocity License 1.0."
 LICENSE_FILE_NOTICE = "See the LICENSE file distributed with this Software."
+INDENTED_LICENSE_TEXT = """LLAM COMMERCIAL RECIPROCITY LICENSE 1.0
+
+   1.4. "Software" means source code, object code, documentation, tests,
+        examples, build materials, configuration, and other materials
+        included in a release, branch, commit, package, repository snapshot,
+        or copy to which this License is expressly applied by a LICENSE file,
+        package metadata, file header, or other accompanying notice,
+        excluding materials expressly identified as being governed by
+        another license.
+
+APPLICATION NOTICE (NOT PART OF THE TERMS)
+
+   This License is expressly applied to the LLAM repository snapshot,
+   distribution, or copy that contains this LICENSE file, except for materials
+   conspicuously identified as governed by another license. LLAM-authored files
+   use the following notice in the appropriate comment syntax:
+
+   Copyright 2026 Feralthedogg
+   SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+   Licensed under the LLAM Commercial Reciprocity License 1.0.
+   See the LICENSE file distributed with this Software.
+"""
 
 
 class LicensePolicyTest(unittest.TestCase):
@@ -179,6 +197,14 @@ class LicensePolicyTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("must be byte-identical to LICENSE", result.stderr)
 
+    def test_accepts_indented_license_policy_text(self) -> None:
+        self._write("LICENSE", INDENTED_LICENSE_TEXT)
+        self._write(ACTIVE_LICENSE_RELATIVE, INDENTED_LICENSE_TEXT)
+
+        result = self._run_checker()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_rejects_unexpected_active_license_file(self) -> None:
         self._write("LICENSES/Apache-2.0.txt", HISTORICAL_APACHE_TEXT)
         self._track("LICENSES/Apache-2.0.txt")
@@ -260,7 +286,14 @@ class LicensePolicyTest(unittest.TestCase):
         self.assertIn("LICENSE: approved Section 1.4 is missing", result.stderr)
 
     def test_rejects_license_without_explicit_application_scope(self) -> None:
-        license_text = CURRENT_LICENSE_TEXT.replace(APPLICATION_SCOPE, "")
+        license_text = (
+            "\n\n".join(
+                paragraph
+                for paragraph in CURRENT_LICENSE_TEXT.rstrip().split("\n\n")
+                if "This License is expressly applied" not in paragraph
+            )
+            + "\n"
+        )
         self._write("LICENSE", license_text)
         self._write(ACTIVE_LICENSE_RELATIVE, license_text)
 

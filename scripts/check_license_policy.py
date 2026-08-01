@@ -93,6 +93,10 @@ def has_stale_apache_notice(text: str) -> bool:
     return False
 
 
+def contains_policy_text(text: str, required: str) -> bool:
+    return " ".join(required.split()) in " ".join(text.split())
+
+
 def requires_current_license(relative: Path) -> bool:
     if relative.name.endswith(".license"):
         return False
@@ -160,10 +164,10 @@ def main() -> int:
         return 1
 
     license_text = (root / "LICENSE").read_text(encoding="utf-8")
-    if SOFTWARE_DEFINITION not in license_text:
+    if not contains_policy_text(license_text, SOFTWARE_DEFINITION):
         print("LICENSE: approved Section 1.4 is missing", file=sys.stderr)
         return 1
-    if APPLICATION_SCOPE not in license_text:
+    if not contains_policy_text(license_text, APPLICATION_SCOPE):
         print("LICENSE: application scope notice is missing", file=sys.stderr)
         return 1
 
