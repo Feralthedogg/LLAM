@@ -316,6 +316,153 @@ test_expired_timer(void)
 }
 
 static bool
+test_three_task_and_mixed_cycles(void)
+{
+    lswg_graph_t graph;
+    lswg_result_t result;
+    const lswg_node_ref_t task_1 = ref(LSWG_NODE_TASK, 101U, 1U, 1U);
+    const lswg_node_ref_t task_2 = ref(LSWG_NODE_TASK, 102U, 1U, 1U);
+    const lswg_node_ref_t task_3 = ref(LSWG_NODE_TASK, 103U, 1U, 1U);
+    const lswg_node_ref_t mutex = ref(LSWG_NODE_MUTEX, 22U, 6U, 0U);
+
+    TEST_CHECK(lswg_graph_init(&graph, 3U, 3U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task_1, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(task_2, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(task_3, 0U, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task_1, task_2,
+                                     LSWG_EDGE_TASK_WAITS_JOIN,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(add_edge(&graph, edge(task_2, task_3,
+                                     LSWG_EDGE_TASK_WAITS_JOIN,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(add_edge(&graph, edge(task_3, task_1,
+                                     LSWG_EDGE_TASK_WAITS_JOIN,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(solve_graph(&graph, &result));
+    TEST_CHECK(result.verdict == LSWG_VERDICT_PROVEN_CYCLE);
+    TEST_CHECK(result.total_member_count == 3U);
+    lswg_graph_destroy(&graph);
+
+    TEST_CHECK(lswg_graph_init(&graph, 3U, 3U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task_1, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(task_2, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(mutex, 0U, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task_1, mutex,
+                                     LSWG_EDGE_TASK_WAITS_MUTEX,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(add_edge(&graph, edge(mutex, task_2,
+                                     LSWG_EDGE_MUTEX_OWNED_BY_TASK,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(add_edge(&graph, edge(task_2, task_1,
+                                     LSWG_EDGE_TASK_WAITS_JOIN,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(solve_graph(&graph, &result));
+    TEST_CHECK(result.verdict == LSWG_VERDICT_PROVEN_CYCLE);
+    TEST_CHECK(result.total_member_count == 3U);
+    lswg_graph_destroy(&graph);
+    return true;
+}
+
+static bool
+expect_direct_source_verdict(lswg_node_kind_t source_kind,
+                             uint32_t source_flags,
+                             lswg_edge_kind_t wait_kind,
+                             lswg_verdict_t expected)
+{
+    lswg_graph_t graph;
+    lswg_result_t result;
+    const lswg_node_ref_t task = ref(LSWG_NODE_TASK, 201U, 3U, 1U);
+    const lswg_node_ref_t source = ref(source_kind, 202U, 4U, 5U);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 1U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(source, source_flags, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task, source, wait_kind,
+                                     LSWG_EDGE_AND_REQUIRED |
+                                         LSWG_EDGE_GENERATION_STABLE)));
+    TEST_CHECK(solve_graph(&graph, &result));
+    TEST_CHECK(result.verdict == expected);
+    lswg_graph_destroy(&graph);
+    return true;
+}
+
+static bool
+test_wait_kind_seed_and_terminal_semantics(void)
+{
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_IO_REQ, LSWG_NODE_LIVE_BACKEND,
+        LSWG_EDGE_TASK_WAITS_IO, LSWG_VERDICT_OPEN));
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_BLOCK_JOB, LSWG_NODE_RUNNING_JOB,
+        LSWG_EDGE_TASK_WAITS_BLOCK_JOB, LSWG_VERDICT_OPEN));
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_CANCEL_TOKEN, LSWG_NODE_UNCANCELLED_TOKEN,
+        LSWG_EDGE_TASK_CAN_CANCEL, LSWG_VERDICT_OPEN));
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_CHANNEL, LSWG_NODE_READY_NOW,
+        LSWG_EDGE_TASK_WAITS_CHANNEL_SEND, LSWG_VERDICT_OPEN));
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_BLOCK_JOB,
+        LSWG_NODE_TERMINAL_PROGRESS | LSWG_NODE_MATCHABLE_STUCK,
+        LSWG_EDGE_TASK_WAITS_BLOCK_JOB,
+        LSWG_VERDICT_MATCHABLE_LOST_WAKE));
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_CANCEL_TOKEN, LSWG_NODE_MATCHABLE_STUCK,
+        LSWG_EDGE_TASK_CAN_CANCEL, LSWG_VERDICT_MATCHABLE_LOST_WAKE));
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_TASK,
+        LSWG_NODE_TERMINAL_PROGRESS | LSWG_NODE_MATCHABLE_STUCK,
+        LSWG_EDGE_TASK_WAITS_JOIN, LSWG_VERDICT_MATCHABLE_LOST_WAKE));
+    TEST_CHECK(expect_direct_source_verdict(
+        LSWG_NODE_IO_REQ, 0U, LSWG_EDGE_TASK_WAITS_IO,
+        LSWG_VERDICT_PROVEN_ORPHAN));
+    return true;
+}
+
+static bool
+test_channel_host_wake_and_incomplete_dominance(void)
+{
+    lswg_graph_t graph;
+    lswg_result_t result;
+    const lswg_node_ref_t task = ref(LSWG_NODE_TASK, 301U, 1U, 1U);
+    const lswg_node_ref_t channel = ref(LSWG_NODE_CHANNEL, 31U, 2U, 0U);
+    const lswg_node_ref_t host =
+        ref(LSWG_NODE_EXTERNAL_SOURCE, 7U, 1U, 0U);
+
+    TEST_CHECK(lswg_graph_init(&graph, 3U, 2U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(channel, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph,
+                        node(host, LSWG_NODE_EXTERNAL_OPEN, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task, channel,
+                                     LSWG_EDGE_TASK_WAITS_CHANNEL_RECV,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(add_edge(&graph, edge(channel, host,
+                                     LSWG_EDGE_RESOURCE_EXTERNAL_SIGNAL,
+                                     LSWG_EDGE_EXTERNAL_OPEN)));
+    TEST_CHECK(solve_graph(&graph, &result));
+    TEST_CHECK(result.verdict == LSWG_VERDICT_OPEN);
+    lswg_graph_destroy(&graph);
+
+    TEST_CHECK(lswg_graph_init(&graph, 2U, 2U, NULL) == LSWG_STATUS_OK);
+    TEST_CHECK(add_node(&graph, node(task, 0U, 0U, 0U)));
+    TEST_CHECK(add_node(&graph, node(channel, 0U, 0U, 0U)));
+    TEST_CHECK(add_edge(&graph, edge(task, channel,
+                                     LSWG_EDGE_TASK_WAITS_CHANNEL_RECV,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    TEST_CHECK(add_edge(&graph, edge(channel, task,
+                                     LSWG_EDGE_CHANNEL_MATCHED_BY_TASK,
+                                     LSWG_EDGE_AND_REQUIRED)));
+    lswg_graph_mark_incomplete(&graph, LSWG_INCOMPLETE_LOCK_BUSY);
+    TEST_CHECK(solve_graph(&graph, &result));
+    TEST_CHECK(result.verdict == LSWG_VERDICT_INCOMPLETE);
+    TEST_CHECK(result.incomplete_reasons == LSWG_INCOMPLETE_LOCK_BUSY);
+    lswg_graph_destroy(&graph);
+    return true;
+}
+
+#ifndef LSWG_NO_CONFIRMATION
+static bool
 build_generation_snapshot(lswg_graph_t *graph, uint64_t wait_generation)
 {
     const lswg_node_ref_t task =
@@ -354,6 +501,7 @@ test_unstable_generation_between_snapshots(void)
     lswg_graph_destroy(&second_graph);
     return true;
 }
+#endif
 #endif
 
 static bool
@@ -503,8 +651,15 @@ main(void)
         {"orphan_mutex_owner", test_orphan_mutex_owner},
         {"ready_channel_lost_wake", test_ready_channel_lost_wake},
         {"expired_timer", test_expired_timer},
+        {"three_task_and_mixed_cycles", test_three_task_and_mixed_cycles},
+        {"wait_kind_seed_and_terminal_semantics",
+         test_wait_kind_seed_and_terminal_semantics},
+        {"channel_host_wake_and_incomplete_dominance",
+         test_channel_host_wake_and_incomplete_dominance},
+#ifndef LSWG_NO_CONFIRMATION
         {"unstable_generation_between_snapshots",
          test_unstable_generation_between_snapshots},
+#endif
 #endif
         {"generation_identity_and_raw_address_rules",
          test_generation_identity_and_raw_address_rules},
