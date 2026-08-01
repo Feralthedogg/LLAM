@@ -212,6 +212,7 @@ foreach ($Dir in @(
     "examples",
     "include",
     "lib",
+    "LICENSES",
     "scripts",
     "share\llam\cmake",
     "lib\pkgconfig"
@@ -255,6 +256,7 @@ $SharedImportLib = Find-BuildArtifact "llam_runtime_shared.lib" (Join-Path $Conf
 $BenchExe = Find-BuildArtifact "bench.exe" (Join-Path $ConfigDir "bench.exe")
 
 Require-Input (Join-Path $Root "LICENSE")
+Require-Input (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt")
 Require-Input (Join-Path $Root "README.md")
 Require-Input (Join-Path $Root "CHANGELOG.md")
 Require-Input (Join-Path $Root "scripts\install.sh")
@@ -270,6 +272,7 @@ Require-Input $BenchExe
 
 foreach ($InputPath in @(
     (Join-Path $Root "LICENSE"),
+    (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"),
     (Join-Path $Root "README.md"),
     (Join-Path $Root "CHANGELOG.md"),
     (Join-Path $Root "scripts\install.sh"),
@@ -290,6 +293,7 @@ Set-Content -LiteralPath (Join-Path $Stage "VERSION") -Value $Version -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "ABI_MAJOR") -Value $AbiMajor -NoNewline
 Set-Content -LiteralPath (Join-Path $Stage "LIBRARY_VERSION") -Value $LibraryVersion -NoNewline
 Copy-Item -LiteralPath @((Join-Path $Root "LICENSE"), (Join-Path $Root "README.md"), (Join-Path $Root "CHANGELOG.md")) -Destination $Stage
+Copy-Item -LiteralPath (Join-Path $Root "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt") -Destination (Join-Path $Stage "LICENSES")
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.sh") -Destination $Stage
 Copy-Item -LiteralPath (Join-Path $Root "scripts\install.ps1") -Destination $Stage
 foreach ($Item in Get-ChildItem -LiteralPath (Join-Path $Root "docs") -Force) {

@@ -377,6 +377,10 @@ jobs:
         shell: pwsh
         run: cmake --build build/windows --config Release --target bench llam_broker test_abi_compat test_multi_runtime_core test_runtime_stress test_runtime_fuzz test_runtime_invariants test_runtime_shutdown_internal test_windows_runtime_smoke test_windows_policy test_windows_iocp_io test_windows_handle_io test_security_capability
 
+      - name: Windows package license layout
+        shell: pwsh
+        run: .\scripts\test_package_license_layout_windows.ps1
+
       - name: CTest Windows backend
         shell: pwsh
         run: |

@@ -112,6 +112,12 @@ jobs:
           grep '/include/llam/io.h$' package-files.txt
           grep '/examples/server_flood_stats.c$' package-files.txt
           grep '/examples/server_flood_stats.h$' package-files.txt
+          grep '/LICENSE$' package-files.txt
+          grep '/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt$' package-files.txt
+          if grep '/OLD-LICENSES/' package-files.txt; then
+            echo "historical licenses must not be shipped as active package terms" >&2
+            exit 1
+          fi
           rm -f package-files.txt
           tmp="$(mktemp -d "${TMPDIR:-/tmp}/llam-release-smoke.XXXXXX")"
           trap 'rm -rf "$tmp"' EXIT
@@ -127,6 +133,10 @@ jobs:
           test "$(cat "$tmp/prefix-success/share/llam/VERSION")" = "$package_version"
           test "$(cat "$tmp/prefix-success/share/llam/ABI_MAJOR")" = "2"
           test "$(cat "$tmp/prefix-success/share/llam/LIBRARY_VERSION")" = "$version"
+          cmp LICENSE "$tmp/prefix-success/share/llam/LICENSE"
+          cmp LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt \
+            "$tmp/prefix-success/share/llam/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
+          test ! -e "$tmp/prefix-success/share/llam/OLD-LICENSES"
           mkdir -p "$tmp/outside"
           ln -s "$tmp/outside" "$tmp/prefix-link"
           if sh "$tmp/llam-${package_version}-${{ matrix.target }}/install.sh" --prefix "$tmp/prefix-link" --force > "$tmp/install-symlink.out" 2>&1; then
@@ -187,6 +197,8 @@ jobs:
           Expand-Archive -LiteralPath $archive -DestinationPath $tmp -Force
           $root = Join-Path $tmp "llam-$packageVersion-${{ matrix.target }}"
           foreach ($file in @(
+            "LICENSE",
+            "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt",
             "install.sh",
             "install.ps1",
             "include\llam\runtime.h",
@@ -202,6 +214,9 @@ jobs:
             if (-not (Test-Path -LiteralPath (Join-Path $root $file))) {
               throw "missing package file: $file"
             }
+          }
+          if (Test-Path -LiteralPath (Join-Path $root "OLD-LICENSES")) {
+            throw "historical licenses must not be shipped as active package terms"
           }
           $archiveInstall = & (Join-Path $root "install.ps1") -DryRun -Prefix (Join-Path $tmp "prefix") 6>&1 | Out-String
           if ($archiveInstall -notmatch "copy .*include" -or $archiveInstall -notmatch "copy .*lib") {
@@ -222,6 +237,19 @@ jobs:
           }
           if ((Get-Content -LiteralPath (Join-Path $successPrefix "share\llam\LIBRARY_VERSION") -Raw).Trim() -ne $version) {
             throw "archive-local Windows installer did not install LIBRARY_VERSION metadata"
+          }
+          $sourceLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSE").Hash
+          $installedLicense = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSE")).Hash
+          if ($sourceLicense -ne $installedLicense) {
+            throw "archive-local Windows installer changed the current root license"
+          }
+          $sourceLicenseRef = (Get-FileHash -Algorithm SHA256 -LiteralPath "LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt").Hash
+          $installedLicenseRef = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $successPrefix "share\llam\LICENSES\LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt")).Hash
+          if ($sourceLicenseRef -ne $installedLicenseRef) {
+            throw "archive-local Windows installer changed the active LicenseRef text"
+          }
+          if (Test-Path -LiteralPath (Join-Path $successPrefix "share\llam\OLD-LICENSES")) {
+            throw "archive-local Windows installer installed historical licenses"
           }
           $hardlinkPrefix = Join-Path $tmp "prefix-hardlink"
           $hardlinkHeaderDir = Join-Path $hardlinkPrefix "include\llam"
@@ -518,6 +546,13 @@ jobs:
           grep '/lib/libllam_runtime.so$' package-files.txt
           grep '/share/llam/cmake/llam-config.cmake$' package-files.txt
           grep '/lib/pkgconfig/llam.pc$' package-files.txt
+          grep '/LICENSE$' package-files.txt
+          grep '/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt$' package-files.txt
+          if grep '/OLD-LICENSES/' package-files.txt; then
+            echo "historical licenses must not be shipped as active package terms" >&2
+            exit 1
+          fi
+          rm -f package-files.txt
 
       - name: Sync BSD artifacts back to runner
         shell: bash

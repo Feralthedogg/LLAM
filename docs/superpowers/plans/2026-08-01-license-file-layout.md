@@ -263,7 +263,7 @@ git commit -m "ci: enforce the current license on new files"
 - Consumes: root `LICENSE` and `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`.
 - Produces: archives and installations with `LICENSE` plus `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`, and without `OLD-LICENSES/`.
 
-- [ ] **Step 1: Write failing package behavior tests**
+- [x] **Step 1: Write failing package behavior tests**
 
 Create `scripts/test_package_license_layout.py`. It must build a temporary repository with the real POSIX packager and metadata generator, minimal safe build artifacts for the current host, distinct literal contents for the current and historical license files, and then execute the packager. Inspect the real `.tar.xz` with Python `tarfile` and assert:
 
@@ -282,7 +282,7 @@ Extract the controlled archive, run its real `install.sh`, and assert the same t
 
 Create `scripts/test_package_license_layout_windows.ps1`. It must create a temporary repository and stub Windows build tree, run the real copied PowerShell packager, expand the resulting ZIP, and throw unless root `LICENSE` and the active `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt` have the literal current text and `OLD-LICENSES` is absent.
 
-- [ ] **Step 2: Run the package tests and verify failure**
+- [x] **Step 2: Run the package tests and verify failure**
 
 Run:
 
@@ -295,29 +295,29 @@ docker run --rm -v "$PWD:/workspace" -w /workspace \
 
 Expected: both tests fail because the active `LICENSES/` text is absent from their archives.
 
-- [ ] **Step 3: Update POSIX and Windows packagers**
+- [x] **Step 3: Update POSIX and Windows packagers**
 
 Both packagers must require and validate the active text, create `LICENSES/` in the staging directory, and copy only the active text into it. Do not copy `OLD-LICENSES/`.
 
-- [ ] **Step 4: Update installers and CMake install rules**
+- [x] **Step 4: Update installers and CMake install rules**
 
 Archive installers copy `LICENSES/` to `share/llam/LICENSES/`. CMake installs the active text to `${CMAKE_INSTALL_DATADIR}/llam/LICENSES`. Root `LICENSE` remains installed at `${CMAKE_INSTALL_DATADIR}/llam/LICENSE`.
 
-- [ ] **Step 5: Repair package security fixtures**
+- [x] **Step 5: Repair package security fixtures**
 
 Every temporary repository in `Makefile` that creates a root `LICENSE` before invoking `scripts/package_release.sh` must also create `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`. Preserve each fixture's original expected failure and do not weaken symlink, hard-link, mode, or path-safety assertions.
 
-- [ ] **Step 6: Wire package behavior tests into normal validation**
+- [x] **Step 6: Wire package behavior tests into normal validation**
 
 Run the POSIX integration test from `test-license-policy`. In the Windows stress job, build `llam_runtime` and `llam_runtime_shared`, then run `scripts/test_package_license_layout_windows.ps1` so the hosted Windows runner verifies real ZIP behavior. Extend the release workflow's existing archive assertions to require the active text and reject `OLD-LICENSES`.
 
-- [ ] **Step 7: Run package and installer tests**
+- [x] **Step 7: Run package and installer tests**
 
 Run: `make -j4 all test CC=clang`
 
 Expected: existing runtime, installer, and package security tests pass.
 
-- [ ] **Step 8: Build and inspect a real local archive**
+- [x] **Step 8: Build and inspect a real local archive**
 
 Run:
 

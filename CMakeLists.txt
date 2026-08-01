@@ -814,6 +814,11 @@ install(
 )
 
 install(
+    FILES LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/llam/LICENSES
+)
+
+install(
     DIRECTORY examples/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/llam/examples
     FILES_MATCHING

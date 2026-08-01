@@ -614,6 +614,7 @@ LINK_TARGETS = \
 
 test-license-policy:
 	$(PYTHON) scripts/test_license_policy.py
+	$(PYTHON) scripts/test_package_license_layout.py
 
 check-license-policy: test-license-policy
 	$(PYTHON) scripts/check_license_policy.py
@@ -1091,9 +1092,10 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package symlink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
+	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
@@ -1163,9 +1165,10 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package unsafe-mode smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
+	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
@@ -1209,9 +1212,10 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/outside"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES" "$$tmp_dir/outside"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
+	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
 	: > "$$tmp_dir/repo/scripts/install.ps1"; \
@@ -1255,10 +1259,11 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package input hardlink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
+	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
@@ -1303,9 +1308,10 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package liblink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
+	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \
@@ -1348,10 +1354,11 @@ test: test_lcwe_model bench_lcwe_model test_abi_contract test_abi_compat test_co
 		DragonFly-aarch64|DragonFly-arm64) package_target=dragonflybsd-aarch64 ;; \
 		*) echo "unsupported package regular-liblink smoke host" >&2; exit 1 ;; \
 	esac; \
-	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples"; \
+	mkdir -p "$$tmp_dir/repo/scripts" "$$tmp_dir/repo/docs" "$$tmp_dir/repo/include/llam" "$$tmp_dir/repo/examples" "$$tmp_dir/repo/LICENSES"; \
 	cp scripts/package_release.sh "$$tmp_dir/repo/scripts/package_release.sh"; \
 	cp scripts/generate_sdk_metadata.sh "$$tmp_dir/repo/scripts/generate_sdk_metadata.sh"; \
 	: > "$$tmp_dir/repo/LICENSE"; \
+	: > "$$tmp_dir/repo/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"; \
 	: > "$$tmp_dir/repo/README.md"; \
 	: > "$$tmp_dir/repo/CHANGELOG.md"; \
 	: > "$$tmp_dir/repo/scripts/install.sh"; \

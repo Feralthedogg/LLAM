@@ -749,6 +749,7 @@ run_archive_install_from() {
     copy_dir "$install_src_dir/docs" "$prefix/share/llam/docs"
     copy_dir "$install_src_dir/examples" "$prefix/share/llam/examples"
     copy_dir "$install_src_dir/scripts" "$prefix/share/llam/scripts"
+    copy_dir "$install_src_dir/LICENSES" "$prefix/share/llam/LICENSES"
 
     copy_file "$install_src_dir/README.md" "$prefix/share/llam/README.md"
     copy_file "$install_src_dir/LICENSE" "$prefix/share/llam/LICENSE"

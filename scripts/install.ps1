@@ -412,6 +412,7 @@ function Install-ArchiveContentsFrom {
     Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "docs") (Join-Path $Prefix "share\llam\docs")
     Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "examples") (Join-Path $Prefix "share\llam\examples")
     Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "scripts") (Join-Path $Prefix "share\llam\scripts")
+    Copy-DirectoryIfPresent (Join-Path $ArchiveSourceDir "LICENSES") (Join-Path $Prefix "share\llam\LICENSES")
 
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "README.md") (Join-Path $Prefix "share\llam\README.md")
     Copy-FileIfPresent (Join-Path $ArchiveSourceDir "LICENSE") (Join-Path $Prefix "share\llam\LICENSE")

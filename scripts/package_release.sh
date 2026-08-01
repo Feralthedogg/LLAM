@@ -299,6 +299,7 @@ validate_release_component "library version" "$library_version"
 validate_safe_output_path "$out_dir" 0
 
 require_input "$root_dir/LICENSE"
+require_input "$root_dir/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
 require_input "$root_dir/README.md"
 require_input "$root_dir/CHANGELOG.md"
 require_input "$root_dir/scripts/install.sh"
@@ -334,6 +335,7 @@ if [ "$missing_inputs" -ne 0 ]; then
 fi
 
 validate_release_input_file "$root_dir/LICENSE"
+validate_release_input_file "$root_dir/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt"
 validate_release_input_file "$root_dir/README.md"
 validate_release_input_file "$root_dir/CHANGELOG.md"
 validate_release_input_file "$root_dir/scripts/install.sh"
@@ -379,7 +381,7 @@ validate_safe_output_path "$archive.sha256"
 validate_safe_output_path "$out_dir/$package_name.tar.gz"
 validate_safe_output_path "$out_dir/$package_name.tar.gz.sha256"
 rm -rf "$stage" "$archive" "$archive.sha256" "$out_dir/$package_name.tar.gz" "$out_dir/$package_name.tar.gz.sha256"
-mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib" "$stage/scripts"
+mkdir -p "$stage/bin" "$stage/docs" "$stage/examples" "$stage/include" "$stage/lib" "$stage/scripts" "$stage/LICENSES"
 validate_safe_output_path "$stage" 0
 validate_safe_stage_tree "$stage"
 
@@ -387,6 +389,7 @@ printf '%s\n' "$version" > "$stage/VERSION"
 printf '%s\n' "$abi_major" > "$stage/ABI_MAJOR"
 printf '%s\n' "$library_version" > "$stage/LIBRARY_VERSION"
 cp "$root_dir/LICENSE" "$root_dir/README.md" "$root_dir/CHANGELOG.md" "$stage/"
+cp "$root_dir/LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt" "$stage/LICENSES/"
 cp "$root_dir/scripts/install.sh" "$root_dir/scripts/install.ps1" "$stage/"
 cp "$root_dir/scripts/stress_server.py" "$root_dir/scripts/stress_server_composite.py" "$stage/scripts/"
 cp -R "$root_dir/docs/." "$stage/docs/"
