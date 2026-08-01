@@ -215,10 +215,21 @@ static int test_invalid_inputs(void) {
     CHECK(lccf_representation_publish(
               LCCF_REP_COUNT, &ticket, &event_storage, &counters) != 0,
           "publication rejects invalid representation");
+    CHECK(lccf_representation_publish(
+              LCCF_REP_SHARED_EVENT, &ticket, &event_storage,
+              &counters) == 0,
+          "invalid-site case publishes a valid event");
     CHECK(lccf_representation_materialize(
               LCCF_REP_SHARED_EVENT, &ticket, &event_storage, 8U,
-              &counters, &fact) != 0,
-          "materialization rejects invalid site");
+              &counters, &fact) == 0 &&
+              fact.event_kind == LCCF_FACT_EVENT_FAIL &&
+              fact.error_code == EPROTO && fact.site_index == 8U &&
+              fact.resolved_site == NULL && fact.fact_id != 0U,
+          "materialization turns invalid site into failure fact");
+    CHECK(lccf_representation_materialize(
+              LCCF_REP_SHARED_EVENT, &ticket, &event_storage,
+              (uint32_t)UINT16_MAX + 1U, &counters, &fact) != 0,
+          "materialization rejects unrepresentable site");
     return 0;
 }
 
