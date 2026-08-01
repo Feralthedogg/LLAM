@@ -1,3 +1,6 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+
 [package]
 name = "bench_tokio_compare"
 version = "0.1.0"

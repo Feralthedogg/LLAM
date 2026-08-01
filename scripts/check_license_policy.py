@@ -35,6 +35,16 @@ HISTORICAL_NOTICE_RELATIVE = Path("OLD-LICENSES/README.md")
 HISTORICAL_APACHE_SHA256 = (
     "7d16370e642185e2eecad74eaf1e15179b27e2690f82644e7d247b395b600430"
 )
+HEADER_REQUIRED_PREFIXES = (
+    Path("src"),
+    Path("include"),
+    Path("tests"),
+    Path("examples"),
+    Path("scripts"),
+    Path("cmake"),
+    Path(".github"),
+)
+HEADER_REQUIRED_FILES = frozenset({Path("Makefile"), Path("CMakeLists.txt")})
 REQUIRED_POLICY_FILES = (
     "LICENSE",
     "README.md",
@@ -73,6 +83,31 @@ def has_stale_apache_notice(text: str) -> bool:
                 return True
             break
     return False
+
+
+def requires_current_license(relative: Path) -> bool:
+    if relative.name.endswith(".license"):
+        return False
+    if relative in HEADER_REQUIRED_FILES:
+        return True
+    return any(prefix in relative.parents for prefix in HEADER_REQUIRED_PREFIXES)
+
+
+def has_current_license(
+    root: Path,
+    path: Path,
+    relative: Path,
+    text: str,
+    tracked_relatives: set[Path],
+) -> bool:
+    if LICENSE_REF in text:
+        return True
+    sidecar = path.with_name(path.name + ".license")
+    sidecar_relative = relative.with_name(relative.name + ".license")
+    if sidecar_relative not in tracked_relatives or not sidecar.is_file():
+        return False
+    sidecar_text = sidecar.read_text(encoding="utf-8", errors="replace")
+    return LICENSE_REF in sidecar_text
 
 
 def main() -> int:
@@ -140,6 +175,7 @@ def main() -> int:
         )
 
     tracked = tracked_files(root)
+    tracked_relatives = {path.relative_to(root) for path in tracked}
     for path in tracked:
         relative = path.relative_to(root)
         if (
@@ -196,11 +232,13 @@ def main() -> int:
         ):
             continue
         data = path.read_bytes()
-        if b"\0" in data:
-            continue
-        text = data.decode("utf-8", errors="replace")
+        text = "" if b"\0" in data else data.decode("utf-8", errors="replace")
         if has_stale_apache_notice(text):
             errors.append(f"{relative}: stale Apache license notice")
+        elif requires_current_license(relative) and not has_current_license(
+            root, path, relative, text, tracked_relatives
+        ):
+            errors.append(f"{relative}: current LicenseRef is missing")
         elif COPYRIGHT_NOTICE in text and LICENSE_REF not in text:
             errors.append(f"{relative}: current LicenseRef is missing")
 

@@ -1,3 +1,6 @@
+# Copyright 2026 Feralthedogg
+# SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+
 param(
     [string]$Prefix,
     [string]$Version = $env:LLAM_INSTALL_VERSION,

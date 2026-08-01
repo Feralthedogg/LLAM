@@ -162,7 +162,7 @@ git commit -m "build: formalize active and historical licenses"
 - Consumes: `tracked_files(root)` and the current `LICENSE_REF` constant.
 - Produces: `requires_current_license(relative: Path) -> bool` and `has_current_license(root: Path, path: Path, text: str) -> bool`.
 
-- [ ] **Step 1: Write failing new-file tests**
+- [x] **Step 1: Write failing new-file tests**
 
 Add this helper and the two cases below:
 
@@ -197,13 +197,13 @@ def test_accepts_adjacent_license_file_for_generated_content(self) -> None:
     self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 ```
 
-- [ ] **Step 2: Run the two tests and verify the missing-header case fails**
+- [x] **Step 2: Run the two tests and verify the missing-header case fails**
 
 Run: `python3 -m unittest -v scripts.test_license_policy.LicensePolicyTest.test_rejects_new_llam_script_without_current_license scripts.test_license_policy.LicensePolicyTest.test_accepts_adjacent_license_file_for_generated_content`
 
 Expected: the missing-header test fails because unmarked new files are not currently rejected.
 
-- [ ] **Step 3: Implement covered-path enforcement**
+- [x] **Step 3: Implement covered-path enforcement**
 
 Require the current identifier for all tracked regular files under these prefixes:
 
@@ -222,21 +222,21 @@ HEADER_REQUIRED_FILES = frozenset({Path("Makefile"), Path("CMakeLists.txt")})
 
 Accept the identifier either inside the file or inside a tracked adjacent `<name>.license` file. Skip a `.license` file as an independent payload after validating its identifier. Continue rejecting stale Apache comment headers. Paths under future top-level `third_party/` and `vendor/` remain outside these LLAM-owned prefixes.
 
-- [ ] **Step 4: Bring existing covered files into compliance**
+- [x] **Step 4: Bring existing covered files into compliance**
 
 Use the comment syntax native to YAML, CMake/TOML, and PowerShell. Use an HTML comment for Markdown. Add `scripts/bench_tokio_compare/Cargo.lock.license` instead of editing the generated lockfile.
 
-- [ ] **Step 5: Document how contributors license new files**
+- [x] **Step 5: Document how contributors license new files**
 
 Add a “New files and third-party material” section to `CONTRIBUTING.md` containing the exact current SPDX identifier, examples for C and `#`-commented files, the `.license` sidecar rule, and the requirement to isolate separately licensed material under `third_party/` or `vendor/`. Extend `docs/licensing.md` with links to the active and historical text locations and an explicit statement that the historical Apache copy is not a current licensing option.
 
-- [ ] **Step 6: Run the policy suite**
+- [x] **Step 6: Run the policy suite**
 
 Run: `make check-license-policy`
 
 Expected: all Python tests pass and the live repository reports `license policy ok`.
 
-- [ ] **Step 7: Commit the new-file default policy**
+- [x] **Step 7: Commit the new-file default policy**
 
 ```bash
 git add .github cmake scripts CONTRIBUTING.md docs/licensing.md

@@ -1,3 +1,8 @@
+<!--
+Copyright 2026 Feralthedogg
+SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+-->
+
 # Security Policy
 
 ## Supported versions

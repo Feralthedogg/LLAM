@@ -83,12 +83,18 @@ class LicensePolicyTest(unittest.TestCase):
         )
         self._write(
             ".github/SECURITY.md",
+            f"SPDX-License-Identifier: {LICENSE_REF}\n"
             "Report privately at /security/advisories/new within 7 calendar days.\n"
             "Report non-security defects within 30 calendar days.\n",
         )
-        self._write(".github/ISSUE_TEMPLATE/defect-report.yml", "name: Defect report\n")
+        self._write(
+            ".github/ISSUE_TEMPLATE/defect-report.yml",
+            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
+            "name: Defect report\n",
+        )
         self._write(
             ".github/ISSUE_TEMPLATE/config.yml",
+            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
             "blank_issues_enabled: false\n"
             "contact_links:\n"
             "  - name: Private security report\n"
@@ -100,10 +106,12 @@ class LicensePolicyTest(unittest.TestCase):
         )
         self._write(
             "scripts/package_release.sh",
+            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
             'cp "$root_dir/LICENSE" "$stage/"\n',
         )
         self._write(
             "scripts/package_release_windows.ps1",
+            f"# SPDX-License-Identifier: {LICENSE_REF}\n"
             'Copy-Item -LiteralPath (Join-Path $Root "LICENSE") -Destination $Stage\n',
         )
         self._write(
@@ -161,6 +169,42 @@ class LicensePolicyTest(unittest.TestCase):
         self.assertIn(
             "LICENSES/Apache-2.0.txt: inactive license text", result.stderr
         )
+
+    def test_rejects_new_llam_script_without_current_license(self) -> None:
+        self._write("scripts/new_tool.py", "print('hello')\n")
+        self._track("scripts/new_tool.py")
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("scripts/new_tool.py: current LicenseRef is missing", result.stderr)
+
+    def test_accepts_adjacent_license_file_for_generated_content(self) -> None:
+        self._write("scripts/generated.lock", "generated = true\n")
+        self._write(
+            "scripts/generated.lock.license",
+            "SPDX-FileCopyrightText: 2026 Feralthedogg\n"
+            f"SPDX-License-Identifier: {LICENSE_REF}\n",
+        )
+        self._track("scripts/generated.lock", "scripts/generated.lock.license")
+
+        result = self._run_checker()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_rejects_adjacent_license_file_with_wrong_license(self) -> None:
+        self._write("scripts/generated.lock", "generated = true\n")
+        self._write(
+            "scripts/generated.lock.license",
+            "SPDX-FileCopyrightText: 2026 Feralthedogg\n"
+            "SPDX-License-Identifier: MIT\n",
+        )
+        self._track("scripts/generated.lock", "scripts/generated.lock.license")
+
+        result = self._run_checker()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("scripts/generated.lock: current LicenseRef is missing", result.stderr)
 
     def test_rejects_modified_historical_apache_text(self) -> None:
         self._write(

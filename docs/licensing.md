@@ -1,3 +1,8 @@
+<!--
+Copyright 2026 Feralthedogg
+SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
+-->
+
 # Licensing
 
 LLAM uses an immutable-version license boundary.
@@ -19,6 +24,10 @@ documentation, tests, examples, build materials, configuration, and other
 materials in the repository snapshot unless a material is conspicuously
 identified as governed by another license.
 
+For SPDX-aware tooling, the same text is provided byte-for-byte at
+[LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt](../LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt).
+The root `LICENSE` remains the controlling human-facing copy.
+
 The SPDX identifier for LLAM-authored files is:
 
 ```text
@@ -27,6 +36,18 @@ SPDX-License-Identifier: LicenseRef-LLAM-Commercial-Reciprocity-1.0
 
 This is a custom **source-available** license. It is **not an OSI-approved open
 source license**.
+
+## Historical Apache text
+
+The Apache 2.0 text formerly shipped by LLAM is retained at
+[OLD-LICENSES/Apache-2.0.txt](../OLD-LICENSES/Apache-2.0.txt) for historical
+reference. It is not an alternative license for the current repository
+snapshot. The controlling terms for `v2.2.1` or an earlier version remain the
+`LICENSE` file stored at that exact immutable tag or commit.
+
+Custom `v3.0.0` release archives and installed metadata contain the root
+`LICENSE` and the active `LICENSES/LicenseRef-LLAM-Commercial-Reciprocity-1.0.txt`.
+They do not present `OLD-LICENSES/` as current terms.
 
 ## Third-party material
 
