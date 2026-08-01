@@ -96,15 +96,19 @@ When an explicit profile is selected, ring creation is exact. Kernel
 `EINVAL` or `EOPNOTSUPP` becomes profile unavailability; the runtime does not
 retry with fewer flags. Other setup failures retain their original error.
 
-`defer_taskrun` is allowed because each LLAM I/O node has one dedicated worker
-that owns both `io_uring_submit()` and `io_uring_wait_cqe_timeout()` for its
-ring. The first submit designates that worker as the single issuer. No public
-task or scheduler worker calls those ring functions. The profile is not
-combined with SQPOLL in this experiment.
+`defer_taskrun` additionally requires the ring creator to be the dedicated
+submit-and-wait worker in LLAM's current non-disabled-ring setup. Current Linux
+kernels bind a `SINGLE_ISSUER` ring to the task calling `io_uring_setup()` when
+the ring is created without `IORING_SETUP_R_DISABLED`; a different task then
+receives `EEXIST` from `io_uring_enter()`. LLAM currently creates rings during
+runtime initialization and submits from a later I/O worker, so this profile is
+reported as `ENOTSUP` before ring creation instead of entering a non-progress
+state. `submit_all` and `coop_taskrun` remain compatible with this topology.
 
-This matches the upstream contract: deferred task work requires
-`SINGLE_ISSUER`, and the same issuer must regularly enter the kernel to drive
-completion work.
+Evaluating `defer_taskrun` requires a separate worker-owned ring-construction
+experiment with a startup handshake, probe and resource registration on the
+worker, and explicit initialization-failure propagation. That architectural
+change is outside this bounded flag-and-cost comparison.
 
 ## 5. Cost attribution
 
@@ -188,6 +192,8 @@ failure.
 
 - Unknown profile: benchmark usage failure, exit 2.
 - Profile absent from build headers: benchmark skip, exit 77.
+- Profile incompatible with the current ring creator/submitter topology:
+  benchmark skip, exit 77.
 - Profile rejected by kernel: benchmark skip, exit 77 with the exact profile
   in the diagnostic.
 - Runtime correctness or ownership failure after initialization: failed
@@ -254,4 +260,5 @@ Stop or narrow the experiment if any of the following occurs:
 - [io_uring setup flags](https://www.man7.org/linux/man-pages/man7/io_uring_setup_flags.7.html)
 - [io_uring_setup(2)](https://man7.org/linux/man-pages/man2/io_uring_setup.2.html)
 - [io_uring_submit_and_wait(3)](https://man7.org/linux/man-pages/man3/io_uring_submit_and_wait.3.html)
+- [Linux io_uring setup and issuer enforcement](https://github.com/torvalds/linux/blob/master/io_uring/io_uring.c)
 - [liburing networking guidance](https://github.com/axboe/liburing/wiki/io_uring-and-networking-in-2023)

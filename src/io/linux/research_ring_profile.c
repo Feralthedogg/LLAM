@@ -139,6 +139,31 @@ int llam_linux_research_ring_profile_select(
     return 0;
 }
 
+int llam_linux_research_ring_profile_validate_topology(
+    const llam_linux_research_ring_profile_config_t *profile,
+    bool creator_is_submitter) {
+    errno = 0;
+    if (profile == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    switch (profile->kind) {
+        case LLAM_LINUX_RING_PROFILE_SUBMIT_ALL:
+        case LLAM_LINUX_RING_PROFILE_COOP_TASKRUN:
+            return 0;
+        case LLAM_LINUX_RING_PROFILE_DEFER_TASKRUN:
+            if (!creator_is_submitter) {
+                errno = ENOTSUP;
+                return -1;
+            }
+            return 0;
+        default:
+            errno = EINVAL;
+            return -1;
+    }
+}
+
 int llam_linux_research_ring_profile_setup_errno(int setup_result) {
     int setup_errno;
 

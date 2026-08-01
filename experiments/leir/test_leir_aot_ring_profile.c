@@ -214,6 +214,70 @@ static int test_normalizes_setup_errors(void) {
     return 0;
 }
 
+static int test_profile_topology_contract(void) {
+    static const struct {
+        uint32_t kind;
+        bool creator_is_submitter;
+        int expected_result;
+        int expected_errno;
+    } cases[] = {
+        {
+            LLAM_LINUX_RING_PROFILE_SUBMIT_ALL,
+            false,
+            0,
+            0,
+        },
+        {
+            LLAM_LINUX_RING_PROFILE_COOP_TASKRUN,
+            false,
+            0,
+            0,
+        },
+        {
+            LLAM_LINUX_RING_PROFILE_DEFER_TASKRUN,
+            true,
+            0,
+            0,
+        },
+        {
+            LLAM_LINUX_RING_PROFILE_DEFER_TASKRUN,
+            false,
+            -1,
+            ENOTSUP,
+        },
+        {UINT32_MAX, true, -1, EINVAL},
+    };
+    size_t i;
+
+    for (i = 0U; i < sizeof(cases) / sizeof(cases[0]); i += 1U) {
+        llam_linux_research_ring_profile_config_t config;
+        int result;
+
+        memset(&config, 0, sizeof(config));
+        config.kind = cases[i].kind;
+        errno = 0;
+        result = llam_linux_research_ring_profile_validate_topology(
+            &config, cases[i].creator_is_submitter);
+        if (result != cases[i].expected_result ||
+            errno != cases[i].expected_errno) {
+            fprintf(
+                stderr,
+                "profile topology contract failed for kind %u\n",
+                cases[i].kind);
+            return 1;
+        }
+    }
+
+    errno = 0;
+    if (llam_linux_research_ring_profile_validate_topology(
+            NULL, true) == 0 ||
+        errno != EINVAL) {
+        fputs("null topology profile was accepted\n", stderr);
+        return 1;
+    }
+    return 0;
+}
+
 static int child_runtime_init(
     const char *profile,
     bool expect_invalid,
@@ -393,6 +457,7 @@ int main(void) {
         test_requires_every_capability() != 0 ||
         test_rejects_explicit_sqpoll() != 0 ||
         test_normalizes_setup_errors() != 0 ||
+        test_profile_topology_contract() != 0 ||
         test_runtime_rejects_invalid_profile() != 0 ||
         test_runtime_rejects_profile_with_sqpoll() != 0) {
         return 1;

@@ -46,6 +46,10 @@ int llam_linux_research_ring_profile_select(
     uint32_t capabilities,
     llam_linux_research_ring_profile_config_t *out);
 
+int llam_linux_research_ring_profile_validate_topology(
+    const llam_linux_research_ring_profile_config_t *profile,
+    bool creator_is_submitter);
+
 int llam_linux_research_ring_profile_setup_errno(int setup_result);
 
 #endif

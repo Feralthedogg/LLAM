@@ -222,6 +222,10 @@ int llam_node_init_ring(llam_runtime_t *rt, llam_node_t *node) {
                     &profile) != 0) {
                 return -1;
             }
+            if (llam_linux_research_ring_profile_validate_topology(
+                    &profile, false) != 0) {
+                return -1;
+            }
             params.flags = profile.setup_flags;
             rc = io_uring_queue_init_params(
                 LLAM_IO_RING_DEPTH, &node->ring, &params);
