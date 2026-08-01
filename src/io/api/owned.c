@@ -34,11 +34,17 @@
 #endif
 
 static bool llam_io_buffer_alignment_valid(size_t alignment) {
-    return alignment == 0U || (alignment >= sizeof(void *) && (alignment & (alignment - 1U)) == 0U);
+    return alignment == 0U ||
+           (alignment & (alignment - 1U)) == 0U;
 }
 
 static size_t llam_io_buffer_normalize_alignment(size_t alignment) {
-    return alignment != 0U ? alignment : sizeof(void *);
+    /*
+     * posix_memalign() and _aligned_malloc() require at least pointer alignment.
+     * A smaller requested power of two is still a valid requirement because a
+     * pointer-aligned allocation satisfies it with stronger alignment.
+     */
+    return alignment < sizeof(void *) ? sizeof(void *) : alignment;
 }
 
 static void llam_io_buffer_external_free(llam_io_buffer_t *buffer) {
