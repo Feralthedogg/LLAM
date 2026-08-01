@@ -1,7 +1,9 @@
 # LCRS Phase 0 Standalone Results
 
-Date: 2026-08-02  
-Source base: `a0674b7` plus the accepted four-track research specification  
+Date: 2026-08-02
+
+Source base: `a0674b7` plus the accepted four-track research specification
+
 Scope: standalone topology and selector model only; production `src/` unchanged
 
 ## Result
