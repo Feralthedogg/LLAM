@@ -227,6 +227,43 @@ def check_docs_workflow(path: Path, text: str) -> list[str]:
     return []
 
 
+def check_stress_workflow(path: Path, text: str) -> list[str]:
+    """Keep the hosted Apple Silicon lane on an explicit smoke threshold."""
+
+    if path.name != "stress.yml":
+        return []
+    block_match = re.search(
+        r'^\s*if \[ "\$\{\{ matrix\.name \}\}" = "macos-aarch64-stress" \]; then\s*$'
+        r"(?P<body>.*?)"
+        r"^\s*fi\s*$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if block_match is None:
+        return [f"{path}: macOS arm64 stress threshold block is missing"]
+    threshold_match = re.search(
+        r'LLAM_BENCH_GUARD_MIN_OPS="(?P<thresholds>[^"]+)"',
+        block_match.group("body"),
+    )
+    if threshold_match is None:
+        return [f"{path}: macOS arm64 stress thresholds are missing"]
+    park_wake_match = re.search(
+        r"(?:^|,)select_park_wake=(?P<value>[0-9]+(?:\.[0-9]+)?)(?:,|$)",
+        threshold_match.group("thresholds"),
+    )
+    if park_wake_match is None:
+        return [
+            f"{path}: macOS arm64 must set an explicit select_park_wake "
+            "catastrophic threshold"
+        ]
+    if float(park_wake_match.group("value")) > 500_000.0:
+        return [
+            f"{path}: macOS arm64 select_park_wake catastrophic threshold "
+            "must not exceed 500000 ops/s"
+        ]
+    return []
+
+
 def find_violations(root: Path) -> list[str]:
     violations: list[str] = []
     workflows = root / ".github" / "workflows"
@@ -237,6 +274,7 @@ def find_violations(root: Path) -> list[str]:
         violations.extend(check_cleartext_workflow_urls(path.relative_to(root), text))
         violations.extend(check_release_workflow(path.relative_to(root), text))
         violations.extend(check_docs_workflow(path.relative_to(root), text))
+        violations.extend(check_stress_workflow(path.relative_to(root), text))
     requirements = root / "docs" / "requirements.txt"
     violations.extend(
         check_docs_requirements(

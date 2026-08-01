@@ -132,5 +132,26 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn("build-artifacts", violations[0])
 
 
+class StressWorkflowTests(unittest.TestCase):
+    def test_rejects_inherited_macos_arm64_park_wake_threshold(self) -> None:
+        text = (
+            'if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then\n'
+            '  export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000"\n'
+            "fi\n"
+        )
+        violations = policy.check_stress_workflow(Path("stress.yml"), text)
+        self.assertEqual(len(violations), 1)
+        self.assertIn("select_park_wake", violations[0])
+
+    def test_accepts_explicit_macos_arm64_catastrophic_threshold(self) -> None:
+        text = (
+            'if [ "${{ matrix.name }}" = "macos-aarch64-stress" ]; then\n'
+            '  export LLAM_BENCH_GUARD_MIN_OPS="spawn_join=300000,'
+            'select_park_wake=500000"\n'
+            "fi\n"
+        )
+        self.assertEqual(policy.check_stress_workflow(Path("stress.yml"), text), [])
+
+
 if __name__ == "__main__":
     unittest.main()
